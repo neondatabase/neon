@@ -26,7 +26,7 @@ use pageserver_api::models::CompactInfoResponse;
 use pageserver_api::shard::{ShardCount, ShardIdentity, TenantShardId};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, info_span, trace, warn, Instrument};
+use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 use utils::critical;
 use utils::id::TimelineId;
 
@@ -775,27 +775,25 @@ impl Timeline {
                     return Ok(CompactionOutcome::YieldForL0);
                 }
             }
-            Err(err) => {
-                // no partitioning? This is normal, if the timeline was just created
-                // as an empty timeline. Also in unit tests, when we use the timeline
-                // as a simple key-value store, ignoring the datadir layout. Log the
-                // error but continue.
-                //
-                // Suppress error when it's due to cancellation
-                if !self.cancel.is_cancelled() && !err.is_cancelled() {
-                    if let CompactionError::CollectKeySpaceError(
-                        CollectKeySpaceError::Decode(_)
-                        | CollectKeySpaceError::PageRead(PageReconstructError::MissingKey(_)),
-                    ) = err
-                    {
-                        critical!("could not compact, repartitioning keyspace failed: {err:?}");
-                    } else {
-                        tracing::error!(
-                            "could not compact, repartitioning keyspace failed: {err:?}"
-                        );
-                    }
-                }
-            }
+
+            // Suppress errors when cancelled.
+            Err(_) if self.cancel.is_cancelled() => {}
+            Err(CompactionError::ShuttingDown) => {}
+
+            // Alert on critical errors that indicate data corruption.
+            Err(
+                err @ CompactionError::CollectKeySpaceError(
+                    CollectKeySpaceError::Decode(_)
+                    | CollectKeySpaceError::PageRead(
+                        PageReconstructError::MissingKey(_) | PageReconstructError::WalRedo(_),
+                    ),
+                ),
+            ) => critical!("could not compact, repartitioning keyspace failed: {err:?}"),
+
+            // Log other errors. No partitioning? This is normal, if the timeline was just created
+            // as an empty timeline. Also in unit tests, when we use the timeline as a simple
+            // key-value store, ignoring the datadir layout. Log the error but continue.
+            Err(err) => error!("could not compact, repartitioning keyspace failed: {err:?}"),
         };
 
         let partition_count = self.partitioning.read().0 .0.parts.len();
