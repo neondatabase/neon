@@ -818,7 +818,9 @@ impl Service {
             .heartbeater_ps
             .heartbeat(Arc::new(nodes_to_heartbeat))
             .await;
-        let res_sk = self.heartbeater_sk.heartbeat(all_sks).await;
+        // Put a small, but reasonable timeout to get the initial heartbeats of the safekeepers to avoid a storage controller downtime
+        const SK_TIMEOUT: Duration = Duration::from_secs(5);
+        let res_sk = tokio::time::timeout(SK_TIMEOUT, self.heartbeater_sk.heartbeat(all_sks)).await;
 
         let mut online_nodes = HashMap::new();
         if let Ok(deltas) = res_ps {
@@ -836,7 +838,7 @@ impl Service {
         }
 
         let mut online_sks = HashMap::new();
-        if let Ok(deltas) = res_sk {
+        if let Ok(Ok(deltas)) = res_sk {
             for (node_id, status) in deltas.0 {
                 match status {
                     SafekeeperState::Available {
