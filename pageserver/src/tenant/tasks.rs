@@ -287,6 +287,7 @@ fn log_compaction_error(
     sleep_duration: Duration,
     task_cancelled: bool,
 ) {
+    use crate::pgdatadir_mapping::CollectKeySpaceError;
     use crate::tenant::upload_queue::NotInitialized;
     use crate::tenant::PageReconstructError;
     use CompactionError::*;
@@ -294,6 +295,8 @@ fn log_compaction_error(
     let level = match err {
         ShuttingDown => return,
         Offload(_) => Level::ERROR,
+        CollectKeySpaceError(CollectKeySpaceError::Cancelled) => Level::INFO,
+        CollectKeySpaceError(_) => Level::ERROR,
         _ if task_cancelled => Level::INFO,
         Other(err) => {
             let root_cause = err.root_cause();
