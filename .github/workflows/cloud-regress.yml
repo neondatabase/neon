@@ -68,7 +68,6 @@ jobs:
           test_selection: test_api_random
           pg_version: ${{matrix.pg-version}}
           extra_params: -m remote_cluster
-          aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
         env:
           PROJECT_ID: ${{ steps.create-project.outputs.project_id }}
 
