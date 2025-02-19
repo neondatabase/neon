@@ -674,16 +674,28 @@ async fn get_operations<'a>(
             }
             Ok(Box::new(empty()))
         }
-
-        ApplySpecPhase::CreatePgauditExtension => Ok(Box::new(once(Operation {
-            query: String::from("CREATE EXTENSION IF NOT EXISTS pgaudit"),
-            comment: Some(String::from("create pgaudit extension")),
-        }))),
-
-        ApplySpecPhase::CreatePgauditlogtofileExtension => Ok(Box::new(once(Operation {
-            query: String::from("CREATE EXTENSION IF NOT EXISTS pgauditlogtofile"),
-            comment: Some(String::from("create pgauditlogtofile extension")),
-        }))),
+        ApplySpecPhase::CreatePgauditExtension => {
+            if let Some(libs) = spec.cluster.settings.find("shared_preload_libraries") {
+                if libs.contains("pgaudit") {
+                    return Ok(Box::new(once(Operation {
+                        query: String::from("CREATE EXTENSION IF NOT EXISTS pgaudit"),
+                        comment: Some(String::from("create pgaudit extensions")),
+                    })));
+                }
+            }
+            Ok(Box::new(empty()))
+        }
+        ApplySpecPhase::CreatePgauditlogtofileExtension => {
+            if let Some(libs) = spec.cluster.settings.find("shared_preload_libraries") {
+                if libs.contains("pgauditlogtofile") {
+                    return Ok(Box::new(once(Operation {
+                        query: String::from("CREATE EXTENSION IF NOT EXISTS pgauditlogtofile"),
+                        comment: Some(String::from("create pgauditlogtofile extensions")),
+                    })));
+                }
+            }
+            Ok(Box::new(empty()))
+        }
         ApplySpecPhase::HandleNeonExtension => {
             let operations = vec![
                 Operation {

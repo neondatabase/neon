@@ -1538,7 +1538,6 @@ impl ComputeNode {
                         self.pg_reload_conf()?;
 
                         self.apply_config(&compute_state)?;
-
                         Ok(())
                     },
                 )?;
@@ -1550,6 +1549,41 @@ impl ComputeNode {
                 )? {
                     info!("updated postgresql.conf to set neon.disable_logical_replication_subscribers=false");
                 }
+
+                let pgdata_path = Path::new(&self.pgdata);
+                let postgresql_conf_path = pgdata_path.join("postgresql.conf");
+                match pspec.spec.audit_log_level {
+                    ComputeAudit::Hipaa => {
+                        // TODO: clarify what events we want to log here.
+                        // requires pg_reload_conf() below to take effect
+                        if config::line_in_file(
+                            &postgresql_conf_path,
+                            "pgaudit.log='write, ddl, function, role'",
+                        )? {
+                            info!("updated postgresql.conf to set pgaudit.log='write, ddl, function, role'");
+                        }
+
+                        let log_directory_path = pgdata_path.join("log");
+                        // get endpoint address from env variable AUDIT_LOGGING_ENDPOINT
+                        let remote_endpoint = std::env::var("AUDIT_LOGGING_ENDPOINT")?;
+
+                        if remote_endpoint.is_empty() {
+                            // Error out
+                            anyhow::bail!("AUDIT_LOGGING_ENDPOINT is empty");
+                        }
+
+                        configure_rsyslog(
+                            log_directory_path.to_str().unwrap(),
+                            "hipaa",
+                            &remote_endpoint,
+                        )?;
+
+                        self.pg_reload_conf()?;
+                    }
+                    ComputeAudit::Log => { /* not implemented yet */ }
+                    ComputeAudit::Disabled => {}
+                }
+
                 self.pg_reload_conf()?;
             }
             self.post_apply_config()?;
@@ -1568,40 +1602,6 @@ impl ComputeNode {
                     Err(err) => error!("could not get installed extensions: {err:?}"),
                 }
             });
-
-            let pgdata_path = Path::new(&self.pgdata);
-            let postgresql_conf_path = pgdata_path.join("postgresql.conf");
-            // TODO move it into apply_config()
-            match pspec.spec.audit_log_level {
-                ComputeAudit::Hipaa => {
-                    // TODO: clarify what events we want to log here.
-                    if config::line_in_file(
-                        &postgresql_conf_path,
-                        "pgaudit.log='write, ddl, function, role'",
-                    )? {
-                        info!("updated postgresql.conf to set pgaudit.log='write, ddl, function, role'");
-                    }
-
-                    let log_directory_path = pgdata_path.join("log");
-                    // get endpoint address from env variable AUDIT_LOGGING_ENDPOINT
-                    let remote_endpoint = std::env::var("AUDIT_LOGGING_ENDPOINT")?;
-
-                    if remote_endpoint.is_empty() {
-                        // Error out
-                        anyhow::bail!("AUDIT_LOGGING_ENDPOINT is empty");
-                    }
-
-                    configure_rsyslog(
-                        log_directory_path.to_str().unwrap(),
-                        "hipaa",
-                        &remote_endpoint,
-                    )?;
-
-                    self.pg_reload_conf()?;
-                }
-                ComputeAudit::Log => { /* not implemented yet */ }
-                ComputeAudit::Disabled => {}
-            }
         }
 
         let startup_end_time = Utc::now();
