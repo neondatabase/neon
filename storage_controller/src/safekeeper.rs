@@ -18,12 +18,14 @@ pub struct Safekeeper {
     cancel: CancellationToken,
     listen_http_addr: String,
     listen_http_port: u16,
+    scheduling_policy: SkSchedulingPolicy,
     id: NodeId,
     availability: SafekeeperState,
 }
 
 impl Safekeeper {
     pub(crate) fn from_persistence(skp: SafekeeperPersistence, cancel: CancellationToken) -> Self {
+        let scheduling_policy = SkSchedulingPolicy::from_str(&skp.scheduling_policy).unwrap();
         Self {
             cancel,
             listen_http_addr: skp.host.clone(),
@@ -31,6 +33,7 @@ impl Safekeeper {
             id: NodeId(skp.id as u64),
             skp,
             availability: SafekeeperState::Offline,
+            scheduling_policy,
         }
     }
     pub(crate) fn base_url(&self) -> String {
@@ -45,6 +48,13 @@ impl Safekeeper {
     }
     pub(crate) fn set_availability(&mut self, availability: SafekeeperState) {
         self.availability = availability;
+    }
+    pub(crate) fn scheduling_policy(&self) -> SkSchedulingPolicy {
+        self.scheduling_policy
+    }
+    pub(crate) fn set_scheduling_policy(&mut self, scheduling_policy: SkSchedulingPolicy) {
+        self.scheduling_policy = scheduling_policy;
+        self.skp.scheduling_policy = String::from(scheduling_policy);
     }
     /// Perform an operation (which is given a [`SafekeeperClient`]) with retries
     pub(crate) async fn with_client_retries<T, O, F>(
@@ -129,10 +139,8 @@ impl Safekeeper {
                 self.id.0
             );
         }
-        self.skp = crate::persistence::SafekeeperPersistence::from_upsert(
-            record,
-            SkSchedulingPolicy::from_str(&self.skp.scheduling_policy).unwrap(),
-        );
+        self.skp =
+            crate::persistence::SafekeeperPersistence::from_upsert(record, self.scheduling_policy);
         self.listen_http_port = http_port as u16;
         self.listen_http_addr = host;
     }

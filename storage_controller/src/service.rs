@@ -7907,7 +7907,7 @@ impl Service {
             let sk = safekeepers
                 .get_mut(&node_id)
                 .ok_or(DatabaseError::Logical("Not found".to_string()))?;
-            sk.skp.scheduling_policy = String::from(scheduling_policy);
+            sk.set_scheduling_policy(scheduling_policy);
 
             locked.safekeepers = Arc::new(safekeepers);
         }
