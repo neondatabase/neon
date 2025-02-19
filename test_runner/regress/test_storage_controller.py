@@ -3247,7 +3247,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     newest_info = target.get_safekeeper(inserted["id"])
     assert newest_info
     assert newest_info["scheduling_policy"] == "Active"
-    #change back to paused again
+    # change back to paused again
     target.safekeeper_scheduling_policy(inserted["id"], "Pause")
 
     def storcon_heartbeat():
