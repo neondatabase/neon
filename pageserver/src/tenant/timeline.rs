@@ -22,6 +22,7 @@ use chrono::{DateTime, Utc};
 use compaction::CompactionOutcome;
 use enumset::EnumSet;
 use fail::fail_point;
+use futures::FutureExt;
 use futures::{stream::FuturesUnordered, StreamExt};
 use handle::ShardTimelineId;
 use layer_manager::Shutdown;
@@ -5125,24 +5126,21 @@ impl Timeline {
                     // image layer generation taking too long time and blocking L0 compaction. So in this
                     // mode, we also inspect the current number of L0 layers and skip image layer generation
                     // if there are too many of them.
-                    let num_of_l0_layers = {
-                        let layers = self.layers.read().await;
-                        layers.layer_map()?.level0_deltas().len()
-                    };
                     let image_preempt_threshold = self.get_image_creation_preempt_threshold()
                         * self.get_compaction_threshold();
                     // TODO: currently we do not respect `get_image_creation_preempt_threshold` and always yield
                     // when there is a single timeline with more than L0 threshold L0 layers. As long as the
                     // `get_image_creation_preempt_threshold` is set to a value greater than 0, we will yield for L0 compaction.
                     if image_preempt_threshold != 0 {
-                        let decide_yield_to_l0 = tokio::select! {
-                            _ = self.l0_compaction_trigger.notified() => true,
-                            () = async {} => false // we don't want to stuck waiting on notified
-                        };
-                        if decide_yield_to_l0 {
+                        let should_yield = self
+                            .l0_compaction_trigger
+                            .notified()
+                            .now_or_never()
+                            .is_some();
+                        if should_yield {
                             tracing::info!(
-                                "preempt image layer generation at {lsn} when processing partition {}..{}: too many L0 layers {}",
-                                partition.start().unwrap(), partition.end().unwrap(), num_of_l0_layers
+                                "preempt image layer generation at {lsn} when processing partition {}..{}: too many L0 layers",
+                                partition.start().unwrap(), partition.end().unwrap()
                             );
                             last_partition_processed = Some(partition.clone());
                             all_generated = false;
