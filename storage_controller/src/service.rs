@@ -815,13 +815,12 @@ impl Service {
         };
 
         tracing::info!("Sending initial heartbeats...");
-        let res_ps = self
-            .heartbeater_ps
-            .heartbeat(Arc::new(nodes_to_heartbeat))
-            .await;
         // Put a small, but reasonable timeout to get the initial heartbeats of the safekeepers to avoid a storage controller downtime
         const SK_TIMEOUT: Duration = Duration::from_secs(5);
-        let res_sk = tokio::time::timeout(SK_TIMEOUT, self.heartbeater_sk.heartbeat(all_sks)).await;
+        let (res_ps, res_sk) = tokio::join!(
+            self.heartbeater_ps.heartbeat(Arc::new(nodes_to_heartbeat)),
+            tokio::time::timeout(SK_TIMEOUT, self.heartbeater_sk.heartbeat(all_sks))
+        );
 
         let mut online_nodes = HashMap::new();
         if let Ok(deltas) = res_ps {
@@ -1064,8 +1063,12 @@ impl Service {
                 locked.safekeepers.clone()
             };
 
-            let res_ps = self.heartbeater_ps.heartbeat(nodes).await;
-            let res_sk = self.heartbeater_sk.heartbeat(safekeepers).await;
+            const SK_TIMEOUT: Duration = Duration::from_secs(3);
+            let (res_ps, res_sk) = tokio::join!(
+                self.heartbeater_ps.heartbeat(nodes),
+                tokio::time::timeout(SK_TIMEOUT, self.heartbeater_sk.heartbeat(safekeepers))
+            );
+
             if let Ok(deltas) = res_ps {
                 let mut to_handle = Vec::default();
 
@@ -1167,7 +1170,7 @@ impl Service {
                     }
                 }
             }
-            if let Ok(deltas) = res_sk {
+            if let Ok(Ok(deltas)) = res_sk {
                 let mut locked = self.inner.write().unwrap();
                 let mut safekeepers = (*locked.safekeepers).clone();
                 for (id, state) in deltas.0 {
