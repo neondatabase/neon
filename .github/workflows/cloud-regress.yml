@@ -64,8 +64,8 @@ jobs:
       - name: Run the regression tests
         uses: ./.github/actions/run-python-test-set
         with:
-          build_type: ${{ env.BUILD_TYPE }}
-          test_selection: cloud_regress/test_api_random
+          build_type: release
+          test_selection: test_api_random
           pg_version: ${{matrix.pg-version}}
           extra_params: -m remote_cluster
           aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
