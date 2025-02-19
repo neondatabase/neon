@@ -58,6 +58,7 @@ jobs:
         uses: ./.github/actions/neon-project-create
         with:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+          admin_api_key: ${{ secrets.NEON_STAGING_ADMIN_API_KEY }}
           postgres_version: ${{ matrix.pg_version }}
 
       - name: Run the regression tests
