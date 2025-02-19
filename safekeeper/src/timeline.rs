@@ -11,6 +11,7 @@ use safekeeper_api::models::{
 use safekeeper_api::Term;
 use tokio::fs::{self};
 use tokio_util::sync::CancellationToken;
+use utils::generation::Generation;
 use utils::id::TenantId;
 use utils::sync::gate::Gate;
 
@@ -974,7 +975,7 @@ impl WalResidentTimeline {
     }
 
     /// Update in memory remote consistent lsn.
-    pub async fn update_remote_consistent_lsn(&self, candidate: Lsn) {
+    pub async fn update_remote_consistent_lsn(&self, candidate: Lsn, generation: Generation) {
         let mut shared_state = self.write_shared_state().await;
         shared_state.sk.state_mut().inmem.remote_consistent_lsn = max(
             shared_state.sk.state().inmem.remote_consistent_lsn,

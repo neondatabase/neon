@@ -5,7 +5,7 @@ use pq_proto::{read_cstr, PG_EPOCH};
 use serde::{Deserialize, Serialize};
 use tracing::{trace, warn};
 
-use crate::lsn::Lsn;
+use crate::{generation::Generation, lsn::Lsn};
 
 /// Feedback pageserver sends to safekeeper and safekeeper resends to compute.
 ///
@@ -32,6 +32,12 @@ pub struct PageserverFeedback {
     pub replytime: SystemTime,
     /// Used to track feedbacks from different shards. Always zero for unsharded tenants.
     pub shard_number: u32,
+    /// The shard's pageserver-side generation number.
+    /// Used to track `remote_consistent_lsn` by generation which is required
+    /// to determine whether
+    /// - WAL offers still need to be sent
+    /// - in future: whether WAL can be evicted and/or pruned
+    pub generation: Generation,
 }
 
 impl PageserverFeedback {
@@ -43,6 +49,7 @@ impl PageserverFeedback {
             disk_consistent_lsn: Lsn::INVALID,
             replytime: *PG_EPOCH,
             shard_number: 0,
+            generation: Generation::none(),
         }
     }
 
@@ -101,6 +108,8 @@ impl PageserverFeedback {
             buf.put_u32(self.shard_number);
         }
 
+        todo!("ps_generation");
+
         buf[buf_ptr] = nkeys;
     }
 
@@ -146,6 +155,9 @@ impl PageserverFeedback {
                     let len = buf.get_i32();
                     assert_eq!(len, 4);
                     rf.shard_number = buf.get_u32();
+                }
+                b"ps_generation" => {
+                    todo!();
                 }
                 _ => {
                     let len = buf.get_i32();

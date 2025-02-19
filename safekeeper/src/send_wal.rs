@@ -1020,7 +1020,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
                     .walsenders
                     .record_ps_feedback(self.ws_guard.id, &ps_feedback);
                 self.tli
-                    .update_remote_consistent_lsn(ps_feedback.remote_consistent_lsn)
+                    .update_remote_consistent_lsn(ps_feedback.remote_consistent_lsn, ps_feedback.generation)
                     .await;
                 // in principle new remote_consistent_lsn could allow to
                 // deactivate the timeline, but we check that regularly through
