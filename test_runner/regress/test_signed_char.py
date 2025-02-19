@@ -1,15 +1,7 @@
-import os
+from pathlib import Path
 
-import pytest
 from fixtures.neon_fixtures import NeonEnv
 
-# In multi-character keys, the GIN index creates a CRC Hash of the first 3 bytes of the key.
-# The hash can have the first bit to be set or unset, needing to have a consistent representation
-# of char across architectures for consistent results. GIN stores these keys by their hashes
-# which determines the order in which the keys are obtained from the GIN index.
-# Using -fsigned-char enforces this order across platforms making this consistent.
-# The following query gets all the data present in the leaf page of a GIN index,
-# which is ordered by the CRC hash and is consistent across platforms.
 SIGNED_CHAR_EXTRACT = """
     WITH
     -- Generates an intermediate table with block numbers of the index
@@ -32,12 +24,18 @@ OUTPUT_DATA_DIR = "data"
 OUTPUT_DATA_FILE = "test_signed_char.out"
 
 
-@pytest.fixture
-def output_path(request):
-    return os.path.join(os.path.dirname(request.module.__file__), OUTPUT_DATA_DIR, OUTPUT_DATA_FILE)
-
-
-def test_signed_char(neon_simple_env: NeonEnv, output_path):
+def test_signed_char(neon_simple_env: NeonEnv):
+    """
+    Test that postgres was compiled with -fsigned-char.
+    ---
+    In multi-character keys, the GIN index creates a CRC Hash of the first 3 bytes of the key.
+    The hash can have the first bit to be set or unset, needing to have a consistent representation
+    of char across architectures for consistent results. GIN stores these keys by their hashes
+    which determines the order in which the keys are obtained from the GIN index.
+    Using -fsigned-char enforces this order across platforms making this consistent.
+    The following query gets all the data present in the leaf page of a GIN index,
+    which is ordered by the CRC hash and is consistent across platforms.
+    """
     env = neon_simple_env
     endpoint = env.endpoints.create_start("main")
 
@@ -60,7 +58,7 @@ def test_signed_char(neon_simple_env: NeonEnv, output_path):
     # Compare expected output
     page1 = pages[0]
     data = bytes(page1[1]).hex()
-    with open(output_path, encoding="utf-8") as f:
+    with open(Path(__file__).parent / "data" / "test_signed_char.out", encoding="utf-8") as f:
         expected = f.read().rstrip()
 
     assert data == expected
