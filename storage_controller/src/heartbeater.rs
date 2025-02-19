@@ -10,7 +10,10 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-use pageserver_api::{controller_api::NodeAvailability, models::PageserverUtilization};
+use pageserver_api::{
+    controller_api::{NodeAvailability, SkSchedulingPolicy},
+    models::PageserverUtilization,
+};
 
 use thiserror::Error;
 use utils::{id::NodeId, logging::SecretString};
@@ -311,6 +314,9 @@ impl HeartBeat<Safekeeper, SafekeeperState> for HeartbeaterTask<Safekeeper, Safe
 
         let mut heartbeat_futs = FuturesUnordered::new();
         for (node_id, sk) in &*safekeepers {
+            if sk.scheduling_policy() == SkSchedulingPolicy::Decomissioned {
+                continue;
+            }
             heartbeat_futs.push({
                 let jwt_token = self
                     .jwt_token
