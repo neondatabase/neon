@@ -331,7 +331,7 @@ fn wait_spec(
     CliSpecParams {
         spec,
         live_config_allowed,
-        compute_ctl_config: _,
+        compute_ctl_config,
     }: CliSpecParams,
 ) -> Result<Arc<ComputeNode>> {
     let mut new_state = ComputeState::new();
@@ -379,11 +379,19 @@ fn wait_spec(
 
     // Launch the external HTTP server first, so that we can serve control plane
     // requests while configuration is still in progress.
-    Server::External(cli.external_http_port).launch(&compute);
+    Server::External {
+        port: cli.external_http_port,
+        jwks: compute_ctl_config.jwks.clone(),
+        compute_id: cli.compute_id.clone(),
+    }
+    .launch(&compute);
 
     // The internal HTTP server could be launched later, but there isn't much
     // sense in waiting.
-    Server::Internal(cli.internal_http_port.unwrap_or(cli.external_http_port + 1)).launch(&compute);
+    Server::Internal {
+        port: cli.internal_http_port.unwrap_or(cli.external_http_port + 1),
+    }
+    .launch(&compute);
 
     if !spec_set {
         // No spec provided, hang waiting for it.
