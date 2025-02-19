@@ -360,9 +360,9 @@ pub(super) async fn handle_walreceiver_connection(
                             // This is valid, but check that we received records
                             // that we haven't seen before.
                             if let Some(first_rec) = batch.records.first() {
-                                if first_rec.next_record_lsn > last_rec_lsn {
+                                if first_rec.next_record_lsn < last_rec_lsn {
                                     let msg = format!(
-                                        "Received record with next_record_lsn multiple times ({} <= {})",
+                                        "Received record with next_record_lsn multiple times ({} < {})",
                                         first_rec.next_record_lsn, expected_wal_start
                                     );
                                     critical!("{msg}");
