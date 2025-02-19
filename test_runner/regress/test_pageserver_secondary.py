@@ -895,7 +895,6 @@ def test_slow_secondary_downloads(neon_env_builder: NeonEnvBuilder, via_controll
     assert progress_3["bytes_total"] == progress_3["bytes_downloaded"]
 
 
-@pytest.mark.repeat(20)
 @skip_in_debug_build("only run with release build")
 @run_only_on_default_postgres("PG version is not interesting here")
 def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
