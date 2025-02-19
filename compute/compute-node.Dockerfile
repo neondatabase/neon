@@ -1847,11 +1847,14 @@ COPY --from=pg_partman-src /ext-src/ /ext-src/
 #COPY --from=pg_repack-src /ext-src/ /ext-src/
 
 COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
+RUN apt-get update && apt-get install -y libtap-parser-sourcehandler-pgtap-perl\
+   && apt clean && rm -rf /ext-src/*.tar.gz /var/lib/apt/lists/*
 ENV PATH=/usr/local/pgsql/bin:$PATH
 ENV PGHOST=compute
 ENV PGPORT=55433
 ENV PGUSER=cloud_admin
 ENV PGDATABASE=postgres
+ENV PG_VERSION=${PG_VERSION:?}
 
 #########################################################################################
 #
