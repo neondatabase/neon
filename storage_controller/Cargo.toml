@@ -34,6 +34,7 @@ reqwest = { workspace = true, features = ["stream"] }
 routerify.workspace = true
 safekeeper_api.workspace = true
 safekeeper_client.workspace = true
+tikv-jemallocator.workspace = true
 regex.workspace = true
 rustls-native-certs.workspace = true
 serde.workspace = true
