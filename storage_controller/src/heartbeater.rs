@@ -346,7 +346,13 @@ impl HeartBeat<Safekeeper, SafekeeperState> for HeartbeaterTask<Safekeeper, Safe
                             // We ignore the node in this case.
                             return None;
                         }
-                        Err(_) => SafekeeperState::Offline,
+                        Err(e) => {
+                            tracing::info!(
+                                "Marking safekeeper {} at as offline: {e}",
+                                sk.base_url()
+                            );
+                            SafekeeperState::Offline
+                        }
                     };
 
                     Some((*node_id, status))
