@@ -1713,8 +1713,12 @@ class StorageControllerLeadershipStatus(StrEnum):
 
 @dataclass
 class StorageControllerMigrationConfig:
-    secondary_warmup_timeout: str | None
-    secondary_download_request_timeout: str | None
+    # Unlike the API itself, tests default to graceful=False because it's a simpler API and doesn't
+    # require the test to go poll for the migration actually completing.
+    graceful: bool = False
+    force: bool = False
+    secondary_warmup_timeout: str | None = None
+    secondary_download_request_timeout: str | None = None
 
 
 class NeonStorageController(MetricsGetter, LogUtils):
@@ -2118,8 +2122,10 @@ class NeonStorageController(MetricsGetter, LogUtils):
         config: StorageControllerMigrationConfig | None = None,
     ):
         payload = {"tenant_shard_id": str(tenant_shard_id), "node_id": dest_ps_id}
-        if config is not None:
-            payload["migration_config"] = dataclasses.asdict(config)
+        if config is None:
+            config = StorageControllerMigrationConfig()
+
+        payload["migration_config"] = dataclasses.asdict(config)
 
         self.request(
             "PUT",

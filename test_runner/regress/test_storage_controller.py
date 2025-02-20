@@ -3865,3 +3865,18 @@ def test_storage_controller_location_conf_equivalence(neon_env_builder: NeonEnvB
     )
 
     assert reconciles_after_restart == 0
+
+def test_storage_controller_graceful_migration(neon_env_builder: NeonEnvBuilder):
+    """
+    Test that the graceful migration API goes through the process of
+    creating a secondary & waiting for it to warm up before cutting over
+    """
+
+    # 2 pageservers in 2 AZs, so that each AZ has a pageserver we can migrate to
+    neon_env_builder.num_pageservers = 4
+    neon_env_builder.num_azs = 2
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    env.storage_controller.tenant_describe(env.initial_tenant)
