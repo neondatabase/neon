@@ -5344,12 +5344,6 @@ impl From<OffloadError> for CompactionError {
     }
 }
 
-impl CompactionError {
-    pub fn is_cancelled(&self) -> bool {
-        matches!(self, CompactionError::ShuttingDown)
-    }
-}
-
 impl From<CollectKeySpaceError> for CompactionError {
     fn from(err: CollectKeySpaceError) -> Self {
         match err {
@@ -6614,7 +6608,7 @@ impl TimelineWriter<'_> {
 
         if let Some(wait_threshold) = wait_threshold {
             if l0_count >= wait_threshold {
-                info!("layer roll waiting for flush due to compaction backpressure at {l0_count} L0 layers");
+                debug!("layer roll waiting for flush due to compaction backpressure at {l0_count} L0 layers");
                 self.tl.wait_flush_completion(flush_id).await?;
             }
         }
