@@ -40,16 +40,26 @@ pub fn bench_warn_slow(c: &mut Criterion) {
     fn run_bench(b: &mut Bencher, enabled: bool) -> anyhow::Result<()> {
         const THRESHOLD: Duration = Duration::from_secs(1);
 
-        let runtime = tokio::runtime::Builder::new_current_thread() // single is fine, sync IO only
+        // Use a multi-threaded runtime to avoid thread parking overhead when yielding.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
 
         // Test both with and without warn_slow, since we're essentially measuring Tokio scheduling
-        // performance too.
+        // performance too. Use a simple noop future that yields once, to avoid any scheduler fast
+        // paths for a ready future.
         if enabled {
-            b.iter(|| runtime.block_on(warn_slow("ready", THRESHOLD, std::future::ready(()))));
+            b.iter(|| {
+                runtime.block_on(warn_slow("ready", THRESHOLD, async {
+                    tokio::task::yield_now().await;
+                }))
+            });
         } else {
-            b.iter(|| runtime.block_on(std::future::ready(())));
+            b.iter(|| {
+                runtime.block_on(async {
+                    tokio::task::yield_now().await;
+                })
+            });
         }
 
         Ok(())
