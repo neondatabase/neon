@@ -85,7 +85,7 @@ pub mod mock {
             Behavior::Success {
                 blocksize,
                 total_blocks,
-                ref name_filter,
+                name_filter,
             } => {
                 let used_bytes = walk_dir_disk_usage(tenants_dir, name_filter.as_deref()).unwrap();
 

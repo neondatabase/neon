@@ -140,7 +140,7 @@ impl TenantStartupMode {
     /// If this returns None, the re-attach struct is in an invalid state and
     /// should be ignored in the response.
     fn from_reattach_tenant(rart: ReAttachResponseTenant) -> Option<Self> {
-        match (rart.mode, rart.gen) {
+        match (rart.mode, rart.r#gen) {
             (LocationConfigMode::Detached, _) => None,
             (LocationConfigMode::Secondary, _) => Some(Self::Secondary),
             (LocationConfigMode::AttachedMulti, Some(g)) => {
@@ -376,7 +376,7 @@ async fn init_load_generations(
                 TenantStartupMode::Attached((_mode, generation)) => Some(generation),
                 TenantStartupMode::Secondary => None,
             }
-            .map(|gen| (*id, *gen))
+            .map(|gen_| (*id, *gen_))
         })
         .collect();
     resources.deletion_queue_client.recover(attached_tenants)?;

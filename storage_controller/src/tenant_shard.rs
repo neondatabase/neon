@@ -1784,8 +1784,8 @@ impl TenantShard {
                 let conf = observed.conf.as_ref()?;
 
                 match (conf.generation, conf.mode) {
-                    (Some(gen), AttachedMulti | AttachedSingle | AttachedStale) => {
-                        Some((*node_id, gen))
+                    (Some(gen_), AttachedMulti | AttachedSingle | AttachedStale) => {
+                        Some((*node_id, gen_))
                     }
                     _ => None,
                 }
@@ -1793,7 +1793,7 @@ impl TenantShard {
             .sorted_by(|(_lhs_node_id, lhs_gen), (_rhs_node_id, rhs_gen)| {
                 lhs_gen.cmp(rhs_gen).reverse()
             })
-            .map(|(node_id, gen)| (node_id, Generation::new(gen)))
+            .map(|(node_id, gen_)| (node_id, Generation::new(gen_)))
             .collect()
     }
 

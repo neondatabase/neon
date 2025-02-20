@@ -44,7 +44,7 @@ pub struct ReAttachResponse {
 #[derive(Serialize, Deserialize)]
 pub struct ValidateRequestTenant {
     pub id: TenantShardId,
-    pub gen: u32,
+    pub r#gen: u32,
 }
 
 #[derive(Serialize, Deserialize)]

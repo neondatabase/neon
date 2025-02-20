@@ -17,7 +17,7 @@ use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::task_mgr::TaskKind;
 use crate::tenant::timeline::{CompactionError, GetVectoredError};
-use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
+use crate::tenant::{Timeline, remote_timeline_client::LayerFileMetadata};
 
 use super::delta_layer::{self};
 use super::image_layer::{self};
@@ -1873,8 +1873,8 @@ impl ResidentLayer {
         self.owner.record_access(ctx);
 
         let res = match inner {
-            Delta(ref d) => delta_layer::DeltaLayerInner::load_keys(d, ctx).await,
-            Image(ref i) => image_layer::ImageLayerInner::load_keys(i, ctx).await,
+            Delta(d) => delta_layer::DeltaLayerInner::load_keys(d, ctx).await,
+            Image(i) => image_layer::ImageLayerInner::load_keys(i, ctx).await,
         };
         res.with_context(|| format!("Layer index is corrupted for {self}"))
     }
@@ -1920,7 +1920,7 @@ impl ResidentLayer {
         let owner = &self.owner.0;
 
         match self.downloaded.get(owner, ctx).await? {
-            Delta(ref d) => d
+            Delta(d) => d
                 .copy_prefix(writer, until, ctx)
                 .await
                 .with_context(|| format!("copy_delta_prefix until {until} of {self}")),
@@ -1943,7 +1943,7 @@ impl ResidentLayer {
     ) -> anyhow::Result<&delta_layer::DeltaLayerInner> {
         use LayerKind::*;
         match self.downloaded.get(&self.owner.0, ctx).await? {
-            Delta(ref d) => Ok(d),
+            Delta(d) => Ok(d),
             Image(_) => Err(anyhow::anyhow!("image layer")),
         }
     }
@@ -1955,7 +1955,7 @@ impl ResidentLayer {
     ) -> anyhow::Result<&image_layer::ImageLayerInner> {
         use LayerKind::*;
         match self.downloaded.get(&self.owner.0, ctx).await? {
-            Image(ref d) => Ok(d),
+            Image(d) => Ok(d),
             Delta(_) => Err(anyhow::anyhow!("delta layer")),
         }
     }

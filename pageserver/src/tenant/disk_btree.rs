@@ -1115,7 +1115,7 @@ pub(crate) mod tests {
 
         // Test get() operations on random keys, most of which will not exist
         for _ in 0..100000 {
-            let key_int = rand::thread_rng().gen::<u128>();
+            let key_int = rand::thread_rng().r#gen::<u128>();
             let search_key = u128::to_be_bytes(key_int);
             assert!(reader.get(&search_key, &ctx).await? == all_data.get(&key_int).cloned());
         }

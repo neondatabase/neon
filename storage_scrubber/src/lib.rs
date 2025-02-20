@@ -411,10 +411,10 @@ async fn init_remote(
     let default_prefix = default_prefix_in_bucket(node_kind).to_string();
 
     match &mut storage_config.0.storage {
-        RemoteStorageKind::AwsS3(ref mut config) => {
+        RemoteStorageKind::AwsS3(config) => {
             config.prefix_in_bucket.get_or_insert(default_prefix);
         }
-        RemoteStorageKind::AzureContainer(ref mut config) => {
+        RemoteStorageKind::AzureContainer(config) => {
             config.prefix_in_container.get_or_insert(default_prefix);
         }
         RemoteStorageKind::LocalFs { .. } => (),

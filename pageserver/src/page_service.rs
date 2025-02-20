@@ -975,7 +975,7 @@ impl PageServerHandler {
                 Ok(BatchedFeMessage::GetPage {
                     span: _,
                     shard: accum_shard,
-                    pages: ref mut accum_pages,
+                    pages: accum_pages,
                     effective_request_lsn: accum_lsn,
                 }),
                 BatchedFeMessage::GetPage {
