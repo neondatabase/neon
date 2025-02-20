@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
+use std::os::fd::RawFd;
 use std::pin::Pin;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
@@ -129,7 +130,7 @@ pub(crate) static LAYERS_PER_READ: Lazy<HistogramVec> = Lazy::new(|| {
         "Layers visited to serve a single read (read amplification). In a batch, all visited layers count towards every read.",
         &["tenant_id", "shard_id", "timeline_id"],
         // Low resolution to reduce cardinality.
-        vec![1.0, 5.0, 10.0, 25.0, 50.0, 100.0],
+        vec![4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0],
     )
     .expect("failed to define a metric")
 });
@@ -1439,27 +1440,66 @@ impl Drop for SmgrOpTimer {
 }
 
 impl SmgrOpFlushInProgress {
-    pub(crate) async fn measure<Fut, O>(self, mut started_at: Instant, mut fut: Fut) -> O
+    /// The caller must guarantee that `socket_fd`` outlives this function.
+    pub(crate) async fn measure<Fut, O>(
+        self,
+        started_at: Instant,
+        mut fut: Fut,
+        socket_fd: RawFd,
+    ) -> O
     where
         Fut: std::future::Future<Output = O>,
     {
         let mut fut = std::pin::pin!(fut);
 
-        // Whenever observe_guard gets called, or dropped,
-        // it adds the time elapsed since its last call to metrics.
-        // Last call is tracked in `now`.
+        let mut logged = false;
+        let mut last_counter_increment_at = started_at;
         let mut observe_guard = scopeguard::guard(
-            || {
+            |is_timeout| {
                 let now = Instant::now();
-                let elapsed = now - started_at;
-                self.global_micros
-                    .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
-                self.per_timeline_micros
-                    .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
-                started_at = now;
+
+                // Increment counter
+                {
+                    let elapsed_since_last_observe = now - last_counter_increment_at;
+                    self.global_micros
+                        .inc_by(u64::try_from(elapsed_since_last_observe.as_micros()).unwrap());
+                    self.per_timeline_micros
+                        .inc_by(u64::try_from(elapsed_since_last_observe.as_micros()).unwrap());
+                    last_counter_increment_at = now;
+                }
+
+                // Log something on every timeout, and on completion but only if we hit a timeout.
+                if is_timeout || logged {
+                    logged = true;
+                    let elapsed_total = now - started_at;
+                    let msg = if is_timeout {
+                        "slow flush ongoing"
+                    } else {
+                        "slow flush completed or cancelled"
+                    };
+
+                    let (inq, outq) = {
+                        // SAFETY: caller guarantees that `socket_fd` outlives this function.
+                        #[cfg(target_os = "linux")]
+                        unsafe {
+                            (
+                                utils::linux_socket_ioctl::inq(socket_fd).unwrap_or(-2),
+                                utils::linux_socket_ioctl::outq(socket_fd).unwrap_or(-2),
+                            )
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            _ = socket_fd; // appease unused lint on macOS
+                            (-1, -1)
+                        }
+                    };
+
+                    let elapsed_total_secs = format!("{:.6}", elapsed_total.as_secs_f64());
+                    tracing::info!(elapsed_total_secs, inq, outq, msg);
+                }
             },
             |mut observe| {
-                observe();
+                observe(false);
             },
         );
 
@@ -1467,7 +1507,7 @@ impl SmgrOpFlushInProgress {
             match tokio::time::timeout(Duration::from_secs(10), &mut fut).await {
                 Ok(v) => return v,
                 Err(_timeout) => {
-                    (*observe_guard)();
+                    (*observe_guard)(true);
                 }
             }
         }

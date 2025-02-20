@@ -73,6 +73,7 @@ use pageserver_api::models::PageTraceEvent;
 use pageserver_api::reltag::SlruKind;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
+use std::os::fd::AsRawFd;
 
 /// How long we may wait for a [`crate::tenant::mgr::TenantSlot::InProgress`]` and/or a [`crate::tenant::Tenant`] which
 /// is not yet in state [`TenantState::Active`].
@@ -236,7 +237,7 @@ pub async fn libpq_listener_main(
 
 type ConnectionHandlerResult = anyhow::Result<()>;
 
-#[instrument(skip_all, fields(peer_addr))]
+#[instrument(skip_all, fields(peer_addr, application_name))]
 #[allow(clippy::too_many_arguments)]
 async fn page_service_conn_main(
     conf: &'static PageServerConf,
@@ -256,6 +257,8 @@ async fn page_service_conn_main(
     socket
         .set_nodelay(true)
         .context("could not set TCP_NODELAY")?;
+
+    let socket_fd = socket.as_raw_fd();
 
     let peer_addr = socket.peer_addr().context("get peer address")?;
     tracing::Span::current().record("peer_addr", field::display(peer_addr));
@@ -305,7 +308,7 @@ async fn page_service_conn_main(
         cancel.clone(),
         gate_guard,
     );
-    let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
+    let pgbackend = PostgresBackend::new_from_io(socket_fd, socket, peer_addr, auth_type, None)?;
 
     match pgbackend.run(&mut conn_handler, &cancel).await {
         Ok(()) => {
@@ -914,7 +917,7 @@ impl PageServerHandler {
                     &shard,
                     req.hdr.request_lsn,
                     req.hdr.not_modified_since,
-                    &shard.get_latest_gc_cutoff_lsn(),
+                    &shard.get_applied_gc_cutoff_lsn(),
                     ctx,
                 )
                 // TODO: if we actually need to wait for lsn here, it delays the entire batch which doesn't need to wait
@@ -1286,12 +1289,15 @@ impl PageServerHandler {
             ))?;
 
             // what we want to do
+            let socket_fd = pgb_writer.socket_fd;
             let flush_fut = pgb_writer.flush();
             // metric for how long flushing takes
             let flush_fut = match flushing_timer {
-                Some(flushing_timer) => {
-                    futures::future::Either::Left(flushing_timer.measure(Instant::now(), flush_fut))
-                }
+                Some(flushing_timer) => futures::future::Either::Left(flushing_timer.measure(
+                    Instant::now(),
+                    flush_fut,
+                    socket_fd,
+                )),
                 None => futures::future::Either::Right(flush_fut),
             };
             // do it while respecting cancellation
@@ -1793,6 +1799,13 @@ impl PageServerHandler {
                 .as_millis()
                 .to_string()
         });
+
+        info!(
+            "acquired lease for {} until {}",
+            lsn,
+            valid_until_str.as_deref().unwrap_or("<unknown>")
+        );
+
         let bytes = valid_until_str.as_ref().map(|x| x.as_bytes());
 
         pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor::text_col(
@@ -1810,7 +1823,7 @@ impl PageServerHandler {
         req: &PagestreamExistsRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
             req.hdr.request_lsn,
@@ -1837,7 +1850,7 @@ impl PageServerHandler {
         req: &PagestreamNblocksRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
             req.hdr.request_lsn,
@@ -1864,7 +1877,7 @@ impl PageServerHandler {
         req: &PagestreamDbSizeRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
             req.hdr.request_lsn,
@@ -1954,7 +1967,7 @@ impl PageServerHandler {
         req: &PagestreamGetSlruSegmentRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
             req.hdr.request_lsn,
@@ -2050,7 +2063,8 @@ impl PageServerHandler {
     {
         fn map_basebackup_error(err: BasebackupError) -> QueryError {
             match err {
-                BasebackupError::Client(e) => QueryError::Disconnected(ConnectionError::Io(e)),
+                // TODO: passthrough the error site to the final error message?
+                BasebackupError::Client(e, _) => QueryError::Disconnected(ConnectionError::Io(e)),
                 BasebackupError::Server(e) => QueryError::Other(e),
             }
         }
@@ -2071,7 +2085,7 @@ impl PageServerHandler {
             //return Err(QueryError::NotFound("timeline is archived".into()))
         }
 
-        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
             // Backup was requested at a particular LSN. Wait for it to arrive.
             info!("waiting for {}", lsn);
@@ -2151,10 +2165,12 @@ impl PageServerHandler {
                 .await
                 .map_err(map_basebackup_error)?;
             }
-            writer
-                .flush()
-                .await
-                .map_err(|e| map_basebackup_error(BasebackupError::Client(e)))?;
+            writer.flush().await.map_err(|e| {
+                map_basebackup_error(BasebackupError::Client(
+                    e,
+                    "handle_basebackup_request,flush",
+                ))
+            })?;
         }
 
         pgb.write_message_noflush(&BeMessage::CopyDone)
@@ -2454,9 +2470,16 @@ where
     fn startup(
         &mut self,
         _pgb: &mut PostgresBackend<IO>,
-        _sm: &FeStartupPacket,
+        sm: &FeStartupPacket,
     ) -> Result<(), QueryError> {
         fail::fail_point!("ps::connection-start::startup-packet");
+
+        if let FeStartupPacket::StartupMessage { params, .. } = sm {
+            if let Some(app_name) = params.get("application_name") {
+                Span::current().record("application_name", field::display(app_name));
+            }
+        };
+
         Ok(())
     }
 

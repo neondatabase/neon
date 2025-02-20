@@ -68,7 +68,7 @@ jobs:
   tag:
     needs: [ check-permissions ]
     runs-on: [ self-hosted, small ]
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
+    container: ${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/base:pinned
     outputs:
       build-tag: ${{steps.build-tag.outputs.tag}}
 
@@ -263,8 +263,9 @@ jobs:
           echo "json=$(jq --compact-output '.' /tmp/benchmark_durations.json)" >> $GITHUB_OUTPUT
 
   benchmarks:
-    if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
-    needs: [ check-permissions, build-and-test-locally, build-build-tools-image, get-benchmarks-durations ]
+    # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `deploy` in PRs
+    if: github.ref_name == 'main' || (contains(github.event.pull_request.labels.*.name, 'run-benchmarks') && !failure() && !cancelled())
+    needs: [ check-permissions, build-build-tools-image, get-benchmarks-durations, deploy ]
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
       statuses: write
@@ -858,14 +859,17 @@ jobs:
           BRANCH: "${{ github.ref_name }}"
           DEV_ACR: "${{ vars.AZURE_DEV_REGISTRY_NAME }}"
           PROD_ACR: "${{ vars.AZURE_PROD_REGISTRY_NAME }}"
+          DEV_AWS: "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}"
+          PROD_AWS: "${{ vars.NEON_PROD_AWS_ACCOUNT_ID }}"
+          AWS_REGION: "${{ vars.AWS_ECR_REGION }}"
 
   push-neon-image-dev:
     needs: [ generate-image-maps, neon-image ]
     uses: ./.github/workflows/_push-to-container-registry.yml
     with:
       image-map: '${{ needs.generate-image-maps.outputs.neon-dev }}'
-      aws-region: eu-central-1
-      aws-account-ids: "369495373322"
+      aws-region: ${{ vars.AWS_ECR_REGION }}
+      aws-account-ids: "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}"
       azure-client-id: ${{ vars.AZURE_DEV_CLIENT_ID }}
       azure-subscription-id: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
       azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -880,8 +884,8 @@ jobs:
     uses: ./.github/workflows/_push-to-container-registry.yml
     with:
       image-map: '${{ needs.generate-image-maps.outputs.compute-dev }}'
-      aws-region: eu-central-1
-      aws-account-ids: "369495373322"
+      aws-region: ${{ vars.AWS_ECR_REGION }}
+      aws-account-ids: "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}"
       azure-client-id: ${{ vars.AZURE_DEV_CLIENT_ID }}
       azure-subscription-id: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
       azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -897,8 +901,8 @@ jobs:
     uses: ./.github/workflows/_push-to-container-registry.yml
     with:
       image-map: '${{ needs.generate-image-maps.outputs.neon-prod }}'
-      aws-region: eu-central-1
-      aws-account-ids: "093970136003"
+      aws-region: ${{ vars.AWS_ECR_REGION }}
+      aws-account-ids: "${{ vars.NEON_PROD_AWS_ACCOUNT_ID }}"
       azure-client-id: ${{ vars.AZURE_PROD_CLIENT_ID }}
       azure-subscription-id: ${{ vars.AZURE_PROD_SUBSCRIPTION_ID }}
       azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -914,8 +918,8 @@ jobs:
     uses: ./.github/workflows/_push-to-container-registry.yml
     with:
       image-map: '${{ needs.generate-image-maps.outputs.compute-prod }}'
-      aws-region: eu-central-1
-      aws-account-ids: "093970136003"
+      aws-region: ${{ vars.AWS_ECR_REGION }}
+      aws-account-ids: "${{ vars.NEON_PROD_AWS_ACCOUNT_ID }}"
       azure-client-id: ${{ vars.AZURE_PROD_CLIENT_ID }}
       azure-subscription-id: ${{ vars.AZURE_PROD_SUBSCRIPTION_ID }}
       azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -1028,7 +1032,7 @@ jobs:
       statuses: write
       contents: write
     runs-on: [ self-hosted, small ]
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
+    container: ${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/ansible:latest
     steps:
       - uses: actions/checkout@v4
 
@@ -1177,6 +1181,22 @@ jobs:
             exit 1
           fi
 
+  notify-storage-release-deploy-failure:
+    needs: [ deploy ]
+    # We want this to run even if (transitive) dependencies are skipped, because deploy should really be successful on release branch workflow runs.
+    if: github.ref_name == 'release' && needs.deploy.result != 'success' && always()
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Post release-deploy failure to team-storage slack channel
+        uses: slackapi/slack-github-action@v2
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ vars.SLACK_STORAGE_CHANNEL_ID }}
+            text: |
+              🔴 @oncall-storage: deploy job on release branch had unexpected status "${{ needs.deploy.result }}" <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>.
+
   # The job runs on `release` branch and copies compatibility data and Neon artifact from the last *release PR* to the latest directory
   promote-compatibility-data:
     needs: [ deploy ]
@@ -1273,7 +1293,7 @@ jobs:
           done
 
   pin-build-tools-image:
-    needs: [ build-build-tools-image, push-compute-image-prod, push-neon-image-prod, build-and-test-locally ]
+    needs: [ build-build-tools-image, test-images, build-and-test-locally ]
     if: github.ref_name == 'main'
     uses: ./.github/workflows/pin-build-tools-image.yml
     with:

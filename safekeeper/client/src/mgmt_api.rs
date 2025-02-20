@@ -5,7 +5,10 @@
 
 use http_utils::error::HttpErrorBody;
 use reqwest::{IntoUrl, Method, StatusCode};
-use safekeeper_api::models::{TimelineCreateRequest, TimelineStatus};
+use safekeeper_api::models::{
+    PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization, TimelineCreateRequest,
+    TimelineStatus,
+};
 use std::error::Error as _;
 use utils::{
     id::{NodeId, TenantId, TimelineId},
@@ -32,6 +35,9 @@ pub enum Error {
     /// Status is not ok; parsed error in body as `HttpErrorBody`.
     #[error("safekeeper API: {1}")]
     ApiError(StatusCode, String),
+
+    #[error("Cancelled")]
+    Cancelled,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -85,6 +91,12 @@ impl Client {
         resp.json().await.map_err(Error::ReceiveBody)
     }
 
+    pub async fn pull_timeline(&self, req: &PullTimelineRequest) -> Result<PullTimelineResponse> {
+        let uri = format!("{}/v1/pull_timeline", self.mgmt_api_endpoint);
+        let resp = self.post(&uri, req).await?;
+        resp.json().await.map_err(Error::ReceiveBody)
+    }
+
     pub async fn delete_timeline(
         &self,
         tenant_id: TenantId,
@@ -124,9 +136,10 @@ impl Client {
         self.get(&uri).await
     }
 
-    pub async fn utilization(&self) -> Result<reqwest::Response> {
-        let uri = format!("{}/v1/utilization/", self.mgmt_api_endpoint);
-        self.get(&uri).await
+    pub async fn utilization(&self) -> Result<SafekeeperUtilization> {
+        let uri = format!("{}/v1/utilization", self.mgmt_api_endpoint);
+        let resp = self.get(&uri).await?;
+        resp.json().await.map_err(Error::ReceiveBody)
     }
 
     async fn post<B: serde::Serialize, U: IntoUrl>(

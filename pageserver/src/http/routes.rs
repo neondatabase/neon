@@ -68,6 +68,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 
 use crate::config::PageServerConf;
+use crate::context::RequestContextBuilder;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::pgdatadir_mapping::LsnForTimestamp;
@@ -482,6 +483,11 @@ async fn build_timeline_info_common(
 
     let (pitr_history_size, within_ancestor_pitr) = timeline.get_pitr_history_stats();
 
+    let min_readable_lsn = std::cmp::max(
+        timeline.get_gc_cutoff_lsn(),
+        *timeline.get_applied_gc_cutoff_lsn(),
+    );
+
     let info = TimelineInfo {
         tenant_id: timeline.tenant_shard_id,
         timeline_id: timeline.timeline_id,
@@ -493,7 +499,12 @@ async fn build_timeline_info_common(
         initdb_lsn,
         last_record_lsn,
         prev_record_lsn: Some(timeline.get_prev_record_lsn()),
-        latest_gc_cutoff_lsn: *timeline.get_latest_gc_cutoff_lsn(),
+        // Externally, expose the lowest LSN that can be used to create a branch as the "GC cutoff", although internally
+        // we distinguish between the "planned" GC cutoff (PITR point) and the "latest" GC cutoff (where we
+        // actually trimmed data to), which can pass each other when PITR is changed.
+        latest_gc_cutoff_lsn: min_readable_lsn,
+        min_readable_lsn,
+        applied_gc_cutoff_lsn: *timeline.get_applied_gc_cutoff_lsn(),
         current_logical_size: current_logical_size.size_dont_care_about_accuracy(),
         current_logical_size_is_accurate: match current_logical_size.accuracy() {
             tenant::timeline::logical_size::Accuracy::Approximate => false,
@@ -1453,6 +1464,59 @@ async fn timeline_layer_scan_disposable_keys(
     )
 }
 
+async fn timeline_download_heatmap_layers_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    // Only used in the case where remote storage is not configured.
+    const DEFAULT_MAX_CONCURRENCY: usize = 100;
+    // A conservative default.
+    const DEFAULT_CONCURRENCY: usize = 16;
+
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+
+    let desired_concurrency =
+        parse_query_param(&request, "concurrency")?.unwrap_or(DEFAULT_CONCURRENCY);
+
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let state = get_state(&request);
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+
+    let max_concurrency = get_config(&request)
+        .remote_storage_config
+        .as_ref()
+        .map(|c| c.concurrency_limit())
+        .unwrap_or(DEFAULT_MAX_CONCURRENCY);
+    let concurrency = std::cmp::min(max_concurrency, desired_concurrency);
+
+    timeline.start_heatmap_layers_download(concurrency).await?;
+
+    json_response(StatusCode::ACCEPTED, ())
+}
+
+async fn timeline_shutdown_download_heatmap_layers_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let state = get_state(&request);
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+
+    timeline.stop_and_drain_heatmap_layers_download().await;
+
+    json_response(StatusCode::OK, ())
+}
+
 async fn layer_download_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
@@ -2331,6 +2395,7 @@ async fn timeline_checkpoint_handler(
                     match e {
                         CompactionError::ShuttingDown => ApiError::ShuttingDown,
                         CompactionError::Offload(e) => ApiError::InternalServerError(anyhow::anyhow!(e)),
+                        CompactionError::CollectKeySpaceError(e) => ApiError::InternalServerError(anyhow::anyhow!(e)),
                         CompactionError::Other(e) => ApiError::InternalServerError(e)
                     }
                 )?;
@@ -2508,14 +2573,30 @@ async fn deletion_queue_flush(
     }
 }
 
-/// Try if `GetPage@Lsn` is successful, useful for manual debugging.
 async fn getpage_at_lsn_handler(
+    request: Request<Body>,
+    cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    getpage_at_lsn_handler_inner(false, request, cancel).await
+}
+
+async fn touchpage_at_lsn_handler(
+    request: Request<Body>,
+    cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    getpage_at_lsn_handler_inner(true, request, cancel).await
+}
+
+/// Try if `GetPage@Lsn` is successful, useful for manual debugging.
+async fn getpage_at_lsn_handler_inner(
+    touch: bool,
     request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
-    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    // Require pageserver admin permission for this API instead of only tenant-level token.
+    check_permission(&request, None)?;
     let state = get_state(&request);
 
     struct Key(pageserver_api::key::Key);
@@ -2530,22 +2611,29 @@ async fn getpage_at_lsn_handler(
 
     let key: Key = parse_query_param(&request, "key")?
         .ok_or_else(|| ApiError::BadRequest(anyhow!("missing 'key' query parameter")))?;
-    let lsn: Lsn = parse_query_param(&request, "lsn")?
-        .ok_or_else(|| ApiError::BadRequest(anyhow!("missing 'lsn' query parameter")))?;
+    let lsn: Option<Lsn> = parse_query_param(&request, "lsn")?;
 
     async {
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+        // Enable read path debugging
+        let ctx = RequestContextBuilder::extend(&ctx).read_path_debug(true).build();
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
 
+        // Use last_record_lsn if no lsn is provided
+        let lsn = lsn.unwrap_or_else(|| timeline.get_last_record_lsn());
         let page = timeline.get(key.0, lsn, &ctx).await?;
 
-        Result::<_, ApiError>::Ok(
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "application/octet-stream")
-                .body(hyper::Body::from(page))
-                .unwrap(),
-        )
+        if touch {
+            json_response(StatusCode::OK, ())
+        } else {
+            Result::<_, ApiError>::Ok(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                    .body(hyper::Body::from(page))
+                    .unwrap(),
+            )
+        }
     }
     .instrument(info_span!("timeline_get", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
     .await
@@ -3616,6 +3704,14 @@ pub fn make_router(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/layer",
             |r| api_handler(r, layer_map_info_handler),
         )
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/download_heatmap_layers",
+            |r| api_handler(r, timeline_download_heatmap_layers_handler),
+        )
+        .delete(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/download_heatmap_layers",
+            |r| api_handler(r, timeline_shutdown_download_heatmap_layers_handler),
+        )
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/layer/:layer_file_name",
             |r| api_handler(r, layer_download_handler),
@@ -3671,6 +3767,10 @@ pub fn make_router(
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/getpage",
             |r| testing_api_handler("getpage@lsn", r, getpage_at_lsn_handler),
+        )
+        .get(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/touchpage",
+            |r| api_handler(r, touchpage_at_lsn_handler),
         )
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/keyspace",

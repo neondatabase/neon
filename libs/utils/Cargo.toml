@@ -24,11 +24,10 @@ diatomic-waker.workspace = true
 git-version.workspace = true
 hex = { workspace = true, features = ["serde"] }
 humantime.workspace = true
-inferno.workspace = true
 fail.workspace = true
 futures = { workspace = true }
 jsonwebtoken.workspace = true
-nix.workspace = true
+nix = {workspace = true, features = [ "ioctl" ] }
 once_cell.workspace = true
 pin-project-lite.workspace = true
 regex.workspace = true

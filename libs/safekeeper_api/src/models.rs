@@ -282,3 +282,18 @@ pub struct TimelineTermBumpResponse {
 pub struct SafekeeperUtilization {
     pub timeline_count: u64,
 }
+
+/// pull_timeline request body.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct PullTimelineRequest {
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
+    pub http_hosts: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PullTimelineResponse {
+    // Donor safekeeper host
+    pub safekeeper_host: String,
+    // TODO: add more fields?
+}
