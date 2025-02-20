@@ -713,17 +713,13 @@ impl Endpoint {
             println!("Also at '{}'", conn_str);
         }
         let mut cmd = Command::new(self.env.neon_distrib_dir.join("compute_ctl"));
-        //cmd.args([
-        //    "--external-http-port",
-        //    &self.external_http_address.port().to_string(),
-        //])
-        //.args([
-        //    "--internal-http-port",
-        //    &self.internal_http_address.port().to_string(),
-        //])
         cmd.args([
-            "--http-port",
+            "--external-http-port",
             &self.external_http_address.port().to_string(),
+        ])
+        .args([
+            "--internal-http-port",
+            &self.internal_http_address.port().to_string(),
         ])
         .args(["--pgdata", self.pgdata().to_str().unwrap()])
         .args(["--connstr", &conn_str])
