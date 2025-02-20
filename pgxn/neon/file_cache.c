@@ -1115,6 +1115,7 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		LWLockRelease(lfc_lock);
 		return;
 	}
+	generation = lfc_ctl->generation;
 
 	/*
 	 * For every chunk that has blocks we're interested in, we
@@ -1171,7 +1172,6 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			}
 		}
 
-		generation = lfc_ctl->generation;
 		entry_offset = entry->offset;
 
 		for (int i = 0; i < blocks_in_chunk; i++)
@@ -1249,7 +1249,11 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 					}
 				}
 			}
-
+			else
+			{
+				/* stop iteration if LFC was disabled */
+				break;
+			}
 		}
 		blkno += blocks_in_chunk;
 		buf_offset += blocks_in_chunk;
