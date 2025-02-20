@@ -2,8 +2,10 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::io::prelude::*;
 use std::path::Path;
+use std::process::Command;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use tracing::info;
 
 use crate::pg_helpers::escape_conf_value;
 use crate::pg_helpers::{GenericOptionExt, PgOptionsSerialize};
@@ -156,4 +158,83 @@ where
     file.set_len(0)?;
 
     res
+}
+
+fn get_rsyslog_pid() -> Option<String> {
+    let output = Command::new("pgrep")
+        .arg("rsyslogd")
+        .output()
+        .expect("Failed to execute pgrep");
+
+    if !output.stdout.is_empty() {
+        let pid = std::str::from_utf8(&output.stdout)
+            .expect("Invalid UTF-8 in process output")
+            .trim()
+            .to_string();
+        Some(pid)
+    } else {
+        None
+    }
+}
+
+// Start rsyslogd with the specified configuration file
+// If rsyslogd is running and restart it if necessary
+fn restart_rsyslog(rsyslog_conf_path: &str) -> Result<()> {
+    let pid = get_rsyslog_pid();
+    if let Some(pid) = pid {
+        info!("rsyslogd is already running with pid: {}", pid);
+        // kill the running rsyslogd
+        let _ = Command::new("kill").arg("-9").arg(&pid).output();
+    }
+
+    let _ = Command::new("/usr/sbin/rsyslogd")
+        .arg("-f")
+        .arg(rsyslog_conf_path)
+        .output()
+        .context("Failed to start rsyslogd")?;
+    info!("Started rsyslogd.");
+
+    // DEBUG ONLY double check if rsyslogd is running
+    let pid = get_rsyslog_pid();
+    if pid.is_none() {
+        return Err(anyhow::anyhow!("Failed to start rsyslogd"));
+    }
+    info!("rsyslogd started successfully with pid: {}", pid.unwrap());
+
+    Ok(())
+}
+
+pub fn configure_rsyslog(log_directory: &str, tag: &str, remote_endpoint: &str) -> Result<()> {
+    let config_content = format!(
+        r#"
+# Load imfile module to read log files
+module(load="imfile")
+
+# Input configuration for log files in the specified directory
+input(type="imfile" File="{}/*.log" Tag="{}" Severity="info" Facility="local0")
+global(workDirectory="/var/log")
+
+# Forward logs to remote syslog server
+*.* @@{}
+"#,
+        log_directory, tag, remote_endpoint,
+    );
+
+    info!("config_content: {}", config_content);
+
+    let rsyslog_conf_path = "/etc/compute_rsyslog.conf";
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(rsyslog_conf_path)?;
+
+    file.write_all(config_content.as_bytes())?;
+
+    info!("rsyslog configuration added successfully. Starting rsyslogd");
+
+    // start the service, using the new configuration
+    restart_rsyslog(rsyslog_conf_path)?;
+
+    Ok(())
 }
