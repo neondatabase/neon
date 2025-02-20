@@ -471,7 +471,6 @@ pub struct TimelineCollector {
     flush_lsn: GenericGaugeVec<AtomicU64>,
     epoch_start_lsn: GenericGaugeVec<AtomicU64>,
     peer_horizon_lsn: GenericGaugeVec<AtomicU64>,
-    remote_consistent_lsn: GenericGaugeVec<AtomicU64>,
     ps_last_received_lsn: GenericGaugeVec<AtomicU64>,
     feedback_last_time_seconds: GenericGaugeVec<AtomicU64>,
     ps_feedback_count: GenericGaugeVec<AtomicU64>,
@@ -542,16 +541,6 @@ impl TimelineCollector {
         )
         .unwrap();
         descs.extend(peer_horizon_lsn.desc().into_iter().cloned());
-
-        let remote_consistent_lsn = GenericGaugeVec::new(
-            Opts::new(
-                "safekeeper_remote_consistent_lsn",
-                "LSN which is persisted to the remote storage in pageserver",
-            ),
-            &["tenant_id", "timeline_id"],
-        )
-        .unwrap();
-        descs.extend(remote_consistent_lsn.desc().into_iter().cloned());
 
         let ps_last_received_lsn = GenericGaugeVec::new(
             Opts::new(
@@ -698,7 +687,6 @@ impl TimelineCollector {
             flush_lsn,
             epoch_start_lsn,
             peer_horizon_lsn,
-            remote_consistent_lsn,
             ps_last_received_lsn,
             feedback_last_time_seconds,
             ps_feedback_count,
@@ -732,7 +720,6 @@ impl Collector for TimelineCollector {
         self.flush_lsn.reset();
         self.epoch_start_lsn.reset();
         self.peer_horizon_lsn.reset();
-        self.remote_consistent_lsn.reset();
         self.ps_last_received_lsn.reset();
         self.feedback_last_time_seconds.reset();
         self.ps_feedback_count.reset();
@@ -786,9 +773,6 @@ impl Collector for TimelineCollector {
             self.peer_horizon_lsn
                 .with_label_values(labels)
                 .set(tli.mem_state.peer_horizon_lsn.into());
-            self.remote_consistent_lsn
-                .with_label_values(labels)
-                .set(tli.mem_state.remote_consistent_lsn.into());
             self.timeline_active
                 .with_label_values(labels)
                 .set(tli.timeline_is_active as u64);
@@ -849,7 +833,6 @@ impl Collector for TimelineCollector {
         mfs.extend(self.flush_lsn.collect());
         mfs.extend(self.epoch_start_lsn.collect());
         mfs.extend(self.peer_horizon_lsn.collect());
-        mfs.extend(self.remote_consistent_lsn.collect());
         mfs.extend(self.ps_last_received_lsn.collect());
         mfs.extend(self.feedback_last_time_seconds.collect());
         mfs.extend(self.ps_feedback_count.collect());

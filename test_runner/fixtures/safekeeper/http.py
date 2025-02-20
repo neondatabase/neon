@@ -34,7 +34,6 @@ class SafekeeperTimelineStatus:
     timeline_start_lsn: Lsn
     backup_lsn: Lsn
     peer_horizon_lsn: Lsn
-    remote_consistent_lsn: Lsn
     walreceivers: list[Walreceiver]
 
 
@@ -205,7 +204,6 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
             timeline_start_lsn=Lsn(resj["timeline_start_lsn"]),
             backup_lsn=Lsn(resj["backup_lsn"]),
             peer_horizon_lsn=Lsn(resj["peer_horizon_lsn"]),
-            remote_consistent_lsn=Lsn(resj["remote_consistent_lsn"]),
             walreceivers=walreceivers,
         )
 

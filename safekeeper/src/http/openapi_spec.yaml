@@ -266,7 +266,6 @@ components:
         - flush_lsn
         - commit_lsn
         - backup_lsn
-        - remote_consistent_lsn
         - peer_horizon_lsn
         - safekeeper_connstr
       properties:
@@ -278,8 +277,6 @@ components:
         commit_lsn:
           type: string
         backup_lsn:
-          type: string
-        remote_consistent_lsn:
           type: string
         peer_horizon_lsn:
           type: string
@@ -324,8 +321,6 @@ components:
         backup_lsn:
           type: string
         peer_horizon_lsn:
-          type: string
-        remote_consistent_lsn:
           type: string
 
     AcceptorStateStatus:

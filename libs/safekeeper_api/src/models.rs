@@ -202,7 +202,6 @@ pub struct TimelineStatus {
     pub commit_lsn: Lsn,
     pub backup_lsn: Lsn,
     pub peer_horizon_lsn: Lsn,
-    pub remote_consistent_lsn: Lsn,
     pub peers: Vec<PeerInfo>,
     pub walsenders: Vec<WalSenderState>,
     pub walreceivers: Vec<WalReceiverState>,

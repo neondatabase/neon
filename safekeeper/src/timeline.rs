@@ -223,13 +223,6 @@ impl StateSK {
         state.inmem.backup_lsn = max(Lsn(sk_info.backup_lsn), state.inmem.backup_lsn);
         sync_control_file |= state.backup_lsn + wal_seg_size < state.inmem.backup_lsn;
 
-        state.inmem.remote_consistent_lsn = max(
-            Lsn(sk_info.remote_consistent_lsn),
-            state.inmem.remote_consistent_lsn,
-        );
-        sync_control_file |=
-            state.remote_consistent_lsn + wal_seg_size < state.inmem.remote_consistent_lsn;
-
         state.inmem.peer_horizon_lsn =
             max(Lsn(sk_info.peer_horizon_lsn), state.inmem.peer_horizon_lsn);
         sync_control_file |= state.peer_horizon_lsn + wal_seg_size < state.inmem.peer_horizon_lsn;
@@ -365,7 +358,6 @@ impl SharedState {
             flush_lsn: self.sk.flush_lsn().0,
             // note: this value is not flushed to control file yet and can be lost
             commit_lsn: self.sk.state().inmem.commit_lsn.0,
-            remote_consistent_lsn: self.sk.state().inmem.remote_consistent_lsn.0,
             peer_horizon_lsn: self.sk.state().inmem.peer_horizon_lsn.0,
             safekeeper_connstr: conf
                 .advertise_pg_addr
@@ -976,11 +968,7 @@ impl WalResidentTimeline {
 
     /// Update in memory remote consistent lsn.
     pub async fn update_remote_consistent_lsn(&self, candidate: Lsn, generation: Generation) {
-        let mut shared_state = self.write_shared_state().await;
-        shared_state.sk.state_mut().inmem.remote_consistent_lsn = max(
-            shared_state.sk.state().inmem.remote_consistent_lsn,
-            candidate,
-        );
+        todo!()
     }
 }
 

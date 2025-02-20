@@ -47,11 +47,9 @@ pub(crate) struct StateSnapshot {
     // inmem values
     pub(crate) commit_lsn: Lsn,
     pub(crate) backup_lsn: Lsn,
-    pub(crate) remote_consistent_lsn: Lsn,
 
     // persistent control file values
     pub(crate) cfile_commit_lsn: Lsn,
-    pub(crate) cfile_remote_consistent_lsn: Lsn,
     pub(crate) cfile_backup_lsn: Lsn,
 
     // latest state
@@ -72,9 +70,7 @@ impl StateSnapshot {
         Self {
             commit_lsn: state.inmem.commit_lsn,
             backup_lsn: state.inmem.backup_lsn,
-            remote_consistent_lsn: state.inmem.remote_consistent_lsn,
             cfile_commit_lsn: state.commit_lsn,
-            cfile_remote_consistent_lsn: state.remote_consistent_lsn,
             cfile_backup_lsn: state.backup_lsn,
             flush_lsn: read_guard.sk.flush_lsn(),
             last_log_term: read_guard.sk.last_log_term(),
@@ -89,7 +85,6 @@ impl StateSnapshot {
         state.inmem.commit_lsn > state.commit_lsn
             || state.inmem.backup_lsn > state.backup_lsn
             || state.inmem.peer_horizon_lsn > state.peer_horizon_lsn
-            || state.inmem.remote_consistent_lsn > state.remote_consistent_lsn
     }
 }
 
@@ -503,6 +498,7 @@ impl Manager {
     ) {
         let is_active = is_wal_backup_required
             || num_computes > 0
+            // TODO: replace with new facility
             || state.remote_consistent_lsn < state.commit_lsn;
 
         // update the broker timeline set
