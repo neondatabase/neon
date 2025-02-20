@@ -101,6 +101,43 @@ class NeonAPI:
 
         return cast("dict[str, Any]", resp.json())
 
+    def create_branch(
+        self,
+        project_id: str,
+        branch_name: str | None = None,
+        parent_id: str | None = None,
+        add_endpoint=True,
+    ) -> dict[str, Any]:
+        data = {}
+        if add_endpoint:
+            data["endpoints"] = [{"type": "read_write"}]
+        if parent_id or branch_name:
+            data["branch"] = {}
+        if parent_id:
+            data["branch"]["parent_id"] = parent_id
+        if branch_name:
+            data["branch"]["name"] = branch_name
+        resp = self.__request(
+            "POST",
+            f"/projects/{project_id}/branches",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            json=data,
+        )
+        return cast("dict[str, Any]", resp.json())
+
+    def delete_branch(self, project_id: str, branch_id: str) -> dict[str, Any]:
+        resp = self.__request(
+            "DELETE",
+            f"/projects/{project_id}/{branch_id}",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+        return cast("dict[str, Any]", resp.json())
+
     def start_endpoint(
         self,
         project_id: str,
