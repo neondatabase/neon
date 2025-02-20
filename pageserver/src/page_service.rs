@@ -34,6 +34,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::SystemTime;
 use std::time::{Duration, Instant};
+use strum_macros::IntoStaticStr;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::task::JoinHandle;
@@ -598,6 +599,7 @@ struct BatchedTestRequest {
 /// NB: we only hold [`timeline::handle::WeakHandle`] inside this enum,
 /// so that we don't keep the [`Timeline::gate`] open while the batch
 /// is being built up inside the [`spsc_fold`] (pagestream pipelining).
+#[derive(IntoStaticStr)]
 enum BatchedFeMessage {
     Exists {
         span: Span,
@@ -642,6 +644,10 @@ enum BatchedFeMessage {
 }
 
 impl BatchedFeMessage {
+    fn as_static_str(&self) -> &'static str {
+        self.into()
+    }
+
     fn observe_execution_start(&mut self, at: Instant) {
         match self {
             BatchedFeMessage::Exists { timer, .. }
@@ -1468,7 +1474,7 @@ impl PageServerHandler {
             };
 
             let result = warn_slow(
-                "getpage request",
+                msg.as_static_str(), // NB: avoid format!() allocation
                 WARN_SLOW_GETPAGE_THRESHOLD,
                 self.pagesteam_handle_batched_message(
                     pgb_writer,
@@ -1644,7 +1650,7 @@ impl PageServerHandler {
                         }
                     };
                     warn_slow(
-                        "getpage request batch",
+                        batch.as_static_str(), // NB: avoid format!() allocation
                         WARN_SLOW_GETPAGE_THRESHOLD,
                         self.pagesteam_handle_batched_message(
                             pgb_writer,
