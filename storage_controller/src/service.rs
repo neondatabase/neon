@@ -399,6 +399,8 @@ pub struct Config {
     pub http_service_port: i32,
 
     pub long_reconcile_threshold: Duration,
+
+    pub use_https_pageserver_api: bool,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -1401,8 +1403,8 @@ impl Service {
             .list_nodes()
             .await?
             .into_iter()
-            .map(Node::from_persistent)
-            .collect::<Vec<_>>();
+            .map(|x| Node::from_persistent(x, config.use_https_pageserver_api))
+            .collect::<anyhow::Result<Vec<Node>>>()?;
         let nodes: HashMap<NodeId, Node> = nodes.into_iter().map(|n| (n.get_id(), n)).collect();
         tracing::info!("Loaded {} nodes from database.", nodes.len());
         metrics::METRICS_REGISTRY
@@ -1501,10 +1503,13 @@ impl Service {
                     NodeId(node_id as u64),
                     "".to_string(),
                     123,
+                    None,
                     "".to_string(),
                     123,
                     AvailabilityZone("test_az".to_string()),
-                );
+                    false,
+                )
+                .unwrap();
 
                 scheduler.node_upsert(&node);
             }
@@ -5907,8 +5912,10 @@ impl Service {
         )
         .await;
 
+        #[derive(PartialEq)]
         enum RegistrationStatus {
-            Matched,
+            UpToDate,
+            NeedUpdate,
             Mismatched,
             New,
         }
@@ -5917,7 +5924,11 @@ impl Service {
             let locked = self.inner.read().unwrap();
             if let Some(node) = locked.nodes.get(&register_req.node_id) {
                 if node.registration_match(&register_req) {
-                    RegistrationStatus::Matched
+                    if node.need_update(&register_req) {
+                        RegistrationStatus::NeedUpdate
+                    } else {
+                        RegistrationStatus::UpToDate
+                    }
                 } else {
                     RegistrationStatus::Mismatched
                 }
@@ -5927,9 +5938,9 @@ impl Service {
         };
 
         match registration_status {
-            RegistrationStatus::Matched => {
+            RegistrationStatus::UpToDate => {
                 tracing::info!(
-                    "Node {} re-registered with matching address",
+                    "Node {} re-registered with matching address and is up to date",
                     register_req.node_id
                 );
 
@@ -5947,7 +5958,7 @@ impl Service {
                     "Node is already registered with different address".to_string(),
                 ));
             }
-            RegistrationStatus::New => {
+            RegistrationStatus::New | RegistrationStatus::NeedUpdate => {
                 // fallthrough
             }
         }
@@ -5976,6 +5987,16 @@ impl Service {
             ));
         }
 
+        if self.config.use_https_pageserver_api && register_req.listen_https_port.is_none() {
+            return Err(ApiError::PreconditionFailed(
+                format!(
+                    "Node {} has no https port, but use_https is enabled",
+                    register_req.node_id
+                )
+                .into(),
+            ));
+        }
+
         // Ordering: we must persist the new node _before_ adding it to in-memory state.
         // This ensures that before we use it for anything or expose it via any external
         // API, it is guaranteed to be available after a restart.
@@ -5983,13 +6004,29 @@ impl Service {
             register_req.node_id,
             register_req.listen_http_addr,
             register_req.listen_http_port,
+            register_req.listen_https_port,
             register_req.listen_pg_addr,
             register_req.listen_pg_port,
             register_req.availability_zone_id.clone(),
+            self.config.use_https_pageserver_api,
         );
+        let new_node = match new_node {
+            Ok(new_node) => new_node,
+            Err(error) => return Err(ApiError::InternalServerError(error)),
+        };
 
-        // TODO: idempotency if the node already exists in the database
-        self.persistence.insert_node(&new_node).await?;
+        match registration_status {
+            RegistrationStatus::New => self.persistence.insert_node(&new_node).await?,
+            RegistrationStatus::NeedUpdate => {
+                self.persistence
+                    .update_node_on_registration(
+                        register_req.node_id,
+                        register_req.listen_https_port,
+                    )
+                    .await?
+            }
+            _ => unreachable!("Other statuses have been processed earlier"),
+        }
 
         let mut locked = self.inner.write().unwrap();
         let mut new_nodes = (*locked.nodes).clone();
@@ -6004,12 +6041,24 @@ impl Service {
             .storage_controller_pageserver_nodes
             .set(locked.nodes.len() as i64);
 
-        tracing::info!(
-            "Registered pageserver {} ({}), now have {} pageservers",
-            register_req.node_id,
-            register_req.availability_zone_id,
-            locked.nodes.len()
-        );
+        match registration_status {
+            RegistrationStatus::New => {
+                tracing::info!(
+                    "Registered pageserver {} ({}), now have {} pageservers",
+                    register_req.node_id,
+                    register_req.availability_zone_id,
+                    locked.nodes.len()
+                );
+            }
+            RegistrationStatus::NeedUpdate => {
+                tracing::info!(
+                    "Re-registered and updated node {} ({})",
+                    register_req.node_id,
+                    register_req.availability_zone_id,
+                );
+            }
+            _ => unreachable!("Other statuses have been processed earlier"),
+        }
         Ok(())
     }
 
@@ -6027,7 +6076,9 @@ impl Service {
         if let Some(scheduling) = scheduling {
             // Scheduling is a persistent part of Node: we must write updates to the database before
             // applying them in memory
-            self.persistence.update_node(node_id, scheduling).await?;
+            self.persistence
+                .update_node_scheduling_policy(node_id, scheduling)
+                .await?;
         }
 
         // If we're activating a node, then before setting it active we must reconcile any shard locations
