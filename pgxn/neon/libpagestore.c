@@ -137,6 +137,8 @@ typedef struct
 	/* request / response counters for debugging */
 	uint64			nrequests_sent;
 	uint64			nresponses_received;
+
+	pthread_mutex_t mutex;
 } PageServer;
 
 static PageServer* page_servers;
@@ -264,7 +266,11 @@ AssignPageserverConnstring(const char *newval, void *extra)
 
 	if (page_servers == NULL)
 	{
-		page_servers = (PageServer*)calloc(MaxNumberOfChannels(), sizeof(PageServer));
+		page_servers = (PageServer*)calloc(n_channels, sizeof(PageServer));
+		for (size_t i = 0; i < n_channels; i++)
+		{
+			pthread_mutex_init(&page_servers[i].mutex, NULL);
+		}
 	}
 
 	/* Force to reestablish connection with old shards */
@@ -303,22 +309,6 @@ get_shard_number(NRelFileInfo rinfo, BlockNumber blocknum)
 #endif
 
 	return hash % communicator->n_shards;
-}
-
-/*
- * Perform disconnect in critical section because it is not thread-safe
- */
-static void
-cleanup_and_disconnect(PageServer *ps)
-{
-	if (ps->conn)
-	{
-		MyNeonCounters->pageserver_disconnects_total++;
-		PQfinish(ps->conn);
-		ps->conn = NULL;
-	}
-
-	ps->state = PS_Disconnected;
 }
 
 /*
@@ -442,8 +432,7 @@ pageserver_connect(int chan_no, int elevel)
 	int64		us_since_last_attempt;
 	PGresult*   res;
 
-	/* Make sure we start with a clean slate */
-	cleanup_and_disconnect(ps);
+	Assert(ps->state != PS_Connected);
 
 	neon_shard_log_cs(shard_no, DEBUG5, "Connection state: Disconnected");
 
@@ -500,7 +489,7 @@ pageserver_connect(int chan_no, int elevel)
 	if (PQstatus(ps->conn) == CONNECTION_BAD)
 	{
 		char	   *msg = chomp(PQerrorMessage(ps->conn));
-		cleanup_and_disconnect(ps);
+		pageserver_disconnect(chan_no);
 		ereport(elevel,
 				(errcode(ERRCODE_SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION),
 				 errmsg(NEON_TAG "[shard %d] could not establish connection to pageserver", chan_no),
@@ -515,7 +504,7 @@ pageserver_connect(int chan_no, int elevel)
 	if (PQresultStatus(res) != PGRES_COPY_BOTH)
 	{
 		char	   *msg = chomp(PQerrorMessage(ps->conn));
-		cleanup_and_disconnect(ps);
+		pageserver_disconnect(chan_no);
 		ereport(elevel,
 				(errcode(ERRCODE_SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION),
 				 errmsg(NEON_TAG "[shard %d] could perform handshake with pageserver", chan_no),
@@ -552,7 +541,33 @@ pageserver_disconnect(int chan_no)
 	 * of the wait event sets or the psql connection, or failed when we tried
 	 * to attach wait events to the WaitEventSets.
 	 */
-	cleanup_and_disconnect(ps);
+	if (ps->conn)
+	{
+		MyNeonCounters->pageserver_disconnects_total++;
+		PQfinish(ps->conn);
+		ps->conn = NULL;
+	}
+	ps->state = PS_Disconnected;
+}
+
+/*
+ * Try to connect page server in critical section to avoid race condition between reader and writer
+ */
+static bool
+ensure_connected(int chan_no)
+{
+	bool connected = true;
+	PageServer *ps = &page_servers[chan_no];
+	if (ps->state != PS_Connected)
+	{
+		pthread_mutex_lock(&ps->mutex);
+		if (ps->state != PS_Connected)
+		{
+			connected = pageserver_connect(chan_no, LOG);
+		}
+		pthread_mutex_unlock(&ps->mutex);
+	}
+	return connected;
 }
 
 static bool
@@ -589,7 +604,7 @@ pageserver_send(int chan_no, StringInfo msg)
 			pageserver_disconnect(chan_no);
 			pageserver_conn = NULL;
 		}
-		while (!pageserver_connect(chan_no, LOG))
+		while (!ensure_connected(chan_no))
 		{
 			ps->n_reconnect_attempts += 1;
 		}
@@ -628,20 +643,16 @@ pageserver_receive(int chan_no)
 	StringInfoData resp_buff;
 	NeonResponse *resp = NULL;
 	PageServer *ps = &page_servers[chan_no];
-	PGconn	   *pageserver_conn = ps->conn;
+	PGconn	   *pageserver_conn;
 	int			shard_no = CHAN_TO_SHARD(chan_no);
 	/* read response */
 	int			rc;
 
-	/* TODO: fix race condition between sender and receiver */
-	if (ps->state != PS_Connected)
+	if (!ensure_connected(chan_no))
 	{
-		neon_shard_log_cs(shard_no, LOG,
-						  "pageserver_receive: returning NULL for non-connected pageserver connection: 0x%02x",
-						  ps->state);
 		return NULL;
 	}
-
+	pageserver_conn = ps->conn;
 	Assert(pageserver_conn);
 
 	resp_buff.data = NULL;
@@ -1042,7 +1053,6 @@ communicator_write_loop(void* arg)
 {
 	uint64	read_start_pos = 0;
 	size_t	chan_no = (size_t)arg;
-	int		shard_no = CHAN_TO_SHARD(chan_no);
 	NeonCommunicatorChannel* chan = &communicator->channels[chan_no];
 	size_t	ring_size = RequestBufferSize();
 	StringInfoData s;
@@ -1057,7 +1067,6 @@ communicator_write_loop(void* arg)
 		/* Number of shards is decreased so this worker is not needed any more */
 		if (chan_no >= shard_map.n_shards * parallel_connections)
 		{
-			neon_shard_log_cs(shard_no, LOG, "Shard %d is not online any more (n_shards=%d)", (int)shard_no, (int)shard_map.n_shards);
 			return NULL;
 		}
 		read_end_pos = pg_atomic_read_u64(&chan->read_pos);
@@ -1132,8 +1141,10 @@ communicator_read_loop(void* arg)
 				if (resp->u.recepient.bufid == InvalidBuffer)
 				{
 					/* result of prefetch */
-					Assert(false);
-					(void) lfc_prefetch(page_resp->req.rinfo, page_resp->req.forknum, page_resp->req.blkno, page_resp->page, resp->not_modified_since);
+
+					pthread_mutex_lock(&mutex); /* FIXME: lfc_prefetch is using LWLock which is not thread-safe (use static variables) */
+ 					(void) lfc_prefetch(page_resp->req.rinfo, page_resp->req.forknum, page_resp->req.blkno, page_resp->page, resp->not_modified_since);
+					pthread_mutex_unlock(&mutex);
 					notify_backend = false;
 				}
 				else
