@@ -177,14 +177,9 @@ static shmem_request_hook_type prev_shmem_request_hook;
  * All cache content should be invalidated to avoid reading of stale or corrupted data
  */
 static void
-lfc_disable(char const *op)
+lfc_switch_off(void)
 {
 	int			fd;
-
-	elog(WARNING, "LFC: failed to %s local file cache at %s: %m, disabling local file cache", op, lfc_path);
-
-	/* Invalidate hash */
-	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 
 	if (LFC_ENABLED())
 	{
@@ -235,12 +230,22 @@ lfc_disable(char const *op)
 	else
 		close(fd);
 
-	LWLockRelease(lfc_lock);
 
 	if (lfc_desc > 0)
 		close(lfc_desc);
 
 	lfc_desc = -1;
+}
+
+static void
+lfc_disable(char const *op)
+{
+	elog(WARNING, "LFC: failed to %s local file cache at %s: %m, disabling local file cache", op, lfc_path);
+
+	/* Invalidate hash */
+	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
+	lfc_switch_off();
+	LWLockRelease(lfc_lock);
 }
 
 /*
@@ -424,7 +429,7 @@ lfc_change_limit_hook(int newval, void *extra)
 	}
 	lfc_ctl->limit = new_size;
 	if (new_size == 0) {
-		lfc_ctl->generation += 1;
+		lfc_switch_off();
 	}
 	neon_log(DEBUG1, "set local file cache limit to %d", new_size);
 
