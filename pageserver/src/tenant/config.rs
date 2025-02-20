@@ -793,4 +793,12 @@ mod tests {
             Some(Duration::from_secs(5))
         );
     }
+
+    #[test]
+    fn test_vlad() {
+        let tenant_conf_opt: TenantConfOpt =
+            serde_json::from_str("{\"pitr_interval\": \"24h0m0s\"}").unwrap();
+        let tenant_config: models::TenantConfig = tenant_conf_opt.clone().into();
+        assert_eq!(tenant_config.pitr_interval.unwrap(), "24h0m0s");
+    }
 }

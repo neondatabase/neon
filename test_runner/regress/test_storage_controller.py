@@ -3764,3 +3764,37 @@ def test_storage_controller_node_flap_detach_race(
             assert len(locs) == 1, f"{shard} has {len(locs)} attached locations"
 
     wait_until(validate_locations, timeout=10)
+
+
+def test_storage_controller_config_equivalence(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_pageservers = 1
+    neon_env_builder.storage_controller_config = {
+        "start_as_candidate": False,
+    }
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_id = TenantId.generate()
+    env.storage_controller.tenant_create(
+        tenant_id, shard_count=2, tenant_config={"pitr_interval": "1h2m3s"}
+    )
+
+    env.storage_controller.reconcile_until_idle()
+
+    reconciles_before_restart = env.storage_controller.get_metric_value(
+        "storage_controller_reconcile_complete_total", filter={"status": "ok"}
+    )
+
+    assert reconciles_before_restart != 0
+
+    env.storage_controller.stop()
+    env.storage_controller.start()
+
+    env.storage_controller.reconcile_until_idle()
+
+    reconciles_after_restart = env.storage_controller.get_metric_value(
+        "storage_controller_reconcile_complete_total", filter={"status": "ok"}
+    )
+
+    assert reconciles_after_restart == 0

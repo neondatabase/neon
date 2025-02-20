@@ -1287,7 +1287,13 @@ impl TenantShard {
                 attached_location_conf(generation, &self.shard, &self.config, &self.policy);
             match self.observed.locations.get(&node_id) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {}
-                Some(_) | None => {
+                Some(conf) => {
+                    tracing::info!("Wanted: {wanted_conf:?}");
+                    tracing::info!("Observed: {conf:?}");
+
+                    dirty_nodes.insert(node_id);
+                }
+                None => {
                     dirty_nodes.insert(node_id);
                 }
             }
