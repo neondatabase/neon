@@ -1157,8 +1157,6 @@ class NeonEnv:
                 # Disable pageserver disk syncs in tests: when running tests concurrently, this avoids
                 # the pageserver taking a long time to start up due to syncfs flushing other tests' data
                 "no_sync": True,
-                # Look for gaps in WAL received from safekeepeers
-                "validate_wal_contiguity": True,
             }
 
             # Batching (https://github.com/neondatabase/neon/issues/9377):
@@ -1168,6 +1166,14 @@ class NeonEnv:
                 "execution": "concurrent-futures",
                 "max_batch_size": 32,
             }
+
+            if config.test_may_use_compatibility_snapshot_binaries:
+                log.info(
+                    "Skipping WAL contiguity validation to avoid forward-compatibility related test failures"
+                )
+            else:
+                # Look for gaps in WAL received from safekeepeers
+                ps_cfg["validate_wal_contiguity"] = True
 
             # Concurrent IO (https://github.com/neondatabase/neon/issues/9378):
             # enable concurrent IO by default in tests and benchmarks.
