@@ -5344,12 +5344,6 @@ impl From<OffloadError> for CompactionError {
     }
 }
 
-impl CompactionError {
-    pub fn is_cancelled(&self) -> bool {
-        matches!(self, CompactionError::ShuttingDown)
-    }
-}
-
 impl From<CollectKeySpaceError> for CompactionError {
     fn from(err: CollectKeySpaceError) -> Self {
         match err {
