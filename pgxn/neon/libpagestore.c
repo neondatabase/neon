@@ -266,6 +266,7 @@ AssignPageserverConnstring(const char *newval, void *extra)
 
 	if (page_servers == NULL)
 	{
+		size_t n_channels = MaxNumberOfChannels();
 		page_servers = (PageServer*)calloc(n_channels, sizeof(PageServer));
 		for (size_t i = 0; i < n_channels; i++)
 		{
