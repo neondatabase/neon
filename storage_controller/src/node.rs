@@ -96,7 +96,7 @@ impl Node {
         self.id == register_req.node_id
             && self.listen_http_addr == register_req.listen_http_addr
             && self.listen_http_port == register_req.listen_http_port
-            // Note: listen_https_port may change. See need_update for mode details.
+            // Note: listen_https_port may change. See [`Self::need_update`] for mode details.
             // && self.listen_https_port == register_req.listen_https_port
             && self.listen_pg_addr == register_req.listen_pg_addr
             && self.listen_pg_port == register_req.listen_pg_port
