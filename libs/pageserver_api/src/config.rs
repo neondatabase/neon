@@ -122,6 +122,8 @@ pub struct ConfigToml {
     pub page_service_pipelining: PageServicePipeliningConfig,
     pub get_vectored_concurrent_io: GetVectoredConcurrentIo,
     pub enable_read_path_debugging: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validate_wal_contiguity: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -521,6 +523,7 @@ impl Default for ConfigToml {
             } else {
                 None
             },
+            validate_wal_contiguity: None,
         }
     }
 }

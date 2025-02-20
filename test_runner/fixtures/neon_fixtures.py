@@ -1157,6 +1157,8 @@ class NeonEnv:
                 # Disable pageserver disk syncs in tests: when running tests concurrently, this avoids
                 # the pageserver taking a long time to start up due to syncfs flushing other tests' data
                 "no_sync": True,
+                # Look for gaps in WAL received from safekeepeers
+                "validate_wal_contiguity": True,
             }
 
             # Batching (https://github.com/neondatabase/neon/issues/9377):
