@@ -30,7 +30,7 @@ fn default_mode() -> LocationConfigMode {
 pub struct ReAttachResponseTenant {
     pub id: TenantShardId,
     /// Mandatory if LocationConfigMode is None or set to an Attached* mode
-    pub gen: Option<u32>,
+    pub r#gen: Option<u32>,
 
     /// Default value only for backward compat: this field should be set
     #[serde(default = "default_mode")]
@@ -44,7 +44,7 @@ pub struct ReAttachResponse {
 #[derive(Serialize, Deserialize)]
 pub struct ValidateRequestTenant {
     pub id: TenantShardId,
-    pub gen: u32,
+    pub r#gen: u32,
 }
 
 #[derive(Serialize, Deserialize)]

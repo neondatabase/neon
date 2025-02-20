@@ -1172,10 +1172,10 @@ mod test {
             ..TenantConf::default()
         };
         let tenant_id = TenantId::generate();
-        let mut gen = Generation::new(0xdead0001);
+        let mut gen_ = Generation::new(0xdead0001);
         let mut get_next_gen = || {
-            let ret = gen;
-            gen = gen.next();
+            let ret = gen_;
+            gen_ = gen_.next();
             ret
         };
         // The LSN at which we will create an image layer to filter

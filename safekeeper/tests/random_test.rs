@@ -18,7 +18,7 @@ fn test_random_schedules() -> anyhow::Result<()> {
     let mut config = TestConfig::new(Some(clock));
 
     for _ in 0..500 {
-        let seed: u64 = rand::thread_rng().gen();
+        let seed: u64 = rand::thread_rng().r#gen();
         config.network = generate_network_opts(seed);
 
         let test = config.start(seed);
