@@ -39,6 +39,7 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::logging::warn_slow;
 use utils::sync::gate::{Gate, GateGuard};
 use utils::sync::spsc_fold;
 use utils::{
@@ -80,6 +81,9 @@ use std::os::fd::AsRawFd;
 ///
 /// NB: this is a different value than [`crate::http::routes::ACTIVE_TENANT_TIMEOUT`].
 const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
+
+/// Threshold at which to log a warning about slow GetPage requests.
+const WARN_SLOW_GETPAGE_THRESHOLD: Duration = Duration::from_secs(30);
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -1463,17 +1467,20 @@ impl PageServerHandler {
                 }
             };
 
-            let err = self
-                .pagesteam_handle_batched_message(
+            let result = warn_slow(
+                "getpage request",
+                WARN_SLOW_GETPAGE_THRESHOLD,
+                self.pagesteam_handle_batched_message(
                     pgb_writer,
                     msg,
                     io_concurrency.clone(),
                     &cancel,
                     protocol_version,
                     ctx,
-                )
-                .await;
-            match err {
+                ),
+            )
+            .await;
+            match result {
                 Ok(()) => {}
                 Err(e) => break e,
             }
@@ -1636,13 +1643,17 @@ impl PageServerHandler {
                             return Err(e);
                         }
                     };
-                    self.pagesteam_handle_batched_message(
-                        pgb_writer,
-                        batch,
-                        io_concurrency.clone(),
-                        &cancel,
-                        protocol_version,
-                        &ctx,
+                    warn_slow(
+                        "getpage request batch",
+                        WARN_SLOW_GETPAGE_THRESHOLD,
+                        self.pagesteam_handle_batched_message(
+                            pgb_writer,
+                            batch,
+                            io_concurrency.clone(),
+                            &cancel,
+                            protocol_version,
+                            &ctx,
+                        ),
                     )
                     .await?;
                 }
