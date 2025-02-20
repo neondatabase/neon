@@ -3,8 +3,8 @@
 use std::num::NonZeroU64;
 
 use crate::MiB;
-use anyhow::{anyhow, Context};
-use tokio_postgres::{types::ToSql, Client, NoTls, Row};
+use anyhow::{Context, anyhow};
+use tokio_postgres::{Client, NoTls, Row, types::ToSql};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 

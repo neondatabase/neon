@@ -3,11 +3,11 @@
 #![cfg(target_os = "linux")]
 
 use anyhow::Context;
+use axum::{Router, routing::get};
 use axum::{
-    extract::{ws::WebSocket, State, WebSocketUpgrade},
+    extract::{State, WebSocketUpgrade, ws::WebSocket},
     response::Response,
 };
-use axum::{routing::get, Router};
 use clap::Parser;
 use futures::Future;
 use std::net::SocketAddr;

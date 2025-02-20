@@ -6,17 +6,17 @@
 //! the cgroup (requesting upscale), and the signals that go to the cgroup
 //! (notifying it of upscale).
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use axum::extract::ws::{Message, Utf8Bytes, WebSocket};
 use futures::{
-    stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
+    stream::{SplitSink, SplitStream},
 };
 use tracing::{debug, info};
 
 use crate::protocol::{
-    OutboundMsg, OutboundMsgKind, ProtocolRange, ProtocolResponse, ProtocolVersion,
-    PROTOCOL_MAX_VERSION, PROTOCOL_MIN_VERSION,
+    OutboundMsg, OutboundMsgKind, PROTOCOL_MAX_VERSION, PROTOCOL_MIN_VERSION, ProtocolRange,
+    ProtocolResponse, ProtocolVersion,
 };
 
 /// The central handler for all communications in the monitor.

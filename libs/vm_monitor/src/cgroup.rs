@@ -1,11 +1,11 @@
 use std::fmt::{self, Debug, Formatter};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use cgroups_rs::{
+    Subsystem,
     hierarchies::{self, is_cgroup2_unified_mode},
     memory::MemController,
-    Subsystem,
 };
 use tokio::sync::watch;
 use tracing::{info, warn};
