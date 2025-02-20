@@ -29,4 +29,6 @@ def test_api_random(
     log.info("Project ID: %s", project_id)
     res = neon_api.create_branch(project_id)
     log.info("%s", res)
+    res = neon_api.get_branches(project_id)
+    log.info("%s", res)
     assert True
