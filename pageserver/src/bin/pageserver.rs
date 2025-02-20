@@ -85,6 +85,9 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Initialize up failpoints support
+    let scenario = failpoint_support::init();
+
     let workdir = arg_matches
         .get_one::<String>("workdir")
         .map(Utf8Path::new)
@@ -176,9 +179,6 @@ fn main() -> anyhow::Result<()> {
             );
         }
     }
-
-    // Initialize up failpoints support
-    let scenario = failpoint_support::init();
 
     // Basic initialization of things that don't change after startup
     tracing::info!("Initializing virtual_file...");

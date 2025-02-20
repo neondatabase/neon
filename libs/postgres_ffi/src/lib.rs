@@ -22,6 +22,7 @@ macro_rules! postgres_ffi {
                 // bindgen generates bindings for a lot of stuff we don't need
                 #![allow(dead_code)]
                 #![allow(clippy::undocumented_unsafe_blocks)]
+                #![allow(unsafe_op_in_unsafe_fn)]
 
                 use serde::{Deserialize, Serialize};
                 include!(concat!(
