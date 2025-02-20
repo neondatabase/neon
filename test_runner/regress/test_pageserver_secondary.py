@@ -903,6 +903,9 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
     )
 
+    tenant_conf = TENANT_CONF.copy()
+    tenant_conf["heatmap_period"] = "0s"
+
     env = neon_env_builder.init_configs()
     env.start()
 
@@ -910,7 +913,7 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
 
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
-    env.create_tenant(tenant_id, timeline_id, conf=TENANT_CONF, placement_policy='{"Attached":1}')
+    env.create_tenant(tenant_id, timeline_id, conf=tenant_conf, placement_policy='{"Attached":1}')
 
     env.storage_controller.reconcile_until_idle()
 
