@@ -26,6 +26,7 @@ from fixtures.neon_fixtures import (
     PgBin,
     StorageControllerApiException,
     StorageControllerLeadershipStatus,
+    StorageControllerMigrationConfig,
     last_flush_lsn_upload,
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
@@ -3876,7 +3877,52 @@ def test_storage_controller_graceful_migration(neon_env_builder: NeonEnvBuilder)
     neon_env_builder.num_pageservers = 4
     neon_env_builder.num_azs = 2
 
-    env = neon_env_builder.init_configs()
-    env.start()
+    env = neon_env_builder.init_start()
 
-    env.storage_controller.tenant_describe(env.initial_tenant)
+    initial_desc = env.storage_controller.tenant_describe(env.initial_tenant)["shards"][0]
+    initial_ps_id = initial_desc["node_attached"]
+    initial_ps_az = initial_desc["preferred_az_id"]
+    initial_ps = [ps for ps in env.pageservers if ps.id == initial_ps_id][0]
+
+    dest_ps = [
+        ps for ps in env.pageservers if ps.id != initial_ps_id and ps.az_id == initial_ps_az
+    ][0]
+    dest_ps_id = dest_ps.id
+
+    # Set a failpoint so that the migration will block at the point it has a secondary location
+    for ps in env.pageservers:
+        ps.http_client().configure_failpoints(("secondary-layer-download-pausable", "pause"))
+
+    # Before migration, our destination has no locations.  Guaranteed because any secondary for our
+    # tenant will be in another AZ.
+    assert dest_ps.http_client().tenant_list_locations()["tenant_shards"] == []
+
+    # We expect this API call to succeed, and result in a new secondary location on the destination
+    env.storage_controller.tenant_shard_migrate(
+        TenantShardId(env.initial_tenant, 0, 0),
+        dest_ps_id,
+        config=StorageControllerMigrationConfig(graceful=True),
+    )
+
+    def secondary_at_dest():
+        locs = dest_ps.http_client().tenant_list_locations()["tenant_shards"]
+        assert len(locs) == 1
+        assert locs[0][0] == str(env.initial_tenant)
+        assert locs[0][1]["mode"] == "Secondary"
+
+    wait_until(secondary_at_dest)
+
+    # Unblock secondary downloads
+    for ps in env.pageservers:
+        ps.http_client().configure_failpoints(("secondary-layer-download-pausable", "off"))
+
+    # Pump the reconciler to avoid waiting for background reconciles
+    env.storage_controller.reconcile_until_idle()
+
+    # We should be attached at the destination
+    locs = dest_ps.http_client().tenant_list_locations()["tenant_shards"]
+    assert len(locs) == 1
+    assert locs[0][1]["mode"] == "AttachedSingle"
+
+    # Nothing left behind at the origin
+    assert initial_ps.http_client().tenant_list_locations()["tenant_shards"] == []
