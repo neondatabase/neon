@@ -350,6 +350,11 @@ pub struct Config {
     // this service to the pageservers it manages.
     pub jwt_token: Option<String>,
 
+    // All safekeepers managed by one instance of this service must have
+    // the same public key. This JWT token will be used to authenticate
+    // this service to the safekeepers it manages.
+    pub safekeeper_jwt_token: Option<String>,
+
     // This JWT token will be used to authenticate this service to the control plane.
     pub control_plane_jwt_token: Option<String>,
 
@@ -1552,7 +1557,7 @@ impl Service {
         );
 
         let heartbeater_sk = Heartbeater::new(
-            config.jwt_token.clone(),
+            config.safekeeper_jwt_token.clone(),
             config.max_offline_interval,
             config.max_warming_up_interval,
             cancel.clone(),
