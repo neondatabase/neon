@@ -348,7 +348,7 @@ pub struct Config {
     // All pageservers managed by one instance of this service must have
     // the same public key.  This JWT token will be used to authenticate
     // this service to the pageservers it manages.
-    pub jwt_token: Option<String>,
+    pub pageserver_jwt_token: Option<String>,
 
     // All safekeepers managed by one instance of this service must have
     // the same public key. This JWT token will be used to authenticate
@@ -886,7 +886,7 @@ impl Service {
                     let response = node
                         .with_client_retries(
                             |client| async move { client.list_location_config().await },
-                            &self.config.jwt_token,
+                            &self.config.pageserver_jwt_token,
                             1,
                             5,
                             timeout,
@@ -987,7 +987,7 @@ impl Service {
             let client = PageserverClient::new(
                 node.get_id(),
                 node.base_url(),
-                self.config.jwt_token.as_deref(),
+                self.config.pageserver_jwt_token.as_deref(),
             );
             match client
                 .location_config(
@@ -1550,7 +1550,7 @@ impl Service {
         let reconcilers_cancel = cancel.child_token();
 
         let heartbeater_ps = Heartbeater::new(
-            config.jwt_token.clone(),
+            config.pageserver_jwt_token.clone(),
             config.max_offline_interval,
             config.max_warming_up_interval,
             cancel.clone(),
@@ -1904,7 +1904,7 @@ impl Service {
         let configs = match node
             .with_client_retries(
                 |client| async move { client.list_location_config().await },
-                &self.config.jwt_token,
+                &self.config.pageserver_jwt_token,
                 1,
                 5,
                 SHORT_RECONCILE_TIMEOUT,
@@ -1962,7 +1962,7 @@ impl Service {
                             .location_config(tenant_shard_id, config, None, false)
                             .await
                     },
-                    &self.config.jwt_token,
+                    &self.config.pageserver_jwt_token,
                     1,
                     5,
                     SHORT_RECONCILE_TIMEOUT,
@@ -3097,7 +3097,7 @@ impl Service {
                 let client = PageserverClient::new(
                     node.get_id(),
                     node.base_url(),
-                    self.config.jwt_token.as_deref(),
+                    self.config.pageserver_jwt_token.as_deref(),
                 );
 
                 tracing::info!("Doing time travel recovery for shard {tenant_shard_id}",);
@@ -3158,7 +3158,7 @@ impl Service {
             let client = PageserverClient::new(
                 node.get_id(),
                 node.base_url(),
-                self.config.jwt_token.as_deref(),
+                self.config.pageserver_jwt_token.as_deref(),
             );
             futs.push(async move {
                 let result = client
@@ -3281,7 +3281,7 @@ impl Service {
                         .tenant_delete(TenantShardId::unsharded(tenant_id))
                         .await
                 },
-                &self.config.jwt_token,
+                &self.config.pageserver_jwt_token,
                 1,
                 3,
                 RECONCILE_TIMEOUT,
@@ -3500,7 +3500,7 @@ impl Service {
             let timeline_info = create_one(
                 shard_zero_tid,
                 shard_zero_locations,
-                self.config.jwt_token.clone(),
+                self.config.pageserver_jwt_token.clone(),
                 create_req.clone(),
             )
             .await?;
@@ -3516,7 +3516,7 @@ impl Service {
             // Create timeline on remaining shards with number >0
             if !targets.0.is_empty() {
                 // If we had multiple shards, issue requests for the remainder now.
-                let jwt = &self.config.jwt_token;
+                let jwt = &self.config.pageserver_jwt_token;
                 self.tenant_for_shards(
                     targets
                         .0
@@ -3599,7 +3599,7 @@ impl Service {
                         tenant_shard_id,
                         timeline_id,
                         node,
-                        self.config.jwt_token.clone(),
+                        self.config.pageserver_jwt_token.clone(),
                         req.clone(),
                     ))
                 })
@@ -3680,7 +3680,7 @@ impl Service {
                         tenant_shard_id,
                         timeline_id,
                         node,
-                        self.config.jwt_token.clone(),
+                        self.config.pageserver_jwt_token.clone(),
                     ))
                 })
                 .await?;
@@ -3754,7 +3754,7 @@ impl Service {
                     tenant_shard_id,
                     timeline_id,
                     node,
-                    self.config.jwt_token.clone(),
+                    self.config.pageserver_jwt_token.clone(),
                     dir,
                 ))
             })
@@ -3869,7 +3869,7 @@ impl Service {
             futs.push(async move {
                 node.with_client_retries(
                     |client| op(tenant_shard_id, client),
-                    &self.config.jwt_token,
+                    &self.config.pageserver_jwt_token,
                     warn_threshold,
                     max_retries,
                     timeout,
@@ -4118,7 +4118,7 @@ impl Service {
                         tenant_shard_id,
                         timeline_id,
                         node,
-                        self.config.jwt_token.clone(),
+                        self.config.pageserver_jwt_token.clone(),
                     ))
                 })
                 .await?;
@@ -4140,7 +4140,7 @@ impl Service {
                 shard_zero_tid,
                 timeline_id,
                 shard_zero_locations.latest.node,
-                self.config.jwt_token.clone(),
+                self.config.pageserver_jwt_token.clone(),
             )
             .await?;
             Ok(shard_zero_status)
@@ -4539,7 +4539,7 @@ impl Service {
 
                         client.location_config(child_id, config, None, false).await
                     },
-                    &self.config.jwt_token,
+                    &self.config.pageserver_jwt_token,
                     1,
                     10,
                     Duration::from_secs(5),
@@ -5139,7 +5139,7 @@ impl Service {
             let client = PageserverClient::new(
                 node.get_id(),
                 node.base_url(),
-                self.config.jwt_token.as_deref(),
+                self.config.pageserver_jwt_token.as_deref(),
             );
             let response = client
                 .tenant_shard_split(
@@ -5465,7 +5465,7 @@ impl Service {
         let client = PageserverClient::new(
             node.get_id(),
             node.base_url(),
-            self.config.jwt_token.as_deref(),
+            self.config.pageserver_jwt_token.as_deref(),
         );
 
         let scan_result = client
@@ -7045,7 +7045,7 @@ impl Service {
         match attached_node
             .with_client_retries(
                 |client| async move { client.tenant_heatmap_upload(tenant_shard_id).await },
-                &self.config.jwt_token,
+                &self.config.pageserver_jwt_token,
                 3,
                 10,
                 SHORT_RECONCILE_TIMEOUT,
@@ -7081,7 +7081,7 @@ impl Service {
                             )
                             .await
                     },
-                    &self.config.jwt_token,
+                    &self.config.pageserver_jwt_token,
                     3,
                     10,
                     SHORT_RECONCILE_TIMEOUT,
@@ -7136,7 +7136,7 @@ impl Service {
                         let request = request_ref.clone();
                         client.top_tenant_shards(request.clone()).await
                     },
-                    &self.config.jwt_token,
+                    &self.config.pageserver_jwt_token,
                     3,
                     3,
                     Duration::from_secs(5),
@@ -7309,7 +7309,7 @@ impl Service {
         match node
             .with_client_retries(
                 |client| async move { client.tenant_secondary_status(tenant_shard_id).await },
-                &self.config.jwt_token,
+                &self.config.pageserver_jwt_token,
                 1,
                 3,
                 Duration::from_millis(250),
