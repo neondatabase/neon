@@ -1,5 +1,4 @@
 use std::future::Future;
-use std::pin::pin;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -328,7 +327,9 @@ impl std::fmt::Debug for SecretString {
 /// This is performance-sensitive as it's used on the GetPage read path.
 #[inline]
 pub async fn warn_slow<O>(name: &str, threshold: Duration, f: impl Future<Output = O>) -> O {
-    let mut f = pin!(f);
+    // TODO: we unfortunately have to pin the future on the heap, since GetPage futures are huge and
+    // won't fit on the stack.
+    let mut f = Box::pin(f);
 
     let started = Instant::now();
     let mut attempt = 1;

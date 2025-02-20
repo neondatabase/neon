@@ -1474,7 +1474,7 @@ impl PageServerHandler {
             };
 
             let result = warn_slow(
-                msg.as_static_str(), // NB: avoid format!() allocation
+                msg.as_static_str(),
                 WARN_SLOW_GETPAGE_THRESHOLD,
                 self.pagesteam_handle_batched_message(
                     pgb_writer,
@@ -1650,7 +1650,7 @@ impl PageServerHandler {
                         }
                     };
                     warn_slow(
-                        batch.as_static_str(), // NB: avoid format!() allocation
+                        batch.as_static_str(),
                         WARN_SLOW_GETPAGE_THRESHOLD,
                         self.pagesteam_handle_batched_message(
                             pgb_writer,
