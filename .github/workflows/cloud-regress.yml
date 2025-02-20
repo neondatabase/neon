@@ -79,6 +79,7 @@ jobs:
           pg_version: ${{ env.DEFAULT_PG_VERSION }}
           aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
         env:
+          NEON_API_KEY: ${{ secrets.NEON_STAGING_API_KEY }}
           PROJECT_ID: ${{ steps.create-neon-project.outputs.project_id }}
 
       - name: Delete Neon Project
