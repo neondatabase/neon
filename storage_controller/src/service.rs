@@ -815,11 +815,12 @@ impl Service {
         };
 
         tracing::info!("Sending initial heartbeats...");
-        let res_ps = self
-            .heartbeater_ps
-            .heartbeat(Arc::new(nodes_to_heartbeat))
-            .await;
-        let res_sk = self.heartbeater_sk.heartbeat(all_sks).await;
+        // Put a small, but reasonable timeout to get the initial heartbeats of the safekeepers to avoid a storage controller downtime
+        const SK_TIMEOUT: Duration = Duration::from_secs(5);
+        let (res_ps, res_sk) = tokio::join!(
+            self.heartbeater_ps.heartbeat(Arc::new(nodes_to_heartbeat)),
+            tokio::time::timeout(SK_TIMEOUT, self.heartbeater_sk.heartbeat(all_sks))
+        );
 
         let mut online_nodes = HashMap::new();
         if let Ok(deltas) = res_ps {
@@ -837,7 +838,7 @@ impl Service {
         }
 
         let mut online_sks = HashMap::new();
-        if let Ok(deltas) = res_sk {
+        if let Ok(Ok(deltas)) = res_sk {
             for (node_id, status) in deltas.0 {
                 match status {
                     SafekeeperState::Available {
@@ -1031,12 +1032,11 @@ impl Service {
                 let reconciles_spawned = self.reconcile_all();
                 if reconciles_spawned == 0 {
                     // Run optimizer only when we didn't find any other work to do
-                    let optimizations = self.optimize_all().await;
-                    if optimizations == 0 {
-                        // Run new splits only when no optimizations are pending
-                        self.autosplit_tenants().await;
-                    }
+                    self.optimize_all().await;
                 }
+                // Always attempt autosplits. Sharding is crucial for bulk ingest performance, so we
+                // must be responsive when new projects begin ingesting and reach the threshold.
+                self.autosplit_tenants().await;
             }
               _ = self.reconcilers_cancel.cancelled() => return
             }
@@ -1063,8 +1063,12 @@ impl Service {
                 locked.safekeepers.clone()
             };
 
-            let res_ps = self.heartbeater_ps.heartbeat(nodes).await;
-            let res_sk = self.heartbeater_sk.heartbeat(safekeepers).await;
+            const SK_TIMEOUT: Duration = Duration::from_secs(3);
+            let (res_ps, res_sk) = tokio::join!(
+                self.heartbeater_ps.heartbeat(nodes),
+                tokio::time::timeout(SK_TIMEOUT, self.heartbeater_sk.heartbeat(safekeepers))
+            );
+
             if let Ok(deltas) = res_ps {
                 let mut to_handle = Vec::default();
 
@@ -1166,7 +1170,7 @@ impl Service {
                     }
                 }
             }
-            if let Ok(deltas) = res_sk {
+            if let Ok(Ok(deltas)) = res_sk {
                 let mut locked = self.inner.write().unwrap();
                 let mut safekeepers = (*locked.safekeepers).clone();
                 for (id, state) in deltas.0 {
@@ -7961,7 +7965,7 @@ impl Service {
             let sk = safekeepers
                 .get_mut(&node_id)
                 .ok_or(DatabaseError::Logical("Not found".to_string()))?;
-            sk.skp.scheduling_policy = String::from(scheduling_policy);
+            sk.set_scheduling_policy(scheduling_policy);
 
             locked.safekeepers = Arc::new(safekeepers);
         }

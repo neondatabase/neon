@@ -544,10 +544,11 @@ pub mod tenant_conf_defaults {
     pub const DEFAULT_COMPACTION_PERIOD: &str = "20 s";
     pub const DEFAULT_COMPACTION_THRESHOLD: usize = 10;
 
-    // This value needs to be tuned to avoid OOM. We have 3/4 of the total CPU threads to do background works, that's 16*3/4=9 on
-    // most of our pageservers. Compaction ~50 layers requires about 2GB memory (could be reduced later by optimizing L0 hole
-    // calculation to avoid loading all keys into the memory). So with this config, we can get a maximum peak compaction usage of 18GB.
-    pub const DEFAULT_COMPACTION_UPPER_LIMIT: usize = 50;
+    // This value needs to be tuned to avoid OOM. We have 3/4*CPUs threads for L0 compaction, that's
+    // 3/4*16=9 on most of our pageservers. Compacting 20 layers requires about 1 GB memory (could
+    // be reduced later by optimizing L0 hole calculation to avoid loading all keys into memory). So
+    // with this config, we can get a maximum peak compaction usage of 9 GB.
+    pub const DEFAULT_COMPACTION_UPPER_LIMIT: usize = 20;
     pub const DEFAULT_COMPACTION_L0_FIRST: bool = false;
     pub const DEFAULT_COMPACTION_L0_SEMAPHORE: bool = true;
 
