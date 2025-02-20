@@ -1317,7 +1317,7 @@ impl ComputeNode {
         // Merge-apply spec & changes to PostgreSQL state.
         self.apply_spec_sql(spec.clone(), conf.clone(), max_concurrent_connections)?;
 
-        if let Some(ref local_proxy) = &spec.clone().local_proxy_config {
+        if let Some(local_proxy) = &spec.clone().local_proxy_config {
             info!("configuring local_proxy");
             local_proxy::configure(local_proxy).context("apply_config local_proxy")?;
         }
