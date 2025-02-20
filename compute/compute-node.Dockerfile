@@ -1480,6 +1480,7 @@ RUN make release -j $(getconf _NPROCESSORS_ONLN) && \
 FROM build-deps AS pg_duckdb-src
 WORKDIR /ext-src
 COPY compute/patches/pg_duckdb_v031.patch .
+COPY compute/patches/duckdb_v020.patch .
 # pg_duckdb build requires source dir to be a git repo to get submodules
 # allow neon_superuser to execute some functions that in pg_duckdb are available to superuser only: 
 # - extension management function duckdb.install_extension()
@@ -1487,7 +1488,9 @@ COPY compute/patches/pg_duckdb_v031.patch .
 RUN git clone --depth 1 --branch v0.3.1 https://github.com/duckdb/pg_duckdb.git pg_duckdb-src && \
     cd pg_duckdb-src && \
     git submodule update --init --recursive && \
-    patch -p1 < /ext-src/pg_duckdb_v031.patch
+    patch -p1 < /ext-src/pg_duckdb_v031.patch && \
+    cd third_party/duckdb && \
+    patch -p1 < /ext-src/duckdb_v020.patch
 
 FROM pg-build AS pg_duckdb-build
 ARG PG_VERSION
