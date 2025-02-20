@@ -49,17 +49,9 @@ pub fn bench_warn_slow(c: &mut Criterion) {
         // performance too. Use a simple noop future that yields once, to avoid any scheduler fast
         // paths for a ready future.
         if enabled {
-            b.iter(|| {
-                runtime.block_on(warn_slow("ready", THRESHOLD, async {
-                    tokio::task::yield_now().await;
-                }))
-            });
+            b.iter(|| runtime.block_on(warn_slow("ready", THRESHOLD, tokio::task::yield_now())));
         } else {
-            b.iter(|| {
-                runtime.block_on(async {
-                    tokio::task::yield_now().await;
-                })
-            });
+            b.iter(|| runtime.block_on(tokio::task::yield_now()));
         }
 
         Ok(())
