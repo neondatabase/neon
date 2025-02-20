@@ -17,13 +17,13 @@ INSERT INTO webhook.incoming_webhooks (
     now(),
     gen_random_uuid(),
     now() - interval '10 minutes',
-    CASE :service_key
+    CASE :service_key::int
         WHEN 1 THEN 'shopify'
         WHEN 2 THEN 'stripe'
         WHEN 3 THEN 'github'
     END,
-    'evt_' || floor(random() * 1000000)::text,
-    CASE :service_key
+    'evt_' || gen_random_uuid(),  -- Ensures uniqueness
+    CASE :service_key::int
         WHEN 1 THEN 'Shopify'
         WHEN 2 THEN 'Stripe'
         WHEN 3 THEN 'GitHub'
@@ -32,7 +32,7 @@ INSERT INTO webhook.incoming_webhooks (
     '{"order_id": 987654, "customer": {"name": "John Doe", "email": "john.doe@example.com"}, "items": [{"product_id": 12345, "quantity": 2}, {"product_id": 67890, "quantity": 1}], "total": 199.99}'::jsonb,
     '{"metadata": {"user_agent": "Mozilla/5.0", "ip_address": "203.0.113.42"}}'::jsonb,
     false,
-    CASE :event_type
+    CASE :event_type::int
         WHEN 1 THEN 'ORDER_PLACED'
         WHEN 2 THEN 'ORDER_CANCELLED'
         WHEN 3 THEN 'PAYMENT_SUCCESSFUL'
