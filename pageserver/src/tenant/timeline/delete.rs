@@ -7,17 +7,17 @@ use anyhow::Context;
 use pageserver_api::{models::TimelineState, shard::TenantShardId};
 use remote_storage::DownloadError;
 use tokio::sync::OwnedMutexGuard;
-use tracing::{error, info, info_span, instrument, Instrument};
+use tracing::{Instrument, error, info, info_span, instrument};
 use utils::{crashsafe, fs_ext, id::TimelineId, pausable_failpoint};
 
 use crate::{
     config::PageServerConf,
     task_mgr::{self, TaskKind},
     tenant::{
-        metadata::TimelineMetadata,
-        remote_timeline_client::{PersistIndexPartWithDeletedFlagError, RemoteTimelineClient},
         CreateTimelineCause, DeleteTimelineError, MaybeDeletedIndexPart, Tenant,
         TenantManifestError, Timeline, TimelineOrOffloaded,
+        metadata::TimelineMetadata,
+        remote_timeline_client::{PersistIndexPartWithDeletedFlagError, RemoteTimelineClient},
     },
     virtual_file::MaybeFatalIo,
 };

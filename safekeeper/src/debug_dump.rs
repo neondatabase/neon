@@ -7,13 +7,13 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::bail;
 use anyhow::Result;
+use anyhow::bail;
 use camino::Utf8Path;
 use camino::Utf8PathBuf;
 use chrono::{DateTime, Utc};
-use postgres_ffi::XLogSegNo;
 use postgres_ffi::MAX_SEND_SIZE;
+use postgres_ffi::XLogSegNo;
 use safekeeper_api::models::WalSenderState;
 use serde::Deserialize;
 use serde::Serialize;
@@ -25,14 +25,14 @@ use utils::id::TenantTimelineId;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
+use crate::GlobalTimelines;
+use crate::SafeKeeperConf;
 use crate::safekeeper::TermHistory;
 use crate::state::TimelineMemState;
 use crate::state::TimelinePersistentState;
-use crate::timeline::get_timeline_dir;
 use crate::timeline::WalResidentTimeline;
+use crate::timeline::get_timeline_dir;
 use crate::timeline_manager;
-use crate::GlobalTimelines;
-use crate::SafeKeeperConf;
 
 /// Various filters that influence the resulting JSON output.
 #[derive(Debug, Serialize, Deserialize, Clone)]

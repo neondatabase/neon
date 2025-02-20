@@ -8,11 +8,11 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use enumset::EnumSet;
-use futures::future::join_all;
 use futures::StreamExt;
 use futures::TryFutureExt;
+use futures::future::join_all;
 use http_utils::endpoint::{
     profile_cpu_handler, profile_heap_handler, prometheus_metrics_handler, request_span,
 };
@@ -20,11 +20,10 @@ use http_utils::failpoints::failpoints_handler;
 use http_utils::request::must_parse_query_param;
 use http_utils::request::{get_request_param, must_get_query_param, parse_query_param};
 use humantime::format_rfc3339;
-use hyper::header;
 use hyper::StatusCode;
+use hyper::header;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
-use pageserver_api::models::virtual_file::IoMode;
 use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
 use pageserver_api::models::IngestAuxFilesRequest;
 use pageserver_api::models::ListAuxFilesRequest;
@@ -55,24 +54,28 @@ use pageserver_api::models::TimelinesInfoAndOffloaded;
 use pageserver_api::models::TopTenantShardItem;
 use pageserver_api::models::TopTenantShardsRequest;
 use pageserver_api::models::TopTenantShardsResponse;
+use pageserver_api::models::virtual_file::IoMode;
 use pageserver_api::shard::ShardCount;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeTravelError;
 use scopeguard::defer;
-use tenant_size_model::{svg::SvgBranchKind, SizeResult, StorageModel};
+use tenant_size_model::{SizeResult, StorageModel, svg::SvgBranchKind};
 use tokio::time::Instant;
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 
+use crate::DEFAULT_PG_VERSION;
 use crate::config::PageServerConf;
 use crate::context::RequestContextBuilder;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
+use crate::tenant::GetTimelineError;
+use crate::tenant::OffloadedTimeline;
 use crate::tenant::config::{LocationConf, TenantConfOpt};
 use crate::tenant::mgr::GetActiveTenantError;
 use crate::tenant::mgr::{
@@ -89,9 +92,6 @@ use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::storage_layer::LayerName;
-use crate::tenant::timeline::import_pgdata;
-use crate::tenant::timeline::offload::offload_timeline;
-use crate::tenant::timeline::offload::OffloadError;
 use crate::tenant::timeline::CompactFlags;
 use crate::tenant::timeline::CompactOptions;
 use crate::tenant::timeline::CompactRequest;
@@ -99,17 +99,17 @@ use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::timeline::WaitLsnTimeout;
 use crate::tenant::timeline::WaitLsnWaiter;
-use crate::tenant::GetTimelineError;
-use crate::tenant::OffloadedTimeline;
+use crate::tenant::timeline::import_pgdata;
+use crate::tenant::timeline::offload::OffloadError;
+use crate::tenant::timeline::offload::offload_timeline;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
-use crate::DEFAULT_PG_VERSION;
 use crate::{disk_usage_eviction_task, tenant};
 use http_utils::{
+    RequestExt, RouterBuilder,
     endpoint::{self, attach_openapi_ui, auth_middleware, check_permission_with},
     error::{ApiError, HttpErrorBody},
     json::{json_request, json_request_maybe, json_response},
     request::parse_request_param,
-    RequestExt, RouterBuilder,
 };
 use pageserver_api::models::{
     StatusResponse, TenantConfigRequest, TenantInfo, TimelineCreateRequest, TimelineGcRequest,
@@ -2058,7 +2058,9 @@ async fn tenant_time_travel_remote_storage_handler(
         )));
     }
 
-    tracing::info!("Issuing time travel request internally. timestamp={timestamp_raw}, done_if_after={done_if_after_raw}");
+    tracing::info!(
+        "Issuing time travel request internally. timestamp={timestamp_raw}, done_if_after={done_if_after_raw}"
+    );
 
     remote_timeline_client::upload::time_travel_recover_tenant(
         &state.remote_storage,
@@ -2805,14 +2807,19 @@ async fn tenant_scan_remote_handler(
             .await
             {
                 Ok((index_part, index_generation, _index_mtime)) => {
-                    tracing::info!("Found timeline {tenant_shard_id}/{timeline_id} metadata (gen {index_generation:?}, {} layers, {} consistent LSN)",
-                        index_part.layer_metadata.len(), index_part.metadata.disk_consistent_lsn());
+                    tracing::info!(
+                        "Found timeline {tenant_shard_id}/{timeline_id} metadata (gen {index_generation:?}, {} layers, {} consistent LSN)",
+                        index_part.layer_metadata.len(),
+                        index_part.metadata.disk_consistent_lsn()
+                    );
                     generation = std::cmp::max(generation, index_generation);
                 }
                 Err(DownloadError::NotFound) => {
                     // This is normal for tenants that were created with multiple shards: they have an unsharded path
                     // containing the timeline's initdb tarball but no index.  Otherwise it is a bit strange.
-                    tracing::info!("Timeline path {tenant_shard_id}/{timeline_id} exists in remote storage but has no index, skipping");
+                    tracing::info!(
+                        "Timeline path {tenant_shard_id}/{timeline_id} exists in remote storage but has no index, skipping"
+                    );
                     continue;
                 }
                 Err(e) => {
@@ -3431,7 +3438,9 @@ async fn read_tar_eof(mut reader: (impl tokio::io::AsyncRead + Unpin)) -> anyhow
         anyhow::bail!("unexpected non-zero bytes after the tar archive");
     }
     if trailing_bytes % 512 != 0 {
-        anyhow::bail!("unexpected number of zeros ({trailing_bytes}), not divisible by tar block size (512 bytes), after the tar archive");
+        anyhow::bail!(
+            "unexpected number of zeros ({trailing_bytes}), not divisible by tar block size (512 bytes), after the tar archive"
+        );
     }
     Ok(())
 }

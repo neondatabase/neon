@@ -76,9 +76,7 @@ impl<A: Alignment> AlignedBufferMut<A> {
     #[inline]
     unsafe fn set_len(&mut self, new_len: usize) {
         // SAFETY: the caller is unsafe
-        unsafe {
-            self.raw.set_len(new_len)
-        }
+        unsafe { self.raw.set_len(new_len) }
     }
 
     #[inline]

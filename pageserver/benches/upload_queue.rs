@@ -1,15 +1,15 @@
 //! Upload queue benchmarks.
 
 use std::str::FromStr as _;
-use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 
-use criterion::{criterion_group, criterion_main, Bencher, Criterion};
+use criterion::{Bencher, Criterion, criterion_group, criterion_main};
+use pageserver::tenant::IndexPart;
 use pageserver::tenant::metadata::TimelineMetadata;
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver::tenant::storage_layer::LayerName;
 use pageserver::tenant::upload_queue::{Delete, UploadOp, UploadQueue, UploadTask};
-use pageserver::tenant::IndexPart;
 use pprof::criterion::{Output, PProfProfiler};
 use utils::generation::Generation;
 use utils::shard::{ShardCount, ShardIndex, ShardNumber};

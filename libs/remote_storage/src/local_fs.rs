@@ -11,7 +11,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{bail, ensure, Context};
+use anyhow::{Context, bail, ensure};
 use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::stream::Stream;
@@ -23,8 +23,8 @@ use tokio_util::{io::ReaderStream, sync::CancellationToken};
 use utils::crashsafe::path_with_suffix_extension;
 
 use crate::{
-    Download, DownloadError, DownloadOpts, Listing, ListingMode, ListingObject, RemotePath,
-    TimeTravelError, TimeoutOrCancel, REMOTE_STORAGE_PREFIX_SEPARATOR,
+    Download, DownloadError, DownloadOpts, Listing, ListingMode, ListingObject,
+    REMOTE_STORAGE_PREFIX_SEPARATOR, RemotePath, TimeTravelError, TimeoutOrCancel,
 };
 
 use super::{RemoteStorage, StorageMetadata};
@@ -284,7 +284,9 @@ impl LocalFs {
             })?;
 
         if bytes_read < from_size_bytes {
-            bail!("Provided stream was shorter than expected: {bytes_read} vs {from_size_bytes} bytes");
+            bail!(
+                "Provided stream was shorter than expected: {bytes_read} vs {from_size_bytes} bytes"
+            );
         }
         // Check if there is any extra data after the given size.
         let mut from = buffer_to_read.into_inner();
@@ -736,9 +738,14 @@ mod fs_tests {
         );
 
         let non_existing_path = RemotePath::new(Utf8Path::new("somewhere/else"))?;
-        match storage.download(&non_existing_path, &DownloadOpts::default(), &cancel).await {
+        match storage
+            .download(&non_existing_path, &DownloadOpts::default(), &cancel)
+            .await
+        {
             Err(DownloadError::NotFound) => {} // Should get NotFound for non existing keys
-            other => panic!("Should get a NotFound error when downloading non-existing storage files, but got: {other:?}"),
+            other => panic!(
+                "Should get a NotFound error when downloading non-existing storage files, but got: {other:?}"
+            ),
         }
         Ok(())
     }

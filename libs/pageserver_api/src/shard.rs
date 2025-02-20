@@ -337,7 +337,7 @@ pub fn describe(
 mod tests {
     use std::str::FromStr;
 
-    use utils::{id::TenantId, Hex};
+    use utils::{Hex, id::TenantId};
 
     use super::*;
 

@@ -24,8 +24,8 @@ use tracing::warn;
 use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::tenant::block_io::BlockCursor;
-use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
 use crate::virtual_file::VirtualFile;
+use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
 use std::cmp::min;
 use std::io::{Error, ErrorKind};
 

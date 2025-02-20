@@ -91,7 +91,9 @@ impl Leadership {
                 // Special case: if this is a brand new storage controller, migrations will not
                 // have run at this point yet, and, hence, the controllers table does not exist.
                 // Detect this case via the error string (diesel doesn't type it) and allow it.
-                tracing::info!("Detected first storage controller start-up. Allowing missing controllers table ...");
+                tracing::info!(
+                    "Detected first storage controller start-up. Allowing missing controllers table ..."
+                );
                 return Ok(None);
             }
         }

@@ -16,10 +16,10 @@ use tracing::*;
 
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::{self, BackgroundLoopSemaphoreMetricsRecorder, TENANT_TASK_EVENTS};
-use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME, TOKIO_WORKER_THREADS};
+use crate::task_mgr::{self, BACKGROUND_RUNTIME, TOKIO_WORKER_THREADS, TaskKind};
 use crate::tenant::throttle::Stats;
-use crate::tenant::timeline::compaction::CompactionOutcome;
 use crate::tenant::timeline::CompactionError;
+use crate::tenant::timeline::compaction::CompactionOutcome;
 use crate::tenant::{Tenant, TenantState};
 use pageserver_api::config::tenant_conf_defaults::DEFAULT_COMPACTION_PERIOD;
 use utils::backoff::exponential_backoff_duration;
@@ -288,8 +288,8 @@ fn log_compaction_error(
     task_cancelled: bool,
 ) {
     use crate::pgdatadir_mapping::CollectKeySpaceError;
-    use crate::tenant::upload_queue::NotInitialized;
     use crate::tenant::PageReconstructError;
+    use crate::tenant::upload_queue::NotInitialized;
     use CompactionError::*;
 
     let level = match err {

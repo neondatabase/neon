@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use futures::Future;
 use hex::FromHex;
 
-use reqwest::{header, Client, StatusCode, Url};
+use reqwest::{Client, StatusCode, Url, header};
 use serde::Deserialize;
 use tokio::sync::Semaphore;
 

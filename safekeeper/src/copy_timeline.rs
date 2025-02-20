@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use camino::Utf8PathBuf;
 use postgres_ffi::{MAX_SEND_SIZE, WAL_SEGMENT_SIZE};
 use safekeeper_api::membership::Configuration;
@@ -11,13 +11,13 @@ use tracing::{info, warn};
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::{
+    GlobalTimelines,
     control_file::FileStorage,
     state::TimelinePersistentState,
     timeline::{TimelineError, WalResidentTimeline},
     timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline},
     wal_backup::copy_s3_segments,
-    wal_storage::{wal_file_paths, WalReader},
-    GlobalTimelines,
+    wal_storage::{WalReader, wal_file_paths},
 };
 
 // we don't want to have more than 10 segments on disk after copy, because they take space

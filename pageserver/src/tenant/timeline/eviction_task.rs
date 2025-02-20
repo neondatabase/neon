@@ -23,18 +23,18 @@ use std::{
 use pageserver_api::models::{EvictionPolicy, EvictionPolicyLayerAccessThreshold};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, info_span, instrument, warn, Instrument};
+use tracing::{Instrument, debug, info, info_span, instrument, warn};
 
 use crate::{
     context::{DownloadBehavior, RequestContext},
     pgdatadir_mapping::CollectKeySpaceError,
-    task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
+    task_mgr::{self, BACKGROUND_RUNTIME, TaskKind},
     tenant::{
+        LogicalSizeCalculationCause, Tenant,
         size::CalculateSyntheticSizeError,
         storage_layer::LayerVisibilityHint,
-        tasks::{sleep_random, BackgroundLoopKind, BackgroundLoopSemaphorePermit},
+        tasks::{BackgroundLoopKind, BackgroundLoopSemaphorePermit, sleep_random},
         timeline::EvictionError,
-        LogicalSizeCalculationCause, Tenant,
     },
 };
 

@@ -10,8 +10,8 @@ use utils::lsn::Lsn;
 use pageserver_api::value::Value;
 
 use super::{
-    merge_iterator::{MergeIterator, MergeIteratorItem},
     PersistentLayerKey,
+    merge_iterator::{MergeIterator, MergeIteratorItem},
 };
 
 /// A filter iterator over merge iterators (and can be easily extended to other types of iterators).
@@ -105,11 +105,11 @@ mod tests {
     use utils::lsn::Lsn;
 
     use crate::{
+        DEFAULT_PG_VERSION,
         tenant::{
-            harness::{TenantHarness, TIMELINE_ID},
+            harness::{TIMELINE_ID, TenantHarness},
             storage_layer::delta_layer::test::produce_delta_layer,
         },
-        DEFAULT_PG_VERSION,
     };
 
     async fn assert_filter_iter_equal(

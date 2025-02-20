@@ -1,12 +1,12 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
 use camino::Utf8PathBuf;
 use chrono::{DateTime, Utc};
 use futures::{SinkExt, StreamExt, TryStreamExt};
-use postgres_ffi::{XLogFileName, XLogSegNo, PG_TLI};
+use postgres_ffi::{PG_TLI, XLogFileName, XLogSegNo};
 use safekeeper_api::{
-    models::{PullTimelineRequest, PullTimelineResponse, TimelineStatus},
     Term,
+    models::{PullTimelineRequest, PullTimelineResponse, TimelineStatus},
 };
 use safekeeper_client::mgmt_api;
 use safekeeper_client::mgmt_api::Client;
@@ -25,6 +25,7 @@ use tokio_util::{
 use tracing::{error, info, instrument};
 
 use crate::{
+    GlobalTimelines,
     control_file::CONTROL_FILE_NAME,
     debug_dump,
     state::{EvictionState, TimelinePersistentState},
@@ -32,7 +33,6 @@ use crate::{
     timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline},
     wal_backup,
     wal_storage::open_wal_file,
-    GlobalTimelines,
 };
 use utils::{
     crashsafe::fsync_async_opt,
@@ -374,8 +374,13 @@ impl WalResidentTimeline {
         // change, but as long as older history is strictly part of new that's
         // fine), but there is no need to do it.
         if bctx.term != term || bctx.last_log_term != last_log_term {
-            bail!("term(s) changed during snapshot: were term={}, last_log_term={}, now term={}, last_log_term={}",
-              bctx.term, bctx.last_log_term, term, last_log_term);
+            bail!(
+                "term(s) changed during snapshot: were term={}, last_log_term={}, now term={}, last_log_term={}",
+                bctx.term,
+                bctx.last_log_term,
+                term,
+                last_log_term
+            );
         }
         Ok(())
     }

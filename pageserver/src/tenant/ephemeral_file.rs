@@ -9,7 +9,7 @@ use crate::tenant::storage_layer::inmemory_layer::vectored_dio_read::File;
 use crate::virtual_file::owned_buffers_io::io_buf_aligned::IoBufAlignedMut;
 use crate::virtual_file::owned_buffers_io::slice::SliceMutExt;
 use crate::virtual_file::owned_buffers_io::write::Buffer;
-use crate::virtual_file::{self, owned_buffers_io, IoBufferMut, VirtualFile};
+use crate::virtual_file::{self, IoBufferMut, VirtualFile, owned_buffers_io};
 use camino::Utf8PathBuf;
 use num_traits::Num;
 use pageserver_api::shard::TenantShardId;
@@ -17,8 +17,8 @@ use tokio_epoll_uring::{BoundedBuf, Slice};
 use tracing::error;
 
 use std::io;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use utils::id::TimelineId;
 
 pub struct EphemeralFile {

@@ -15,7 +15,7 @@ pub mod l0_flush;
 
 extern crate hyper0 as hyper;
 
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::{StreamExt, stream::FuturesUnordered};
 pub use pageserver_api::keyspace;
 use tokio_util::sync::CancellationToken;
 mod assert_u64_eq_usize;

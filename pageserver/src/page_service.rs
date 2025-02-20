@@ -1,7 +1,7 @@
 //! The Page Service listens for client connections and serves their GetPage@LSN
 //! requests.
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
 use futures::FutureExt;
@@ -21,10 +21,10 @@ use pageserver_api::models::{
 };
 use pageserver_api::shard::TenantShardId;
 use postgres_backend::{
-    is_expected_io_error, AuthType, PostgresBackend, PostgresBackendReader, QueryError,
+    AuthType, PostgresBackend, PostgresBackendReader, QueryError, is_expected_io_error,
 };
-use pq_proto::framed::ConnectionError;
 use pq_proto::FeStartupPacket;
+use pq_proto::framed::ConnectionError;
 use pq_proto::{BeMessage, FeMessage, RowDescriptor};
 use std::borrow::Cow;
 use std::io;
@@ -53,26 +53,26 @@ use crate::basebackup::BasebackupError;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::{self, SmgrOpTimer};
-use crate::metrics::{ComputeCommandKind, COMPUTE_COMMANDS_COUNTERS, LIVE_CONNECTIONS};
+use crate::metrics::{COMPUTE_COMMANDS_COUNTERS, ComputeCommandKind, LIVE_CONNECTIONS};
 use crate::pgdatadir_mapping::Version;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::task_mgr::TaskKind;
 use crate::task_mgr::{self, COMPUTE_REQUEST_RUNTIME};
+use crate::tenant::GetTimelineError;
+use crate::tenant::PageReconstructError;
+use crate::tenant::Timeline;
 use crate::tenant::mgr::ShardSelector;
 use crate::tenant::mgr::TenantManager;
 use crate::tenant::mgr::{GetActiveTenantError, GetTenantError, ShardResolveResult};
 use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::timeline::{self, WaitLsnError};
-use crate::tenant::GetTimelineError;
-use crate::tenant::PageReconstructError;
-use crate::tenant::Timeline;
 use crate::{basebackup, timed_after_cancellation};
 use pageserver_api::key::rel_block_to_key;
 use pageserver_api::models::PageTraceEvent;
 use pageserver_api::reltag::SlruKind;
-use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
+use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use std::os::fd::AsRawFd;
 
 /// How long we may wait for a [`crate::tenant::mgr::TenantSlot::InProgress`]` and/or a [`crate::tenant::Tenant`] which
@@ -1089,12 +1089,13 @@ impl PageServerHandler {
             } => {
                 fail::fail_point!("ps::handle-pagerequest-message::exists");
                 (
-                    vec![self
-                        .handle_get_rel_exists_request(&*shard.upgrade()?, &req, ctx)
-                        .instrument(span.clone())
-                        .await
-                        .map(|msg| (msg, timer))
-                        .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
+                    vec![
+                        self.handle_get_rel_exists_request(&*shard.upgrade()?, &req, ctx)
+                            .instrument(span.clone())
+                            .await
+                            .map(|msg| (msg, timer))
+                            .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
+                    ],
                     span,
                 )
             }
@@ -1106,12 +1107,13 @@ impl PageServerHandler {
             } => {
                 fail::fail_point!("ps::handle-pagerequest-message::nblocks");
                 (
-                    vec![self
-                        .handle_get_nblocks_request(&*shard.upgrade()?, &req, ctx)
-                        .instrument(span.clone())
-                        .await
-                        .map(|msg| (msg, timer))
-                        .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
+                    vec![
+                        self.handle_get_nblocks_request(&*shard.upgrade()?, &req, ctx)
+                            .instrument(span.clone())
+                            .await
+                            .map(|msg| (msg, timer))
+                            .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
+                    ],
                     span,
                 )
             }
@@ -1150,12 +1152,13 @@ impl PageServerHandler {
             } => {
                 fail::fail_point!("ps::handle-pagerequest-message::dbsize");
                 (
-                    vec![self
-                        .handle_db_size_request(&*shard.upgrade()?, &req, ctx)
-                        .instrument(span.clone())
-                        .await
-                        .map(|msg| (msg, timer))
-                        .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
+                    vec![
+                        self.handle_db_size_request(&*shard.upgrade()?, &req, ctx)
+                            .instrument(span.clone())
+                            .await
+                            .map(|msg| (msg, timer))
+                            .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
+                    ],
                     span,
                 )
             }
@@ -1167,12 +1170,13 @@ impl PageServerHandler {
             } => {
                 fail::fail_point!("ps::handle-pagerequest-message::slrusegment");
                 (
-                    vec![self
-                        .handle_get_slru_segment_request(&*shard.upgrade()?, &req, ctx)
-                        .instrument(span.clone())
-                        .await
-                        .map(|msg| (msg, timer))
-                        .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
+                    vec![
+                        self.handle_get_slru_segment_request(&*shard.upgrade()?, &req, ctx)
+                            .instrument(span.clone())
+                            .await
+                            .map(|msg| (msg, timer))
+                            .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
+                    ],
                     span,
                 )
             }
@@ -2081,7 +2085,9 @@ impl PageServerHandler {
 
         if timeline.is_archived() == Some(true) {
             // TODO after a grace period, turn this log line into a hard error
-            tracing::warn!("timeline {tenant_id}/{timeline_id} is archived, but got basebackup request for it.");
+            tracing::warn!(
+                "timeline {tenant_id}/{timeline_id} is archived, but got basebackup request for it."
+            );
             //return Err(QueryError::NotFound("timeline is archived".into()))
         }
 

@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use super::{alignment::Alignment, raw::RawAlignedBuffer, AlignedBufferMut, ConstAlign};
+use super::{AlignedBufferMut, ConstAlign, alignment::Alignment, raw::RawAlignedBuffer};
 
 /// An shared, immutable aligned buffer type.
 #[derive(Clone, Debug)]

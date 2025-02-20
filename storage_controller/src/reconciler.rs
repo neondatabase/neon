@@ -510,7 +510,8 @@ impl Reconciler {
             } else if status == StatusCode::ACCEPTED {
                 let total_runtime = started_at.elapsed();
                 if total_runtime > total_download_timeout {
-                    tracing::warn!("Timed out after {}ms downloading layers to {node}.  Progress so far: {}/{} layers, {}/{} bytes",
+                    tracing::warn!(
+                        "Timed out after {}ms downloading layers to {node}.  Progress so far: {}/{} layers, {}/{} bytes",
                         total_runtime.as_millis(),
                         progress.layers_downloaded,
                         progress.layers_total,

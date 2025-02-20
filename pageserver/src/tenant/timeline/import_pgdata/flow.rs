@@ -35,13 +35,13 @@ use bytes::Bytes;
 
 use itertools::Itertools;
 use pageserver_api::{
-    key::{rel_block_to_key, rel_dir_to_key, rel_size_to_key, relmap_file_key, DBDIR_KEY},
+    key::{DBDIR_KEY, rel_block_to_key, rel_dir_to_key, rel_size_to_key, relmap_file_key},
     reltag::RelTag,
     shard::ShardIdentity,
 };
-use postgres_ffi::{pg_constants, relfile_utils::parse_relfilename, BLCKSZ};
+use postgres_ffi::{BLCKSZ, pg_constants, relfile_utils::parse_relfilename};
 use tokio::task::JoinSet;
-use tracing::{debug, info_span, instrument, Instrument};
+use tracing::{Instrument, debug, info_span, instrument};
 
 use crate::{
     assert_u64_eq_usize::UsizeIsU64,
@@ -56,8 +56,8 @@ use crate::{
 
 use pageserver_api::key::Key;
 use pageserver_api::key::{
-    slru_block_to_key, slru_dir_to_key, slru_segment_size_to_key, CHECKPOINT_KEY, CONTROLFILE_KEY,
-    TWOPHASEDIR_KEY,
+    CHECKPOINT_KEY, CONTROLFILE_KEY, TWOPHASEDIR_KEY, slru_block_to_key, slru_dir_to_key,
+    slru_segment_size_to_key,
 };
 use pageserver_api::keyspace::singleton_range;
 use pageserver_api::keyspace::{contiguous_range_len, is_contiguous_range};
@@ -69,8 +69,8 @@ use std::collections::HashSet;
 use std::ops::Range;
 
 use super::{
-    importbucket_client::{ControlFile, RemoteStorageWrapper},
     Timeline,
+    importbucket_client::{ControlFile, RemoteStorageWrapper},
 };
 
 use remote_storage::RemotePath;

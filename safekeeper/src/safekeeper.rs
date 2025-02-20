@@ -1,12 +1,12 @@
 //! Acceptor part of proposer-acceptor consensus algorithm.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use postgres_ffi::{TimeLineID, MAX_SEND_SIZE};
-use safekeeper_api::models::HotStandbyFeedback;
+use postgres_ffi::{MAX_SEND_SIZE, TimeLineID};
 use safekeeper_api::Term;
+use safekeeper_api::models::HotStandbyFeedback;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::cmp::min;
@@ -769,9 +769,14 @@ where
         // and walproposer recalculates the streaming point. OTOH repeating
         // error indicates a serious bug.
         if last_common_point.lsn != msg.start_streaming_at {
-            bail!("refusing ProposerElected with unexpected truncation point: lcp={:?} start_streaming_at={}, term={}, sk_th={:?} flush_lsn={}, wp_th={:?}",
-                    last_common_point, msg.start_streaming_at,
-                    self.state.acceptor_state.term, sk_th, self.flush_lsn(), msg.term_history,
+            bail!(
+                "refusing ProposerElected with unexpected truncation point: lcp={:?} start_streaming_at={}, term={}, sk_th={:?} flush_lsn={}, wp_th={:?}",
+                last_common_point,
+                msg.start_streaming_at,
+                self.state.acceptor_state.term,
+                sk_th,
+                self.flush_lsn(),
+                msg.term_history,
             );
         }
 
@@ -779,8 +784,12 @@ where
         assert!(
             msg.start_streaming_at >= self.state.inmem.commit_lsn,
             "attempt to truncate committed data: start_streaming_at={}, commit_lsn={}, term={}, sk_th={:?} flush_lsn={}, wp_th={:?}",
-            msg.start_streaming_at, self.state.inmem.commit_lsn,
-            self.state.acceptor_state.term, sk_th, self.flush_lsn(), msg.term_history,
+            msg.start_streaming_at,
+            self.state.inmem.commit_lsn,
+            self.state.acceptor_state.term,
+            sk_th,
+            self.flush_lsn(),
+            msg.term_history,
         );
 
         // Before first WAL write initialize its segment. It makes first segment
@@ -1002,10 +1011,10 @@ where
 mod tests {
     use futures::future::BoxFuture;
 
-    use postgres_ffi::{XLogSegNo, WAL_SEGMENT_SIZE};
+    use postgres_ffi::{WAL_SEGMENT_SIZE, XLogSegNo};
     use safekeeper_api::{
-        membership::{Configuration, MemberSet, SafekeeperGeneration, SafekeeperId},
         ServerInfo,
+        membership::{Configuration, MemberSet, SafekeeperGeneration, SafekeeperId},
     };
 
     use super::*;

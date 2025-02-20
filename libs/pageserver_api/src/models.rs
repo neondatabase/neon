@@ -332,7 +332,7 @@ pub struct ImportPgdataIdempotencyKey(pub String);
 
 impl ImportPgdataIdempotencyKey {
     pub fn random() -> Self {
-        use rand::{distributions::Alphanumeric, Rng};
+        use rand::{Rng, distributions::Alphanumeric};
         Self(
             rand::thread_rng()
                 .sample_iter(&Alphanumeric)

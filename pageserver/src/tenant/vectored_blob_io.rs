@@ -139,7 +139,10 @@ impl VectoredBlob {
             bits => {
                 let error = std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("Failed to decompress blob for {}@{}, {}..{}: invalid compression byte {bits:x}", self.meta.key, self.meta.lsn, self.start, self.end),
+                    format!(
+                        "Failed to decompress blob for {}@{}, {}..{}: invalid compression byte {bits:x}",
+                        self.meta.key, self.meta.lsn, self.start, self.end
+                    ),
                 );
                 Err(error)
             }

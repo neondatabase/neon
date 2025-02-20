@@ -12,7 +12,7 @@ use utils::{
     pageserver_feedback::PageserverFeedback,
 };
 
-use crate::{membership::Configuration, ServerInfo, Term};
+use crate::{ServerInfo, Term, membership::Configuration};
 
 #[derive(Debug, Serialize)]
 pub struct SafekeeperStatus {

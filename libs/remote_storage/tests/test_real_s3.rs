@@ -15,8 +15,8 @@ use remote_storage::{
     DownloadError, DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath,
     RemoteStorageConfig, RemoteStorageKind, S3Config,
 };
-use test_context::test_context;
 use test_context::AsyncTestContext;
+use test_context::test_context;
 use tokio::io::AsyncBufReadExt;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -128,8 +128,10 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
         let t0_hwt = t0 + half_wt;
         let t1_hwt = t1 - half_wt;
         if !(t0_hwt..=t1_hwt).contains(&last_modified) {
-            panic!("last_modified={last_modified:?} is not between t0_hwt={t0_hwt:?} and t1_hwt={t1_hwt:?}. \
-                This likely means a large lock discrepancy between S3 and the local clock.");
+            panic!(
+                "last_modified={last_modified:?} is not between t0_hwt={t0_hwt:?} and t1_hwt={t1_hwt:?}. \
+                This likely means a large lock discrepancy between S3 and the local clock."
+            );
         }
     }
 

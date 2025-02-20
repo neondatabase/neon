@@ -15,13 +15,13 @@ use utils::shard::TenantShardId;
 
 use crate::cloud_admin_api::BranchData;
 use crate::metadata_stream::stream_listing;
-use crate::{download_object_with_retries, RootTarget, TenantShardTimelineId};
+use crate::{RootTarget, TenantShardTimelineId, download_object_with_retries};
 use futures_util::StreamExt;
+use pageserver::tenant::IndexPart;
 use pageserver::tenant::remote_timeline_client::{
     parse_remote_index_path, parse_remote_tenant_manifest_path, remote_layer_path,
 };
 use pageserver::tenant::storage_layer::LayerName;
-use pageserver::tenant::IndexPart;
 use remote_storage::{GenericRemoteStorage, ListingObject, RemotePath};
 
 pub(crate) struct TimelineAnalysis {
@@ -521,7 +521,7 @@ async fn list_timeline_blobs_impl(
                     },
                     unused_index_keys: index_part_keys,
                     unknown_keys,
-                }))
+                }));
             }
             Err(index_parse_error) => errors.push(format!(
                 "index_part.json body parsing error: {index_parse_error}"

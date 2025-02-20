@@ -578,7 +578,9 @@ impl ApiImpl for SimulationApi {
         let disk_lsn = disk.lock().flush_rec_ptr().0;
         debug!("start_streaming at {} (disk_lsn={})", startpos, disk_lsn);
         if startpos < disk_lsn {
-            debug!("startpos < disk_lsn, it means we wrote some transaction even before streaming started");
+            debug!(
+                "startpos < disk_lsn, it means we wrote some transaction even before streaming started"
+            );
         }
         assert!(startpos <= disk_lsn);
         let mut broadcasted = Lsn(startpos);

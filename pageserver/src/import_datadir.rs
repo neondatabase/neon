@@ -4,7 +4,7 @@
 //!
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
 use camino::Utf8Path;
 use futures::StreamExt;
@@ -21,13 +21,13 @@ use crate::pgdatadir_mapping::*;
 use crate::tenant::Timeline;
 use crate::walingest::WalIngest;
 use pageserver_api::reltag::{RelTag, SlruKind};
-use postgres_ffi::pg_constants;
-use postgres_ffi::relfile_utils::*;
-use postgres_ffi::waldecoder::WalStreamDecoder;
 use postgres_ffi::ControlFileData;
 use postgres_ffi::DBState_DB_SHUTDOWNED;
 use postgres_ffi::Oid;
 use postgres_ffi::XLogFileName;
+use postgres_ffi::pg_constants;
+use postgres_ffi::relfile_utils::*;
+use postgres_ffi::waldecoder::WalStreamDecoder;
 use postgres_ffi::{BLCKSZ, WAL_SEGMENT_SIZE};
 use utils::lsn::Lsn;
 

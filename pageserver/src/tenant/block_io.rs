@@ -4,7 +4,7 @@
 
 use super::storage_layer::delta_layer::{Adapter, DeltaLayerInner};
 use crate::context::RequestContext;
-use crate::page_cache::{self, FileId, PageReadGuard, PageWriteGuard, ReadBufResult, PAGE_SZ};
+use crate::page_cache::{self, FileId, PAGE_SZ, PageReadGuard, PageWriteGuard, ReadBufResult};
 #[cfg(test)]
 use crate::virtual_file::IoBufferMut;
 use crate::virtual_file::VirtualFile;

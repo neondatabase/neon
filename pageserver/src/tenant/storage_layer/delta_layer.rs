@@ -27,6 +27,7 @@
 //! "values" part.  The actual page images and WAL records are stored in the
 //! "values" part.
 //!
+use crate::TEMP_FILE_SUFFIX;
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::page_cache::{self, FileId, PAGE_SZ};
@@ -41,22 +42,21 @@ use crate::tenant::vectored_blob_io::{
     BlobFlag, BufView, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadPlanner,
 };
-use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
 use crate::virtual_file::IoBufferMut;
+use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
 use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
-use crate::TEMP_FILE_SUFFIX;
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
 use itertools::Itertools;
 use pageserver_api::config::MaxVectoredReadBytes;
-use pageserver_api::key::{Key, DBDIR_KEY, KEY_SIZE};
+use pageserver_api::key::{DBDIR_KEY, KEY_SIZE, Key};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
 use pageserver_api::value::Value;
-use rand::{distributions::Alphanumeric, Rng};
+use rand::{Rng, distributions::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
@@ -1600,8 +1600,8 @@ pub(crate) mod test {
     use std::collections::BTreeMap;
 
     use itertools::MinMaxResult;
-    use rand::prelude::{SeedableRng, SliceRandom, StdRng};
     use rand::RngCore;
+    use rand::prelude::{SeedableRng, SliceRandom, StdRng};
 
     use super::*;
     use crate::tenant::harness::TIMELINE_ID;
@@ -1609,10 +1609,10 @@ pub(crate) mod test {
     use crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner;
     use crate::tenant::{Tenant, Timeline};
     use crate::{
+        DEFAULT_PG_VERSION,
         context::DownloadBehavior,
         task_mgr::TaskKind,
         tenant::{disk_btree::tests::TestDisk, harness::TenantHarness},
-        DEFAULT_PG_VERSION,
     };
     use bytes::Bytes;
     use pageserver_api::value::Value;

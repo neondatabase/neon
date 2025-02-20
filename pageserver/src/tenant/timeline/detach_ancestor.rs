@@ -1,15 +1,15 @@
 use std::{collections::HashSet, sync::Arc};
 
-use super::{layer_manager::LayerManager, FlushLayerError, Timeline};
+use super::{FlushLayerError, Timeline, layer_manager::LayerManager};
 use crate::{
     context::{DownloadBehavior, RequestContext},
     task_mgr::TaskKind,
     tenant::{
+        Tenant,
         remote_timeline_client::index::GcBlockingReason::DetachAncestor,
         storage_layer::{
-            layer::local_layer_path, AsLayerDesc as _, DeltaLayerWriter, Layer, ResidentLayer,
+            AsLayerDesc as _, DeltaLayerWriter, Layer, ResidentLayer, layer::local_layer_path,
         },
-        Tenant,
     },
     virtual_file::{MaybeFatalIo, VirtualFile},
 };
@@ -780,7 +780,7 @@ pub(super) async fn detach_and_reparent(
             // TODO: make sure there are no `?` before tenant_reset from after a questionmark from
             // here.
             panic!(
-            "bug: detach_and_reparent called on a timeline which has not been detached or which has no live ancestor"
+                "bug: detach_and_reparent called on a timeline which has not been detached or which has no live ancestor"
             );
         }
     };

@@ -12,9 +12,9 @@
 //! src/backend/storage/file/fd.c
 //!
 use crate::context::RequestContext;
-use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC};
+use crate::metrics::{STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC, StorageIoOperation};
 
-use crate::page_cache::{PageWriteGuard, PAGE_SZ};
+use crate::page_cache::{PAGE_SZ, PageWriteGuard};
 use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
@@ -37,9 +37,9 @@ use tokio::time::Instant;
 
 pub use pageserver_api::models::virtual_file as api;
 pub(crate) mod io_engine;
+pub use io_engine::FeatureTestResult as IoEngineFeatureTestResult;
 pub use io_engine::feature_test as io_engine_feature_test;
 pub use io_engine::io_engine_for_bench;
-pub use io_engine::FeatureTestResult as IoEngineFeatureTestResult;
 mod metadata;
 mod open_options;
 use self::owned_buffers_io::write::OwnedAsyncWriter;
@@ -1430,9 +1430,9 @@ mod tests {
     use super::*;
     use owned_buffers_io::io_buf_ext::IoBufExt;
     use owned_buffers_io::slice::SliceMutExt;
+    use rand::Rng;
     use rand::seq::SliceRandom;
     use rand::thread_rng;
-    use rand::Rng;
     use std::io::Write;
     use std::os::unix::fs::FileExt;
     use std::sync::Arc;

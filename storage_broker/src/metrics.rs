@@ -1,6 +1,6 @@
 //! Broker metrics.
 
-use metrics::{register_int_counter, register_int_gauge, IntCounter, IntGauge};
+use metrics::{IntCounter, IntGauge, register_int_counter, register_int_gauge};
 use once_cell::sync::Lazy;
 
 pub static NUM_PUBS: Lazy<IntGauge> = Lazy::new(|| {

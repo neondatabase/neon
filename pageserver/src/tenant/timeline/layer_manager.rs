@@ -1,4 +1,4 @@
-use anyhow::{bail, ensure, Context};
+use anyhow::{Context, bail, ensure};
 use itertools::Itertools;
 use pageserver_api::shard::TenantShardId;
 use std::{collections::HashMap, sync::Arc};
@@ -208,9 +208,7 @@ impl OpenLayerManager {
 
             trace!(
                 "creating in-memory layer at {}/{} for record at {}",
-                timeline_id,
-                start_lsn,
-                lsn
+                timeline_id, start_lsn, lsn
             );
 
             let new_layer =

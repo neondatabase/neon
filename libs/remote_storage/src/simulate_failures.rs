@@ -2,8 +2,8 @@
 //! causes the first N attempts at each upload or download operatio to fail. For
 //! testing purposes.
 use bytes::Bytes;
-use futures::stream::Stream;
 use futures::StreamExt;
+use futures::stream::Stream;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::Mutex;

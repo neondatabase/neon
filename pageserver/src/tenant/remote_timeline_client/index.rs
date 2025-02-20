@@ -10,10 +10,10 @@ use pageserver_api::models::AuxFilePolicy;
 use serde::{Deserialize, Serialize};
 
 use super::is_same_remote_layer_path;
+use crate::tenant::Generation;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::storage_layer::LayerName;
 use crate::tenant::timeline::import_pgdata;
-use crate::tenant::Generation;
 use pageserver_api::shard::ShardIndex;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;

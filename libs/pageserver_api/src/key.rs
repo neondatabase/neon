@@ -1,9 +1,9 @@
-use anyhow::{bail, Result};
-use byteorder::{ByteOrder, BE};
+use anyhow::{Result, bail};
+use byteorder::{BE, ByteOrder};
 use bytes::Bytes;
-use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::Oid;
 use postgres_ffi::RepOriginId;
+use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use serde::{Deserialize, Serialize};
 use std::{fmt, ops::Range};
 use utils::const_assert;
@@ -954,8 +954,8 @@ impl std::str::FromStr for Key {
 mod tests {
     use std::str::FromStr;
 
-    use crate::key::is_metadata_key_slice;
     use crate::key::Key;
+    use crate::key::is_metadata_key_slice;
 
     use rand::Rng;
     use rand::SeedableRng;

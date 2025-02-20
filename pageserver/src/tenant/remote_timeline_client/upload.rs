@@ -1,6 +1,6 @@
 //! Helper functions to upload files to remote storage with a RemoteStorage
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use bytes::Bytes;
 use camino::Utf8Path;
 use fail::fail_point;
@@ -12,9 +12,9 @@ use tokio::io::AsyncSeekExt;
 use tokio_util::sync::CancellationToken;
 use utils::{backoff, pausable_failpoint};
 
+use super::Generation;
 use super::index::IndexPart;
 use super::manifest::TenantManifest;
-use super::Generation;
 use crate::tenant::remote_timeline_client::{
     remote_index_path, remote_initdb_archive_path, remote_initdb_preserved_archive_path,
     remote_tenant_manifest_path,
@@ -134,7 +134,9 @@ pub(super) async fn upload_timeline_layer<'a>(
         .len();
 
     if metadata_size != fs_size {
-        bail!("File {local_path:?} has its current FS size {fs_size} diferent from initially determined {metadata_size}");
+        bail!(
+            "File {local_path:?} has its current FS size {fs_size} diferent from initially determined {metadata_size}"
+        );
     }
 
     let fs_size = usize::try_from(fs_size)

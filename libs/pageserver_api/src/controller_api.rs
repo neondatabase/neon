@@ -354,7 +354,7 @@ impl FromStr for SkSchedulingPolicy {
             _ => {
                 return Err(anyhow::anyhow!(
                     "Unknown scheduling policy '{s}', try active,pause,decomissioned"
-                ))
+                ));
             }
         })
     }

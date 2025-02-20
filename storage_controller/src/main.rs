@@ -1,8 +1,8 @@
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use clap::Parser;
 use hyper0::Uri;
-use metrics::launch_timestamp::LaunchTimestamp;
 use metrics::BuildInfo;
+use metrics::launch_timestamp::LaunchTimestamp;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,9 +11,9 @@ use storage_controller::metrics::preinitialize_metrics;
 use storage_controller::persistence::Persistence;
 use storage_controller::service::chaos_injector::ChaosInjector;
 use storage_controller::service::{
-    Config, Service, HEARTBEAT_INTERVAL_DEFAULT, LONG_RECONCILE_THRESHOLD_DEFAULT,
+    Config, HEARTBEAT_INTERVAL_DEFAULT, LONG_RECONCILE_THRESHOLD_DEFAULT,
     MAX_OFFLINE_INTERVAL_DEFAULT, MAX_WARMING_UP_INTERVAL_DEFAULT,
-    PRIORITY_RECONCILER_CONCURRENCY_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT,
+    PRIORITY_RECONCILER_CONCURRENCY_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT, Service,
 };
 use tokio::signal::unix::SignalKind;
 use tokio_util::sync::CancellationToken;
@@ -274,8 +274,8 @@ async fn async_main() -> anyhow::Result<()> {
             // Production systems should always have secrets configured: if public_key was not set
             // then we would implicitly disable auth.
             anyhow::bail!(
-                    "Insecure config!  One or more secrets is not set.  This is only permitted in `--dev` mode"
-                );
+                "Insecure config!  One or more secrets is not set.  This is only permitted in `--dev` mode"
+            );
         }
         StrictMode::Strict if args.compute_hook_url.is_none() => {
             // Production systems should always have a compute hook set, to prevent falling

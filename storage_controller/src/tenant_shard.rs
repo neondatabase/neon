@@ -26,7 +26,7 @@ use pageserver_api::{
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{instrument, Instrument};
+use tracing::{Instrument, instrument};
 use utils::{
     generation::Generation,
     id::NodeId,
@@ -36,14 +36,15 @@ use utils::{
 };
 
 use crate::{
+    Sequence,
     compute_hook::ComputeHook,
     node::Node,
-    persistence::{split_state::SplitState, Persistence},
+    persistence::{Persistence, split_state::SplitState},
     reconciler::{
-        attached_location_conf, secondary_location_conf, ReconcileError, Reconciler, TargetState,
+        ReconcileError, Reconciler, TargetState, attached_location_conf, secondary_location_conf,
     },
     scheduler::{ScheduleError, Scheduler},
-    service, Sequence,
+    service,
 };
 
 /// Serialization helper
@@ -828,7 +829,9 @@ impl TenantShard {
                 let current_score = current_score.for_optimization();
 
                 if candidate_score < current_score {
-                    tracing::info!("Found a lower scoring location! {candidate} is better than {current} ({candidate_score:?} is better than {current_score:?})");
+                    tracing::info!(
+                        "Found a lower scoring location! {candidate} is better than {current} ({candidate_score:?} is better than {current_score:?})"
+                    );
                     Some(true)
                 } else {
                     // The candidate node is no better than our current location, so don't migrate
@@ -998,7 +1001,7 @@ impl TenantShard {
                 // most cases, even if some nodes are offline or have scheduling=pause set.
 
                 debug_assert!(self.intent.attached.is_some()); // We should not make it here unless attached -- this
-                                                               // logic presumes we are in a mode where we want secondaries to be in non-home AZ
+                // logic presumes we are in a mode where we want secondaries to be in non-home AZ
                 if let Some(retain_secondary) = self.intent.get_secondary().iter().find(|n| {
                     let in_home_az = scheduler.get_node_az(n) == self.intent.preferred_az_id;
                     let is_available = secondary_scores
@@ -1022,7 +1025,8 @@ impl TenantShard {
                 }
 
                 // Fall through: we didn't identify one to remove.  This ought to be rare.
-                tracing::warn!("Keeping extra secondaries: can't determine which of {:?} to remove (some nodes offline?)",
+                tracing::warn!(
+                    "Keeping extra secondaries: can't determine which of {:?} to remove (some nodes offline?)",
                     self.intent.get_secondary()
                 );
             } else {
@@ -1825,7 +1829,10 @@ impl TenantShard {
                         (Some(crnt), Some(new)) if crnt_gen > new_gen => {
                             tracing::warn!(
                                 "Skipping observed state update {}: {:?} and using None due to stale generation ({} > {})",
-                                node_id, loc, crnt, new
+                                node_id,
+                                loc,
+                                crnt,
+                                new
                             );
 
                             self.observed
@@ -1888,7 +1895,7 @@ pub(crate) mod tests {
         controller_api::NodeAvailability,
         shard::{ShardCount, ShardNumber},
     };
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::{SeedableRng, rngs::StdRng};
     use utils::id::TenantId;
 
     use crate::scheduler::test_utils::make_test_nodes;
@@ -2071,16 +2078,20 @@ pub(crate) mod tests {
 
         // In pause mode, schedule() shouldn't do anything
         tenant_shard.scheduling_policy = ShardSchedulingPolicy::Pause;
-        assert!(tenant_shard
-            .schedule(&mut scheduler, &mut ScheduleContext::default())
-            .is_ok());
+        assert!(
+            tenant_shard
+                .schedule(&mut scheduler, &mut ScheduleContext::default())
+                .is_ok()
+        );
         assert!(tenant_shard.intent.all_pageservers().is_empty());
 
         // In active mode, schedule() works
         tenant_shard.scheduling_policy = ShardSchedulingPolicy::Active;
-        assert!(tenant_shard
-            .schedule(&mut scheduler, &mut ScheduleContext::default())
-            .is_ok());
+        assert!(
+            tenant_shard
+                .schedule(&mut scheduler, &mut ScheduleContext::default())
+                .is_ok()
+        );
         assert!(!tenant_shard.intent.all_pageservers().is_empty());
 
         tenant_shard.intent.clear(&mut scheduler);
@@ -2607,9 +2618,11 @@ pub(crate) mod tests {
         );
         let mut schedule_context = ScheduleContext::default();
         for shard in &mut shards {
-            assert!(shard
-                .schedule(&mut scheduler, &mut schedule_context)
-                .is_ok());
+            assert!(
+                shard
+                    .schedule(&mut scheduler, &mut schedule_context)
+                    .is_ok()
+            );
         }
 
         // Initial: attached locations land in the tenant's home AZ.

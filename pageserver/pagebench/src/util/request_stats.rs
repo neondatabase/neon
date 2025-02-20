@@ -40,9 +40,7 @@ impl Stats {
         }
     }
     pub(crate) fn add(&mut self, other: &Self) {
-        let Self {
-            latency_histo,
-        } = self;
+        let Self { latency_histo } = self;
         latency_histo.add(&other.latency_histo).unwrap();
     }
 }

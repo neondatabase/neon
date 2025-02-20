@@ -3,21 +3,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::checks::{
-    list_tenant_manifests, list_timeline_blobs, BlobDataParseResult, ListTenantManifestResult,
-    RemoteTenantManifestInfo,
+    BlobDataParseResult, ListTenantManifestResult, RemoteTenantManifestInfo, list_tenant_manifests,
+    list_timeline_blobs,
 };
 use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
-use crate::{init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId, MAX_RETRIES};
+use crate::{BucketConfig, MAX_RETRIES, NodeKind, RootTarget, TenantShardTimelineId, init_remote};
 use async_stream::try_stream;
 use futures::future::Either;
 use futures_util::{StreamExt, TryStreamExt};
+use pageserver::tenant::IndexPart;
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver::tenant::remote_timeline_client::manifest::OffloadedTimelineManifest;
 use pageserver::tenant::remote_timeline_client::{
     parse_remote_index_path, parse_remote_tenant_manifest_path, remote_layer_path,
 };
 use pageserver::tenant::storage_layer::LayerName;
-use pageserver::tenant::IndexPart;
 use pageserver_api::controller_api::TenantDescribeResponse;
 use pageserver_api::shard::{ShardIndex, TenantShardId};
 use remote_storage::{GenericRemoteStorage, ListingObject, RemotePath};
@@ -25,7 +25,7 @@ use reqwest::Method;
 use serde::Serialize;
 use storage_controller_client::control_api;
 use tokio_util::sync::CancellationToken;
-use tracing::{info_span, Instrument};
+use tracing::{Instrument, info_span};
 use utils::backoff;
 use utils::generation::Generation;
 use utils::id::{TenantId, TenantTimelineId};

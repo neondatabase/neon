@@ -27,7 +27,7 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{TaskKind, WALRECEIVER_RUNTIME};
 use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::timeline::walreceiver::connection_manager::{
-    connection_manager_loop_step, ConnectionManagerState,
+    ConnectionManagerState, connection_manager_loop_step,
 };
 
 use std::future::Future;

@@ -9,7 +9,7 @@ use pageserver_api::{
         ValidateRequestTenant, ValidateResponse,
     },
 };
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use utils::{backoff, failpoint_support, generation::Generation, id::NodeId};
@@ -157,14 +157,18 @@ impl ControlPlaneGenerationsApi for ControllerUpcallClient {
                         match az_id_from_metadata {
                             Some(az_id) => Some(AvailabilityZone(az_id)),
                             None => {
-                                tracing::warn!("metadata.json does not contain an 'availability_zone_id' field");
+                                tracing::warn!(
+                                    "metadata.json does not contain an 'availability_zone_id' field"
+                                );
                                 conf.availability_zone.clone().map(AvailabilityZone)
                             }
                         }
                     };
 
                     if az_id.is_none() {
-                        panic!("Availablity zone id could not be inferred from metadata.json or pageserver config");
+                        panic!(
+                            "Availablity zone id could not be inferred from metadata.json or pageserver config"
+                        );
                     }
 
                     Some(NodeRegisterRequest {
