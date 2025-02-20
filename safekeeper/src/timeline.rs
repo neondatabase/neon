@@ -168,7 +168,7 @@ impl StateSK {
     pub fn state(&self) -> &TimelineState<control_file::FileStorage> {
         match self {
             StateSK::Loaded(sk) => &sk.state,
-            StateSK::Offloaded(ref s) => s,
+            StateSK::Offloaded(s) => s,
             StateSK::Empty => unreachable!(),
         }
     }
@@ -176,7 +176,7 @@ impl StateSK {
     pub fn state_mut(&mut self) -> &mut TimelineState<control_file::FileStorage> {
         match self {
             StateSK::Loaded(sk) => &mut sk.state,
-            StateSK::Offloaded(ref mut s) => s,
+            StateSK::Offloaded( s) => s,
             StateSK::Empty => unreachable!(),
         }
     }

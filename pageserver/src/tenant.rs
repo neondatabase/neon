@@ -2006,7 +2006,7 @@ impl Tenant {
         remote_storage: GenericRemoteStorage,
         previous_heatmap: Option<PreviousHeatmap>,
         cancel: CancellationToken,
-    ) -> impl Future<Output = TimelinePreload> {
+    ) -> impl Future<Output = TimelinePreload> + use<> {
         let client = self.build_timeline_client(timeline_id, remote_storage);
         async move {
             debug_assert_current_span_has_tenant_and_timeline_id();

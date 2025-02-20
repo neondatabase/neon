@@ -41,7 +41,7 @@ impl Stats {
     }
     pub(crate) fn add(&mut self, other: &Self) {
         let Self {
-            ref mut latency_histo,
+            latency_histo,
         } = self;
         latency_histo.add(&other.latency_histo).unwrap();
     }

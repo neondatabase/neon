@@ -1862,7 +1862,7 @@ impl Service {
         }
 
         Ok(AttachHookResponse {
-            gen: attach_req
+            r#gen: attach_req
                 .node_id
                 .map(|_| tenant_shard.generation.expect("Test hook, not used on tenants that are mid-onboarding with a NULL generation").into().unwrap()),
         })
@@ -2034,7 +2034,7 @@ impl Service {
                 let new_gen = *new_gen;
                 response.tenants.push(ReAttachResponseTenant {
                     id: *tenant_shard_id,
-                    gen: Some(new_gen.into().unwrap()),
+                    r#gen: Some(new_gen.into().unwrap()),
                     // A tenant is only put into multi or stale modes in the middle of a [`Reconciler::live_migrate`]
                     // execution.  If a pageserver is restarted during that process, then the reconcile pass will
                     // fail, and start from scratch, so it doesn't make sense for us to try and preserve
@@ -2071,7 +2071,7 @@ impl Service {
 
                 response.tenants.push(ReAttachResponseTenant {
                     id: *tenant_shard_id,
-                    gen: None,
+                    r#gen: None,
                     mode: LocationConfigMode::Secondary,
                 });
 
@@ -2133,15 +2133,15 @@ impl Service {
             let locked = self.inner.read().unwrap();
             for req_tenant in validate_req.tenants {
                 if let Some(tenant_shard) = locked.tenants.get(&req_tenant.id) {
-                    let valid = tenant_shard.generation == Some(Generation::new(req_tenant.gen));
+                    let valid = tenant_shard.generation == Some(Generation::new(req_tenant.r#gen));
                     tracing::info!(
                         "handle_validate: {}(gen {}): valid={valid} (latest {:?})",
                         req_tenant.id,
-                        req_tenant.gen,
+                        req_tenant.r#gen,
                         tenant_shard.generation
                     );
 
-                    in_memory_result.push((req_tenant.id, Generation::new(req_tenant.gen), valid));
+                    in_memory_result.push((req_tenant.id, Generation::new(req_tenant.r#gen), valid));
                 } else {
                     // This is legal: for example during a shard split the pageserver may still
                     // have deletions in its queue from the old pre-split shard, or after deletion

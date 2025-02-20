@@ -1128,12 +1128,12 @@ async fn tenant_list_handler(
             ApiError::ResourceUnavailable("Tenant map is initializing or shutting down".into())
         })?
         .iter()
-        .map(|(id, state, gen)| TenantInfo {
+        .map(|(id, state, gen_)| TenantInfo {
             id: *id,
             state: state.clone(),
             current_physical_size: None,
             attachment_status: state.attachment_status(),
-            generation: (*gen)
+            generation: (*gen_)
                 .into()
                 .expect("Tenants are always attached with a generation"),
             gc_blocking: None,

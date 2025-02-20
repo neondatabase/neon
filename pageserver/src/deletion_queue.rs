@@ -724,26 +724,26 @@ mod test {
                 .expect("Failed to join workers for previous deletion queue");
         }
 
-        fn set_latest_generation(&self, gen: Generation) {
+        fn set_latest_generation(&self, gen_: Generation) {
             let tenant_shard_id = self.harness.tenant_shard_id;
             self.mock_control_plane
                 .latest_generation
                 .lock()
                 .unwrap()
-                .insert(tenant_shard_id, gen);
+                .insert(tenant_shard_id, gen_);
         }
 
         /// Returns remote layer file name, suitable for use in assert_remote_files
         fn write_remote_layer(
             &self,
             file_name: LayerName,
-            gen: Generation,
+            gen_: Generation,
         ) -> anyhow::Result<String> {
             let tenant_shard_id = self.harness.tenant_shard_id;
             let relative_remote_path = remote_timeline_path(&tenant_shard_id, &TIMELINE_ID);
             let remote_timeline_path = self.remote_fs_dir.join(relative_remote_path.get_path());
             std::fs::create_dir_all(&remote_timeline_path)?;
-            let remote_layer_file_name = format!("{}{}", file_name, gen.get_suffix());
+            let remote_layer_file_name = format!("{}{}", file_name, gen_.get_suffix());
 
             let content: Vec<u8> = format!("placeholder contents of {file_name}").into();
 

@@ -236,7 +236,7 @@ impl ControlPlaneGenerationsApi for ControllerUpcallClient {
                     .iter()
                     .map(|(id, generation)| ValidateRequestTenant {
                         id: *id,
-                        gen: (*generation).into().expect(
+                        r#gen: (*generation).into().expect(
                             "Generation should always be valid for a Tenant doing deletions",
                         ),
                     })

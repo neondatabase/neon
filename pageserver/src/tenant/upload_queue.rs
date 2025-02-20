@@ -225,7 +225,7 @@ impl UploadQueueInitialized {
             // most one of them can be an index upload (enforced by can_bypass).
             .scan(&self.clean.0, |next_active_index, op| {
                 let active_index = *next_active_index;
-                if let UploadOp::UploadMetadata { ref uploaded } = op {
+                if let UploadOp::UploadMetadata { uploaded } = op {
                     *next_active_index = uploaded; // stash index for next operation after this
                 }
                 Some((op, active_index))
