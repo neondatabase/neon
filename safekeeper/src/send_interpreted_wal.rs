@@ -411,7 +411,7 @@ impl InterpretedWalReader {
                             } else if wal_end_lsn > state.next_record_lsn {
                                 // All the records in this batch were seen by the shard
                                 // However, the batch maps to a chunk of WAL that the
-                                // shard has not yet seen. Notify if of the start LSN
+                                // shard has not yet seen. Notify it of the start LSN
                                 // of the PG WAL chunk such that it doesn't look like a gap.
                                 InterpretedWalRecords {
                                     records: Vec::default(),
