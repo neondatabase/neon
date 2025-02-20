@@ -759,8 +759,7 @@ PagestoreShmemInit(void)
 		for (size_t i = 0; i < n_channels; i++)
 		{
 			NeonCommunicatorChannel* chan = &communicator->channels[i];
-			pg_atomic_init_u64(&chan->write_pos, 0);
-			pg_atomic_init_u64(&chan->read_pos, 0);
+			chan->write_pos = 0;
 			pthread_cond_init(&chan->cond, &attrcond);
 			pthread_mutex_init(&chan->mutex, &attrmutex);
 			chan->requests = requests;
@@ -821,9 +820,10 @@ communicator_send_request(int shard, NeonCommunicatorRequest* req)
 	/* bind backend to the particular channel */
 	NeonCommunicatorChannel* chan = &communicator->channels[shard * parallel_connections + (MyProcNumber % parallel_connections)];
 	size_t ring_size = RequestBufferSize();
-	uint64 write_pos = pg_atomic_fetch_add_u64(&chan->write_pos, 1); /* reserve write position */
-	size_t ring_pos = (size_t)(write_pos % ring_size);
-	uint64 read_pos;
+	size_t ring_pos;
+
+	pthread_mutex_lock(&chan->mutex);
+	ring_pos = (size_t)(chan->write_pos++ % ring_size);
 
 	/* ring overflow should not happen */
 	Assert(chan->requests[ring_pos].hdr.u.reqid == 0);
@@ -837,15 +837,8 @@ communicator_send_request(int shard, NeonCommunicatorRequest* req)
 	/* will be overwritten with response code when request will be processed */
 	communicator->responses[MyProcNumber].tag = req->hdr.tag;
 
-	/* enforce memory barrier before pinging communicator */
-	pg_write_barrier();
-
-	/* advance read-up-to position */
-	do {
-		read_pos = write_pos;
-	} while (!pg_atomic_compare_exchange_u64(&chan->read_pos, &read_pos, write_pos+1));
-
 	pthread_cond_signal(&chan->cond);
+	pthread_mutex_unlock(&chan->mutex);
 }
 
 /*
@@ -1052,7 +1045,7 @@ allocStringInfo(StringInfo s, size_t size)
 static void*
 communicator_write_loop(void* arg)
 {
-	uint64	read_start_pos = 0;
+	uint64	read_pos = 0;
 	size_t	chan_no = (size_t)arg;
 	NeonCommunicatorChannel* chan = &communicator->channels[chan_no];
 	size_t	ring_size = RequestBufferSize();
@@ -1060,43 +1053,26 @@ communicator_write_loop(void* arg)
 
 	allocStringInfo(&s, MAX_REQUEST_SIZE);
 
-	while (true)
+	pthread_mutex_lock(&chan->mutex);
+
+	/* Check if number of shards is decreased so this worker is not needed any more */
+	while (chan_no < shard_map.n_shards * parallel_connections)
 	{
 		NeonCommunicatorRequest* req;
-		uint64 read_end_pos;
-
-		/* Number of shards is decreased so this worker is not needed any more */
-		if (chan_no >= shard_map.n_shards * parallel_connections)
+		while (read_pos == chan->write_pos)
 		{
-			return NULL;
+			pthread_cond_wait(&chan->cond, &chan->mutex);
 		}
-		read_end_pos = pg_atomic_read_u64(&chan->read_pos);
-		Assert(read_start_pos <= read_end_pos);
-		if (read_start_pos == read_end_pos) /* fast path */
-		{
-			pthread_mutex_lock(&chan->mutex);
-			while (!ShutdownRequestPending)
-			{
-				read_end_pos = pg_atomic_read_u64(&chan->read_pos);
-				Assert(read_start_pos <= read_end_pos);
-				if (read_start_pos < read_end_pos)
-				{
-					pthread_mutex_unlock(&chan->mutex);
-					break;
-				}
-				pthread_cond_wait(&chan->cond, &chan->mutex);
-			}
-			pthread_mutex_unlock(&chan->mutex);
-			if (ShutdownRequestPending)
-				return NULL;
-		}
-		req = &chan->requests[read_start_pos++ % ring_size];
+		Assert(read_pos < chan->write_pos);
+		req = &chan->requests[read_pos++ % ring_size];
 		Assert(req->hdr.u.reqid != 0);
 		nm_pack_request(&s, &req->hdr);
 		Assert(s.maxlen == MAX_REQUEST_SIZE); /* string buffer was not reallocated */
 		req->hdr.u.reqid = 0; /* mark requests as processed */
 		pageserver_send(chan_no, &s);
 	}
+	pthread_mutex_unlock(&chan->mutex);
+	return NULL;
 }
 
 /*

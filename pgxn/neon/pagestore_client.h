@@ -165,10 +165,9 @@ typedef struct
 
 typedef struct
 {
-	pg_atomic_uint64 write_pos;
-	pg_atomic_uint64 read_pos;
-	pthread_mutex_t  mutex;
-	pthread_cond_t   cond;
+	uint64			write_pos;
+	pthread_mutex_t	mutex;
+	pthread_cond_t	cond;
 	NeonCommunicatorRequest* requests;
 } NeonCommunicatorChannel;
 
