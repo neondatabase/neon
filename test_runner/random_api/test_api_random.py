@@ -14,7 +14,7 @@ from fixtures.pg_version import PgVersion
 from fixtures.neon_api import NeonAPI
 
 
-class TestNeonProject:
+class RandomNeonProject:
     def __init__(self, project_id: str, neon_api: NeonAPI):
         self.project_id = project_id
         self.neon_api = neon_api
@@ -58,7 +58,7 @@ def test_api_random(
     """
     project_id = os.getenv("PROJECT_ID")
     log.info("Project ID: %s", project_id)
-    project = TestNeonProject(project_id, neon_api)
+    project = RandomNeonProject(project_id, neon_api)
     br1 = project.create_branch()
     log.info("created branch %s", br1)
     br2 = project.create_branch(br1)
