@@ -474,8 +474,7 @@ readahead_buffer_resize(int newsize, void *extra)
 	 */
 	if (MyPState->n_requests_inflight > newsize)
 	{
-		Assert(MyPState->ring_unused >= MyPState->n_requests_inflight - newsize);
-		prefetch_wait_for(MyPState->ring_unused - (MyPState->n_requests_inflight - newsize));
+		prefetch_wait_for(MyPState->ring_unused - newsize - 1);
 		Assert(MyPState->n_requests_inflight <= newsize);
 	}
 
