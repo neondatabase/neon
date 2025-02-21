@@ -2,23 +2,25 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 #![cfg(target_os = "linux")]
 
+use std::fmt::Debug;
+use std::net::SocketAddr;
+use std::time::Duration;
+
 use anyhow::Context;
-use axum::{Router, routing::get};
-use axum::{
-    extract::{State, WebSocketUpgrade, ws::WebSocket},
-    response::Response,
-};
+use axum::Router;
+use axum::extract::ws::WebSocket;
+use axum::extract::{State, WebSocketUpgrade};
+use axum::response::Response;
+use axum::routing::get;
 use clap::Parser;
 use futures::Future;
-use std::net::SocketAddr;
-use std::{fmt::Debug, time::Duration};
+use runner::Runner;
 use sysinfo::{RefreshKind, System, SystemExt};
 use tokio::net::TcpListener;
-use tokio::{sync::broadcast, task::JoinHandle};
+use tokio::sync::broadcast;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
-
-use runner::Runner;
 
 // Code that interfaces with agent
 pub mod dispatcher;

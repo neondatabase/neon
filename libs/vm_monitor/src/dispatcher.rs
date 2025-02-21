@@ -8,10 +8,8 @@
 
 use anyhow::{Context, bail};
 use axum::extract::ws::{Message, Utf8Bytes, WebSocket};
-use futures::{
-    SinkExt, StreamExt,
-    stream::{SplitSink, SplitStream},
-};
+use futures::stream::{SplitSink, SplitStream};
+use futures::{SinkExt, StreamExt};
 use tracing::{debug, info};
 
 use crate::protocol::{

@@ -2,11 +2,13 @@
 
 use std::num::NonZeroU64;
 
-use crate::MiB;
 use anyhow::{Context, anyhow};
-use tokio_postgres::{Client, NoTls, Row, types::ToSql};
+use tokio_postgres::types::ToSql;
+use tokio_postgres::{Client, NoTls, Row};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
+
+use crate::MiB;
 
 /// Manages Postgres' file cache by keeping a connection open.
 #[derive(Debug)]
