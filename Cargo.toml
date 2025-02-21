@@ -210,6 +210,7 @@ rustls-native-certs = "0.8"
 x509-parser = "0.16"
 whoami = "1.5.1"
 zerocopy = { version = "0.7", features = ["derive"] }
+json-structural-diff = { version = "0.2.0" }
 
 ## TODO replace this with tracing
 env_logger = "0.10"
