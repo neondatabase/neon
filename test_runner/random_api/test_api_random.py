@@ -42,6 +42,7 @@ class RandomNeonProject:
         return self.neon_api.create_branch(self.project_id, parent_branch_id)["branch"]["id"]
 
     def wait(self):
+        log.info("waiting")
         return self.neon_api.wait_for_operation_to_finish(self.project_id)
 
 
