@@ -1251,12 +1251,6 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             // TODO(sharding): this command shouldn't have to specify a shard ID: we should ask the storage controller
             // where shard 0 is attached, and query there.
             let tenant_shard_id = get_tenant_shard_id(args.tenant_shard_id, env)?;
-            let timeline_infos = get_timeline_infos(env, &tenant_shard_id)
-                .await
-                .unwrap_or_else(|e| {
-                    eprintln!("Failed to load timeline info: {}", e);
-                    HashMap::new()
-                });
 
             let timeline_name_mappings = env.timeline_name_mappings();
 
@@ -1285,12 +1279,9 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                         lsn.to_string()
                     }
                     _ => {
-                        // -> primary endpoint or hot replica
-                        // Use the LSN at the end of the timeline.
-                        timeline_infos
-                            .get(&endpoint.timeline_id)
-                            .map(|bi| bi.last_record_lsn.to_string())
-                            .unwrap_or_else(|| "?".to_string())
+                        // As the LSN here refers to the one that the compute is started with,
+                        // we display nothing as it is a primary/hot standby compute.
+                        "---".to_string()
                     }
                 };
 
