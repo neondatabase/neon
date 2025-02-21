@@ -220,7 +220,7 @@ lfc_switch_off(void)
 
 	/*
 	 * We need to use unlink to to avoid races in LFC write, because it is not
-	 * protectedby
+	 * protected by lock
 	 */
 	unlink(lfc_path);
 
@@ -229,7 +229,6 @@ lfc_switch_off(void)
 		elog(WARNING, "LFC: failed to recreate local file cache %s: %m", lfc_path);
 	else
 		close(fd);
-
 
 	if (lfc_desc > 0)
 		close(lfc_desc);
@@ -379,7 +378,13 @@ lfc_change_limit_hook(int newval, void *extra)
 
 	/* Open LFC file only if LFC was enabled or we are going to reenable it */
 	if ((newval > 0 || LFC_ENABLED()) && !lfc_ensure_opened())
+	{
+		/* File should be reopened if LFC is reenabled */
+		if (lfc_desc > 0)
+			close(lfc_desc);
+		lfc_desc = -1;
 		return;
+	}
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 
