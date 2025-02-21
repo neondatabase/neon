@@ -112,6 +112,15 @@ enum Command {
         tenant_shard_id: TenantShardId,
         #[arg(long)]
         node: NodeId,
+        #[arg(long, default_value_t = true)]
+        graceful: bool,
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+    /// Watch the location of a tenant shard evolve, e.g. while expecting it to migrate
+    TenantShardWatch {
+        #[arg(long)]
+        tenant_shard_id: TenantShardId,
     },
     /// Migrate the secondary location for a tenant shard to a specific pageserver.
     TenantShardMigrateSecondary {
@@ -619,10 +628,18 @@ async fn main() -> anyhow::Result<()> {
         Command::TenantShardMigrate {
             tenant_shard_id,
             node,
+            graceful,
+            force,
         } => {
+            let migration_config = MigrationConfig {
+                graceful,
+                force,
+                ..Default::default()
+            };
+
             let req = TenantShardMigrateRequest {
                 node_id: node,
-                migration_config: MigrationConfig::default(),
+                migration_config,
             };
 
             storcon_client
@@ -632,6 +649,11 @@ async fn main() -> anyhow::Result<()> {
                     Some(req),
                 )
                 .await?;
+
+            watch_tenant_shard(storcon_client, tenant_shard_id, Some(node)).await?;
+        }
+        Command::TenantShardWatch { tenant_shard_id } => {
+            watch_tenant_shard(storcon_client, tenant_shard_id, None).await?;
         }
         Command::TenantShardMigrateSecondary {
             tenant_shard_id,
@@ -1282,5 +1304,70 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+static WATCH_INTERVAL: Duration = Duration::from_secs(5);
+
+async fn watch_tenant_shard(
+    storcon_client: Client,
+    tenant_shard_id: TenantShardId,
+    until_migrated_to: Option<NodeId>,
+) -> anyhow::Result<()> {
+    if let Some(until_migrated_to) = until_migrated_to {
+        println!(
+            "Waiting for tenant shard {} to be migrated to node {}",
+            tenant_shard_id, until_migrated_to
+        );
+    }
+
+    loop {
+        let desc = storcon_client
+            .dispatch::<(), TenantDescribeResponse>(
+                Method::GET,
+                format!("control/v1/tenant/{}", tenant_shard_id),
+                None,
+            )
+            .await?;
+
+        // Output the current state of the tenant shard
+        let shard = desc
+            .shards
+            .iter()
+            .find(|s| s.tenant_shard_id == tenant_shard_id)
+            .ok_or(anyhow::anyhow!("Tenant shard not found"))?;
+        let summary = format!(
+            "attached: {} secondary: {} {}",
+            shard
+                .node_attached
+                .map(|n| format!("{}", n))
+                .unwrap_or("none".to_string()),
+            shard
+                .node_secondary
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            if shard.is_reconciling {
+                "(reconciler active)"
+            } else {
+                "(reconciler idle)"
+            }
+        );
+        println!("{}", summary);
+
+        // Maybe drop out if we finished migration
+        if let Some(until_migrated_to) = until_migrated_to {
+            if shard.node_attached == Some(until_migrated_to) && !shard.is_reconciling {
+                println!(
+                    "Tenant shard {} is now on node {}",
+                    tenant_shard_id, until_migrated_to
+                );
+                break;
+            }
+        }
+
+        tokio::time::sleep(WATCH_INTERVAL).await;
+    }
     Ok(())
 }
