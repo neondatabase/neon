@@ -3522,6 +3522,14 @@ impl Timeline {
         Ok(layer)
     }
 
+    pub(super) fn is_previous_heatmap_active(&self) -> bool {
+        self.previous_heatmap
+            .load()
+            .as_ref()
+            .map(|prev| matches!(**prev, PreviousHeatmap::Active { .. }))
+            .unwrap_or(false)
+    }
+
     /// The timeline heatmap is a hint to secondary locations from the primary location,
     /// indicating which layers are currently on-disk on the primary.
     ///
@@ -3594,6 +3602,7 @@ impl Timeline {
             Some(non_resident) => {
                 let mut non_resident = non_resident.peekable();
                 if non_resident.peek().is_none() {
+                    tracing::info!(timeline_id=%self.timeline_id, "Previous heatmap now obsolete");
                     self.previous_heatmap
                         .store(Some(PreviousHeatmap::Obsolete.into()));
                 }
@@ -3625,20 +3634,16 @@ impl Timeline {
         Some(HeatMapTimeline::new(self.timeline_id, layers))
     }
 
-    pub(super) async fn generate_unarchival_heatmap(&self) -> Option<PreviousHeatmap> {
-        let crnt_state = self.current_state();
-        if crnt_state != TimelineState::Loading {
-            tracing::warn!(
-                "Attempted to generate heatmap on unarchival at the wrong point: {crnt_state:?}"
-            );
-            return None;
-        }
-
+    pub(super) async fn generate_unarchival_heatmap(&self, end_lsn: Lsn) -> PreviousHeatmap {
         let guard = self.layers.read().await;
 
         let now = SystemTime::now();
         let mut heatmap_layers = Vec::default();
         for vl in guard.visible_layers() {
+            if vl.layer_desc().get_lsn_range().start >= end_lsn {
+                continue;
+            }
+
             let hl = HeatMapLayer {
                 name: vl.layer_desc().layer_name(),
                 metadata: vl.metadata(),
@@ -3653,10 +3658,10 @@ impl Timeline {
         );
 
         let heatmap = HeatMapTimeline::new(self.timeline_id, heatmap_layers);
-        Some(PreviousHeatmap::Active {
+        PreviousHeatmap::Active {
             heatmap,
             read_at: Instant::now(),
-        })
+        }
     }
 
     /// Returns true if the given lsn is or was an ancestor branchpoint.

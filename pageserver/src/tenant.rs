@@ -1195,10 +1195,30 @@ impl Tenant {
         // This previous heatmap will be used whenever a fresh heatmap is generated
         // for the timeline.
         if matches!(cause, LoadTimelineCause::Unoffload) {
-            if let Some(unarchival_heatmap) = timeline.generate_unarchival_heatmap().await {
-                timeline
-                    .previous_heatmap
-                    .store(Some(Arc::new(unarchival_heatmap)));
+            let mut tline_ending_at = Some((&timeline, timeline.get_last_record_lsn()));
+            while let Some((tline, end_lsn)) = tline_ending_at {
+                let unarchival_heatmap = tline.generate_unarchival_heatmap(end_lsn).await;
+                if !tline.is_previous_heatmap_active() {
+                    tline
+                        .previous_heatmap
+                        .store(Some(Arc::new(unarchival_heatmap)));
+                } else {
+                    tracing::info!("Previous heatmap still active. Dropping unarchival heatmap.")
+                }
+
+                match tline.ancestor_timeline() {
+                    Some(ancestor) => {
+                        if ancestor.update_layer_visibility().await.is_err() {
+                            // Ancestor timeline is shutting down.
+                            break;
+                        }
+
+                        tline_ending_at = Some((ancestor, tline.get_ancestor_lsn()));
+                    }
+                    None => {
+                        tline_ending_at = None;
+                    }
+                }
             }
         }
 
