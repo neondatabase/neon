@@ -1,8 +1,8 @@
 use tracing::instrument;
 use tracing::{error, info};
 
-use crate::metrics::WalRedoKillCause;
 use crate::metrics::WAL_REDO_PROCESS_COUNTERS;
+use crate::metrics::WalRedoKillCause;
 
 use std::io;
 use std::process::Command;

@@ -16,7 +16,7 @@ use utils::id::{TenantId, TimelineId};
 
 use utils::lsn::Lsn;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkGroup, Criterion};
+use criterion::{BenchmarkGroup, Criterion, black_box, criterion_group, criterion_main};
 
 fn fixture_path(relative: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)

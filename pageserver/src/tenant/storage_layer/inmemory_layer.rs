@@ -4,7 +4,7 @@
 //! held in an ephemeral file, not in memory. The metadata for each page version, i.e.
 //! its position in the file, is kept in memory, though.
 //!
-use crate::assert_u64_eq_usize::{u64_to_usize, U64IsUsize, UsizeIsU64};
+use crate::assert_u64_eq_usize::{U64IsUsize, UsizeIsU64, u64_to_usize};
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::tenant::ephemeral_file::EphemeralFile;
@@ -555,7 +555,9 @@ impl InMemoryLayer {
         gate: &utils::sync::gate::Gate,
         ctx: &RequestContext,
     ) -> Result<InMemoryLayer> {
-        trace!("initializing new empty InMemoryLayer for writing on timeline {timeline_id} at {start_lsn}");
+        trace!(
+            "initializing new empty InMemoryLayer for writing on timeline {timeline_id} at {start_lsn}"
+        );
 
         let file = EphemeralFile::create(conf, tenant_shard_id, timeline_id, gate, ctx).await?;
         let key = InMemoryLayerFileId(file.page_cache_file_id());

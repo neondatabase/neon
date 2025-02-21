@@ -8,20 +8,20 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use bytes::BytesMut;
 use chrono::{NaiveDateTime, Utc};
 use fail::fail_point;
 use futures::StreamExt;
-use postgres::{error::SqlState, SimpleQueryMessage, SimpleQueryRow};
+use postgres::{SimpleQueryMessage, SimpleQueryRow, error::SqlState};
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use postgres_ffi::{v14::xlog_utils::normalize_lsn, waldecoder::WalDecodeError};
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
 use tokio::{select, sync::watch, time};
-use tokio_postgres::{replication::ReplicationStream, Client};
+use tokio_postgres::{Client, replication::ReplicationStream};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, trace, warn, Instrument};
+use tracing::{Instrument, debug, error, info, trace, warn};
 use wal_decoder::{
     models::{FlushUncommittedRecords, InterpretedWalRecord, InterpretedWalRecords},
     wire_format::FromWireFormat,
@@ -30,10 +30,10 @@ use wal_decoder::{
 use super::TaskStateUpdate;
 use crate::{
     context::RequestContext,
-    metrics::{LIVE_CONNECTIONS, WALRECEIVER_STARTED_CONNECTIONS, WAL_INGEST},
+    metrics::{LIVE_CONNECTIONS, WAL_INGEST, WALRECEIVER_STARTED_CONNECTIONS},
     pgdatadir_mapping::DatadirModification,
     task_mgr::{TaskKind, WALRECEIVER_RUNTIME},
-    tenant::{debug_assert_current_span_has_tenant_and_timeline_id, Timeline, WalReceiverInfo},
+    tenant::{Timeline, WalReceiverInfo, debug_assert_current_span_has_tenant_and_timeline_id},
     walingest::WalIngest,
 };
 use postgres_backend::is_expected_io_error;
@@ -149,7 +149,9 @@ pub(super) async fn handle_walreceiver_connection(
                 // Timing out to connect to a safekeeper node could happen long time, due to
                 // many reasons that pageserver cannot control.
                 // Do not produce an error, but make it visible, that timeouts happen by logging the `event.
-                info!("Timed out while waiting {connect_timeout:?} for walreceiver connection to open");
+                info!(
+                    "Timed out while waiting {connect_timeout:?} for walreceiver connection to open"
+                );
                 return Ok(());
             }
         }
@@ -166,7 +168,9 @@ pub(super) async fn handle_walreceiver_connection(
         node: safekeeper_node,
     };
     if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status)) {
-        warn!("Wal connection event listener dropped right after connection init, aborting the connection: {e}");
+        warn!(
+            "Wal connection event listener dropped right after connection init, aborting the connection: {e}"
+        );
         return Ok(());
     }
 
@@ -227,7 +231,9 @@ pub(super) async fn handle_walreceiver_connection(
     connection_status.latest_wal_update = Utc::now().naive_utc();
     connection_status.commit_lsn = Some(end_of_wal);
     if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status)) {
-        warn!("Wal connection event listener dropped after IDENTIFY_SYSTEM, aborting the connection: {e}");
+        warn!(
+            "Wal connection event listener dropped after IDENTIFY_SYSTEM, aborting the connection: {e}"
+        );
         return Ok(());
     }
 
@@ -254,7 +260,9 @@ pub(super) async fn handle_walreceiver_connection(
     //  to the safekeepers.
     startpoint = normalize_lsn(startpoint, WAL_SEGMENT_SIZE);
 
-    info!("last_record_lsn {last_rec_lsn} starting replication from {startpoint}, safekeeper is at {end_of_wal}...");
+    info!(
+        "last_record_lsn {last_rec_lsn} starting replication from {startpoint}, safekeeper is at {end_of_wal}..."
+    );
 
     let query = format!("START_REPLICATION PHYSICAL {startpoint}");
 
@@ -626,7 +634,9 @@ pub(super) async fn handle_walreceiver_connection(
                 let timestamp = keepalive.timestamp();
                 let reply_requested = keepalive.reply() != 0;
 
-                trace!("received PrimaryKeepAlive(wal_end: {wal_end}, timestamp: {timestamp:?} reply: {reply_requested})");
+                trace!(
+                    "received PrimaryKeepAlive(wal_end: {wal_end}, timestamp: {timestamp:?} reply: {reply_requested})"
+                );
 
                 if reply_requested {
                     Some(last_rec_lsn)

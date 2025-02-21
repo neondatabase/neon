@@ -1,14 +1,15 @@
 use crate::http;
 use crate::metrics::{
-    HttpRequestLatencyLabelGroup, HttpRequestStatusLabelGroup, PageserverRequestLabelGroup,
-    METRICS_REGISTRY,
+    HttpRequestLatencyLabelGroup, HttpRequestStatusLabelGroup, METRICS_REGISTRY,
+    PageserverRequestLabelGroup,
 };
 use crate::persistence::SafekeeperUpsert;
 use crate::reconciler::ReconcileError;
-use crate::service::{LeadershipStatus, Service, RECONCILE_TIMEOUT, STARTUP_RECONCILE_TIMEOUT};
+use crate::service::{LeadershipStatus, RECONCILE_TIMEOUT, STARTUP_RECONCILE_TIMEOUT, Service};
 use anyhow::Context;
 use futures::Future;
 use http_utils::{
+    RequestExt, RouterBuilder,
     endpoint::{
         self, auth_middleware, check_permission_with, profile_cpu_handler, profile_heap_handler,
         request_span,
@@ -17,7 +18,6 @@ use http_utils::{
     failpoints::failpoints_handler,
     json::{json_request, json_response},
     request::{must_get_query_param, parse_query_param, parse_request_param},
-    RequestExt, RouterBuilder,
 };
 use hyper::header::CONTENT_TYPE;
 use hyper::{Body, Request, Response};
@@ -34,7 +34,7 @@ use pageserver_api::models::{
     TimelineCreateRequest,
 };
 use pageserver_api::shard::TenantShardId;
-use pageserver_client::{mgmt_api, BlockUnblock};
+use pageserver_client::{BlockUnblock, mgmt_api};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1455,8 +1455,8 @@ pub fn prologue_leadership_status_check_middleware<
     })
 }
 
-fn prologue_metrics_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
-) -> Middleware<B, ApiError> {
+fn prologue_metrics_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>()
+-> Middleware<B, ApiError> {
     Middleware::pre(move |req| async move {
         let meta = RequestMeta {
             method: req.method().clone(),
@@ -1469,8 +1469,8 @@ fn prologue_metrics_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>
     })
 }
 
-fn epilogue_metrics_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
-) -> Middleware<B, ApiError> {
+fn epilogue_metrics_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>()
+-> Middleware<B, ApiError> {
     Middleware::post_with_info(move |resp, req_info| async move {
         let request_name = match req_info.context::<RequestName>() {
             Some(name) => name,
@@ -1621,8 +1621,8 @@ async fn maybe_forward(req: Request<Body>) -> ForwardOutcome {
             Err(err) => {
                 return ForwardOutcome::Forwarded(Err(ApiError::InternalServerError(
                     anyhow::anyhow!(
-                    "Failed to parse leader uri for forwarding while in stepped down state: {err}"
-                ),
+                        "Failed to parse leader uri for forwarding while in stepped down state: {err}"
+                    ),
                 )));
             }
         };
@@ -2155,8 +2155,23 @@ mod test {
 
     #[test]
     fn test_path_without_ids() {
-        assert_eq!(path_without_ids("/v1/tenant/1a2b3344556677881122334455667788/timeline/AA223344556677881122334455667788"), "/v1/tenant//timeline/");
-        assert_eq!(path_without_ids("/v1/tenant/1a2b3344556677881122334455667788-0108/timeline/AA223344556677881122334455667788"), "/v1/tenant//timeline/");
-        assert_eq!(path_without_ids("/v1/tenant/1a2b3344556677881122334455667788-0108/timeline/AA223344556677881122334455667788?parameter=foo"), "/v1/tenant//timeline/");
+        assert_eq!(
+            path_without_ids(
+                "/v1/tenant/1a2b3344556677881122334455667788/timeline/AA223344556677881122334455667788"
+            ),
+            "/v1/tenant//timeline/"
+        );
+        assert_eq!(
+            path_without_ids(
+                "/v1/tenant/1a2b3344556677881122334455667788-0108/timeline/AA223344556677881122334455667788"
+            ),
+            "/v1/tenant//timeline/"
+        );
+        assert_eq!(
+            path_without_ids(
+                "/v1/tenant/1a2b3344556677881122334455667788-0108/timeline/AA223344556677881122334455667788?parameter=foo"
+            ),
+            "/v1/tenant//timeline/"
+        );
     }
 }

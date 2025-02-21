@@ -1,9 +1,9 @@
-use anyhow::{bail, Result};
-use byteorder::{ByteOrder, BE};
+use anyhow::{Result, bail};
+use byteorder::{BE, ByteOrder};
 use bytes::Bytes;
-use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::Oid;
 use postgres_ffi::RepOriginId;
+use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use serde::{Deserialize, Serialize};
 use std::{fmt, ops::Range};
 use utils::const_assert;
@@ -954,8 +954,8 @@ impl std::str::FromStr for Key {
 mod tests {
     use std::str::FromStr;
 
-    use crate::key::is_metadata_key_slice;
     use crate::key::Key;
+    use crate::key::is_metadata_key_slice;
 
     use rand::Rng;
     use rand::SeedableRng;
@@ -967,12 +967,12 @@ mod tests {
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
 
         let key = Key {
-            field1: rng.gen(),
-            field2: rng.gen(),
-            field3: rng.gen(),
-            field4: rng.gen(),
-            field5: rng.gen(),
-            field6: rng.gen(),
+            field1: rng.r#gen(),
+            field2: rng.r#gen(),
+            field3: rng.r#gen(),
+            field4: rng.r#gen(),
+            field5: rng.r#gen(),
+            field6: rng.r#gen(),
         };
 
         assert_eq!(key, Key::from_str(&format!("{key}")).unwrap());

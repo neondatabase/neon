@@ -9,20 +9,20 @@ use crate::{
     context::RequestContext,
     disk_usage_eviction_task::DiskUsageEvictionInfo,
     metrics::SECONDARY_HEATMAP_TOTAL_SIZE,
-    task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
+    task_mgr::{self, BACKGROUND_RUNTIME, TaskKind},
 };
 
 use self::{
-    downloader::{downloader_task, SecondaryDetail},
+    downloader::{SecondaryDetail, downloader_task},
     heatmap_uploader::heatmap_uploader_task,
 };
 
 use super::{
+    GetTenantError,
     config::{SecondaryLocationConfig, TenantConfOpt},
     mgr::TenantManager,
     span::debug_assert_current_span_has_tenant_id,
     storage_layer::LayerName,
-    GetTenantError,
 };
 
 use crate::metrics::SECONDARY_RESIDENT_PHYSICAL_SIZE;

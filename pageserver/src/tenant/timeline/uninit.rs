@@ -128,7 +128,7 @@ impl<'t> UninitializedTimeline<'t> {
                 // We do not call Self::abort here.  Because we don't cleanly shut down our Timeline, [`Self::drop`] should
                 // skip trying to delete the timeline directory too.
                 anyhow::bail!(
-                "Found freshly initialized timeline {tenant_shard_id}/{timeline_id} in the tenant map"
+                    "Found freshly initialized timeline {tenant_shard_id}/{timeline_id} in the tenant map"
                 )
             }
             Entry::Vacant(v) => {

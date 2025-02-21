@@ -15,18 +15,18 @@ use std::time::SystemTime;
 use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
 use anyhow::Context;
 use anyhow::Result;
-use azure_core::request_options::{IfMatchCondition, MaxResults, Metadata, Range};
 use azure_core::HttpClient;
 use azure_core::TransportOptions;
+use azure_core::request_options::{IfMatchCondition, MaxResults, Metadata, Range};
 use azure_core::{Continuable, RetryOptions};
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::blob::CopyStatus;
 use azure_storage_blobs::prelude::ClientBuilder;
 use azure_storage_blobs::{blob::operations::GetBlobBuilder, prelude::ContainerClient};
 use bytes::Bytes;
+use futures::FutureExt;
 use futures::future::Either;
 use futures::stream::Stream;
-use futures::FutureExt;
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
 use http_types::{StatusCode, Url};
@@ -36,12 +36,12 @@ use tracing::debug;
 use utils::backoff;
 use utils::backoff::exponential_backoff_duration_seconds;
 
-use crate::metrics::{start_measuring_requests, AttemptOutcome, RequestKind};
 use crate::DownloadKind;
+use crate::metrics::{AttemptOutcome, RequestKind, start_measuring_requests};
 use crate::{
-    config::AzureConfig, error::Cancelled, ConcurrencyLimiter, Download, DownloadError,
-    DownloadOpts, Listing, ListingMode, ListingObject, RemotePath, RemoteStorage, StorageMetadata,
-    TimeTravelError, TimeoutOrCancel,
+    ConcurrencyLimiter, Download, DownloadError, DownloadOpts, Listing, ListingMode, ListingObject,
+    RemotePath, RemoteStorage, StorageMetadata, TimeTravelError, TimeoutOrCancel,
+    config::AzureConfig, error::Cancelled,
 };
 
 pub struct AzureBlobStorage {

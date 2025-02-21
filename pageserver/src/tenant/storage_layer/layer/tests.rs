@@ -1,6 +1,6 @@
 use std::time::UNIX_EPOCH;
 
-use pageserver_api::key::{Key, CONTROLFILE_KEY};
+use pageserver_api::key::{CONTROLFILE_KEY, Key};
 use tokio::task::JoinSet;
 use utils::{
     completion::{self, Completion},
@@ -771,10 +771,12 @@ async fn evict_and_wait_does_not_wait_for_download() {
     let (arrival, _download_arrived) = utils::completion::channel();
     layer.enable_failpoint(Failpoint::WaitBeforeDownloading(Some(arrival), barrier));
 
-    let mut download = std::pin::pin!(layer
-        .0
-        .get_or_maybe_download(true, None)
-        .instrument(download_span));
+    let mut download = std::pin::pin!(
+        layer
+            .0
+            .get_or_maybe_download(true, None)
+            .instrument(download_span)
+    );
 
     assert!(
         !layer.is_likely_resident(),

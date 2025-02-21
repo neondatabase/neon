@@ -49,10 +49,11 @@ use remote_storage::GenericRemoteStorage;
 use serde::Serialize;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument, warn, Instrument};
+use tracing::{Instrument, debug, error, info, instrument, warn};
 use utils::{completion, id::TimelineId};
 
 use crate::{
+    CancellableTask, DiskUsageEvictionTask,
     config::PageServerConf,
     metrics::disk_usage_based_eviction::METRICS,
     task_mgr::{self, BACKGROUND_RUNTIME},
@@ -63,7 +64,6 @@ use crate::{
         storage_layer::{AsLayerDesc, EvictionError, Layer, LayerName, LayerVisibilityHint},
         tasks::sleep_random,
     },
-    CancellableTask, DiskUsageEvictionTask,
 };
 
 /// Selects the sort order for eviction candidates *after* per tenant `min_resident_size`
@@ -1007,10 +1007,14 @@ async fn collect_eviction_candidates(
         }
     }
 
-    debug_assert!(EvictionPartition::Above < EvictionPartition::Below,
-        "as explained in the function's doc comment, layers that aren't in the tenant's min_resident_size are evicted first");
-    debug_assert!(EvictionPartition::EvictNow < EvictionPartition::Above,
-        "as explained in the function's doc comment, layers that aren't in the tenant's min_resident_size are evicted first");
+    debug_assert!(
+        EvictionPartition::Above < EvictionPartition::Below,
+        "as explained in the function's doc comment, layers that aren't in the tenant's min_resident_size are evicted first"
+    );
+    debug_assert!(
+        EvictionPartition::EvictNow < EvictionPartition::Above,
+        "as explained in the function's doc comment, layers that aren't in the tenant's min_resident_size are evicted first"
+    );
 
     eviction_order.sort(&mut candidates);
 

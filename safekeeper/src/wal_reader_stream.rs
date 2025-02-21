@@ -4,7 +4,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures::{stream::BoxStream, Stream, StreamExt};
+use futures::{Stream, StreamExt, stream::BoxStream};
 use utils::lsn::Lsn;
 
 use crate::{send_wal::EndWatch, timeline::WalResidentTimeline, wal_storage::WalReader};

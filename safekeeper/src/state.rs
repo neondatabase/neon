@@ -3,12 +3,12 @@
 
 use std::{cmp::max, ops::Deref, time::SystemTime};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use safekeeper_api::{
+    INITIAL_TERM, ServerInfo, Term,
     membership::Configuration,
     models::{TimelineMembershipSwitchResponse, TimelineTermBumpResponse},
-    ServerInfo, Term, INITIAL_TERM,
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;

@@ -7,30 +7,30 @@
 //!
 //! Note that last file has `.partial` suffix, that's different from postgres.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::future::BoxFuture;
 use postgres_ffi::v14::xlog_utils::{IsPartialXLogFileName, IsXLogFileName, XLogFromFileName};
-use postgres_ffi::{dispatch_pgversion, XLogSegNo, PG_TLI};
+use postgres_ffi::{PG_TLI, XLogSegNo, dispatch_pgversion};
 use remote_storage::RemotePath;
 use std::cmp::{max, min};
 use std::future::Future;
 use std::io::{self, SeekFrom};
 use std::pin::Pin;
-use tokio::fs::{self, remove_file, File, OpenOptions};
+use tokio::fs::{self, File, OpenOptions, remove_file};
 use tokio::io::{AsyncRead, AsyncWriteExt};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::*;
 use utils::crashsafe::durable_rename;
 
 use crate::metrics::{
-    time_io_closure, WalStorageMetrics, REMOVED_WAL_SEGMENTS, WAL_STORAGE_OPERATION_SECONDS,
+    REMOVED_WAL_SEGMENTS, WAL_STORAGE_OPERATION_SECONDS, WalStorageMetrics, time_io_closure,
 };
 use crate::state::TimelinePersistentState;
 use crate::wal_backup::{read_object, remote_timeline_path};
-use postgres_ffi::waldecoder::WalStreamDecoder;
 use postgres_ffi::XLogFileName;
+use postgres_ffi::waldecoder::WalStreamDecoder;
 use pq_proto::SystemId;
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
@@ -200,7 +200,12 @@ impl PhysicalStorage {
             ttid.timeline_id, flush_lsn, state.commit_lsn, state.peer_horizon_lsn,
         );
         if flush_lsn < state.commit_lsn {
-            bail!("timeline {} potential data loss: flush_lsn {} by find_end_of_wal is less than commit_lsn  {} from control file", ttid.timeline_id, flush_lsn, state.commit_lsn);
+            bail!(
+                "timeline {} potential data loss: flush_lsn {} by find_end_of_wal is less than commit_lsn  {} from control file",
+                ttid.timeline_id,
+                flush_lsn,
+                state.commit_lsn
+            );
         }
         if flush_lsn < state.peer_horizon_lsn {
             warn!(

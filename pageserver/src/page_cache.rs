@@ -68,10 +68,10 @@
 //!
 
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::{HashMap, hash_map::Entry},
     sync::{
-        atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering},
         Arc, Weak,
+        atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -81,7 +81,7 @@ use once_cell::sync::OnceCell;
 
 use crate::{
     context::RequestContext,
-    metrics::{page_cache_eviction_metrics, PageCacheSizeMetrics},
+    metrics::{PageCacheSizeMetrics, page_cache_eviction_metrics},
     virtual_file::{IoBufferMut, IoPageSlice},
 };
 
@@ -168,11 +168,7 @@ impl Slot {
         let count_res =
             self.usage_count
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |val| {
-                    if val == 0 {
-                        None
-                    } else {
-                        Some(val - 1)
-                    }
+                    if val == 0 { None } else { Some(val - 1) }
                 });
 
         match count_res {

@@ -30,12 +30,12 @@ use crate::controller_upcall_client::RetryForeverError;
 use crate::metrics;
 use crate::virtual_file::MaybeFatalIo;
 
-use super::deleter::DeleterMessage;
 use super::DeletionHeader;
 use super::DeletionList;
 use super::DeletionQueueError;
 use super::FlushOp;
 use super::VisibleLsnUpdates;
+use super::deleter::DeleterMessage;
 
 // After this length of time, do any validation work that is pending,
 // even if we haven't accumulated many keys to delete.
@@ -190,7 +190,10 @@ where
                 }
             } else {
                 // If we failed validation, then do not apply any of the projected updates
-                info!("Dropped remote consistent LSN updates for tenant {tenant_id} in stale generation {:?}", tenant_lsn_state.generation);
+                info!(
+                    "Dropped remote consistent LSN updates for tenant {tenant_id} in stale generation {:?}",
+                    tenant_lsn_state.generation
+                );
                 metrics::DELETION_QUEUE.dropped_lsn_updates.inc();
             }
         }

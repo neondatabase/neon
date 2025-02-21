@@ -9,7 +9,7 @@ use tokio_epoll_uring::{BoundedBuf, IoBufMut, Slice};
 use crate::{
     assert_u64_eq_usize::{U64IsUsize, UsizeIsU64},
     context::RequestContext,
-    virtual_file::{owned_buffers_io::io_buf_aligned::IoBufAlignedMut, IoBufferMut},
+    virtual_file::{IoBufferMut, owned_buffers_io::io_buf_aligned::IoBufAlignedMut},
 };
 
 /// The file interface we require. At runtime, this is a [`crate::tenant::ephemeral_file::EphemeralFile`].
@@ -132,7 +132,9 @@ where
         let req_len = match cur {
             LogicalReadState::NotStarted(buf) => {
                 if buf.len() != 0 {
-                    panic!("The `LogicalRead`s that are passed in must be freshly created using `LogicalRead::new`");
+                    panic!(
+                        "The `LogicalRead`s that are passed in must be freshly created using `LogicalRead::new`"
+                    );
                 }
                 // buf.cap() == 0 is ok
 
@@ -141,7 +143,9 @@ where
                 *state = LogicalReadState::Ongoing(buf);
                 req_len
             }
-            x => panic!("must only call with fresh LogicalReads, got another state, leaving Undefined state behind state={x:?}"),
+            x => panic!(
+                "must only call with fresh LogicalReads, got another state, leaving Undefined state behind state={x:?}"
+            ),
         };
 
         // plan which chunks we need to read from

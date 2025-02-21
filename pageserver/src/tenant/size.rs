@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tenant_size_model::svg::SvgBranchKind;
-use tokio::sync::oneshot::error::RecvError;
 use tokio::sync::Semaphore;
+use tokio::sync::oneshot::error::RecvError;
 use tokio_util::sync::CancellationToken;
 
 use crate::context::RequestContext;
@@ -498,7 +498,9 @@ async fn fill_logical_sizes(
             }
             Err(join_error) => {
                 // cannot really do anything, as this panic is likely a bug
-                error!("task that calls spawn_ondemand_logical_size_calculation panicked: {join_error:#}");
+                error!(
+                    "task that calls spawn_ondemand_logical_size_calculation panicked: {join_error:#}"
+                );
 
                 have_any_error = Some(CalculateSyntheticSizeError::Fatal(
                     anyhow::anyhow!(join_error)

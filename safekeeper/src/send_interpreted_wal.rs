@@ -3,9 +3,9 @@ use std::fmt::Display;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context};
-use futures::future::Either;
+use anyhow::{Context, anyhow};
 use futures::StreamExt;
+use futures::future::Either;
 use pageserver_api::shard::ShardIdentity;
 use postgres_backend::{CopyStreamHandlerEnd, PostgresBackend};
 use postgres_ffi::waldecoder::WalDecodeError;
@@ -15,7 +15,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::error::SendError;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
-use tracing::{error, info, info_span, Instrument};
+use tracing::{Instrument, error, info, info_span};
 use utils::critical;
 use utils::lsn::Lsn;
 use utils::postgres_client::Compression;
@@ -738,9 +738,11 @@ mod tests {
 
         // This test uses logical messages. Those only go to shard 0. Check that the
         // filtering worked and shard 1 did not get any.
-        assert!(shard_1_interpreted_records
-            .iter()
-            .all(|recs| recs.records.is_empty()));
+        assert!(
+            shard_1_interpreted_records
+                .iter()
+                .all(|recs| recs.records.is_empty())
+        );
 
         // Shard 0 should not receive anything more since the reader is
         // going through wal that it has already processed.

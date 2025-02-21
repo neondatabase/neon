@@ -775,10 +775,10 @@ impl Scheduler {
 
         if !matches!(context.mode, ScheduleMode::Speculative) {
             tracing::info!(
-            "scheduler selected node {node_id} (elegible nodes {:?}, hard exclude: {hard_exclude:?}, soft exclude: {context:?}, preferred_az: {:?})",
-            scores.iter().map(|i| i.node_id().0).collect::<Vec<_>>(),
-            preferred_az,
-       );
+                "scheduler selected node {node_id} (elegible nodes {:?}, hard exclude: {hard_exclude:?}, soft exclude: {context:?}, preferred_az: {:?})",
+                scores.iter().map(|i| i.node_id().0).collect::<Vec<_>>(),
+                preferred_az,
+            );
         }
 
         // Note that we do not update shard count here to reflect the scheduling: that

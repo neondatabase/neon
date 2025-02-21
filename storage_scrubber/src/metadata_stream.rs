@@ -1,14 +1,14 @@
 use std::str::FromStr;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use async_stream::{stream, try_stream};
 use futures::StreamExt;
 use remote_storage::{GenericRemoteStorage, ListingMode, ListingObject, RemotePath};
 use tokio_stream::Stream;
 
 use crate::{
-    list_objects_with_retries, stream_objects_with_retries, RootTarget, S3Target,
-    TenantShardTimelineId,
+    RootTarget, S3Target, TenantShardTimelineId, list_objects_with_retries,
+    stream_objects_with_retries,
 };
 use pageserver_api::shard::TenantShardId;
 use utils::id::{TenantId, TimelineId};

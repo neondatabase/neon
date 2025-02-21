@@ -2,7 +2,7 @@ use std::{env, num::NonZeroUsize};
 
 use bytes::Bytes;
 use camino::Utf8PathBuf;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use pageserver::{
     config::PageServerConf,
     context::{DownloadBehavior, RequestContext},

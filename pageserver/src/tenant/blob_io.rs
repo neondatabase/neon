@@ -24,8 +24,8 @@ use tracing::warn;
 use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::tenant::block_io::BlockCursor;
-use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
 use crate::virtual_file::VirtualFile;
+use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
 use std::cmp::min;
 use std::io::{Error, ErrorKind};
 
@@ -486,7 +486,7 @@ pub(crate) mod tests {
 
     pub(crate) fn random_array(len: usize) -> Vec<u8> {
         let mut rng = rand::thread_rng();
-        (0..len).map(|_| rng.gen()).collect::<_>()
+        (0..len).map(|_| rng.r#gen()).collect::<_>()
     }
 
     #[tokio::test]
@@ -544,9 +544,9 @@ pub(crate) mod tests {
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
         let blobs = (0..1024)
             .map(|_| {
-                let mut sz: u16 = rng.gen();
+                let mut sz: u16 = rng.r#gen();
                 // Make 50% of the arrays small
-                if rng.gen() {
+                if rng.r#gen() {
                     sz &= 63;
                 }
                 random_array(sz.into())

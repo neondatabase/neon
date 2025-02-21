@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ::metrics::IntGauge;
 use bytes::{Buf, BufMut, Bytes};
-use pageserver_api::key::{Key, AUX_KEY_PREFIX, METADATA_KEY_SIZE};
+use pageserver_api::key::{AUX_KEY_PREFIX, Key, METADATA_KEY_SIZE};
 use tracing::warn;
 
 // BEGIN Copyright (c) 2017 Servo Contributors

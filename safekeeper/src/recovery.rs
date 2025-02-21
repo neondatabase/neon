@@ -4,12 +4,12 @@
 use std::time::SystemTime;
 use std::{fmt, pin::pin};
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use futures::StreamExt;
 use postgres_protocol::message::backend::ReplicationMessage;
-use safekeeper_api::models::{PeerInfo, TimelineStatus};
 use safekeeper_api::Term;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
+use safekeeper_api::models::{PeerInfo, TimelineStatus};
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::time::timeout;
 use tokio::{
     select,
@@ -22,16 +22,16 @@ use tracing::*;
 use utils::postgres_client::{ConnectionConfigArgs, PostgresClientProtocol};
 use utils::{id::NodeId, lsn::Lsn, postgres_client::wal_stream_connection_config};
 
-use crate::receive_wal::{WalAcceptor, REPLY_QUEUE_SIZE};
+use crate::receive_wal::{REPLY_QUEUE_SIZE, WalAcceptor};
 use crate::safekeeper::{AppendRequest, AppendRequestHeader};
 use crate::timeline::WalResidentTimeline;
 use crate::{
+    SafeKeeperConf,
     receive_wal::MSG_QUEUE_SIZE,
     safekeeper::{
         AcceptorProposerMessage, ProposerAcceptorMessage, ProposerElected, TermHistory, TermLsn,
         VoteRequest,
     },
-    SafeKeeperConf,
 };
 
 /// Entrypoint for per timeline task which always runs, checking whether
@@ -348,7 +348,9 @@ async fn recovery_stream(
     {
         Ok(client_and_conn) => client_and_conn?,
         Err(_elapsed) => {
-            bail!("timed out while waiting {connect_timeout:?} for connection to peer safekeeper to open");
+            bail!(
+                "timed out while waiting {connect_timeout:?} for connection to peer safekeeper to open"
+            );
         }
     };
     trace!("connected to {:?}", donor);

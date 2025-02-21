@@ -62,7 +62,8 @@ async fn pagination_should_work(ctx: &mut MaybeEnabledStorageWithTestBlobs) -> a
         .into_iter()
         .collect::<HashSet<_>>();
     assert_eq!(
-        root_remote_prefixes, HashSet::from([base_prefix.clone()]),
+        root_remote_prefixes,
+        HashSet::from([base_prefix.clone()]),
         "remote storage root prefixes list mismatches with the uploads. Returned prefixes: {root_remote_prefixes:?}"
     );
 
@@ -84,7 +85,8 @@ async fn pagination_should_work(ctx: &mut MaybeEnabledStorageWithTestBlobs) -> a
         .difference(&nested_remote_prefixes)
         .collect::<HashSet<_>>();
     assert_eq!(
-        remote_only_prefixes.len() + missing_uploaded_prefixes.len(), 0,
+        remote_only_prefixes.len() + missing_uploaded_prefixes.len(),
+        0,
         "remote storage nested prefixes list mismatches with the uploads. Remote only prefixes: {remote_only_prefixes:?}, missing uploaded prefixes: {missing_uploaded_prefixes:?}",
     );
 
@@ -119,7 +121,8 @@ async fn pagination_should_work(ctx: &mut MaybeEnabledStorageWithTestBlobs) -> a
         .difference(&nested_remote_prefixes_combined)
         .collect::<HashSet<_>>();
     assert_eq!(
-        remote_only_prefixes.len() + missing_uploaded_prefixes.len(), 0,
+        remote_only_prefixes.len() + missing_uploaded_prefixes.len(),
+        0,
         "remote storage nested prefixes list mismatches with the uploads. Remote only prefixes: {remote_only_prefixes:?}, missing uploaded prefixes: {missing_uploaded_prefixes:?}",
     );
 
