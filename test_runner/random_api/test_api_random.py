@@ -46,7 +46,7 @@ class RandomNeonProject:
         return self.neon_api.create_branch(self.project_id, parent_id=parent_id)["branch"]["id"]
 
     def create_ro_endpoint(self, branch_id):
-        return self.neon_api.create_endpoint(self.project_id, branch_id,"read_only",{})
+        return self.neon_api.create_endpoint(self.project_id, branch_id,"read_only",{})["endpoint"]["id"]
 
     def get_ro_endpoints(self):
         return [_["id"] for _ in self.neon_api.get_endpoints(self.project_id)["endpoints"] if _["type"] == "read_only"]
