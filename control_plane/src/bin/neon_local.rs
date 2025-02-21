@@ -887,20 +887,6 @@ fn print_timeline(
     Ok(())
 }
 
-/// Returns a map of timeline IDs to timeline_id@lsn strings.
-/// Connects to the pageserver to query this information.
-async fn get_timeline_infos(
-    env: &local_env::LocalEnv,
-    tenant_shard_id: &TenantShardId,
-) -> Result<HashMap<TimelineId, TimelineInfo>> {
-    Ok(get_default_pageserver(env)
-        .timeline_list(tenant_shard_id)
-        .await?
-        .into_iter()
-        .map(|timeline_info| (timeline_info.timeline_id, timeline_info))
-        .collect())
-}
-
 /// Helper function to get tenant id from an optional --tenant_id option or from the config file
 fn get_tenant_id(
     tenant_id_arg: Option<TenantId>,
