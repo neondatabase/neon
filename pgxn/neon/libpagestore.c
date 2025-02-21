@@ -62,7 +62,7 @@ static int	max_reconnect_attempts = 60;
 static int	stripe_size;
 
 static int pageserver_response_log_timeout = 10000;
-static int pageserver_response_disconnect_timeout = 30000;
+static int pageserver_response_disconnect_timeout = 120000; /* 2 minutes */
 
 typedef struct
 {
@@ -1305,7 +1305,7 @@ pg_init_libpagestore(void)
 							"If the pageserver doesn't respond to a request within this timeout,"
 							"disconnect and reconnect.",
 							&pageserver_response_disconnect_timeout,
-							30000, 100, INT_MAX,
+							120000, 100, INT_MAX,
 							PGC_SUSET,
 							GUC_UNIT_MS,
 							NULL, NULL, NULL);
