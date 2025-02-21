@@ -148,7 +148,7 @@ impl State {
     }
 }
 
-pub struct PartialBackup {
+pub struct PartialUpload {
     wal_seg_size: usize,
     tli: WalResidentTimeline,
     conf: SafeKeeperConf,
@@ -158,18 +158,18 @@ pub struct PartialBackup {
     state: State,
 }
 
-impl PartialBackup {
-    pub async fn new(tli: WalResidentTimeline, conf: SafeKeeperConf) -> PartialBackup {
+impl PartialUpload {
+    pub async fn new(tli: WalResidentTimeline, conf: SafeKeeperConf) -> PartialUpload {
         let (_, persistent_state) = tli.get_state().await;
         let wal_seg_size = tli.get_wal_seg_size().await;
 
         let local_prefix = tli.get_timeline_dir();
         let remote_timeline_path = tli.remote_path.clone();
 
-        PartialBackup {
+        PartialUpload {
             wal_seg_size,
             tli,
-            state: persistent_state.partial_backup,
+            state: persistent_state.partial_upload,
             conf,
             local_prefix,
             remote_timeline_path,
@@ -207,7 +207,7 @@ impl PartialBackup {
     }
 }
 
-impl PartialBackup {
+impl PartialUpload {
     /// Takes a lock to read actual safekeeper state and returns a segment that should be uploaded.
     async fn prepare_upload(&self) -> PartialRemoteSegment {
         // this operation takes a lock to get the actual state
@@ -260,17 +260,17 @@ impl PartialBackup {
     async fn commit_state(&mut self, new_state: State) -> anyhow::Result<()> {
         self.tli
             .map_control_file(|cf| {
-                if cf.partial_backup != self.state {
+                if cf.partial_upload != self.state {
                     let memory = self.state.clone();
-                    self.state = cf.partial_backup.clone();
+                    self.state = cf.partial_upload.clone();
                     anyhow::bail!(
                         "partial backup state diverged, memory={:?}, disk={:?}",
                         memory,
-                        cf.partial_backup
+                        cf.partial_upload
                     );
                 }
 
-                cf.partial_backup = new_state.clone();
+                cf.partial_upload = new_state.clone();
                 Ok(())
             })
             .await?;
@@ -432,7 +432,7 @@ pub async fn main_task(
     let mut commit_lsn_rx = tli.get_commit_lsn_watch_rx();
     let mut flush_lsn_rx = tli.get_term_flush_lsn_watch_rx();
 
-    let mut backup = PartialBackup::new(tli, conf).await;
+    let mut backup = PartialUpload::new(tli, conf).await;
 
     debug!("state: {:?}", backup.state);
 
