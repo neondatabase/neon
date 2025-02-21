@@ -278,6 +278,7 @@ class NeonAPI:
         while has_running:
             has_running = False
             operations = self.get_operations(project_id)["operations"]
+            log.info("Operations: %s", operations)
             for op in operations:
                 if op["status"] in {"scheduling", "running", "cancelling"}:
                     has_running = True
