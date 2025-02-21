@@ -5,6 +5,7 @@ use std::sync::{Arc, Weak};
 use hyper::client::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use parking_lot::RwLock;
+use smol_str::ToSmolStr;
 use tokio::net::TcpStream;
 use tracing::{debug, error, info, info_span, Instrument};
 
@@ -16,8 +17,9 @@ use super::conn_pool_lib::{
 use crate::context::RequestContext;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
+use crate::protocol2::ConnectionInfoExtra;
 use crate::types::EndpointCacheKey;
-use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
+use crate::usage_metrics::{Ids, MetricCounter, TrafficDirection, USAGE_METRICS};
 
 pub(crate) type Send = http2::SendRequest<hyper::body::Incoming>;
 pub(crate) type Connect =
@@ -264,11 +266,24 @@ impl<C: ClientInnerExt + Clone> Client<C> {
         Self { inner }
     }
 
-    pub(crate) fn metrics(&self) -> Arc<MetricCounter> {
+    pub(crate) fn metrics(
+        &self,
+        direction: TrafficDirection,
+        ctx: &RequestContext,
+    ) -> Arc<MetricCounter> {
         let aux = &self.inner.aux;
+
+        let private_link_id = match ctx.extra() {
+            None => None,
+            Some(ConnectionInfoExtra::Aws { vpce_id }) => Some(vpce_id.clone()),
+            Some(ConnectionInfoExtra::Azure { link_id }) => Some(link_id.to_smolstr()),
+        };
+
         USAGE_METRICS.register(Ids {
             endpoint_id: aux.endpoint_id,
             branch_id: aux.branch_id,
+            direction,
+            private_link_id,
         })
     }
 }
