@@ -432,10 +432,11 @@ lfc_change_limit_hook(int newval, void *extra)
 
 		lfc_ctl->used -= 1;
 	}
-	lfc_ctl->limit = new_size;
-	if (new_size == 0) {
+	if (new_size == 0)
 		lfc_switch_off();
-	}
+	else
+		lfc_ctl->limit = new_size;
+
 	neon_log(DEBUG1, "set local file cache limit to %d", new_size);
 
 	LWLockRelease(lfc_lock);
