@@ -1,5 +1,5 @@
 diff --git a/Makefile b/Makefile
-index 3235cc8..ca401da 100644
+index 3235cc8..e232052 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -32,7 +32,16 @@ else
@@ -8,10 +8,10 @@ index 3235cc8..ca401da 100644
  
 -DUCKDB_LIB = libduckdb$(DLSUFFIX)
 +DUCKDB_STATIC ?= 0
-+PG_DUCKDB_LINK_FLAGS = -Wl,-rpath,$(PG_LIB)/ -lpq -Lthird_party/duckdb/build/$(DUCKDB_BUILD_TYPE)/src -L$(PG_LIB) -lstdc++ -llz4
++PG_DUCKDB_LINK_FLAGS = -Wl,-rpath,$(PG_LIB)/ -lpq -Lthird_party/duckdb/build/$(DUCKDB_BUILD_TYPE)/src -Lthird_party/duckdb/build/$(DUCKDB_BUILD_TYPE)/extension/json -Lthird_party/duckdb/build/$(DUCKDB_BUILD_TYPE)/extension/parquet -Lthird_party/duckdb/build/$(DUCKDB_BUILD_TYPE)/extension/core_functions -Lthird_party/duckdb/build/$(DUCKDB_BUILD_TYPE)/extension/jemalloc -Lthird_party/duckdb/build/$(DUCKDB_BUILD_TYPE)/extension/icu -Lthird_party/duckdb/build/$(DUCKDB_BUILD_TYPE)/extension/cached_httpfs -Lthird_party/duckdb/build/$(DUCKDB_BUILD_TYPE)/third_party/yyjson -Lthird_party/duckdb/build/$(DUCKDB_BUILD_TYPE)/third_party/miniz -Lthird_party/duckdb/build/$(DUCKDB_BUILD_TYPE)/third_party/zstd -Lthird_party/duckdb/build/$(DUCKDB_BUILD_TYPE)/third_party/skiplist -Lthird_party/duckdb/build/$(DUCKDB_BUILD_TYPE)/third_party/mbedtls -Lthird_party/duckdb/build/$(DUCKDB_BUILD_TYPE)/third_party/utf8proc -Lthird_party/duckdb/build/$(DUCKDB_BUILD_TYPE)/third_party/hyperloglog -Lthird_party/duckdb/build/$(DUCKDB_BUILD_TYPE)/third_party/fastpforlib -Lthird_party/duckdb/build/$(DUCKDB_BUILD_TYPE)/third_party/re2 -Lthird_party/duckdb/build/$(DUCKDB_BUILD_TYPE)/third_party/libpg_query -Lthird_party/duckdb/build/$(DUCKDB_BUILD_TYPE)/third_party/fsst -Lthird_party/duckdb/build/$(DUCKDB_BUILD_TYPE)/third_party/fmt -L$(PG_LIB) -lstdc++ -llz4
 +ifeq ($(DUCKDB_STATIC), 1)
 +	DUCKDB_LIB = libduckdb_static.a
-+	PG_DUCKDB_LINK_FLAGS += -l:$(DUCKDB_LIB)
++	PG_DUCKDB_LINK_FLAGS += -l:$(DUCKDB_LIB) -l:libjson_extension.a -l:libparquet_extension.a -l:libcore_functions_extension.a -l:libjemalloc_extension.a -l:libicu_extension.a -l:libcached_httpfs_extension.a -l:libduckdb_yyjson.a -l:libduckdb_miniz.a -l:libduckdb_zstd.a -l:libduckdb_skiplistlib.a -l:libduckdb_mbedtls.a -l:libduckdb_utf8proc.a -l:libduckdb_hyperloglog.a -l:libduckdb_fastpforlib.a -l:libduckdb_re2.a -l:libduckdb_pg_query.a -l:libduckdb_fsst.a -l:libduckdb_fmt.a
 +else
 +	DUCKDB_LIB = libduckdb$(DLSUFFIX)
 +	PG_DUCKDB_LINK_FLAGS += -lduckdb
