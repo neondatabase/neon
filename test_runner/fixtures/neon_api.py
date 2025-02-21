@@ -31,8 +31,6 @@ class NeonAPI:
         if "headers" not in kwargs:
             kwargs["headers"] = {}
         kwargs["headers"]["Authorization"] = f"Bearer {self.__neon_api_key}"
-        if "json" in kwargs:
-            log.info("args: %s", kwargs["json"])
 
         resp = requests.request(method, f"{self.__neon_api_base_url}{endpoint}", **kwargs)
         log.debug("%s %s returned a %d: %s", method, endpoint, resp.status_code, resp.text)
