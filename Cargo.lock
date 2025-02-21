@@ -1547,6 +1547,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cron-parser"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "baa5650eabdaa360e2c240c2a5f544f10185b439cd76d748e44e3f28128a016b"
+dependencies = [
+ "chrono",
+]
+
+[[package]]
 name = "crossbeam-channel"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6450,6 +6459,7 @@ dependencies = [
  "chrono",
  "clap",
  "control_plane",
+ "cron-parser",
  "diesel",
  "diesel-async",
  "diesel_migrations",
