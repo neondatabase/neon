@@ -39,7 +39,7 @@ jobs:
     uses: ./.github/workflows/build-build-tools-image.yml
     secrets: inherit
 
-  test-logical-replication:
+  run-random-rests:
     needs: [ build-build-tools-image ]
     runs-on: ubuntu-22.04
 

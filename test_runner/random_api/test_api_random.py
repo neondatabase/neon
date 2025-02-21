@@ -73,7 +73,6 @@ def test_api_random(
     br1 = project.create_branch()
     log.info("created branch %s", br1)
     project.wait()
-    time.sleep(10)
     br2 = project.create_branch(parent_id=br1)
     log.info("created branch %s", br2)
     project.wait()
@@ -81,4 +80,5 @@ def test_api_random(
     for branch in project.get_branches():
         ep = project.create_ro_endpoint(branch)
         log.info("RO endpoint created: %s", ep)
+    log.info("RO endpoints: %s", project.get_ro_endpoints())
     assert True
