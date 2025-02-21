@@ -40,6 +40,7 @@ members = [
     "libs/proxy/postgres-protocol2",
     "libs/proxy/postgres-types2",
     "libs/proxy/tokio-postgres2",
+    "lambda/pod_info_dumper",
 ]
 
 [workspace.package]
@@ -342,3 +343,12 @@ inherits = "release"
 debug = false # true = 2 = all symbols, 1 = line only
 opt-level = "z"
 lto = true
+
+[profile.release-lambda-function]
+inherits = "release"
+lto = true
+opt-level = "z"
+codegen-units = 1
+panic = "abort"
+debug = false
+strip = true
