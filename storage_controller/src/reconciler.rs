@@ -296,7 +296,7 @@ impl Reconciler {
                         .location_config(tenant_shard_id, config.clone(), flush_ms, lazy)
                         .await
                 },
-                &self.service_config.jwt_token,
+                &self.service_config.pageserver_jwt_token,
                 1,
                 3,
                 timeout,
@@ -417,7 +417,7 @@ impl Reconciler {
         let client = PageserverClient::new(
             node.get_id(),
             node.base_url(),
-            self.service_config.jwt_token.as_deref(),
+            self.service_config.pageserver_jwt_token.as_deref(),
         );
 
         client
@@ -440,7 +440,7 @@ impl Reconciler {
         let client = PageserverClient::new(
             node.get_id(),
             node.base_url(),
-            self.service_config.jwt_token.as_deref(),
+            self.service_config.pageserver_jwt_token.as_deref(),
         );
 
         let timelines = client.timeline_list(&tenant_shard_id).await?;
@@ -478,7 +478,7 @@ impl Reconciler {
                             )
                             .await
                     },
-                    &self.service_config.jwt_token,
+                    &self.service_config.pageserver_jwt_token,
                     1,
                     3,
                     request_download_timeout * 2,
@@ -771,7 +771,7 @@ impl Reconciler {
             let observed_conf = match attached_node
                 .with_client_retries(
                     |client| async move { client.get_location_config(tenant_shard_id).await },
-                    &self.service_config.jwt_token,
+                    &self.service_config.pageserver_jwt_token,
                     1,
                     1,
                     Duration::from_secs(5),
@@ -1099,7 +1099,7 @@ impl Reconciler {
             match origin
                 .with_client_retries(
                     |client| async move { client.get_location_config(tenant_shard_id).await },
-                    &self.service_config.jwt_token,
+                    &self.service_config.pageserver_jwt_token,
                     1,
                     3,
                     Duration::from_secs(5),

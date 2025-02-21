@@ -395,15 +395,22 @@ RUN case "${PG_VERSION:?}" in \
     cd plv8-src && \
     if [[ "${PG_VERSION:?}" < "v17" ]]; then patch -p1 < /ext-src/plv8-3.1.10.patch; fi
 
-FROM pg-build AS plv8-build
+# Step 1: Build the vendored V8 engine. It doesn't depend on PostgreSQL, so use
+# 'build-deps' as the base. This enables caching and avoids unnecessary rebuilds.
+# (The V8 engine takes a very long time to build)
+FROM build-deps AS plv8-build
 ARG PG_VERSION
+WORKDIR /ext-src/plv8-src
 RUN apt update && \
     apt install --no-install-recommends --no-install-suggests -y \
     ninja-build python3-dev libncurses5 binutils clang \
     && apt clean && rm -rf /var/lib/apt/lists/*
-
 COPY --from=plv8-src /ext-src/ /ext-src/
-WORKDIR /ext-src/plv8-src
+RUN make DOCKER=1 -j $(getconf _NPROCESSORS_ONLN) v8
+
+# Step 2: Build the PostgreSQL-dependent parts
+COPY --from=pg-build /usr/local/pgsql /usr/local/pgsql
+ENV PATH="/usr/local/pgsql/bin:$PATH"
 RUN \
     # generate and copy upgrade scripts
     make generate_upgrades && \
@@ -1669,7 +1676,11 @@ COPY --from=pg_anon-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_ivm-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_partman-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_mooncake-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pg_duckdb-build /usr/local/pgsql/ /usr/local/pgsql/
+
+# Disabled temporarily, because it clashed with pg_mooncake. pg_mooncake
+# also depends on libduckdb, but a different version.
+#COPY --from=pg_duckdb-build /usr/local/pgsql/ /usr/local/pgsql/
+
 COPY --from=pg_repack-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pgaudit-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pgauditlogtofile-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -1844,7 +1855,10 @@ COPY --from=pg_semver-src /ext-src/ /ext-src/
 COPY --from=pg_ivm-src /ext-src/ /ext-src/
 COPY --from=pg_partman-src /ext-src/ /ext-src/
 #COPY --from=pg_mooncake-src /ext-src/ /ext-src/
-#COPY --from=pg_repack-src /ext-src/ /ext-src/
+COPY --from=pg_repack-src /ext-src/ /ext-src/
+COPY --from=pg_repack-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY compute/patches/pg_repack.patch /ext-src
+RUN cd /ext-src/pg_repack-src && patch -p1 </ext-src/pg_repack.patch && rm -f /ext-src/pg_repack.patch
 
 COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
 RUN apt-get update && apt-get install -y libtap-parser-sourcehandler-pgtap-perl\

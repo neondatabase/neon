@@ -292,7 +292,7 @@ WORKDIR /home/nonroot
 
 # Rust
 # Please keep the version of llvm (installed above) in sync with rust llvm (`rustc --version --verbose | grep LLVM`)
-ENV RUSTC_VERSION=1.84.1
+ENV RUSTC_VERSION=1.85.0
 ENV RUSTUP_HOME="/home/nonroot/.rustup"
 ENV PATH="/home/nonroot/.cargo/bin:${PATH}"
 ARG RUSTFILT_VERSION=0.2.1

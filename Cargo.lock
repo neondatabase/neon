@@ -7616,6 +7616,7 @@ dependencies = [
  "once_cell",
  "pin-project-lite",
  "postgres_connection",
+ "pprof",
  "pq_proto",
  "rand 0.8.5",
  "regex",

@@ -140,8 +140,13 @@ where
                 request = self.receiver.recv() => {
                     match request {
                         Some(req) => {
+                            if req.reply.is_closed() {
+                                // Prevent a possibly infinite buildup of the receiver channel, if requests arrive faster than we can handle them
+                                continue;
+                            }
                             let res = self.heartbeat(req.servers).await;
-                            req.reply.send(res).unwrap();
+                            // Ignore the return value in order to not panic if the heartbeat function's future was cancelled
+                            _ = req.reply.send(res);
                         },
                         None => { return; }
                     }
@@ -346,7 +351,13 @@ impl HeartBeat<Safekeeper, SafekeeperState> for HeartbeaterTask<Safekeeper, Safe
                             // We ignore the node in this case.
                             return None;
                         }
-                        Err(_) => SafekeeperState::Offline,
+                        Err(e) => {
+                            tracing::info!(
+                                "Marking safekeeper {} at as offline: {e}",
+                                sk.base_url()
+                            );
+                            SafekeeperState::Offline
+                        }
                     };
 
                     Some((*node_id, status))
