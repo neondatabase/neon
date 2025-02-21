@@ -5,6 +5,7 @@ Run the regression tests on the cloud instance of Neon
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,7 @@ def test_api_random(
     br1 = project.create_branch()
     log.info("created branch %s", br1)
     project.wait()
+    time.sleep(10)
     br2 = project.create_branch(br1)
     log.info("created branch %s", br2)
     project.wait()
