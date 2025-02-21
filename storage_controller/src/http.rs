@@ -1354,10 +1354,7 @@ async fn handle_safekeeper_scheduling_policy(
         .set_safekeeper_scheduling_policy(id, body.scheduling_policy)
         .await?;
 
-    Ok(Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(Body::empty())
-        .unwrap())
+    json_response(StatusCode::OK, ())
 }
 
 /// Common wrapper for request handlers that call into Service and will operate on tenants: they must only
