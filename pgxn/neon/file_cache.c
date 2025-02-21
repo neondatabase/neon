@@ -377,7 +377,7 @@ lfc_change_limit_hook(int newval, void *extra)
 		return;
 
 	/* Open LFC file only if LFC was enabled or we are going to reenable it */
-	if ((newval > 0 || LFC_ENABLED()) && !lfc_ensure_opened())
+	if ((newval == 0 && !LFC_ENABLED()) || !lfc_ensure_opened())
 	{
 		/* File should be reopened if LFC is reenabled */
 		if (lfc_desc > 0)
