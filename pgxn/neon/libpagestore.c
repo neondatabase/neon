@@ -1119,9 +1119,7 @@ communicator_read_loop(void* arg)
 				{
 					/* result of prefetch */
 
-					pthread_mutex_lock(&mutex); /* FIXME: lfc_prefetch is using LWLock which is not thread-safe (use static variables) */
  					(void) lfc_prefetch(page_resp->req.rinfo, page_resp->req.forknum, page_resp->req.blkno, page_resp->page, resp->not_modified_since);
-					pthread_mutex_unlock(&mutex);
 					notify_backend = false;
 				}
 				else
