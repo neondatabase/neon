@@ -132,6 +132,11 @@ typedef struct
 	uint64			nrequests_sent;
 	uint64			nresponses_received;
 
+	/* State for the receive timeout mechanism in call_PQgetCopyData() */
+	instr_time		receive_start_time;			/* when we started waiting */
+	instr_time		receive_last_log_time;		/* when we last printed a log message for the wait */
+	bool			receive_logged;				/* has the wait been logged */
+
 	/*---
 	 * WaitEventSet containing:
 	 *	- WL_SOCKET_READABLE on 'conn'
@@ -664,6 +669,9 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		shard->state = PS_Connected;
 		shard->nrequests_sent = 0;
 		shard->nresponses_received = 0;
+		INSTR_TIME_SET_ZERO(shard->receive_start_time);
+		INSTR_TIME_SET_ZERO(shard->receive_last_log_time);
+		shard->receive_logged = false;
 	}
 	/* FALLTHROUGH */
 	case PS_Connected:
@@ -683,6 +691,33 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	Assert(false);
 }
 
+static void
+get_socket_stats(int socketfd, int *sndbuf, int *recvbuf)
+{
+	*sndbuf = -1;
+	*recvbuf = -1;
+
+#ifdef __linux__
+	/*
+	 * get kernel's send and recv queue size via ioctl
+	 * https://elixir.bootlin.com/linux/v6.1.128/source/include/uapi/linux/sockios.h#L25-L27
+	 */
+	if (socketfd != -1)
+	{
+		int			ioctl_err;
+
+		ioctl_err = ioctl(socketfd, SIOCOUTQ, sndbuf);
+		if (ioctl_err!= 0) {
+			*sndbuf = -errno;
+		}
+		ioctl_err = ioctl(socketfd, FIONREAD, recvbuf);
+		if (ioctl_err != 0) {
+			*recvbuf = -errno;
+		}
+	}
+#endif
+}
+
 /*
  * A wrapper around PQgetCopyData that checks for interrupts while sleeping.
  */
@@ -693,15 +728,8 @@ call_PQgetCopyData(shardno_t shard_no, char **buffer)
 	PageServer *shard = &page_servers[shard_no];
 	PGconn	   *pageserver_conn = shard->conn;
 	instr_time	now,
-				start_ts,
 				since_start,
-				last_log_ts,
 				since_last_log;
-	bool		logged = false;
-
-	INSTR_TIME_SET_CURRENT(now);
-	start_ts = last_log_ts = now;
-	INSTR_TIME_SET_ZERO(since_last_log);
 
 retry:
 	ret = PQgetCopyData(pageserver_conn, buffer, 1 /* async */ );
@@ -709,11 +737,35 @@ retry:
 	if (ret == 0)
 	{
 		WaitEvent	event;
-		long		timeout;
+		long		log_timeout,
+					disconnect_timeout,
+					timeout;
 
-		timeout = Max(0, pageserver_response_log_timeout - INSTR_TIME_GET_MILLISEC(since_last_log));
+		/*
+		 * Calculate time elapsed since the start, and since the last progress
+		 * log message. On first call, remember the start time.
+		 */
+		INSTR_TIME_SET_CURRENT(now);
+		if (INSTR_TIME_IS_ZERO(shard->receive_start_time))
+		{
+			shard->receive_start_time = now;
+			INSTR_TIME_SET_ZERO(since_start);
+			shard->receive_last_log_time = now;
+			INSTR_TIME_SET_ZERO(since_last_log);
+			shard->receive_logged = false;
+		}
+		else
+		{
+			since_start = now;
+			INSTR_TIME_SUBTRACT(since_start, shard->receive_start_time);
+			since_last_log = now;
+			INSTR_TIME_SUBTRACT(since_last_log, shard->receive_last_log_time);
+		}
 
-		/* Sleep until there's something to do */
+		/* Sleep until the log or disconnect timeout is reached. */
+		log_timeout = Max(0, pageserver_response_log_timeout - INSTR_TIME_GET_MILLISEC(since_last_log));
+		disconnect_timeout = Max(0, pageserver_response_disconnect_timeout - INSTR_TIME_GET_MILLISEC(since_start));
+		timeout = Min(log_timeout, disconnect_timeout);
 		(void) WaitEventSetWait(shard->wes_read, timeout, &event, 1,
 								WAIT_EVENT_NEON_PS_READ);
 		ResetLatch(MyLatch);
@@ -731,7 +783,15 @@ retry:
 				pfree(msg);
 				return -1;
 			}
+			goto retry;
 		}
+
+		/* Timeout was reached, or we were interrupted for some other reason */
+		INSTR_TIME_SET_CURRENT(now);
+		since_last_log = now;
+		INSTR_TIME_SUBTRACT(since_last_log, shard->receive_last_log_time);
+		since_start = now;
+		INSTR_TIME_SUBTRACT(since_start, shard->receive_start_time);
 
 		/*
 		 * As a debugging aid, if we don't get a response to a pageserver request
@@ -743,42 +803,19 @@ retry:
 		 * but in the cases that take exceptionally long, it's useful to log
 		 * the exact timestamps.
 		 */
-		since_last_log = now;
-		INSTR_TIME_SUBTRACT(since_last_log, last_log_ts);
 		if (INSTR_TIME_GET_MILLISEC(since_last_log) >= pageserver_response_log_timeout)
 		{
-			int sndbuf = -1;
-			int recvbuf = -1;
-#ifdef __linux__
-			int socketfd;
-#endif
+			int			sndbuf;
+			int			recvbuf;
 
-			since_start = now;
-			INSTR_TIME_SUBTRACT(since_start, start_ts);
+			get_socket_stats(PQsocket(pageserver_conn), &sndbuf, &recvbuf);
 
-#ifdef __linux__
-			/*
-			 * get kernel's send and recv queue size via ioctl
-			 * https://elixir.bootlin.com/linux/v6.1.128/source/include/uapi/linux/sockios.h#L25-L27
-			 */
-			socketfd = PQsocket(pageserver_conn);
-			if (socketfd != -1) {
-				int ioctl_err;
-				ioctl_err = ioctl(socketfd, SIOCOUTQ, &sndbuf);
-				if (ioctl_err!= 0) {
-					sndbuf = -errno;
-				}
-				ioctl_err = ioctl(socketfd, FIONREAD, &recvbuf);
-				if (ioctl_err != 0) {
-					recvbuf = -errno;
-				}
-			}
-#endif
-			neon_shard_log(shard_no, LOG, "no response received from pageserver for %0.3f s, still waiting (sent " UINT64_FORMAT " requests, received " UINT64_FORMAT " responses) (socket sndbuf=%d recvbuf=%d)",
+			neon_shard_log(shard_no, LOG,
+						   "no response received from pageserver for %0.3f s, still waiting (sent " UINT64_FORMAT " requests, received " UINT64_FORMAT " responses) (socket sndbuf=%d recvbuf=%d)",
 						   INSTR_TIME_GET_DOUBLE(since_start),
 						   shard->nrequests_sent, shard->nresponses_received, sndbuf, recvbuf);
-			last_log_ts = now;
-			logged = true;
+			shard->receive_last_log_time = now;
+			shard->receive_logged = true;
 		}
 
 		/*
@@ -795,9 +832,6 @@ retry:
 		 * there's a good chance that we'll get the response sooner by
 		 * reconnecting.
 		 */
-		INSTR_TIME_SET_CURRENT(now);
-		since_start = now;
-		INSTR_TIME_SUBTRACT(since_start, start_ts);
 		if (INSTR_TIME_GET_MILLISEC(since_start) >= pageserver_response_disconnect_timeout)
 		{
 			neon_shard_log(shard_no, LOG, "no response from pageserver for %0.3f s, disconnecting",
@@ -813,14 +847,18 @@ retry:
 	 * If we logged earlier that the response is taking a long time, log
 	 * another message when the response is finally received.
 	 */
-	if (logged)
+	if (shard->receive_logged)
 	{
 		INSTR_TIME_SET_CURRENT(now);
 		since_start = now;
-		INSTR_TIME_SUBTRACT(since_start, start_ts);
-		neon_shard_log(shard_no, LOG, "received response from pageserver after %0.3f s",
+		INSTR_TIME_SUBTRACT(since_start, shard->receive_start_time);
+		neon_shard_log(shard_no, LOG,
+					   "received response from pageserver after %0.3f s",
 					   INSTR_TIME_GET_DOUBLE(since_start));
 	}
+	INSTR_TIME_SET_ZERO(shard->receive_start_time);
+	INSTR_TIME_SET_ZERO(shard->receive_last_log_time);
+	shard->receive_logged = false;
 
 	return ret;
 }

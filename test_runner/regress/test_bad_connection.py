@@ -131,7 +131,7 @@ def test_compute_pageserver_hung_connections(neon_env_builder: NeonEnvBuilder):
         log.info(f"Workload executed {times_executed} times")
         assert times_executed > 0
 
-    ## Test short connections hiccups
+    ## Test short connection hiccups
     ##
     ## This is to exercise the logging timeout.
     log.info("running workload with log timeout")
@@ -152,6 +152,104 @@ def test_compute_pageserver_hung_connections(neon_env_builder: NeonEnvBuilder):
     cur.execute("SET neon.pageserver_response_disconnect_timeout = '500ms'")
     pageserver_http.configure_failpoints(("before-pagestream-msg-flush", "10%3*return(1500)"))
     run_workload(15)
+
+    assert endpoint.log_contains("no response from pageserver for .* s, disconnecting")
+
+    # do a graceful shutdown which would had caught the allowed_errors before
+    # https://github.com/neondatabase/neon/pull/8632
+    env.pageserver.stop()
+
+
+def test_compute_pageserver_statement_timeout(neon_env_builder: NeonEnvBuilder):
+    """
+    Test statement_timeout while waiting for response to pageserver request
+    """
+    env = neon_env_builder.init_start()
+    pageserver_http = env.pageserver.http_client()
+    endpoint = env.endpoints.create_start(
+        "main",
+        tenant_id=env.initial_tenant,
+        config_lines=[
+            "neon.max_file_cache_size='1MB'",
+            "neon.file_cache_size_limit='1MB'",
+            "shared_buffers='512kB'",
+        ],
+    )
+    pg_conn = endpoint.connect()
+    cur = pg_conn.cursor()
+
+    # Disable parallel query. Parallel workers open their own pageserver connections,
+    # which messes up the test logic.
+    cur.execute("SET max_parallel_workers_per_gather=0")
+    cur.execute("SET effective_io_concurrency=0")
+
+    # Create table, and insert some rows. Make it big enough that it doesn't fit in
+    # shared_buffers, otherwise the SELECT after restart will just return answer
+    # from shared_buffers without hitting the page server, which defeats the point
+    # of this test.
+    cur.execute("CREATE TABLE foo (t text)")
+    cur.execute(
+        """
+        INSERT INTO foo
+            SELECT 'long string to consume some space' || g
+            FROM generate_series(1, 100000) g
+        """
+    )
+
+    # Verify that the table is larger than shared_buffers
+    cur.execute(
+        """
+        select setting::int * pg_size_bytes(unit) as shared_buffers, pg_relation_size('foo') as tbl_size
+        from pg_settings where name = 'shared_buffers'
+        """
+    )
+    row = cur.fetchone()
+    assert row is not None
+    log.debug(f"shared_buffers is {row[0]}, table size {row[1]}")
+    assert int(row[0]) < int(row[1])
+
+    ## Test that if you hit statement_timeout while waiting on a getpage request, we also
+    ## disconnect.
+    log.info("running workload with statement_timeout")
+    cur.execute("SET neon.pageserver_response_log_timeout = '2000ms'")
+    cur.execute("SET neon.pageserver_response_disconnect_timeout = '30000ms'")
+    cur.execute("SET statement_timeout='10s'")
+    pageserver_http.configure_failpoints(("before-pagestream-msg-flush", "10%return(60000)"))
+
+    # Run queries until you the compute->pageserver connection hits the failpoint and
+    # get stuck. This tests that the statement_timeout is obeyed while waiting on a
+    # GetPage request.
+    start_time = time.time()
+    with pytest.raises(psycopg2.errors.QueryCanceled):
+        cur.execute("SELECT count(*) FROM foo")
+        cur.fetchall()
+    log.info("Statement timeout reached")
+    end_time = time.time()
+    # Verify that the statement_timeout canceled the query before
+    # neon.pageserver_response_disconnect_timeout expired
+    assert end_time - start_time < 20
+    times_canceled = 1
+
+    # Should not have disconnected yet
+    assert not endpoint.log_contains("no response from pageserver for .* s, disconnecting")
+
+    # Clear the failpoint. This doesn't affect the connection that already hit it. It
+    # will keep waiting. But subsequent connections will work normally.
+    pageserver_http.configure_failpoints(("before-pagestream-msg-flush", "off"))
+
+    # If we keep retrying, we should eventually succeed. (This tests that the
+    # neon.pageserver_response_disconnect_timeout is not reset on query
+    # cancellation.)
+    while times_canceled < 10:
+        try:
+            cur.execute("SELECT count(*) FROM foo")
+            cur.fetchall()
+            log.info("Statement succeeded")
+            break
+        except psycopg2.errors.QueryCanceled:
+            log.info("Statement timed out, retrying")
+            times_canceled += 1
+    assert times_canceled > 1 and times_canceled < 5
 
     assert endpoint.log_contains("no response from pageserver for .* s, disconnecting")
 
