@@ -184,7 +184,7 @@ pub static BROKER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .expect("Failed to create broker runtime")
 });
 
-pub static wal_upload_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+pub static WAL_UPLOAD_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .thread_name("WAL upload worker")
         .enable_all()

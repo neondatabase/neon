@@ -33,7 +33,7 @@ use utils::{id::TenantTimelineId, lsn::Lsn};
 use crate::metrics::{BACKED_UP_SEGMENTS, BACKUP_ERRORS, wal_upload_TASKS};
 use crate::timeline::WalResidentTimeline;
 use crate::timeline_manager::{Manager, StateSnapshot};
-use crate::{SafeKeeperConf, wal_upload_RUNTIME};
+use crate::{SafeKeeperConf, WAL_UPLOAD_RUNTIME};
 
 const UPLOAD_FAILURE_RETRY_MIN_MS: u64 = 10;
 const UPLOAD_FAILURE_RETRY_MAX_MS: u64 = 5000;
@@ -92,7 +92,7 @@ pub(crate) async fn update_task(mgr: &mut Manager, need_backup: bool, state: &St
             let handle = if mgr.conf.current_thread_runtime {
                 tokio::spawn(async_task)
             } else {
-                wal_upload_RUNTIME.spawn(async_task)
+                WAL_UPLOAD_RUNTIME.spawn(async_task)
             };
 
             mgr.backup_task = Some(WalBackupTaskHandle {
