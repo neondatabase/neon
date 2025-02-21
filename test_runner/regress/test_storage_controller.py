@@ -3764,3 +3764,56 @@ def test_storage_controller_node_flap_detach_race(
             assert len(locs) == 1, f"{shard} has {len(locs)} attached locations"
 
     wait_until(validate_locations, timeout=10)
+
+
+def test_update_node_on_registration(neon_env_builder: NeonEnvBuilder):
+    """
+    Check that storage controller handles node_register requests with updated fields correctly.
+    1. Run storage controller and register 1 pageserver without https port.
+    2. Register the same pageserver with https port. Check that port has been updated.
+    3. Restart the storage controller. Check that https port is persistent.
+    4. Register the same pageserver without https port again (rollback). Check that port has been removed.
+    """
+    neon_env_builder.num_pageservers = 1
+    env = neon_env_builder.init_configs()
+
+    env.storage_controller.start()
+    env.storage_controller.wait_until_ready()
+
+    pageserver = env.pageservers[0]
+
+    # Step 1. Register pageserver without https port.
+    env.storage_controller.node_register(pageserver)
+    env.storage_controller.consistency_check()
+
+    nodes = env.storage_controller.node_list()
+    assert len(nodes) == 1
+    assert nodes[0]["listen_https_port"] is None
+
+    # Step 2. Register pageserver with https port.
+    pageserver.service_port.https = 1234
+    env.storage_controller.node_register(pageserver)
+    env.storage_controller.consistency_check()
+
+    nodes = env.storage_controller.node_list()
+    assert len(nodes) == 1
+    assert nodes[0]["listen_https_port"] == 1234
+
+    # Step 3. Restart storage controller.
+    env.storage_controller.stop()
+    env.storage_controller.start()
+    env.storage_controller.wait_until_ready()
+    env.storage_controller.consistency_check()
+
+    nodes = env.storage_controller.node_list()
+    assert len(nodes) == 1
+    assert nodes[0]["listen_https_port"] == 1234
+
+    # Step 4. Register pageserver with no https port again.
+    pageserver.service_port.https = None
+    env.storage_controller.node_register(pageserver)
+    env.storage_controller.consistency_check()
+
+    nodes = env.storage_controller.node_list()
+    assert len(nodes) == 1
+    assert nodes[0]["listen_https_port"] is None

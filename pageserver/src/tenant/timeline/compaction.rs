@@ -2212,7 +2212,7 @@ impl Timeline {
         let sub_compaction_max_job_size_mb =
             sub_compaction_max_job_size_mb.unwrap_or(GC_COMPACT_MAX_SIZE_MB);
 
-        let mut compact_jobs = Vec::new();
+        let mut compact_jobs = Vec::<GcCompactJob>::new();
         // For now, we simply use the key partitioning information; we should do a more fine-grained partitioning
         // by estimating the amount of files read for a compaction job. We should also partition on LSN.
         let ((dense_ks, sparse_ks), _) = self.partitioning.read().as_ref().clone();
@@ -2299,16 +2299,25 @@ impl Timeline {
                 } else {
                     end
                 };
-                info!(
-                    "splitting compaction job: {}..{}, estimated_size={}",
-                    start, end, total_size
-                );
-                compact_jobs.push(GcCompactJob {
-                    dry_run: job.dry_run,
-                    compact_key_range: start..end,
-                    compact_lsn_range: job.compact_lsn_range.start..compact_below_lsn,
-                });
-                current_start = Some(end);
+                if total_size == 0 && !compact_jobs.is_empty() {
+                    info!(
+                        "splitting compaction job: {}..{}, estimated_size={}, extending the previous job",
+                        start, end, total_size
+                    );
+                    compact_jobs.last_mut().unwrap().compact_key_range.end = end;
+                    current_start = Some(end);
+                } else {
+                    info!(
+                        "splitting compaction job: {}..{}, estimated_size={}",
+                        start, end, total_size
+                    );
+                    compact_jobs.push(GcCompactJob {
+                        dry_run: job.dry_run,
+                        compact_key_range: start..end,
+                        compact_lsn_range: job.compact_lsn_range.start..compact_below_lsn,
+                    });
+                    current_start = Some(end);
+                }
             }
         }
         Ok(compact_jobs)
