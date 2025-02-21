@@ -931,7 +931,6 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
     )
 
     workload.write_rows(128, upload=True)
-    workload.stop()
 
     # Expect lots of layers
     assert len(ps_attached.list_layers(tenant_id, timeline_id)) > 10
@@ -988,10 +987,8 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
 
     assert len(heatmap_before_migration["layers"]) > 0
 
-    # The new layer map should contain all the layers in the pre-migration one
-    # and a new in memory layer
     after_migration_heatmap_layers_count = len(heatmap_after_migration["layers"])
-    assert len(heatmap_before_migration["layers"]) + 1 == after_migration_heatmap_layers_count
+    assert len(heatmap_before_migration["layers"]) <= after_migration_heatmap_layers_count
 
     log.info(f"Heatmap size after cold migration is {after_migration_heatmap_layers_count}")
 
@@ -1012,6 +1009,23 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
 
     wait_until(lambda: all_layers_downloaded(after_migration_heatmap_layers_count))
     ps_secondary.http_client().tenant_heatmap_upload(tenant_id)
+
+    before = (
+        ps_secondary.http_client()
+        .get_metrics()
+        .query_one("pageserver_remote_ondemand_downloaded_layers_total")
+        .value
+    )
+    workload.validate()
+    after = (
+        ps_secondary.http_client()
+        .get_metrics()
+        .query_one("pageserver_remote_ondemand_downloaded_layers_total")
+        .value
+    )
+
+    workload.stop()
+    assert before == after
 
     def check_archival_state(state: TimelineArchivalState, tline):
         timelines = (
