@@ -37,8 +37,8 @@ pub mod timeline_eviction;
 pub mod timeline_guard;
 pub mod timeline_manager;
 pub mod timelines_set;
-pub mod wal_backup;
-pub mod wal_backup_partial;
+pub mod wal_upload;
+pub mod wal_upload_partial;
 pub mod wal_reader_stream;
 pub mod wal_service;
 pub mod wal_storage;
@@ -93,7 +93,7 @@ pub struct SafeKeeperConf {
     pub remote_storage: Option<RemoteStorageConfig>,
     pub max_offloader_lag_bytes: u64,
     pub backup_parallel_jobs: usize,
-    pub wal_backup_enabled: bool,
+    pub wal_upload_enabled: bool,
     pub pg_auth: Option<Arc<JwtAuth>>,
     pub pg_tenant_only_auth: Option<Arc<JwtAuth>>,
     pub http_auth: Option<Arc<SwappableJwtAuth>>,
@@ -113,8 +113,8 @@ pub struct SafeKeeperConf {
 }
 
 impl SafeKeeperConf {
-    pub fn is_wal_backup_enabled(&self) -> bool {
-        self.remote_storage.is_some() && self.wal_backup_enabled
+    pub fn is_wal_upload_enabled(&self) -> bool {
+        self.remote_storage.is_some() && self.wal_upload_enabled
     }
 }
 
@@ -135,7 +135,7 @@ impl SafeKeeperConf {
                 .expect("failed to parse default broker endpoint"),
             broker_keepalive_interval: Duration::from_secs(5),
             peer_recovery_enabled: true,
-            wal_backup_enabled: true,
+            wal_upload_enabled: true,
             backup_parallel_jobs: 1,
             pg_auth: None,
             pg_tenant_only_auth: None,
@@ -184,7 +184,7 @@ pub static BROKER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .expect("Failed to create broker runtime")
 });
 
-pub static WAL_BACKUP_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+pub static wal_upload_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .thread_name("WAL upload worker")
         .enable_all()

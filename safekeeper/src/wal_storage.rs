@@ -28,7 +28,7 @@ use crate::metrics::{
     time_io_closure, WalStorageMetrics, REMOVED_WAL_SEGMENTS, WAL_STORAGE_OPERATION_SECONDS,
 };
 use crate::state::TimelinePersistentState;
-use crate::wal_backup::{read_object, remote_timeline_path};
+use crate::wal_upload::{read_object, remote_timeline_path};
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use postgres_ffi::XLogFileName;
 use pq_proto::SystemId;

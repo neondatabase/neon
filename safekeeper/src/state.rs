@@ -21,7 +21,7 @@ use crate::{
     control_file,
     safekeeper::{AcceptorState, PgUuid, TermHistory, TermLsn, UNKNOWN_SERVER_VERSION},
     timeline::TimelineError,
-    wal_backup_partial::{self},
+    wal_upload_partial::{self},
 };
 
 /// Persistent information stored on safekeeper node about timeline.
@@ -67,7 +67,7 @@ pub struct TimelinePersistentState {
     pub remote_consistent_lsn: Lsn,
     /// Holds names of partial segments uploaded to remote storage. Used to
     /// clean up old objects without leaving garbage in remote storage.
-    pub partial_backup: wal_backup_partial::State,
+    pub partial_backup: wal_upload_partial::State,
     /// Eviction state of the timeline. If it's Offloaded, we should download
     /// WAL files from remote storage to serve the timeline.
     pub eviction_state: EvictionState,
@@ -142,7 +142,7 @@ impl TimelinePersistentState {
             backup_lsn: start_lsn,
             peer_horizon_lsn: start_lsn,
             remote_consistent_lsn: Lsn(0),
-            partial_backup: wal_backup_partial::State::default(),
+            partial_backup: wal_upload_partial::State::default(),
             eviction_state: EvictionState::Present,
             creation_ts: SystemTime::now(),
         })

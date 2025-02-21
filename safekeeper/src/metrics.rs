@@ -195,14 +195,14 @@ pub static MANAGER_ACTIVE_CHANGES: Lazy<IntCounter> = Lazy::new(|| {
     )
     .expect("Failed to register safekeeper_manager_active_changes_total counter")
 });
-pub static WAL_BACKUP_TASKS: Lazy<IntCounterPair> = Lazy::new(|| {
+pub static wal_upload_TASKS: Lazy<IntCounterPair> = Lazy::new(|| {
     register_int_counter_pair!(
-        "safekeeper_wal_backup_tasks_started_total",
+        "safekeeper_wal_upload_tasks_started_total",
         "Number of active WAL upload tasks",
-        "safekeeper_wal_backup_tasks_finished_total",
+        "safekeeper_wal_upload_tasks_finished_total",
         "Number of finished WAL upload tasks",
     )
-    .expect("Failed to register safekeeper_wal_backup_tasks_finished_total counter")
+    .expect("Failed to register safekeeper_wal_upload_tasks_finished_total counter")
 });
 pub static WAL_RECEIVERS: Lazy<IntGauge> = Lazy::new(|| {
     register_int_gauge!(
@@ -447,7 +447,7 @@ pub struct FullTimelineInfo {
     pub ttid: TenantTimelineId,
     pub ps_feedback_count: u64,
     pub last_ps_feedback: PageserverFeedback,
-    pub wal_backup_active: bool,
+    pub wal_upload_active: bool,
     pub timeline_is_active: bool,
     pub num_computes: u32,
     pub last_removed_segno: XLogSegNo,
@@ -476,7 +476,7 @@ pub struct TimelineCollector {
     feedback_last_time_seconds: GenericGaugeVec<AtomicU64>,
     ps_feedback_count: GenericGaugeVec<AtomicU64>,
     timeline_active: GenericGaugeVec<AtomicU64>,
-    wal_backup_active: GenericGaugeVec<AtomicU64>,
+    wal_upload_active: GenericGaugeVec<AtomicU64>,
     connected_computes: IntGaugeVec,
     disk_usage: GenericGaugeVec<AtomicU64>,
     acceptor_term: GenericGaugeVec<AtomicU64>,
@@ -592,15 +592,15 @@ impl TimelineCollector {
         .unwrap();
         descs.extend(timeline_active.desc().into_iter().cloned());
 
-        let wal_backup_active = GenericGaugeVec::new(
+        let wal_upload_active = GenericGaugeVec::new(
             Opts::new(
-                "safekeeper_wal_backup_active",
+                "safekeeper_wal_upload_active",
                 "Reports 1 for timelines with active WAL upload, 0 otherwise",
             ),
             &["tenant_id", "timeline_id"],
         )
         .unwrap();
-        descs.extend(wal_backup_active.desc().into_iter().cloned());
+        descs.extend(wal_upload_active.desc().into_iter().cloned());
 
         let connected_computes = IntGaugeVec::new(
             Opts::new(
@@ -703,7 +703,7 @@ impl TimelineCollector {
             feedback_last_time_seconds,
             ps_feedback_count,
             timeline_active,
-            wal_backup_active,
+            wal_upload_active,
             connected_computes,
             disk_usage,
             acceptor_term,
@@ -737,7 +737,7 @@ impl Collector for TimelineCollector {
         self.feedback_last_time_seconds.reset();
         self.ps_feedback_count.reset();
         self.timeline_active.reset();
-        self.wal_backup_active.reset();
+        self.wal_upload_active.reset();
         self.connected_computes.reset();
         self.disk_usage.reset();
         self.acceptor_term.reset();
@@ -792,9 +792,9 @@ impl Collector for TimelineCollector {
             self.timeline_active
                 .with_label_values(labels)
                 .set(tli.timeline_is_active as u64);
-            self.wal_backup_active
+            self.wal_upload_active
                 .with_label_values(labels)
-                .set(tli.wal_backup_active as u64);
+                .set(tli.wal_upload_active as u64);
             self.connected_computes
                 .with_label_values(labels)
                 .set(tli.num_computes as i64);
@@ -854,7 +854,7 @@ impl Collector for TimelineCollector {
         mfs.extend(self.feedback_last_time_seconds.collect());
         mfs.extend(self.ps_feedback_count.collect());
         mfs.extend(self.timeline_active.collect());
-        mfs.extend(self.wal_backup_active.collect());
+        mfs.extend(self.wal_upload_active.collect());
         mfs.extend(self.connected_computes.collect());
         mfs.extend(self.disk_usage.collect());
         mfs.extend(self.acceptor_term.collect());

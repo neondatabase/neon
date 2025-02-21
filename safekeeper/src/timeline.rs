@@ -40,8 +40,8 @@ use crate::state::{EvictionState, TimelineMemState, TimelinePersistentState, Tim
 use crate::timeline_guard::ResidenceGuard;
 use crate::timeline_manager::{AtomicStatus, ManagerCtl};
 use crate::timelines_set::TimelinesSet;
-use crate::wal_backup::{self, remote_timeline_path};
-use crate::wal_backup_partial::PartialRemoteSegment;
+use crate::wal_upload::{self, remote_timeline_path};
+use crate::wal_upload_partial::PartialRemoteSegment;
 
 use crate::metrics::{FullTimelineInfo, WalStorageMetrics, MISC_OPERATION_SECONDS};
 use crate::wal_storage::{Storage as wal_storage_iface, WalReader};
@@ -463,7 +463,7 @@ pub struct Timeline {
 
     // timeline_manager controlled state
     pub(crate) broker_active: AtomicBool,
-    pub(crate) wal_backup_active: AtomicBool,
+    pub(crate) wal_upload_active: AtomicBool,
     pub(crate) last_removed_segno: AtomicU64,
     pub(crate) mgr_status: AtomicStatus,
 }
@@ -505,7 +505,7 @@ impl Timeline {
             manager_ctl: ManagerCtl::new(),
             conf,
             broker_active: AtomicBool::new(false),
-            wal_backup_active: AtomicBool::new(false),
+            wal_upload_active: AtomicBool::new(false),
             last_removed_segno: AtomicU64::new(0),
             mgr_status: AtomicStatus::new(),
         })
@@ -598,11 +598,11 @@ impl Timeline {
         // it is cancelled, so WAL storage won't be opened again.
         shared_state.sk.close_wal_store();
 
-        if !only_local && self.conf.is_wal_backup_enabled() {
+        if !only_local && self.conf.is_wal_upload_enabled() {
             // Note: we concurrently delete remote storage data from multiple
             // safekeepers. That's ok, s3 replies 200 if object doesn't exist and we
             // do some retries anyway.
-            wal_backup::delete_timeline(&self.ttid).await?;
+            wal_upload::delete_timeline(&self.ttid).await?;
         }
         let dir_existed = delete_dir(&self.timeline_dir).await?;
         Ok(dir_existed)
@@ -652,12 +652,12 @@ impl Timeline {
     }
 
     /// Returns latest backup_lsn.
-    pub async fn get_wal_backup_lsn(&self) -> Lsn {
+    pub async fn get_wal_upload_lsn(&self) -> Lsn {
         self.read_shared_state().await.sk.state().inmem.backup_lsn
     }
 
     /// Sets backup_lsn to the given value.
-    pub async fn set_wal_backup_lsn(self: &Arc<Self>, backup_lsn: Lsn) -> Result<()> {
+    pub async fn set_wal_upload_lsn(self: &Arc<Self>, backup_lsn: Lsn) -> Result<()> {
         if self.is_cancelled() {
             bail!(TimelineError::Cancelled(self.ttid));
         }
@@ -725,7 +725,7 @@ impl Timeline {
             ttid: self.ttid,
             ps_feedback_count: ps_feedback_counter,
             last_ps_feedback,
-            wal_backup_active: self.wal_backup_active.load(Ordering::Relaxed),
+            wal_upload_active: self.wal_upload_active.load(Ordering::Relaxed),
             timeline_is_active: self.broker_active.load(Ordering::Relaxed),
             num_computes: self.walreceivers.get_num() as u32,
             last_removed_segno: self.last_removed_segno.load(Ordering::Relaxed),
@@ -749,7 +749,7 @@ impl Timeline {
             is_cancelled: self.is_cancelled(),
             peers_info_len: state.peers_info.0.len(),
             walsenders: self.walsenders.get_all_public(),
-            wal_backup_active: self.wal_backup_active.load(Ordering::Relaxed),
+            wal_upload_active: self.wal_upload_active.load(Ordering::Relaxed),
             active: self.broker_active.load(Ordering::Relaxed),
             num_computes: self.walreceivers.get_num() as u32,
             last_removed_segno: self.last_removed_segno.load(Ordering::Relaxed),
@@ -958,7 +958,7 @@ impl WalResidentTimeline {
 
     pub async fn get_walreader(&self, start_lsn: Lsn) -> Result<WalReader> {
         let (_, persisted_state) = self.get_state().await;
-        let enable_remote_read = self.conf.is_wal_backup_enabled();
+        let enable_remote_read = self.conf.is_wal_upload_enabled();
 
         WalReader::new(
             &self.ttid,

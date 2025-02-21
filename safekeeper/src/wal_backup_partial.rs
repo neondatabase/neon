@@ -34,7 +34,7 @@ use crate::{
     rate_limit::{rand_duration, RateLimiter},
     timeline::WalResidentTimeline,
     timeline_manager::StateSnapshot,
-    wal_backup::{self},
+    wal_upload::{self},
     SafeKeeperConf,
 };
 
@@ -240,7 +240,7 @@ impl PartialBackup {
         let remote_path = prepared.remote_path(&self.remote_timeline_path);
 
         // Upload first `backup_bytes` bytes of the segment to the remote storage.
-        wal_backup::backup_partial_segment(&local_path, &remote_path, backup_bytes).await?;
+        wal_upload::backup_partial_segment(&local_path, &remote_path, backup_bytes).await?;
         PARTIAL_BACKUP_UPLOADED_BYTES.inc_by(backup_bytes as u64);
 
         // We uploaded the segment, now let's verify that the data is still actual.
@@ -326,7 +326,7 @@ impl PartialBackup {
             let remote_path = self.remote_timeline_path.join(seg);
             objects_to_delete.push(remote_path);
         }
-        wal_backup::delete_objects(&objects_to_delete).await
+        wal_upload::delete_objects(&objects_to_delete).await
     }
 
     /// Delete all non-Uploaded segments from the remote storage. There should be only one

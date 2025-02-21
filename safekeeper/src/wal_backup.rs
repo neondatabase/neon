@@ -30,10 +30,10 @@ use tracing::*;
 
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
-use crate::metrics::{BACKED_UP_SEGMENTS, BACKUP_ERRORS, WAL_BACKUP_TASKS};
+use crate::metrics::{BACKED_UP_SEGMENTS, BACKUP_ERRORS, wal_upload_TASKS};
 use crate::timeline::WalResidentTimeline;
 use crate::timeline_manager::{Manager, StateSnapshot};
-use crate::{SafeKeeperConf, WAL_BACKUP_RUNTIME};
+use crate::{SafeKeeperConf, wal_upload_RUNTIME};
 
 const UPLOAD_FAILURE_RETRY_MIN_MS: u64 = 10;
 const UPLOAD_FAILURE_RETRY_MAX_MS: u64 = 5000;
@@ -55,7 +55,7 @@ impl WalBackupTaskHandle {
 }
 
 /// Do we have anything to upload to S3, i.e. should safekeepers run backup activity?
-pub(crate) fn is_wal_backup_required(
+pub(crate) fn is_wal_upload_required(
     wal_seg_size: usize,
     num_computes: usize,
     state: &StateSnapshot,
@@ -92,7 +92,7 @@ pub(crate) async fn update_task(mgr: &mut Manager, need_backup: bool, state: &St
             let handle = if mgr.conf.current_thread_runtime {
                 tokio::spawn(async_task)
             } else {
-                WAL_BACKUP_RUNTIME.spawn(async_task)
+                wal_upload_RUNTIME.spawn(async_task)
             };
 
             mgr.backup_task = Some(WalBackupTaskHandle {
@@ -132,14 +132,14 @@ async fn shut_down_task(entry: &mut Option<WalBackupTaskHandle>) {
 /// where s3 is unreachable only for some sks.
 fn determine_offloader(
     alive_peers: &[PeerInfo],
-    wal_backup_lsn: Lsn,
+    wal_upload_lsn: Lsn,
     ttid: TenantTimelineId,
     conf: &SafeKeeperConf,
 ) -> (Option<NodeId>, String) {
     // TODO: remove this once we fill newly joined safekeepers since backup_lsn.
     let capable_peers = alive_peers
         .iter()
-        .filter(|p| p.local_start_lsn <= wal_backup_lsn);
+        .filter(|p| p.local_start_lsn <= wal_upload_lsn);
     match capable_peers.clone().map(|p| p.commit_lsn).max() {
         None => (None, "no connected peers to elect from".to_string()),
         Some(max_commit_lsn) => {
@@ -212,13 +212,13 @@ struct WalBackupTask {
 }
 
 /// Offload single timeline.
-#[instrument(name = "wal_backup", skip_all, fields(ttid = %tli.ttid))]
+#[instrument(name = "wal_upload", skip_all, fields(ttid = %tli.ttid))]
 async fn backup_task_main(
     tli: WalResidentTimeline,
     parallel_jobs: usize,
     mut shutdown_rx: Receiver<()>,
 ) {
-    let _guard = WAL_BACKUP_TASKS.guard();
+    let _guard = wal_upload_TASKS.guard();
     info!("started");
 
     let cancel = tli.tli.cancel.clone();
@@ -288,7 +288,7 @@ impl WalBackupTask {
                 continue; /* nothing to do, common case as we wake up on every commit_lsn bump */
             }
             // Perhaps peers advanced the position, check shmem value.
-            backup_lsn = self.timeline.get_wal_backup_lsn().await;
+            backup_lsn = self.timeline.get_wal_upload_lsn().await;
             if backup_lsn.segment_number(self.wal_seg_size)
                 >= commit_lsn.segment_number(self.wal_seg_size)
             {
@@ -372,9 +372,9 @@ async fn backup_lsn_range(
                 let segment = res?;
                 let new_backup_lsn = segment.end_lsn;
                 timeline
-                    .set_wal_backup_lsn(new_backup_lsn)
+                    .set_wal_upload_lsn(new_backup_lsn)
                     .await
-                    .context("setting wal_backup_lsn")?;
+                    .context("setting wal_upload_lsn")?;
                 *backup_lsn = new_backup_lsn;
             } else {
                 // no more segments to upload
@@ -616,7 +616,7 @@ pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
     Ok(())
 }
 
-/// Used by wal_backup_partial.
+/// Used by wal_upload_partial.
 pub async fn delete_objects(paths: &[RemotePath]) -> Result<()> {
     let cancel = CancellationToken::new(); // not really used
     let storage = get_configured_remote_storage();

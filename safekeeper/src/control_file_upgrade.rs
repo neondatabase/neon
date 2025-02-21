@@ -4,7 +4,7 @@ use std::vec;
 use crate::{
     safekeeper::{AcceptorState, PgUuid, TermHistory, TermLsn},
     state::{EvictionState, TimelinePersistentState},
-    wal_backup_partial,
+    wal_upload_partial,
 };
 use anyhow::{bail, Result};
 use pq_proto::SystemId;
@@ -235,7 +235,7 @@ pub struct SafeKeeperStateV8 {
     pub peers: PersistedPeers,
     /// Holds names of partial segments uploaded to remote storage. Used to
     /// clean up old objects without leaving garbage in remote storage.
-    pub partial_backup: wal_backup_partial::State,
+    pub partial_backup: wal_upload_partial::State,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -316,7 +316,7 @@ pub struct TimelinePersistentStateV9 {
     pub peers: PersistedPeers,
     /// Holds names of partial segments uploaded to remote storage. Used to
     /// clean up old objects without leaving garbage in remote storage.
-    pub partial_backup: wal_backup_partial::State,
+    pub partial_backup: wal_upload_partial::State,
     /// Eviction state of the timeline. If it's Offloaded, we should download
     /// WAL files from remote storage to serve the timeline.
     pub eviction_state: EvictionState,
@@ -351,7 +351,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersiste
             backup_lsn: Lsn(0),
             peer_horizon_lsn: oldstate.truncate_lsn,
             remote_consistent_lsn: Lsn(0),
-            partial_backup: wal_backup_partial::State::default(),
+            partial_backup: wal_upload_partial::State::default(),
             eviction_state: EvictionState::Present,
             creation_ts: std::time::SystemTime::UNIX_EPOCH,
         });
@@ -377,7 +377,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersiste
             backup_lsn: Lsn(0),
             peer_horizon_lsn: oldstate.truncate_lsn,
             remote_consistent_lsn: Lsn(0),
-            partial_backup: wal_backup_partial::State::default(),
+            partial_backup: wal_upload_partial::State::default(),
             eviction_state: EvictionState::Present,
             creation_ts: std::time::SystemTime::UNIX_EPOCH,
         });
@@ -403,7 +403,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersiste
             backup_lsn: Lsn(0),
             peer_horizon_lsn: oldstate.truncate_lsn,
             remote_consistent_lsn: Lsn(0),
-            partial_backup: wal_backup_partial::State::default(),
+            partial_backup: wal_upload_partial::State::default(),
             eviction_state: EvictionState::Present,
             creation_ts: std::time::SystemTime::UNIX_EPOCH,
         });
@@ -429,7 +429,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersiste
             backup_lsn: Lsn::INVALID,
             peer_horizon_lsn: oldstate.peer_horizon_lsn,
             remote_consistent_lsn: Lsn(0),
-            partial_backup: wal_backup_partial::State::default(),
+            partial_backup: wal_upload_partial::State::default(),
             eviction_state: EvictionState::Present,
             creation_ts: std::time::SystemTime::UNIX_EPOCH,
         });
@@ -475,7 +475,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersiste
             backup_lsn: oldstate.backup_lsn,
             peer_horizon_lsn: oldstate.peer_horizon_lsn,
             remote_consistent_lsn: oldstate.remote_consistent_lsn,
-            partial_backup: wal_backup_partial::State::default(),
+            partial_backup: wal_upload_partial::State::default(),
             eviction_state: EvictionState::Present,
             creation_ts: std::time::SystemTime::UNIX_EPOCH,
         });

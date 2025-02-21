@@ -1335,7 +1335,7 @@ mod tests {
             backup_lsn: Lsn(1234567300),
             peer_horizon_lsn: Lsn(9999999),
             remote_consistent_lsn: Lsn(1234560000),
-            partial_backup: crate::wal_backup_partial::State::default(),
+            partial_backup: crate::wal_upload_partial::State::default(),
             eviction_state: EvictionState::Present,
             creation_ts: UNIX_EPOCH,
         };

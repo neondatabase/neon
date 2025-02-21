@@ -161,7 +161,7 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
         heartbeat_timeout: Duration::from_secs(0),
         remote_storage: None,
         max_offloader_lag_bytes: 0,
-        wal_backup_enabled: false,
+        wal_upload_enabled: false,
         listen_pg_addr_tenant_only: None,
         advertise_pg_addr: None,
         availability_zone: None,

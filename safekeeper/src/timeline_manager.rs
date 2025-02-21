@@ -38,8 +38,8 @@ use crate::{
     timeline::{ManagerTimeline, ReadGuardSharedState, StateSK, WalResidentTimeline},
     timeline_guard::{AccessService, GuardId, ResidenceGuard},
     timelines_set::{TimelineSetGuard, TimelinesSet},
-    wal_backup::{self, WalBackupTaskHandle},
-    wal_backup_partial::{self, PartialBackup, PartialRemoteSegment},
+    wal_upload::{self, WalBackupTaskHandle},
+    wal_upload_partial::{self, PartialBackup, PartialRemoteSegment},
     SafeKeeperConf,
 };
 
@@ -288,8 +288,8 @@ pub async fn main_task(
             let num_computes = *mgr.num_computes_rx.borrow();
 
             mgr.set_status(Status::UpdateBackup);
-            let is_wal_backup_required = mgr.update_backup(num_computes, &state_snapshot).await;
-            mgr.update_is_active(is_wal_backup_required, num_computes, &state_snapshot);
+            let is_wal_upload_required = mgr.update_backup(num_computes, &state_snapshot).await;
+            mgr.update_is_active(is_wal_upload_required, num_computes, &state_snapshot);
 
             mgr.set_status(Status::UpdateControlFile);
             mgr.update_control_file_save(&state_snapshot, &mut next_event)
@@ -376,15 +376,15 @@ pub async fn main_task(
     mgr.tli_broker_active.set(false);
 
     // shutdown background tasks
-    if mgr.conf.is_wal_backup_enabled() {
+    if mgr.conf.is_wal_upload_enabled() {
         if let Some(backup_task) = mgr.backup_task.take() {
             // If we fell through here, then the timeline is shutting down. This is important
-            // because otherwise joining on the wal_backup handle might hang.
+            // because otherwise joining on the wal_upload handle might hang.
             assert!(mgr.tli.cancel.is_cancelled());
 
             backup_task.join().await;
         }
-        wal_backup::update_task(&mut mgr, false, &last_state).await;
+        wal_upload::update_task(&mut mgr, false, &last_state).await;
     }
 
     if let Some(recovery_task) = &mut mgr.recovery_task {
@@ -479,29 +479,29 @@ impl Manager {
 
     /// Spawns/kills backup task and returns true if backup is required.
     async fn update_backup(&mut self, num_computes: usize, state: &StateSnapshot) -> bool {
-        let is_wal_backup_required =
-            wal_backup::is_wal_backup_required(self.wal_seg_size, num_computes, state);
+        let is_wal_upload_required =
+            wal_upload::is_wal_upload_required(self.wal_seg_size, num_computes, state);
 
-        if self.conf.is_wal_backup_enabled() {
-            wal_backup::update_task(self, is_wal_backup_required, state).await;
+        if self.conf.is_wal_upload_enabled() {
+            wal_upload::update_task(self, is_wal_upload_required, state).await;
         }
 
         // update the state in Arc<Timeline>
-        self.tli.wal_backup_active.store(
+        self.tli.wal_upload_active.store(
             self.backup_task.is_some(),
             std::sync::atomic::Ordering::Relaxed,
         );
-        is_wal_backup_required
+        is_wal_upload_required
     }
 
     /// Update is_active flag and returns its value.
     fn update_is_active(
         &mut self,
-        is_wal_backup_required: bool,
+        is_wal_upload_required: bool,
         num_computes: usize,
         state: &StateSnapshot,
     ) {
-        let is_active = is_wal_backup_required
+        let is_active = is_wal_upload_required
             || num_computes > 0
             || state.remote_consistent_lsn < state.commit_lsn;
 
@@ -629,7 +629,7 @@ impl Manager {
     /// Spawns partial WAL upload task if needed.
     async fn update_partial_backup(&mut self, state: &StateSnapshot) {
         // check if WAL upload is enabled and should be started
-        if !self.conf.is_wal_backup_enabled() {
+        if !self.conf.is_wal_upload_enabled() {
             return;
         }
 
@@ -638,7 +638,7 @@ impl Manager {
             return;
         }
 
-        if !wal_backup_partial::needs_uploading(state, &self.partial_backup_uploaded) {
+        if !wal_upload_partial::needs_uploading(state, &self.partial_backup_uploaded) {
             // nothing to upload
             return;
         }
@@ -650,7 +650,7 @@ impl Manager {
 
         // Get WalResidentTimeline and start partial backup task.
         let cancel = CancellationToken::new();
-        let handle = tokio::spawn(wal_backup_partial::main_task(
+        let handle = tokio::spawn(wal_upload_partial::main_task(
             resident,
             self.conf.clone(),
             self.global_rate_limiter.clone(),

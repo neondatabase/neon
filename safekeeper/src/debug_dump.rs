@@ -157,7 +157,7 @@ pub struct Config {
     pub listen_http_addr: String,
     pub no_sync: bool,
     pub max_offloader_lag_bytes: u64,
-    pub wal_backup_enabled: bool,
+    pub wal_upload_enabled: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -175,7 +175,7 @@ pub struct Memory {
     pub is_cancelled: bool,
     pub peers_info_len: usize,
     pub walsenders: Vec<WalSenderState>,
-    pub wal_backup_active: bool,
+    pub wal_upload_active: bool,
     pub active: bool,
     pub num_computes: u32,
     pub last_removed_segno: XLogSegNo,
@@ -352,7 +352,7 @@ fn build_config(config: Arc<SafeKeeperConf>) -> Config {
         listen_http_addr: config.listen_http_addr.clone(),
         no_sync: config.no_sync,
         max_offloader_lag_bytes: config.max_offloader_lag_bytes,
-        wal_backup_enabled: config.wal_backup_enabled,
+        wal_upload_enabled: config.wal_upload_enabled,
     }
 }
 

@@ -37,7 +37,7 @@ use safekeeper::GlobalTimelines;
 use safekeeper::SafeKeeperConf;
 use safekeeper::{broker, WAL_SERVICE_RUNTIME};
 use safekeeper::{control_file, BROKER_RUNTIME};
-use safekeeper::{wal_backup, HTTP_RUNTIME};
+use safekeeper::{wal_upload, HTTP_RUNTIME};
 use storage_broker::DEFAULT_ENDPOINT;
 use utils::auth::{JwtAuth, Scope, SwappableJwtAuth};
 use utils::{
@@ -146,11 +146,11 @@ struct Args {
     max_offloader_lag: u64,
     /// Number of max parallel WAL segments to be offloaded to remote storage.
     #[arg(long, default_value = "5")]
-    wal_backup_parallel_jobs: usize,
+    wal_upload_parallel_jobs: usize,
     /// Disable WAL upload to s3. When disabled, safekeeper removes WAL ignoring
     /// WAL upload horizon.
     #[arg(long)]
-    disable_wal_backup: bool,
+    disable_wal_upload: bool,
     /// If given, enables auth on incoming connections to WAL service endpoint
     /// (--listen-pg). Value specifies path to a .pem public key used for
     /// validations of JWT tokens. Empty string is allowed and means disabling
@@ -362,8 +362,8 @@ async fn main() -> anyhow::Result<()> {
         peer_recovery_enabled: args.peer_recovery,
         remote_storage: args.remote_storage,
         max_offloader_lag_bytes: args.max_offloader_lag,
-        wal_backup_enabled: !args.disable_wal_backup,
-        backup_parallel_jobs: args.wal_backup_parallel_jobs,
+        wal_upload_enabled: !args.disable_wal_upload,
+        backup_parallel_jobs: args.wal_upload_parallel_jobs,
         pg_auth,
         pg_tenant_only_auth,
         http_auth,
@@ -446,7 +446,7 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
     let timeline_collector = safekeeper::metrics::TimelineCollector::new(global_timelines.clone());
     metrics::register_internal(Box::new(timeline_collector))?;
 
-    wal_backup::init_remote_storage(&conf).await;
+    wal_upload::init_remote_storage(&conf).await;
 
     // Keep handles to main tasks to die if any of them disappears.
     let mut tasks_handles: FuturesUnordered<BoxFuture<(String, JoinTaskRes)>> =

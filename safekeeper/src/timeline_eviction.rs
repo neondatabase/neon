@@ -20,8 +20,8 @@ use crate::{
     },
     rate_limit::rand_duration,
     timeline_manager::{Manager, StateSnapshot},
-    wal_backup,
-    wal_backup_partial::{self, PartialRemoteSegment},
+    wal_upload,
+    wal_upload_partial::{self, PartialRemoteSegment},
     wal_storage::wal_file_paths,
 };
 
@@ -47,7 +47,7 @@ impl Manager {
             && self.access_service.is_empty()
             && !self.tli_broker_active.get()
             // Partial segment of current flush_lsn is uploaded up to this flush_lsn.
-            && !wal_backup_partial::needs_uploading(state, &self.partial_backup_uploaded)
+            && !wal_upload_partial::needs_uploading(state, &self.partial_backup_uploaded)
             // And it is the next one after the last removed. Given that local
             // WAL is removed only after it is uploaded to s3 (and pageserver
             // advancing remote_consistent_lsn) which happens only after WAL is
@@ -195,7 +195,7 @@ async fn redownload_partial_segment(
         remote_segfile, tmp_file
     );
 
-    let mut reader = wal_backup::read_object(&remote_segfile, 0).await?;
+    let mut reader = wal_upload::read_object(&remote_segfile, 0).await?;
     let mut file = File::create(&tmp_file).await?;
 
     let actual_len = tokio::io::copy(&mut reader, &mut file).await?;
@@ -275,7 +275,7 @@ async fn do_validation(
 
     let remote_segfile = remote_segment_path(mgr, partial);
     let mut remote_reader: std::pin::Pin<Box<dyn AsyncRead + Send + Sync>> =
-        wal_backup::read_object(&remote_segfile, 0).await?;
+        wal_upload::read_object(&remote_segfile, 0).await?;
 
     // remote segment should have bytes excatly up to `flush_lsn`
     let expected_remote_size = partial.flush_lsn.segment_offset(mgr.wal_seg_size);

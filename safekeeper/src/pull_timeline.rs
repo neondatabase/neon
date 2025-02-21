@@ -30,7 +30,7 @@ use crate::{
     state::{EvictionState, TimelinePersistentState},
     timeline::{Timeline, WalResidentTimeline},
     timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline},
-    wal_backup,
+    wal_upload,
     wal_storage::open_wal_file,
     GlobalTimelines,
 };
@@ -221,7 +221,7 @@ impl Timeline {
         // Optimistically try to copy the partial segment to the destination's path: this
         // can fail if the timeline was un-evicted and modified in the background.
         let remote_timeline_path = &self.remote_path;
-        wal_backup::copy_partial_segment(
+        wal_upload::copy_partial_segment(
             &replace.previous.remote_path(remote_timeline_path),
             &replace.current.remote_path(remote_timeline_path),
         )
@@ -288,7 +288,7 @@ impl WalResidentTimeline {
             );
 
             let remote_timeline_path = &self.tli.remote_path;
-            wal_backup::copy_partial_segment(
+            wal_upload::copy_partial_segment(
                 &replace.previous.remote_path(remote_timeline_path),
                 &replace.current.remote_path(remote_timeline_path),
             )

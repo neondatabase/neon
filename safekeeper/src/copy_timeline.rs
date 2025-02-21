@@ -15,7 +15,7 @@ use crate::{
     state::TimelinePersistentState,
     timeline::{TimelineError, WalResidentTimeline},
     timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline},
-    wal_backup::copy_s3_segments,
+    wal_upload::copy_s3_segments,
     wal_storage::{wal_file_paths, WalReader},
     GlobalTimelines,
 };
