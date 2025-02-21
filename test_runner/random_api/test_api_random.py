@@ -39,8 +39,8 @@ class RandomNeonProject:
                 main.add(branch["id"])
         return list(branches - parents - main)
 
-    def create_branch(self, parent_branch_id: str | None = None):
-        return self.neon_api.create_branch(self.project_id, parent_branch_id)["branch"]["id"]
+    def create_branch(self, parent_id: str | None = None):
+        return self.neon_api.create_branch(self.project_id, parent_id=parent_id)["branch"]["id"]
 
     def wait(self):
         return self.neon_api.wait_for_operation_to_finish(self.project_id)
@@ -65,7 +65,7 @@ def test_api_random(
     log.info("created branch %s", br1)
     project.wait()
     time.sleep(10)
-    br2 = project.create_branch(br1)
+    br2 = project.create_branch(parent_id=br1)
     log.info("created branch %s", br2)
     project.wait()
     log.info("leaf branches: %s", project.get_leaf_branches())
