@@ -38,10 +38,11 @@ class RandomNeonProject:
                 main.add(branch["id"])
         return list(branches - parents - main)
 
-
     def create_branch(self, parent_branch_id: str | None = None):
         return self.neon_api.create_branch(self.project_id, parent_branch_id)["branch"]["id"]
 
+    def wait(self):
+        return self.neon_api.wait_for_operation_to_finish(self.project_id)
 
 
 @pytest.mark.timeout(7200)
@@ -61,7 +62,9 @@ def test_api_random(
     project = RandomNeonProject(project_id, neon_api)
     br1 = project.create_branch()
     log.info("created branch %s", br1)
+    project.wait()
     br2 = project.create_branch(br1)
     log.info("created branch %s", br2)
+    project.wait()
     log.info("leaf branches: %s", project.get_leaf_branches())
     assert True
