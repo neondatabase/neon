@@ -46,7 +46,7 @@ jobs:
         env:
           RUN_KIND: >-
             ${{
-              false
+              'compute-rc-pr'
               || (inputs.github-event-name == 'push'         && github.ref_name == 'main')            && 'push-main'
               || (inputs.github-event-name == 'push'         && github.ref_name == 'release')         && 'storage-release'
               || (inputs.github-event-name == 'push'         && github.ref_name == 'release-compute') && 'compute-release'
