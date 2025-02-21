@@ -3,11 +3,9 @@ use std::error::Error as _;
 use chrono::{DateTime, Utc};
 use futures::Future;
 use hex::FromHex;
-
 use reqwest::{Client, StatusCode, Url, header};
 use serde::Deserialize;
 use tokio::sync::Semaphore;
-
 use tokio_util::sync::CancellationToken;
 use utils::backoff;
 use utils::id::{TenantId, TimelineId};

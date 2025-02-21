@@ -2,33 +2,26 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::env;
 use std::fmt::Display;
-use std::io;
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+use std::{env, io};
 
-use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
-use anyhow::Context;
-use anyhow::Result;
-use azure_core::HttpClient;
-use azure_core::TransportOptions;
+use anyhow::{Context, Result};
 use azure_core::request_options::{IfMatchCondition, MaxResults, Metadata, Range};
-use azure_core::{Continuable, RetryOptions};
+use azure_core::{Continuable, HttpClient, RetryOptions, TransportOptions};
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::blob::CopyStatus;
-use azure_storage_blobs::prelude::ClientBuilder;
-use azure_storage_blobs::{blob::operations::GetBlobBuilder, prelude::ContainerClient};
+use azure_storage_blobs::blob::operations::GetBlobBuilder;
+use azure_storage_blobs::prelude::{ClientBuilder, ContainerClient};
 use bytes::Bytes;
 use futures::FutureExt;
 use futures::future::Either;
 use futures::stream::Stream;
-use futures_util::StreamExt;
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use http_types::{StatusCode, Url};
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
@@ -36,12 +29,13 @@ use tracing::debug;
 use utils::backoff;
 use utils::backoff::exponential_backoff_duration_seconds;
 
-use crate::DownloadKind;
+use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
+use crate::config::AzureConfig;
+use crate::error::Cancelled;
 use crate::metrics::{AttemptOutcome, RequestKind, start_measuring_requests};
 use crate::{
-    ConcurrencyLimiter, Download, DownloadError, DownloadOpts, Listing, ListingMode, ListingObject,
-    RemotePath, RemoteStorage, StorageMetadata, TimeTravelError, TimeoutOrCancel,
-    config::AzureConfig, error::Cancelled,
+    ConcurrencyLimiter, Download, DownloadError, DownloadKind, DownloadOpts, Listing, ListingMode,
+    ListingObject, RemotePath, RemoteStorage, StorageMetadata, TimeTravelError, TimeoutOrCancel,
 };
 
 pub struct AzureBlobStorage {

@@ -1,28 +1,24 @@
 //! Defines per timeline data stored persistently (SafeKeeperPersistentState)
 //! and its wrapper with in memory layer (SafekeeperState).
 
-use std::{cmp::max, ops::Deref, time::SystemTime};
+use std::cmp::max;
+use std::ops::Deref;
+use std::time::SystemTime;
 
 use anyhow::{Result, bail};
 use postgres_ffi::WAL_SEGMENT_SIZE;
-use safekeeper_api::{
-    INITIAL_TERM, ServerInfo, Term,
-    membership::Configuration,
-    models::{TimelineMembershipSwitchResponse, TimelineTermBumpResponse},
-};
+use safekeeper_api::membership::Configuration;
+use safekeeper_api::models::{TimelineMembershipSwitchResponse, TimelineTermBumpResponse};
+use safekeeper_api::{INITIAL_TERM, ServerInfo, Term};
 use serde::{Deserialize, Serialize};
 use tracing::info;
-use utils::{
-    id::{TenantId, TenantTimelineId, TimelineId},
-    lsn::Lsn,
-};
+use utils::id::{TenantId, TenantTimelineId, TimelineId};
+use utils::lsn::Lsn;
 
-use crate::{
-    control_file,
-    safekeeper::{AcceptorState, PgUuid, TermHistory, TermLsn, UNKNOWN_SERVER_VERSION},
-    timeline::TimelineError,
-    wal_backup_partial::{self},
-};
+use crate::control_file;
+use crate::safekeeper::{AcceptorState, PgUuid, TermHistory, TermLsn, UNKNOWN_SERVER_VERSION};
+use crate::timeline::TimelineError;
+use crate::wal_backup_partial::{self};
 
 /// Persistent information stored on safekeeper node about timeline.
 /// On disk data is prefixed by magic and format version and followed by checksum.

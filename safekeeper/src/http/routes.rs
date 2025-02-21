@@ -1,51 +1,41 @@
-use http_utils::failpoints::failpoints_handler;
-use hyper::{Body, Request, Response, StatusCode};
-use safekeeper_api::ServerInfo;
-use safekeeper_api::models;
-use safekeeper_api::models::AcceptorStateStatus;
-use safekeeper_api::models::PullTimelineRequest;
-use safekeeper_api::models::SafekeeperStatus;
-use safekeeper_api::models::TermSwitchApiEntry;
-use safekeeper_api::models::TimelineStatus;
 use std::collections::HashMap;
 use std::fmt;
 use std::io::Write as _;
 use std::str::FromStr;
 use std::sync::Arc;
-use storage_broker::proto::SafekeeperTimelineInfo;
-use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
+
+use http_utils::endpoint::{
+    self, ChannelWriter, auth_middleware, check_permission_with, profile_cpu_handler,
+    profile_heap_handler, prometheus_metrics_handler, request_span,
+};
+use http_utils::error::ApiError;
+use http_utils::failpoints::failpoints_handler;
+use http_utils::json::{json_request, json_response};
+use http_utils::request::{ensure_no_body, parse_query_param, parse_request_param};
+use http_utils::{RequestExt, RouterBuilder};
+use hyper::{Body, Request, Response, StatusCode};
+use postgres_ffi::WAL_SEGMENT_SIZE;
+use safekeeper_api::models::{
+    AcceptorStateStatus, PullTimelineRequest, SafekeeperStatus, SkTimelineInfo, TermSwitchApiEntry,
+    TimelineCopyRequest, TimelineCreateRequest, TimelineStatus, TimelineTermBumpRequest,
+};
+use safekeeper_api::{ServerInfo, models};
+use storage_broker::proto::{SafekeeperTimelineInfo, TenantTimelineId as ProtoTenantTimelineId};
 use tokio::sync::mpsc;
 use tokio::task;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span};
+use utils::auth::SwappableJwtAuth;
+use utils::id::{TenantId, TenantTimelineId, TimelineId};
+use utils::lsn::Lsn;
 
-use http_utils::endpoint::{
-    profile_cpu_handler, profile_heap_handler, prometheus_metrics_handler, request_span,
-};
-use http_utils::{
-    RequestExt, RouterBuilder,
-    endpoint::{self, ChannelWriter, auth_middleware, check_permission_with},
-    error::ApiError,
-    json::{json_request, json_response},
-    request::{ensure_no_body, parse_query_param, parse_request_param},
-};
-
-use postgres_ffi::WAL_SEGMENT_SIZE;
-use safekeeper_api::models::{SkTimelineInfo, TimelineCopyRequest};
-use safekeeper_api::models::{TimelineCreateRequest, TimelineTermBumpRequest};
-use utils::{
-    auth::SwappableJwtAuth,
-    id::{TenantId, TenantTimelineId, TimelineId},
-    lsn::Lsn,
-};
-
-use crate::GlobalTimelines;
-use crate::SafeKeeperConf;
 use crate::debug_dump::TimelineDigestRequest;
 use crate::safekeeper::TermLsn;
 use crate::timelines_global_map::TimelineDeleteForceResult;
-use crate::{copy_timeline, debug_dump, patch_control_file, pull_timeline};
+use crate::{
+    GlobalTimelines, SafeKeeperConf, copy_timeline, debug_dump, patch_control_file, pull_timeline,
+};
 
 /// Healthcheck handler.
 async fn status_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {

@@ -1,46 +1,38 @@
+use std::cmp::min;
+use std::io::{self, ErrorKind};
+use std::sync::Arc;
+
 use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
 use camino::Utf8PathBuf;
 use chrono::{DateTime, Utc};
 use futures::{SinkExt, StreamExt, TryStreamExt};
 use postgres_ffi::{PG_TLI, XLogFileName, XLogSegNo};
-use safekeeper_api::{
-    Term,
-    models::{PullTimelineRequest, PullTimelineResponse, TimelineStatus},
-};
+use safekeeper_api::Term;
+use safekeeper_api::models::{PullTimelineRequest, PullTimelineResponse, TimelineStatus};
 use safekeeper_client::mgmt_api;
 use safekeeper_client::mgmt_api::Client;
 use serde::Deserialize;
-use std::{
-    cmp::min,
-    io::{self, ErrorKind},
-    sync::Arc,
-};
-use tokio::{fs::OpenOptions, io::AsyncWrite, sync::mpsc, task};
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWrite;
+use tokio::sync::mpsc;
+use tokio::task;
 use tokio_tar::{Archive, Builder, Header};
-use tokio_util::{
-    io::{CopyToBytes, SinkWriter},
-    sync::PollSender,
-};
+use tokio_util::io::{CopyToBytes, SinkWriter};
+use tokio_util::sync::PollSender;
 use tracing::{error, info, instrument};
+use utils::crashsafe::fsync_async_opt;
+use utils::id::{NodeId, TenantTimelineId};
+use utils::logging::SecretString;
+use utils::lsn::Lsn;
+use utils::pausable_failpoint;
 
-use crate::{
-    GlobalTimelines,
-    control_file::CONTROL_FILE_NAME,
-    debug_dump,
-    state::{EvictionState, TimelinePersistentState},
-    timeline::{Timeline, WalResidentTimeline},
-    timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline},
-    wal_backup,
-    wal_storage::open_wal_file,
-};
-use utils::{
-    crashsafe::fsync_async_opt,
-    id::{NodeId, TenantTimelineId},
-    logging::SecretString,
-    lsn::Lsn,
-    pausable_failpoint,
-};
+use crate::control_file::CONTROL_FILE_NAME;
+use crate::state::{EvictionState, TimelinePersistentState};
+use crate::timeline::{Timeline, WalResidentTimeline};
+use crate::timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline};
+use crate::wal_storage::open_wal_file;
+use crate::{GlobalTimelines, debug_dump, wal_backup};
 
 /// Stream tar archive of timeline to tx.
 #[instrument(name = "snapshot", skip_all, fields(ttid = %tli.ttid))]

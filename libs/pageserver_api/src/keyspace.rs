@@ -1,11 +1,10 @@
-use postgres_ffi::BLCKSZ;
 use std::ops::Range;
 
-use crate::{
-    key::Key,
-    shard::{ShardCount, ShardIdentity},
-};
 use itertools::Itertools;
+use postgres_ffi::BLCKSZ;
+
+use crate::key::Key;
+use crate::shard::{ShardCount, ShardIdentity};
 
 ///
 /// Represents a set of Keys, in a compact form.
@@ -609,15 +608,13 @@ pub fn singleton_range(key: Key) -> Range<Key> {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write;
+
     use rand::{RngCore, SeedableRng};
 
-    use crate::{
-        models::ShardParameters,
-        shard::{ShardCount, ShardNumber},
-    };
-
     use super::*;
-    use std::fmt::Write;
+    use crate::models::ShardParameters;
+    use crate::shard::{ShardCount, ShardNumber};
 
     // Helper function to create a key range.
     //

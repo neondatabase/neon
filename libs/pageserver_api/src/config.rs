@@ -9,19 +9,18 @@ pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN
 pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 9898;
 pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
 
+use std::collections::HashMap;
+use std::num::{NonZeroU64, NonZeroUsize};
+use std::str::FromStr;
+use std::time::Duration;
+
 use postgres_backend::AuthType;
 use remote_storage::RemoteStorageConfig;
 use serde_with::serde_as;
-use std::{
-    collections::HashMap,
-    num::{NonZeroU64, NonZeroUsize},
-    str::FromStr,
-    time::Duration,
-};
-use utils::{logging::LogFormat, postgres_client::PostgresClientProtocol};
+use utils::logging::LogFormat;
+use utils::postgres_client::PostgresClientProtocol;
 
-use crate::models::ImageCompressionAlgorithm;
-use crate::models::LsnLease;
+use crate::models::{ImageCompressionAlgorithm, LsnLease};
 
 // Certain metadata (e.g. externally-addressable name, AZ) is delivered
 // as a separate structure.  This information is not neeed by the pageserver
@@ -367,9 +366,9 @@ pub struct TenantConfigToml {
 }
 
 pub mod defaults {
-    use crate::models::ImageCompressionAlgorithm;
-
     pub use storage_broker::DEFAULT_ENDPOINT as BROKER_DEFAULT_ENDPOINT;
+
+    use crate::models::ImageCompressionAlgorithm;
 
     pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "300 s";
     pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";

@@ -1,13 +1,12 @@
 //! FIXME: most of this is copy-paste from mgmt_api.rs ; dedupe into a `reqwest_utils::Client` crate.
 use pageserver_client::mgmt_api::{Error, ResponseErrorMessageExt};
+use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 
-use crate::config::PageServerConf;
-use reqwest::Method;
-
 use super::importbucket_format::Spec;
+use crate::config::PageServerConf;
 
 pub struct Client {
     base_url: String,

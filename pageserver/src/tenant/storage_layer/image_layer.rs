@@ -25,6 +25,39 @@
 //! layer, and offsets to the other parts. The "index" is a B-tree,
 //! mapping from Key to an offset in the "values" part.  The
 //! actual page images are stored in the "values" part.
+use std::collections::{HashMap, VecDeque};
+use std::fs::File;
+use std::io::SeekFrom;
+use std::ops::Range;
+use std::os::unix::prelude::FileExt;
+use std::str::FromStr;
+use std::sync::Arc;
+
+use anyhow::{Context, Result, bail, ensure};
+use bytes::Bytes;
+use camino::{Utf8Path, Utf8PathBuf};
+use hex;
+use itertools::Itertools;
+use pageserver_api::config::MaxVectoredReadBytes;
+use pageserver_api::key::{DBDIR_KEY, KEY_SIZE, Key};
+use pageserver_api::keyspace::KeySpace;
+use pageserver_api::shard::{ShardIdentity, TenantShardId};
+use pageserver_api::value::Value;
+use rand::Rng;
+use rand::distributions::Alphanumeric;
+use serde::{Deserialize, Serialize};
+use tokio::sync::OnceCell;
+use tokio_stream::StreamExt;
+use tracing::*;
+use utils::bin_ser::BeSer;
+use utils::id::{TenantId, TimelineId};
+use utils::lsn::Lsn;
+
+use super::layer_name::ImageLayerName;
+use super::{
+    AsLayerDesc, LayerName, OnDiskValue, OnDiskValueIo, PersistentLayerDesc, ResidentLayer,
+    ValuesReconstructState,
+};
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::page_cache::{self, FileId, PAGE_SZ};
@@ -38,44 +71,9 @@ use crate::tenant::vectored_blob_io::{
     BlobFlag, BufView, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadPlanner,
 };
-use crate::virtual_file::IoBufferMut;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
-use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
+use crate::virtual_file::{self, IoBufferMut, MaybeFatalIo, VirtualFile};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
-use anyhow::{Context, Result, bail, ensure};
-use bytes::Bytes;
-use camino::{Utf8Path, Utf8PathBuf};
-use hex;
-use itertools::Itertools;
-use pageserver_api::config::MaxVectoredReadBytes;
-use pageserver_api::key::{DBDIR_KEY, KEY_SIZE, Key};
-use pageserver_api::keyspace::KeySpace;
-use pageserver_api::shard::{ShardIdentity, TenantShardId};
-use pageserver_api::value::Value;
-use rand::{Rng, distributions::Alphanumeric};
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
-use std::fs::File;
-use std::io::SeekFrom;
-use std::ops::Range;
-use std::os::unix::prelude::FileExt;
-use std::str::FromStr;
-use std::sync::Arc;
-use tokio::sync::OnceCell;
-use tokio_stream::StreamExt;
-use tracing::*;
-
-use utils::{
-    bin_ser::BeSer,
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
-
-use super::layer_name::ImageLayerName;
-use super::{
-    AsLayerDesc, LayerName, OnDiskValue, OnDiskValueIo, PersistentLayerDesc, ResidentLayer,
-    ValuesReconstructState,
-};
 
 ///
 /// Header stored in the beginning of the file
@@ -1135,34 +1133,26 @@ impl ImageLayerIterator<'_> {
 
 #[cfg(test)]
 mod test {
-    use std::{sync::Arc, time::Duration};
+    use std::sync::Arc;
+    use std::time::Duration;
 
     use bytes::Bytes;
     use itertools::Itertools;
-    use pageserver_api::{
-        key::Key,
-        shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize},
-        value::Value,
-    };
-    use utils::{
-        generation::Generation,
-        id::{TenantId, TimelineId},
-        lsn::Lsn,
-    };
-
-    use crate::{
-        DEFAULT_PG_VERSION,
-        context::RequestContext,
-        tenant::{
-            Tenant, Timeline,
-            config::TenantConf,
-            harness::{TIMELINE_ID, TenantHarness},
-            storage_layer::{Layer, ResidentLayer},
-            vectored_blob_io::StreamingVectoredReadPlanner,
-        },
-    };
+    use pageserver_api::key::Key;
+    use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
+    use pageserver_api::value::Value;
+    use utils::generation::Generation;
+    use utils::id::{TenantId, TimelineId};
+    use utils::lsn::Lsn;
 
     use super::{ImageLayerIterator, ImageLayerWriter};
+    use crate::DEFAULT_PG_VERSION;
+    use crate::context::RequestContext;
+    use crate::tenant::config::TenantConf;
+    use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
+    use crate::tenant::storage_layer::{Layer, ResidentLayer};
+    use crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner;
+    use crate::tenant::{Tenant, Timeline};
 
     #[tokio::test]
     async fn image_layer_rewrite() {

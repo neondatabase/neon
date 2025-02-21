@@ -1,24 +1,23 @@
 //! Control file serialization, deserialization and persistence.
 
-use anyhow::{Context, Result, bail, ensure};
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use camino::{Utf8Path, Utf8PathBuf};
-use safekeeper_api::membership::INVALID_GENERATION;
-use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
-use utils::crashsafe::durable_rename;
-
 use std::future::Future;
 use std::io::Read;
 use std::ops::Deref;
 use std::path::Path;
 use std::time::Instant;
 
-use crate::control_file_upgrade::downgrade_v10_to_v9;
-use crate::control_file_upgrade::upgrade_control_file;
+use anyhow::{Context, Result, bail, ensure};
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use camino::{Utf8Path, Utf8PathBuf};
+use safekeeper_api::membership::INVALID_GENERATION;
+use tokio::fs::File;
+use tokio::io::AsyncWriteExt;
+use utils::bin_ser::LeSer;
+use utils::crashsafe::durable_rename;
+
+use crate::control_file_upgrade::{downgrade_v10_to_v9, upgrade_control_file};
 use crate::metrics::PERSIST_CONTROL_FILE_SECONDS;
 use crate::state::{EvictionState, TimelinePersistentState};
-use utils::bin_ser::LeSer;
 
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
 pub const SK_FORMAT_VERSION: u32 = 10;
@@ -234,10 +233,11 @@ impl Storage for FileStorage {
 
 #[cfg(test)]
 mod test {
-    use super::*;
     use safekeeper_api::membership::{Configuration, MemberSet, SafekeeperGeneration};
     use tokio::fs;
     use utils::lsn::Lsn;
+
+    use super::*;
 
     const NO_SYNC: bool = true;
 

@@ -33,12 +33,13 @@
 
 use std::hash::{Hash, Hasher};
 
-use crate::{key::Key, models::ShardParameters};
+#[doc(inline)]
+pub use ::utils::shard::*;
 use postgres_ffi::relfile_utils::INIT_FORKNUM;
 use serde::{Deserialize, Serialize};
 
-#[doc(inline)]
-pub use ::utils::shard::*;
+use crate::key::Key;
+use crate::models::ShardParameters;
 
 /// The ShardIdentity contains enough information to map a [`Key`] to a [`ShardNumber`],
 /// and to check whether that [`ShardNumber`] is the same as the current shard.
@@ -337,7 +338,8 @@ pub fn describe(
 mod tests {
     use std::str::FromStr;
 
-    use utils::{Hex, id::TenantId};
+    use utils::Hex;
+    use utils::id::TenantId;
 
     use super::*;
 

@@ -10,11 +10,6 @@
 //!
 //! DeletionLists are passed onwards to the Validator.
 
-use super::DeletionHeader;
-use super::DeletionList;
-use super::FlushOp;
-use super::ValidatorQueueMessage;
-
 use std::collections::HashMap;
 use std::fs::create_dir_all;
 use std::time::Duration;
@@ -23,20 +18,17 @@ use pageserver_api::shard::TenantShardId;
 use regex::Regex;
 use remote_storage::RemotePath;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
-use tracing::info;
-use tracing::warn;
+use tracing::{debug, info, warn};
 use utils::generation::Generation;
 use utils::id::TimelineId;
 
+use super::{DeletionHeader, DeletionList, FlushOp, ValidatorQueueMessage};
 use crate::config::PageServerConf;
 use crate::deletion_queue::TEMP_SUFFIX;
 use crate::metrics;
-use crate::tenant::remote_timeline_client::LayerFileMetadata;
-use crate::tenant::remote_timeline_client::remote_layer_path;
+use crate::tenant::remote_timeline_client::{LayerFileMetadata, remote_layer_path};
 use crate::tenant::storage_layer::LayerName;
-use crate::virtual_file::MaybeFatalIo;
-use crate::virtual_file::on_fatal_io_error;
+use crate::virtual_file::{MaybeFatalIo, on_fatal_io_error};
 
 // The number of keys in a DeletionList before we will proactively persist it
 // (without reaching a flush deadline).  This aims to deliver objects of the order

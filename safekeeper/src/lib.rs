@@ -2,15 +2,16 @@
 
 extern crate hyper0 as hyper;
 
+use std::time::Duration;
+
 use camino::Utf8PathBuf;
 use once_cell::sync::Lazy;
 use remote_storage::RemoteStorageConfig;
-use tokio::runtime::Runtime;
-
-use std::time::Duration;
 use storage_broker::Uri;
-
-use utils::{auth::SwappableJwtAuth, id::NodeId, logging::SecretString};
+use tokio::runtime::Runtime;
+use utils::auth::SwappableJwtAuth;
+use utils::id::NodeId;
+use utils::logging::SecretString;
 
 mod auth;
 pub mod broker;
@@ -48,6 +49,7 @@ pub mod test_utils;
 
 mod timelines_global_map;
 use std::sync::Arc;
+
 pub use timelines_global_map::GlobalTimelines;
 use utils::auth::JwtAuth;
 

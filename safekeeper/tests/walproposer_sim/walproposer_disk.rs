@@ -1,4 +1,5 @@
-use std::{ffi::CStr, sync::Arc};
+use std::ffi::CStr;
+use std::sync::Arc;
 
 use parking_lot::{Mutex, MutexGuard};
 use postgres_ffi::v16::wal_generator::{LogicalMessageGenerator, WalGenerator};

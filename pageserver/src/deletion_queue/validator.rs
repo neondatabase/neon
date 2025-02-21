@@ -20,22 +20,14 @@ use std::time::Duration;
 
 use camino::Utf8PathBuf;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
-use tracing::info;
-use tracing::warn;
+use tracing::{debug, info, warn};
 
+use super::deleter::DeleterMessage;
+use super::{DeletionHeader, DeletionList, DeletionQueueError, FlushOp, VisibleLsnUpdates};
 use crate::config::PageServerConf;
-use crate::controller_upcall_client::ControlPlaneGenerationsApi;
-use crate::controller_upcall_client::RetryForeverError;
+use crate::controller_upcall_client::{ControlPlaneGenerationsApi, RetryForeverError};
 use crate::metrics;
 use crate::virtual_file::MaybeFatalIo;
-
-use super::DeletionHeader;
-use super::DeletionList;
-use super::DeletionQueueError;
-use super::FlushOp;
-use super::VisibleLsnUpdates;
-use super::deleter::DeleterMessage;
 
 // After this length of time, do any validation work that is pending,
 // even if we haven't accumulated many keys to delete.

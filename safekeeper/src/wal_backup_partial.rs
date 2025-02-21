@@ -24,19 +24,19 @@ use postgres_ffi::{PG_TLI, XLogFileName, XLogSegNo};
 use remote_storage::RemotePath;
 use safekeeper_api::Term;
 use serde::{Deserialize, Serialize};
-
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
-use utils::{id::NodeId, lsn::Lsn};
+use utils::id::NodeId;
+use utils::lsn::Lsn;
 
-use crate::{
-    SafeKeeperConf,
-    metrics::{MISC_OPERATION_SECONDS, PARTIAL_BACKUP_UPLOADED_BYTES, PARTIAL_BACKUP_UPLOADS},
-    rate_limit::{RateLimiter, rand_duration},
-    timeline::WalResidentTimeline,
-    timeline_manager::StateSnapshot,
-    wal_backup::{self},
+use crate::SafeKeeperConf;
+use crate::metrics::{
+    MISC_OPERATION_SECONDS, PARTIAL_BACKUP_UPLOADED_BYTES, PARTIAL_BACKUP_UPLOADS,
 };
+use crate::rate_limit::{RateLimiter, rand_duration};
+use crate::timeline::WalResidentTimeline;
+use crate::timeline_manager::StateSnapshot;
+use crate::wal_backup::{self};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum UploadStatus {

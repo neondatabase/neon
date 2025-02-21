@@ -1,9 +1,7 @@
 use core::slice;
-use std::{
-    alloc::{self, Layout},
-    cmp,
-    mem::ManuallyDrop,
-};
+use std::alloc::{self, Layout};
+use std::cmp;
+use std::mem::ManuallyDrop;
 
 use super::alignment::{Alignment, ConstAlign};
 

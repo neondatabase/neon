@@ -11,13 +11,26 @@ use std::time::SystemTime;
 use anyhow::{Context, anyhow};
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::shard::TenantShardId;
+use remote_storage::{
+    DownloadError, DownloadKind, DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath,
+};
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
-use utils::backoff;
+use utils::crashsafe::path_with_suffix_extension;
+use utils::id::{TenantId, TimelineId};
+use utils::{backoff, pausable_failpoint};
 
+use super::index::{IndexPart, LayerFileMetadata};
+use super::manifest::TenantManifest;
+use super::{
+    FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES, INITDB_PATH, parse_remote_index_path,
+    parse_remote_tenant_manifest_path, remote_index_path, remote_initdb_archive_path,
+    remote_initdb_preserved_archive_path, remote_tenant_manifest_path,
+    remote_tenant_manifest_prefix, remote_tenant_path,
+};
 use crate::TEMP_FILE_SUFFIX;
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
@@ -28,21 +41,6 @@ use crate::tenant::Generation;
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::LayerName;
 use crate::virtual_file::{MaybeFatalIo, VirtualFile, on_fatal_io_error};
-use remote_storage::{
-    DownloadError, DownloadKind, DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath,
-};
-use utils::crashsafe::path_with_suffix_extension;
-use utils::id::{TenantId, TimelineId};
-use utils::pausable_failpoint;
-
-use super::index::{IndexPart, LayerFileMetadata};
-use super::manifest::TenantManifest;
-use super::{
-    FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES, INITDB_PATH, parse_remote_index_path,
-    parse_remote_tenant_manifest_path, remote_index_path, remote_initdb_archive_path,
-    remote_initdb_preserved_archive_path, remote_tenant_manifest_path,
-    remote_tenant_manifest_prefix, remote_tenant_path,
-};
 
 ///
 /// If 'metadata' is given, we will validate that the downloaded file's size matches that
@@ -207,9 +205,9 @@ async fn download_object(
         }
         #[cfg(target_os = "linux")]
         crate::virtual_file::io_engine::IoEngine::TokioEpollUring => {
-            use crate::virtual_file::IoBufferMut;
-            use crate::virtual_file::owned_buffers_io;
             use std::sync::Arc;
+
+            use crate::virtual_file::{IoBufferMut, owned_buffers_io};
             async {
                 let destination_file = Arc::new(
                     VirtualFile::create(dst_path, ctx)

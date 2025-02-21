@@ -3,11 +3,9 @@
 //! Garbage means S3 objects which are either not referenced by any metadata,
 //! or are referenced by a control plane tenant/timeline in a deleted state.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-    time::Duration,
-};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use futures_util::TryStreamExt;
@@ -16,13 +14,14 @@ use remote_storage::{GenericRemoteStorage, ListingMode, ListingObject, RemotePat
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
-use utils::{backoff, id::TenantId};
+use utils::backoff;
+use utils::id::TenantId;
 
+use crate::cloud_admin_api::{CloudAdminApiClient, MaybeDeleted, ProjectData};
+use crate::metadata_stream::{stream_tenant_timelines, stream_tenants_maybe_prefix};
 use crate::{
     BucketConfig, ConsoleConfig, MAX_RETRIES, NodeKind, TenantShardTimelineId, TraversingDepth,
-    cloud_admin_api::{CloudAdminApiClient, MaybeDeleted, ProjectData},
     init_remote, list_objects_with_retries,
-    metadata_stream::{stream_tenant_timelines, stream_tenants_maybe_prefix},
 };
 
 #[derive(Serialize, Deserialize, Debug)]

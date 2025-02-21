@@ -5,10 +5,9 @@ use pageserver::tenant::storage_layer::LayerName;
 use remote_storage::ListingMode;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    BucketConfig, NodeKind, checks::parse_layer_object_name, init_remote,
-    metadata_stream::stream_tenants, stream_objects_with_retries,
-};
+use crate::checks::parse_layer_object_name;
+use crate::metadata_stream::stream_tenants;
+use crate::{BucketConfig, NodeKind, init_remote, stream_objects_with_retries};
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 enum LargeObjectKind {

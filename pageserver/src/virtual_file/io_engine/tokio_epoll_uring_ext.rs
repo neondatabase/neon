@@ -8,15 +8,13 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+use tokio_epoll_uring::{System, SystemHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, info_span, warn};
 use utils::backoff::{DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS};
 
-use tokio_epoll_uring::{System, SystemHandle};
-
-use crate::virtual_file::on_fatal_io_error;
-
 use crate::metrics::tokio_epoll_uring::{self as metrics, THREAD_LOCAL_METRICS_STORAGE};
+use crate::virtual_file::on_fatal_io_error;
 
 #[derive(Clone)]
 struct ThreadLocalState(Arc<ThreadLocalStateInner>);

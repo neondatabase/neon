@@ -1,9 +1,7 @@
-use std::{
-    future::Future,
-    pin::Pin,
-    task::{Context, Poll},
-    time::Duration,
-};
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::Stream;
@@ -114,9 +112,10 @@ pub(crate) fn cancel_or_timeout(
 
 #[cfg(test)]
 mod tests {
+    use futures::stream::StreamExt;
+
     use super::*;
     use crate::DownloadError;
-    use futures::stream::StreamExt;
 
     #[tokio::test(start_paused = true)]
     async fn cancelled_download_stream() {

@@ -8,11 +8,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
+use pageserver_api::config::tenant_conf_defaults::DEFAULT_COMPACTION_PERIOD;
 use rand::Rng;
 use scopeguard::defer;
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::backoff::exponential_backoff_duration;
+use utils::completion::Barrier;
+use utils::pausable_failpoint;
 
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::{self, BackgroundLoopSemaphoreMetricsRecorder, TENANT_TASK_EVENTS};
@@ -21,10 +25,6 @@ use crate::tenant::throttle::Stats;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::compaction::CompactionOutcome;
 use crate::tenant::{Tenant, TenantState};
-use pageserver_api::config::tenant_conf_defaults::DEFAULT_COMPACTION_PERIOD;
-use utils::backoff::exponential_backoff_duration;
-use utils::completion::Barrier;
-use utils::pausable_failpoint;
 
 /// Semaphore limiting concurrent background tasks (across all tenants).
 ///
@@ -287,10 +287,11 @@ fn log_compaction_error(
     sleep_duration: Duration,
     task_cancelled: bool,
 ) {
+    use CompactionError::*;
+
     use crate::pgdatadir_mapping::CollectKeySpaceError;
     use crate::tenant::PageReconstructError;
     use crate::tenant::upload_queue::NotInitialized;
-    use CompactionError::*;
 
     let level = match err {
         ShuttingDown => return,

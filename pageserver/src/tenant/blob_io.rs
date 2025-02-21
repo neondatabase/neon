@@ -14,6 +14,9 @@
 //! len <  128: 0XXXXXXX
 //! len >= 128: 1CCCXXXX XXXXXXXX XXXXXXXX XXXXXXXX
 //!
+use std::cmp::min;
+use std::io::{Error, ErrorKind};
+
 use async_compression::Level;
 use bytes::{BufMut, BytesMut};
 use pageserver_api::models::ImageCompressionAlgorithm;
@@ -26,8 +29,6 @@ use crate::page_cache::PAGE_SZ;
 use crate::tenant::block_io::BlockCursor;
 use crate::virtual_file::VirtualFile;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
-use std::cmp::min;
-use std::io::{Error, ErrorKind};
 
 #[derive(Copy, Clone, Debug)]
 pub struct CompressionInfo {
@@ -414,11 +415,14 @@ impl BlobWriter<false> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::*;
-    use crate::{context::DownloadBehavior, task_mgr::TaskKind, tenant::block_io::BlockReaderRef};
     use camino::Utf8PathBuf;
     use camino_tempfile::Utf8TempDir;
     use rand::{Rng, SeedableRng};
+
+    use super::*;
+    use crate::context::DownloadBehavior;
+    use crate::task_mgr::TaskKind;
+    use crate::tenant::block_io::BlockReaderRef;
 
     async fn round_trip_test<const BUFFERED: bool>(blobs: &[Vec<u8>]) -> Result<(), Error> {
         round_trip_test_compressed::<BUFFERED>(blobs, false).await

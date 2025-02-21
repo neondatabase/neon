@@ -10,6 +10,13 @@
 //!
 //! Only safekeeper message is supported, but it is not hard to add something
 //! else with generics.
+use std::collections::HashMap;
+use std::convert::Infallible;
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+
 use clap::{Parser, command};
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -19,25 +26,8 @@ use hyper::header::CONTENT_TYPE;
 use hyper::service::service_fn;
 use hyper::{Method, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use parking_lot::RwLock;
-use std::collections::HashMap;
-use std::convert::Infallible;
-use std::net::SocketAddr;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::net::TcpListener;
-use tokio::sync::broadcast;
-use tokio::sync::broadcast::error::RecvError;
-use tokio::time;
-use tonic::Code;
-use tonic::body::{self, BoxBody, empty_body};
-use tonic::codegen::Service;
-use tonic::{Request, Response, Status};
-use tracing::*;
-use utils::signals::ShutdownSignals;
-
 use metrics::{Encoder, TextEncoder};
+use parking_lot::RwLock;
 use storage_broker::metrics::{
     BROADCAST_DROPPED_MESSAGES_TOTAL, BROADCASTED_MESSAGES_TOTAL, NUM_PUBS, NUM_SUBS_ALL,
     NUM_SUBS_TIMELINE, PROCESSED_MESSAGES_TOTAL, PUBLISHED_ONEOFF_MESSAGES_TOTAL,
@@ -49,9 +39,18 @@ use storage_broker::proto::{
     SafekeeperTimelineInfo, SubscribeByFilterRequest, SubscribeSafekeeperInfoRequest, TypedMessage,
 };
 use storage_broker::{DEFAULT_KEEPALIVE_INTERVAL, DEFAULT_LISTEN_ADDR, parse_proto_ttid};
+use tokio::net::TcpListener;
+use tokio::sync::broadcast;
+use tokio::sync::broadcast::error::RecvError;
+use tokio::time;
+use tonic::body::{self, BoxBody, empty_body};
+use tonic::codegen::Service;
+use tonic::{Code, Request, Response, Status};
+use tracing::*;
 use utils::id::TenantTimelineId;
 use utils::logging::{self, LogFormat};
 use utils::sentry_init::init_sentry;
+use utils::signals::ShutdownSignals;
 use utils::{project_build_tag, project_git_version};
 
 project_git_version!(GIT_VERSION);
@@ -743,10 +742,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
     use tokio::sync::broadcast::error::TryRecvError;
     use utils::id::{TenantId, TimelineId};
+
+    use super::*;
 
     fn msg(timeline_id: Vec<u8>) -> Message {
         Message::SafekeeperTimelineInfo(SafekeeperTimelineInfo {

@@ -7,23 +7,19 @@
 use anyhow::Context;
 use camino::Utf8PathBuf;
 use remote_storage::RemotePath;
-use tokio::{
-    fs::File,
-    io::{AsyncRead, AsyncWriteExt},
-};
+use tokio::fs::File;
+use tokio::io::{AsyncRead, AsyncWriteExt};
 use tracing::{debug, info, instrument, warn};
 use utils::crashsafe::durable_rename;
 
-use crate::{
-    metrics::{
-        EVICTION_EVENTS_COMPLETED, EVICTION_EVENTS_STARTED, EvictionEvent, NUM_EVICTED_TIMELINES,
-    },
-    rate_limit::rand_duration,
-    timeline_manager::{Manager, StateSnapshot},
-    wal_backup,
-    wal_backup_partial::{self, PartialRemoteSegment},
-    wal_storage::wal_file_paths,
+use crate::metrics::{
+    EVICTION_EVENTS_COMPLETED, EVICTION_EVENTS_STARTED, EvictionEvent, NUM_EVICTED_TIMELINES,
 };
+use crate::rate_limit::rand_duration;
+use crate::timeline_manager::{Manager, StateSnapshot};
+use crate::wal_backup;
+use crate::wal_backup_partial::{self, PartialRemoteSegment};
+use crate::wal_storage::wal_file_paths;
 
 impl Manager {
     /// Returns true if the timeline is ready for eviction.

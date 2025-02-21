@@ -27,7 +27,38 @@
 //! "values" part.  The actual page images and WAL records are stored in the
 //! "values" part.
 //!
-use crate::TEMP_FILE_SUFFIX;
+use std::collections::{HashMap, VecDeque};
+use std::fs::File;
+use std::io::SeekFrom;
+use std::ops::Range;
+use std::os::unix::fs::FileExt;
+use std::str::FromStr;
+use std::sync::Arc;
+
+use anyhow::{Context, Result, bail, ensure};
+use camino::{Utf8Path, Utf8PathBuf};
+use futures::StreamExt;
+use itertools::Itertools;
+use pageserver_api::config::MaxVectoredReadBytes;
+use pageserver_api::key::{DBDIR_KEY, KEY_SIZE, Key};
+use pageserver_api::keyspace::KeySpace;
+use pageserver_api::models::ImageCompressionAlgorithm;
+use pageserver_api::shard::TenantShardId;
+use pageserver_api::value::Value;
+use rand::Rng;
+use rand::distributions::Alphanumeric;
+use serde::{Deserialize, Serialize};
+use tokio::sync::OnceCell;
+use tokio_epoll_uring::IoBuf;
+use tracing::*;
+use utils::bin_ser::BeSer;
+use utils::id::{TenantId, TimelineId};
+use utils::lsn::Lsn;
+
+use super::{
+    AsLayerDesc, LayerName, OnDiskValue, OnDiskValueIo, PersistentLayerDesc, ResidentLayer,
+    ValuesReconstructState,
+};
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::page_cache::{self, FileId, PAGE_SZ};
@@ -42,43 +73,9 @@ use crate::tenant::vectored_blob_io::{
     BlobFlag, BufView, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadPlanner,
 };
-use crate::virtual_file::IoBufferMut;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
-use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
-use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
-use anyhow::{Context, Result, bail, ensure};
-use camino::{Utf8Path, Utf8PathBuf};
-use futures::StreamExt;
-use itertools::Itertools;
-use pageserver_api::config::MaxVectoredReadBytes;
-use pageserver_api::key::{DBDIR_KEY, KEY_SIZE, Key};
-use pageserver_api::keyspace::KeySpace;
-use pageserver_api::models::ImageCompressionAlgorithm;
-use pageserver_api::shard::TenantShardId;
-use pageserver_api::value::Value;
-use rand::{Rng, distributions::Alphanumeric};
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
-use std::fs::File;
-use std::io::SeekFrom;
-use std::ops::Range;
-use std::os::unix::fs::FileExt;
-use std::str::FromStr;
-use std::sync::Arc;
-use tokio::sync::OnceCell;
-use tokio_epoll_uring::IoBuf;
-use tracing::*;
-
-use utils::{
-    bin_ser::BeSer,
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
-
-use super::{
-    AsLayerDesc, LayerName, OnDiskValue, OnDiskValueIo, PersistentLayerDesc, ResidentLayer,
-    ValuesReconstructState,
-};
+use crate::virtual_file::{self, IoBufferMut, MaybeFatalIo, VirtualFile};
+use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 
 ///
 /// Header stored in the beginning of the file
@@ -1130,10 +1127,11 @@ impl DeltaLayerInner {
         until: Lsn,
         ctx: &RequestContext,
     ) -> anyhow::Result<usize> {
+        use futures::stream::TryStreamExt;
+
         use crate::tenant::vectored_blob_io::{
             BlobMeta, ChunkedVectoredReadBuilder, VectoredReadExtended,
         };
-        use futures::stream::TryStreamExt;
 
         #[derive(Debug)]
         enum Item {
@@ -1599,23 +1597,21 @@ impl DeltaLayerIterator<'_> {
 pub(crate) mod test {
     use std::collections::BTreeMap;
 
+    use bytes::Bytes;
     use itertools::MinMaxResult;
+    use pageserver_api::value::Value;
     use rand::RngCore;
     use rand::prelude::{SeedableRng, SliceRandom, StdRng};
 
     use super::*;
-    use crate::tenant::harness::TIMELINE_ID;
+    use crate::DEFAULT_PG_VERSION;
+    use crate::context::DownloadBehavior;
+    use crate::task_mgr::TaskKind;
+    use crate::tenant::disk_btree::tests::TestDisk;
+    use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
     use crate::tenant::storage_layer::{Layer, ResidentLayer};
     use crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner;
     use crate::tenant::{Tenant, Timeline};
-    use crate::{
-        DEFAULT_PG_VERSION,
-        context::DownloadBehavior,
-        task_mgr::TaskKind,
-        tenant::{disk_btree::tests::TestDisk, harness::TenantHarness},
-    };
-    use bytes::Bytes;
-    use pageserver_api::value::Value;
 
     /// Construct an index for a fictional delta layer and and then
     /// traverse in order to plan vectored reads for a query. Finally,

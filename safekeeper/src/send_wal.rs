@@ -1,6 +1,34 @@
 //! This module implements the streaming side of replication protocol, starting
 //! with the "START_REPLICATION" message, and registry of walsenders.
 
+use std::cmp::{max, min};
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{Context as AnyhowContext, bail};
+use bytes::Bytes;
+use futures::FutureExt;
+use itertools::Itertools;
+use parking_lot::Mutex;
+use postgres_backend::{CopyStreamHandlerEnd, PostgresBackend, PostgresBackendReader, QueryError};
+use postgres_ffi::{MAX_SEND_SIZE, TimestampTz, get_current_timestamp};
+use pq_proto::{BeMessage, WalSndKeepAlive, XLogDataBody};
+use safekeeper_api::Term;
+use safekeeper_api::models::{
+    HotStandbyFeedback, INVALID_FULL_TRANSACTION_ID, ReplicationFeedback, StandbyFeedback,
+    StandbyReply,
+};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::watch::Receiver;
+use tokio::time::timeout;
+use tracing::*;
+use utils::bin_ser::BeSer;
+use utils::failpoint_support;
+use utils::lsn::Lsn;
+use utils::pageserver_feedback::PageserverFeedback;
+use utils::postgres_client::PostgresClientProtocol;
+
 use crate::handler::SafekeeperPostgresHandler;
 use crate::metrics::{RECEIVED_PS_FEEDBACKS, WAL_READERS};
 use crate::receive_wal::WalReceivers;
@@ -11,34 +39,6 @@ use crate::send_interpreted_wal::{
 use crate::timeline::WalResidentTimeline;
 use crate::wal_reader_stream::StreamingWalReader;
 use crate::wal_storage::WalReader;
-use anyhow::{Context as AnyhowContext, bail};
-use bytes::Bytes;
-use futures::FutureExt;
-use parking_lot::Mutex;
-use postgres_backend::PostgresBackend;
-use postgres_backend::{CopyStreamHandlerEnd, PostgresBackendReader, QueryError};
-use postgres_ffi::get_current_timestamp;
-use postgres_ffi::{MAX_SEND_SIZE, TimestampTz};
-use pq_proto::{BeMessage, WalSndKeepAlive, XLogDataBody};
-use safekeeper_api::Term;
-use safekeeper_api::models::{
-    HotStandbyFeedback, INVALID_FULL_TRANSACTION_ID, ReplicationFeedback, StandbyFeedback,
-    StandbyReply,
-};
-use tokio::io::{AsyncRead, AsyncWrite};
-use utils::failpoint_support;
-use utils::pageserver_feedback::PageserverFeedback;
-use utils::postgres_client::PostgresClientProtocol;
-
-use itertools::Itertools;
-use std::cmp::{max, min};
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::watch::Receiver;
-use tokio::time::timeout;
-use tracing::*;
-use utils::{bin_ser::BeSer, lsn::Lsn};
 
 // See: https://www.postgresql.org/docs/13/protocol-replication.html
 const HOT_STANDBY_FEEDBACK_TAG_BYTE: u8 = b'h';

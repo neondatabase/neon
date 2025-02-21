@@ -1,23 +1,24 @@
-use std::{cell::Cell, str::FromStr, sync::Arc};
+use std::cell::Cell;
+use std::str::FromStr;
+use std::sync::Arc;
 
-use crate::walproposer_sim::{safekeeper::run_server, walproposer_api::SimulationApi};
-use desim::{
-    executor::{self, ExternalHandle},
-    node_os::NodeOs,
-    options::{Delay, NetworkOptions},
-    proto::{AnyMessage, NodeEvent},
-    world::Node,
-    world::World,
-};
+use desim::executor::{self, ExternalHandle};
+use desim::node_os::NodeOs;
+use desim::options::{Delay, NetworkOptions};
+use desim::proto::{AnyMessage, NodeEvent};
+use desim::world::{Node, World};
 use rand::{Rng, SeedableRng};
 use tracing::{debug, info_span, warn};
-use utils::{id::TenantTimelineId, lsn::Lsn};
+use utils::id::TenantTimelineId;
+use utils::lsn::Lsn;
 use walproposer::walproposer::{Config, Wrapper};
 
-use super::{
-    log::SimClock, safekeeper_disk::SafekeeperDisk, walproposer_api,
-    walproposer_disk::DiskWalProposer,
-};
+use super::log::SimClock;
+use super::safekeeper_disk::SafekeeperDisk;
+use super::walproposer_api;
+use super::walproposer_disk::DiskWalProposer;
+use crate::walproposer_sim::safekeeper::run_server;
+use crate::walproposer_sim::walproposer_api::SimulationApi;
 
 /// Simulated safekeeper node.
 pub struct SafekeeperNode {

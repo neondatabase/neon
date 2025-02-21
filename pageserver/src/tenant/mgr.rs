@@ -1,34 +1,42 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
-use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
-use futures::StreamExt;
-use itertools::Itertools;
-use pageserver_api::key::Key;
-use pageserver_api::models::LocationConfigMode;
-use pageserver_api::shard::{
-    ShardCount, ShardIdentity, ShardIndex, ShardNumber, ShardStripeSize, TenantShardId,
-};
-use pageserver_api::upcall_api::ReAttachResponseTenant;
-use rand::{Rng, distributions::Alphanumeric};
-use remote_storage::TimeoutOrCancel;
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
-use sysinfo::SystemExt;
-use tokio::fs;
 
 use anyhow::Context;
+use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
+use futures::StreamExt;
+use itertools::Itertools;
 use once_cell::sync::Lazy;
+use pageserver_api::key::Key;
+use pageserver_api::models::LocationConfigMode;
+use pageserver_api::shard::{
+    ShardCount, ShardIdentity, ShardIndex, ShardNumber, ShardStripeSize, TenantShardId,
+};
+use pageserver_api::upcall_api::ReAttachResponseTenant;
+use rand::Rng;
+use rand::distributions::Alphanumeric;
+use remote_storage::TimeoutOrCancel;
+use sysinfo::SystemExt;
+use tokio::fs;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-
+use utils::crashsafe::path_with_suffix_extension;
+use utils::fs_ext::PathExt;
+use utils::generation::Generation;
+use utils::id::{TenantId, TimelineId};
 use utils::{backoff, completion, crashsafe};
 
+use super::remote_timeline_client::remote_tenant_path;
+use super::secondary::SecondaryTenant;
+use super::timeline::detach_ancestor::{self, PreparedTimelineDetach};
+use super::{GlobalShutDown, TenantSharedResources};
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::controller_upcall_client::{
@@ -47,16 +55,6 @@ use crate::tenant::timeline::ShutdownMode;
 use crate::tenant::{AttachedTenantConf, GcError, LoadConfigError, SpawnMode, Tenant, TenantState};
 use crate::virtual_file::MaybeFatalIo;
 use crate::{InitializationOrder, TEMP_FILE_SUFFIX};
-
-use utils::crashsafe::path_with_suffix_extension;
-use utils::fs_ext::PathExt;
-use utils::generation::Generation;
-use utils::id::{TenantId, TimelineId};
-
-use super::remote_timeline_client::remote_tenant_path;
-use super::secondary::SecondaryTenant;
-use super::timeline::detach_ancestor::{self, PreparedTimelineDetach};
-use super::{GlobalShutDown, TenantSharedResources};
 
 /// For a tenant that appears in TenantsMap, it may either be
 /// - `Attached`: has a full Tenant object, is elegible to service
@@ -2822,20 +2820,21 @@ where
     }
 }
 
-use {
-    crate::tenant::gc_result::GcResult, http_utils::error::ApiError,
-    pageserver_api::models::TimelineGcRequest,
-};
+use http_utils::error::ApiError;
+use pageserver_api::models::TimelineGcRequest;
+
+use crate::tenant::gc_result::GcResult;
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
+
     use tracing::Instrument;
 
+    use super::super::harness::TenantHarness;
+    use super::TenantsMap;
     use crate::tenant::mgr::TenantSlot;
-
-    use super::{super::harness::TenantHarness, TenantsMap};
 
     #[tokio::test(start_paused = true)]
     async fn shutdown_awaits_in_progress_tenant() {

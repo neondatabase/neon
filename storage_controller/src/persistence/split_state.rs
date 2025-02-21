@@ -1,8 +1,8 @@
+use diesel::deserialize::{FromSql, FromSqlRow};
+use diesel::expression::AsExpression;
 use diesel::pg::{Pg, PgValue};
-use diesel::{
-    deserialize::FromSql, deserialize::FromSqlRow, expression::AsExpression, serialize::ToSql,
-    sql_types::Int2,
-};
+use diesel::serialize::ToSql;
+use diesel::sql_types::Int2;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, FromSqlRow, AsExpression)]

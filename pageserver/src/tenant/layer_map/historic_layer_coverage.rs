@@ -3,9 +3,8 @@ use std::ops::Range;
 
 use tracing::info;
 
-use crate::tenant::storage_layer::PersistentLayerDesc;
-
 use super::layer_coverage::LayerCoverageTuple;
+use crate::tenant::storage_layer::PersistentLayerDesc;
 
 /// Layers in this module are identified and indexed by this data.
 ///

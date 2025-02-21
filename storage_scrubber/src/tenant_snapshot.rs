@@ -1,12 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::checks::{BlobDataParseResult, RemoteTimelineBlobData, list_timeline_blobs};
-use crate::metadata_stream::{stream_tenant_shards, stream_tenant_timelines};
-use crate::{
-    BucketConfig, NodeKind, RootTarget, TenantShardTimelineId, download_object_to_file_s3,
-    init_remote, init_remote_s3,
-};
 use anyhow::Context;
 use async_stream::stream;
 use aws_sdk_s3::Client;
@@ -19,6 +13,13 @@ use pageserver_api::shard::TenantShardId;
 use remote_storage::{GenericRemoteStorage, S3Config};
 use utils::generation::Generation;
 use utils::id::TenantId;
+
+use crate::checks::{BlobDataParseResult, RemoteTimelineBlobData, list_timeline_blobs};
+use crate::metadata_stream::{stream_tenant_shards, stream_tenant_timelines};
+use crate::{
+    BucketConfig, NodeKind, RootTarget, TenantShardTimelineId, download_object_to_file_s3,
+    init_remote, init_remote_s3,
+};
 
 pub struct SnapshotDownloader {
     s3_client: Arc<Client>,

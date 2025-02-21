@@ -6,9 +6,9 @@
 use serde::{Deserialize, Serialize};
 use utils::id::NodeId;
 
-use crate::{
-    controller_api::NodeRegisterRequest, models::LocationConfigMode, shard::TenantShardId,
-};
+use crate::controller_api::NodeRegisterRequest;
+use crate::models::LocationConfigMode;
+use crate::shard::TenantShardId;
 
 /// Upcall message sent by the pageserver to the configured `control_plane_api` on
 /// startup.

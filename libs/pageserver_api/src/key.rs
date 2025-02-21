@@ -1,11 +1,12 @@
+use std::fmt;
+use std::ops::Range;
+
 use anyhow::{Result, bail};
 use byteorder::{BE, ByteOrder};
 use bytes::Bytes;
-use postgres_ffi::Oid;
-use postgres_ffi::RepOriginId;
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
+use postgres_ffi::{Oid, RepOriginId};
 use serde::{Deserialize, Serialize};
-use std::{fmt, ops::Range};
 use utils::const_assert;
 
 use crate::reltag::{BlockNumber, RelTag, SlruKind};
@@ -954,13 +955,10 @@ impl std::str::FromStr for Key {
 mod tests {
     use std::str::FromStr;
 
-    use crate::key::Key;
-    use crate::key::is_metadata_key_slice;
-
-    use rand::Rng;
-    use rand::SeedableRng;
+    use rand::{Rng, SeedableRng};
 
     use super::AUX_KEY_PREFIX;
+    use crate::key::{Key, is_metadata_key_slice};
 
     #[test]
     fn display_fromstr_bijection() {

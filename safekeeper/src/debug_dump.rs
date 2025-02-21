@@ -2,37 +2,25 @@
 
 use std::fs;
 use std::fs::DirEntry;
-use std::io::BufReader;
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
-use anyhow::bail;
-use camino::Utf8Path;
-use camino::Utf8PathBuf;
+use anyhow::{Result, bail};
+use camino::{Utf8Path, Utf8PathBuf};
 use chrono::{DateTime, Utc};
-use postgres_ffi::MAX_SEND_SIZE;
-use postgres_ffi::XLogSegNo;
-use safekeeper_api::models::WalSenderState;
-use serde::Deserialize;
-use serde::Serialize;
-
 use postgres_ffi::v14::xlog_utils::{IsPartialXLogFileName, IsXLogFileName};
+use postgres_ffi::{MAX_SEND_SIZE, XLogSegNo};
+use safekeeper_api::models::WalSenderState;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use utils::id::NodeId;
-use utils::id::TenantTimelineId;
-use utils::id::{TenantId, TimelineId};
+use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
 
-use crate::GlobalTimelines;
-use crate::SafeKeeperConf;
 use crate::safekeeper::TermHistory;
-use crate::state::TimelineMemState;
-use crate::state::TimelinePersistentState;
-use crate::timeline::WalResidentTimeline;
-use crate::timeline::get_timeline_dir;
-use crate::timeline_manager;
+use crate::state::{TimelineMemState, TimelinePersistentState};
+use crate::timeline::{WalResidentTimeline, get_timeline_dir};
+use crate::{GlobalTimelines, SafeKeeperConf, timeline_manager};
 
 /// Various filters that influence the resulting JSON output.
 #[derive(Debug, Serialize, Deserialize, Clone)]

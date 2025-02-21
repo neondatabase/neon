@@ -10,33 +10,31 @@
 //! This module is responsible for creation of such tarball
 //! from data stored in object storage.
 //!
+use std::fmt::Write as FmtWrite;
+use std::time::{Instant, SystemTime};
+
 use anyhow::{Context, anyhow};
 use bytes::{BufMut, Bytes, BytesMut};
 use fail::fail_point;
 use pageserver_api::key::{Key, rel_block_to_key};
-use postgres_ffi::pg_constants;
-use std::fmt::Write as FmtWrite;
-use std::time::{Instant, SystemTime};
+use pageserver_api::reltag::{RelTag, SlruKind};
+use postgres_ffi::pg_constants::{
+    DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID, PG_HBA, PGDATA_SPECIAL_FILES,
+};
+use postgres_ffi::relfile_utils::{INIT_FORKNUM, MAIN_FORKNUM};
+use postgres_ffi::{
+    BLCKSZ, PG_TLI, RELSEG_SIZE, WAL_SEGMENT_SIZE, XLogFileName, dispatch_pgversion, pg_constants,
+};
 use tokio::io;
 use tokio::io::AsyncWrite;
-use tracing::*;
-
 use tokio_tar::{Builder, EntryType, Header};
+use tracing::*;
+use utils::lsn::Lsn;
 
 use crate::context::RequestContext;
 use crate::pgdatadir_mapping::Version;
 use crate::tenant::Timeline;
 use crate::tenant::storage_layer::IoConcurrency;
-use pageserver_api::reltag::{RelTag, SlruKind};
-
-use postgres_ffi::PG_TLI;
-use postgres_ffi::XLogFileName;
-use postgres_ffi::dispatch_pgversion;
-use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
-use postgres_ffi::pg_constants::{PG_HBA, PGDATA_SPECIAL_FILES};
-use postgres_ffi::relfile_utils::{INIT_FORKNUM, MAIN_FORKNUM};
-use postgres_ffi::{BLCKSZ, RELSEG_SIZE, WAL_SEGMENT_SIZE};
-use utils::lsn::Lsn;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BasebackupError {

@@ -1,4 +1,5 @@
-use std::{num::NonZeroUsize, sync::Arc};
+use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum L0FlushConfig {

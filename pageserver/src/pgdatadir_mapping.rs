@@ -6,6 +6,36 @@
 //! walingest.rs handles a few things like implicit relation creation and extension.
 //! Clarify that)
 //!
+use std::collections::{BTreeMap, HashMap, HashSet, hash_map};
+use std::ops::{ControlFlow, Range};
+
+use anyhow::{Context, ensure};
+use bytes::{Buf, Bytes, BytesMut};
+use enum_map::Enum;
+use itertools::Itertools;
+use pageserver_api::key::{
+    AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, CompactKey, DBDIR_KEY, Key, RelDirExists,
+    TWOPHASEDIR_KEY, dbdir_key_range, rel_block_to_key, rel_dir_to_key, rel_key_range,
+    rel_size_to_key, rel_tag_sparse_key, rel_tag_sparse_key_range, relmap_file_key,
+    repl_origin_key, repl_origin_key_range, slru_block_to_key, slru_dir_to_key,
+    slru_segment_key_range, slru_segment_size_to_key, twophase_file_key, twophase_key_range,
+};
+use pageserver_api::keyspace::SparseKeySpace;
+use pageserver_api::record::NeonWalRecord;
+use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
+use pageserver_api::shard::ShardIdentity;
+use pageserver_api::value::Value;
+use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
+use postgres_ffi::{BLCKSZ, Oid, RepOriginId, TimestampTz, TransactionId};
+use serde::{Deserialize, Serialize};
+use strum::IntoEnumIterator;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, trace, warn};
+use utils::bin_ser::{BeSer, DeserializeError};
+use utils::lsn::Lsn;
+use utils::pausable_failpoint;
+use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
+
 use super::tenant::{PageReconstructError, Timeline};
 use crate::aux_file;
 use crate::context::RequestContext;
@@ -19,37 +49,6 @@ use crate::span::{
 };
 use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::timeline::GetVectoredError;
-use anyhow::{Context, ensure};
-use bytes::{Buf, Bytes, BytesMut};
-use enum_map::Enum;
-use itertools::Itertools;
-use pageserver_api::key::{
-    AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, CompactKey, DBDIR_KEY, RelDirExists,
-    TWOPHASEDIR_KEY, dbdir_key_range, rel_block_to_key, rel_dir_to_key, rel_key_range,
-    rel_size_to_key, rel_tag_sparse_key_range, relmap_file_key, repl_origin_key,
-    repl_origin_key_range, slru_block_to_key, slru_dir_to_key, slru_segment_key_range,
-    slru_segment_size_to_key, twophase_file_key, twophase_key_range,
-};
-use pageserver_api::key::{Key, rel_tag_sparse_key};
-use pageserver_api::keyspace::SparseKeySpace;
-use pageserver_api::record::NeonWalRecord;
-use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
-use pageserver_api::shard::ShardIdentity;
-use pageserver_api::value::Value;
-use postgres_ffi::BLCKSZ;
-use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
-use postgres_ffi::{Oid, RepOriginId, TimestampTz, TransactionId};
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet, hash_map};
-use std::ops::ControlFlow;
-use std::ops::Range;
-use strum::IntoEnumIterator;
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace, warn};
-use utils::bin_ser::DeserializeError;
-use utils::pausable_failpoint;
-use utils::{bin_ser::BeSer, lsn::Lsn};
-use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 
 /// Max delta records appended to the AUX_FILES_KEY (for aux v1). The write path will write a full image once this threshold is reached.
 pub const MAX_AUX_FILE_DELTAS: usize = 1024;
@@ -2668,15 +2667,14 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 #[cfg(test)]
 mod tests {
     use hex_literal::hex;
-    use pageserver_api::{models::ShardParameters, shard::ShardStripeSize};
-    use utils::{
-        id::TimelineId,
-        shard::{ShardCount, ShardNumber},
-    };
+    use pageserver_api::models::ShardParameters;
+    use pageserver_api::shard::ShardStripeSize;
+    use utils::id::TimelineId;
+    use utils::shard::{ShardCount, ShardNumber};
 
     use super::*;
-
-    use crate::{DEFAULT_PG_VERSION, tenant::harness::TenantHarness};
+    use crate::DEFAULT_PG_VERSION;
+    use crate::tenant::harness::TenantHarness;
 
     /// Test a round trip of aux file updates, from DatadirModification to reading back from the Timeline
     #[tokio::test]

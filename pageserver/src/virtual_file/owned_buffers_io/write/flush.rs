@@ -2,12 +2,10 @@ use std::sync::Arc;
 
 use utils::sync::duplex;
 
-use crate::{
-    context::RequestContext,
-    virtual_file::owned_buffers_io::{io_buf_aligned::IoBufAligned, io_buf_ext::FullSlice},
-};
-
 use super::{Buffer, CheapCloneForRead, OwnedAsyncWriter};
+use crate::context::RequestContext;
+use crate::virtual_file::owned_buffers_io::io_buf_aligned::IoBufAligned;
+use crate::virtual_file::owned_buffers_io::io_buf_ext::FullSlice;
 
 /// A handle to the flush task.
 pub struct FlushHandle<Buf, W> {

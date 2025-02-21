@@ -1,6 +1,8 @@
-use crate::pageserver_client::PageserverClient;
-use crate::persistence::Persistence;
-use crate::{compute_hook, service};
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use pageserver_api::controller_api::{AvailabilityZone, MigrationConfig, PlacementPolicy};
 use pageserver_api::models::{
     LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig, TenantWaitLsnRequest,
@@ -8,10 +10,6 @@ use pageserver_api::models::{
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use pageserver_client::mgmt_api;
 use reqwest::StatusCode;
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use utils::backoff::exponential_backoff;
 use utils::generation::Generation;
@@ -22,7 +20,10 @@ use utils::sync::gate::GateGuard;
 
 use crate::compute_hook::{ComputeHook, NotifyError};
 use crate::node::Node;
+use crate::pageserver_client::PageserverClient;
+use crate::persistence::Persistence;
 use crate::tenant_shard::{IntentState, ObservedState, ObservedStateDelta, ObservedStateLocation};
+use crate::{compute_hook, service};
 
 const DEFAULT_HEATMAP_PERIOD: &str = "60s";
 

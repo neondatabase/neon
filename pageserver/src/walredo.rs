@@ -24,25 +24,26 @@ mod process;
 /// Code to apply [`NeonWalRecord`]s.
 pub(crate) mod apply_neon;
 
-use crate::config::PageServerConf;
-use crate::metrics::{
-    WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM,
-    WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_TIME,
-};
+use std::future::Future;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 use pageserver_api::key::Key;
 use pageserver_api::models::{WalRedoManagerProcessStatus, WalRedoManagerStatus};
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::shard::TenantShardId;
-use std::future::Future;
-use std::sync::Arc;
-use std::time::Duration;
-use std::time::Instant;
 use tracing::*;
 use utils::lsn::Lsn;
 use utils::sync::gate::GateError;
 use utils::sync::heavier_once_cell;
+
+use crate::config::PageServerConf;
+use crate::metrics::{
+    WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM,
+    WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_TIME,
+};
 
 /// The real implementation that uses a Postgres process to
 /// perform WAL replay.
@@ -547,15 +548,18 @@ impl PostgresRedoManager {
 
 #[cfg(test)]
 mod tests {
-    use super::PostgresRedoManager;
-    use crate::config::PageServerConf;
+    use std::str::FromStr;
+
     use bytes::Bytes;
     use pageserver_api::key::Key;
     use pageserver_api::record::NeonWalRecord;
     use pageserver_api::shard::TenantShardId;
-    use std::str::FromStr;
     use tracing::Instrument;
-    use utils::{id::TenantId, lsn::Lsn};
+    use utils::id::TenantId;
+    use utils::lsn::Lsn;
+
+    use super::PostgresRedoManager;
+    use crate::config::PageServerConf;
 
     #[tokio::test]
     async fn test_ping() {

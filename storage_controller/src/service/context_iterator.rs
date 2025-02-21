@@ -54,17 +54,16 @@ impl<'a> Iterator for TenantShardContextIterator<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, str::FromStr};
+    use std::collections::BTreeMap;
+    use std::str::FromStr;
 
     use pageserver_api::controller_api::PlacementPolicy;
     use utils::shard::{ShardCount, ShardNumber};
 
-    use crate::{
-        scheduler::test_utils::make_test_nodes, service::Scheduler,
-        tenant_shard::tests::make_test_tenant_with_id,
-    };
-
     use super::*;
+    use crate::scheduler::test_utils::make_test_nodes;
+    use crate::service::Scheduler;
+    use crate::tenant_shard::tests::make_test_tenant_with_id;
 
     #[test]
     fn test_context_iterator() {

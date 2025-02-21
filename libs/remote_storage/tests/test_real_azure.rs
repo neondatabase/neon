@@ -1,9 +1,9 @@
+use std::collections::HashSet;
 use std::env;
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
-use std::{collections::HashSet, time::Duration};
+use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::Context;
 use remote_storage::{

@@ -22,38 +22,34 @@
 //! bespoken Rust code.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::OnceLock;
-use std::time::Duration;
-use std::time::Instant;
-use std::time::SystemTime;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Result, bail};
 use bytes::{Buf, Bytes};
+use pageserver_api::key::rel_block_to_key;
+use pageserver_api::record::NeonWalRecord;
+use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
+use pageserver_api::shard::ShardIdentity;
+use postgres_ffi::relfile_utils::{FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
+use postgres_ffi::walrecord::*;
+use postgres_ffi::{
+    TimestampTz, TransactionId, dispatch_pgversion, enum_pgversion, enum_pgversion_dispatch,
+    fsm_logical_to_physical, pg_constants,
+};
 use tracing::*;
+use utils::bin_ser::SerializeError;
+use utils::lsn::Lsn;
+use utils::rate_limit::RateLimit;
+use utils::{critical, failpoint_support};
+use wal_decoder::models::*;
 
 use crate::ZERO_PAGE;
 use crate::context::RequestContext;
 use crate::metrics::WAL_INGEST;
 use crate::pgdatadir_mapping::{DatadirModification, Version};
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
-use crate::tenant::PageReconstructError;
-use crate::tenant::Timeline;
-use pageserver_api::key::rel_block_to_key;
-use pageserver_api::record::NeonWalRecord;
-use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
-use pageserver_api::shard::ShardIdentity;
-use postgres_ffi::TransactionId;
-use postgres_ffi::fsm_logical_to_physical;
-use postgres_ffi::pg_constants;
-use postgres_ffi::relfile_utils::{FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
-use postgres_ffi::walrecord::*;
-use postgres_ffi::{TimestampTz, dispatch_pgversion, enum_pgversion, enum_pgversion_dispatch};
-use utils::bin_ser::SerializeError;
-use utils::lsn::Lsn;
-use utils::rate_limit::RateLimit;
-use utils::{critical, failpoint_support};
-use wal_decoder::models::*;
+use crate::tenant::{PageReconstructError, Timeline};
 
 enum_pgversion! {CheckPoint, pgv::CheckPoint}
 
@@ -1366,8 +1362,9 @@ impl WalIngest {
             // with zero pages. Logging is rate limited per pg version to
             // avoid skewing.
             if gap_blocks_filled > 0 {
-                use once_cell::sync::Lazy;
                 use std::sync::Mutex;
+
+                use once_cell::sync::Lazy;
                 use utils::rate_limit::RateLimit;
 
                 struct RateLimitPerPgVersion {
@@ -1512,13 +1509,13 @@ async fn get_relsize(
 #[allow(clippy::bool_assert_comparison)]
 #[cfg(test)]
 mod tests {
+    use postgres_ffi::RELSEG_SIZE;
+
     use super::*;
+    use crate::DEFAULT_PG_VERSION;
     use crate::tenant::harness::*;
     use crate::tenant::remote_timeline_client::{INITDB_PATH, remote_initdb_archive_path};
     use crate::tenant::storage_layer::IoConcurrency;
-    use postgres_ffi::RELSEG_SIZE;
-
-    use crate::DEFAULT_PG_VERSION;
 
     /// Arbitrary relation tag, for testing.
     const TESTREL_A: RelTag = RelTag {
@@ -2229,9 +2226,10 @@ mod tests {
     /// without waiting for unrelated steps.
     #[tokio::test]
     async fn test_ingest_real_wal() {
-        use crate::tenant::harness::*;
         use postgres_ffi::WAL_SEGMENT_SIZE;
         use postgres_ffi::waldecoder::WalStreamDecoder;
+
+        use crate::tenant::harness::*;
 
         // Define test data path and constants.
         //

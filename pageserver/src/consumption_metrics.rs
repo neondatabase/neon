@@ -1,13 +1,9 @@
 //! Periodically collect consumption metrics for all active tenants
 //! and push them to a HTTP endpoint.
-use crate::config::PageServerConf;
-use crate::consumption_metrics::metrics::MetricsKey;
-use crate::consumption_metrics::upload::KeyGen as _;
-use crate::context::{DownloadBehavior, RequestContext};
-use crate::task_mgr::{self, BACKGROUND_RUNTIME, TaskKind};
-use crate::tenant::size::CalculateSyntheticSizeError;
-use crate::tenant::tasks::BackgroundLoopKind;
-use crate::tenant::{LogicalSizeCalculationCause, Tenant, mgr::TenantManager};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+
 use camino::Utf8PathBuf;
 use consumption_metrics::EventType;
 use itertools::Itertools as _;
@@ -15,13 +11,20 @@ use pageserver_api::models::TenantState;
 use remote_storage::{GenericRemoteStorage, RemoteStorageConfig};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::id::NodeId;
+
+use crate::config::PageServerConf;
+use crate::consumption_metrics::metrics::MetricsKey;
+use crate::consumption_metrics::upload::KeyGen as _;
+use crate::context::{DownloadBehavior, RequestContext};
+use crate::task_mgr::{self, BACKGROUND_RUNTIME, TaskKind};
+use crate::tenant::mgr::TenantManager;
+use crate::tenant::size::CalculateSyntheticSizeError;
+use crate::tenant::tasks::BackgroundLoopKind;
+use crate::tenant::{LogicalSizeCalculationCause, Tenant};
 
 mod disk_cache;
 mod metrics;

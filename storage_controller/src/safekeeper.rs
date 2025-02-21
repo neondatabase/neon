@@ -1,16 +1,17 @@
-use std::{str::FromStr, time::Duration};
+use std::str::FromStr;
+use std::time::Duration;
 
 use pageserver_api::controller_api::{SafekeeperDescribeResponse, SkSchedulingPolicy};
 use reqwest::StatusCode;
 use safekeeper_client::mgmt_api;
 use tokio_util::sync::CancellationToken;
-use utils::{backoff, id::NodeId, logging::SecretString};
+use utils::backoff;
+use utils::id::NodeId;
+use utils::logging::SecretString;
 
-use crate::{
-    heartbeater::SafekeeperState,
-    persistence::{DatabaseError, SafekeeperPersistence},
-    safekeeper_client::SafekeeperClient,
-};
+use crate::heartbeater::SafekeeperState;
+use crate::persistence::{DatabaseError, SafekeeperPersistence};
+use crate::safekeeper_client::SafekeeperClient;
 
 #[derive(Clone)]
 pub struct Safekeeper {

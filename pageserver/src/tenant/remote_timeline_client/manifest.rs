@@ -1,6 +1,7 @@
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
-use utils::{id::TimelineId, lsn::Lsn};
+use utils::id::TimelineId;
+use utils::lsn::Lsn;
 
 /// Tenant-shard scoped manifest
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]

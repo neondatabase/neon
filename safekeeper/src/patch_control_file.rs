@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::info;
 
-use crate::{state::TimelinePersistentState, timeline::Timeline};
+use crate::state::TimelinePersistentState;
+use crate::timeline::Timeline;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Request {

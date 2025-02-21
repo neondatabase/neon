@@ -6,38 +6,31 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::controller_upcall_client::ControlPlaneGenerationsApi;
-use crate::metrics;
-use crate::tenant::remote_timeline_client::LayerFileMetadata;
-use crate::tenant::remote_timeline_client::remote_timeline_path;
-use crate::virtual_file::MaybeFatalIo;
-use crate::virtual_file::VirtualFile;
 use anyhow::Context;
 use camino::Utf8PathBuf;
+use deleter::DeleterMessage;
+use list_writer::ListWriterQueueMessage;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::{GenericRemoteStorage, RemotePath};
-use serde::Deserialize;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
-use tracing::Instrument;
-use tracing::{debug, error};
+use tracing::{Instrument, debug, error};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::generation::Generation;
 use utils::id::TimelineId;
-use utils::lsn::AtomicLsn;
-use utils::lsn::Lsn;
-
-use self::deleter::Deleter;
-use self::list_writer::DeletionOp;
-use self::list_writer::ListWriter;
-use self::list_writer::RecoverOp;
-use self::validator::Validator;
-use deleter::DeleterMessage;
-use list_writer::ListWriterQueueMessage;
+use utils::lsn::{AtomicLsn, Lsn};
 use validator::ValidatorQueueMessage;
 
-use crate::{config::PageServerConf, tenant::storage_layer::LayerName};
+use self::deleter::Deleter;
+use self::list_writer::{DeletionOp, ListWriter, RecoverOp};
+use self::validator::Validator;
+use crate::config::PageServerConf;
+use crate::controller_upcall_client::ControlPlaneGenerationsApi;
+use crate::metrics;
+use crate::tenant::remote_timeline_client::{LayerFileMetadata, remote_timeline_path};
+use crate::tenant::storage_layer::LayerName;
+use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 
 // TODO: configurable for how long to wait before executing deletions
 
@@ -664,21 +657,22 @@ impl DeletionQueue {
 
 #[cfg(test)]
 mod test {
+    use std::io::ErrorKind;
+    use std::time::Duration;
+
     use camino::Utf8Path;
     use hex_literal::hex;
-    use pageserver_api::{key::Key, shard::ShardIndex, upcall_api::ReAttachResponseTenant};
-    use std::{io::ErrorKind, time::Duration};
-    use tracing::info;
-
+    use pageserver_api::key::Key;
+    use pageserver_api::shard::ShardIndex;
+    use pageserver_api::upcall_api::ReAttachResponseTenant;
     use remote_storage::{RemoteStorageConfig, RemoteStorageKind};
     use tokio::task::JoinHandle;
-
-    use crate::{
-        controller_upcall_client::RetryForeverError,
-        tenant::{harness::TenantHarness, storage_layer::DeltaLayerName},
-    };
+    use tracing::info;
 
     use super::*;
+    use crate::controller_upcall_client::RetryForeverError;
+    use crate::tenant::harness::TenantHarness;
+    use crate::tenant::storage_layer::DeltaLayerName;
     pub const TIMELINE_ID: TimelineId =
         TimelineId::from_array(hex!("11223344556677881122334455667788"));
 
@@ -1098,11 +1092,12 @@ mod test {
 /// or coalescing, and doesn't actually execute any deletions unless you call pump() to kick it.
 #[cfg(test)]
 pub(crate) mod mock {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use tracing::info;
 
     use super::*;
     use crate::tenant::remote_timeline_client::remote_layer_path;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     pub struct ConsumerState {
         rx: tokio::sync::mpsc::UnboundedReceiver<ListWriterQueueMessage>,

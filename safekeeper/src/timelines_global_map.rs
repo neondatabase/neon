@@ -2,13 +2,12 @@
 //! All timelines should always be present in this map, this is done by loading them
 //! all from the disk on startup and keeping them in memory.
 
-use crate::defaults::DEFAULT_EVICTION_CONCURRENCY;
-use crate::rate_limit::RateLimiter;
-use crate::state::TimelinePersistentState;
-use crate::timeline::{Timeline, TimelineError, get_tenant_dir, get_timeline_dir};
-use crate::timelines_set::TimelinesSet;
-use crate::wal_storage::Storage;
-use crate::{SafeKeeperConf, control_file, wal_storage};
+use std::collections::HashMap;
+use std::str::FromStr;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
 use anyhow::{Context, Result, bail};
 use camino::Utf8PathBuf;
 use camino_tempfile::Utf8TempDir;
@@ -16,16 +15,19 @@ use safekeeper_api::ServerInfo;
 use safekeeper_api::membership::Configuration;
 use safekeeper_api::models::SafekeeperUtilization;
 use serde::Serialize;
-use std::collections::HashMap;
-use std::str::FromStr;
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 use tokio::fs;
 use tracing::*;
 use utils::crashsafe::{durable_rename, fsync_async_opt};
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
+
+use crate::defaults::DEFAULT_EVICTION_CONCURRENCY;
+use crate::rate_limit::RateLimiter;
+use crate::state::TimelinePersistentState;
+use crate::timeline::{Timeline, TimelineError, get_tenant_dir, get_timeline_dir};
+use crate::timelines_set::TimelinesSet;
+use crate::wal_storage::Storage;
+use crate::{SafeKeeperConf, control_file, wal_storage};
 
 // Timeline entry in the global map: either a ready timeline, or mark that it is
 // being created.

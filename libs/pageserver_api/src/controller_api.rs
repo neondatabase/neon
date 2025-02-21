@@ -9,11 +9,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use utils::id::{NodeId, TenantId};
 
-use crate::models::PageserverUtilization;
-use crate::{
-    models::{ShardParameters, TenantConfig},
-    shard::{ShardStripeSize, TenantShardId},
-};
+use crate::models::{PageserverUtilization, ShardParameters, TenantConfig};
+use crate::shard::{ShardStripeSize, TenantShardId};
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
@@ -457,8 +454,9 @@ pub struct SafekeeperSchedulingPolicyRequest {
 
 #[cfg(test)]
 mod test {
-    use super::*;
     use serde_json;
+
+    use super::*;
 
     /// Check stability of PlacementPolicy's serialization
     #[test]

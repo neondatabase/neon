@@ -1,13 +1,9 @@
-use std::{
-    mem::MaybeUninit,
-    ops::{Deref, DerefMut},
-};
+use std::mem::MaybeUninit;
+use std::ops::{Deref, DerefMut};
 
-use super::{
-    alignment::{Alignment, ConstAlign},
-    buffer::AlignedBuffer,
-    raw::RawAlignedBuffer,
-};
+use super::alignment::{Alignment, ConstAlign};
+use super::buffer::AlignedBuffer;
+use super::raw::RawAlignedBuffer;
 
 /// A mutable aligned buffer type.
 #[derive(Debug)]

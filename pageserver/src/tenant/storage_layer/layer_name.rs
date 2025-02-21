@@ -1,12 +1,12 @@
 //!
 //! Helper functions for dealing with filenames of the image and delta layer files.
 //!
-use pageserver_api::key::Key;
 use std::cmp::Ordering;
 use std::fmt;
 use std::ops::Range;
 use std::str::FromStr;
 
+use pageserver_api::key::Key;
 use utils::lsn::Lsn;
 
 use super::PersistentLayerDesc;

@@ -109,15 +109,12 @@ pub(crate) fn get() -> IoEngine {
     }
 }
 
-use std::{
-    os::unix::prelude::FileExt,
-    sync::atomic::{AtomicU8, Ordering},
-};
+use std::os::unix::prelude::FileExt;
+use std::sync::atomic::{AtomicU8, Ordering};
 
-use super::{
-    FileGuard, Metadata,
-    owned_buffers_io::{io_buf_ext::FullSlice, slice::SliceMutExt},
-};
+use super::owned_buffers_io::io_buf_ext::FullSlice;
+use super::owned_buffers_io::slice::SliceMutExt;
+use super::{FileGuard, Metadata};
 
 #[cfg(target_os = "linux")]
 fn epoll_uring_error_to_std(e: tokio_epoll_uring::Error<std::io::Error>) -> std::io::Error {

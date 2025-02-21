@@ -1,33 +1,27 @@
 //! Acceptor part of proposer-acceptor consensus algorithm.
 
+use std::cmp::{max, min};
+use std::fmt;
+use std::io::Read;
+
 use anyhow::{Context, Result, bail};
 use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-
 use postgres_ffi::{MAX_SEND_SIZE, TimeLineID};
+use pq_proto::SystemId;
 use safekeeper_api::Term;
 use safekeeper_api::models::HotStandbyFeedback;
 use serde::{Deserialize, Serialize};
-use std::cmp::max;
-use std::cmp::min;
-use std::fmt;
-use std::io::Read;
 use storage_broker::proto::SafekeeperTimelineInfo;
-
 use tracing::*;
-
-use crate::control_file;
-use crate::metrics::MISC_OPERATION_SECONDS;
-
-use crate::state::TimelineState;
-use crate::wal_storage;
-use pq_proto::SystemId;
+use utils::bin_ser::LeSer;
+use utils::id::{NodeId, TenantId, TimelineId};
+use utils::lsn::Lsn;
 use utils::pageserver_feedback::PageserverFeedback;
-use utils::{
-    bin_ser::LeSer,
-    id::{NodeId, TenantId, TimelineId},
-    lsn::Lsn,
-};
+
+use crate::metrics::MISC_OPERATION_SECONDS;
+use crate::state::TimelineState;
+use crate::{control_file, wal_storage};
 
 pub const SK_PROTOCOL_VERSION: u32 = 2;
 pub const UNKNOWN_SERVER_VERSION: u32 = 0;
@@ -1009,21 +1003,19 @@ where
 
 #[cfg(test)]
 mod tests {
-    use futures::future::BoxFuture;
+    use std::ops::Deref;
+    use std::str::FromStr;
+    use std::time::{Instant, UNIX_EPOCH};
 
+    use futures::future::BoxFuture;
     use postgres_ffi::{WAL_SEGMENT_SIZE, XLogSegNo};
-    use safekeeper_api::{
-        ServerInfo,
-        membership::{Configuration, MemberSet, SafekeeperGeneration, SafekeeperId},
+    use safekeeper_api::ServerInfo;
+    use safekeeper_api::membership::{
+        Configuration, MemberSet, SafekeeperGeneration, SafekeeperId,
     };
 
     use super::*;
     use crate::state::{EvictionState, TimelinePersistentState};
-    use std::{
-        ops::Deref,
-        str::FromStr,
-        time::{Instant, UNIX_EPOCH},
-    };
 
     // fake storage for tests
     struct InMemoryState {

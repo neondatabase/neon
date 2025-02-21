@@ -1,3 +1,41 @@
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use anyhow::Context;
+use control_plane::storage_controller::{AttachHookRequest, InspectRequest};
+use futures::Future;
+use http_utils::endpoint::{
+    self, auth_middleware, check_permission_with, profile_cpu_handler, profile_heap_handler,
+    request_span,
+};
+use http_utils::error::ApiError;
+use http_utils::failpoints::failpoints_handler;
+use http_utils::json::{json_request, json_response};
+use http_utils::request::{must_get_query_param, parse_query_param, parse_request_param};
+use http_utils::{RequestExt, RouterBuilder};
+use hyper::header::CONTENT_TYPE;
+use hyper::{Body, Request, Response, StatusCode, Uri};
+use metrics::{BuildInfo, NeonMetrics};
+use pageserver_api::controller_api::{
+    MetadataHealthListOutdatedRequest, MetadataHealthListOutdatedResponse,
+    MetadataHealthListUnhealthyResponse, MetadataHealthUpdateRequest, MetadataHealthUpdateResponse,
+    NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, SafekeeperSchedulingPolicyRequest,
+    ShardsPreferredAzsRequest, TenantCreateRequest, TenantPolicyRequest, TenantShardMigrateRequest,
+};
+use pageserver_api::models::{
+    TenantConfigPatchRequest, TenantConfigRequest, TenantLocationConfigRequest,
+    TenantShardSplitRequest, TenantTimeTravelRequest, TimelineArchivalConfigRequest,
+    TimelineCreateRequest,
+};
+use pageserver_api::shard::TenantShardId;
+use pageserver_api::upcall_api::{ReAttachRequest, ValidateRequest};
+use pageserver_client::{BlockUnblock, mgmt_api};
+use routerify::Middleware;
+use tokio_util::sync::CancellationToken;
+use utils::auth::{Scope, SwappableJwtAuth};
+use utils::id::{NodeId, TenantId, TimelineId};
+
 use crate::http;
 use crate::metrics::{
     HttpRequestLatencyLabelGroup, HttpRequestStatusLabelGroup, METRICS_REGISTRY,
@@ -6,51 +44,6 @@ use crate::metrics::{
 use crate::persistence::SafekeeperUpsert;
 use crate::reconciler::ReconcileError;
 use crate::service::{LeadershipStatus, RECONCILE_TIMEOUT, STARTUP_RECONCILE_TIMEOUT, Service};
-use anyhow::Context;
-use futures::Future;
-use http_utils::{
-    RequestExt, RouterBuilder,
-    endpoint::{
-        self, auth_middleware, check_permission_with, profile_cpu_handler, profile_heap_handler,
-        request_span,
-    },
-    error::ApiError,
-    failpoints::failpoints_handler,
-    json::{json_request, json_response},
-    request::{must_get_query_param, parse_query_param, parse_request_param},
-};
-use hyper::header::CONTENT_TYPE;
-use hyper::{Body, Request, Response};
-use hyper::{StatusCode, Uri};
-use metrics::{BuildInfo, NeonMetrics};
-use pageserver_api::controller_api::{
-    MetadataHealthListOutdatedRequest, MetadataHealthListOutdatedResponse,
-    MetadataHealthListUnhealthyResponse, MetadataHealthUpdateRequest, MetadataHealthUpdateResponse,
-    SafekeeperSchedulingPolicyRequest, ShardsPreferredAzsRequest, TenantCreateRequest,
-};
-use pageserver_api::models::{
-    TenantConfigPatchRequest, TenantConfigRequest, TenantLocationConfigRequest,
-    TenantShardSplitRequest, TenantTimeTravelRequest, TimelineArchivalConfigRequest,
-    TimelineCreateRequest,
-};
-use pageserver_api::shard::TenantShardId;
-use pageserver_client::{BlockUnblock, mgmt_api};
-use std::str::FromStr;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio_util::sync::CancellationToken;
-use utils::auth::{Scope, SwappableJwtAuth};
-use utils::id::{NodeId, TenantId, TimelineId};
-
-use pageserver_api::controller_api::{
-    NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, TenantPolicyRequest,
-    TenantShardMigrateRequest,
-};
-use pageserver_api::upcall_api::{ReAttachRequest, ValidateRequest};
-
-use control_plane::storage_controller::{AttachHookRequest, InspectRequest};
-
-use routerify::Middleware;
 
 /// State available to HTTP request handlers
 pub struct HttpState {

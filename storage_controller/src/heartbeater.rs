@@ -1,24 +1,22 @@
-use futures::{StreamExt, stream::FuturesUnordered};
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::future::Future;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
+use pageserver_api::controller_api::{NodeAvailability, SkSchedulingPolicy};
+use pageserver_api::models::PageserverUtilization;
 use safekeeper_api::models::SafekeeperUtilization;
 use safekeeper_client::mgmt_api;
-use std::{
-    collections::HashMap,
-    fmt::Debug,
-    future::Future,
-    sync::Arc,
-    time::{Duration, Instant},
-};
-use tokio_util::sync::CancellationToken;
-
-use pageserver_api::{
-    controller_api::{NodeAvailability, SkSchedulingPolicy},
-    models::PageserverUtilization,
-};
-
 use thiserror::Error;
-use utils::{id::NodeId, logging::SecretString};
+use tokio_util::sync::CancellationToken;
+use utils::id::NodeId;
+use utils::logging::SecretString;
 
-use crate::{node::Node, safekeeper::Safekeeper};
+use crate::node::Node;
+use crate::safekeeper::Safekeeper;
 
 struct HeartbeaterTask<Server, State> {
     receiver: tokio::sync::mpsc::UnboundedReceiver<HeartbeatRequest<Server, State>>,

@@ -1,22 +1,20 @@
-use std::{env, num::NonZeroUsize};
+use std::env;
+use std::num::NonZeroUsize;
 
 use bytes::Bytes;
 use camino::Utf8PathBuf;
 use criterion::{Criterion, criterion_group, criterion_main};
-use pageserver::{
-    config::PageServerConf,
-    context::{DownloadBehavior, RequestContext},
-    l0_flush::{L0FlushConfig, L0FlushGlobalState},
-    page_cache,
-    task_mgr::TaskKind,
-    tenant::storage_layer::InMemoryLayer,
-    virtual_file,
-};
-use pageserver_api::{key::Key, shard::TenantShardId, value::Value};
-use utils::{
-    bin_ser::BeSer,
-    id::{TenantId, TimelineId},
-};
+use pageserver::config::PageServerConf;
+use pageserver::context::{DownloadBehavior, RequestContext};
+use pageserver::l0_flush::{L0FlushConfig, L0FlushGlobalState};
+use pageserver::task_mgr::TaskKind;
+use pageserver::tenant::storage_layer::InMemoryLayer;
+use pageserver::{page_cache, virtual_file};
+use pageserver_api::key::Key;
+use pageserver_api::shard::TenantShardId;
+use pageserver_api::value::Value;
+use utils::bin_ser::BeSer;
+use utils::id::{TenantId, TimelineId};
 use wal_decoder::serialized_batch::SerializedValueBatch;
 
 // A very cheap hash for generating non-sequential keys.

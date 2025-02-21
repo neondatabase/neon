@@ -1,7 +1,8 @@
-use anyhow::Result;
-use serde::Serialize;
 use std::ops::AddAssign;
 use std::time::Duration;
+
+use anyhow::Result;
+use serde::Serialize;
 
 ///
 /// Result of performing GC

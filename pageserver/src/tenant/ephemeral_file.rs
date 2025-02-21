@@ -1,6 +1,17 @@
 //! Implementation of append-only file data structure
 //! used to keep in-memory layers spilled on disk.
 
+use std::io;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+
+use camino::Utf8PathBuf;
+use num_traits::Num;
+use pageserver_api::shard::TenantShardId;
+use tokio_epoll_uring::{BoundedBuf, Slice};
+use tracing::error;
+use utils::id::TimelineId;
+
 use crate::assert_u64_eq_usize::{U64IsUsize, UsizeIsU64};
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
@@ -10,16 +21,6 @@ use crate::virtual_file::owned_buffers_io::io_buf_aligned::IoBufAlignedMut;
 use crate::virtual_file::owned_buffers_io::slice::SliceMutExt;
 use crate::virtual_file::owned_buffers_io::write::Buffer;
 use crate::virtual_file::{self, IoBufferMut, VirtualFile, owned_buffers_io};
-use camino::Utf8PathBuf;
-use num_traits::Num;
-use pageserver_api::shard::TenantShardId;
-use tokio_epoll_uring::{BoundedBuf, Slice};
-use tracing::error;
-
-use std::io;
-use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
-use utils::id::TimelineId;
 
 pub struct EphemeralFile {
     _tenant_shard_id: TenantShardId,
@@ -319,13 +320,14 @@ pub fn is_ephemeral_file(filename: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::str::FromStr;
+
     use rand::Rng;
 
     use super::*;
     use crate::context::DownloadBehavior;
     use crate::task_mgr::TaskKind;
-    use std::fs;
-    use std::str::FromStr;
 
     fn harness(
         test_name: &str,

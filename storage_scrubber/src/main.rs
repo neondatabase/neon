@@ -1,24 +1,20 @@
 use anyhow::{Context, anyhow, bail};
 use camino::Utf8PathBuf;
+use clap::{Parser, Subcommand};
 use pageserver_api::controller_api::{MetadataHealthUpdateRequest, MetadataHealthUpdateResponse};
 use pageserver_api::shard::TenantShardId;
 use reqwest::{Method, Url};
 use storage_controller_client::control_api;
 use storage_scrubber::garbage::{PurgeMode, find_garbage, purge_garbage};
-use storage_scrubber::pageserver_physical_gc::GcMode;
+use storage_scrubber::pageserver_physical_gc::{GcMode, pageserver_physical_gc};
 use storage_scrubber::scan_pageserver_metadata::scan_pageserver_metadata;
-use storage_scrubber::scan_safekeeper_metadata::DatabaseOrList;
+use storage_scrubber::scan_safekeeper_metadata::{DatabaseOrList, scan_safekeeper_metadata};
 use storage_scrubber::tenant_snapshot::SnapshotDownloader;
 use storage_scrubber::{
-    BucketConfig, ConsoleConfig, NodeKind, TraversingDepth, init_logging,
-    pageserver_physical_gc::pageserver_physical_gc,
-    scan_safekeeper_metadata::scan_safekeeper_metadata,
+    BucketConfig, ConsoleConfig, ControllerClientConfig, NodeKind, TraversingDepth,
+    find_large_objects, init_logging,
 };
-use storage_scrubber::{ControllerClientConfig, find_large_objects};
-
-use clap::{Parser, Subcommand};
 use utils::id::TenantId;
-
 use utils::{project_build_tag, project_git_version};
 
 project_git_version!(GIT_VERSION);

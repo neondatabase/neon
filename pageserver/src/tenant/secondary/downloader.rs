@@ -1,47 +1,8 @@
-use std::{
-    collections::{HashMap, HashSet},
-    pin::Pin,
-    str::FromStr,
-    sync::Arc,
-    time::{Duration, Instant, SystemTime},
-};
-
-use crate::{
-    TEMP_FILE_SUFFIX,
-    config::PageServerConf,
-    context::RequestContext,
-    disk_usage_eviction_task::{
-        DiskUsageEvictionInfo, EvictionCandidate, EvictionLayer, EvictionSecondaryLayer, finite_f32,
-    },
-    metrics::SECONDARY_MODE,
-    tenant::{
-        config::SecondaryLocationConfig,
-        debug_assert_current_span_has_tenant_and_timeline_id,
-        ephemeral_file::is_ephemeral_file,
-        remote_timeline_client::{
-            FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES, index::LayerFileMetadata,
-            is_temp_download_file,
-        },
-        span::debug_assert_current_span_has_tenant_id,
-        storage_layer::{LayerName, LayerVisibilityHint, layer::local_layer_path},
-        tasks::{BackgroundLoopKind, warn_when_period_overrun},
-    },
-    virtual_file::{MaybeFatalIo, VirtualFile, on_fatal_io_error},
-};
-
-use super::{
-    GetTenantError, SecondaryTenant, SecondaryTenantError,
-    heatmap::HeatMapLayer,
-    scheduler::{
-        self, Completion, JobGenerator, SchedulingResult, TenantBackgroundJobs, period_jitter,
-        period_warmup,
-    },
-};
-
-use crate::tenant::{
-    mgr::TenantManager,
-    remote_timeline_client::{download::download_layer_file, remote_heatmap_path},
-};
+use std::collections::{HashMap, HashSet};
+use std::pin::Pin;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 
 use camino::Utf8PathBuf;
 use chrono::format::{DelayedFormat, StrftimeItems};
@@ -50,18 +11,43 @@ use metrics::UIntGauge;
 use pageserver_api::models::SecondaryProgress;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::{DownloadError, DownloadKind, DownloadOpts, Etag, GenericRemoteStorage};
-
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span, instrument, warn};
-use utils::{
-    backoff, completion::Barrier, crashsafe::path_with_suffix_extension, failpoint_support, fs_ext,
-    id::TimelineId, pausable_failpoint, serde_system_time,
-};
+use utils::completion::Barrier;
+use utils::crashsafe::path_with_suffix_extension;
+use utils::id::TimelineId;
+use utils::{backoff, failpoint_support, fs_ext, pausable_failpoint, serde_system_time};
 
-use super::{
-    CommandRequest, DownloadCommand,
-    heatmap::{HeatMapTenant, HeatMapTimeline},
+use super::heatmap::{HeatMapLayer, HeatMapTenant, HeatMapTimeline};
+use super::scheduler::{
+    self, Completion, JobGenerator, SchedulingResult, TenantBackgroundJobs, period_jitter,
+    period_warmup,
 };
+use super::{
+    CommandRequest, DownloadCommand, GetTenantError, SecondaryTenant, SecondaryTenantError,
+};
+use crate::TEMP_FILE_SUFFIX;
+use crate::config::PageServerConf;
+use crate::context::RequestContext;
+use crate::disk_usage_eviction_task::{
+    DiskUsageEvictionInfo, EvictionCandidate, EvictionLayer, EvictionSecondaryLayer, finite_f32,
+};
+use crate::metrics::SECONDARY_MODE;
+use crate::tenant::config::SecondaryLocationConfig;
+use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
+use crate::tenant::ephemeral_file::is_ephemeral_file;
+use crate::tenant::mgr::TenantManager;
+use crate::tenant::remote_timeline_client::download::download_layer_file;
+use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
+use crate::tenant::remote_timeline_client::{
+    FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES, is_temp_download_file,
+    remote_heatmap_path,
+};
+use crate::tenant::span::debug_assert_current_span_has_tenant_id;
+use crate::tenant::storage_layer::layer::local_layer_path;
+use crate::tenant::storage_layer::{LayerName, LayerVisibilityHint};
+use crate::tenant::tasks::{BackgroundLoopKind, warn_when_period_overrun};
+use crate::virtual_file::{MaybeFatalIo, VirtualFile, on_fatal_io_error};
 
 /// For each tenant, default period for how long must have passed since the last download_tenant call before
 /// calling it again.  This default is replaced with the value of [`HeatMapTenant::upload_period_ms`] after first

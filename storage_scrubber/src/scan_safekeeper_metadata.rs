@@ -1,4 +1,6 @@
-use std::{collections::HashSet, str::FromStr, sync::Arc};
+use std::collections::HashSet;
+use std::str::FromStr;
+use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use futures::stream::{StreamExt, TryStreamExt};
@@ -10,14 +12,13 @@ use rustls::crypto::ring;
 use serde::Serialize;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, error, info};
-use utils::{
-    id::{TenantId, TenantTimelineId, TimelineId},
-    lsn::Lsn,
-};
+use utils::id::{TenantId, TenantTimelineId, TimelineId};
+use utils::lsn::Lsn;
 
+use crate::cloud_admin_api::CloudAdminApiClient;
+use crate::metadata_stream::stream_listing;
 use crate::{
-    BucketConfig, ConsoleConfig, NodeKind, RootTarget, TenantShardTimelineId,
-    cloud_admin_api::CloudAdminApiClient, init_remote, metadata_stream::stream_listing,
+    BucketConfig, ConsoleConfig, NodeKind, RootTarget, TenantShardTimelineId, init_remote,
 };
 
 /// Generally we should ask safekeepers, but so far we use everywhere default 16MB.
