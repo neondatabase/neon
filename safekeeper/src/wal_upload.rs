@@ -62,7 +62,7 @@ pub(crate) fn is_wal_upload_required(
 ) -> bool {
     num_computes > 0 ||
     // Currently only the whole segment is offloaded, so compare segment numbers.
-    (state.commit_lsn.segment_number(wal_seg_size) > state.backup_lsn.segment_number(wal_seg_size))
+    (state.commit_lsn.segment_number(wal_seg_size) > state.upload_lsn.segment_number(wal_seg_size))
 }
 
 /// Based on peer information determine which safekeeper should offload; if it
@@ -70,13 +70,13 @@ pub(crate) fn is_wal_upload_required(
 /// is running, kill it.
 pub(crate) async fn update_task(mgr: &mut Manager, need_backup: bool, state: &StateSnapshot) {
     let (offloader, election_dbg_str) =
-        determine_offloader(&state.peers, state.backup_lsn, mgr.tli.ttid, &mgr.conf);
+        determine_offloader(&state.peers, state.upload_lsn, mgr.tli.ttid, &mgr.conf);
     let elected_me = Some(mgr.conf.my_id) == offloader;
 
     let should_task_run = need_backup && elected_me;
 
     // start or stop the task
-    if should_task_run != (mgr.backup_task.is_some()) {
+    if should_task_run != (mgr.upload_task.is_some()) {
         if should_task_run {
             info!("elected for backup: {}", election_dbg_str);
 
@@ -95,7 +95,7 @@ pub(crate) async fn update_task(mgr: &mut Manager, need_backup: bool, state: &St
                 WAL_UPLOAD_RUNTIME.spawn(async_task)
             };
 
-            mgr.backup_task = Some(WalBackupTaskHandle {
+            mgr.upload_task = Some(WalBackupTaskHandle {
                 shutdown_tx,
                 handle,
             });
@@ -107,7 +107,7 @@ pub(crate) async fn update_task(mgr: &mut Manager, need_backup: bool, state: &St
                 // someone else has been elected
                 info!("stepping down from backup: {}", election_dbg_str);
             }
-            shut_down_task(&mut mgr.backup_task).await;
+            shut_down_task(&mut mgr.upload_task).await;
         }
     }
 }

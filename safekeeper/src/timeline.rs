@@ -878,7 +878,7 @@ impl Timeline {
     }
 
     pub async fn backup_partial_reset(self: &Arc<Self>) -> Result<Vec<String>> {
-        self.manager_ctl.backup_partial_reset().await
+        self.manager_ctl.upload_partial_reset().await
     }
 }
 

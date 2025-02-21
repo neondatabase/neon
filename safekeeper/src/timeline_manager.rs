@@ -46,13 +46,13 @@ use crate::{
 pub(crate) struct StateSnapshot {
     // inmem values
     pub(crate) commit_lsn: Lsn,
-    pub(crate) backup_lsn: Lsn,
+    pub(crate) upload_lsn: Lsn,
     pub(crate) remote_consistent_lsn: Lsn,
 
     // persistent control file values
     pub(crate) cfile_commit_lsn: Lsn,
     pub(crate) cfile_remote_consistent_lsn: Lsn,
-    pub(crate) cfile_backup_lsn: Lsn,
+    pub(crate) cfile_upload_lsn: Lsn,
 
     // latest state
     pub(crate) flush_lsn: Lsn,
@@ -71,11 +71,11 @@ impl StateSnapshot {
         let state = read_guard.sk.state();
         Self {
             commit_lsn: state.inmem.commit_lsn,
-            backup_lsn: state.inmem.upload_lsn,
+            upload_lsn: state.inmem.upload_lsn,
             remote_consistent_lsn: state.inmem.remote_consistent_lsn,
             cfile_commit_lsn: state.commit_lsn,
             cfile_remote_consistent_lsn: state.remote_consistent_lsn,
-            cfile_backup_lsn: state.upload_lsn,
+            cfile_upload_lsn: state.upload_lsn,
             flush_lsn: read_guard.sk.flush_lsn(),
             last_log_term: read_guard.sk.last_log_term(),
             cfile_last_persist_at: state.pers.last_persist_at(),
@@ -104,8 +104,8 @@ pub enum ManagerCtlMessage {
     TryGuardRequest(tokio::sync::oneshot::Sender<Option<ResidenceGuard>>),
     /// Request to drop the guard.
     GuardDrop(GuardId),
-    /// Request to reset uploaded partial backup state.
-    BackupPartialReset(oneshot::Sender<anyhow::Result<Vec<String>>>),
+    /// Request to reset uploaded partial upload state.
+    UploadPartialReset(oneshot::Sender<anyhow::Result<Vec<String>>>),
 }
 
 impl std::fmt::Debug for ManagerCtlMessage {
@@ -114,7 +114,7 @@ impl std::fmt::Debug for ManagerCtlMessage {
             ManagerCtlMessage::GuardRequest(_) => write!(f, "GuardRequest"),
             ManagerCtlMessage::TryGuardRequest(_) => write!(f, "TryGuardRequest"),
             ManagerCtlMessage::GuardDrop(id) => write!(f, "GuardDrop({:?})", id),
-            ManagerCtlMessage::BackupPartialReset(_) => write!(f, "BackupPartialReset"),
+            ManagerCtlMessage::UploadPartialReset(_) => write!(f, "UploadPartialReset"),
         }
     }
 }
@@ -170,10 +170,10 @@ impl ManagerCtl {
 
     /// Request timeline manager to reset uploaded partial segment state and
     /// wait for the result.
-    pub async fn backup_partial_reset(&self) -> anyhow::Result<Vec<String>> {
+    pub async fn upload_partial_reset(&self) -> anyhow::Result<Vec<String>> {
         let (tx, rx) = oneshot::channel();
         self.manager_tx
-            .send(ManagerCtlMessage::BackupPartialReset(tx))
+            .send(ManagerCtlMessage::UploadPartialReset(tx))
             .expect("manager task is not running");
         match rx.await {
             Ok(res) => res,
@@ -214,14 +214,14 @@ pub(crate) struct Manager {
     pub(crate) is_offloaded: bool,
 
     // background tasks
-    pub(crate) backup_task: Option<WalBackupTaskHandle>,
+    pub(crate) upload_task: Option<WalBackupTaskHandle>,
     pub(crate) recovery_task: Option<JoinHandle<()>>,
     pub(crate) wal_removal_task: Option<JoinHandle<anyhow::Result<u64>>>,
 
-    // partial backup
-    pub(crate) partial_backup_task:
+    // partial upload
+    pub(crate) partial_upload_task:
         Option<(JoinHandle<Option<PartialRemoteSegment>>, CancellationToken)>,
-    pub(crate) partial_backup_uploaded: Option<PartialRemoteSegment>,
+    pub(crate) partial_upload: Option<PartialRemoteSegment>,
 
     // misc
     pub(crate) access_service: AccessService,
@@ -287,8 +287,8 @@ pub async fn main_task(
         if !mgr.is_offloaded {
             let num_computes = *mgr.num_computes_rx.borrow();
 
-            mgr.set_status(Status::UpdateBackup);
-            let is_wal_upload_required = mgr.update_backup(num_computes, &state_snapshot).await;
+            mgr.set_status(Status::UpdateUpload);
+            let is_wal_upload_required = mgr.update_upload(num_computes, &state_snapshot).await;
             mgr.update_is_active(is_wal_upload_required, num_computes, &state_snapshot);
 
             mgr.set_status(Status::UpdateControlFile);
@@ -298,8 +298,8 @@ pub async fn main_task(
             mgr.set_status(Status::UpdateWalRemoval);
             mgr.update_wal_removal(&state_snapshot).await;
 
-            mgr.set_status(Status::UpdatePartialBackup);
-            mgr.update_partial_backup(&state_snapshot).await;
+            mgr.set_status(Status::UpdatePartialUpload);
+            mgr.update_partial_upload(&state_snapshot).await;
 
             let now = Instant::now();
             if mgr.evict_not_before > now {
@@ -358,10 +358,10 @@ pub async fn main_task(
                 mgr.wal_removal_task = None;
                 mgr.update_wal_removal_end(res);
             }
-            res = await_task_finish(mgr.partial_backup_task.as_mut().map(|(handle, _)| handle)) => {
-                // partial backup task finished
-                mgr.partial_backup_task = None;
-                mgr.update_partial_backup_end(res);
+            res = await_task_finish(mgr.partial_upload_task.as_mut().map(|(handle, _)| handle)) => {
+                // partial upload task finished
+                mgr.partial_upload_task = None;
+                mgr.update_partial_upload_end(res);
             }
 
             msg = manager_rx.recv() => {
@@ -377,12 +377,12 @@ pub async fn main_task(
 
     // shutdown background tasks
     if mgr.conf.is_wal_upload_enabled() {
-        if let Some(backup_task) = mgr.backup_task.take() {
+        if let Some(upload_task) = mgr.upload_task.take() {
             // If we fell through here, then the timeline is shutting down. This is important
             // because otherwise joining on the wal_upload handle might hang.
             assert!(mgr.tli.cancel.is_cancelled());
 
-            backup_task.join().await;
+            upload_task.join().await;
         }
         wal_upload::update_task(&mut mgr, false, &last_state).await;
     }
@@ -393,10 +393,10 @@ pub async fn main_task(
         }
     }
 
-    if let Some((handle, cancel)) = &mut mgr.partial_backup_task {
+    if let Some((handle, cancel)) = &mut mgr.partial_upload_task {
         cancel.cancel();
         if let Err(e) = handle.await {
-            warn!("partial backup task failed: {:?}", e);
+            warn!("partial upload task failed: {:?}", e);
         }
     }
 
@@ -421,7 +421,7 @@ impl Manager {
         manager_tx: tokio::sync::mpsc::UnboundedSender<ManagerCtlMessage>,
         global_rate_limiter: RateLimiter,
     ) -> Manager {
-        let (is_offloaded, partial_backup_uploaded) = tli.bootstrap_mgr().await;
+        let (is_offloaded, partial_upload) = tli.bootstrap_mgr().await;
         Manager {
             wal_seg_size: tli.get_wal_seg_size().await,
             walsenders: tli.get_walsenders().clone(),
@@ -430,11 +430,11 @@ impl Manager {
             tli_broker_active: broker_active_set.guard(tli.clone()),
             last_removed_segno: 0,
             is_offloaded,
-            backup_task: None,
+            upload_task: None,
             recovery_task: None,
             wal_removal_task: None,
-            partial_backup_task: None,
-            partial_backup_uploaded,
+            partial_upload_task: None,
+            partial_upload,
             access_service: AccessService::new(manager_tx),
             tli,
             global_rate_limiter,
@@ -477,8 +477,8 @@ impl Manager {
         )
     }
 
-    /// Spawns/kills backup task and returns true if backup is required.
-    async fn update_backup(&mut self, num_computes: usize, state: &StateSnapshot) -> bool {
+    /// Spawns/kills upload task and returns true if upload is required.
+    async fn update_upload(&mut self, num_computes: usize, state: &StateSnapshot) -> bool {
         let is_wal_upload_required =
             wal_upload::is_wal_upload_required(self.wal_seg_size, num_computes, state);
 
@@ -488,7 +488,7 @@ impl Manager {
 
         // update the state in Arc<Timeline>
         self.tli.wal_upload_active.store(
-            self.backup_task.is_some(),
+            self.upload_task.is_some(),
             std::sync::atomic::Ordering::Relaxed,
         );
         is_wal_upload_required
@@ -627,18 +627,18 @@ impl Manager {
     }
 
     /// Spawns partial WAL upload task if needed.
-    async fn update_partial_backup(&mut self, state: &StateSnapshot) {
+    async fn update_partial_upload(&mut self, state: &StateSnapshot) {
         // check if WAL upload is enabled and should be started
         if !self.conf.is_wal_upload_enabled() {
             return;
         }
 
-        if self.partial_backup_task.is_some() {
-            // partial backup is already running
+        if self.partial_upload_task.is_some() {
+            // partial upload is already running
             return;
         }
 
-        if !wal_upload_partial::needs_uploading(state, &self.partial_backup_uploaded) {
+        if !wal_upload_partial::needs_uploading(state, &self.partial_upload) {
             // nothing to upload
             return;
         }
@@ -648,7 +648,7 @@ impl Manager {
             return;
         };
 
-        // Get WalResidentTimeline and start partial backup task.
+        // Get WalResidentTimeline and start partial upload task.
         let cancel = CancellationToken::new();
         let handle = tokio::spawn(wal_upload_partial::main_task(
             resident,
@@ -656,26 +656,26 @@ impl Manager {
             self.global_rate_limiter.clone(),
             cancel.clone(),
         ));
-        self.partial_backup_task = Some((handle, cancel));
+        self.partial_upload_task = Some((handle, cancel));
     }
 
     /// Update the state after partial WAL upload task finished.
-    fn update_partial_backup_end(&mut self, res: Result<Option<PartialRemoteSegment>, JoinError>) {
+    fn update_partial_upload_end(&mut self, res: Result<Option<PartialRemoteSegment>, JoinError>) {
         match res {
             Ok(new_upload_state) => {
-                self.partial_backup_uploaded = new_upload_state;
+                self.partial_upload = new_upload_state;
             }
             Err(e) => {
-                warn!("partial backup task panicked: {:?}", e);
+                warn!("partial upload task panicked: {:?}", e);
             }
         }
     }
 
-    /// Reset partial backup state and remove its remote storage data. Since it
+    /// Reset partial upload state and remove its remote storage data. Since it
     /// might concurrently uploading something, cancel the task first.
-    async fn backup_partial_reset(&mut self) -> anyhow::Result<Vec<String>> {
-        info!("resetting partial backup state");
-        // Force unevict timeline if it is evicted before erasing partial backup
+    async fn upload_partial_reset(&mut self) -> anyhow::Result<Vec<String>> {
+        info!("resetting partial upload state");
+        // Force unevict timeline if it is evicted before erasing partial upload
         // state. The intended use of this function is to drop corrupted remote
         // state; we haven't enabled local files deletion yet anywhere,
         // so direct switch is safe.
@@ -685,21 +685,21 @@ impl Manager {
             self.is_offloaded = false;
         }
 
-        if let Some((handle, cancel)) = &mut self.partial_backup_task {
+        if let Some((handle, cancel)) = &mut self.partial_upload_task {
             cancel.cancel();
-            info!("cancelled partial backup task, awaiting it");
-            // we're going to reset .partial_backup_uploaded to None anyway, so ignore the result
+            info!("cancelled partial upload task, awaiting it");
+            // we're going to reset .partial_upload to None anyway, so ignore the result
             handle.await.ok();
-            self.partial_backup_task = None;
+            self.partial_upload_task = None;
         }
 
         let tli = self.wal_resident_timeline()?;
-        let mut partial_backup = PartialUpload::new(tli, self.conf.clone()).await;
+        let mut partial_upload = PartialUpload::new(tli, self.conf.clone()).await;
         // Reset might fail e.g. when cfile is already reset but s3 removal
         // failed, so set manager state to None beforehand. In any case caller
         // is expected to retry until success.
-        self.partial_backup_uploaded = None;
-        let res = partial_backup.reset().await?;
+        self.partial_upload = None;
+        let res = partial_upload.reset().await?;
         info!("reset is done");
         Ok(res)
     }
@@ -746,14 +746,14 @@ impl Manager {
             Some(ManagerCtlMessage::GuardDrop(guard_id)) => {
                 self.access_service.drop_guard(guard_id);
             }
-            Some(ManagerCtlMessage::BackupPartialReset(tx)) => {
-                info!("resetting uploaded partial backup state");
-                let res = self.backup_partial_reset().await;
+            Some(ManagerCtlMessage::UploadPartialReset(tx)) => {
+                info!("resetting uploaded partial upload state");
+                let res = self.upload_partial_reset().await;
                 if let Err(ref e) = res {
-                    warn!("failed to reset partial backup state: {:?}", e);
+                    warn!("failed to reset partial upload state: {:?}", e);
                 }
                 if tx.send(res).is_err() {
-                    warn!("failed to send partial backup reset result, receiver dropped");
+                    warn!("failed to send partial upload reset result, receiver dropped");
                 }
             }
             None => {
@@ -802,10 +802,10 @@ pub enum Status {
     NotStarted,
     Started,
     StateSnapshot,
-    UpdateBackup,
+    UpdateUpload,
     UpdateControlFile,
     UpdateWalRemoval,
-    UpdatePartialBackup,
+    UpdatePartialUpload,
     EvictTimeline,
     Wait,
     HandleMessage,

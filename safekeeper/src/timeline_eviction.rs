@@ -39,15 +39,15 @@ impl Manager {
         next_event: &Option<tokio::time::Instant>,
         state: &StateSnapshot,
     ) -> bool {
-        let ready = self.backup_task.is_none()
+        let ready = self.upload_task.is_none()
             && self.recovery_task.is_none()
             && self.wal_removal_task.is_none()
-            && self.partial_backup_task.is_none()
+            && self.partial_upload_task.is_none()
             && next_event.is_none()
             && self.access_service.is_empty()
             && !self.tli_broker_active.get()
             // Partial segment of current flush_lsn is uploaded up to this flush_lsn.
-            && !wal_upload_partial::needs_uploading(state, &self.partial_backup_uploaded)
+            && !wal_upload_partial::needs_uploading(state, &self.partial_upload)
             // And it is the next one after the last removed. Given that local
             // WAL is removed only after it is uploaded to s3 (and pageserver
             // advancing remote_consistent_lsn) which happens only after WAL is
@@ -60,7 +60,7 @@ impl Manager {
             // **Note** pull_timeline functionality assumes that evicted timelines always have
             // a partial segment: if we ever change this condition, must also update that code.
             && self
-                .partial_backup_uploaded
+                .partial_upload
                 .as_ref()
                 .unwrap()
                 .flush_lsn
@@ -73,7 +73,7 @@ impl Manager {
     #[instrument(name = "evict_timeline", skip_all)]
     pub(crate) async fn evict_timeline(&mut self) -> bool {
         assert!(!self.is_offloaded);
-        let partial_backup_uploaded = match &self.partial_backup_uploaded {
+        let partial_backup_uploaded = match &self.partial_upload {
             Some(p) => p.clone(),
             None => {
                 warn!("no partial backup uploaded, skipping eviction");
@@ -107,7 +107,7 @@ impl Manager {
     #[instrument(name = "unevict_timeline", skip_all)]
     pub(crate) async fn unevict_timeline(&mut self) {
         assert!(self.is_offloaded);
-        let partial_backup_uploaded = match &self.partial_backup_uploaded {
+        let partial_backup_uploaded = match &self.partial_upload {
             Some(p) => p.clone(),
             None => {
                 warn!("no partial backup uploaded, cannot unevict");
