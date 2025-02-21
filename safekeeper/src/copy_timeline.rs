@@ -21,7 +21,7 @@ use crate::{
 };
 
 // we don't want to have more than 10 segments on disk after copy, because they take space
-const MAX_BACKUP_LAG: u64 = 10 * WAL_SEGMENT_SIZE as u64;
+const MAX_UPLOAD_LAG: u64 = 10 * WAL_SEGMENT_SIZE as u64;
 
 pub struct Request {
     pub source_ttid: TenantTimelineId,
@@ -61,18 +61,18 @@ pub async fn handle_request(
     if start_lsn == Lsn::INVALID {
         bail!("timeline is not initialized");
     }
-    let backup_lsn = mem_state.upload_lsn;
+    let upload_lsn = mem_state.upload_lsn;
 
     {
         let commit_lsn = mem_state.commit_lsn;
         let flush_lsn = source_tli.get_flush_lsn().await;
 
         info!(
-            "collected info about source timeline: start_lsn={}, backup_lsn={}, commit_lsn={}, flush_lsn={}",
-            start_lsn, backup_lsn, commit_lsn, flush_lsn
+            "collected info about source timeline: start_lsn={}, upload_lsn={}, commit_lsn={}, flush_lsn={}",
+            start_lsn, upload_lsn, commit_lsn, flush_lsn
         );
 
-        assert!(backup_lsn >= start_lsn);
+        assert!(upload_lsn >= start_lsn);
         assert!(commit_lsn >= start_lsn);
         assert!(flush_lsn >= start_lsn);
 
@@ -93,7 +93,7 @@ pub async fn handle_request(
             warn!("copy_timeline WAL is not fully committed");
         }
 
-        if backup_lsn < request.until_lsn && request.until_lsn.0 - backup_lsn.0 > MAX_BACKUP_LAG {
+        if upload_lsn < request.until_lsn && request.until_lsn.0 - upload_lsn.0 > MAX_UPLOAD_LAG {
             // we have a lot of segments that are not backed up. we can try to wait here until
             // segments will be backed up to remote storage, but it's not clear how long to wait
             bail!("too many segments are not backed up");
@@ -108,23 +108,23 @@ pub async fn handle_request(
     let first_segment = start_lsn.segment_number(wal_seg_size);
     let last_segment = request.until_lsn.segment_number(wal_seg_size);
 
-    let new_backup_lsn = {
-        // we can't have new backup_lsn greater than existing backup_lsn or start of the last segment
-        let max_backup_lsn = backup_lsn.min(Lsn(last_segment * wal_seg_size as u64));
+    let new_upload_lsn = {
+        // we can't have new upload_lsn greater than existing upload_lsn or start of the last segment
+        let max_upload_lsn = upload_lsn.min(Lsn(last_segment * wal_seg_size as u64));
 
-        if max_backup_lsn <= start_lsn {
+        if max_upload_lsn <= start_lsn {
             // probably we are starting from the first segment, which was not backed up yet.
             // note that start_lsn can be in the middle of the segment
             start_lsn
         } else {
-            // we have some segments backed up, so we will assume all WAL below max_backup_lsn is backed up
-            assert!(max_backup_lsn.segment_offset(wal_seg_size) == 0);
-            max_backup_lsn
+            // we have some segments backed up, so we will assume all WAL below max_upload_lsn is backed up
+            assert!(max_upload_lsn.segment_offset(wal_seg_size) == 0);
+            max_upload_lsn
         }
     };
 
     // all previous segments will be copied inside S3
-    let first_ondisk_segment = new_backup_lsn.segment_number(wal_seg_size);
+    let first_ondisk_segment = new_upload_lsn.segment_number(wal_seg_size);
     assert!(first_ondisk_segment <= last_segment);
     assert!(first_ondisk_segment >= first_segment);
 
@@ -140,7 +140,7 @@ pub async fn handle_request(
     copy_disk_segments(
         &source_tli,
         wal_seg_size,
-        new_backup_lsn,
+        new_upload_lsn,
         request.until_lsn,
         &tli_dir_path,
     )
@@ -155,7 +155,7 @@ pub async fn handle_request(
     )?;
     new_state.timeline_start_lsn = start_lsn;
     new_state.peer_horizon_lsn = request.until_lsn;
-    new_state.upload_lsn = new_backup_lsn;
+    new_state.upload_lsn = new_upload_lsn;
 
     FileStorage::create_new(&tli_dir_path, new_state.clone(), conf.no_sync).await?;
 
