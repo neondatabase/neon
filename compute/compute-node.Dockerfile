@@ -1486,7 +1486,7 @@ FROM pg-build AS pg_duckdb-build
 ARG PG_VERSION
 COPY --from=pg_duckdb-src /ext-src/ /ext-src/
 WORKDIR /ext-src/pg_duckdb-src
-RUN make install -j $(getconf _NPROCESSORS_ONLN) && \
+RUN make DUCKDB_STATIC=1 install -j $(getconf _NPROCESSORS_ONLN) && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_duckdb.control 
         
 #########################################################################################

@@ -1,3 +1,47 @@
+diff --git a/Makefile b/Makefile
+index 3235cc8..ca401da 100644
+--- a/Makefile
++++ b/Makefile
+@@ -32,7 +32,16 @@ else
+ 	DUCKDB_BUILD_TYPE = release
+ endif
+ 
+-DUCKDB_LIB = libduckdb$(DLSUFFIX)
++DUCKDB_STATIC ?= 0
++PG_DUCKDB_LINK_FLAGS = -Wl,-rpath,$(PG_LIB)/ -lpq -Lthird_party/duckdb/build/$(DUCKDB_BUILD_TYPE)/src -L$(PG_LIB) -lstdc++ -llz4
++ifeq ($(DUCKDB_STATIC), 1)
++	DUCKDB_LIB = libduckdb_static.a
++	PG_DUCKDB_LINK_FLAGS += -l:$(DUCKDB_LIB)
++else
++	DUCKDB_LIB = libduckdb$(DLSUFFIX)
++	PG_DUCKDB_LINK_FLAGS += -lduckdb
++endif
++
+ FULL_DUCKDB_LIB = third_party/duckdb/build/$(DUCKDB_BUILD_TYPE)/src/$(DUCKDB_LIB)
+ 
+ ERROR_ON_WARNING ?=
+@@ -54,7 +63,7 @@ override PG_CXXFLAGS += -std=c++17 ${DUCKDB_BUILD_CXX_FLAGS} ${COMPILER_FLAGS} -
+ # changes to the vendored code in one place.
+ override PG_CFLAGS += -Wno-declaration-after-statement
+ 
+-SHLIB_LINK += -Wl,-rpath,$(PG_LIB)/ -lpq -Lthird_party/duckdb/build/$(DUCKDB_BUILD_TYPE)/src -L$(PG_LIB) -lduckdb -lstdc++ -llz4
++SHLIB_LINK += $(PG_DUCKDB_LINK_FLAGS)
+ 
+ include Makefile.global
+ 
+diff --git a/docs/compilation.md b/docs/compilation.md
+index e25396f..b94a63a 100644
+--- a/docs/compilation.md
++++ b/docs/compilation.md
+@@ -14,6 +14,8 @@ To build and install, run:
+ make install
+ ```
+ 
++If you want to link `libduckdb` statically, set `DUCKDB_STATIC=1` when interacting with `make(1)`.
++
+ Add `pg_duckdb` to the `shared_preload_libraries` in your `postgresql.conf` file:
+ 
+ ```ini
 diff --git a/sql/pg_duckdb--0.2.0--0.3.0.sql b/sql/pg_duckdb--0.2.0--0.3.0.sql
 index d777d76..af60106 100644
 --- a/sql/pg_duckdb--0.2.0--0.3.0.sql
