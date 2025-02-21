@@ -39,8 +39,17 @@ class RandomNeonProject:
                 main.add(branch["id"])
         return list(branches - parents - main)
 
+    def get_branches(self) -> list[str]:
+        return [_["id"] for _ in self.__get_branches_info()]
+
     def create_branch(self, parent_id: str | None = None):
         return self.neon_api.create_branch(self.project_id, parent_id=parent_id)["branch"]["id"]
+
+    def create_ro_endpoint(self, branch_id):
+        return self.neon_api.create_endpoint(self.project_id, branch_id,"read_only",{})["id"]
+
+    def get_ro_endpoints(self):
+        return [_["id"] for _ in self.neon_api.get_endpoints(self.project_id)["endpoints"] if _["type"] == "read_only"]
 
     def wait(self):
         return self.neon_api.wait_for_operation_to_finish(self.project_id)
@@ -69,4 +78,7 @@ def test_api_random(
     log.info("created branch %s", br2)
     project.wait()
     log.info("leaf branches: %s", project.get_leaf_branches())
+    for branch in project.get_branches():
+        ep = project.create_ro_endpoint(branch)
+        log.info("RO endpoint created: %s", ep)
     assert True
