@@ -495,19 +495,10 @@ pub async fn profile_heap_handler(req: Request<Body>) -> Result<Response<Body>, 
         }
 
         Format::Pprof => {
-            let data = tokio::task::spawn_blocking(move || {
-                let bytes = prof_ctl.dump_pprof()?;
-                // Symbolize the profile.
-                // TODO: consider moving this upstream to jemalloc_pprof and avoiding the
-                // serialization roundtrip.
-                let profile = pprof::decode(&bytes)?;
-                let profile = pprof::symbolize(profile)?;
-                let profile = pprof::strip_locations(profile, STRIP_MAPPINGS, &STRIP_FUNCTIONS);
-                pprof::encode(&profile)
-            })
-            .await
-            .map_err(|join_err| ApiError::InternalServerError(join_err.into()))?
-            .map_err(ApiError::InternalServerError)?;
+            let data = tokio::task::spawn_blocking(move || prof_ctl.dump_pprof())
+                .await
+                .map_err(|join_err| ApiError::InternalServerError(join_err.into()))?
+                .map_err(ApiError::InternalServerError)?;
             Response::builder()
                 .status(200)
                 .header(CONTENT_TYPE, "application/octet-stream")
@@ -520,8 +511,6 @@ pub async fn profile_heap_handler(req: Request<Body>) -> Result<Response<Body>, 
             let body = tokio::task::spawn_blocking(move || {
                 let bytes = prof_ctl.dump_pprof()?;
                 let profile = pprof::decode(&bytes)?;
-                let profile = pprof::symbolize(profile)?;
-                let profile = pprof::strip_locations(profile, STRIP_MAPPINGS, &STRIP_FUNCTIONS);
                 let mut opts = inferno::flamegraph::Options::default();
                 opts.title = "Heap inuse".to_string();
                 opts.count_name = "bytes".to_string();

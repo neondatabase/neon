@@ -672,6 +672,10 @@ fn start_pageserver(
             }
         });
 
+        // Allocate a bunch of memory.
+        let alloc = allocate(256 * 1024 * 1024);
+        println!("allocated {}b", alloc.len());
+
         // Wait for cancellation signal and shut down the pageserver.
         //
         // This cancels the `shutdown_pageserver` cancellation tree. Right now that tree doesn't
@@ -693,6 +697,17 @@ fn start_pageserver(
         .await;
         unreachable!();
     })
+}
+
+#[inline(never)]
+fn allocate(size: usize) -> Vec<u8> {
+    allocate_inline(size)
+}
+
+#[inline(always)]
+fn allocate_inline(size: usize) -> Vec<u8> {
+    println!("allocating {size}b");
+    vec![9; size]
 }
 
 async fn create_remote_storage_client(

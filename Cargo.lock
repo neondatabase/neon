@@ -3263,8 +3263,7 @@ checksum = "49f1f14873335454500d59611f1cf4a4b0f786f9ac11f4312a78e4cf2566695b"
 [[package]]
 name = "jemalloc_pprof"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a883828bd6a4b957cd9f618886ff19e5f3ebd34e06ba0e855849e049fef32fb"
+source = "git+https://github.com/erikgrinaker/rust-jemalloc-pprof?branch=symbolize#0b146a1e2013bbc7fc8dc45f208f868c0b8ed193"
 dependencies = [
  "anyhow",
  "libc",
@@ -3453,8 +3452,7 @@ dependencies = [
 [[package]]
 name = "mappings"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce9229c438fbf1c333926e2053c4c091feabbd40a1b590ec62710fea2384af9e"
+source = "git+https://github.com/erikgrinaker/rust-jemalloc-pprof?branch=symbolize#0b146a1e2013bbc7fc8dc45f208f868c0b8ed193"
 dependencies = [
  "anyhow",
  "libc",
@@ -4729,10 +4727,10 @@ dependencies = [
 [[package]]
 name = "pprof_util"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65c568b3f8c1c37886ae07459b1946249e725c315306b03be5632f84c239f781"
+source = "git+https://github.com/erikgrinaker/rust-jemalloc-pprof?branch=symbolize#0b146a1e2013bbc7fc8dc45f208f868c0b8ed193"
 dependencies = [
  "anyhow",
+ "backtrace",
  "flate2",
  "num",
  "paste",

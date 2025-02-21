@@ -116,7 +116,7 @@ inferno = "0.12.0"
 ipnet = "2.10.0"
 itertools = "0.10"
 itoa = "1.0.11"
-jemalloc_pprof = "0.6"
+jemalloc_pprof = { git = "https://github.com/erikgrinaker/rust-jemalloc-pprof", branch = "symbolize", version = "0.6", features = ["symbolize"] }
 jsonwebtoken = "9"
 lasso = "0.7"
 libc = "0.2"
