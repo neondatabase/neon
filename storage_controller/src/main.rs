@@ -53,6 +53,10 @@ struct Cli {
     #[arg(long)]
     jwt_token: Option<String>,
 
+    /// Token for authenticating this service with the safekeepers it controls
+    #[arg(long)]
+    safekeeper_jwt_token: Option<String>,
+
     /// Token for authenticating this service with the control plane, when calling
     /// the compute notification endpoint
     #[arg(long)]
@@ -153,7 +157,8 @@ impl Default for StrictMode {
 struct Secrets {
     database_url: String,
     public_key: Option<JwtAuth>,
-    jwt_token: Option<String>,
+    pageserver_jwt_token: Option<String>,
+    safekeeper_jwt_token: Option<String>,
     control_plane_jwt_token: Option<String>,
     peer_jwt_token: Option<String>,
 }
@@ -161,6 +166,7 @@ struct Secrets {
 impl Secrets {
     const DATABASE_URL_ENV: &'static str = "DATABASE_URL";
     const PAGESERVER_JWT_TOKEN_ENV: &'static str = "PAGESERVER_JWT_TOKEN";
+    const SAFEKEEPER_JWT_TOKEN_ENV: &'static str = "SAFEKEEPER_JWT_TOKEN";
     const CONTROL_PLANE_JWT_TOKEN_ENV: &'static str = "CONTROL_PLANE_JWT_TOKEN";
     const PEER_JWT_TOKEN_ENV: &'static str = "PEER_JWT_TOKEN";
     const PUBLIC_KEY_ENV: &'static str = "PUBLIC_KEY";
@@ -184,7 +190,14 @@ impl Secrets {
         let this = Self {
             database_url,
             public_key,
-            jwt_token: Self::load_secret(&args.jwt_token, Self::PAGESERVER_JWT_TOKEN_ENV),
+            pageserver_jwt_token: Self::load_secret(
+                &args.jwt_token,
+                Self::PAGESERVER_JWT_TOKEN_ENV,
+            ),
+            safekeeper_jwt_token: Self::load_secret(
+                &args.safekeeper_jwt_token,
+                Self::SAFEKEEPER_JWT_TOKEN_ENV,
+            ),
             control_plane_jwt_token: Self::load_secret(
                 &args.control_plane_jwt_token,
                 Self::CONTROL_PLANE_JWT_TOKEN_ENV,
@@ -264,11 +277,17 @@ async fn async_main() -> anyhow::Result<()> {
 
     let secrets = Secrets::load(&args).await?;
 
+    // TODO: once we've rolled out the safekeeper JWT token everywhere, put it into the validation code below
+    tracing::info!(
+        "safekeeper_jwt_token set: {:?}",
+        secrets.safekeeper_jwt_token.is_some()
+    );
+
     // Validate required secrets and arguments are provided in strict mode
     match strict_mode {
         StrictMode::Strict
             if (secrets.public_key.is_none()
-                || secrets.jwt_token.is_none()
+                || secrets.pageserver_jwt_token.is_none()
                 || secrets.control_plane_jwt_token.is_none()) =>
         {
             // Production systems should always have secrets configured: if public_key was not set
@@ -293,7 +312,8 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     let config = Config {
-        jwt_token: secrets.jwt_token,
+        pageserver_jwt_token: secrets.pageserver_jwt_token,
+        safekeeper_jwt_token: secrets.safekeeper_jwt_token,
         control_plane_jwt_token: secrets.control_plane_jwt_token,
         peer_jwt_token: secrets.peer_jwt_token,
         compute_hook_url: args.compute_hook_url,

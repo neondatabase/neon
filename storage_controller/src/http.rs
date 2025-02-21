@@ -598,7 +598,10 @@ async fn handle_tenant_timeline_passthrough(
 
     let _timer = latency.start_timer(labels.clone());
 
-    let client = mgmt_api::Client::new(node.base_url(), service.get_config().jwt_token.as_deref());
+    let client = mgmt_api::Client::new(
+        node.base_url(),
+        service.get_config().pageserver_jwt_token.as_deref(),
+    );
     let resp = client.get_raw(path).await.map_err(|e|
         // We return 503 here because if we can't successfully send a request to the pageserver,
         // either we aren't available or the pageserver is unavailable.
