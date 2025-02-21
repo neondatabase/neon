@@ -2921,7 +2921,9 @@ impl Service {
             first
         };
 
-        let updated_config = base.apply_patch(patch);
+        let updated_config = base
+            .apply_patch(patch)
+            .map_err(|err| ApiError::BadRequest(anyhow::anyhow!(err)))?;
         self.set_tenant_config_and_reconcile(tenant_id, updated_config)
             .await
     }

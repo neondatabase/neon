@@ -25,7 +25,7 @@ use crate::compute_hook::{ComputeHook, NotifyError};
 use crate::node::Node;
 use crate::tenant_shard::{IntentState, ObservedState, ObservedStateDelta, ObservedStateLocation};
 
-const DEFAULT_HEATMAP_PERIOD: &str = "60s";
+const DEFAULT_HEATMAP_PERIOD: Duration = Duration::from_secs(60);
 
 /// Object with the lifetime of the background reconcile task that is created
 /// for tenants which have a difference between their intent and observed states.
@@ -1201,7 +1201,7 @@ fn ha_aware_config(config: &TenantConfig, has_secondaries: bool) -> TenantConfig
     let mut config = config.clone();
     if has_secondaries {
         if config.heatmap_period.is_none() {
-            config.heatmap_period = Some(DEFAULT_HEATMAP_PERIOD.to_string());
+            config.heatmap_period = Some(DEFAULT_HEATMAP_PERIOD);
         }
     } else {
         config.heatmap_period = None;
