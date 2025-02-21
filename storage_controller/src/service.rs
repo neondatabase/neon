@@ -6821,7 +6821,7 @@ impl Service {
         // with the frequency of background calls, this acts as an implicit rate limit that runs a small
         // trickle of optimizations in the background, rather than executing a large number in parallel
         // when a change occurs.
-        const MAX_OPTIMIZATIONS_EXEC_PER_PASS: usize = 2;
+        const MAX_OPTIMIZATIONS_EXEC_PER_PASS: usize = 16;
 
         // Synchronous prepare: scan shards for possible scheduling optimizations
         let candidate_work = self.optimize_all_plan();
@@ -6872,7 +6872,7 @@ impl Service {
         // How many candidate optimizations we will generate, before evaluating them for readniess: setting
         // this higher than the execution limit gives us a chance to execute some work even if the first
         // few optimizations we find are not ready.
-        const MAX_OPTIMIZATIONS_PLAN_PER_PASS: usize = 8;
+        const MAX_OPTIMIZATIONS_PLAN_PER_PASS: usize = 64;
 
         let mut work = Vec::new();
         let mut locked = self.inner.write().unwrap();
