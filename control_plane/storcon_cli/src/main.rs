@@ -22,7 +22,7 @@ use pageserver_api::{
 };
 use pageserver_client::mgmt_api::{self};
 use reqwest::{Method, StatusCode, Url};
-use utils::id::{NodeId, TenantId};
+use utils::id::{NodeId, TenantId, TimelineId};
 
 use pageserver_api::controller_api::{
     NodeConfigureRequest, NodeRegisterRequest, NodeSchedulingPolicy, PlacementPolicy,
@@ -47,6 +47,9 @@ enum Command {
         listen_http_addr: String,
         #[arg(long)]
         listen_http_port: u16,
+        #[arg(long)]
+        listen_https_port: Option<u16>,
+
         #[arg(long)]
         availability_zone_id: String,
     },
@@ -239,6 +242,19 @@ enum Command {
         #[arg(long)]
         scheduling_policy: SkSchedulingPolicyArg,
     },
+    /// Downloads any missing heatmap layers for all shard for a given timeline
+    DownloadHeatmapLayers {
+        /// Tenant ID or tenant shard ID. When an unsharded tenant ID is specified,
+        /// the operation is performed on all shards. When a sharded tenant ID is
+        /// specified, the operation is only performed on the specified shard.
+        #[arg(long)]
+        tenant_shard_id: TenantShardId,
+        #[arg(long)]
+        timeline_id: TimelineId,
+        /// Optional: Maximum download concurrency (default is 16)
+        #[arg(long)]
+        concurrency: Option<usize>,
+    },
 }
 
 #[derive(Parser)]
@@ -381,6 +397,7 @@ async fn main() -> anyhow::Result<()> {
             listen_pg_port,
             listen_http_addr,
             listen_http_port,
+            listen_https_port,
             availability_zone_id,
         } => {
             storcon_client
@@ -393,6 +410,7 @@ async fn main() -> anyhow::Result<()> {
                         listen_pg_port,
                         listen_http_addr,
                         listen_http_port,
+                        listen_https_port,
                         availability_zone_id: AvailabilityZone(availability_zone_id),
                     }),
                 )
@@ -941,7 +959,7 @@ async fn main() -> anyhow::Result<()> {
                                 threshold: threshold.into(),
                             },
                         )),
-                        heatmap_period: Some("300s".to_string()),
+                        heatmap_period: Some(Duration::from_secs(300)),
                         ..Default::default()
                     },
                 })
@@ -1246,6 +1264,24 @@ async fn main() -> anyhow::Result<()> {
                 "Scheduling policy of {node_id} set to {}",
                 String::from(scheduling_policy)
             );
+        }
+        Command::DownloadHeatmapLayers {
+            tenant_shard_id,
+            timeline_id,
+            concurrency,
+        } => {
+            let mut path = format!(
+                "/v1/tenant/{}/timeline/{}/download_heatmap_layers",
+                tenant_shard_id, timeline_id,
+            );
+
+            if let Some(c) = concurrency {
+                path = format!("{path}?concurrency={c}");
+            }
+
+            storcon_client
+                .dispatch::<(), ()>(Method::POST, path, None)
+                .await?;
         }
     }
 

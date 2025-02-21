@@ -120,6 +120,7 @@ pub(super) async fn handle_walreceiver_connection(
     ctx: RequestContext,
     safekeeper_node: NodeId,
     ingest_batch_size: u64,
+    validate_wal_contiguity: bool,
 ) -> Result<(), WalReceiverError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -274,6 +275,7 @@ pub(super) async fn handle_walreceiver_connection(
         } => Some((format, compression)),
     };
 
+    let mut expected_wal_start = startpoint;
     while let Some(replication_message) = {
         select! {
             _ = cancellation.cancelled() => {
@@ -340,13 +342,49 @@ pub(super) async fn handle_walreceiver_connection(
                     )
                     })?;
 
+                // Guard against WAL gaps. If the start LSN of the PG WAL section
+                // from which the interpreted records were extracted, doesn't match
+                // the end of the previous batch (or the starting point for the first batch),
+                // then kill this WAL receiver connection and start a new one.
+                if validate_wal_contiguity {
+                    if let Some(raw_wal_start_lsn) = batch.raw_wal_start_lsn {
+                        match raw_wal_start_lsn.cmp(&expected_wal_start) {
+                            std::cmp::Ordering::Greater => {
+                                let msg = format!(
+                                    "Gap in streamed WAL: [{}, {})",
+                                    expected_wal_start, raw_wal_start_lsn
+                                );
+                                critical!("{msg}");
+                                return Err(WalReceiverError::Other(anyhow!(msg)));
+                            }
+                            std::cmp::Ordering::Less => {
+                                // Other shards are reading WAL behind us.
+                                // This is valid, but check that we received records
+                                // that we haven't seen before.
+                                if let Some(first_rec) = batch.records.first() {
+                                    if first_rec.next_record_lsn < last_rec_lsn {
+                                        let msg = format!(
+                                            "Received record with next_record_lsn multiple times ({} < {})",
+                                            first_rec.next_record_lsn, expected_wal_start
+                                        );
+                                        critical!("{msg}");
+                                        return Err(WalReceiverError::Other(anyhow!(msg)));
+                                    }
+                                }
+                            }
+                            std::cmp::Ordering::Equal => {}
+                        }
+                    }
+                }
+
                 let InterpretedWalRecords {
                     records,
                     next_record_lsn,
+                    raw_wal_start_lsn: _,
                 } = batch;
 
                 tracing::debug!(
-                    "Received WAL up to {} with next_record_lsn={:?}",
+                    "Received WAL up to {} with next_record_lsn={}",
                     streaming_lsn,
                     next_record_lsn
                 );
@@ -423,12 +461,11 @@ pub(super) async fn handle_walreceiver_connection(
                 // need to advance last record LSN on all shards. If we've not ingested the latest
                 // record, then set the LSN of the modification past it. This way all shards
                 // advance their last record LSN at the same time.
-                let needs_last_record_lsn_advance = match next_record_lsn {
-                    Some(lsn) if lsn > modification.get_lsn() => {
-                        modification.set_lsn(lsn).unwrap();
-                        true
-                    }
-                    _ => false,
+                let needs_last_record_lsn_advance = if next_record_lsn > modification.get_lsn() {
+                    modification.set_lsn(next_record_lsn).unwrap();
+                    true
+                } else {
+                    false
                 };
 
                 if uncommitted_records > 0 || needs_last_record_lsn_advance {
@@ -446,9 +483,8 @@ pub(super) async fn handle_walreceiver_connection(
                     timeline.get_last_record_lsn()
                 );
 
-                if let Some(lsn) = next_record_lsn {
-                    last_rec_lsn = lsn;
-                }
+                last_rec_lsn = next_record_lsn;
+                expected_wal_start = streaming_lsn;
 
                 Some(streaming_lsn)
             }

@@ -34,11 +34,13 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::SystemTime;
 use std::time::{Duration, Instant};
+use strum_macros::IntoStaticStr;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::logging::warn_slow;
 use utils::sync::gate::{Gate, GateGuard};
 use utils::sync::spsc_fold;
 use utils::{
@@ -73,12 +75,16 @@ use pageserver_api::models::PageTraceEvent;
 use pageserver_api::reltag::SlruKind;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
+use std::os::fd::AsRawFd;
 
 /// How long we may wait for a [`crate::tenant::mgr::TenantSlot::InProgress`]` and/or a [`crate::tenant::Tenant`] which
 /// is not yet in state [`TenantState::Active`].
 ///
 /// NB: this is a different value than [`crate::http::routes::ACTIVE_TENANT_TIMEOUT`].
 const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
+
+/// Threshold at which to log a warning about slow GetPage requests.
+const WARN_SLOW_GETPAGE_THRESHOLD: Duration = Duration::from_secs(30);
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -236,7 +242,7 @@ pub async fn libpq_listener_main(
 
 type ConnectionHandlerResult = anyhow::Result<()>;
 
-#[instrument(skip_all, fields(peer_addr))]
+#[instrument(skip_all, fields(peer_addr, application_name))]
 #[allow(clippy::too_many_arguments)]
 async fn page_service_conn_main(
     conf: &'static PageServerConf,
@@ -256,6 +262,8 @@ async fn page_service_conn_main(
     socket
         .set_nodelay(true)
         .context("could not set TCP_NODELAY")?;
+
+    let socket_fd = socket.as_raw_fd();
 
     let peer_addr = socket.peer_addr().context("get peer address")?;
     tracing::Span::current().record("peer_addr", field::display(peer_addr));
@@ -305,7 +313,7 @@ async fn page_service_conn_main(
         cancel.clone(),
         gate_guard,
     );
-    let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
+    let pgbackend = PostgresBackend::new_from_io(socket_fd, socket, peer_addr, auth_type, None)?;
 
     match pgbackend.run(&mut conn_handler, &cancel).await {
         Ok(()) => {
@@ -591,6 +599,7 @@ struct BatchedTestRequest {
 /// NB: we only hold [`timeline::handle::WeakHandle`] inside this enum,
 /// so that we don't keep the [`Timeline::gate`] open while the batch
 /// is being built up inside the [`spsc_fold`] (pagestream pipelining).
+#[derive(IntoStaticStr)]
 enum BatchedFeMessage {
     Exists {
         span: Span,
@@ -635,6 +644,10 @@ enum BatchedFeMessage {
 }
 
 impl BatchedFeMessage {
+    fn as_static_str(&self) -> &'static str {
+        self.into()
+    }
+
     fn observe_execution_start(&mut self, at: Instant) {
         match self {
             BatchedFeMessage::Exists { timer, .. }
@@ -1286,12 +1299,15 @@ impl PageServerHandler {
             ))?;
 
             // what we want to do
+            let socket_fd = pgb_writer.socket_fd;
             let flush_fut = pgb_writer.flush();
             // metric for how long flushing takes
             let flush_fut = match flushing_timer {
-                Some(flushing_timer) => {
-                    futures::future::Either::Left(flushing_timer.measure(Instant::now(), flush_fut))
-                }
+                Some(flushing_timer) => futures::future::Either::Left(flushing_timer.measure(
+                    Instant::now(),
+                    flush_fut,
+                    socket_fd,
+                )),
                 None => futures::future::Either::Right(flush_fut),
             };
             // do it while respecting cancellation
@@ -1457,17 +1473,20 @@ impl PageServerHandler {
                 }
             };
 
-            let err = self
-                .pagesteam_handle_batched_message(
+            let result = warn_slow(
+                msg.as_static_str(),
+                WARN_SLOW_GETPAGE_THRESHOLD,
+                self.pagesteam_handle_batched_message(
                     pgb_writer,
                     msg,
                     io_concurrency.clone(),
                     &cancel,
                     protocol_version,
                     ctx,
-                )
-                .await;
-            match err {
+                ),
+            )
+            .await;
+            match result {
                 Ok(()) => {}
                 Err(e) => break e,
             }
@@ -1630,13 +1649,17 @@ impl PageServerHandler {
                             return Err(e);
                         }
                     };
-                    self.pagesteam_handle_batched_message(
-                        pgb_writer,
-                        batch,
-                        io_concurrency.clone(),
-                        &cancel,
-                        protocol_version,
-                        &ctx,
+                    warn_slow(
+                        batch.as_static_str(),
+                        WARN_SLOW_GETPAGE_THRESHOLD,
+                        self.pagesteam_handle_batched_message(
+                            pgb_writer,
+                            batch,
+                            io_concurrency.clone(),
+                            &cancel,
+                            protocol_version,
+                            &ctx,
+                        ),
                     )
                     .await?;
                 }
@@ -1793,6 +1816,13 @@ impl PageServerHandler {
                 .as_millis()
                 .to_string()
         });
+
+        info!(
+            "acquired lease for {} until {}",
+            lsn,
+            valid_until_str.as_deref().unwrap_or("<unknown>")
+        );
+
         let bytes = valid_until_str.as_ref().map(|x| x.as_bytes());
 
         pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor::text_col(
@@ -2457,9 +2487,16 @@ where
     fn startup(
         &mut self,
         _pgb: &mut PostgresBackend<IO>,
-        _sm: &FeStartupPacket,
+        sm: &FeStartupPacket,
     ) -> Result<(), QueryError> {
         fail::fail_point!("ps::connection-start::startup-packet");
+
+        if let FeStartupPacket::StartupMessage { params, .. } = sm {
+            if let Some(app_name) = params.get("application_name") {
+                Span::current().record("application_name", field::display(app_name));
+            }
+        };
+
         Ok(())
     }
 

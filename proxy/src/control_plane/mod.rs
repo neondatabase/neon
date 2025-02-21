@@ -19,8 +19,7 @@ use crate::cache::{Cached, TimedLru};
 use crate::config::ComputeConfig;
 use crate::context::RequestContext;
 use crate::control_plane::messages::{ControlPlaneErrorMessage, MetricsAuxInfo};
-use crate::intern::AccountIdInt;
-use crate::intern::ProjectIdInt;
+use crate::intern::{AccountIdInt, ProjectIdInt};
 use crate::types::{EndpointCacheKey, EndpointId};
 use crate::{compute, scram};
 

@@ -119,7 +119,7 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
         // if no more bytes available then exit
         if bytes_read == 0 {
             return Ok((ChainRW { inner: read, buf }, ConnectHeader::Missing));
-        };
+        }
 
         // check if we have enough bytes to continue
         if let Some(header) = buf.try_get::<ProxyProtocolV2Header>() {
@@ -169,7 +169,7 @@ fn process_proxy_payload(
                 header.version_and_command
             ),
         )),
-    };
+    }
 
     let size_err =
         "invalid proxy protocol length. payload not large enough to fit requested IP addresses";

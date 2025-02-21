@@ -786,7 +786,7 @@ dependencies = [
 [[package]]
 name = "azure_core"
 version = "0.21.0"
-source = "git+https://github.com/neondatabase/azure-sdk-for-rust.git?branch=neon#c36ed4c039bb3d59b5a1705f2cc337636c73b541"
+source = "git+https://github.com/neondatabase/azure-sdk-for-rust.git?branch=neon#f64bd57262ced51afce5d8909c06dcb11a6dd85a"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -815,7 +815,7 @@ dependencies = [
 [[package]]
 name = "azure_identity"
 version = "0.21.0"
-source = "git+https://github.com/neondatabase/azure-sdk-for-rust.git?branch=neon#c36ed4c039bb3d59b5a1705f2cc337636c73b541"
+source = "git+https://github.com/neondatabase/azure-sdk-for-rust.git?branch=neon#f64bd57262ced51afce5d8909c06dcb11a6dd85a"
 dependencies = [
  "async-lock",
  "async-trait",
@@ -834,7 +834,7 @@ dependencies = [
 [[package]]
 name = "azure_storage"
 version = "0.21.0"
-source = "git+https://github.com/neondatabase/azure-sdk-for-rust.git?branch=neon#c36ed4c039bb3d59b5a1705f2cc337636c73b541"
+source = "git+https://github.com/neondatabase/azure-sdk-for-rust.git?branch=neon#f64bd57262ced51afce5d8909c06dcb11a6dd85a"
 dependencies = [
  "RustyXML",
  "async-lock",
@@ -852,7 +852,7 @@ dependencies = [
 [[package]]
 name = "azure_storage_blobs"
 version = "0.21.0"
-source = "git+https://github.com/neondatabase/azure-sdk-for-rust.git?branch=neon#c36ed4c039bb3d59b5a1705f2cc337636c73b541"
+source = "git+https://github.com/neondatabase/azure-sdk-for-rust.git?branch=neon#f64bd57262ced51afce5d8909c06dcb11a6dd85a"
 dependencies = [
  "RustyXML",
  "azure_core",
@@ -872,7 +872,7 @@ dependencies = [
 [[package]]
 name = "azure_svc_blobstorage"
 version = "0.21.0"
-source = "git+https://github.com/neondatabase/azure-sdk-for-rust.git?branch=neon#c36ed4c039bb3d59b5a1705f2cc337636c73b541"
+source = "git+https://github.com/neondatabase/azure-sdk-for-rust.git?branch=neon#f64bd57262ced51afce5d8909c06dcb11a6dd85a"
 dependencies = [
  "azure_core",
  "bytes",
@@ -1028,12 +1028,6 @@ checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array",
 ]
-
-[[package]]
-name = "boxcar"
-version = "0.2.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2721c3c5a6f0e7f7e607125d963fedeb765f545f67adc9d71ed934693881eb42"
 
 [[package]]
 name = "bstr"
@@ -1309,6 +1303,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-kms",
  "aws-sdk-s3",
+ "aws-smithy-types",
  "axum",
  "base64 0.13.1",
  "bytes",
@@ -1321,7 +1316,6 @@ dependencies = [
  "flate2",
  "futures",
  "http 1.1.0",
- "jsonwebtoken",
  "metrics",
  "nix 0.27.1",
  "notify",
@@ -1331,7 +1325,6 @@ dependencies = [
  "opentelemetry_sdk",
  "postgres",
  "postgres_initdb",
- "prometheus",
  "regex",
  "remote_storage",
  "reqwest",
@@ -1350,13 +1343,13 @@ dependencies = [
  "tower 0.5.2",
  "tower-http",
  "tracing",
- "tracing-opentelemetry",
  "tracing-subscriber",
  "tracing-utils",
  "url",
  "utils",
  "uuid",
  "vm_monitor",
+ "walkdir",
  "workspace_hack",
  "zstd",
 ]
@@ -1880,6 +1873,12 @@ checksum = "209c735641a413bc68c4923a9d6ad4bcb3ca306b794edaa7eb0b3228a99ffb25"
 dependencies = [
  "syn 2.0.90",
 ]
+
+[[package]]
+name = "difflib"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6184e33543162437515c2e2b48714794e37845ec9851711914eec9d308f6ebe8"
 
 [[package]]
 name = "digest"
@@ -3336,6 +3335,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29c15563dc2726973df627357ce0c9ddddbea194836909d655df6a75d2cf296d"
 dependencies = [
  "wasm-bindgen",
+]
+
+[[package]]
+name = "json-structural-diff"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e878e36a8a44c158505c2c818abdc1350413ad83dcb774a0459f6a7ef2b65cbf"
+dependencies = [
+ "difflib",
+ "regex",
+ "serde_json",
 ]
 
 [[package]]
@@ -4929,7 +4939,6 @@ dependencies = [
  "aws-sdk-iam",
  "aws-sigv4",
  "base64 0.13.1",
- "boxcar",
  "bstr",
  "bytes",
  "camino",
@@ -4981,7 +4990,6 @@ dependencies = [
  "postgres-protocol2",
  "postgres_backend",
  "pq_proto",
- "prometheus",
  "rand 0.8.5",
  "rand_distr",
  "rcgen",
@@ -5006,7 +5014,6 @@ dependencies = [
  "smallvec",
  "smol_str",
  "socket2",
- "strum",
  "strum_macros",
  "subtle",
  "thiserror 1.0.69",
@@ -5021,7 +5028,6 @@ dependencies = [
  "tracing",
  "tracing-log",
  "tracing-opentelemetry",
- "tracing-serde",
  "tracing-subscriber",
  "tracing-utils",
  "try-lock",
@@ -6454,6 +6460,7 @@ dependencies = [
  "humantime",
  "hyper 0.14.30",
  "itertools 0.10.5",
+ "json-structural-diff",
  "lasso",
  "measured",
  "metrics",
@@ -6476,6 +6483,7 @@ dependencies = [
  "strum",
  "strum_macros",
  "thiserror 1.0.69",
+ "tikv-jemallocator",
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",
@@ -7029,14 +7037,11 @@ dependencies = [
 name = "tokio-postgres2"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "byteorder",
  "bytes",
  "fallible-iterator",
  "futures-util",
  "log",
  "parking_lot 0.12.1",
- "percent-encoding",
  "phf",
  "pin-project-lite",
  "postgres-protocol2",
@@ -7623,13 +7628,13 @@ dependencies = [
  "hex",
  "hex-literal",
  "humantime",
- "inferno 0.12.0",
  "jsonwebtoken",
  "metrics",
  "nix 0.27.1",
  "once_cell",
  "pin-project-lite",
  "postgres_connection",
+ "pprof",
  "pq_proto",
  "rand 0.8.5",
  "regex",

@@ -4,6 +4,20 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::{bail, ensure, Context};
+use camino::{Utf8Path, Utf8PathBuf};
+use clap::Parser;
+use compute_api::spec::LocalProxySpec;
+use futures::future::Either;
+use thiserror::Error;
+use tokio::net::TcpListener;
+use tokio::sync::Notify;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, warn};
+use utils::sentry_init::init_sentry;
+use utils::{pid_file, project_build_tag, project_git_version};
+
 use crate::auth::backend::jwt::JwkCache;
 use crate::auth::backend::local::{LocalBackend, JWKS_ROLE_MAP};
 use crate::auth::{self};
@@ -25,23 +39,9 @@ use crate::serverless::{self, GlobalConnPoolOptions};
 use crate::tls::client_config::compute_client_config_with_root_certs;
 use crate::types::RoleName;
 use crate::url::ApiUrl;
-use anyhow::{bail, ensure, Context};
-use camino::{Utf8Path, Utf8PathBuf};
-use compute_api::spec::LocalProxySpec;
-use futures::future::Either;
 
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
-
-use clap::Parser;
-use thiserror::Error;
-use tokio::net::TcpListener;
-use tokio::sync::Notify;
-use tokio::task::JoinSet;
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
-use utils::sentry_init::init_sentry;
-use utils::{pid_file, project_build_tag, project_git_version};
 
 /// Neon proxy/router
 #[derive(Parser)]
