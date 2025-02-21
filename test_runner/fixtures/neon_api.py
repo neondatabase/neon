@@ -31,9 +31,10 @@ class NeonAPI:
         if "headers" not in kwargs:
             kwargs["headers"] = {}
         kwargs["headers"]["Authorization"] = f"Bearer {self.__neon_api_key}"
+        log.info("args: %s", **kwargs)
 
         resp = requests.request(method, f"{self.__neon_api_base_url}{endpoint}", **kwargs)
-        log.debug("%s %s returned a %d: %s", method, endpoint, resp.status_code, resp.text)
+        log.info("%s %s returned a %d: %s", method, endpoint, resp.status_code, resp.text)
         resp.raise_for_status()
 
         return resp
@@ -278,7 +279,6 @@ class NeonAPI:
         while has_running:
             has_running = False
             operations = self.get_operations(project_id)["operations"]
-            log.info("Operations: %s", operations)
             for op in operations:
                 if op["status"] in {"scheduling", "running", "cancelling"}:
                     has_running = True
