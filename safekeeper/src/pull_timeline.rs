@@ -207,7 +207,7 @@ impl Timeline {
         // Modify the partial segment of the in-memory copy for the control file to
         // point to the destination safekeeper.
         let replace = control_file
-            .partial_backup
+            .partial_upload
             .replace_uploaded_segment(source, destination)?;
 
         let Some(replace) = replace else {
@@ -276,7 +276,7 @@ impl WalResidentTimeline {
         // Modify the partial segment of the in-memory copy for the control file to
         // point to the destination safekeeper.
         let replace = control_store
-            .partial_backup
+            .partial_upload
             .replace_uploaded_segment(source, destination)?;
 
         if let Some(replace) = replace {
@@ -313,7 +313,7 @@ impl WalResidentTimeline {
         // won't be removed until we're done.
         let from_lsn = min(
             shared_state.sk.state().remote_consistent_lsn,
-            shared_state.sk.state().backup_lsn,
+            shared_state.sk.state().upload_lsn,
         );
         if from_lsn == Lsn::INVALID {
             // this is possible if snapshot is called before handling first

@@ -39,7 +39,7 @@ use crate::{
     timeline_guard::{AccessService, GuardId, ResidenceGuard},
     timelines_set::{TimelineSetGuard, TimelinesSet},
     wal_upload::{self, WalBackupTaskHandle},
-    wal_upload_partial::{self, PartialBackup, PartialRemoteSegment},
+    wal_upload_partial::{self, PartialUpload, PartialRemoteSegment},
     SafeKeeperConf,
 };
 
@@ -71,11 +71,11 @@ impl StateSnapshot {
         let state = read_guard.sk.state();
         Self {
             commit_lsn: state.inmem.commit_lsn,
-            backup_lsn: state.inmem.backup_lsn,
+            backup_lsn: state.inmem.upload_lsn,
             remote_consistent_lsn: state.inmem.remote_consistent_lsn,
             cfile_commit_lsn: state.commit_lsn,
             cfile_remote_consistent_lsn: state.remote_consistent_lsn,
-            cfile_backup_lsn: state.backup_lsn,
+            cfile_backup_lsn: state.upload_lsn,
             flush_lsn: read_guard.sk.flush_lsn(),
             last_log_term: read_guard.sk.last_log_term(),
             cfile_last_persist_at: state.pers.last_persist_at(),
@@ -87,7 +87,7 @@ impl StateSnapshot {
 
     fn has_unflushed_inmem_state(state: &TimelineState<FileStorage>) -> bool {
         state.inmem.commit_lsn > state.commit_lsn
-            || state.inmem.backup_lsn > state.backup_lsn
+            || state.inmem.upload_lsn > state.upload_lsn
             || state.inmem.peer_horizon_lsn > state.peer_horizon_lsn
             || state.inmem.remote_consistent_lsn > state.remote_consistent_lsn
     }
@@ -694,7 +694,7 @@ impl Manager {
         }
 
         let tli = self.wal_resident_timeline()?;
-        let mut partial_backup = PartialBackup::new(tli, self.conf.clone()).await;
+        let mut partial_backup = PartialUpload::new(tli, self.conf.clone()).await;
         // Reset might fail e.g. when cfile is already reset but s3 removal
         // failed, so set manager state to None beforehand. In any case caller
         // is expected to retry until success.

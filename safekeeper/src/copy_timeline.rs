@@ -61,7 +61,7 @@ pub async fn handle_request(
     if start_lsn == Lsn::INVALID {
         bail!("timeline is not initialized");
     }
-    let backup_lsn = mem_state.backup_lsn;
+    let backup_lsn = mem_state.upload_lsn;
 
     {
         let commit_lsn = mem_state.commit_lsn;
@@ -155,7 +155,7 @@ pub async fn handle_request(
     )?;
     new_state.timeline_start_lsn = start_lsn;
     new_state.peer_horizon_lsn = request.until_lsn;
-    new_state.backup_lsn = new_backup_lsn;
+    new_state.upload_lsn = new_backup_lsn;
 
     FileStorage::create_new(&tli_dir_path, new_state.clone(), conf.no_sync).await?;
 

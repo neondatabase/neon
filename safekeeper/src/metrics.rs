@@ -776,7 +776,7 @@ impl Collector for TimelineCollector {
                 .set(tli.mem_state.commit_lsn.into());
             self.backup_lsn
                 .with_label_values(labels)
-                .set(tli.mem_state.backup_lsn.into());
+                .set(tli.mem_state.upload_lsn.into());
             self.flush_lsn
                 .with_label_values(labels)
                 .set(tli.flush_lsn.into());

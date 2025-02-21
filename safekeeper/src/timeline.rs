@@ -219,8 +219,8 @@ impl StateSK {
         let state = self.state_mut();
         let wal_seg_size = state.server.wal_seg_size as u64;
 
-        state.inmem.backup_lsn = max(Lsn(sk_info.backup_lsn), state.inmem.backup_lsn);
-        sync_control_file |= state.backup_lsn + wal_seg_size < state.inmem.backup_lsn;
+        state.inmem.upload_lsn = max(Lsn(sk_info.backup_lsn), state.inmem.upload_lsn);
+        sync_control_file |= state.upload_lsn + wal_seg_size < state.inmem.upload_lsn;
 
         state.inmem.remote_consistent_lsn = max(
             Lsn(sk_info.remote_consistent_lsn),
@@ -371,7 +371,7 @@ impl SharedState {
                 .to_owned()
                 .unwrap_or(conf.listen_pg_addr.clone()),
             http_connstr: conf.listen_http_addr.to_owned(),
-            backup_lsn: self.sk.state().inmem.backup_lsn.0,
+            backup_lsn: self.sk.state().inmem.upload_lsn.0,
             local_start_lsn: self.sk.state().local_start_lsn.0,
             availability_zone: conf.availability_zone.clone(),
             standby_horizon: standby_apply_lsn.0,
@@ -653,7 +653,7 @@ impl Timeline {
 
     /// Returns latest backup_lsn.
     pub async fn get_wal_upload_lsn(&self) -> Lsn {
-        self.read_shared_state().await.sk.state().inmem.backup_lsn
+        self.read_shared_state().await.sk.state().inmem.upload_lsn
     }
 
     /// Sets backup_lsn to the given value.
@@ -663,7 +663,7 @@ impl Timeline {
         }
 
         let mut state = self.write_shared_state().await;
-        state.sk.state_mut().inmem.backup_lsn = max(state.sk.state().inmem.backup_lsn, backup_lsn);
+        state.sk.state_mut().inmem.upload_lsn = max(state.sk.state().inmem.upload_lsn, backup_lsn);
         // we should check whether to shut down offloader, but this will be done
         // soon by peer communication anyway.
         Ok(())
@@ -1008,7 +1008,7 @@ impl ManagerTimeline {
             shared_state.sk.state().eviction_state,
             EvictionState::Offloaded(_)
         );
-        let partial_backup_uploaded = shared_state.sk.state().partial_backup.uploaded_segment();
+        let partial_backup_uploaded = shared_state.sk.state().partial_upload.uploaded_segment();
 
         (is_offloaded, partial_backup_uploaded)
     }

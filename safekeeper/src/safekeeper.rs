@@ -832,7 +832,7 @@ where
             state.commit_lsn = max(state.commit_lsn, state.timeline_start_lsn);
 
             // Initializing backup_lsn is useful to avoid making backup think it should upload 0 segment.
-            state.backup_lsn = max(state.backup_lsn, state.timeline_start_lsn);
+            state.upload_lsn = max(state.upload_lsn, state.timeline_start_lsn);
             // similar for remote_consistent_lsn
             state.remote_consistent_lsn =
                 max(state.remote_consistent_lsn, state.timeline_start_lsn);
@@ -1332,10 +1332,10 @@ mod tests {
             timeline_start_lsn: Lsn(0x12345600),
             local_start_lsn: Lsn(0x12),
             commit_lsn: Lsn(1234567800),
-            backup_lsn: Lsn(1234567300),
+            upload_lsn: Lsn(1234567300),
             peer_horizon_lsn: Lsn(9999999),
             remote_consistent_lsn: Lsn(1234560000),
-            partial_backup: crate::wal_upload_partial::State::default(),
+            partial_upload: crate::wal_upload_partial::State::default(),
             eviction_state: EvictionState::Present,
             creation_ts: UNIX_EPOCH,
         };

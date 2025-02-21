@@ -169,9 +169,9 @@ pub struct SafeKeeperStateV7 {
     /// Part of WAL acknowledged by quorum *and available locally*. Always points
     /// to record boundary.
     pub commit_lsn: Lsn,
-    /// LSN that points to the end of the last backed up segment. Useful to
+    /// LSN that points to the end of the last uploaded segment. Useful to
     /// persist to avoid finding out offloading progress on boot.
-    pub backup_lsn: Lsn,
+    pub upload_lsn: Lsn,
     /// Minimal LSN which may be needed for recovery of some safekeeper (end_lsn
     /// of last record streamed to everyone). Persisting it helps skipping
     /// recovery in walproposer, generally we compute it from peers. In
@@ -215,9 +215,9 @@ pub struct SafeKeeperStateV8 {
     /// Part of WAL acknowledged by quorum *and available locally*. Always points
     /// to record boundary.
     pub commit_lsn: Lsn,
-    /// LSN that points to the end of the last backed up segment. Useful to
+    /// LSN that points to the end of the last uploaded segment. Useful to
     /// persist to avoid finding out offloading progress on boot.
-    pub backup_lsn: Lsn,
+    pub upload_lsn: Lsn,
     /// Minimal LSN which may be needed for recovery of some safekeeper (end_lsn
     /// of last record streamed to everyone). Persisting it helps skipping
     /// recovery in walproposer, generally we compute it from peers. In
@@ -244,7 +244,7 @@ pub struct PersistedPeers(pub Vec<(NodeId, PersistedPeerInfo)>);
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistedPeerInfo {
     /// LSN up to which safekeeper offloaded WAL to s3.
-    pub backup_lsn: Lsn,
+    pub upload_lsn: Lsn,
     /// Term of the last entry.
     pub term: Term,
     /// LSN of the last record.
@@ -256,7 +256,7 @@ pub struct PersistedPeerInfo {
 impl PersistedPeerInfo {
     pub fn new() -> Self {
         Self {
-            backup_lsn: Lsn::INVALID,
+            upload_lsn: Lsn::INVALID,
             term: safekeeper_api::INITIAL_TERM,
             flush_lsn: Lsn(0),
             commit_lsn: Lsn(0),
@@ -296,9 +296,9 @@ pub struct TimelinePersistentStateV9 {
     /// Part of WAL acknowledged by quorum *and available locally*. Always points
     /// to record boundary.
     pub commit_lsn: Lsn,
-    /// LSN that points to the end of the last backed up segment. Useful to
+    /// LSN that points to the end of the last uploaded segment. Useful to
     /// persist to avoid finding out offloading progress on boot.
-    pub backup_lsn: Lsn,
+    pub upload_lsn: Lsn,
     /// Minimal LSN which may be needed for recovery of some safekeeper (end_lsn
     /// of last record streamed to everyone). Persisting it helps skipping
     /// recovery in walproposer, generally we compute it from peers. In
@@ -316,7 +316,7 @@ pub struct TimelinePersistentStateV9 {
     pub peers: PersistedPeers,
     /// Holds names of partial segments uploaded to remote storage. Used to
     /// clean up old objects without leaving garbage in remote storage.
-    pub partial_backup: wal_upload_partial::State,
+    pub upload_backup: wal_upload_partial::State,
     /// Eviction state of the timeline. If it's Offloaded, we should download
     /// WAL files from remote storage to serve the timeline.
     pub eviction_state: EvictionState,
@@ -348,10 +348,10 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersiste
             timeline_start_lsn: Lsn(0),
             local_start_lsn: Lsn(0),
             commit_lsn: oldstate.commit_lsn,
-            backup_lsn: Lsn(0),
+            upload_lsn: Lsn(0),
             peer_horizon_lsn: oldstate.truncate_lsn,
             remote_consistent_lsn: Lsn(0),
-            partial_backup: wal_upload_partial::State::default(),
+            partial_upload: wal_upload_partial::State::default(),
             eviction_state: EvictionState::Present,
             creation_ts: std::time::SystemTime::UNIX_EPOCH,
         });
@@ -374,10 +374,10 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersiste
             timeline_start_lsn: Lsn(0),
             local_start_lsn: Lsn(0),
             commit_lsn: oldstate.commit_lsn,
-            backup_lsn: Lsn(0),
+            upload_lsn: Lsn(0),
             peer_horizon_lsn: oldstate.truncate_lsn,
             remote_consistent_lsn: Lsn(0),
-            partial_backup: wal_upload_partial::State::default(),
+            partial_upload: wal_upload_partial::State::default(),
             eviction_state: EvictionState::Present,
             creation_ts: std::time::SystemTime::UNIX_EPOCH,
         });
@@ -400,10 +400,10 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersiste
             timeline_start_lsn: Lsn(0),
             local_start_lsn: Lsn(0),
             commit_lsn: oldstate.commit_lsn,
-            backup_lsn: Lsn(0),
+            upload_lsn: Lsn(0),
             peer_horizon_lsn: oldstate.truncate_lsn,
             remote_consistent_lsn: Lsn(0),
-            partial_backup: wal_upload_partial::State::default(),
+            partial_upload: wal_upload_partial::State::default(),
             eviction_state: EvictionState::Present,
             creation_ts: std::time::SystemTime::UNIX_EPOCH,
         });
@@ -426,10 +426,10 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersiste
             timeline_start_lsn: Lsn(0),
             local_start_lsn: Lsn(0),
             commit_lsn: oldstate.commit_lsn,
-            backup_lsn: Lsn::INVALID,
+            upload_lsn: Lsn::INVALID,
             peer_horizon_lsn: oldstate.peer_horizon_lsn,
             remote_consistent_lsn: Lsn(0),
-            partial_backup: wal_upload_partial::State::default(),
+            partial_upload: wal_upload_partial::State::default(),
             eviction_state: EvictionState::Present,
             creation_ts: std::time::SystemTime::UNIX_EPOCH,
         });
@@ -472,10 +472,10 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersiste
             timeline_start_lsn: oldstate.timeline_start_lsn,
             local_start_lsn: oldstate.local_start_lsn,
             commit_lsn: oldstate.commit_lsn,
-            backup_lsn: oldstate.backup_lsn,
+            upload_lsn: oldstate.upload_lsn,
             peer_horizon_lsn: oldstate.peer_horizon_lsn,
             remote_consistent_lsn: oldstate.remote_consistent_lsn,
-            partial_backup: wal_upload_partial::State::default(),
+            partial_upload: wal_upload_partial::State::default(),
             eviction_state: EvictionState::Present,
             creation_ts: std::time::SystemTime::UNIX_EPOCH,
         });
@@ -492,10 +492,10 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersiste
             timeline_start_lsn: oldstate.timeline_start_lsn,
             local_start_lsn: oldstate.local_start_lsn,
             commit_lsn: oldstate.commit_lsn,
-            backup_lsn: oldstate.backup_lsn,
+            upload_lsn: oldstate.upload_lsn,
             peer_horizon_lsn: oldstate.peer_horizon_lsn,
             remote_consistent_lsn: oldstate.remote_consistent_lsn,
-            partial_backup: oldstate.partial_backup,
+            partial_upload: oldstate.partial_backup,
             eviction_state: EvictionState::Present,
             creation_ts: std::time::SystemTime::UNIX_EPOCH,
         });
@@ -511,10 +511,10 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersiste
             timeline_start_lsn: oldstate.timeline_start_lsn,
             local_start_lsn: oldstate.local_start_lsn,
             commit_lsn: oldstate.commit_lsn,
-            backup_lsn: oldstate.backup_lsn,
+            upload_lsn: oldstate.upload_lsn,
             peer_horizon_lsn: oldstate.peer_horizon_lsn,
             remote_consistent_lsn: oldstate.remote_consistent_lsn,
-            partial_backup: oldstate.partial_backup,
+            partial_upload: oldstate.upload_backup,
             eviction_state: oldstate.eviction_state,
             creation_ts: std::time::SystemTime::UNIX_EPOCH,
         });
@@ -539,11 +539,11 @@ pub fn downgrade_v10_to_v9(state: &TimelinePersistentState) -> TimelinePersisten
         timeline_start_lsn: state.timeline_start_lsn,
         local_start_lsn: state.local_start_lsn,
         commit_lsn: state.commit_lsn,
-        backup_lsn: state.backup_lsn,
+        upload_lsn: state.upload_lsn,
         peer_horizon_lsn: state.peer_horizon_lsn,
         remote_consistent_lsn: state.remote_consistent_lsn,
         peers: PersistedPeers(vec![]),
-        partial_backup: state.partial_backup.clone(),
+        upload_backup: state.partial_upload.clone(),
         eviction_state: state.eviction_state,
     }
 }
@@ -748,7 +748,7 @@ mod tests {
             peers: PersistedPeers(vec![(
                 NodeId(1),
                 PersistedPeerInfo {
-                    backup_lsn: Lsn(1234567000),
+                    upload_lsn: Lsn(1234567000),
                     term: 42,
                     flush_lsn: Lsn(1234567800 - 8),
                     commit_lsn: Lsn(1234567600),
