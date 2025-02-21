@@ -1,3 +1,15 @@
+diff --git a/libduckdb_pg_duckdb.map b/libduckdb_pg_duckdb.map
+new file mode 100644
+index 0000000000..0872978b48
+--- /dev/null
++++ b/libduckdb_pg_duckdb.map
+@@ -0,0 +1,6 @@
++DUCKDB_1.2.0 {
++    global:
++        *duckdb*;
++    local:
++        *;
++};
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
 index 58adef3fc0..2c522f91be 100644
 --- a/src/CMakeLists.txt
