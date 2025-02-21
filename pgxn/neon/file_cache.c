@@ -1243,9 +1243,6 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
 		return false;
 
-	if (!lfc_ensure_opened())
-		return false;
-
 	CopyNRelFileInfoToBufTag(tag, rinfo);
 	tag.forkNum = forknum;
 
