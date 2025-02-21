@@ -2288,7 +2288,6 @@ impl Default for PageTraceEvent {
 
 #[cfg(test)]
 mod tests {
-    use json_structural_diff::JsonDiff;
     use serde_json::json;
     use std::str::FromStr;
 
