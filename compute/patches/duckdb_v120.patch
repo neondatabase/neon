@@ -1,5 +1,5 @@
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 58adef3fc0..892ee4a142 100644
+index 58adef3fc0..2c522f91be 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
 @@ -59,7 +59,7 @@ endfunction()
@@ -20,7 +20,7 @@ index 58adef3fc0..892ee4a142 100644
  
    if(WIN32 AND NOT MINGW)
      ensure_variable_is_number(DUCKDB_MAJOR_VERSION RC_MAJOR_VERSION)
-@@ -131,9 +131,9 @@ else()
+@@ -131,9 +131,11 @@ else()
      target_sources(duckdb PRIVATE version.rc)
    endif()
  
@@ -30,10 +30,12 @@ index 58adef3fc0..892ee4a142 100644
 +  target_link_libraries(duckdb_pg_duckdb ${DUCKDB_LINK_LIBS})
 +  link_threads(duckdb_pg_duckdb)
 +  link_extension_libraries(duckdb_pg_duckdb)
++  target_link_options(duckdb_pg_duckdb PRIVATE
++    -Wl,--version-script=${CMAKE_SOURCE_DIR}/libduckdb_pg_duckdb.map)
  
    add_library(duckdb_static STATIC ${ALL_OBJECT_FILES})
    target_link_libraries(duckdb_static ${DUCKDB_LINK_LIBS})
-@@ -141,7 +141,7 @@ else()
+@@ -141,7 +143,7 @@ else()
    link_extension_libraries(duckdb_static)
  
    target_include_directories(
@@ -42,7 +44,7 @@ index 58adef3fc0..892ee4a142 100644
                    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
  
    target_include_directories(
-@@ -161,7 +161,7 @@ else()
+@@ -161,7 +163,7 @@ else()
  endif()
  
  install(
