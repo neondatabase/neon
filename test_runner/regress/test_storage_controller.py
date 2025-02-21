@@ -3189,15 +3189,17 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
 
     assert len(target.get_safekeepers()) == 0
 
+    sk_0 = env.safekeepers[0]
+
     body = {
         "active": True,
         "id": fake_id,
         "created_at": "2023-10-25T09:11:25Z",
         "updated_at": "2024-08-28T11:32:43Z",
         "region_id": "aws-us-east-2",
-        "host": "safekeeper-333.us-east-2.aws.neon.build",
-        "port": 6401,
-        "http_port": 7676,
+        "host": "localhost",
+        "port": sk_0.port.pg,
+        "http_port": sk_0.port.http,
         "version": 5957,
         "availability_zone_id": "us-east-2b",
     }
@@ -3236,11 +3238,26 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     newest_info = target.get_safekeeper(inserted["id"])
     assert newest_info
     assert newest_info["scheduling_policy"] == "Pause"
-    target.safekeeper_scheduling_policy(inserted["id"], "Decomissioned")
+    target.safekeeper_scheduling_policy(inserted["id"], "Active")
     newest_info = target.get_safekeeper(inserted["id"])
     assert newest_info
-    assert newest_info["scheduling_policy"] == "Decomissioned"
+    assert newest_info["scheduling_policy"] == "Active"
     # Ensure idempotency
+    target.safekeeper_scheduling_policy(inserted["id"], "Active")
+    newest_info = target.get_safekeeper(inserted["id"])
+    assert newest_info
+    assert newest_info["scheduling_policy"] == "Active"
+    # change back to paused again
+    target.safekeeper_scheduling_policy(inserted["id"], "Pause")
+
+    def storcon_heartbeat():
+        assert env.storage_controller.log_contains(
+            "Heartbeat round complete for 1 safekeepers, 0 offline"
+        )
+
+    wait_until(storcon_heartbeat)
+
+    # Now decomission it
     target.safekeeper_scheduling_policy(inserted["id"], "Decomissioned")
 
 
@@ -3747,3 +3764,56 @@ def test_storage_controller_node_flap_detach_race(
             assert len(locs) == 1, f"{shard} has {len(locs)} attached locations"
 
     wait_until(validate_locations, timeout=10)
+
+
+def test_update_node_on_registration(neon_env_builder: NeonEnvBuilder):
+    """
+    Check that storage controller handles node_register requests with updated fields correctly.
+    1. Run storage controller and register 1 pageserver without https port.
+    2. Register the same pageserver with https port. Check that port has been updated.
+    3. Restart the storage controller. Check that https port is persistent.
+    4. Register the same pageserver without https port again (rollback). Check that port has been removed.
+    """
+    neon_env_builder.num_pageservers = 1
+    env = neon_env_builder.init_configs()
+
+    env.storage_controller.start()
+    env.storage_controller.wait_until_ready()
+
+    pageserver = env.pageservers[0]
+
+    # Step 1. Register pageserver without https port.
+    env.storage_controller.node_register(pageserver)
+    env.storage_controller.consistency_check()
+
+    nodes = env.storage_controller.node_list()
+    assert len(nodes) == 1
+    assert nodes[0]["listen_https_port"] is None
+
+    # Step 2. Register pageserver with https port.
+    pageserver.service_port.https = 1234
+    env.storage_controller.node_register(pageserver)
+    env.storage_controller.consistency_check()
+
+    nodes = env.storage_controller.node_list()
+    assert len(nodes) == 1
+    assert nodes[0]["listen_https_port"] == 1234
+
+    # Step 3. Restart storage controller.
+    env.storage_controller.stop()
+    env.storage_controller.start()
+    env.storage_controller.wait_until_ready()
+    env.storage_controller.consistency_check()
+
+    nodes = env.storage_controller.node_list()
+    assert len(nodes) == 1
+    assert nodes[0]["listen_https_port"] == 1234
+
+    # Step 4. Register pageserver with no https port again.
+    pageserver.service_port.https = None
+    env.storage_controller.node_register(pageserver)
+    env.storage_controller.consistency_check()
+
+    nodes = env.storage_controller.node_list()
+    assert len(nodes) == 1
+    assert nodes[0]["listen_https_port"] is None

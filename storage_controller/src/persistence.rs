@@ -375,18 +375,23 @@ impl Persistence {
         Ok(nodes)
     }
 
-    pub(crate) async fn update_node(
+    pub(crate) async fn update_node<V>(
         &self,
         input_node_id: NodeId,
-        input_scheduling: NodeSchedulingPolicy,
-    ) -> DatabaseResult<()> {
+        values: V,
+    ) -> DatabaseResult<()>
+    where
+        V: diesel::AsChangeset<Target = crate::schema::nodes::table> + Clone + Send + Sync,
+        V::Changeset: diesel::query_builder::QueryFragment<diesel::pg::Pg> + Send, // valid Postgres SQL
+    {
         use crate::schema::nodes::dsl::*;
         let updated = self
             .with_measured_conn(DatabaseOperation::UpdateNode, move |conn| {
+                let values = values.clone();
                 Box::pin(async move {
                     let updated = diesel::update(nodes)
                         .filter(node_id.eq(input_node_id.0 as i64))
-                        .set((scheduling_policy.eq(String::from(input_scheduling)),))
+                        .set(values)
                         .execute(conn)
                         .await?;
                     Ok(updated)
@@ -401,6 +406,32 @@ impl Persistence {
         } else {
             Ok(())
         }
+    }
+
+    pub(crate) async fn update_node_scheduling_policy(
+        &self,
+        input_node_id: NodeId,
+        input_scheduling: NodeSchedulingPolicy,
+    ) -> DatabaseResult<()> {
+        use crate::schema::nodes::dsl::*;
+        self.update_node(
+            input_node_id,
+            scheduling_policy.eq(String::from(input_scheduling)),
+        )
+        .await
+    }
+
+    pub(crate) async fn update_node_on_registration(
+        &self,
+        input_node_id: NodeId,
+        input_https_port: Option<u16>,
+    ) -> DatabaseResult<()> {
+        use crate::schema::nodes::dsl::*;
+        self.update_node(
+            input_node_id,
+            listen_https_port.eq(input_https_port.map(|x| x as i32)),
+        )
+        .await
     }
 
     /// At startup, load the high level state for shards, such as their config + policy.  This will
@@ -1185,23 +1216,6 @@ impl Persistence {
         Ok(safekeepers)
     }
 
-    pub(crate) async fn safekeeper_get(
-        &self,
-        id: i64,
-    ) -> Result<SafekeeperPersistence, DatabaseError> {
-        use crate::schema::safekeepers::dsl::{id as id_column, safekeepers};
-        self.with_conn(move |conn| {
-            Box::pin(async move {
-                Ok(safekeepers
-                    .filter(id_column.eq(&id))
-                    .select(SafekeeperPersistence::as_select())
-                    .get_result(conn)
-                    .await?)
-            })
-        })
-        .await
-    }
-
     pub(crate) async fn safekeeper_upsert(
         &self,
         record: SafekeeperUpsert,
@@ -1469,6 +1483,7 @@ pub(crate) struct NodePersistence {
     pub(crate) listen_pg_addr: String,
     pub(crate) listen_pg_port: i32,
     pub(crate) availability_zone_id: String,
+    pub(crate) listen_https_port: Option<i32>,
 }
 
 /// Tenant metadata health status that are stored durably.
@@ -1554,6 +1569,21 @@ pub(crate) struct SafekeeperPersistence {
 }
 
 impl SafekeeperPersistence {
+    pub(crate) fn from_upsert(
+        upsert: SafekeeperUpsert,
+        scheduling_policy: SkSchedulingPolicy,
+    ) -> Self {
+        crate::persistence::SafekeeperPersistence {
+            id: upsert.id,
+            region_id: upsert.region_id,
+            version: upsert.version,
+            host: upsert.host,
+            port: upsert.port,
+            http_port: upsert.http_port,
+            availability_zone_id: upsert.availability_zone_id,
+            scheduling_policy: String::from(scheduling_policy),
+        }
+    }
     pub(crate) fn as_describe_response(&self) -> Result<SafekeeperDescribeResponse, DatabaseError> {
         let scheduling_policy =
             SkSchedulingPolicy::from_str(&self.scheduling_policy).map_err(|e| {

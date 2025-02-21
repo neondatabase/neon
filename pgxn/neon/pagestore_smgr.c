@@ -474,8 +474,7 @@ readahead_buffer_resize(int newsize, void *extra)
 	 */
 	if (MyPState->n_requests_inflight > newsize)
 	{
-		Assert(MyPState->ring_unused >= MyPState->n_requests_inflight - newsize);
-		prefetch_wait_for(MyPState->ring_unused - (MyPState->n_requests_inflight - newsize));
+		prefetch_wait_for(MyPState->ring_unused - newsize - 1);
 		Assert(MyPState->n_requests_inflight <= newsize);
 	}
 
@@ -3765,7 +3764,7 @@ neon_dbsize(Oid dbNode)
  *	neon_truncate() -- Truncate relation to specified number of blocks.
  */
 static void
-neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
+neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber old_blocks, BlockNumber nblocks)
 {
 	XLogRecPtr	lsn;
 
@@ -3780,7 +3779,7 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
-			mdtruncate(reln, forknum, nblocks);
+			mdtruncate(reln, forknum, old_blocks, nblocks);
 			return;
 
 		default:
@@ -3818,7 +3817,7 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
-		mdtruncate(reln, forknum, nblocks);
+		mdtruncate(reln, forknum, old_blocks, nblocks);
 #endif
 }
 

@@ -11,7 +11,8 @@ use std::sync::Arc;
 use super::layer_manager::LayerManager;
 use super::{
     CompactFlags, CompactOptions, CreateImageLayersError, DurationRecorder, GetVectoredError,
-    ImageLayerCreationMode, LastImageLayerCreationStatus, RecordedDuration, Timeline,
+    ImageLayerCreationMode, LastImageLayerCreationStatus, PageReconstructError, RecordedDuration,
+    Timeline,
 };
 
 use anyhow::{anyhow, bail, Context};
@@ -25,12 +26,13 @@ use pageserver_api::models::CompactInfoResponse;
 use pageserver_api::shard::{ShardCount, ShardIdentity, TenantShardId};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, info_span, trace, warn, Instrument};
+use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 use utils::critical;
 use utils::id::TimelineId;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
+use crate::pgdatadir_mapping::CollectKeySpaceError;
 use crate::statvfs::Statvfs;
 use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::gc_block::GcBlock;
@@ -301,18 +303,12 @@ impl GcCompactionQueue {
                         let mut guard = self.inner.lock().unwrap();
                         guard.gc_guards.insert(id, gc_guard);
                     }
-                    let _ = timeline
-                        .compact_with_options(cancel, options, ctx)
-                        .instrument(info_span!("scheduled_compact_timeline", %timeline.timeline_id))
-                        .await?;
+                    let _ = timeline.compact_with_options(cancel, options, ctx).await?;
                     self.notify_and_unblock(id);
                 }
             }
             GcCompactionQueueItem::SubCompactionJob(options) => {
-                let _ = timeline
-                    .compact_with_options(cancel, options, ctx)
-                    .instrument(info_span!("scheduled_compact_timeline", %timeline.timeline_id))
-                    .await?;
+                let _ = timeline.compact_with_options(cancel, options, ctx).await?;
             }
             GcCompactionQueueItem::Notify(id) => {
                 self.notify_and_unblock(id);
@@ -692,21 +688,6 @@ impl Timeline {
 
         // Define partitioning schema if needed
 
-        let l0_l1_boundary_lsn = {
-            // We do the repartition on the L0-L1 boundary. All data below the boundary
-            // are compacted by L0 with low read amplification, thus making the `repartition`
-            // function run fast.
-            let guard = self.layers.read().await;
-            let l0_min_lsn = guard
-                .layer_map()?
-                .level0_deltas()
-                .iter()
-                .map(|l| l.get_lsn_range().start)
-                .min()
-                .unwrap_or(self.get_disk_consistent_lsn());
-            l0_min_lsn.max(self.get_ancestor_lsn())
-        };
-
         // 1. L0 Compact
         let l0_outcome = {
             let timer = self.metrics.compact_time_histo.start_timer();
@@ -733,86 +714,87 @@ impl Timeline {
             return Ok(CompactionOutcome::YieldForL0);
         }
 
-        if l0_l1_boundary_lsn < self.partitioning.read().1 {
-            // We never go backwards when repartition and create image layers.
-            info!("skipping image layer generation because repartition LSN is greater than L0-L1 boundary LSN.");
-        } else {
-            // 2. Repartition and create image layers if necessary
-            match self
-                .repartition(
-                    l0_l1_boundary_lsn,
-                    self.get_compaction_target_size(),
-                    options.flags,
-                    ctx,
-                )
-                .await
-            {
-                Ok(((dense_partitioning, sparse_partitioning), lsn)) => {
-                    // Disables access_stats updates, so that the files we read remain candidates for eviction after we're done with them
-                    let image_ctx = RequestContextBuilder::extend(ctx)
-                        .access_stats_behavior(AccessStatsBehavior::Skip)
-                        .build();
+        // 2. Repartition and create image layers if necessary
+        match self
+            .repartition(
+                self.get_last_record_lsn(),
+                self.get_compaction_target_size(),
+                options.flags,
+                ctx,
+            )
+            .await
+        {
+            Ok(((dense_partitioning, sparse_partitioning), lsn)) => {
+                // Disables access_stats updates, so that the files we read remain candidates for eviction after we're done with them
+                let image_ctx = RequestContextBuilder::extend(ctx)
+                    .access_stats_behavior(AccessStatsBehavior::Skip)
+                    .build();
 
-                    let mut partitioning = dense_partitioning;
-                    partitioning
-                        .parts
-                        .extend(sparse_partitioning.into_dense().parts);
+                let mut partitioning = dense_partitioning;
+                partitioning
+                    .parts
+                    .extend(sparse_partitioning.into_dense().parts);
 
-                    // 3. Create new image layers for partitions that have been modified "enough".
-                    let (image_layers, outcome) = self
-                        .create_image_layers(
-                            &partitioning,
-                            lsn,
-                            if options
-                                .flags
-                                .contains(CompactFlags::ForceImageLayerCreation)
-                            {
-                                ImageLayerCreationMode::Force
-                            } else {
-                                ImageLayerCreationMode::Try
-                            },
-                            &image_ctx,
-                            self.last_image_layer_creation_status
-                                .load()
-                                .as_ref()
-                                .clone(),
-                            !options.flags.contains(CompactFlags::NoYield),
-                        )
-                        .await
-                        .inspect_err(|err| {
-                            if let CreateImageLayersError::GetVectoredError(
-                                GetVectoredError::MissingKey(_),
-                            ) = err
-                            {
-                                critical!("missing key during compaction: {err:?}");
-                            }
-                        })?;
+                // 3. Create new image layers for partitions that have been modified "enough".
+                let (image_layers, outcome) = self
+                    .create_image_layers(
+                        &partitioning,
+                        lsn,
+                        if options
+                            .flags
+                            .contains(CompactFlags::ForceImageLayerCreation)
+                        {
+                            ImageLayerCreationMode::Force
+                        } else {
+                            ImageLayerCreationMode::Try
+                        },
+                        &image_ctx,
+                        self.last_image_layer_creation_status
+                            .load()
+                            .as_ref()
+                            .clone(),
+                        !options.flags.contains(CompactFlags::NoYield),
+                    )
+                    .await
+                    .inspect_err(|err| {
+                        if let CreateImageLayersError::GetVectoredError(
+                            GetVectoredError::MissingKey(_),
+                        ) = err
+                        {
+                            critical!("missing key during compaction: {err:?}");
+                        }
+                    })?;
 
-                    self.last_image_layer_creation_status
-                        .store(Arc::new(outcome.clone()));
+                self.last_image_layer_creation_status
+                    .store(Arc::new(outcome.clone()));
 
-                    self.upload_new_image_layers(image_layers)?;
-                    if let LastImageLayerCreationStatus::Incomplete { .. } = outcome {
-                        // Yield and do not do any other kind of compaction.
-                        info!("skipping shard ancestor compaction due to pending image layer generation tasks (preempted by L0 compaction).");
-                        return Ok(CompactionOutcome::YieldForL0);
-                    }
+                self.upload_new_image_layers(image_layers)?;
+                if let LastImageLayerCreationStatus::Incomplete { .. } = outcome {
+                    // Yield and do not do any other kind of compaction.
+                    info!("skipping shard ancestor compaction due to pending image layer generation tasks (preempted by L0 compaction).");
+                    return Ok(CompactionOutcome::YieldForL0);
                 }
-                Err(err) => {
-                    // no partitioning? This is normal, if the timeline was just created
-                    // as an empty timeline. Also in unit tests, when we use the timeline
-                    // as a simple key-value store, ignoring the datadir layout. Log the
-                    // error but continue.
-                    //
-                    // Suppress error when it's due to cancellation
-                    if !self.cancel.is_cancelled() && !err.is_cancelled() {
-                        tracing::error!(
-                            "could not compact, repartitioning keyspace failed: {err:?}"
-                        );
-                    }
-                }
-            };
-        }
+            }
+
+            // Suppress errors when cancelled.
+            Err(_) if self.cancel.is_cancelled() => {}
+            Err(CompactionError::ShuttingDown) => {}
+
+            // Alert on critical errors that indicate data corruption.
+            Err(
+                err @ CompactionError::CollectKeySpaceError(
+                    CollectKeySpaceError::Decode(_)
+                    | CollectKeySpaceError::PageRead(
+                        PageReconstructError::MissingKey(_) | PageReconstructError::WalRedo(_),
+                    ),
+                ),
+            ) => critical!("could not compact, repartitioning keyspace failed: {err:?}"),
+
+            // Log other errors. No partitioning? This is normal, if the timeline was just created
+            // as an empty timeline. Also in unit tests, when we use the timeline as a simple
+            // key-value store, ignoring the datadir layout. Log the error but continue.
+            Err(err) => error!("could not compact, repartitioning keyspace failed: {err:?}"),
+        };
 
         let partition_count = self.partitioning.read().0 .0.parts.len();
 
@@ -852,7 +834,7 @@ impl Timeline {
         //
         // Holding this read guard also blocks [`Self::gc_timeline`] from entering while we
         // are rewriting layers.
-        let latest_gc_cutoff = self.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff = self.get_applied_gc_cutoff_lsn();
 
         tracing::info!(
             "latest_gc_cutoff: {}, pitr cutoff {}",
@@ -2202,7 +2184,7 @@ impl Timeline {
 
         // TODO: ensure the child branches will not use anything below the watermark, or consider
         // them when computing the watermark.
-        gc_cutoff_lsn.min(*self.get_latest_gc_cutoff_lsn())
+        gc_cutoff_lsn.min(*self.get_applied_gc_cutoff_lsn())
     }
 
     /// Split a gc-compaction job into multiple compaction jobs. The split is based on the key range and the estimated size of the compaction job.
@@ -2230,7 +2212,7 @@ impl Timeline {
         let sub_compaction_max_job_size_mb =
             sub_compaction_max_job_size_mb.unwrap_or(GC_COMPACT_MAX_SIZE_MB);
 
-        let mut compact_jobs = Vec::new();
+        let mut compact_jobs = Vec::<GcCompactJob>::new();
         // For now, we simply use the key partitioning information; we should do a more fine-grained partitioning
         // by estimating the amount of files read for a compaction job. We should also partition on LSN.
         let ((dense_ks, sparse_ks), _) = self.partitioning.read().as_ref().clone();
@@ -2317,16 +2299,25 @@ impl Timeline {
                 } else {
                     end
                 };
-                info!(
-                    "splitting compaction job: {}..{}, estimated_size={}",
-                    start, end, total_size
-                );
-                compact_jobs.push(GcCompactJob {
-                    dry_run: job.dry_run,
-                    compact_key_range: start..end,
-                    compact_lsn_range: job.compact_lsn_range.start..compact_below_lsn,
-                });
-                current_start = Some(end);
+                if total_size == 0 && !compact_jobs.is_empty() {
+                    info!(
+                        "splitting compaction job: {}..{}, estimated_size={}, extending the previous job",
+                        start, end, total_size
+                    );
+                    compact_jobs.last_mut().unwrap().compact_key_range.end = end;
+                    current_start = Some(end);
+                } else {
+                    info!(
+                        "splitting compaction job: {}..{}, estimated_size={}",
+                        start, end, total_size
+                    );
+                    compact_jobs.push(GcCompactJob {
+                        dry_run: job.dry_run,
+                        compact_key_range: start..end,
+                        compact_lsn_range: job.compact_lsn_range.start..compact_below_lsn,
+                    });
+                    current_start = Some(end);
+                }
             }
         }
         Ok(compact_jobs)

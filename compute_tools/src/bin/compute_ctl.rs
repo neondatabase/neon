@@ -41,7 +41,6 @@ use std::process::exit;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
-use std::time::SystemTime;
 use std::{thread, time::Duration};
 
 use anyhow::{Context, Result};
@@ -55,7 +54,7 @@ use signal_hook::{consts::SIGINT, iterator::Signals};
 use tracing::{error, info, warn};
 use url::Url;
 
-use compute_api::responses::ComputeStatus;
+use compute_api::responses::{ComputeCtlConfig, ComputeStatus};
 use compute_api::spec::ComputeSpec;
 
 use compute_tools::compute::{
@@ -86,19 +85,6 @@ fn parse_remote_ext_config(arg: &str) -> Result<String> {
     }
 }
 
-/// Generate a compute ID if one is not supplied. This exists to keep forward
-/// compatibility tests working, but will be removed in a future iteration.
-fn generate_compute_id() -> String {
-    let now = SystemTime::now();
-
-    format!(
-        "compute-{}",
-        now.duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-    )
-}
-
 #[derive(Parser)]
 #[command(rename_all = "kebab-case")]
 struct Cli {
@@ -112,16 +98,13 @@ struct Cli {
     /// outside the compute will talk to the compute through this port. Keep
     /// the previous name for this argument around for a smoother release
     /// with the control plane.
-    ///
-    /// TODO: Remove the alias after the control plane release which teaches the
-    /// control plane about the renamed argument.
-    #[arg(long, alias = "http-port", default_value_t = 3080)]
+    #[arg(long, default_value_t = 3080)]
     pub external_http_port: u16,
 
-    /// The port to bind the internal listening HTTP server to. Clients like
+    /// The port to bind the internal listening HTTP server to. Clients include
     /// the neon extension (for installing remote extensions) and local_proxy.
-    #[arg(long)]
-    pub internal_http_port: Option<u16>,
+    #[arg(long, default_value_t = 3081)]
+    pub internal_http_port: u16,
 
     #[arg(short = 'D', long, value_name = "DATADIR")]
     pub pgdata: String,
@@ -156,7 +139,7 @@ struct Cli {
     #[arg(short = 'S', long, group = "spec-path")]
     pub spec_path: Option<OsString>,
 
-    #[arg(short = 'i', long, group = "compute-id", default_value = generate_compute_id())]
+    #[arg(short = 'i', long, group = "compute-id")]
     pub compute_id: String,
 
     #[arg(short = 'p', long, conflicts_with_all = ["spec", "spec-path"], value_name = "CONTROL_PLANE_API_BASE_URL")]
@@ -281,6 +264,7 @@ fn try_spec_from_cli(cli: &Cli) -> Result<CliSpecParams> {
         info!("got spec from cli argument {}", spec_json);
         return Ok(CliSpecParams {
             spec: Some(serde_json::from_str(spec_json)?),
+            compute_ctl_config: ComputeCtlConfig::default(),
             live_config_allowed: false,
         });
     }
@@ -290,6 +274,7 @@ fn try_spec_from_cli(cli: &Cli) -> Result<CliSpecParams> {
         let file = File::open(Path::new(spec_path))?;
         return Ok(CliSpecParams {
             spec: Some(serde_json::from_reader(file)?),
+            compute_ctl_config: ComputeCtlConfig::default(),
             live_config_allowed: true,
         });
     }
@@ -299,8 +284,9 @@ fn try_spec_from_cli(cli: &Cli) -> Result<CliSpecParams> {
     };
 
     match get_spec_from_control_plane(cli.control_plane_uri.as_ref().unwrap(), &cli.compute_id) {
-        Ok(spec) => Ok(CliSpecParams {
-            spec,
+        Ok(resp) => Ok(CliSpecParams {
+            spec: resp.0,
+            compute_ctl_config: resp.1,
             live_config_allowed: true,
         }),
         Err(e) => {
@@ -317,6 +303,8 @@ fn try_spec_from_cli(cli: &Cli) -> Result<CliSpecParams> {
 struct CliSpecParams {
     /// If a spec was provided via CLI or file, the [`ComputeSpec`]
     spec: Option<ComputeSpec>,
+    #[allow(dead_code)]
+    compute_ctl_config: ComputeCtlConfig,
     live_config_allowed: bool,
 }
 
@@ -326,6 +314,7 @@ fn wait_spec(
     CliSpecParams {
         spec,
         live_config_allowed,
+        compute_ctl_config: _,
     }: CliSpecParams,
 ) -> Result<Arc<ComputeNode>> {
     let mut new_state = ComputeState::new();
@@ -353,7 +342,7 @@ fn wait_spec(
         pgbin: cli.pgbin.clone(),
         pgversion: get_pg_version_string(&cli.pgbin),
         external_http_port: cli.external_http_port,
-        internal_http_port: cli.internal_http_port.unwrap_or(cli.external_http_port + 1),
+        internal_http_port: cli.internal_http_port,
         live_config_allowed,
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
@@ -377,7 +366,7 @@ fn wait_spec(
 
     // The internal HTTP server could be launched later, but there isn't much
     // sense in waiting.
-    Server::Internal(cli.internal_http_port.unwrap_or(cli.external_http_port + 1)).launch(&compute);
+    Server::Internal(cli.internal_http_port).launch(&compute);
 
     if !spec_set {
         // No spec provided, hang waiting for it.

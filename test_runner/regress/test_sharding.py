@@ -1821,7 +1821,7 @@ def test_sharding_gc(
         # TODO: remove when https://github.com/neondatabase/neon/issues/10720 is fixed
         ps.allowed_errors.extend(
             [
-                ".*could not find data for key 020000000000000000000000000000000000.*",
+                ".*could not find data for key.*",
                 ".*could not ingest record.*",
             ]
         )

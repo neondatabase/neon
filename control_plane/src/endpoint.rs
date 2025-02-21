@@ -46,8 +46,12 @@ use std::process::Command;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use anyhow::{anyhow, bail, Context, Result};
+use compute_api::requests::ConfigurationRequest;
+use compute_api::responses::ComputeCtlConfig;
 use compute_api::spec::Database;
 use compute_api::spec::PgIdent;
 use compute_api::spec::RemoteExtSpec;
@@ -57,6 +61,7 @@ use nix::sys::signal::Signal;
 use pageserver_api::shard::ShardStripeSize;
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
 
@@ -79,8 +84,10 @@ pub struct EndpointConf {
     internal_http_port: u16,
     pg_version: u32,
     skip_pg_catalog_updates: bool,
+    reconfigure_concurrency: usize,
     drop_subscriptions_before_start: bool,
     features: Vec<ComputeFeature>,
+    cluster: Option<Cluster>,
 }
 
 //
@@ -177,7 +184,9 @@ impl ComputeControlPlane {
             // we also skip catalog updates in the cloud.
             skip_pg_catalog_updates,
             drop_subscriptions_before_start,
+            reconfigure_concurrency: 1,
             features: vec![],
+            cluster: None,
         });
 
         ep.create_endpoint_dir()?;
@@ -194,7 +203,9 @@ impl ComputeControlPlane {
                 pg_version,
                 skip_pg_catalog_updates,
                 drop_subscriptions_before_start,
+                reconfigure_concurrency: 1,
                 features: vec![],
+                cluster: None,
             })?,
         )?;
         std::fs::write(
@@ -259,8 +270,11 @@ pub struct Endpoint {
     skip_pg_catalog_updates: bool,
 
     drop_subscriptions_before_start: bool,
+    reconfigure_concurrency: usize,
     // Feature flags
     features: Vec<ComputeFeature>,
+    // Cluster settings
+    cluster: Option<Cluster>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -300,6 +314,8 @@ impl Endpoint {
         let conf: EndpointConf =
             serde_json::from_slice(&std::fs::read(entry.path().join("endpoint.json"))?)?;
 
+        debug!("serialized endpoint conf: {:?}", conf);
+
         Ok(Endpoint {
             pg_address: SocketAddr::new(IpAddr::from(Ipv4Addr::LOCALHOST), conf.pg_port),
             external_http_address: SocketAddr::new(
@@ -317,8 +333,10 @@ impl Endpoint {
             tenant_id: conf.tenant_id,
             pg_version: conf.pg_version,
             skip_pg_catalog_updates: conf.skip_pg_catalog_updates,
+            reconfigure_concurrency: conf.reconfigure_concurrency,
             drop_subscriptions_before_start: conf.drop_subscriptions_before_start,
             features: conf.features,
+            cluster: conf.cluster,
         })
     }
 
@@ -605,7 +623,7 @@ impl Endpoint {
         };
 
         // Create spec file
-        let spec = ComputeSpec {
+        let mut spec = ComputeSpec {
             skip_pg_catalog_updates: self.skip_pg_catalog_updates,
             format_version: 1.0,
             operation_uuid: None,
@@ -638,7 +656,7 @@ impl Endpoint {
                     Vec::new()
                 },
                 settings: None,
-                postgresql_conf: Some(postgresql_conf),
+                postgresql_conf: Some(postgresql_conf.clone()),
             },
             delta_operations: None,
             tenant_id: Some(self.tenant_id),
@@ -651,9 +669,35 @@ impl Endpoint {
             pgbouncer_settings: None,
             shard_stripe_size: Some(shard_stripe_size),
             local_proxy_config: None,
-            reconfigure_concurrency: 1,
+            reconfigure_concurrency: self.reconfigure_concurrency,
             drop_subscriptions_before_start: self.drop_subscriptions_before_start,
         };
+
+        // this strange code is needed to support respec() in tests
+        if self.cluster.is_some() {
+            debug!("Cluster is already set in the endpoint spec, using it");
+            spec.cluster = self.cluster.clone().unwrap();
+
+            debug!("spec.cluster {:?}", spec.cluster);
+
+            // fill missing fields again
+            if create_test_user {
+                spec.cluster.roles.push(Role {
+                    name: PgIdent::from_str("test").unwrap(),
+                    encrypted_password: None,
+                    options: None,
+                });
+                spec.cluster.databases.push(Database {
+                    name: PgIdent::from_str("neondb").unwrap(),
+                    owner: PgIdent::from_str("test").unwrap(),
+                    options: None,
+                    restrict_conn: false,
+                    invalid: false,
+                });
+            }
+            spec.cluster.postgresql_conf = Some(postgresql_conf);
+        }
+
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
 
@@ -671,17 +715,13 @@ impl Endpoint {
             println!("Also at '{}'", conn_str);
         }
         let mut cmd = Command::new(self.env.neon_distrib_dir.join("compute_ctl"));
-        //cmd.args([
-        //    "--external-http-port",
-        //    &self.external_http_address.port().to_string(),
-        //])
-        //.args([
-        //    "--internal-http-port",
-        //    &self.internal_http_address.port().to_string(),
-        //])
         cmd.args([
-            "--http-port",
+            "--external-http-port",
             &self.external_http_address.port().to_string(),
+        ])
+        .args([
+            "--internal-http-port",
+            &self.internal_http_address.port().to_string(),
         ])
         .args(["--pgdata", self.pgdata().to_str().unwrap()])
         .args(["--connstr", &conn_str])
@@ -699,20 +739,16 @@ impl Endpoint {
         ])
         // TODO: It would be nice if we generated compute IDs with the same
         // algorithm as the real control plane.
-        //
-        // TODO: Add this back when
-        // https://github.com/neondatabase/neon/pull/10747 is merged.
-        //
-        //.args([
-        //    "--compute-id",
-        //    &format!(
-        //        "compute-{}",
-        //        SystemTime::now()
-        //            .duration_since(UNIX_EPOCH)
-        //            .unwrap()
-        //            .as_secs()
-        //    ),
-        //])
+        .args([
+            "--compute-id",
+            &format!(
+                "compute-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+            ),
+        ])
         .stdin(std::process::Stdio::null())
         .stderr(logfile.try_clone()?)
         .stdout(logfile);
@@ -880,10 +916,13 @@ impl Endpoint {
                 self.external_http_address.port()
             ))
             .header(CONTENT_TYPE.as_str(), "application/json")
-            .body(format!(
-                "{{\"spec\":{}}}",
-                serde_json::to_string_pretty(&spec)?
-            ))
+            .body(
+                serde_json::to_string(&ConfigurationRequest {
+                    spec,
+                    compute_ctl_config: ComputeCtlConfig::default(),
+                })
+                .unwrap(),
+            )
             .send()
             .await?;
 

@@ -566,10 +566,14 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder):
     assert_prefix_empty(neon_env_builder.safekeepers_remote_storage, prefix)
 
 
-def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder):
+# This test is flaky, probably because PUTs of local fs storage are not atomic.
+# Let's keep both remote storage kinds for a while to see if this is the case.
+# https://github.com/neondatabase/neon/issues/10761
+@pytest.mark.parametrize("remote_storage_kind", [s3_storage(), RemoteStorageKind.LOCAL_FS])
+def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
     neon_env_builder.num_safekeepers = 3
 
-    neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
+    neon_env_builder.enable_safekeeper_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
     tenant_id = env.initial_tenant
@@ -1441,6 +1445,7 @@ def test_peer_recovery(neon_env_builder: NeonEnvBuilder):
 
     # roughly fills one segment
     endpoint.safe_psql("insert into t select generate_series(1,250000), 'payload'")
+    lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
 
     endpoint.stop()  # stop compute
 
@@ -1469,7 +1474,15 @@ def test_peer_recovery(neon_env_builder: NeonEnvBuilder):
         "flush_lsn to get aligned",
     )
 
-    cmp_sk_wal([sk1, sk2], tenant_id, timeline_id)
+    sk1_digest = sk1.http_client().timeline_digest(
+        tenant_id, timeline_id, sk1.get_timeline_start_lsn(tenant_id, timeline_id), lsn
+    )
+
+    sk2_digest = sk1.http_client().timeline_digest(
+        tenant_id, timeline_id, sk2.get_timeline_start_lsn(tenant_id, timeline_id), lsn
+    )
+
+    assert sk1_digest == sk2_digest
 
     # stop one of safekeepers which weren't recovering and insert a bit more to check we can commit
     env.safekeepers[2].stop()

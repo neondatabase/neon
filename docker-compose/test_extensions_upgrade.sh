@@ -11,6 +11,7 @@ if [ -z ${OLDTAG+x} ] || [ -z ${NEWTAG+x} ] || [ -z "${OLDTAG}" ] || [ -z "${NEW
   exit 1
 fi
 export PG_VERSION=${PG_VERSION:-16}
+export PG_TEST_VERSION=${PG_VERSION}
 function wait_for_ready {
   TIME=0
   while ! docker compose logs compute_is_ready | grep -q "accepting connections" && [ ${TIME} -le 300 ] ; do
@@ -41,7 +42,9 @@ EXTENSIONS='[
 {"extname": "roaringbitmap", "extdir": "pg_roaringbitmap-src"},
 {"extname": "semver", "extdir": "pg_semver-src"},
 {"extname": "pg_ivm", "extdir": "pg_ivm-src"},
-{"extname": "pgjwt", "extdir": "pgjwt-src"}
+{"extname": "pgjwt", "extdir": "pgjwt-src"},
+{"extname": "pgtap", "extdir": "pgtap-src"},
+{"extname": "pg_repack", "extdir": "pg_repack-src"}
 ]'
 EXTNAMES=$(echo ${EXTENSIONS} | jq -r '.[].extname' | paste -sd ' ' -)
 TAG=${NEWTAG} docker compose --profile test-extensions up --quiet-pull --build -d
@@ -57,9 +60,15 @@ wait_for_ready
 docker compose cp  ext-src neon-test-extensions:/
 docker compose exec neon-test-extensions psql -c "DROP DATABASE IF EXISTS contrib_regression"
 docker compose exec neon-test-extensions psql -c "CREATE DATABASE contrib_regression"
+docker compose exec neon-test-extensions psql -c "CREATE DATABASE pgtap_regression"
+docker compose exec neon-test-extensions psql -d pgtap_regression -c "CREATE EXTENSION pgtap"
 create_extensions "${EXTNAMES}"
-query="select pge.extname from pg_extension pge join (select key as extname, value as extversion from json_each_text('${new_vers}')) x on pge.extname=x.extname and pge.extversion <> x.extversion"
-exts=$(docker compose exec neon-test-extensions psql -Aqt -d contrib_regression -c "$query")
+if [ "${FORCE_ALL_UPGRADE_TESTS:-false}" = true ]; then
+  exts="${EXTNAMES}"
+else
+  query="select pge.extname from pg_extension pge join (select key as extname, value as extversion from json_each_text('${new_vers}')) x on pge.extname=x.extname and pge.extversion <> x.extversion"
+  exts=$(docker compose exec neon-test-extensions psql -Aqt -d contrib_regression -c "$query")
+fi
 if [ -z "${exts}" ]; then
   echo "No extensions were upgraded"
 else
@@ -87,7 +96,10 @@ else
       exit 1
     fi
     docker compose exec neon-test-extensions psql -d contrib_regression -c "\dx ${ext}"
-    docker compose exec neon-test-extensions sh -c /ext-src/${EXTDIR}/test-upgrade.sh
+    if ! docker compose exec neon-test-extensions sh -c /ext-src/${EXTDIR}/test-upgrade.sh; then
+      docker  compose exec neon-test-extensions  cat /ext-src/${EXTDIR}/regression.diffs
+      exit 1
+    fi
     docker compose exec neon-test-extensions psql -d contrib_regression -c "alter extension ${ext} update"
     docker compose exec neon-test-extensions psql -d contrib_regression -c "\dx ${ext}"
   done

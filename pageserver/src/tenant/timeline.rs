@@ -4,6 +4,7 @@ pub mod delete;
 pub(crate) mod detach_ancestor;
 mod eviction_task;
 pub(crate) mod handle;
+mod heatmap_layers_downloader;
 pub(crate) mod import_pgdata;
 mod init;
 pub mod layer_manager;
@@ -21,6 +22,7 @@ use chrono::{DateTime, Utc};
 use compaction::CompactionOutcome;
 use enumset::EnumSet;
 use fail::fail_point;
+use futures::FutureExt;
 use futures::{stream::FuturesUnordered, StreamExt};
 use handle::ShardTimelineId;
 use layer_manager::Shutdown;
@@ -117,7 +119,7 @@ use pageserver_api::config::tenant_conf_defaults::DEFAULT_PITR_INTERVAL;
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::metrics::{TimelineMetrics, DELTAS_PER_READ_GLOBAL, LAYERS_PER_READ_GLOBAL};
-use crate::pgdatadir_mapping::CalculateLogicalSizeError;
+use crate::pgdatadir_mapping::{CalculateLogicalSizeError, MetricsUpdate};
 use crate::tenant::config::TenantConfOpt;
 use pageserver_api::reltag::RelTag;
 use pageserver_api::shard::ShardIndex;
@@ -150,16 +152,15 @@ use super::{
     config::TenantConf, storage_layer::LayerVisibilityHint, upload_queue::NotInitialized,
     MaybeOffloaded,
 };
-use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
+use super::{
+    debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf, HeatMapTimeline,
+};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
 use super::{
     remote_timeline_client::RemoteTimelineClient, remote_timeline_client::WaitCompletionError,
     storage_layer::ReadableLayer,
 };
-use super::{
-    secondary::heatmap::{HeatMapLayer, HeatMapTimeline},
-    GcError,
-};
+use super::{secondary::heatmap::HeatMapLayer, GcError};
 
 #[cfg(test)]
 use pageserver_api::value::Value;
@@ -328,6 +329,7 @@ pub struct Timeline {
     // in `crate::page_service` writes these metrics.
     pub(crate) query_metrics: crate::metrics::SmgrQueryTimePerTimeline,
 
+    directory_metrics_inited: [AtomicBool; DirectoryKind::KINDS_NUM],
     directory_metrics: [AtomicU64; DirectoryKind::KINDS_NUM],
 
     /// Ensures layers aren't frozen by checkpointer between
@@ -352,8 +354,11 @@ pub struct Timeline {
     /// to be notified when layer flushing has finished, subscribe to the layer_flush_done channel
     layer_flush_done_tx: tokio::sync::watch::Sender<(u64, Result<(), FlushLayerError>)>,
 
-    // Needed to ensure that we can't create a branch at a point that was already garbage collected
-    pub latest_gc_cutoff_lsn: Rcu<Lsn>,
+    // The LSN at which we have executed GC: whereas [`Self::gc_info`] records the LSN at which
+    // we _intend_ to GC (i.e. the PITR cutoff), this LSN records where we actually last did it.
+    // Because PITR interval is mutable, it's possible for this LSN to be earlier or later than
+    // the planned GC cutoff.
+    pub applied_gc_cutoff_lsn: Rcu<Lsn>,
 
     pub(crate) gc_compaction_layer_update_lock: tokio::sync::RwLock<()>,
 
@@ -462,6 +467,20 @@ pub struct Timeline {
 
     /// If Some, collects GetPage metadata for an ongoing PageTrace.
     pub(crate) page_trace: ArcSwapOption<Sender<PageTraceEvent>>,
+
+    previous_heatmap: ArcSwapOption<PreviousHeatmap>,
+
+    /// May host a background Tokio task which downloads all the layers from the current
+    /// heatmap on demand.
+    heatmap_layers_downloader: Mutex<Option<heatmap_layers_downloader::HeatmapLayersDownloader>>,
+}
+
+pub(crate) enum PreviousHeatmap {
+    Active {
+        heatmap: HeatMapTimeline,
+        read_at: std::time::Instant,
+    },
+    Obsolete,
 }
 
 pub type TimelineDeleteProgress = Arc<tokio::sync::Mutex<DeleteTimelineFlow>>;
@@ -1077,9 +1096,15 @@ impl Timeline {
         (history, gc_info.within_ancestor_pitr)
     }
 
-    /// Lock and get timeline's GC cutoff
-    pub(crate) fn get_latest_gc_cutoff_lsn(&self) -> RcuReadGuard<Lsn> {
-        self.latest_gc_cutoff_lsn.read()
+    /// Read timeline's GC cutoff: this is the LSN at which GC has started to happen
+    pub(crate) fn get_applied_gc_cutoff_lsn(&self) -> RcuReadGuard<Lsn> {
+        self.applied_gc_cutoff_lsn.read()
+    }
+
+    /// Read timeline's planned GC cutoff: this is the logical end of history that users
+    /// are allowed to read (based on configured PITR), even if physically we have more history.
+    pub(crate) fn get_gc_cutoff_lsn(&self) -> Lsn {
+        self.gc_info.read().unwrap().cutoffs.time
     }
 
     /// Look up given page version.
@@ -1274,7 +1299,7 @@ impl Timeline {
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
-        let read_path = if self.conf.enable_read_path_debugging {
+        let read_path = if self.conf.enable_read_path_debugging || ctx.read_path_debug() {
             Some(ReadPath::new(keyspace.clone(), lsn))
         } else {
             None
@@ -1587,7 +1612,7 @@ impl Timeline {
                     };
 
                     if init || validate {
-                        let latest_gc_cutoff_lsn = self.get_latest_gc_cutoff_lsn();
+                        let latest_gc_cutoff_lsn = self.get_applied_gc_cutoff_lsn();
                         if lsn < *latest_gc_cutoff_lsn {
                             bail!("tried to request an lsn lease for an lsn below the latest gc cutoff. requested at {} gc cutoff {}", lsn, *latest_gc_cutoff_lsn);
                         }
@@ -1857,7 +1882,7 @@ impl Timeline {
         // Signal compaction failure to avoid L0 flush stalls when it's broken.
         match result {
             Ok(_) => self.compaction_failed.store(false, AtomicOrdering::Relaxed),
-            Err(CompactionError::Other(_)) => {
+            Err(CompactionError::Other(_)) | Err(CompactionError::CollectKeySpaceError(_)) => {
                 self.compaction_failed.store(true, AtomicOrdering::Relaxed)
             }
             // Don't change the current value on offload failure or shutdown. We don't want to
@@ -2019,6 +2044,11 @@ impl Timeline {
         // Signal any subscribers to our cancellation token to drop out
         tracing::debug!("Cancelling CancellationToken");
         self.cancel.cancel();
+
+        // If we have a background task downloading heatmap layers stop it.
+        // The background downloads are sensitive to timeline cancellation (done above),
+        // so the drain will be immediate.
+        self.stop_and_drain_heatmap_layers_download().await;
 
         // Ensure Prevent new page service requests from starting.
         self.handles.shutdown();
@@ -2337,6 +2367,14 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
     }
 
+    pub(crate) fn get_rel_size_v2_enabled(&self) -> bool {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .rel_size_v2_enabled
+            .unwrap_or(self.conf.default_tenant_conf.rel_size_v2_enabled)
+    }
+
     fn get_compaction_upper_limit(&self) -> usize {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -2559,6 +2597,7 @@ impl Timeline {
         conf: &'static PageServerConf,
         tenant_conf: Arc<ArcSwap<AttachedTenantConf>>,
         metadata: &TimelineMetadata,
+        previous_heatmap: Option<PreviousHeatmap>,
         ancestor: Option<Arc<Timeline>>,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
@@ -2645,6 +2684,7 @@ impl Timeline {
                 ),
 
                 directory_metrics: array::from_fn(|_| AtomicU64::new(0)),
+                directory_metrics_inited: array::from_fn(|_| AtomicBool::new(false)),
 
                 flush_loop_state: Mutex::new(FlushLoopState::NotStarted),
 
@@ -2659,7 +2699,7 @@ impl Timeline {
                     LastImageLayerCreationStatus::default(),
                 )),
 
-                latest_gc_cutoff_lsn: Rcu::new(metadata.latest_gc_cutoff_lsn()),
+                applied_gc_cutoff_lsn: Rcu::new(metadata.latest_gc_cutoff_lsn()),
                 initdb_lsn: metadata.initdb_lsn(),
 
                 current_logical_size: if disk_consistent_lsn.is_valid() {
@@ -2721,6 +2761,10 @@ impl Timeline {
                 create_idempotency,
 
                 page_trace: Default::default(),
+
+                previous_heatmap: ArcSwapOption::from_pointee(previous_heatmap),
+
+                heatmap_layers_downloader: Mutex::new(None),
             };
 
             result.repartition_threshold =
@@ -2830,6 +2874,7 @@ impl Timeline {
                 auth_token: crate::config::SAFEKEEPER_AUTH_TOKEN.get().cloned(),
                 availability_zone: self.conf.availability_zone.clone(),
                 ingest_batch_size: self.conf.ingest_batch_size,
+                validate_wal_contiguity: self.conf.validate_wal_contiguity,
             },
             broker_client,
             ctx,
@@ -3409,8 +3454,42 @@ impl Timeline {
         }
     }
 
-    pub(crate) fn update_directory_entries_count(&self, kind: DirectoryKind, count: u64) {
-        self.directory_metrics[kind.offset()].store(count, AtomicOrdering::Relaxed);
+    pub(crate) fn update_directory_entries_count(&self, kind: DirectoryKind, count: MetricsUpdate) {
+        // TODO: this directory metrics is not correct -- we could have multiple reldirs in the system
+        // for each of the database, but we only store one value, and therefore each pgdirmodification
+        // would overwrite the previous value if they modify different databases.
+
+        match count {
+            MetricsUpdate::Set(count) => {
+                self.directory_metrics[kind.offset()].store(count, AtomicOrdering::Relaxed);
+                self.directory_metrics_inited[kind.offset()].store(true, AtomicOrdering::Relaxed);
+            }
+            MetricsUpdate::Add(count) => {
+                // TODO: these operations are not atomic; but we only have one writer to the metrics, so
+                // it's fine.
+                if self.directory_metrics_inited[kind.offset()].load(AtomicOrdering::Relaxed) {
+                    // The metrics has been initialized with `MetricsUpdate::Set` before, so we can add/sub
+                    // the value reliably.
+                    self.directory_metrics[kind.offset()].fetch_add(count, AtomicOrdering::Relaxed);
+                }
+                // Otherwise, ignore this update
+            }
+            MetricsUpdate::Sub(count) => {
+                // TODO: these operations are not atomic; but we only have one writer to the metrics, so
+                // it's fine.
+                if self.directory_metrics_inited[kind.offset()].load(AtomicOrdering::Relaxed) {
+                    // The metrics has been initialized with `MetricsUpdate::Set` before.
+                    // The operation could overflow so we need to normalize the value.
+                    let prev_val =
+                        self.directory_metrics[kind.offset()].load(AtomicOrdering::Relaxed);
+                    let res = prev_val.saturating_sub(count);
+                    self.directory_metrics[kind.offset()].store(res, AtomicOrdering::Relaxed);
+                }
+                // Otherwise, ignore this update
+            }
+        };
+
+        // TODO: remove this, there's no place in the code that updates this aux metrics.
         let aux_metric =
             self.directory_metrics[DirectoryKind::AuxFiles.offset()].load(AtomicOrdering::Relaxed);
 
@@ -3459,12 +3538,52 @@ impl Timeline {
 
         let guard = self.layers.read().await;
 
+        // Firstly, if there's any heatmap left over from when this location
+        // was a secondary, take that into account. Keep layers that are:
+        // * present in the layer map
+        // * visible
+        // * non-resident
+        // * not evicted since we read the heatmap
+        //
+        // Without this, a new cold, attached location would clobber the previous
+        // heatamp.
+        let previous_heatmap = self.previous_heatmap.load();
+        let visible_non_resident = match previous_heatmap.as_deref() {
+            Some(PreviousHeatmap::Active { heatmap, read_at }) => {
+                Some(heatmap.layers.iter().filter_map(|hl| {
+                    let desc: PersistentLayerDesc = hl.name.clone().into();
+                    let layer = guard.try_get_from_key(&desc.key())?;
+
+                    if layer.visibility() == LayerVisibilityHint::Covered {
+                        return None;
+                    }
+
+                    if layer.is_likely_resident() {
+                        return None;
+                    }
+
+                    if layer.last_evicted_at().happened_after(*read_at) {
+                        return None;
+                    }
+
+                    Some((desc, hl.metadata.clone(), hl.access_time))
+                }))
+            }
+            Some(PreviousHeatmap::Obsolete) => None,
+            None => None,
+        };
+
+        // Secondly, all currently visible, resident layers are included.
         let resident = guard.likely_resident_layers().filter_map(|layer| {
             match layer.visibility() {
                 LayerVisibilityHint::Visible => {
                     // Layer is visible to one or more read LSNs: elegible for inclusion in layer map
                     let last_activity_ts = layer.latest_activity();
-                    Some((layer.layer_desc(), layer.metadata(), last_activity_ts))
+                    Some((
+                        layer.layer_desc().clone(),
+                        layer.metadata(),
+                        last_activity_ts,
+                    ))
                 }
                 LayerVisibilityHint::Covered => {
                     // Layer is resident but unlikely to be read: not elegible for inclusion in heatmap.
@@ -3473,7 +3592,18 @@ impl Timeline {
             }
         });
 
-        let mut layers = resident.collect::<Vec<_>>();
+        let mut layers = match visible_non_resident {
+            Some(non_resident) => {
+                let mut non_resident = non_resident.peekable();
+                if non_resident.peek().is_none() {
+                    self.previous_heatmap
+                        .store(Some(PreviousHeatmap::Obsolete.into()));
+                }
+
+                non_resident.chain(resident).collect::<Vec<_>>()
+            }
+            None => resident.collect::<Vec<_>>(),
+        };
 
         // Sort layers in order of which to download first.  For a large set of layers to download, we
         // want to prioritize those layers which are most likely to still be in the resident many minutes
@@ -3577,7 +3707,9 @@ impl Timeline {
             // space. If that's not the case, we had at least one key encounter a gap in the image layer
             // and stop the search as a result of that.
             let mut removed = keyspace.remove_overlapping_with(&image_covered_keyspace);
-            // Do not fire missing key error for sparse keys.
+            // Do not fire missing key error and end early for sparse keys. Note that we hava already removed
+            // non-inherited keyspaces before, so we can safely do a full `SPARSE_RANGE` remove instead of
+            // figuring out what is the inherited key range and do a fine-grained pruning.
             removed.remove_overlapping_with(&KeySpace {
                 ranges: vec![SPARSE_RANGE],
             });
@@ -3662,7 +3794,7 @@ impl Timeline {
         // the timeline, then it will remove layers that are required for fulfilling
         // the current get request (read-path cannot "look back" and notice the new
         // image layer).
-        let _gc_cutoff_holder = timeline.get_latest_gc_cutoff_lsn();
+        let _gc_cutoff_holder = timeline.get_applied_gc_cutoff_lsn();
 
         // See `compaction::compact_with_gc` for why we need this.
         let _guard = timeline.gc_compaction_layer_update_lock.read().await;
@@ -4349,7 +4481,7 @@ impl Timeline {
         let update = crate::tenant::metadata::MetadataUpdate::new(
             disk_consistent_lsn,
             ondisk_prev_record_lsn,
-            *self.latest_gc_cutoff_lsn.read(),
+            *self.applied_gc_cutoff_lsn.read(),
         );
 
         fail_point!("checkpoint-before-saving-metadata", |x| bail!(
@@ -4474,7 +4606,10 @@ impl Timeline {
             ));
         }
 
-        let (dense_ks, sparse_ks) = self.collect_keyspace(lsn, ctx).await?;
+        let (dense_ks, sparse_ks) = self
+            .collect_keyspace(lsn, ctx)
+            .await
+            .map_err(CompactionError::CollectKeySpaceError)?;
         let dense_partitioning = dense_ks.partition(&self.shard_identity, partition_size);
         let sparse_partitioning = SparseKeyPartitioning {
             parts: vec![sparse_ks],
@@ -4995,20 +5130,26 @@ impl Timeline {
                     // image layer generation taking too long time and blocking L0 compaction. So in this
                     // mode, we also inspect the current number of L0 layers and skip image layer generation
                     // if there are too many of them.
-                    let num_of_l0_layers = {
-                        let layers = self.layers.read().await;
-                        layers.layer_map()?.level0_deltas().len()
-                    };
                     let image_preempt_threshold = self.get_image_creation_preempt_threshold()
                         * self.get_compaction_threshold();
-                    if image_preempt_threshold != 0 && num_of_l0_layers >= image_preempt_threshold {
-                        tracing::info!(
-                        "preempt image layer generation at {lsn} when processing partition {}..{}: too many L0 layers {}",
-                        partition.start().unwrap(), partition.end().unwrap(), num_of_l0_layers
-                    );
-                        last_partition_processed = Some(partition.clone());
-                        all_generated = false;
-                        break;
+                    // TODO: currently we do not respect `get_image_creation_preempt_threshold` and always yield
+                    // when there is a single timeline with more than L0 threshold L0 layers. As long as the
+                    // `get_image_creation_preempt_threshold` is set to a value greater than 0, we will yield for L0 compaction.
+                    if image_preempt_threshold != 0 {
+                        let should_yield = self
+                            .l0_compaction_trigger
+                            .notified()
+                            .now_or_never()
+                            .is_some();
+                        if should_yield {
+                            tracing::info!(
+                                "preempt image layer generation at {lsn} when processing partition {}..{}: too many L0 layers",
+                                partition.start().unwrap(), partition.end().unwrap()
+                            );
+                            last_partition_processed = Some(partition.clone());
+                            all_generated = false;
+                            break;
+                        }
                     }
                 }
             }
@@ -5037,14 +5178,16 @@ impl Timeline {
             .map(|l| l.metadata().file_size)
             .sum::<u64>();
 
-        info!(
-            "created {} image layers ({} bytes) in {}s, processed {} out of {} partitions",
-            image_layers.len(),
-            total_layer_size,
-            duration.as_secs_f64(),
-            partition_processed,
-            total_partitions
-        );
+        if !image_layers.is_empty() {
+            info!(
+                "created {} image layers ({} bytes) in {}s, processed {} out of {} partitions",
+                image_layers.len(),
+                total_layer_size,
+                duration.as_secs_f64(),
+                partition_processed,
+                total_partitions
+            );
+        }
 
         Ok((
             image_layers,
@@ -5187,6 +5330,8 @@ pub(crate) enum CompactionError {
     #[error("Failed to offload timeline: {0}")]
     Offload(OffloadError),
     /// Compaction cannot be done right now; page reconstruction and so on.
+    #[error("Failed to collect keyspace: {0}")]
+    CollectKeySpaceError(CollectKeySpaceError),
     #[error(transparent)]
     Other(anyhow::Error),
 }
@@ -5197,12 +5342,6 @@ impl From<OffloadError> for CompactionError {
             OffloadError::Cancelled => Self::ShuttingDown,
             _ => Self::Offload(e),
         }
-    }
-}
-
-impl CompactionError {
-    pub fn is_cancelled(&self) -> bool {
-        matches!(self, CompactionError::ShuttingDown)
     }
 }
 
@@ -5577,7 +5716,7 @@ impl Timeline {
                 // PITR interval is set & we didn't look up a timestamp successfully.  Conservatively assume PITR
                 // cannot advance beyond what was already GC'd, and respect space-based retention
                 GcCutoffs {
-                    time: *self.get_latest_gc_cutoff_lsn(),
+                    time: *self.get_applied_gc_cutoff_lsn(),
                     space: space_cutoff,
                 }
             }
@@ -5698,7 +5837,7 @@ impl Timeline {
         let mut result: GcResult = GcResult::default();
 
         // Nothing to GC. Return early.
-        let latest_gc_cutoff = *self.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff = *self.get_applied_gc_cutoff_lsn();
         if latest_gc_cutoff >= new_gc_cutoff {
             info!(
                 "Nothing to GC: new_gc_cutoff_lsn {new_gc_cutoff}, latest_gc_cutoff_lsn {latest_gc_cutoff}",
@@ -5712,7 +5851,7 @@ impl Timeline {
         //
         // The GC cutoff should only ever move forwards.
         let waitlist = {
-            let write_guard = self.latest_gc_cutoff_lsn.lock_for_write();
+            let write_guard = self.applied_gc_cutoff_lsn.lock_for_write();
             if *write_guard > new_gc_cutoff {
                 return Err(GcError::BadLsn {
                     why: format!(
@@ -6470,7 +6609,7 @@ impl TimelineWriter<'_> {
 
         if let Some(wait_threshold) = wait_threshold {
             if l0_count >= wait_threshold {
-                info!("layer roll waiting for flush due to compaction backpressure at {l0_count} L0 layers");
+                debug!("layer roll waiting for flush due to compaction backpressure at {l0_count} L0 layers");
                 self.tl.wait_flush_completion(flush_id).await?;
             }
         }
@@ -6652,17 +6791,31 @@ fn is_send() {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use pageserver_api::key::Key;
     use pageserver_api::value::Value;
+    use tracing::Instrument;
     use utils::{id::TimelineId, lsn::Lsn};
 
     use crate::tenant::{
         harness::{test_img, TenantHarness},
         layer_map::LayerMap,
-        storage_layer::{Layer, LayerName},
+        storage_layer::{Layer, LayerName, LayerVisibilityHint},
         timeline::{DeltaLayerTestDesc, EvictionError},
-        Timeline,
+        PreviousHeatmap, Timeline,
     };
+
+    use super::HeatMapTimeline;
+
+    fn assert_heatmaps_have_same_layers(lhs: &HeatMapTimeline, rhs: &HeatMapTimeline) {
+        assert_eq!(lhs.layers.len(), rhs.layers.len());
+        let lhs_rhs = lhs.layers.iter().zip(rhs.layers.iter());
+        for (l, r) in lhs_rhs {
+            assert_eq!(l.name, r.name);
+            assert_eq!(l.metadata, r.metadata);
+        }
+    }
 
     #[tokio::test]
     async fn test_heatmap_generation() {
@@ -6737,7 +6890,7 @@ mod tests {
         assert_eq!(heatmap.layers.last().unwrap().name, l0_delta.layer_name());
 
         let mut last_lsn = Lsn::MAX;
-        for layer in heatmap.layers {
+        for layer in &heatmap.layers {
             // Covered layer should be omitted
             assert!(layer.name != covered_delta.layer_name());
 
@@ -6752,6 +6905,144 @@ mod tests {
                 last_lsn = layer_lsn;
             }
         }
+
+        // Evict all the layers and stash the old heatmap in the timeline.
+        // This simulates a migration to a cold secondary location.
+
+        let guard = timeline.layers.read().await;
+        let mut all_layers = Vec::new();
+        let forever = std::time::Duration::from_secs(120);
+        for layer in guard.likely_resident_layers() {
+            all_layers.push(layer.clone());
+            layer.evict_and_wait(forever).await.unwrap();
+        }
+        drop(guard);
+
+        timeline
+            .previous_heatmap
+            .store(Some(Arc::new(PreviousHeatmap::Active {
+                heatmap: heatmap.clone(),
+                read_at: std::time::Instant::now(),
+            })));
+
+        // Generate a new heatmap and assert that it contains the same layers as the old one.
+        let post_migration_heatmap = timeline.generate_heatmap().await.unwrap();
+        assert_heatmaps_have_same_layers(&heatmap, &post_migration_heatmap);
+
+        // Download each layer one by one. Generate the heatmap at each step and check
+        // that it's stable.
+        for layer in all_layers {
+            if layer.visibility() == LayerVisibilityHint::Covered {
+                continue;
+            }
+
+            eprintln!("Downloading {layer} and re-generating heatmap");
+
+            let _resident = layer
+                .download_and_keep_resident()
+                .instrument(tracing::info_span!(
+                    parent: None,
+                    "download_layer",
+                    tenant_id = %timeline.tenant_shard_id.tenant_id,
+                    shard_id = %timeline.tenant_shard_id.shard_slug(),
+                    timeline_id = %timeline.timeline_id
+                ))
+                .await
+                .unwrap();
+
+            let post_download_heatmap = timeline.generate_heatmap().await.unwrap();
+            assert_heatmaps_have_same_layers(&heatmap, &post_download_heatmap);
+        }
+
+        // Everything from the post-migration heatmap is now resident.
+        // Check that we drop it from memory.
+        assert!(matches!(
+            timeline.previous_heatmap.load().as_deref(),
+            Some(PreviousHeatmap::Obsolete)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_previous_heatmap_obsoletion() {
+        let harness = TenantHarness::create("heatmap_previous_heatmap_obsoletion")
+            .await
+            .unwrap();
+
+        let l0_delta = DeltaLayerTestDesc::new(
+            Lsn(0x20)..Lsn(0x30),
+            Key::from_hex("000000000000000000000000000000000000").unwrap()
+                ..Key::from_hex("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF").unwrap(),
+            vec![(
+                Key::from_hex("720000000033333333444444445500000000").unwrap(),
+                Lsn(0x25),
+                Value::Image(test_img("foo")),
+            )],
+        );
+
+        let image_layer = (
+            Lsn(0x40),
+            vec![(
+                Key::from_hex("620000000033333333444444445500000000").unwrap(),
+                test_img("bar"),
+            )],
+        );
+
+        let delta_layers = vec![l0_delta];
+        let image_layers = vec![image_layer];
+
+        let (tenant, ctx) = harness.load().await;
+        let timeline = tenant
+            .create_test_timeline_with_layers(
+                TimelineId::generate(),
+                Lsn(0x10),
+                14,
+                &ctx,
+                delta_layers,
+                image_layers,
+                Lsn(0x100),
+            )
+            .await
+            .unwrap();
+
+        // Layer visibility is an input to heatmap generation, so refresh it first
+        timeline.update_layer_visibility().await.unwrap();
+
+        let heatmap = timeline
+            .generate_heatmap()
+            .await
+            .expect("Infallible while timeline is not shut down");
+
+        // Both layers should be in the heatmap
+        assert!(!heatmap.layers.is_empty());
+
+        // Now simulate a migration.
+        timeline
+            .previous_heatmap
+            .store(Some(Arc::new(PreviousHeatmap::Active {
+                heatmap: heatmap.clone(),
+                read_at: std::time::Instant::now(),
+            })));
+
+        // Evict all the layers in the previous heatmap
+        let guard = timeline.layers.read().await;
+        let forever = std::time::Duration::from_secs(120);
+        for layer in guard.likely_resident_layers() {
+            layer.evict_and_wait(forever).await.unwrap();
+        }
+        drop(guard);
+
+        // Generate a new heatmap and check that the previous heatmap
+        // has been marked obsolete.
+        let post_eviction_heatmap = timeline
+            .generate_heatmap()
+            .await
+            .expect("Infallible while timeline is not shut down");
+
+        assert!(post_eviction_heatmap.layers.is_empty());
+        assert!(matches!(
+            timeline.previous_heatmap.load().as_deref(),
+            Some(PreviousHeatmap::Obsolete)
+        ));
     }
 
     #[tokio::test]

@@ -12,7 +12,8 @@ use storage_controller::persistence::Persistence;
 use storage_controller::service::chaos_injector::ChaosInjector;
 use storage_controller::service::{
     Config, Service, HEARTBEAT_INTERVAL_DEFAULT, LONG_RECONCILE_THRESHOLD_DEFAULT,
-    MAX_OFFLINE_INTERVAL_DEFAULT, MAX_WARMING_UP_INTERVAL_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT,
+    MAX_OFFLINE_INTERVAL_DEFAULT, MAX_WARMING_UP_INTERVAL_DEFAULT,
+    PRIORITY_RECONCILER_CONCURRENCY_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT,
 };
 use tokio::signal::unix::SignalKind;
 use tokio_util::sync::CancellationToken;
@@ -25,6 +26,16 @@ use utils::{project_build_tag, project_git_version, tcp_listener};
 
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
+
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+/// Configure jemalloc to profile heap allocations by sampling stack traces every 2 MB (1 << 21).
+/// This adds roughly 3% overhead for allocations on average, which is acceptable considering
+/// performance-sensitive code will avoid allocations as far as possible anyway.
+#[allow(non_upper_case_globals)]
+#[export_name = "malloc_conf"]
+pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:21\0";
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -75,9 +86,13 @@ struct Cli {
     #[arg(long)]
     split_threshold: Option<u64>,
 
-    /// Maximum number of reconcilers that may run in parallel
+    /// Maximum number of normal-priority reconcilers that may run in parallel
     #[arg(long)]
     reconciler_concurrency: Option<usize>,
+
+    /// Maximum number of high-priority reconcilers that may run in parallel
+    #[arg(long)]
+    priority_reconciler_concurrency: Option<usize>,
 
     /// How long to wait for the initial database connection to be available.
     #[arg(long, default_value = "5s")]
@@ -111,6 +126,10 @@ struct Cli {
 
     #[arg(long)]
     long_reconcile_threshold: Option<humantime::Duration>,
+
+    // Flag to use https for requests to pageserver API.
+    #[arg(long, default_value = "false")]
+    use_https_pageserver_api: bool,
 }
 
 enum StrictMode {
@@ -289,6 +308,9 @@ async fn async_main() -> anyhow::Result<()> {
         reconciler_concurrency: args
             .reconciler_concurrency
             .unwrap_or(RECONCILER_CONCURRENCY_DEFAULT),
+        priority_reconciler_concurrency: args
+            .priority_reconciler_concurrency
+            .unwrap_or(PRIORITY_RECONCILER_CONCURRENCY_DEFAULT),
         split_threshold: args.split_threshold,
         neon_local_repo_dir: args.neon_local_repo_dir,
         max_secondary_lag_bytes: args.max_secondary_lag_bytes,
@@ -303,6 +325,7 @@ async fn async_main() -> anyhow::Result<()> {
         address_for_peers: args.address_for_peers,
         start_as_candidate: args.start_as_candidate,
         http_service_port: args.listen.port() as i32,
+        use_https_pageserver_api: args.use_https_pageserver_api,
     };
 
     // Validate that we can connect to the database
