@@ -1,6 +1,6 @@
 //! Code related to evicting WAL files to remote storage.
 //!
-//! The actual upload is done by the partial WAL backup code. This file has
+//! The actual upload is done by the partial WAL upload code. This file has
 //! code to delete and re-download WAL files, cross-validate with partial WAL
 //! backup if local file is still present.
 
@@ -233,7 +233,7 @@ async fn redownload_partial_segment(
     Ok(())
 }
 
-/// Compare local WAL segment with partial WAL backup in remote storage.
+/// Compare local WAL segment with partial WAL upload in remote storage.
 /// If the local segment is not present, the function does nothing.
 /// If the local segment is present, it compares the local segment with the remote one.
 async fn compare_local_segment_with_remote(
@@ -256,7 +256,7 @@ async fn compare_local_segment_with_remote(
     }
 }
 
-/// Compare opened local WAL segment with partial WAL backup in remote storage.
+/// Compare opened local WAL segment with partial WAL upload in remote storage.
 /// Validate full content of both files.
 async fn do_validation(
     mgr: &Manager,

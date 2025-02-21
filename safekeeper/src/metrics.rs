@@ -198,9 +198,9 @@ pub static MANAGER_ACTIVE_CHANGES: Lazy<IntCounter> = Lazy::new(|| {
 pub static WAL_BACKUP_TASKS: Lazy<IntCounterPair> = Lazy::new(|| {
     register_int_counter_pair!(
         "safekeeper_wal_backup_tasks_started_total",
-        "Number of active WAL backup tasks",
+        "Number of active WAL upload tasks",
         "safekeeper_wal_backup_tasks_finished_total",
-        "Number of finished WAL backup tasks",
+        "Number of finished WAL upload tasks",
     )
     .expect("Failed to register safekeeper_wal_backup_tasks_finished_total counter")
 });
@@ -595,7 +595,7 @@ impl TimelineCollector {
         let wal_backup_active = GenericGaugeVec::new(
             Opts::new(
                 "safekeeper_wal_backup_active",
-                "Reports 1 for timelines with active WAL backup, 0 otherwise",
+                "Reports 1 for timelines with active WAL upload, 0 otherwise",
             ),
             &["tenant_id", "timeline_id"],
         )

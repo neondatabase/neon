@@ -49,7 +49,7 @@ pub struct WalBackupTaskHandle {
 impl WalBackupTaskHandle {
     pub(crate) async fn join(self) {
         if let Err(e) = self.handle.await {
-            error!("WAL backup task panicked: {}", e);
+            error!("WAL upload task panicked: {}", e);
         }
     }
 }
@@ -468,7 +468,7 @@ async fn backup_object(
 
     let file = File::open(&source_file)
         .await
-        .with_context(|| format!("Failed to open file {source_file:?} for wal backup"))?;
+        .with_context(|| format!("Failed to open file {source_file:?} for wal upload"))?;
 
     let file = tokio_util::io::ReaderStream::with_capacity(file, BUFFER_SIZE);
 
@@ -488,7 +488,7 @@ pub(crate) async fn backup_partial_segment(
 
     let file = File::open(&source_file)
         .await
-        .with_context(|| format!("Failed to open file {source_file:?} for wal backup"))?;
+        .with_context(|| format!("Failed to open file {source_file:?} for wal upload"))?;
 
     // limiting the file to read only the first `size` bytes
     let limited_file = tokio::io::AsyncReadExt::take(file, size as u64);

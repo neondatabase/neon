@@ -626,9 +626,9 @@ impl Manager {
             .store(new_last_removed_segno, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Spawns partial WAL backup task if needed.
+    /// Spawns partial WAL upload task if needed.
     async fn update_partial_backup(&mut self, state: &StateSnapshot) {
-        // check if WAL backup is enabled and should be started
+        // check if WAL upload is enabled and should be started
         if !self.conf.is_wal_backup_enabled() {
             return;
         }
@@ -659,7 +659,7 @@ impl Manager {
         self.partial_backup_task = Some((handle, cancel));
     }
 
-    /// Update the state after partial WAL backup task finished.
+    /// Update the state after partial WAL upload task finished.
     fn update_partial_backup_end(&mut self, res: Result<Option<PartialRemoteSegment>, JoinError>) {
         match res {
             Ok(new_upload_state) => {

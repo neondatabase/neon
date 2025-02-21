@@ -133,7 +133,7 @@ struct Args {
     /// Enable/disable peer recovery.
     #[arg(long, default_value = "false", action=ArgAction::Set)]
     peer_recovery: bool,
-    /// Remote storage configuration for WAL backup (offloading to s3) as TOML
+    /// Remote storage configuration for WAL upload (offloading to s3) as TOML
     /// inline table, e.g.
     ///   {max_concurrent_syncs = 17, max_sync_errors = 13, bucket_name = "<BUCKETNAME>", bucket_region = "<REGION>", concurrency_limit = 119}
     /// Safekeeper offloads WAL to
@@ -147,8 +147,8 @@ struct Args {
     /// Number of max parallel WAL segments to be offloaded to remote storage.
     #[arg(long, default_value = "5")]
     wal_backup_parallel_jobs: usize,
-    /// Disable WAL backup to s3. When disabled, safekeeper removes WAL ignoring
-    /// WAL backup horizon.
+    /// Disable WAL upload to s3. When disabled, safekeeper removes WAL ignoring
+    /// WAL upload horizon.
     #[arg(long)]
     disable_wal_backup: bool,
     /// If given, enables auth on incoming connections to WAL service endpoint
@@ -452,7 +452,7 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
     let mut tasks_handles: FuturesUnordered<BoxFuture<(String, JoinTaskRes)>> =
         FuturesUnordered::new();
 
-    // Start wal backup launcher before loading timelines as we'll notify it
+    // Start wal upload launcher before loading timelines as we'll notify it
     // through the channel about timelines which need offloading, not draining
     // the channel would cause deadlock.
     let current_thread_rt = conf
