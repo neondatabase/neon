@@ -1,6 +1,7 @@
 use crate::pageserver_client::PageserverClient;
 use crate::persistence::Persistence;
 use crate::{compute_hook, service};
+use json_structural_diff::JsonDiff;
 use pageserver_api::controller_api::{AvailabilityZone, MigrationConfig, PlacementPolicy};
 use pageserver_api::models::{
     LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig, TenantWaitLsnRequest,
@@ -880,7 +881,27 @@ impl Reconciler {
                         self.generation = Some(generation);
                         wanted_conf.generation = generation.into();
                     }
-                    tracing::info!(node_id=%node.get_id(), "Observed configuration requires update.");
+
+                    let diff = match observed {
+                        Some(ObservedStateLocation {
+                            conf: Some(observed),
+                        }) => {
+                            let diff = JsonDiff::diff(
+                                &serde_json::to_value(observed.clone()).unwrap(),
+                                &serde_json::to_value(wanted_conf.clone()).unwrap(),
+                                false,
+                            );
+
+                            if let Some(json_diff) = diff.diff {
+                                serde_json::to_string(&json_diff).unwrap_or("diff err".to_string())
+                            } else {
+                                "unknown".to_string()
+                            }
+                        }
+                        _ => "full".to_string(),
+                    };
+
+                    tracing::info!(node_id=%node.get_id(), "Observed configuration requires update: {diff}");
 
                     // Because `node` comes from a ref to &self, clone it before calling into a &mut self
                     // function: this could be avoided by refactoring the state mutated by location_config into

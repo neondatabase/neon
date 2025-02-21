@@ -24,6 +24,7 @@ hex.workspace = true
 hyper0.workspace = true
 humantime.workspace = true
 itertools.workspace = true
+json-structural-diff.workspace = true
 lasso.workspace = true
 once_cell.workspace = true
 pageserver_api.workspace = true
