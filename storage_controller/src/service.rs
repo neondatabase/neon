@@ -2926,7 +2926,9 @@ impl Service {
             first
         };
 
-        let updated_config = base.apply_patch(patch);
+        let updated_config = base
+            .apply_patch(patch)
+            .map_err(|err| ApiError::BadRequest(anyhow::anyhow!(err)))?;
         self.set_tenant_config_and_reconcile(tenant_id, updated_config)
             .await
     }
@@ -6654,11 +6656,12 @@ impl Service {
     ) -> Option<ReconcilerWaiter> {
         let reconcile_needed = shard.get_reconcile_needed(nodes);
 
-        match reconcile_needed {
+        let reconcile_reason = match reconcile_needed {
             ReconcileNeeded::No => return None,
             ReconcileNeeded::WaitExisting(waiter) => return Some(waiter),
-            ReconcileNeeded::Yes => {
+            ReconcileNeeded::Yes(reason) => {
                 // Fall through to try and acquire units for spawning reconciler
+                reason
             }
         };
 
@@ -6697,6 +6700,7 @@ impl Service {
         };
 
         shard.spawn_reconciler(
+            reconcile_reason,
             &self.result_tx,
             nodes,
             &self.compute_hook,
