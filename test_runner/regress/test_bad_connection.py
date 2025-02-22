@@ -83,12 +83,12 @@ def test_compute_pageserver_connection_stress(neon_env_builder: NeonEnvBuilder):
     env.pageserver.stop()
 
 
-@pytest.mark.timeout(600)
 def test_compute_pageserver_hung_connections(neon_env_builder: NeonEnvBuilder):
     """
     Test timeouts in waiting for response to pageserver request
     """
     env = neon_env_builder.init_start()
+    env.pageserver.allowed_errors.append(".*slow GetPage.*")
     pageserver_http = env.pageserver.http_client()
     endpoint = env.endpoints.create_start("main", tenant_id=env.initial_tenant)
     pg_conn = endpoint.connect()
