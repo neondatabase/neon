@@ -5,16 +5,6 @@ commands:
     user: root
     sysvInitAction: sysinit
     shell: 'cgconfigparser -l /etc/cgconfig.conf -s 1664'
-  # restrict permissions on /neonvm/bin/resize-swap, because we grant access to compute_ctl for
-  # running it as root.
-  - name: chmod-resize-swap
-    user: root
-    sysvInitAction: sysinit
-    shell: 'chmod 711 /neonvm/bin/resize-swap'
-  - name: chmod-set-disk-quota
-    user: root
-    sysvInitAction: sysinit
-    shell: 'chmod 711 /neonvm/bin/set-disk-quota'
   - name: pgbouncer
     user: postgres
     sysvInitAction: respawn
@@ -44,12 +34,9 @@ shutdownHook: |
 files:
   - filename: compute_ctl-sudoers
     content: |
-      # Allow postgres user (which is what compute_ctl runs as) to run /neonvm/bin/resize-swap
-      # and /neonvm/bin/set-disk-quota as root without requiring entering a password (NOPASSWD),
-      # regardless of hostname (ALL)
-      #
-      # Also allow it to shut down the VM. The fast_import job does that when it's finished.
-      postgres ALL=(root) NOPASSWD: /neonvm/bin/resize-swap, /neonvm/bin/set-disk-quota, /neonvm/bin/poweroff
+      # Allow postgres user to shut down the VM. The fast_import job does that
+      # when it's finished.
+      postgres ALL=(root) NOPASSWD: /neonvm/bin/poweroff
   - filename: cgconfig.conf
     content: |
       # Configuration for cgroups in VM compute nodes
@@ -107,10 +94,7 @@ merge: |
       && echo 'root - nofile 1048576' >>/etc/security/limits.conf \
          )
 
-  # Allow postgres user (compute_ctl) to run swap resizer.
-  # Need to install sudo in order to allow this.
-  #
-  # Also, remove the 'read' permission from group/other on /neonvm/bin/resize-swap, just to be safe.
+  # Install sudo so that the fast_import can do "sudo poweroff"
   RUN set -e \
       && apt update \
       && apt install --no-install-recommends -y \
