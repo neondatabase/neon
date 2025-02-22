@@ -137,8 +137,8 @@ def test_compute_pageserver_hung_connections(neon_env_builder: NeonEnvBuilder):
     ## This is to exercise the logging timeout.
     log.info("running workload with log timeout")
     cur.execute("SET neon.pageserver_response_log_timeout = '500ms'")
-    pageserver_http.configure_failpoints(("before-pagestream-msg-flush", "10%3*return(1500)"))
-    run_workload(15)
+    pageserver_http.configure_failpoints(("before-pagestream-msg-flush", "10%3*return(3000)"))
+    run_workload(20)
 
     # check that the message was logged
     assert endpoint.log_contains("no response received from pageserver for .* s, still waiting")
