@@ -7,6 +7,7 @@ import psycopg2.errors
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.utils import USE_LFC
 
 
 @pytest.mark.timeout(600)
@@ -166,14 +167,16 @@ def test_compute_pageserver_statement_timeout(neon_env_builder: NeonEnvBuilder):
     """
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
+
+    # Make sure the shared_buffers and LFC are tiny, to ensure the queries
+    # hit the storage.
+    config_lines = ["shared_buffers='512kB'"]
+    if USE_LFC:
+        config_lines = ["neon.max_file_cache_size = 1MB", "neon.file_cache_size_limit = 1MB"]
     endpoint = env.endpoints.create_start(
         "main",
         tenant_id=env.initial_tenant,
-        config_lines=[
-            "neon.max_file_cache_size='1MB'",
-            "neon.file_cache_size_limit='1MB'",
-            "shared_buffers='512kB'",
-        ],
+        config_lines=config_lines,
     )
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
