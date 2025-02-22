@@ -194,6 +194,7 @@ static PgSeccompRule allowed_syscalls[] =
 	 * is stored in MyProcPid anyway.
 	 */
 	PG_SCMP_ALLOW(getpid),
+	PG_SCMP_ALLOW(futex), /* needed for errbacktrace */
 
 	/* Enable those for a proper shutdown. */
 #if 0
