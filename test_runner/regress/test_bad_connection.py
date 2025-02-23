@@ -123,6 +123,11 @@ def test_compute_pageserver_hung_connections(neon_env_builder: NeonEnvBuilder):
     log.debug(f"shared_buffers is {row[0]}, table size {row[1]}")
     assert int(row[0]) < int(row[1])
 
+    # Print the backend PID so that it can be compared with the logs easily
+    cur.execute("SELECT pg_backend_pid()")
+    row = cur.fetchone()
+    log.info(f"running test workload in backend PID {row[0]}")
+
     def run_workload(duration: float):
         end_time = time.time() + duration
         times_executed = 0
@@ -155,7 +160,7 @@ def test_compute_pageserver_hung_connections(neon_env_builder: NeonEnvBuilder):
     log.info("running workload with disconnect timeout")
     cur.execute("SET neon.pageserver_response_log_timeout = '250ms'")
     cur.execute("SET neon.pageserver_response_disconnect_timeout = '500ms'")
-    pageserver_http.configure_failpoints(("before-pagestream-msg-flush", "10%3*return(1500)"))
+    pageserver_http.configure_failpoints(("before-pagestream-msg-flush", "10%3*return(3000)"))
     run_workload(15)
 
     assert endpoint.log_contains("no response from pageserver for .* s, disconnecting")
