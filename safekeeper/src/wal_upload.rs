@@ -87,7 +87,7 @@ pub(crate) async fn update_task(mgr: &mut Manager, need_upload: bool, state: &St
                 return;
             };
 
-            let async_task = upload_task_main(resident, mgr.conf.backup_parallel_jobs, shutdown_rx);
+            let async_task = upload_task_main(resident, mgr.conf.upload_parallel_jobs, shutdown_rx);
 
             let handle = if mgr.conf.current_thread_runtime {
                 tokio::spawn(async_task)

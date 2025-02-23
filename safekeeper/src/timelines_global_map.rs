@@ -102,7 +102,7 @@ impl GlobalTimelines {
         let tenants_dir = {
             let mut state = self.state.lock().unwrap();
             state.global_rate_limiter = RateLimiter::new(
-                state.conf.partial_backup_concurrency,
+                state.conf.partial_upload_concurrency,
                 DEFAULT_EVICTION_CONCURRENCY,
             );
 

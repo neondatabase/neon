@@ -2,7 +2,7 @@
 //! and `flush_lsn` updates.
 //!
 //! After the partial segment was updated (`flush_lsn` was changed), the segment
-//! will be uploaded to S3 within the configured `partial_backup_timeout`.
+//! will be uploaded to S3 within the configured [`SafeKeeperConf::partial_upload_timeout`].
 //!
 //! The filename format for partial segments is
 //! `Segment_Term_Flush_Commit_skNN.partial`, where:
@@ -426,7 +426,7 @@ pub async fn main_task(
     cancel: CancellationToken,
 ) -> Option<PartialRemoteSegment> {
     debug!("started");
-    let await_duration = conf.partial_backup_timeout;
+    let await_duration = conf.partial_upload_timeout;
     let mut first_iteration = true;
 
     let mut commit_lsn_rx = tli.get_commit_lsn_watch_rx();
