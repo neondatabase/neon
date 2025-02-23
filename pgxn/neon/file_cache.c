@@ -467,7 +467,7 @@ lfc_init(void)
 							"Immediately store received prefetch result in LFC",
 							NULL,
 							&lfc_store_prefetch_result,
-							false,
+							true,
 							PGC_SUSET,
 							0,
 							NULL,
