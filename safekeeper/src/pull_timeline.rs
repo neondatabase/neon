@@ -308,7 +308,7 @@ impl WalResidentTimeline {
         // still needs. This duplicates calc_horizon_lsn logic.
         //
         // We know that WAL wasn't removed up to this point because it cannot be
-        // removed further than `backup_lsn`. Since we're holding shared_state
+        // removed further than `upload_lsn`. Since we're holding shared_state
         // lock and setting `wal_removal_on_hold` later, it guarantees that WAL
         // won't be removed until we're done.
         let from_lsn = min(
@@ -499,7 +499,7 @@ async fn pull_timeline(
             }
             _ => {
                 bail!(
-                    "entry {} in backup tar archive is of unexpected type: {:?}",
+                    "entry {} in upload tar archive is of unexpected type: {:?}",
                     file_path.display(),
                     header.entry_type()
                 );

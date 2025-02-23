@@ -537,7 +537,7 @@ impl Timeline {
         _shared_state: &mut WriteGuardSharedState<'_>,
         conf: &SafeKeeperConf,
         broker_active_set: Arc<TimelinesSet>,
-        partial_backup_rate_limiter: RateLimiter,
+        partial_upload_rate_limiter: RateLimiter,
     ) {
         let (tx, rx) = self.manager_ctl.bootstrap_manager();
 
@@ -559,7 +559,7 @@ impl Timeline {
                     broker_active_set,
                     tx,
                     rx,
-                    partial_backup_rate_limiter,
+                    partial_upload_rate_limiter,
                 )
                 .await
             }
@@ -877,7 +877,7 @@ impl Timeline {
         self.do_wal_residence_guard(false).await
     }
 
-    pub async fn backup_partial_reset(self: &Arc<Self>) -> Result<Vec<String>> {
+    pub async fn upload_partial_reset(self: &Arc<Self>) -> Result<Vec<String>> {
         self.manager_ctl.upload_partial_reset().await
     }
 }
@@ -1008,9 +1008,9 @@ impl ManagerTimeline {
             shared_state.sk.state().eviction_state,
             EvictionState::Offloaded(_)
         );
-        let partial_backup_uploaded = shared_state.sk.state().partial_upload.uploaded_segment();
+        let partial_segment_uploaded = shared_state.sk.state().partial_upload.uploaded_segment();
 
-        (is_offloaded, partial_backup_uploaded)
+        (is_offloaded, partial_segment_uploaded)
     }
 
     /// Try to switch state Present->Offloaded.
@@ -1032,7 +1032,7 @@ impl ManagerTimeline {
 
         if partial.flush_lsn != shared.sk.flush_lsn() {
             bail!(
-                "flush_lsn mismatch in partial backup, expected {}, got {}",
+                "flush_lsn mismatch in partial upload, expected {}, got {}",
                 shared.sk.flush_lsn(),
                 partial.flush_lsn
             );
@@ -1040,7 +1040,7 @@ impl ManagerTimeline {
 
         if partial.commit_lsn != pstate.commit_lsn {
             bail!(
-                "commit_lsn mismatch in partial backup, expected {}, got {}",
+                "commit_lsn mismatch in partial upload, expected {}, got {}",
                 pstate.commit_lsn,
                 partial.commit_lsn
             );
@@ -1048,7 +1048,7 @@ impl ManagerTimeline {
 
         if partial.term != shared.sk.last_log_term() {
             bail!(
-                "term mismatch in partial backup, expected {}, got {}",
+                "term mismatch in partial upload, expected {}, got {}",
                 shared.sk.last_log_term(),
                 partial.term
             );

@@ -2,7 +2,7 @@
 //!
 //! The actual upload is done by the partial WAL upload code. This file has
 //! code to delete and re-download WAL files, cross-validate with partial WAL
-//! backup if local file is still present.
+//! upload if local file is still present.
 
 use anyhow::Context;
 use camino::Utf8PathBuf;
@@ -73,15 +73,15 @@ impl Manager {
     #[instrument(name = "evict_timeline", skip_all)]
     pub(crate) async fn evict_timeline(&mut self) -> bool {
         assert!(!self.is_offloaded);
-        let partial_backup_uploaded = match &self.partial_upload {
+        let partial_segment_uploaded = match &self.partial_upload {
             Some(p) => p.clone(),
             None => {
-                warn!("no partial backup uploaded, skipping eviction");
+                warn!("no partial segment uploaded, skipping eviction");
                 return false;
             }
         };
 
-        info!("starting eviction, using {:?}", partial_backup_uploaded);
+        info!("starting eviction, using {:?}", partial_segment_uploaded);
 
         EVICTION_EVENTS_STARTED
             .with_label_values(&[EvictionEvent::Evict.into()])
@@ -92,7 +92,7 @@ impl Manager {
                 .inc();
         });
 
-        if let Err(e) = do_eviction(self, &partial_backup_uploaded).await {
+        if let Err(e) = do_eviction(self, &partial_segment_uploaded).await {
             warn!("failed to evict timeline: {:?}", e);
             return false;
         }
@@ -107,15 +107,15 @@ impl Manager {
     #[instrument(name = "unevict_timeline", skip_all)]
     pub(crate) async fn unevict_timeline(&mut self) {
         assert!(self.is_offloaded);
-        let partial_backup_uploaded = match &self.partial_upload {
+        let partial_segment_uploaded = match &self.partial_upload {
             Some(p) => p.clone(),
             None => {
-                warn!("no partial backup uploaded, cannot unevict");
+                warn!("no partial segment uploaded, cannot unevict");
                 return;
             }
         };
 
-        info!("starting uneviction, using {:?}", partial_backup_uploaded);
+        info!("starting uneviction, using {:?}", partial_segment_uploaded);
 
         EVICTION_EVENTS_STARTED
             .with_label_values(&[EvictionEvent::Restore.into()])
@@ -126,7 +126,7 @@ impl Manager {
                 .inc();
         });
 
-        if let Err(e) = do_uneviction(self, &partial_backup_uploaded).await {
+        if let Err(e) = do_uneviction(self, &partial_segment_uploaded).await {
             warn!("failed to unevict timeline: {:?}", e);
             return;
         }
@@ -139,7 +139,7 @@ impl Manager {
     }
 }
 
-/// Ensure that content matches the remote partial backup, if local segment exists.
+/// Ensure that content matches the remote partial upload, if local segment exists.
 /// Then change state in control file and in-memory. If `delete_offloaded_wal` is set,
 /// delete the local segment.
 async fn do_eviction(mgr: &mut Manager, partial: &PartialRemoteSegment) -> anyhow::Result<()> {
@@ -156,7 +156,7 @@ async fn do_eviction(mgr: &mut Manager, partial: &PartialRemoteSegment) -> anyho
     Ok(())
 }
 
-/// Ensure that content matches the remote partial backup, if local segment exists.
+/// Ensure that content matches the remote partial upload, if local segment exists.
 /// Then download segment to local disk and change state in control file and in-memory.
 async fn do_uneviction(mgr: &mut Manager, partial: &PartialRemoteSegment) -> anyhow::Result<()> {
     // if the local segment is present, validate it

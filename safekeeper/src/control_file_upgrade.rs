@@ -235,7 +235,7 @@ pub struct SafeKeeperStateV8 {
     pub peers: PersistedPeers,
     /// Holds names of partial segments uploaded to remote storage. Used to
     /// clean up old objects without leaving garbage in remote storage.
-    pub partial_backup: wal_upload_partial::State,
+    pub partial_upload: wal_upload_partial::State,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -316,7 +316,7 @@ pub struct TimelinePersistentStateV9 {
     pub peers: PersistedPeers,
     /// Holds names of partial segments uploaded to remote storage. Used to
     /// clean up old objects without leaving garbage in remote storage.
-    pub upload_backup: wal_upload_partial::State,
+    pub partial_upload_segments: wal_upload_partial::State,
     /// Eviction state of the timeline. If it's Offloaded, we should download
     /// WAL files from remote storage to serve the timeline.
     pub eviction_state: EvictionState,
@@ -495,7 +495,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersiste
             upload_lsn: oldstate.upload_lsn,
             peer_horizon_lsn: oldstate.peer_horizon_lsn,
             remote_consistent_lsn: oldstate.remote_consistent_lsn,
-            partial_upload: oldstate.partial_backup,
+            partial_upload: oldstate.partial_upload,
             eviction_state: EvictionState::Present,
             creation_ts: std::time::SystemTime::UNIX_EPOCH,
         });
@@ -514,7 +514,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersiste
             upload_lsn: oldstate.upload_lsn,
             peer_horizon_lsn: oldstate.peer_horizon_lsn,
             remote_consistent_lsn: oldstate.remote_consistent_lsn,
-            partial_upload: oldstate.upload_backup,
+            partial_upload: oldstate.partial_upload_segments,
             eviction_state: oldstate.eviction_state,
             creation_ts: std::time::SystemTime::UNIX_EPOCH,
         });
@@ -543,7 +543,7 @@ pub fn downgrade_v10_to_v9(state: &TimelinePersistentState) -> TimelinePersisten
         peer_horizon_lsn: state.peer_horizon_lsn,
         remote_consistent_lsn: state.remote_consistent_lsn,
         peers: PersistedPeers(vec![]),
-        upload_backup: state.partial_upload.clone(),
+        partial_upload_segments: state.partial_upload.clone(),
         eviction_state: state.eviction_state,
     }
 }

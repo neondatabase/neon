@@ -410,7 +410,7 @@ async fn timeline_backup_partial_reset(request: Request<Body>) -> Result<Respons
     let tli = global_timelines.get(ttid).map_err(ApiError::from)?;
 
     let response = tli
-        .backup_partial_reset()
+        .upload_partial_reset()
         .await
         .map_err(ApiError::InternalServerError)?;
     json_response(StatusCode::OK, response)
