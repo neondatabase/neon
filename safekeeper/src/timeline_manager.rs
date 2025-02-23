@@ -38,7 +38,7 @@ use crate::{
     timeline::{ManagerTimeline, ReadGuardSharedState, StateSK, WalResidentTimeline},
     timeline_guard::{AccessService, GuardId, ResidenceGuard},
     timelines_set::{TimelineSetGuard, TimelinesSet},
-    wal_upload::{self, WalBackupTaskHandle},
+    wal_upload::{self, WalUploadTaskHandle},
     wal_upload_partial::{self, PartialUpload, PartialRemoteSegment},
     SafeKeeperConf,
 };
@@ -214,7 +214,7 @@ pub(crate) struct Manager {
     pub(crate) is_offloaded: bool,
 
     // background tasks
-    pub(crate) upload_task: Option<WalBackupTaskHandle>,
+    pub(crate) upload_task: Option<WalUploadTaskHandle>,
     pub(crate) recovery_task: Option<JoinHandle<()>>,
     pub(crate) wal_removal_task: Option<JoinHandle<anyhow::Result<u64>>>,
 

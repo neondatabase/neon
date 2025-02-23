@@ -214,7 +214,7 @@ impl StateSK {
             StateSK::Empty => unreachable!(),
         }
 
-        // update everything else, including remote_consistent_lsn and backup_lsn
+        // update everything else, including remote_consistent_lsn and upload_lsn
         let mut sync_control_file = false;
         let state = self.state_mut();
         let wal_seg_size = state.server.wal_seg_size as u64;
@@ -651,19 +651,19 @@ impl Timeline {
         )
     }
 
-    /// Returns latest backup_lsn.
+    /// Returns latest upload_lsn.
     pub async fn get_wal_upload_lsn(&self) -> Lsn {
         self.read_shared_state().await.sk.state().inmem.upload_lsn
     }
 
-    /// Sets backup_lsn to the given value.
-    pub async fn set_wal_upload_lsn(self: &Arc<Self>, backup_lsn: Lsn) -> Result<()> {
+    /// Sets upload_lsn to the given value.
+    pub async fn set_wal_upload_lsn(self: &Arc<Self>, upload_lsn: Lsn) -> Result<()> {
         if self.is_cancelled() {
             bail!(TimelineError::Cancelled(self.ttid));
         }
 
         let mut state = self.write_shared_state().await;
-        state.sk.state_mut().inmem.upload_lsn = max(state.sk.state().inmem.upload_lsn, backup_lsn);
+        state.sk.state_mut().inmem.upload_lsn = max(state.sk.state().inmem.upload_lsn, upload_lsn);
         // we should check whether to shut down offloader, but this will be done
         // soon by peer communication anyway.
         Ok(())
