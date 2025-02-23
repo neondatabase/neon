@@ -170,6 +170,7 @@ def test_compute_pageserver_statement_timeout(neon_env_builder: NeonEnvBuilder):
     Test statement_timeout while waiting for response to pageserver request
     """
     env = neon_env_builder.init_start()
+    env.pageserver.allowed_errors.append(".*slow GetPage.*")
     pageserver_http = env.pageserver.http_client()
 
     # Make sure the shared_buffers and LFC are tiny, to ensure the queries
