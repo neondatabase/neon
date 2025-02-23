@@ -233,15 +233,15 @@ impl PartialUpload {
         let flush_lsn = prepared.flush_lsn;
         let segno = self.segno(flush_lsn);
 
-        // We're going to backup bytes from the start of the segment up to flush_lsn.
-        let backup_bytes = flush_lsn.segment_offset(self.wal_seg_size);
+        // We're going to upload bytes from the start of the segment up to flush_lsn.
+        let upload_bytes = flush_lsn.segment_offset(self.wal_seg_size);
 
         let local_path = self.local_prefix.join(self.local_segment_name(segno));
         let remote_path = prepared.remote_path(&self.remote_timeline_path);
 
-        // Upload first `backup_bytes` bytes of the segment to the remote storage.
-        wal_upload::upload_partial_segment(&local_path, &remote_path, backup_bytes).await?;
-        PARTIAL_BACKUP_UPLOADED_BYTES.inc_by(backup_bytes as u64);
+        // Upload first `upload_bytes` bytes of the segment to the remote storage.
+        wal_upload::upload_partial_segment(&local_path, &remote_path, upload_bytes).await?;
+        PARTIAL_BACKUP_UPLOADED_BYTES.inc_by(upload_bytes as u64);
 
         // We uploaded the segment, now let's verify that the data is still actual.
         // If the term changed, we cannot guarantee the validity of the uploaded data.
@@ -264,7 +264,7 @@ impl PartialUpload {
                     let memory = self.state.clone();
                     self.state = cf.partial_upload.clone();
                     anyhow::bail!(
-                        "partial backup state diverged, memory={:?}, disk={:?}",
+                        "partial upload state diverged, memory={:?}, disk={:?}",
                         memory,
                         cf.partial_upload
                     );
@@ -397,7 +397,7 @@ impl PartialUpload {
     }
 }
 
-/// Check if everything is uploaded and partial backup task doesn't need to run.
+/// Check if everything is uploaded and partial upload task doesn't need to run.
 pub(crate) fn needs_uploading(
     state: &StateSnapshot,
     uploaded: &Option<PartialRemoteSegment>,
@@ -413,12 +413,12 @@ pub(crate) fn needs_uploading(
     }
 }
 
-/// Main task for partial backup. It waits for the flush_lsn to change and then uploads the
+/// Main task for partial upload. It waits for the flush_lsn to change and then uploads the
 /// partial segment to the remote storage. It also does garbage collection of old segments.
 ///
 /// When there is nothing more to do and the last segment was successfully uploaded, the task
 /// returns PartialRemoteSegment, to signal readiness for offloading the timeline.
-#[instrument(name = "partial_backup", skip_all, fields(ttid = %tli.ttid))]
+#[instrument(name = "partial_upload", skip_all, fields(ttid = %tli.ttid))]
 pub async fn main_task(
     tli: WalResidentTimeline,
     conf: SafeKeeperConf,
@@ -432,9 +432,9 @@ pub async fn main_task(
     let mut commit_lsn_rx = tli.get_commit_lsn_watch_rx();
     let mut flush_lsn_rx = tli.get_term_flush_lsn_watch_rx();
 
-    let mut backup = PartialUpload::new(tli, conf).await;
+    let mut upload = PartialUpload::new(tli, conf).await;
 
-    debug!("state: {:?}", backup.state);
+    debug!("state: {:?}", upload.state);
 
     // The general idea is that each safekeeper keeps only one partial segment
     // both in remote storage and in local state. If this is not true, something
@@ -442,19 +442,19 @@ pub async fn main_task(
     const MAX_SIMULTANEOUS_SEGMENTS: usize = 10;
 
     'outer: loop {
-        if backup.state.segments.len() > MAX_SIMULTANEOUS_SEGMENTS {
+        if upload.state.segments.len() > MAX_SIMULTANEOUS_SEGMENTS {
             warn!(
                 "too many segments in control_file state, running gc: {}",
-                backup.state.segments.len()
+                upload.state.segments.len()
             );
 
-            backup.gc().await.unwrap_or_else(|e| {
+            upload.gc().await.unwrap_or_else(|e| {
                 error!("failed to run gc: {:#}", e);
             });
         }
 
         // wait until we have something to upload
-        let uploaded_segment = backup.state.uploaded_segment();
+        let uploaded_segment = upload.state.uploaded_segment();
         if let Some(seg) = &uploaded_segment {
             // check if uploaded segment matches the current state
             if flush_lsn_rx.borrow().lsn == seg.flush_lsn
@@ -473,7 +473,7 @@ pub async fn main_task(
         // if we don't have any data and zero LSNs, wait for something
         while flush_lsn_rx.borrow().lsn == Lsn(0) {
             tokio::select! {
-                _ = backup.tli.cancel.cancelled() => {
+                _ = upload.tli.cancel.cancelled() => {
                     info!("timeline canceled");
                     return None;
                 }
@@ -495,7 +495,7 @@ pub async fn main_task(
         };
 
         // fixing the segno and waiting some time to prevent reuploading the same segment too often
-        let pending_segno = backup.segno(flush_lsn_rx.borrow().lsn);
+        let pending_segno = upload.segno(flush_lsn_rx.borrow().lsn);
         let timeout = tokio::time::sleep(await_duration);
         tokio::pin!(timeout);
         let mut timeout_expired = false;
@@ -503,7 +503,7 @@ pub async fn main_task(
         // waiting until timeout expires OR segno changes
         'inner: loop {
             tokio::select! {
-                _ = backup.tli.cancel.cancelled() => {
+                _ = upload.tli.cancel.cancelled() => {
                     info!("timeline canceled");
                     return None;
                 }
@@ -513,7 +513,7 @@ pub async fn main_task(
                 }
                 _ = commit_lsn_rx.changed() => {}
                 _ = flush_lsn_rx.changed() => {
-                    let segno = backup.segno(flush_lsn_rx.borrow().lsn);
+                    let segno = upload.segno(flush_lsn_rx.borrow().lsn);
                     if segno != pending_segno {
                         // previous segment is no longer partial, aborting the wait
                         break 'inner;
@@ -534,8 +534,8 @@ pub async fn main_task(
 
         // limit concurrent uploads
         let _upload_permit = tokio::select! {
-            acq = limiter.acquire_partial_backup() => acq,
-            _ = backup.tli.cancel.cancelled() => {
+            acq = limiter.acquire_partial_upload() => acq,
+            _ = upload.tli.cancel.cancelled() => {
                 info!("timeline canceled");
                 return None;
             }
@@ -545,7 +545,7 @@ pub async fn main_task(
             }
         };
 
-        let prepared = backup.prepare_upload().await;
+        let prepared = upload.prepare_upload().await;
         if let Some(seg) = &uploaded_segment {
             if seg.eq_without_status(&prepared) {
                 // we already uploaded this segment, nothing to do
@@ -553,7 +553,7 @@ pub async fn main_task(
             }
         }
 
-        match backup.do_upload(&prepared).await {
+        match upload.do_upload(&prepared).await {
             Ok(()) => {
                 debug!(
                     "uploaded {} up to flush_lsn {}",

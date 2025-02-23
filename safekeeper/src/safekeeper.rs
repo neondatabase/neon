@@ -831,7 +831,7 @@ where
             // upgrade.
             state.commit_lsn = max(state.commit_lsn, state.timeline_start_lsn);
 
-            // Initializing backup_lsn is useful to avoid making backup think it should upload 0 segment.
+            // Initializing upload_lsn is useful to avoid making upload think it should upload 0 segment.
             state.upload_lsn = max(state.upload_lsn, state.timeline_start_lsn);
             // similar for remote_consistent_lsn
             state.remote_consistent_lsn =
