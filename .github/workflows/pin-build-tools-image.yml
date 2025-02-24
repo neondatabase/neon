@@ -89,14 +89,10 @@ jobs:
           ]
         }
       aws-region: ${{ vars.AWS_ECR_REGION }}
-      aws-account-ids: "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}"
+      aws-account-id: "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}"
+      aws-role-to-assume: "gha-oidc-neon-admin"
       azure-client-id: ${{ vars.AZURE_DEV_CLIENT_ID }}
       azure-subscription-id: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
       azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
       acr-registry-name: ${{ vars.AZURE_DEV_REGISTRY_NAME }}
-    secrets:
-      aws-role-to-assume: "${{ vars.DEV_AWS_OIDC_ROLE_ARN }}"
-      docker-hub-username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-      docker-hub-password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
-      github-user: ${{ github.repository_owner }}
-      github-token: ${{ secrets.GITHUB_TOKEN }}
+    secrets: inherit
