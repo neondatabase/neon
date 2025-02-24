@@ -94,10 +94,7 @@ use std::sync::Arc;
 use once_cell::sync::Lazy;
 use tracing::warn;
 
-use crate::{
-    task_mgr::TaskKind,
-    tenant::{Tenant, Timeline},
-};
+use crate::{task_mgr::TaskKind, tenant::Timeline};
 
 // The main structure of this module, see module-level comment.
 #[derive(Debug)]
@@ -115,9 +112,6 @@ pub(crate) enum Scope {
     Global {
         io_size_metrics: &'static crate::metrics::StorageIoSizeMetrics,
     },
-    Tenant {
-        tenant: Arc<Tenant>,
-    },
     Timeline {
         timeline: Arc<Timeline>,
     },
@@ -131,22 +125,14 @@ impl Scope {
             io_size_metrics: &&GLOBAL_IO_SIZE_METRICS,
         }
     }
-    pub(crate) fn new_tenant(tenant: &Arc<Tenant>) -> Self {
-        Scope::Tenant {
-            tenant: Arc::clone(tenant),
-        }
-    }
     pub(crate) fn new_timeline(timeline: &Arc<Timeline>) -> Self {
         Scope::Timeline {
             timeline: Arc::clone(timeline),
         }
     }
-
-
     pub(crate) fn io_size_metrics(&self) -> &crate::metrics::StorageIoSizeMetrics {
         match self {
             Scope::Global { io_size_metrics } => io_size_metrics,
-            Scope::Tenant { tenant } => &tenant.virtual_file_io_metrics,
             Scope::Timeline { timeline } => &timeline.metrics.storage_io_size,
         }
     }
@@ -364,10 +350,6 @@ impl RequestContext {
 
     pub(crate) fn scope(&self) -> &Scope {
         &self.scope
-    }
-
-    pub(crate) fn scope_mut(&mut self) -> &mut Scope {
-        &mut self.scope
     }
 
     pub(crate) fn assert_is_timeline_scoped(&self, what: &str) {

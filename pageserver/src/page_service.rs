@@ -53,7 +53,7 @@ use utils::{
 use crate::auth::check_permission;
 use crate::basebackup::BasebackupError;
 use crate::config::PageServerConf;
-use crate::context::{self, DownloadBehavior, RequestContext, RequestContextBuilder};
+use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::{self, SmgrOpTimer};
 use crate::metrics::{ComputeCommandKind, COMPUTE_COMMANDS_COUNTERS, LIVE_CONNECTIONS};
 use crate::pgdatadir_mapping::Version;

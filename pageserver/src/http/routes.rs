@@ -68,7 +68,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 
 use crate::config::PageServerConf;
-use crate::context;
 use crate::context::RequestContextBuilder;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
@@ -2617,9 +2616,8 @@ async fn getpage_at_lsn_handler_inner(
     async {
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
         // Enable read path debugging
+        let ctx = RequestContextBuilder::extend(&ctx).read_path_debug(true).build();
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
-        let ctx = RequestContextBuilder::extend(&ctx).read_path_debug(true)
-        .scope(context::Scope::new_timeline(&timeline)).build();
 
         // Use last_record_lsn if no lsn is provided
         let lsn = lsn.unwrap_or_else(|| timeline.get_last_record_lsn());
@@ -3286,7 +3284,7 @@ async fn put_tenant_timeline_import_basebackup(
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
-        let (timeline, timeline_ctx) = tenant
+        let timeline = tenant
             .create_empty_timeline(timeline_id, base_lsn, pg_version, &ctx)
             .map_err(ApiError::InternalServerError)
             .await?;
@@ -3305,7 +3303,7 @@ async fn put_tenant_timeline_import_basebackup(
         info!("importing basebackup");
 
         timeline
-            .import_basebackup_from_tar(tenant.clone(), &mut body, base_lsn, broker_client, &timeline_ctx)
+            .import_basebackup_from_tar(tenant.clone(), &mut body, base_lsn, broker_client, &ctx)
             .await
             .map_err(ApiError::InternalServerError)?;
 
