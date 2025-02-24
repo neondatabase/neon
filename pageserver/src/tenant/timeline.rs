@@ -6837,12 +6837,15 @@ mod tests {
     use tracing::Instrument;
     use utils::{id::TimelineId, lsn::Lsn};
 
-    use crate::tenant::{
-        harness::{test_img, TenantHarness},
-        layer_map::LayerMap,
-        storage_layer::{Layer, LayerName, LayerVisibilityHint},
-        timeline::{DeltaLayerTestDesc, EvictionError},
-        PreviousHeatmap, Timeline,
+    use crate::{
+        context::RequestContextBuilder,
+        tenant::{
+            harness::{test_img, TenantHarness},
+            layer_map::LayerMap,
+            storage_layer::{Layer, LayerName, LayerVisibilityHint},
+            timeline::{DeltaLayerTestDesc, EvictionError},
+            PreviousHeatmap, Timeline,
+        },
     };
 
     use super::HeatMapTimeline;
@@ -6977,6 +6980,11 @@ mod tests {
             }
 
             eprintln!("Downloading {layer} and re-generating heatmap");
+
+            // unit tests don't allow on-demand downloads by default
+            let ctx = &RequestContextBuilder::extend(ctx)
+                .download_behavior(crate::context::DownloadBehavior::Download)
+                .build();
 
             let _resident = layer
                 .download_and_keep_resident(Some(ctx))
