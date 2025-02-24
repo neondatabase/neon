@@ -3,8 +3,8 @@ use tracing::{error, info};
 use super::connect_compute::ComputeConnectBackend;
 use crate::config::RetryConfig;
 use crate::context::RequestContext;
-use crate::control_plane::errors::{ControlPlaneError, WakeComputeError};
 use crate::control_plane::CachedNodeInfo;
+use crate::control_plane::errors::{ControlPlaneError, WakeComputeError};
 use crate::error::ReportableError;
 use crate::metrics::{
     ConnectOutcome, ConnectionFailuresBreakdownGroup, Metrics, RetriesMetricGroup, RetryType,

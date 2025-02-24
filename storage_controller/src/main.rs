@@ -115,9 +115,13 @@ struct Cli {
     #[arg(long)]
     neon_local_repo_dir: Option<PathBuf>,
 
-    /// Chaos testing
+    /// Chaos testing: exercise tenant migrations
     #[arg(long)]
     chaos_interval: Option<humantime::Duration>,
+
+    /// Chaos testing: exercise an immediate exit
+    #[arg(long)]
+    chaos_exit_crontab: Option<cron::Schedule>,
 
     // Maximum acceptable lag for the secondary location while draining
     // a pageserver
@@ -382,10 +386,12 @@ async fn async_main() -> anyhow::Result<()> {
         let service = service.clone();
         let cancel = CancellationToken::new();
         let cancel_bg = cancel.clone();
+        let chaos_exit_crontab = args.chaos_exit_crontab;
         (
             tokio::task::spawn(
                 async move {
-                    let mut chaos_injector = ChaosInjector::new(service, interval.into());
+                    let mut chaos_injector =
+                        ChaosInjector::new(service, interval.into(), chaos_exit_crontab);
                     chaos_injector.run(cancel_bg).await
                 }
                 .instrument(tracing::info_span!("chaos_injector")),

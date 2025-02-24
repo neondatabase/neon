@@ -1,17 +1,18 @@
 //! Rows.
 
+use std::ops::Range;
+use std::sync::Arc;
+use std::{fmt, str};
+
+use fallible_iterator::FallibleIterator;
+use postgres_protocol2::message::backend::DataRowBody;
+use postgres_types2::{Format, WrongFormat};
+
 use crate::row::sealed::{AsName, Sealed};
 use crate::simple_query::SimpleColumn;
 use crate::statement::Column;
 use crate::types::{FromSql, Type, WrongType};
 use crate::{Error, Statement};
-use fallible_iterator::FallibleIterator;
-use postgres_protocol2::message::backend::DataRowBody;
-use postgres_types2::{Format, WrongFormat};
-use std::fmt;
-use std::ops::Range;
-use std::str;
-use std::sync::Arc;
 
 mod sealed {
     pub trait Sealed {}

@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use itertools::Itertools;
 use rustls::crypto::ring::{self, sign};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
-use super::{TlsServerEndPoint, PG_ALPN_PROTOCOL};
+use super::{PG_ALPN_PROTOCOL, TlsServerEndPoint};
 
 pub struct TlsConfig {
     pub config: Arc<rustls::ServerConfig>,

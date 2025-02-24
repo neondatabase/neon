@@ -2,17 +2,17 @@
 //! and push them to a HTTP endpoint.
 use std::borrow::Cow;
 use std::convert::Infallible;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use async_compression::tokio::write::GzipEncoder;
 use bytes::Bytes;
 use chrono::{DateTime, Datelike, Timelike, Utc};
-use clashmap::mapref::entry::Entry;
 use clashmap::ClashMap;
-use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
+use clashmap::mapref::entry::Entry;
+use consumption_metrics::{CHUNK_SIZE, Event, EventChunk, EventType, idempotency_key};
 use once_cell::sync::Lazy;
 use remote_storage::{GenericRemoteStorage, RemotePath, TimeoutOrCancel};
 use serde::{Deserialize, Serialize};
@@ -62,11 +62,7 @@ mod none_as_empty_string {
         d: D,
     ) -> Result<Option<SmolStr>, D::Error> {
         let s = SmolStr::deserialize(d)?;
-        if s.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(s))
-        }
+        if s.is_empty() { Ok(None) } else { Ok(Some(s)) }
     }
 }
 

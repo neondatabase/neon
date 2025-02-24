@@ -1,15 +1,14 @@
+use std::fmt;
+use std::sync::{Arc, Weak};
+
+use postgres_protocol2::Oid;
+use postgres_protocol2::message::backend::Field;
+use postgres_protocol2::message::frontend;
+
 use crate::client::InnerClient;
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
 use crate::types::Type;
-use postgres_protocol2::{
-    message::{backend::Field, frontend},
-    Oid,
-};
-use std::{
-    fmt,
-    sync::{Arc, Weak},
-};
 
 struct StatementInner {
     client: Weak<InnerClient>,

@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ahash::RandomState;
 use clashmap::ClashMap;
-use rand::{thread_rng, Rng};
+use rand::{Rng, thread_rng};
 use tokio::time::Instant;
 use tracing::info;
 use utils::leaky_bucket::LeakyBucketState;

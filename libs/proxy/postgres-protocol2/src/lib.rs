@@ -11,9 +11,10 @@
 //! set to `UTF8`. It will most likely not behave properly if that is not the case.
 #![warn(missing_docs, clippy::all)]
 
+use std::io;
+
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
-use std::io;
 
 pub mod authentication;
 pub mod escape;

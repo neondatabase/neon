@@ -1,11 +1,13 @@
 //! MaybeTlsStream.
 //!
 //! Represents a stream that may or may not be encrypted with TLS.
-use crate::tls::{ChannelBinding, TlsStream};
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+use crate::tls::{ChannelBinding, TlsStream};
 
 /// A stream that may or may not be encrypted with TLS.
 pub enum MaybeTlsStream<S, T> {
