@@ -100,7 +100,12 @@ struct ShardSenderState {
 /// State of [`InterpretedWalReader`] visible outside of the task running it.
 #[derive(Debug)]
 pub(crate) enum InterpretedWalReaderState {
-    Running { current_position: Lsn },
+    Running {
+        current_position: Lsn,
+        /// Tracks the start of the PG WAL LSN from which the current batch of
+        /// interpreted records originated.
+        current_batch_wal_start_lsn: Option<Lsn>,
+    },
     Done,
 }
 
@@ -175,6 +180,47 @@ impl InterpretedWalReaderState {
             }
         }
     }
+
+    fn update_current_batch_wal_start(&mut self, lsn: Lsn) {
+        match self {
+            InterpretedWalReaderState::Running {
+                current_batch_wal_start_lsn,
+                ..
+            } => {
+                if current_batch_wal_start_lsn.is_none() {
+                    *current_batch_wal_start_lsn = Some(lsn);
+                }
+            }
+            InterpretedWalReaderState::Done => {
+                panic!("update_current_batch_wal_start called on finished reader")
+            }
+        }
+    }
+
+    fn take_current_batch_wal_start(&mut self) -> Lsn {
+        match self {
+            InterpretedWalReaderState::Running {
+                current_batch_wal_start_lsn,
+                ..
+            } => current_batch_wal_start_lsn.take().unwrap(),
+            InterpretedWalReaderState::Done => {
+                panic!("take_current_batch_wal_start called on finished reader")
+            }
+        }
+    }
+
+    fn update_current_position(&mut self, lsn: Lsn) {
+        match self {
+            InterpretedWalReaderState::Running {
+                current_position, ..
+            } => {
+                *current_position = lsn;
+            }
+            InterpretedWalReaderState::Done => {
+                panic!("update_current_position called on finished reader")
+            }
+        }
+    }
 }
 
 pub(crate) struct AttachShardNotification {
@@ -195,6 +241,7 @@ impl InterpretedWalReader {
     ) -> InterpretedWalReaderHandle {
         let state = Arc::new(std::sync::RwLock::new(InterpretedWalReaderState::Running {
             current_position: start_pos,
+            current_batch_wal_start_lsn: None,
         }));
 
         let (shard_notification_tx, shard_notification_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -251,6 +298,7 @@ impl InterpretedWalReader {
     ) -> InterpretedWalReader {
         let state = Arc::new(std::sync::RwLock::new(InterpretedWalReaderState::Running {
             current_position: start_pos,
+            current_batch_wal_start_lsn: None,
         }));
 
         InterpretedWalReader {
@@ -306,10 +354,6 @@ impl InterpretedWalReader {
 
         let mut wal_decoder = WalStreamDecoder::new(start_pos, self.pg_version);
 
-        // Tracks the start of the PG WAL LSN from which the current batch of
-        // interpreted records originated.
-        let mut current_batch_wal_start_lsn: Option<Lsn> = None;
-
         loop {
             tokio::select! {
                 // Main branch for reading WAL and forwarding it
@@ -330,11 +374,7 @@ impl InterpretedWalReader {
                         }
                     };
 
-                    // We will already have a value if the previous chunks of WAL
-                    // did not decode into anything useful.
-                    if current_batch_wal_start_lsn.is_none() {
-                        current_batch_wal_start_lsn = Some(wal_start_lsn);
-                    }
+                    self.state.write().unwrap().update_current_batch_wal_start(wal_start_lsn);
 
                     wal_decoder.feed_bytes(&wal);
 
@@ -391,16 +431,11 @@ impl InterpretedWalReader {
 
                     // Update the current position such that new receivers can decide
                     // whether to attach to us or spawn a new WAL reader.
-                    match &mut *self.state.write().unwrap() {
-                        InterpretedWalReaderState::Running { current_position, .. } => {
-                            *current_position = max_next_record_lsn;
-                        },
-                        InterpretedWalReaderState::Done => {
-                            unreachable!()
-                        }
-                    }
-
-                    let batch_wal_start_lsn = current_batch_wal_start_lsn.take().unwrap();
+                    let batch_wal_start_lsn = {
+                        let mut guard = self.state.write().unwrap();
+                        guard.update_current_position(max_next_record_lsn);
+                        guard.take_current_batch_wal_start()
+                    };
 
                     // Send interpreted records downstream. Anything that has already been seen
                     // by a shard is filtered out.
