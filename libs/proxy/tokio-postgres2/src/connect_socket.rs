@@ -1,5 +1,5 @@
-use crate::config::Host;
 use crate::Error;
+use crate::config::Host;
 use std::future::Future;
 use std::io;
 use std::time::Duration;

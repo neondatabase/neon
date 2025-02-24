@@ -5,8 +5,8 @@ use crate::types::IsNull;
 use crate::{Column, Error, ReadyForQueryStatus, Row, Statement};
 use bytes::{BufMut, Bytes, BytesMut};
 use fallible_iterator::FallibleIterator;
-use futures_util::{ready, Stream};
-use log::{debug, log_enabled, Level};
+use futures_util::{Stream, ready};
+use log::{Level, debug, log_enabled};
 use pin_project_lite::pin_project;
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
@@ -257,7 +257,7 @@ impl Stream for RowStream {
                         this.statement.clone(),
                         body,
                         *this.output_format,
-                    )?)))
+                    )?)));
                 }
                 Message::EmptyQueryResponse | Message::PortalSuspended => {}
                 Message::CommandComplete(body) => {

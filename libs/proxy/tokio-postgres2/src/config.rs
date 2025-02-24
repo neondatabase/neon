@@ -1,8 +1,8 @@
 //! Connection configuration.
 
 use crate::connect::connect;
-use crate::connect_raw::connect_raw;
 use crate::connect_raw::RawConnection;
+use crate::connect_raw::connect_raw;
 use crate::tls::MakeTlsConnect;
 use crate::tls::TlsConnect;
 use crate::{Client, Connection, Error};

@@ -3,8 +3,8 @@ use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
 use crate::types::Type;
 use postgres_protocol2::{
-    message::{backend::Field, frontend},
     Oid,
+    message::{backend::Field, frontend},
 };
 use std::{
     fmt,

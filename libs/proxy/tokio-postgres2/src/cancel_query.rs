@@ -3,7 +3,7 @@ use tokio::net::TcpStream;
 use crate::client::SocketConfig;
 use crate::config::{Host, SslMode};
 use crate::tls::MakeTlsConnect;
-use crate::{cancel_query_raw, connect_socket, Error};
+use crate::{Error, cancel_query_raw, connect_socket};
 use std::io;
 
 pub(crate) async fn cancel_query<T>(
@@ -22,7 +22,7 @@ where
             return Err(Error::connect(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "unknown host",
-            )))
+            )));
         }
     };
 

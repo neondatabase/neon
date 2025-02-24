@@ -1,8 +1,8 @@
 use crate::config::SslMode;
 use crate::tls::TlsConnect;
 
+use crate::{Error, cancel_query_raw};
 use crate::{cancel_query, client::SocketConfig, tls::MakeTlsConnect};
-use crate::{cancel_query_raw, Error};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;

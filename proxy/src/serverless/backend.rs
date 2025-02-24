@@ -7,27 +7,27 @@ use ed25519_dalek::SigningKey;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use jose_jwk::jose_b64;
 use rand::rngs::OsRng;
-use tokio::net::{lookup_host, TcpStream};
+use tokio::net::{TcpStream, lookup_host};
 use tracing::field::display;
 use tracing::{debug, info};
 
 use super::conn_pool::poll_client;
 use super::conn_pool_lib::{Client, ConnInfo, EndpointConnPool, GlobalConnPool};
-use super::http_conn_pool::{self, poll_http2_client, HttpConnPool, Send};
-use super::local_conn_pool::{self, LocalConnPool, EXT_NAME, EXT_SCHEMA, EXT_VERSION};
+use super::http_conn_pool::{self, HttpConnPool, Send, poll_http2_client};
+use super::local_conn_pool::{self, EXT_NAME, EXT_SCHEMA, EXT_VERSION, LocalConnPool};
 use crate::auth::backend::local::StaticAuthRules;
 use crate::auth::backend::{ComputeCredentials, ComputeUserInfo};
-use crate::auth::{self, check_peer_addr_is_in_list, AuthError};
+use crate::auth::{self, AuthError, check_peer_addr_is_in_list};
 use crate::compute;
 use crate::compute_ctl::{
     ComputeCtlError, ExtensionInstallRequest, Privilege, SetRoleGrantsRequest,
 };
 use crate::config::{ComputeConfig, ProxyConfig};
 use crate::context::RequestContext;
+use crate::control_plane::CachedNodeInfo;
 use crate::control_plane::client::ApiLockError;
 use crate::control_plane::errors::{GetAuthInfoError, WakeComputeError};
 use crate::control_plane::locks::ApiLocks;
-use crate::control_plane::CachedNodeInfo;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::intern::EndpointIdInt;
 use crate::protocol2::ConnectionInfoExtra;

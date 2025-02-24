@@ -10,12 +10,12 @@ use crate::simple_query::SimpleQueryStream;
 use crate::types::{Oid, ToSql, Type};
 
 use crate::{
-    query, simple_query, slice_iter, CancelToken, Error, ReadyForQueryStatus, Row,
-    SimpleQueryMessage, Statement, Transaction, TransactionBuilder,
+    CancelToken, Error, ReadyForQueryStatus, Row, SimpleQueryMessage, Statement, Transaction,
+    TransactionBuilder, query, simple_query, slice_iter,
 };
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
-use futures_util::{future, ready, TryStreamExt};
+use futures_util::{TryStreamExt, future, ready};
 use parking_lot::Mutex;
 use postgres_protocol2::message::{backend::Message, frontend};
 use serde::{Deserialize, Serialize};

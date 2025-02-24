@@ -4,7 +4,7 @@ use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::{AsyncMessage, Error, Notification};
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
-use futures_util::{ready, Sink, Stream};
+use futures_util::{Sink, Stream, ready};
 use log::{info, trace};
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
@@ -139,7 +139,7 @@ where
                 Some(response) => response,
                 None => match messages.next().map_err(Error::parse)? {
                     Some(Message::ErrorResponse(error)) => {
-                        return Poll::Ready(Err(Error::db(error)))
+                        return Poll::Ready(Err(Error::db(error)));
                     }
                     _ => return Poll::Ready(Err(Error::unexpected_message())),
                 },

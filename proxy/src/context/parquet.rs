@@ -8,7 +8,7 @@ use chrono::{Datelike, Timelike};
 use futures::{Stream, StreamExt};
 use parquet::basic::Compression;
 use parquet::file::metadata::RowGroupMetaDataPtr;
-use parquet::file::properties::{WriterProperties, WriterPropertiesPtr, DEFAULT_PAGE_SIZE};
+use parquet::file::properties::{DEFAULT_PAGE_SIZE, WriterProperties, WriterPropertiesPtr};
 use parquet::file::writer::SerializedFileWriter;
 use parquet::record::RecordWriter;
 use pq_proto::StartupMessageParams;
@@ -17,10 +17,10 @@ use serde::ser::SerializeMap;
 use tokio::sync::mpsc;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, Span};
+use tracing::{Span, debug, info};
 use utils::backoff;
 
-use super::{RequestContextInner, LOG_CHAN};
+use super::{LOG_CHAN, RequestContextInner};
 use crate::config::remote_storage_from_toml;
 use crate::context::LOG_CHAN_DISCONNECT;
 use crate::ext::TaskExt;
@@ -425,20 +425,20 @@ mod tests {
     use futures::{Stream, StreamExt};
     use itertools::Itertools;
     use parquet::basic::{Compression, ZstdLevel};
-    use parquet::file::properties::{WriterProperties, DEFAULT_PAGE_SIZE};
+    use parquet::file::properties::{DEFAULT_PAGE_SIZE, WriterProperties};
     use parquet::file::reader::FileReader;
     use parquet::file::serialized_reader::SerializedFileReader;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
     use remote_storage::{
-        GenericRemoteStorage, RemoteStorageConfig, RemoteStorageKind, S3Config,
         DEFAULT_MAX_KEYS_PER_LIST_RESPONSE, DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT,
+        GenericRemoteStorage, RemoteStorageConfig, RemoteStorageKind, S3Config,
     };
     use tokio::sync::mpsc;
     use tokio::time;
     use walkdir::WalkDir;
 
-    use super::{worker_inner, ParquetConfig, ParquetUploadArgs, RequestData};
+    use super::{ParquetConfig, ParquetUploadArgs, RequestData, worker_inner};
 
     #[derive(Parser)]
     struct ProxyCliArgs {
