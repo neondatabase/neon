@@ -733,6 +733,8 @@ call_PQgetCopyData(shardno_t shard_no, char **buffer)
 				since_start,
 				since_last_log;
 
+	elog(DEBUG1, "call_PQgetCopyData: enter");
+
 retry:
 	ret = PQgetCopyData(pageserver_conn, buffer, 1 /* async */ );
 
@@ -769,6 +771,7 @@ retry:
 		disconnect_timeout = Max(0, (double) pageserver_response_disconnect_timeout - INSTR_TIME_GET_MILLISEC(since_start));
 		timeout = (long) ceil(Min(log_timeout, disconnect_timeout));
 
+		elog(DEBUG1, "call_PQgetCopyData: waiting with timeout %ld (log_timeout %f, disconnect_timeout %f", timeout, log_timeout, disconnect_timeout);
 		(void) WaitEventSetWait(shard->wes_read, timeout, &event, 1,
 								WAIT_EVENT_NEON_PS_READ);
 		ResetLatch(MyLatch);
@@ -778,6 +781,7 @@ retry:
 		/* Data available in socket? */
 		if (event.events & WL_SOCKET_READABLE)
 		{
+			elog(DEBUG1, "call_PQgetCopyData: woke up with WL_SOCKET_READABLE");
 			if (!PQconsumeInput(pageserver_conn))
 			{
 				char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
@@ -795,6 +799,9 @@ retry:
 		INSTR_TIME_SUBTRACT(since_last_log, shard->receive_last_log_time);
 		since_start = now;
 		INSTR_TIME_SUBTRACT(since_start, shard->receive_start_time);
+
+		elog(DEBUG1, "call_PQgetCopyData: woke up, since_last_log: %f, since_start: %f",
+			 INSTR_TIME_GET_MILLISEC(since_last_log), INSTR_TIME_GET_MILLISEC(since_start));
 
 		/*
 		 * As a debugging aid, if we don't get a response to a pageserver request
@@ -862,6 +869,8 @@ retry:
 	INSTR_TIME_SET_ZERO(shard->receive_start_time);
 	INSTR_TIME_SET_ZERO(shard->receive_last_log_time);
 	shard->receive_logged = false;
+
+	elog(DEBUG1, "call_PQgetCopyData: exit");
 
 	return ret;
 }

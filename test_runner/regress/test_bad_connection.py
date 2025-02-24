@@ -142,6 +142,8 @@ def test_compute_pageserver_hung_connections(neon_env_builder: NeonEnvBuilder):
         log.info(f"Workload executed {times_executed} times")
         assert times_executed > 0
 
+    cur.execute("SET log_min_messages='debug1'")
+
     ## Test short connection hiccups
     ##
     ## This is to exercise the logging timeout.
