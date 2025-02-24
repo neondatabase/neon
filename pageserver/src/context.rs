@@ -94,7 +94,7 @@ use std::sync::Arc;
 use once_cell::sync::Lazy;
 use tracing::warn;
 
-use crate::{task_mgr::TaskKind, tenant::Timeline};
+use crate::{metrics::StorageIoSizeMetrics, task_mgr::TaskKind, tenant::Timeline};
 
 // The main structure of this module, see module-level comment.
 #[derive(Debug)]
@@ -104,36 +104,30 @@ pub struct RequestContext {
     access_stats_behavior: AccessStatsBehavior,
     page_content_kind: PageContentKind,
     read_path_debug: bool,
-    scope: Scope,
+    pub(crate) scope: std::sync::Mutex<Scope>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) enum Scope {
     Global {
-        io_size_metrics: &'static crate::metrics::StorageIoSizeMetrics,
+        io_size_metrics: Arc<crate::metrics::StorageIoSizeMetrics>,
     },
     Timeline {
-        timeline: Arc<Timeline>,
+        io_size_metrics: Arc<crate::metrics::StorageIoSizeMetrics>,
     },
 }
 
 impl Scope {
     pub(crate) fn new_global() -> Self {
-        static GLOBAL_IO_SIZE_METRICS: Lazy<crate::metrics::StorageIoSizeMetrics> =
-            Lazy::new(|| crate::metrics::StorageIoSizeMetrics::new("*", "*", "*"));
+        static GLOBAL_IO_SIZE_METRICS: Lazy<Arc<crate::metrics::StorageIoSizeMetrics>> =
+            Lazy::new(|| Arc::new(crate::metrics::StorageIoSizeMetrics::new("*", "*", "*")));
         Scope::Global {
-            io_size_metrics: &&GLOBAL_IO_SIZE_METRICS,
+            io_size_metrics: Arc::clone(&GLOBAL_IO_SIZE_METRICS),
         }
     }
-    pub(crate) fn new_timeline(timeline: &Arc<Timeline>) -> Self {
+    pub(crate) fn new_timeline(timeline: &Timeline) -> Self {
         Scope::Timeline {
-            timeline: Arc::clone(timeline),
-        }
-    }
-    pub(crate) fn io_size_metrics(&self) -> &crate::metrics::StorageIoSizeMetrics {
-        match self {
-            Scope::Global { io_size_metrics } => io_size_metrics,
-            Scope::Timeline { timeline } => &timeline.metrics.storage_io_size,
+            io_size_metrics: Arc::clone(&timeline.metrics.storage_io_size),
         }
     }
 }
@@ -194,7 +188,7 @@ impl RequestContextBuilder {
                 access_stats_behavior: AccessStatsBehavior::Update,
                 page_content_kind: PageContentKind::Unknown,
                 read_path_debug: false,
-                scope: Scope::new_global(),
+                scope: std::sync::Mutex::new(Scope::new_global()),
             },
         }
     }
@@ -209,9 +203,14 @@ impl RequestContextBuilder {
                 access_stats_behavior: original.access_stats_behavior,
                 page_content_kind: original.page_content_kind,
                 read_path_debug: original.read_path_debug,
-                scope: original.scope.clone(),
+                scope: std::sync::Mutex::new(original.scope.lock().unwrap().clone()),
             },
         }
+    }
+
+    pub fn task_kind(mut self, k: TaskKind) -> Self {
+        self.inner.task_kind = k;
+        self
     }
 
     /// Configure the DownloadBehavior of the context: whether to
@@ -235,11 +234,6 @@ impl RequestContextBuilder {
 
     pub(crate) fn read_path_debug(mut self, b: bool) -> Self {
         self.inner.read_path_debug = b;
-        self
-    }
-
-    pub(crate) fn scope(mut self, s: Scope) -> Self {
-        self.inner.scope = s;
         self
     }
 
@@ -325,7 +319,10 @@ impl RequestContext {
     }
 
     fn child_impl(&self, task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
-        Self::new(task_kind, download_behavior)
+        RequestContextBuilder::extend(self)
+            .task_kind(task_kind)
+            .download_behavior(download_behavior)
+            .build()
     }
 
     pub fn task_kind(&self) -> TaskKind {
@@ -348,31 +345,30 @@ impl RequestContext {
         self.read_path_debug
     }
 
-    pub(crate) fn scope(&self) -> &Scope {
-        &self.scope
-    }
-
-    pub(crate) fn assert_is_timeline_scoped(&self, what: &str) {
-        if let Scope::Timeline { .. } = self.scope() {
-            return;
-        }
-        if cfg!(debug_assertions) || cfg!(feature = "testing") {
-            panic!("RequestContext must be timeline-scoped what={what}");
-        } else {
-            use once_cell::sync::Lazy;
-            use std::sync::Mutex;
-            use std::time::Duration;
-            use utils::rate_limit::RateLimit;
-            static LIMIT: Lazy<Mutex<RateLimit>> =
-                Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(1))));
-            let mut guard = LIMIT.lock().unwrap();
-            guard.call2(|rate_limit_stats| {
-                warn!(
-                    %rate_limit_stats,
-                    what,
-                    "RequestContext must be timeline-scoped",
-                );
-            });
+    pub(crate) fn io_size_metrics(&self) -> Arc<StorageIoSizeMetrics> {
+        let guard = self.scope.lock().unwrap();
+        match &*guard {
+            Scope::Global { io_size_metrics } => {
+                if cfg!(debug_assertions) || cfg!(feature = "testing") {
+                    panic!("all VirtualFile instances are timeline-scoped");
+                } else {
+                    use once_cell::sync::Lazy;
+                    use std::sync::Mutex;
+                    use std::time::Duration;
+                    use utils::rate_limit::RateLimit;
+                    static LIMIT: Lazy<Mutex<RateLimit>> =
+                        Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(1))));
+                    let mut guard = LIMIT.lock().unwrap();
+                    guard.call2(|rate_limit_stats| {
+                        warn!(
+                            %rate_limit_stats,
+                            "all VirtualFile instances are timeline-scoped",
+                        );
+                    });
+                    Arc::clone(io_size_metrics)
+                }
+            }
+            Scope::Timeline { io_size_metrics } => Arc::clone(io_size_metrics),
         }
     }
 }

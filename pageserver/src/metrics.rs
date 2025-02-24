@@ -29,7 +29,7 @@ use pq_proto::framed::ConnectionError;
 
 use strum::{EnumCount, IntoEnumIterator as _, VariantNames};
 use strum_macros::{IntoStaticStr, VariantNames};
-use utils::id::{TimelineId};
+use utils::id::TimelineId;
 
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext};
@@ -2835,7 +2835,7 @@ pub(crate) struct TimelineMetrics {
     /// Number of valid LSN leases.
     pub valid_lsn_lease_count_gauge: UIntGauge,
     pub wal_records_received: IntCounter,
-    pub storage_io_size: StorageIoSizeMetrics,
+    pub storage_io_size: Arc<StorageIoSizeMetrics>,
     shutdown: std::sync::atomic::AtomicBool,
 }
 
@@ -2971,7 +2971,11 @@ impl TimelineMetrics {
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
 
-        let storage_io_size = StorageIoSizeMetrics::new(&tenant_id, &shard_id, &timeline_id);
+        let storage_io_size = Arc::new(StorageIoSizeMetrics::new(
+            &tenant_id,
+            &shard_id,
+            &timeline_id,
+        ));
 
         TimelineMetrics {
             tenant_id,

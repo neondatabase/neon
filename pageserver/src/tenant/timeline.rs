@@ -72,6 +72,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::context::{self};
 use crate::l0_flush::{self, L0FlushGlobalState};
 use crate::tenant::storage_layer::ImageLayerName;
 use crate::{
@@ -1299,7 +1300,13 @@ impl Timeline {
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
-        ctx.assert_is_timeline_scoped("Timeline::get_vectored_impl");
+        let prev_scope = std::mem::replace(
+            &mut *ctx.scope.lock().unwrap(),
+            context::Scope::new_timeline(self),
+        );
+        scopeguard::defer! {
+            *ctx.scope.lock().unwrap() = prev_scope;
+        }
 
         let read_path = if self.conf.enable_read_path_debugging || ctx.read_path_debug() {
             Some(ReadPath::new(keyspace.clone(), lsn))
