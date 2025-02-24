@@ -45,6 +45,7 @@ use utils::sync::gate::{Gate, GateGuard};
 use utils::sync::spsc_fold;
 use utils::{
     auth::{Claims, Scope, SwappableJwtAuth},
+    failpoint_support,
     id::{TenantId, TimelineId},
     lsn::Lsn,
     simple_rcu::RcuReadGuard,
@@ -1297,6 +1298,8 @@ impl PageServerHandler {
             pgb_writer.write_message_noflush(&BeMessage::CopyData(
                 &response_msg.serialize(protocol_version),
             ))?;
+
+            failpoint_support::sleep_millis_async!("before-pagestream-msg-flush", cancel);
 
             // what we want to do
             let socket_fd = pgb_writer.socket_fd;
