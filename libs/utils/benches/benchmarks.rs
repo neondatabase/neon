@@ -3,14 +3,14 @@ use std::time::Duration;
 use criterion::{criterion_group, criterion_main, Bencher, Criterion};
 use pprof::criterion::{Output, PProfProfiler};
 use utils::id;
-use utils::logging::warn_slow;
+use utils::logging::log_slow;
 
 // Register benchmarks with Criterion.
 criterion_group!(
     name = benches;
     config = Criterion::default().with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
     targets = bench_id_stringify,
-    bench_warn_slow,
+    bench_log_slow,
 );
 criterion_main!(benches);
 
@@ -29,9 +29,9 @@ pub fn bench_id_stringify(c: &mut Criterion) {
     });
 }
 
-pub fn bench_warn_slow(c: &mut Criterion) {
+pub fn bench_log_slow(c: &mut Criterion) {
     for enabled in [false, true] {
-        c.bench_function(&format!("warn_slow/enabled={enabled}"), |b| {
+        c.bench_function(&format!("log_slow/enabled={enabled}"), |b| {
             run_bench(b, enabled).unwrap()
         });
     }
@@ -45,11 +45,11 @@ pub fn bench_warn_slow(c: &mut Criterion) {
             .enable_all()
             .build()?;
 
-        // Test both with and without warn_slow, since we're essentially measuring Tokio scheduling
+        // Test both with and without log_slow, since we're essentially measuring Tokio scheduling
         // performance too. Use a simple noop future that yields once, to avoid any scheduler fast
         // paths for a ready future.
         if enabled {
-            b.iter(|| runtime.block_on(warn_slow("ready", THRESHOLD, tokio::task::yield_now())));
+            b.iter(|| runtime.block_on(log_slow("ready", THRESHOLD, tokio::task::yield_now())));
         } else {
             b.iter(|| runtime.block_on(tokio::task::yield_now()));
         }
