@@ -40,7 +40,7 @@ impl CancelSet {
 
     pub(crate) fn take(&self) -> Option<CancellationToken> {
         for _ in 0..4 {
-            if let Some(token) = self.take_raw(thread_rng().gen()) {
+            if let Some(token) = self.take_raw(thread_rng().r#gen()) {
                 return Some(token);
             }
             tracing::trace!("failed to get cancel token");

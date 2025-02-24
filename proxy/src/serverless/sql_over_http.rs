@@ -1021,7 +1021,7 @@ async fn query_to_json<T: GenericClient>(
     data: QueryData,
     current_size: &mut usize,
     parsed_headers: HttpHeaders,
-) -> Result<(ReadyForQueryStatus, impl Serialize), SqlOverHttpError> {
+) -> Result<(ReadyForQueryStatus, impl Serialize + use<T>), SqlOverHttpError> {
     let query_start = Instant::now();
 
     let query_params = data.params;

@@ -514,26 +514,26 @@ mod tests {
 
     fn generate_request_data(rng: &mut impl Rng) -> RequestData {
         RequestData {
-            session_id: uuid::Builder::from_random_bytes(rng.gen()).into_uuid(),
-            peer_addr: Ipv4Addr::from(rng.gen::<[u8; 4]>()).to_string(),
+            session_id: uuid::Builder::from_random_bytes(rng.r#gen()).into_uuid(),
+            peer_addr: Ipv4Addr::from(rng.r#gen::<[u8; 4]>()).to_string(),
             timestamp: chrono::DateTime::from_timestamp_millis(
                 rng.gen_range(1703862754..1803862754),
             )
             .unwrap()
             .naive_utc(),
             application_name: Some("test".to_owned()),
-            username: Some(hex::encode(rng.gen::<[u8; 4]>())),
-            endpoint_id: Some(hex::encode(rng.gen::<[u8; 16]>())),
-            database: Some(hex::encode(rng.gen::<[u8; 16]>())),
-            project: Some(hex::encode(rng.gen::<[u8; 16]>())),
-            branch: Some(hex::encode(rng.gen::<[u8; 16]>())),
+            username: Some(hex::encode(rng.r#gen::<[u8; 4]>())),
+            endpoint_id: Some(hex::encode(rng.r#gen::<[u8; 16]>())),
+            database: Some(hex::encode(rng.r#gen::<[u8; 16]>())),
+            project: Some(hex::encode(rng.r#gen::<[u8; 16]>())),
+            branch: Some(hex::encode(rng.r#gen::<[u8; 16]>())),
             pg_options: None,
             auth_method: None,
             jwt_issuer: None,
             protocol: ["tcp", "ws", "http"][rng.gen_range(0..3)],
             region: "us-east-1",
             error: None,
-            success: rng.gen(),
+            success: rng.r#gen(),
             cold_start_info: "no",
             duration_us: rng.gen_range(0..30_000_000),
             disconnect_timestamp: None,
