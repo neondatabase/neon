@@ -55,6 +55,7 @@ pub trait CompactionJobExecutor {
     fn downcast_delta_layer(
         &self,
         layer: &Self::Layer,
+        ctx: &Self::RequestContext,
     ) -> impl Future<Output = anyhow::Result<Option<Self::DeltaLayer>>> + Send;
 
     // ----

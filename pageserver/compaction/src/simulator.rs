@@ -487,6 +487,7 @@ impl interface::CompactionJobExecutor for MockTimeline {
     async fn downcast_delta_layer(
         &self,
         layer: &MockLayer,
+        _ctx: &MockRequestContext,
     ) -> anyhow::Result<Option<Arc<MockDeltaLayer>>> {
         Ok(match layer {
             MockLayer::Delta(l) => Some(l.clone()),

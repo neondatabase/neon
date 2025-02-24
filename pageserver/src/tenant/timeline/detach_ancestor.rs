@@ -591,7 +591,7 @@ async fn copy_lsn_prefix(
     .with_context(|| format!("prepare to copy lsn prefix of ancestors {layer}"))
     .map_err(Error::Prepare)?;
 
-    let resident = layer.download_and_keep_resident().await.map_err(|e| {
+    let resident = layer.download_and_keep_resident(ctx).await.map_err(|e| {
         if e.is_cancelled() {
             Error::ShuttingDown
         } else {
