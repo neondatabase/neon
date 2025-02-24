@@ -233,6 +233,11 @@ impl GcCompactionQueue {
             // Only schedule auto compaction when the queue is empty
             return;
         }
+        if timeline.ancestor_timeline().is_some() {
+            // Do not trigger auto compaction for child timelines. We haven't tested
+            // it enough in staging yet.
+            return;
+        }
 
         let Ok(permit) = CONCURRENT_GC_COMPACTION_TASKS.clone().try_acquire_owned() else {
             // Only allow one compaction run at a time. TODO: As we do `try_acquire_owned`, we cannot ensure
