@@ -43,8 +43,6 @@
 #include <linux/sockios.h>
 #endif
 
-#include "libpq-int.h" /* FIXME: temporarily for debugging */
-
 #define PageStoreTrace DEBUG5
 
 #define MIN_RECONNECT_INTERVAL_USEC 1000
@@ -735,8 +733,6 @@ call_PQgetCopyData(shardno_t shard_no, char **buffer)
 				since_start,
 				since_last_log;
 
-	elog(DEBUG1, "call_PQgetCopyData: enter");
-
 retry:
 	ret = PQgetCopyData(pageserver_conn, buffer, 1 /* async */ );
 
@@ -774,10 +770,6 @@ retry:
 		disconnect_timeout = Max(0, (double) pageserver_response_disconnect_timeout - INSTR_TIME_GET_MILLISEC(since_start));
 		timeout = (long) ceil(Min(log_timeout, disconnect_timeout));
 
-		elog(DEBUG1, "call_PQgetCopyData: waiting with timeout %ld (log_timeout %f, disconnect_timeout %f, inStart %d, inCursor %d, inEnd %d)",
-			 timeout, log_timeout, disconnect_timeout,
-			 pageserver_conn->inStart, pageserver_conn->inCursor, pageserver_conn->inEnd
-			);
 		noccurred = WaitEventSetWait(shard->wes_read, timeout, &occurred_event, 1,
 									 WAIT_EVENT_NEON_PS_READ);
 		ResetLatch(MyLatch);
@@ -787,13 +779,6 @@ retry:
 		/* Data available in socket? */
 		if (noccurred > 0 && (occurred_event.events & WL_SOCKET_READABLE) != 0)
 		{
-			int			sndbuf;
-			int			recvbuf;
-
-			get_socket_stats(PQsocket(pageserver_conn), &sndbuf, &recvbuf);
-
-			elog(DEBUG1, "call_PQgetCopyData: woke up with WL_SOCKET_READABLE (sndbuf %d, recvbuf %d)",
-				 sndbuf, recvbuf);
 			if (!PQconsumeInput(pageserver_conn))
 			{
 				char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
@@ -811,9 +796,6 @@ retry:
 		INSTR_TIME_SUBTRACT(since_last_log, shard->receive_last_log_time);
 		since_start = now;
 		INSTR_TIME_SUBTRACT(since_start, shard->receive_start_time);
-
-		elog(DEBUG1, "call_PQgetCopyData: woke up, since_last_log: %f, since_start: %f",
-			 INSTR_TIME_GET_MILLISEC(since_last_log), INSTR_TIME_GET_MILLISEC(since_start));
 
 		/*
 		 * As a debugging aid, if we don't get a response to a pageserver request
@@ -881,8 +863,6 @@ retry:
 	INSTR_TIME_SET_ZERO(shard->receive_start_time);
 	INSTR_TIME_SET_ZERO(shard->receive_last_log_time);
 	shard->receive_logged = false;
-
-	elog(DEBUG1, "call_PQgetCopyData: exit");
 
 	return ret;
 }
