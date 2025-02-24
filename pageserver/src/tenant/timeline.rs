@@ -22,6 +22,7 @@ use chrono::{DateTime, Utc};
 use compaction::CompactionOutcome;
 use enumset::EnumSet;
 use fail::fail_point;
+use futures::FutureExt;
 use futures::{stream::FuturesUnordered, StreamExt};
 use handle::ShardTimelineId;
 use layer_manager::Shutdown;
@@ -467,7 +468,7 @@ pub struct Timeline {
     /// If Some, collects GetPage metadata for an ongoing PageTrace.
     pub(crate) page_trace: ArcSwapOption<Sender<PageTraceEvent>>,
 
-    previous_heatmap: ArcSwapOption<PreviousHeatmap>,
+    pub(super) previous_heatmap: ArcSwapOption<PreviousHeatmap>,
 
     /// May host a background Tokio task which downloads all the layers from the current
     /// heatmap on demand.
@@ -1298,7 +1299,7 @@ impl Timeline {
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
-        let read_path = if self.conf.enable_read_path_debugging {
+        let read_path = if self.conf.enable_read_path_debugging || ctx.read_path_debug() {
             Some(ReadPath::new(keyspace.clone(), lsn))
         } else {
             None
@@ -1881,7 +1882,7 @@ impl Timeline {
         // Signal compaction failure to avoid L0 flush stalls when it's broken.
         match result {
             Ok(_) => self.compaction_failed.store(false, AtomicOrdering::Relaxed),
-            Err(CompactionError::Other(_)) => {
+            Err(CompactionError::Other(_)) | Err(CompactionError::CollectKeySpaceError(_)) => {
                 self.compaction_failed.store(true, AtomicOrdering::Relaxed)
             }
             // Don't change the current value on offload failure or shutdown. We don't want to
@@ -2873,6 +2874,7 @@ impl Timeline {
                 auth_token: crate::config::SAFEKEEPER_AUTH_TOKEN.get().cloned(),
                 availability_zone: self.conf.availability_zone.clone(),
                 ingest_batch_size: self.conf.ingest_batch_size,
+                validate_wal_contiguity: self.conf.validate_wal_contiguity,
             },
             broker_client,
             ctx,
@@ -3522,6 +3524,14 @@ impl Timeline {
         Ok(layer)
     }
 
+    pub(super) fn is_previous_heatmap_active(&self) -> bool {
+        self.previous_heatmap
+            .load()
+            .as_ref()
+            .map(|prev| matches!(**prev, PreviousHeatmap::Active { .. }))
+            .unwrap_or(false)
+    }
+
     /// The timeline heatmap is a hint to secondary locations from the primary location,
     /// indicating which layers are currently on-disk on the primary.
     ///
@@ -3594,6 +3604,7 @@ impl Timeline {
             Some(non_resident) => {
                 let mut non_resident = non_resident.peekable();
                 if non_resident.peek().is_none() {
+                    tracing::info!(timeline_id=%self.timeline_id, "Previous heatmap now obsolete");
                     self.previous_heatmap
                         .store(Some(PreviousHeatmap::Obsolete.into()));
                 }
@@ -3623,6 +3634,36 @@ impl Timeline {
             .collect();
 
         Some(HeatMapTimeline::new(self.timeline_id, layers))
+    }
+
+    pub(super) async fn generate_unarchival_heatmap(&self, end_lsn: Lsn) -> PreviousHeatmap {
+        let guard = self.layers.read().await;
+
+        let now = SystemTime::now();
+        let mut heatmap_layers = Vec::default();
+        for vl in guard.visible_layers() {
+            if vl.layer_desc().get_lsn_range().start >= end_lsn {
+                continue;
+            }
+
+            let hl = HeatMapLayer {
+                name: vl.layer_desc().layer_name(),
+                metadata: vl.metadata(),
+                access_time: now,
+            };
+            heatmap_layers.push(hl);
+        }
+
+        tracing::info!(
+            "Generating unarchival heatmap with {} layers",
+            heatmap_layers.len()
+        );
+
+        let heatmap = HeatMapTimeline::new(self.timeline_id, heatmap_layers);
+        PreviousHeatmap::Active {
+            heatmap,
+            read_at: Instant::now(),
+        }
     }
 
     /// Returns true if the given lsn is or was an ancestor branchpoint.
@@ -4604,7 +4645,10 @@ impl Timeline {
             ));
         }
 
-        let (dense_ks, sparse_ks) = self.collect_keyspace(lsn, ctx).await?;
+        let (dense_ks, sparse_ks) = self
+            .collect_keyspace(lsn, ctx)
+            .await
+            .map_err(CompactionError::CollectKeySpaceError)?;
         let dense_partitioning = dense_ks.partition(&self.shard_identity, partition_size);
         let sparse_partitioning = SparseKeyPartitioning {
             parts: vec![sparse_ks],
@@ -5125,20 +5169,26 @@ impl Timeline {
                     // image layer generation taking too long time and blocking L0 compaction. So in this
                     // mode, we also inspect the current number of L0 layers and skip image layer generation
                     // if there are too many of them.
-                    let num_of_l0_layers = {
-                        let layers = self.layers.read().await;
-                        layers.layer_map()?.level0_deltas().len()
-                    };
                     let image_preempt_threshold = self.get_image_creation_preempt_threshold()
                         * self.get_compaction_threshold();
-                    if image_preempt_threshold != 0 && num_of_l0_layers >= image_preempt_threshold {
-                        tracing::info!(
-                        "preempt image layer generation at {lsn} when processing partition {}..{}: too many L0 layers {}",
-                        partition.start().unwrap(), partition.end().unwrap(), num_of_l0_layers
-                    );
-                        last_partition_processed = Some(partition.clone());
-                        all_generated = false;
-                        break;
+                    // TODO: currently we do not respect `get_image_creation_preempt_threshold` and always yield
+                    // when there is a single timeline with more than L0 threshold L0 layers. As long as the
+                    // `get_image_creation_preempt_threshold` is set to a value greater than 0, we will yield for L0 compaction.
+                    if image_preempt_threshold != 0 {
+                        let should_yield = self
+                            .l0_compaction_trigger
+                            .notified()
+                            .now_or_never()
+                            .is_some();
+                        if should_yield {
+                            tracing::info!(
+                                "preempt image layer generation at {lsn} when processing partition {}..{}: too many L0 layers",
+                                partition.start().unwrap(), partition.end().unwrap()
+                            );
+                            last_partition_processed = Some(partition.clone());
+                            all_generated = false;
+                            break;
+                        }
                     }
                 }
             }
@@ -5167,14 +5217,16 @@ impl Timeline {
             .map(|l| l.metadata().file_size)
             .sum::<u64>();
 
-        info!(
-            "created {} image layers ({} bytes) in {}s, processed {} out of {} partitions",
-            image_layers.len(),
-            total_layer_size,
-            duration.as_secs_f64(),
-            partition_processed,
-            total_partitions
-        );
+        if !image_layers.is_empty() {
+            info!(
+                "created {} image layers ({} bytes) in {}s, processed {} out of {} partitions",
+                image_layers.len(),
+                total_layer_size,
+                duration.as_secs_f64(),
+                partition_processed,
+                total_partitions
+            );
+        }
 
         Ok((
             image_layers,
@@ -5317,6 +5369,8 @@ pub(crate) enum CompactionError {
     #[error("Failed to offload timeline: {0}")]
     Offload(OffloadError),
     /// Compaction cannot be done right now; page reconstruction and so on.
+    #[error("Failed to collect keyspace: {0}")]
+    CollectKeySpaceError(CollectKeySpaceError),
     #[error(transparent)]
     Other(anyhow::Error),
 }
@@ -5327,12 +5381,6 @@ impl From<OffloadError> for CompactionError {
             OffloadError::Cancelled => Self::ShuttingDown,
             _ => Self::Offload(e),
         }
-    }
-}
-
-impl CompactionError {
-    pub fn is_cancelled(&self) -> bool {
-        matches!(self, CompactionError::ShuttingDown)
     }
 }
 
@@ -6600,7 +6648,7 @@ impl TimelineWriter<'_> {
 
         if let Some(wait_threshold) = wait_threshold {
             if l0_count >= wait_threshold {
-                info!("layer roll waiting for flush due to compaction backpressure at {l0_count} L0 layers");
+                debug!("layer roll waiting for flush due to compaction backpressure at {l0_count} L0 layers");
                 self.tl.wait_flush_completion(flush_id).await?;
             }
         }

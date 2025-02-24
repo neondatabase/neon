@@ -1316,7 +1316,6 @@ dependencies = [
  "flate2",
  "futures",
  "http 1.1.0",
- "jsonwebtoken",
  "metrics",
  "nix 0.27.1",
  "notify",
@@ -1326,7 +1325,6 @@ dependencies = [
  "opentelemetry_sdk",
  "postgres",
  "postgres_initdb",
- "prometheus",
  "regex",
  "remote_storage",
  "reqwest",
@@ -1345,7 +1343,6 @@ dependencies = [
  "tower 0.5.2",
  "tower-http",
  "tracing",
- "tracing-opentelemetry",
  "tracing-subscriber",
  "tracing-utils",
  "url",
@@ -1876,6 +1873,12 @@ checksum = "209c735641a413bc68c4923a9d6ad4bcb3ca306b794edaa7eb0b3228a99ffb25"
 dependencies = [
  "syn 2.0.90",
 ]
+
+[[package]]
+name = "difflib"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6184e33543162437515c2e2b48714794e37845ec9851711914eec9d308f6ebe8"
 
 [[package]]
 name = "digest"
@@ -3335,6 +3338,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "json-structural-diff"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e878e36a8a44c158505c2c818abdc1350413ad83dcb774a0459f6a7ef2b65cbf"
+dependencies = [
+ "difflib",
+ "regex",
+ "serde_json",
+]
+
+[[package]]
 name = "jsonwebtoken"
 version = "9.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4158,7 +4172,6 @@ dependencies = [
  "pageserver_client",
  "pageserver_compaction",
  "pin-project-lite",
- "postgres",
  "postgres-protocol",
  "postgres-types",
  "postgres_backend",
@@ -4245,7 +4258,6 @@ dependencies = [
  "futures",
  "http-utils",
  "pageserver_api",
- "postgres",
  "reqwest",
  "serde",
  "thiserror 1.0.69",
@@ -4660,7 +4672,6 @@ dependencies = [
  "anyhow",
  "itertools 0.10.5",
  "once_cell",
- "postgres",
  "tokio-postgres",
  "url",
 ]
@@ -5802,7 +5813,6 @@ dependencies = [
  "once_cell",
  "pageserver_api",
  "parking_lot 0.12.1",
- "postgres",
  "postgres-protocol",
  "postgres_backend",
  "postgres_ffi",
@@ -6446,6 +6456,7 @@ dependencies = [
  "humantime",
  "hyper 0.14.30",
  "itertools 0.10.5",
+ "json-structural-diff",
  "lasso",
  "measured",
  "metrics",
@@ -6468,6 +6479,7 @@ dependencies = [
  "strum",
  "strum_macros",
  "thiserror 1.0.69",
+ "tikv-jemallocator",
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",
@@ -7021,14 +7033,11 @@ dependencies = [
 name = "tokio-postgres2"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "byteorder",
  "bytes",
  "fallible-iterator",
  "futures-util",
  "log",
  "parking_lot 0.12.1",
- "percent-encoding",
  "phf",
  "pin-project-lite",
  "postgres-protocol2",
@@ -7615,13 +7624,13 @@ dependencies = [
  "hex",
  "hex-literal",
  "humantime",
- "inferno 0.12.0",
  "jsonwebtoken",
  "metrics",
  "nix 0.27.1",
  "once_cell",
  "pin-project-lite",
  "postgres_connection",
+ "pprof",
  "pq_proto",
  "rand 0.8.5",
  "regex",

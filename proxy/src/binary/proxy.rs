@@ -9,16 +9,16 @@ use remote_storage::RemoteStorageConfig;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn, Instrument};
+use tracing::{Instrument, info, warn};
 use utils::sentry_init::init_sentry;
 use utils::{project_build_tag, project_git_version};
 
 use crate::auth::backend::jwt::JwkCache;
 use crate::auth::backend::{AuthRateLimiter, ConsoleRedirectBackend, MaybeOwned};
-use crate::cancellation::{handle_cancel_messages, CancellationHandler};
+use crate::cancellation::{CancellationHandler, handle_cancel_messages};
 use crate::config::{
-    self, remote_storage_from_toml, AuthenticationConfig, CacheOptions, ComputeConfig, HttpConfig,
-    ProjectInfoCacheOptions, ProxyConfig, ProxyProtocolV2,
+    self, AuthenticationConfig, CacheOptions, ComputeConfig, HttpConfig, ProjectInfoCacheOptions,
+    ProxyConfig, ProxyProtocolV2, remote_storage_from_toml,
 };
 use crate::context::parquet::ParquetUploadArgs;
 use crate::http::health_server::AppMetrics;
@@ -30,8 +30,8 @@ use crate::redis::connection_with_credentials_provider::ConnectionWithCredential
 use crate::redis::kv_ops::RedisKVClient;
 use crate::redis::{elasticache, notifications};
 use crate::scram::threadpool::ThreadPool;
-use crate::serverless::cancel_set::CancelSet;
 use crate::serverless::GlobalConnPoolOptions;
+use crate::serverless::cancel_set::CancelSet;
 use crate::tls::client_config::compute_client_config_with_root_certs;
 use crate::{auth, control_plane, http, serverless, usage_metrics};
 
@@ -331,7 +331,9 @@ pub async fn run() -> anyhow::Result<()> {
                 ),
             ),
             (None, None) => {
-                warn!("irsa auth requires redis-host and redis-port to be set, continuing without regional_redis_client");
+                warn!(
+                    "irsa auth requires redis-host and redis-port to be set, continuing without regional_redis_client"
+                );
                 None
             }
             _ => {

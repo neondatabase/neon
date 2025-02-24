@@ -930,13 +930,16 @@ pub(crate) mod test_utils {
                         NodeId(i),
                         format!("httphost-{i}"),
                         80 + i as u16,
+                        None,
                         format!("pghost-{i}"),
                         5432 + i as u16,
                         az_iter
                             .next()
                             .cloned()
                             .unwrap_or(AvailabilityZone("test-az".to_string())),
-                    );
+                        false,
+                    )
+                    .unwrap();
                     node.set_availability(NodeAvailability::Active(test_utilization::simple(0, 0)));
                     assert!(node.is_available());
                     node

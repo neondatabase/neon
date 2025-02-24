@@ -11,7 +11,8 @@ use std::sync::Arc;
 use super::layer_manager::LayerManager;
 use super::{
     CompactFlags, CompactOptions, CreateImageLayersError, DurationRecorder, GetVectoredError,
-    ImageLayerCreationMode, LastImageLayerCreationStatus, RecordedDuration, Timeline,
+    ImageLayerCreationMode, LastImageLayerCreationStatus, PageReconstructError, RecordedDuration,
+    Timeline,
 };
 
 use anyhow::{anyhow, bail, Context};
@@ -25,12 +26,13 @@ use pageserver_api::models::CompactInfoResponse;
 use pageserver_api::shard::{ShardCount, ShardIdentity, TenantShardId};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, info_span, trace, warn, Instrument};
+use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 use utils::critical;
 use utils::id::TimelineId;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
+use crate::pgdatadir_mapping::CollectKeySpaceError;
 use crate::statvfs::Statvfs;
 use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::gc_block::GcBlock;
@@ -773,17 +775,25 @@ impl Timeline {
                     return Ok(CompactionOutcome::YieldForL0);
                 }
             }
-            Err(err) => {
-                // no partitioning? This is normal, if the timeline was just created
-                // as an empty timeline. Also in unit tests, when we use the timeline
-                // as a simple key-value store, ignoring the datadir layout. Log the
-                // error but continue.
-                //
-                // Suppress error when it's due to cancellation
-                if !self.cancel.is_cancelled() && !err.is_cancelled() {
-                    tracing::error!("could not compact, repartitioning keyspace failed: {err:?}");
-                }
-            }
+
+            // Suppress errors when cancelled.
+            Err(_) if self.cancel.is_cancelled() => {}
+            Err(CompactionError::ShuttingDown) => {}
+
+            // Alert on critical errors that indicate data corruption.
+            Err(
+                err @ CompactionError::CollectKeySpaceError(
+                    CollectKeySpaceError::Decode(_)
+                    | CollectKeySpaceError::PageRead(
+                        PageReconstructError::MissingKey(_) | PageReconstructError::WalRedo(_),
+                    ),
+                ),
+            ) => critical!("could not compact, repartitioning keyspace failed: {err:?}"),
+
+            // Log other errors. No partitioning? This is normal, if the timeline was just created
+            // as an empty timeline. Also in unit tests, when we use the timeline as a simple
+            // key-value store, ignoring the datadir layout. Log the error but continue.
+            Err(err) => error!("could not compact, repartitioning keyspace failed: {err:?}"),
         };
 
         let partition_count = self.partitioning.read().0 .0.parts.len();
@@ -1010,7 +1020,7 @@ impl Timeline {
     ///
     /// The result may be used as an input to eviction and secondary downloads to de-prioritize layers
     /// that we know won't be needed for reads.
-    pub(super) async fn update_layer_visibility(
+    pub(crate) async fn update_layer_visibility(
         &self,
     ) -> Result<(), super::layer_manager::Shutdown> {
         let head_lsn = self.get_last_record_lsn();
@@ -2202,7 +2212,7 @@ impl Timeline {
         let sub_compaction_max_job_size_mb =
             sub_compaction_max_job_size_mb.unwrap_or(GC_COMPACT_MAX_SIZE_MB);
 
-        let mut compact_jobs = Vec::new();
+        let mut compact_jobs = Vec::<GcCompactJob>::new();
         // For now, we simply use the key partitioning information; we should do a more fine-grained partitioning
         // by estimating the amount of files read for a compaction job. We should also partition on LSN.
         let ((dense_ks, sparse_ks), _) = self.partitioning.read().as_ref().clone();
@@ -2289,16 +2299,25 @@ impl Timeline {
                 } else {
                     end
                 };
-                info!(
-                    "splitting compaction job: {}..{}, estimated_size={}",
-                    start, end, total_size
-                );
-                compact_jobs.push(GcCompactJob {
-                    dry_run: job.dry_run,
-                    compact_key_range: start..end,
-                    compact_lsn_range: job.compact_lsn_range.start..compact_below_lsn,
-                });
-                current_start = Some(end);
+                if total_size == 0 && !compact_jobs.is_empty() {
+                    info!(
+                        "splitting compaction job: {}..{}, estimated_size={}, extending the previous job",
+                        start, end, total_size
+                    );
+                    compact_jobs.last_mut().unwrap().compact_key_range.end = end;
+                    current_start = Some(end);
+                } else {
+                    info!(
+                        "splitting compaction job: {}..{}, estimated_size={}",
+                        start, end, total_size
+                    );
+                    compact_jobs.push(GcCompactJob {
+                        dry_run: job.dry_run,
+                        compact_key_range: start..end,
+                        compact_lsn_range: job.compact_lsn_range.start..compact_below_lsn,
+                    });
+                    current_start = Some(end);
+                }
             }
         }
         Ok(compact_jobs)

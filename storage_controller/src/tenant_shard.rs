@@ -481,7 +481,14 @@ pub(crate) enum ReconcileNeeded {
     /// spawned: wait for the existing reconciler rather than spawning a new one.
     WaitExisting(ReconcilerWaiter),
     /// shard needs reconciliation: call into [`TenantShard::spawn_reconciler`]
-    Yes,
+    Yes(ReconcileReason),
+}
+
+#[derive(Debug)]
+pub(crate) enum ReconcileReason {
+    ActiveNodesDirty,
+    UnknownLocation,
+    PendingComputeNotification,
 }
 
 /// Pending modification to the observed state of a tenant shard.
@@ -1341,12 +1348,18 @@ impl TenantShard {
 
         let active_nodes_dirty = self.dirty(pageservers);
 
-        // Even if there is no pageserver work to be done, if we have a pending notification to computes,
-        // wake up a reconciler to send it.
-        let do_reconcile =
-            active_nodes_dirty || dirty_observed || self.pending_compute_notification;
+        let reconcile_needed = match (
+            active_nodes_dirty,
+            dirty_observed,
+            self.pending_compute_notification,
+        ) {
+            (true, _, _) => ReconcileNeeded::Yes(ReconcileReason::ActiveNodesDirty),
+            (_, true, _) => ReconcileNeeded::Yes(ReconcileReason::UnknownLocation),
+            (_, _, true) => ReconcileNeeded::Yes(ReconcileReason::PendingComputeNotification),
+            _ => ReconcileNeeded::No,
+        };
 
-        if !do_reconcile {
+        if matches!(reconcile_needed, ReconcileNeeded::No) {
             tracing::debug!("Not dirty, no reconciliation needed.");
             return ReconcileNeeded::No;
         }
@@ -1389,7 +1402,7 @@ impl TenantShard {
             }
         }
 
-        ReconcileNeeded::Yes
+        reconcile_needed
     }
 
     /// Ensure the sequence number is set to a value where waiting for this value will make us wait
@@ -1479,6 +1492,7 @@ impl TenantShard {
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
     pub(crate) fn spawn_reconciler(
         &mut self,
+        reason: ReconcileReason,
         result_tx: &tokio::sync::mpsc::UnboundedSender<ReconcileResultRequest>,
         pageservers: &Arc<HashMap<NodeId, Node>>,
         compute_hook: &Arc<ComputeHook>,
@@ -1538,7 +1552,7 @@ impl TenantShard {
         let reconcile_seq = self.sequence;
         let long_reconcile_threshold = service_config.long_reconcile_threshold;
 
-        tracing::info!(seq=%reconcile_seq, "Spawning Reconciler for sequence {}", self.sequence);
+        tracing::info!(seq=%reconcile_seq, "Spawning Reconciler ({reason:?})");
         let must_notify = self.pending_compute_notification;
         let reconciler_span = tracing::info_span!(parent: None, "reconciler", seq=%reconcile_seq,
                                                         tenant_id=%reconciler.tenant_shard_id.tenant_id,
