@@ -477,7 +477,7 @@ async fn fill_logical_sizes(
             if cached_size.is_none() {
                 let timeline = Arc::clone(timeline_hash.get(&timeline_id).unwrap());
                 let parallel_size_calcs = Arc::clone(limit);
-                let ctx = ctx.attached_child();
+                let ctx = ctx.attached_child().with_scope_timeline(&timeline);
                 joinset.spawn(
                     calculate_logical_size(parallel_size_calcs, timeline, lsn, cause, ctx)
                         .in_current_span(),

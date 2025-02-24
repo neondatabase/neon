@@ -924,6 +924,7 @@ async fn timeline_detail_handler(
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
         let timeline = tenant.get_timeline(timeline_id, false)?;
+        let ctx = &ctx.with_scope_timeline(&timeline);
 
         let timeline_info = build_timeline_info(
             &timeline,
