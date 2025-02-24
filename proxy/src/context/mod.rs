@@ -8,7 +8,7 @@ use pq_proto::StartupMessageParams;
 use smol_str::SmolStr;
 use tokio::sync::mpsc;
 use tracing::field::display;
-use tracing::{debug, error, info_span, Span};
+use tracing::{Span, debug, error, info_span};
 use try_lock::TryLock;
 use uuid::Uuid;
 

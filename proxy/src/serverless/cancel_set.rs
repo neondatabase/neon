@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use indexmap::IndexMap;
 use parking_lot::Mutex;
-use rand::{thread_rng, Rng};
+use rand::{Rng, thread_rng};
 use rustc_hash::FxHasher;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -40,7 +40,7 @@ impl CancelSet {
 
     pub(crate) fn take(&self) -> Option<CancellationToken> {
         for _ in 0..4 {
-            if let Some(token) = self.take_raw(thread_rng().gen()) {
+            if let Some(token) = self.take_raw(thread_rng().r#gen()) {
                 return Some(token);
             }
             tracing::trace!("failed to get cancel token");
@@ -68,7 +68,7 @@ impl CancelShard {
     fn take(&mut self, rng: usize) -> Option<CancellationToken> {
         NonZeroUsize::new(self.tokens.len()).and_then(|len| {
             // 10 second grace period so we don't cancel new connections
-            if self.tokens.get_index(rng % len)?.1 .0.elapsed() < Duration::from_secs(10) {
+            if self.tokens.get_index(rng % len)?.1.0.elapsed() < Duration::from_secs(10) {
                 return None;
             }
 
