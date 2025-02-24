@@ -810,6 +810,12 @@ jobs:
               || needs.meta.outputs.build-tag
             }}
           TEST_VERSION_ONLY: ${{ matrix.pg_version }}
+          SKIP: >-
+            ${{
+              contains(fromJSON('["storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind)
+              && 'pg_repack-src'
+              || ''
+            }}
         run: ./docker-compose/docker_compose_test.sh
 
       - name: Print logs and clean up docker-compose test
