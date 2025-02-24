@@ -1892,6 +1892,7 @@ impl Timeline {
             // abruptly stall nor resume L0 flushes in these cases.
             Err(CompactionError::Offload(_)) => {}
             Err(CompactionError::ShuttingDown) => {}
+            Err(CompactionError::AlreadyRunning(_)) => {}
         };
 
         result
@@ -5375,6 +5376,8 @@ pub(crate) enum CompactionError {
     CollectKeySpaceError(CollectKeySpaceError),
     #[error(transparent)]
     Other(anyhow::Error),
+    #[error("Compaction already running: {0}")]
+    AlreadyRunning(&'static str),
 }
 
 impl From<OffloadError> for CompactionError {

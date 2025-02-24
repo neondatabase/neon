@@ -234,7 +234,9 @@ impl GcCompactionQueue {
         }
 
         let Ok(permit) = CONCURRENT_GC_COMPACTION_TASKS.clone().try_acquire_owned() else {
-            // Only allow one compaction run at a time
+            // Only allow one compaction run at a time. TODO: As we do `try_acquire_owned`, we cannot ensure
+            // the fairness of the lock across timelines. We should listen for both `acquire` and `l0_compaction_trigger`
+            // to ensure the fairness while avoid starving other tasks.
             return;
         };
 
@@ -421,7 +423,9 @@ impl GcCompactionQueue {
         gc_block: &GcBlock,
         timeline: &Arc<Timeline>,
     ) -> Result<CompactionOutcome, CompactionError> {
-        let _one_op_at_a_time_guard = self.consumer_lock.lock().await;
+        let Ok(_one_op_at_a_time_guard) = self.consumer_lock.try_lock() else {
+            return Err(CompactionError::AlreadyRunning("cannot run gc-compaction because another gc-compaction is running. This should not happen because we only call this function from the gc-compaction queue."));
+        };
         let has_pending_tasks;
         let Some((id, item)) = ({
             let mut guard = self.inner.lock().unwrap();

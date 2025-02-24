@@ -3162,6 +3162,7 @@ impl Tenant {
                     .unwrap()
                     .fail(&CIRCUIT_BREAKERS_BROKEN, err);
             }
+            CompactionError::AlreadyRunning(_) => {}
         }
     }
 
