@@ -232,8 +232,8 @@ def test_compute_pageserver_statement_timeout(neon_env_builder: NeonEnvBuilder):
     ## GetPage request.
     log.info("running workload with statement_timeout")
     cur.execute("SET neon.pageserver_response_log_timeout = '2000ms'")
-    cur.execute("SET neon.pageserver_response_disconnect_timeout = '60000ms'")
-    cur.execute("SET statement_timeout='30s'")
+    cur.execute("SET neon.pageserver_response_disconnect_timeout = '30000ms'")
+    cur.execute("SET statement_timeout='10s'")
     pageserver_http.configure_failpoints(("before-pagestream-msg-flush", "10%return(60000)"))
 
     start_time = time.time()
