@@ -435,7 +435,9 @@ impl GcCompactionQueue {
             }
         }) else {
             self.trigger_auto_compaction(timeline).await;
-            // Always yield after triggering auto-compaction
+            // Always yield after triggering auto-compaction. Gc-compaction is a low-priority task and we
+            // have not implemented preemption mechanism yet. We always want to yield it to more important
+            // tasks if there is one.
             return Ok(CompactionOutcome::Done);
         };
         match item {
