@@ -6,7 +6,6 @@ use std::{
 use anyhow::Context;
 use pageserver_api::{models::TimelineState, shard::TenantShardId};
 use remote_storage::DownloadError;
-use reqwest::Request;
 use tokio::sync::OwnedMutexGuard;
 use tracing::{error, info, info_span, instrument, Instrument};
 use utils::{crashsafe, fs_ext, id::TimelineId, pausable_failpoint};

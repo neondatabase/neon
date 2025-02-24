@@ -100,7 +100,6 @@ use crate::{
 };
 
 // The main structure of this module, see module-level comment.
-#[derive(Debug)]
 pub struct RequestContext {
     task_kind: TaskKind,
     download_behavior: DownloadBehavior,
@@ -110,8 +109,13 @@ pub struct RequestContext {
     scope: Scope,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) enum Scope {
+// we wrap the inner struct in an Arc so that we can clone it cheaply
+// for context propagation; the inner's `Arc<Timeline>`` are not cheap
+// to clone because the ref count atomics are shared among tasks
+#[derive(Clone)]
+pub(crate) struct Scope(Arc<ScopeInner>);
+
+pub(crate) enum ScopeInner {
     Global {
         io_size_metrics: &'static crate::metrics::StorageIoSizeMetrics,
     },
@@ -131,34 +135,36 @@ impl Scope {
     pub(crate) fn new_global() -> Self {
         static GLOBAL_IO_SIZE_METRICS: Lazy<crate::metrics::StorageIoSizeMetrics> =
             Lazy::new(|| crate::metrics::StorageIoSizeMetrics::new("*", "*", "*"));
-        Scope::Global {
+        Scope(Arc::new(ScopeInner::Global {
             io_size_metrics: &&GLOBAL_IO_SIZE_METRICS,
-        }
+        }))
     }
     pub(crate) fn new_tenant(tenant: &Arc<Tenant>) -> Self {
-        Scope::Tenant {
+        Scope(Arc::new(ScopeInner::Tenant {
             tenant: Arc::clone(tenant),
-        }
+        }))
     }
     pub(crate) fn new_timeline(timeline: &Arc<Timeline>) -> Self {
-        Scope::Timeline {
+        Scope(Arc::new(ScopeInner::Timeline {
             timeline: Arc::clone(timeline),
-        }
+        }))
     }
     pub(crate) fn new_timeline_handle(
         timeline_handle: crate::tenant::timeline::handle::Handle<
             crate::page_service::TenantManagerTypes,
         >,
     ) -> Self {
-        Scope::TimelineHandle { timeline_handle }
+        Scope(Arc::new(ScopeInner::TimelineHandle { timeline_handle }))
     }
 
     pub(crate) fn io_size_metrics(&self) -> &crate::metrics::StorageIoSizeMetrics {
-        match self {
-            Scope::Global { io_size_metrics } => io_size_metrics,
-            Scope::Tenant { tenant } => &tenant.virtual_file_io_metrics,
-            Scope::Timeline { timeline } => &timeline.metrics.storage_io_size,
-            Scope::TimelineHandle { timeline_handle } => &timeline_handle.metrics.storage_io_size,
+        match &*self.0 {
+            ScopeInner::Global { io_size_metrics } => io_size_metrics,
+            ScopeInner::Tenant { tenant } => &tenant.virtual_file_io_metrics,
+            ScopeInner::Timeline { timeline } => &timeline.metrics.storage_io_size,
+            ScopeInner::TimelineHandle { timeline_handle } => {
+                &timeline_handle.metrics.storage_io_size
+            }
         }
     }
 }
@@ -377,12 +383,8 @@ impl RequestContext {
         &self.scope
     }
 
-    pub(crate) fn scope_mut(&mut self) -> &mut Scope {
-        &mut self.scope
-    }
-
     pub(crate) fn assert_is_timeline_scoped(&self, what: &str) {
-        if let Scope::Timeline { .. } = self.scope() {
+        if let ScopeInner::Timeline { .. } = &*self.scope.0 {
             return;
         }
         if cfg!(debug_assertions) || cfg!(feature = "testing") {

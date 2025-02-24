@@ -1087,12 +1087,14 @@ impl PageServerHandler {
         };
 
         macro_rules! upgrade_handle_and_set_context {
-            ($shard:expr) => {{
-                let shard = $shard.upgrade()?;
+            ($shard:ident) => {{
+                let weak_handle = &$shard;
+                let strong1 = weak_handle.upgrade()?;
+                let strong2 = weak_handle.upgrade()?;
                 let ctx = RequestContextBuilder::extend(ctx)
-                    .scope(context::Scope::new_timeline_handle(shard.clone()))
+                    .scope(context::Scope::new_timeline_handle(strong1))
                     .build();
-                (shard, ctx)
+                (strong2, ctx)
             }};
         }
 
