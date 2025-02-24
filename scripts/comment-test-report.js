@@ -48,11 +48,13 @@ const parseReportJson = async ({ reportJsonUrl, fetch }) => {
     const skippedTests = new DefaultMap(() => new DefaultMap(() => []))
     const retriedTests = new DefaultMap(() => new DefaultMap(() => []))
     const flakyTests = new DefaultMap(() => new DefaultMap(() => []))
+    const unstableTests = new DefaultMap(() => new DefaultMap(() => []))
 
     let failedTestsCount = 0
     let passedTestsCount = 0
     let skippedTestsCount = 0
     let flakyTestsCount = 0
+    let unstableTestsCount = 0
 
     const pgVersions = new Set()
 
@@ -90,6 +92,10 @@ const parseReportJson = async ({ reportJsonUrl, fetch }) => {
                 } else {
                     lfcState = "without-lfc"
                 }
+                let testingMode = ""
+                if (test.parameters.includes("'test_stability'")) {
+                    testingMode = "test_stability"
+                }
 
                 // Removing build type and PostgreSQL version from the test name to make it shorter
                 const testName = test.name.replace(new RegExp(`${buildType}-pg${pgVersion}-?`), "").replace("[]", "")
@@ -103,14 +109,19 @@ const parseReportJson = async ({ reportJsonUrl, fetch }) => {
                     passedTests[pgVersion][testName].push(test)
                     passedTestsCount += 1
                 } else if (test.status === "failed" || test.status === "broken") {
-                    failedTests[pgVersion][testName].push(test)
-                    failedTestsCount += 1
+                    if (testingMode != "test_stability") {
+                        failedTests[pgVersion][testName].push(test)
+                        failedTestsCount += 1
+                    } else {
+                        unstableTests[pgVersion][testName].push(test)
+                        unstableTestsCount += 1
+                    }
                 } else if (test.status === "skipped") {
                     skippedTests[pgVersion][testName].push(test)
                     skippedTestsCount += 1
                 }
 
-                if (test.retriesCount > 0) {
+                if (test.retriesCount > 0 && testingMode != "test_stability") {
                     retriedTests[pgVersion][testName].push(test)
 
                     if (test.retriesStatusChange) {
@@ -132,6 +143,8 @@ const parseReportJson = async ({ reportJsonUrl, fetch }) => {
         flakyTests,
         flakyTestsCount,
         retriedTests,
+        unstableTests,
+        unstableTestsCount,
         pgVersions,
     }
 }
@@ -147,6 +160,8 @@ const reportSummary = async (params) => {
         flakyTests,
         flakyTestsCount,
         retriedTests,
+        unstableTests,
+        unstableTestsCount,
         pgVersions,
         reportUrl,
     } = params
@@ -185,6 +200,25 @@ const reportSummary = async (params) => {
         summary += `${command}\n`
         summary += "```\n"
     }
+
+    if (unstableTestsCount > 0) {
+        summary += `\n#### New unstable tests (${unstableTestsCount}\n\n`
+        for (const pgVersion of Array.from(pgVersions).sort().reverse()) {
+            if (Object.keys(unstableTests[pgVersion]).length > 0) {
+                summary += `#### Postgres ${pgVersion}\n\n`
+                for (const [testName, tests] of Object.entries(unstableTests[pgVersion])) {
+                    const links = []
+                    for (const test of tests) {
+                        const allureLink = `${reportUrl}#suites/${test.parentUid}/${test.uid}/retries`
+                        links.push(`[${test.buildType}-${test.arch}-${test.lfcState}](${allureLink})`)
+                    }
+                    summary += `- \`${testName}\`: ${links.join(", ")}\n`
+                }
+            }
+        }
+        summary += "\n"
+    }
+
 
     if (flakyTestsCount > 0) {
         summary += `<details>\n<summary>Flaky tests (${flakyTestsCount})</summary>\n\n`
