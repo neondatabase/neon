@@ -247,7 +247,7 @@ impl GcCompactionQueue {
         };
         let mut l2_size: u64 = 0;
         let mut l1_size = 0;
-        let gc_cutoff = *timeline.get_latest_gc_cutoff_lsn();
+        let gc_cutoff = *timeline.get_applied_gc_cutoff_lsn();
         for layer in layers {
             if layer.lsn_range.start <= l2_lsn {
                 l2_size += layer.file_size();
