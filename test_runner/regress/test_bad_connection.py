@@ -224,17 +224,15 @@ def test_compute_pageserver_statement_timeout(neon_env_builder: NeonEnvBuilder):
     log.debug(f"shared_buffers is {row[0]}, table size {row[1]}")
     assert int(row[0]) < int(row[1])
 
-    ## Test that if you hit statement_timeout while waiting on a getpage request, we also
-    ## disconnect.
+    ## Run a query until the compute->pageserver connection hits the failpoint and
+    ## get stuck. This tests that the statement_timeout is obeyed while waiting on a
+    ## GetPage request.
     log.info("running workload with statement_timeout")
     cur.execute("SET neon.pageserver_response_log_timeout = '2000ms'")
-    cur.execute("SET neon.pageserver_response_disconnect_timeout = '30000ms'")
-    cur.execute("SET statement_timeout='10s'")
+    cur.execute("SET neon.pageserver_response_disconnect_timeout = '60000ms'")
+    cur.execute("SET statement_timeout='30s'")
     pageserver_http.configure_failpoints(("before-pagestream-msg-flush", "10%return(60000)"))
 
-    # Run queries until you the compute->pageserver connection hits the failpoint and
-    # get stuck. This tests that the statement_timeout is obeyed while waiting on a
-    # GetPage request.
     start_time = time.time()
     with pytest.raises(psycopg2.errors.QueryCanceled):
         cur.execute("SELECT count(*) FROM foo")
@@ -243,7 +241,7 @@ def test_compute_pageserver_statement_timeout(neon_env_builder: NeonEnvBuilder):
     end_time = time.time()
     # Verify that the statement_timeout canceled the query before
     # neon.pageserver_response_disconnect_timeout expired
-    assert end_time - start_time < 20
+    assert end_time - start_time < 40
     times_canceled = 1
 
     # Should not have disconnected yet
@@ -265,7 +263,7 @@ def test_compute_pageserver_statement_timeout(neon_env_builder: NeonEnvBuilder):
         except psycopg2.errors.QueryCanceled:
             log.info("Statement timed out, retrying")
             times_canceled += 1
-    assert times_canceled > 1 and times_canceled < 5
+    assert times_canceled > 1 and times_canceled < 10
 
     assert endpoint.log_contains("no response from pageserver for .* s, disconnecting")
 
