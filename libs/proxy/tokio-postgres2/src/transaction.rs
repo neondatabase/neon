@@ -1,8 +1,9 @@
+use postgres_protocol2::message::frontend;
+
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
 use crate::query::RowStream;
 use crate::{CancelToken, Client, Error, ReadyForQueryStatus};
-use postgres_protocol2::message::frontend;
 
 /// A representation of a PostgreSQL database transaction.
 ///

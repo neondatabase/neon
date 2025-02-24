@@ -2,7 +2,7 @@ use thiserror::Error;
 
 use crate::control_plane::client::ApiLockError;
 use crate::control_plane::messages::{self, ControlPlaneErrorMessage, Reason};
-use crate::error::{io_error, ErrorKind, ReportableError, UserFacingError};
+use crate::error::{ErrorKind, ReportableError, UserFacingError, io_error};
 use crate::proxy::retry::CouldRetry;
 
 /// A go-to error message which doesn't leak any detail.

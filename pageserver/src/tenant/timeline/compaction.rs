@@ -1020,7 +1020,7 @@ impl Timeline {
     ///
     /// The result may be used as an input to eviction and secondary downloads to de-prioritize layers
     /// that we know won't be needed for reads.
-    pub(super) async fn update_layer_visibility(
+    pub(crate) async fn update_layer_visibility(
         &self,
     ) -> Result<(), super::layer_manager::Shutdown> {
         let head_lsn = self.get_last_record_lsn();

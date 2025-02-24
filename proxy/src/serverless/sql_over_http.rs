@@ -2,23 +2,23 @@ use std::pin::pin;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use futures::future::{select, try_join, Either};
+use futures::future::{Either, select, try_join};
 use futures::{StreamExt, TryFutureExt};
-use http::header::AUTHORIZATION;
 use http::Method;
+use http::header::AUTHORIZATION;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use http_utils::error::ApiError;
 use hyper::body::Incoming;
 use hyper::http::{HeaderName, HeaderValue};
-use hyper::{header, HeaderMap, Request, Response, StatusCode};
+use hyper::{HeaderMap, Request, Response, StatusCode, header};
 use indexmap::IndexMap;
 use postgres_client::error::{DbError, ErrorPosition, SqlState};
 use postgres_client::{GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, Transaction};
 use pq_proto::StartupMessageParamsBuilder;
 use serde::Serialize;
-use serde_json::value::RawValue;
 use serde_json::Value;
+use serde_json::value::RawValue;
 use tokio::time::{self, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
@@ -31,15 +31,15 @@ use super::conn_pool::{AuthData, ConnInfoWithAuth};
 use super::conn_pool_lib::{self, ConnInfo};
 use super::error::HttpCodeError;
 use super::http_util::json_response;
-use super::json::{json_to_pg_text, pg_text_row_to_json, JsonConversionError};
+use super::json::{JsonConversionError, json_to_pg_text, pg_text_row_to_json};
 use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
-use crate::auth::{endpoint_sni, ComputeUserInfoParseError};
+use crate::auth::{ComputeUserInfoParseError, endpoint_sni};
 use crate::config::{AuthenticationConfig, HttpConfig, ProxyConfig, TlsConfig};
 use crate::context::RequestContext;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
-use crate::http::{read_body_with_limit, ReadBodyError};
+use crate::http::{ReadBodyError, read_body_with_limit};
 use crate::metrics::{HttpDirection, Metrics};
-use crate::proxy::{run_until_cancelled, NeonOptions};
+use crate::proxy::{NeonOptions, run_until_cancelled};
 use crate::serverless::backend::HttpConnError;
 use crate::types::{DbName, RoleName};
 use crate::usage_metrics::{MetricCounter, MetricCounterRecorder, TrafficDirection};
@@ -1021,7 +1021,7 @@ async fn query_to_json<T: GenericClient>(
     data: QueryData,
     current_size: &mut usize,
     parsed_headers: HttpHeaders,
-) -> Result<(ReadyForQueryStatus, impl Serialize), SqlOverHttpError> {
+) -> Result<(ReadyForQueryStatus, impl Serialize + use<T>), SqlOverHttpError> {
     let query_start = Instant::now();
 
     let query_params = data.params;
