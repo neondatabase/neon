@@ -1,18 +1,19 @@
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
+use bytes::Bytes;
+use fallible_iterator::FallibleIterator;
+use futures_util::{TryStreamExt, pin_mut};
+use log::debug;
+use postgres_protocol2::message::backend::Message;
+use postgres_protocol2::message::frontend;
+
 use crate::client::InnerClient;
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
 use crate::types::{Field, Kind, Oid, Type};
-use crate::{query, slice_iter};
-use crate::{Column, Error, Statement};
-use bytes::Bytes;
-use fallible_iterator::FallibleIterator;
-use futures_util::{pin_mut, TryStreamExt};
-use log::debug;
-use postgres_protocol2::message::backend::Message;
-use postgres_protocol2::message::frontend;
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
+use crate::{Column, Error, Statement, query, slice_iter};
 
 pub(crate) const TYPEINFO_QUERY: &str = "\
 SELECT t.typname, t.typtype, t.typelem, r.rngsubtype, t.typbasetype, n.nspname, t.typrelid

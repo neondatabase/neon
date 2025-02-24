@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use tokio::sync::Notify;
-use tokio::time::error::Elapsed;
 use tokio::time::Instant;
+use tokio::time::error::Elapsed;
 
 use self::aimd::Aimd;
 

@@ -1189,6 +1189,39 @@ impl Tenant {
                 format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
             })?;
 
+        // When unarchiving, we've mostly likely lost the heatmap generated prior
+        // to the archival operation. To allow warming this timeline up, generate
+        // a previous heatmap which contains all visible layers in the layer map.
+        // This previous heatmap will be used whenever a fresh heatmap is generated
+        // for the timeline.
+        if matches!(cause, LoadTimelineCause::Unoffload) {
+            let mut tline_ending_at = Some((&timeline, timeline.get_last_record_lsn()));
+            while let Some((tline, end_lsn)) = tline_ending_at {
+                let unarchival_heatmap = tline.generate_unarchival_heatmap(end_lsn).await;
+                if !tline.is_previous_heatmap_active() {
+                    tline
+                        .previous_heatmap
+                        .store(Some(Arc::new(unarchival_heatmap)));
+                } else {
+                    tracing::info!("Previous heatmap still active. Dropping unarchival heatmap.")
+                }
+
+                match tline.ancestor_timeline() {
+                    Some(ancestor) => {
+                        if ancestor.update_layer_visibility().await.is_err() {
+                            // Ancestor timeline is shutting down.
+                            break;
+                        }
+
+                        tline_ending_at = Some((ancestor, tline.get_ancestor_lsn()));
+                    }
+                    None => {
+                        tline_ending_at = None;
+                    }
+                }
+            }
+        }
+
         match import_pgdata {
             Some(import_pgdata) if !import_pgdata.is_done() => {
                 match cause {
@@ -3150,6 +3183,12 @@ impl Tenant {
             // Offload failures don't trip the circuit breaker, since they're cheap to retry and
             // shouldn't block compaction.
             CompactionError::Offload(_) => {}
+            CompactionError::CollectKeySpaceError(err) => {
+                self.compaction_circuit_breaker
+                    .lock()
+                    .unwrap()
+                    .fail(&CIRCUIT_BREAKERS_BROKEN, err);
+            }
             CompactionError::Other(err) => {
                 self.compaction_circuit_breaker
                     .lock()

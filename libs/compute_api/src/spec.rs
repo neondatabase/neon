@@ -252,7 +252,7 @@ pub enum ComputeMode {
     Replica,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Cluster {
     pub cluster_id: Option<String>,
     pub name: Option<String>,
@@ -283,7 +283,7 @@ pub struct DeltaOp {
 
 /// Rust representation of Postgres role info with only those fields
 /// that matter for us.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Role {
     pub name: PgIdent,
     pub encrypted_password: Option<String>,
@@ -292,7 +292,7 @@ pub struct Role {
 
 /// Rust representation of Postgres database info with only those fields
 /// that matter for us.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Database {
     pub name: PgIdent,
     pub owner: PgIdent,
@@ -308,7 +308,7 @@ pub struct Database {
 /// Common type representing both SQL statement params with or without value,
 /// like `LOGIN` or `OWNER username` in the `CREATE/ALTER ROLE`, and config
 /// options like `wal_level = logical`.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct GenericOption {
     pub name: String,
     pub value: Option<String>,

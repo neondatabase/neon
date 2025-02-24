@@ -1,6 +1,6 @@
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{ready, Context, Poll};
+use std::task::{Context, Poll, ready};
 
 use anyhow::Context as _;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -15,9 +15,9 @@ use tracing::warn;
 use crate::cancellation::CancellationHandler;
 use crate::config::ProxyConfig;
 use crate::context::RequestContext;
-use crate::error::{io_error, ReportableError};
+use crate::error::{ReportableError, io_error};
 use crate::metrics::Metrics;
-use crate::proxy::{handle_client, ClientMode, ErrorSource};
+use crate::proxy::{ClientMode, ErrorSource, handle_client};
 use crate::rate_limiter::EndpointRateLimiter;
 
 pin_project! {
@@ -184,11 +184,11 @@ mod tests {
 
     use framed_websockets::WebSocketServer;
     use futures::{SinkExt, StreamExt};
-    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
     use tokio::task::JoinSet;
-    use tokio_tungstenite::tungstenite::protocol::Role;
-    use tokio_tungstenite::tungstenite::Message;
     use tokio_tungstenite::WebSocketStream;
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::protocol::Role;
 
     use super::WebSocketRw;
 

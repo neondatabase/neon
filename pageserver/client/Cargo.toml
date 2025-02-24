@@ -21,5 +21,4 @@ tokio.workspace = true
 futures.workspace = true
 tokio-util.workspace = true
 anyhow.workspace = true
-postgres.workspace = true
 bytes.workspace = true

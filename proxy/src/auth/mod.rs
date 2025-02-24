@@ -5,13 +5,13 @@ pub use backend::Backend;
 
 mod credentials;
 pub(crate) use credentials::{
-    check_peer_addr_is_in_list, endpoint_sni, ComputeUserInfoMaybeEndpoint,
-    ComputeUserInfoParseError, IpPattern,
+    ComputeUserInfoMaybeEndpoint, ComputeUserInfoParseError, IpPattern, check_peer_addr_is_in_list,
+    endpoint_sni,
 };
 
 mod password_hack;
-pub(crate) use password_hack::parse_endpoint_param;
 use password_hack::PasswordHackPayload;
+pub(crate) use password_hack::parse_endpoint_param;
 
 mod flow;
 use std::io;

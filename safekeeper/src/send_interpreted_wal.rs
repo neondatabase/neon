@@ -295,6 +295,10 @@ impl InterpretedWalReader {
 
         let mut wal_decoder = WalStreamDecoder::new(start_pos, self.pg_version);
 
+        // Tracks the start of the PG WAL LSN from which the current batch of
+        // interpreted records originated.
+        let mut current_batch_wal_start_lsn: Option<Lsn> = None;
+
         loop {
             tokio::select! {
                 // Main branch for reading WAL and forwarding it
@@ -302,7 +306,7 @@ impl InterpretedWalReader {
                     let wal = wal_or_reset.map(|wor| wor.get_wal().expect("reset handled in select branch below"));
                     let WalBytes {
                         wal,
-                        wal_start_lsn: _,
+                        wal_start_lsn,
                         wal_end_lsn,
                         available_wal_end_lsn,
                     } = match wal {
@@ -314,6 +318,12 @@ impl InterpretedWalReader {
                             return Result::Err(InterpretedWalReaderError::WalStreamClosed);
                         }
                     };
+
+                    // We will already have a value if the previous chunks of WAL
+                    // did not decode into anything useful.
+                    if current_batch_wal_start_lsn.is_none() {
+                        current_batch_wal_start_lsn = Some(wal_start_lsn);
+                    }
 
                     wal_decoder.feed_bytes(&wal);
 
@@ -363,7 +373,9 @@ impl InterpretedWalReader {
 
                     let max_next_record_lsn = match max_next_record_lsn {
                         Some(lsn) => lsn,
-                        None => { continue; }
+                        None => {
+                            continue;
+                        }
                     };
 
                     // Update the current position such that new receivers can decide
@@ -377,21 +389,38 @@ impl InterpretedWalReader {
                         }
                     }
 
+                    let batch_wal_start_lsn = current_batch_wal_start_lsn.take().unwrap();
+
                     // Send interpreted records downstream. Anything that has already been seen
                     // by a shard is filtered out.
                     let mut shard_senders_to_remove = Vec::new();
                     for (shard, states) in &mut self.shard_senders {
                         for state in states {
-                            if max_next_record_lsn <= state.next_record_lsn {
-                                continue;
-                            }
-
                             let shard_sender_id = ShardSenderId::new(*shard, state.sender_id);
-                            let records = records_by_sender.remove(&shard_sender_id).unwrap_or_default();
 
-                            let batch = InterpretedWalRecords {
-                                records,
-                                next_record_lsn: Some(max_next_record_lsn),
+                            let batch = if max_next_record_lsn > state.next_record_lsn {
+                                // This batch contains at least one record that this shard has not
+                                // seen yet.
+                                let records = records_by_sender.remove(&shard_sender_id).unwrap_or_default();
+
+                                InterpretedWalRecords {
+                                    records,
+                                    next_record_lsn: max_next_record_lsn,
+                                    raw_wal_start_lsn: Some(batch_wal_start_lsn),
+                                }
+                            } else if wal_end_lsn > state.next_record_lsn {
+                                // All the records in this batch were seen by the shard
+                                // However, the batch maps to a chunk of WAL that the
+                                // shard has not yet seen. Notify it of the start LSN
+                                // of the PG WAL chunk such that it doesn't look like a gap.
+                                InterpretedWalRecords {
+                                    records: Vec::default(),
+                                    next_record_lsn: state.next_record_lsn,
+                                    raw_wal_start_lsn: Some(batch_wal_start_lsn),
+                                }
+                            } else {
+                                // The shard has seen this chunk of WAL before. Skip it.
+                                continue;
                             };
 
                             let res = state.tx.send(Batch {
@@ -403,7 +432,7 @@ impl InterpretedWalReader {
                             if res.is_err() {
                                 shard_senders_to_remove.push(shard_sender_id);
                             } else {
-                                state.next_record_lsn = max_next_record_lsn;
+                                state.next_record_lsn = std::cmp::max(state.next_record_lsn, max_next_record_lsn);
                             }
                         }
                     }

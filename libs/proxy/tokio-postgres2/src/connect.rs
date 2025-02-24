@@ -1,3 +1,7 @@
+use postgres_protocol2::message::backend::Message;
+use tokio::net::TcpStream;
+use tokio::sync::mpsc;
+
 use crate::client::SocketConfig;
 use crate::codec::BackendMessage;
 use crate::config::Host;
@@ -5,9 +9,6 @@ use crate::connect_raw::connect_raw;
 use crate::connect_socket::connect_socket;
 use crate::tls::{MakeTlsConnect, TlsConnect};
 use crate::{Client, Config, Connection, Error, RawConnection};
-use postgres_protocol2::message::backend::Message;
-use tokio::net::TcpStream;
-use tokio::sync::mpsc;
 
 pub async fn connect<T>(
     mut tls: T,

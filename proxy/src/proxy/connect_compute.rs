@@ -5,7 +5,7 @@ use tracing::{debug, info, warn};
 
 use super::retry::ShouldRetryWakeCompute;
 use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
-use crate::compute::{self, PostgresConnection, COULD_NOT_CONNECT};
+use crate::compute::{self, COULD_NOT_CONNECT, PostgresConnection};
 use crate::config::{ComputeConfig, RetryConfig};
 use crate::context::RequestContext;
 use crate::control_plane::errors::WakeComputeError;
@@ -15,7 +15,7 @@ use crate::error::ReportableError;
 use crate::metrics::{
     ConnectOutcome, ConnectionFailureKind, Metrics, RetriesMetricGroup, RetryType,
 };
-use crate::proxy::retry::{retry_after, should_retry, CouldRetry};
+use crate::proxy::retry::{CouldRetry, retry_after, should_retry};
 use crate::proxy::wake_compute::wake_compute;
 use crate::types::Host;
 

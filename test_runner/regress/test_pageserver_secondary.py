@@ -8,9 +8,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from fixtures.common_types import TenantId, TenantShardId, TimelineId
+from fixtures.common_types import TenantId, TenantShardId, TimelineArchivalState, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
+    DEFAULT_BRANCH_NAME,
     NeonEnvBuilder,
     NeonPageserver,
     StorageControllerMigrationConfig,
@@ -903,6 +904,9 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
     )
 
+    tenant_conf = TENANT_CONF.copy()
+    tenant_conf["heatmap_period"] = "0s"
+
     env = neon_env_builder.init_configs()
     env.start()
 
@@ -910,7 +914,7 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
 
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
-    env.create_tenant(tenant_id, timeline_id, conf=TENANT_CONF, placement_policy='{"Attached":1}')
+    env.create_tenant(tenant_id, timeline_id, conf=tenant_conf, placement_policy='{"Attached":1}')
 
     env.storage_controller.reconcile_until_idle()
 
@@ -924,8 +928,12 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
     workload.write_rows(128, upload=True)
     workload.write_rows(128, upload=True)
     workload.write_rows(128, upload=True)
+
+    child_timeline_id = env.create_branch(
+        "foo", tenant_id, ancestor_branch_name=DEFAULT_BRANCH_NAME
+    )
+
     workload.write_rows(128, upload=True)
-    workload.stop()
 
     # Expect lots of layers
     assert len(ps_attached.list_layers(tenant_id, timeline_id)) > 10
@@ -934,9 +942,19 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
     for ps in env.pageservers:
         ps.http_client().configure_failpoints([("secondary-layer-download-sleep", "return(1000)")])
 
+    def timeline_heatmap(tlid):
+        assert env.pageserver_remote_storage is not None
+
+        heatmap = env.pageserver_remote_storage.heatmap_content(tenant_id)
+        for htl in heatmap["timelines"]:
+            if htl["timeline_id"] == str(tlid):
+                return htl
+
+        raise RuntimeError(f"No heatmap for timeline: {tlid}")
+
     # Upload a heatmap, so that secondaries have something to download
     ps_attached.http_client().tenant_heatmap_upload(tenant_id)
-    heatmap_before_migration = env.pageserver_remote_storage.heatmap_content(tenant_id)
+    heatmap_before_migration = timeline_heatmap(timeline_id)
 
     # This has no chance to succeed: we have lots of layers and each one takes at least 1000ms.
     # However, it pulls the heatmap, which will be important later.
@@ -968,17 +986,12 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
     assert env.storage_controller.locate(tenant_id)[0]["node_id"] == ps_secondary.id
 
     ps_secondary.http_client().tenant_heatmap_upload(tenant_id)
-    heatmap_after_migration = env.pageserver_remote_storage.heatmap_content(tenant_id)
+    heatmap_after_migration = timeline_heatmap(timeline_id)
 
-    assert len(heatmap_before_migration["timelines"][0]["layers"]) > 0
+    assert len(heatmap_before_migration["layers"]) > 0
 
-    # The new layer map should contain all the layers in the pre-migration one
-    # and a new in memory layer
-    after_migration_heatmap_layers_count = len(heatmap_after_migration["timelines"][0]["layers"])
-    assert (
-        len(heatmap_before_migration["timelines"][0]["layers"]) + 1
-        == after_migration_heatmap_layers_count
-    )
+    after_migration_heatmap_layers_count = len(heatmap_after_migration["layers"])
+    assert len(heatmap_before_migration["layers"]) <= after_migration_heatmap_layers_count
 
     log.info(f"Heatmap size after cold migration is {after_migration_heatmap_layers_count}")
 
@@ -986,10 +999,71 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
         TenantShardId(tenant_id, shard_number=0, shard_count=0), timeline_id
     )
 
-    def all_layers_downloaded():
+    # Now simulate the case where a child timeline is archived, parent layers
+    # are evicted and the child is unarchived. When the child is unarchived,
+    # itself and the parent update their heatmaps to contain layers needed by the
+    # child. One can warm up the timeline hierarchy since the heatmaps are ready.
+
+    def all_layers_downloaded(expected_layer_count: int):
         local_layers_count = len(ps_secondary.list_layers(tenant_id, timeline_id))
 
         log.info(f"{local_layers_count=} {after_migration_heatmap_layers_count=}")
-        assert local_layers_count == after_migration_heatmap_layers_count
+        assert local_layers_count >= expected_layer_count
 
-    wait_until(all_layers_downloaded)
+    wait_until(lambda: all_layers_downloaded(after_migration_heatmap_layers_count))
+    ps_secondary.http_client().tenant_heatmap_upload(tenant_id)
+
+    before = (
+        ps_secondary.http_client()
+        .get_metrics()
+        .query_one("pageserver_remote_ondemand_downloaded_layers_total")
+        .value
+    )
+    workload.validate()
+    after = (
+        ps_secondary.http_client()
+        .get_metrics()
+        .query_one("pageserver_remote_ondemand_downloaded_layers_total")
+        .value
+    )
+
+    workload.stop()
+    assert before == after
+
+    def check_archival_state(state: TimelineArchivalState, tline):
+        timelines = (
+            timeline["timeline_id"]
+            for timeline in ps_secondary.http_client().timeline_list(tenant_id=tenant_id)
+        )
+
+        if state == TimelineArchivalState.ARCHIVED:
+            assert str(tline) not in timelines
+        elif state == TimelineArchivalState.UNARCHIVED:
+            assert str(tline) in timelines
+
+    ps_secondary.http_client().timeline_archival_config(
+        tenant_id, child_timeline_id, TimelineArchivalState.ARCHIVED
+    )
+    ps_secondary.http_client().timeline_offload(tenant_id, child_timeline_id)
+    wait_until(lambda: check_archival_state(TimelineArchivalState.ARCHIVED, child_timeline_id))
+
+    ps_secondary.http_client().evict_all_layers(tenant_id, timeline_id)
+    ps_secondary.http_client().tenant_heatmap_upload(tenant_id)
+    assert len(timeline_heatmap(timeline_id)["layers"]) == 0
+
+    ps_secondary.http_client().timeline_archival_config(
+        tenant_id, child_timeline_id, TimelineArchivalState.UNARCHIVED
+    )
+    wait_until(lambda: check_archival_state(TimelineArchivalState.UNARCHIVED, child_timeline_id))
+
+    ps_secondary.http_client().tenant_heatmap_upload(tenant_id)
+    log.info(f"Parent timeline heatmap size: {len(timeline_heatmap(timeline_id)['layers'])}")
+    log.info(f"Child timeline heatmap size: {len(timeline_heatmap(child_timeline_id)['layers'])}")
+
+    expected_locally = len(timeline_heatmap(timeline_id)["layers"])
+    assert expected_locally > 0
+
+    env.storage_controller.download_heatmap_layers(
+        TenantShardId(tenant_id, shard_number=0, shard_count=0), timeline_id
+    )
+    wait_until(lambda: all_layers_downloaded(expected_locally))

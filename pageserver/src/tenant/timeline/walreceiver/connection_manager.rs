@@ -537,6 +537,7 @@ impl ConnectionManagerState {
         let connect_timeout = self.conf.wal_connect_timeout;
         let ingest_batch_size = self.conf.ingest_batch_size;
         let protocol = self.conf.protocol;
+        let validate_wal_contiguity = self.conf.validate_wal_contiguity;
         let timeline = Arc::clone(&self.timeline);
         let ctx = ctx.detached_child(
             TaskKind::WalReceiverConnectionHandler,
@@ -558,6 +559,7 @@ impl ConnectionManagerState {
                     ctx,
                     node_id,
                     ingest_batch_size,
+                    validate_wal_contiguity,
                 )
                 .await;
 
@@ -1563,6 +1565,7 @@ mod tests {
                 auth_token: None,
                 availability_zone: None,
                 ingest_batch_size: 1,
+                validate_wal_contiguity: false,
             },
             wal_connection: None,
             wal_stream_candidates: HashMap::new(),

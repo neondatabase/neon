@@ -1,7 +1,7 @@
 use std::io::ErrorKind;
 
 use anyhow::Ok;
-use pq_proto::{id_to_cancel_key, CancelKeyData};
+use pq_proto::{CancelKeyData, id_to_cancel_key};
 use serde::{Deserialize, Serialize};
 
 pub mod keyspace {

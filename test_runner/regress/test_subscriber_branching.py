@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import threading
 import time
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
+from fixtures.neon_fixtures import NeonEnv, logical_replication_sync
 from fixtures.utils import query_scalar, wait_until
 
 
@@ -239,3 +240,173 @@ def test_subscriber_branching(neon_simple_env: NeonEnv):
             res = scur_postgres.fetchall()
             assert len(res) == 1
             assert str(sub_child_2_timeline_id) == res[0][0]
+
+
+def test_multiple_subscription_branching(neon_simple_env: NeonEnv):
+    """
+    Test that compute_ctl can handle concurrent deletion of subscriptions in a multiple databases
+    """
+    env = neon_simple_env
+
+    NUMBER_OF_DBS = 5
+
+    # Create and start endpoint so that neon_local put all the generated
+    # stuff into the spec.json file.
+    endpoint = env.endpoints.create_start(
+        "main",
+        config_lines=[
+            "max_replication_slots = 10",
+            "max_logical_replication_workers=10",
+            "max_worker_processes=10",
+        ],
+    )
+
+    TEST_DB_NAMES = [
+        {
+            "name": "neondb",
+            "owner": "cloud_admin",
+        },
+        {
+            "name": "publisher_db",
+            "owner": "cloud_admin",
+        },
+    ]
+
+    for i in range(NUMBER_OF_DBS):
+        TEST_DB_NAMES.append(
+            {
+                "name": f"db{i}",
+                "owner": "cloud_admin",
+            }
+        )
+
+    # Update the spec.json file to create the databases
+    # and reconfigure the endpoint to apply the changes.
+    endpoint.respec_deep(
+        **{
+            "skip_pg_catalog_updates": False,
+            "cluster": {
+                "databases": TEST_DB_NAMES,
+            },
+        }
+    )
+    endpoint.reconfigure()
+
+    connstr = endpoint.connstr(dbname="publisher_db").replace("'", "''")
+
+    # create table, replication and subscription for each of the databases
+    with endpoint.cursor(dbname="publisher_db") as publisher_cursor:
+        for i in range(NUMBER_OF_DBS):
+            publisher_cursor.execute(f"CREATE TABLE t{i}(a int)")
+            publisher_cursor.execute(f"CREATE PUBLICATION mypub{i} FOR TABLE t{i}")
+            publisher_cursor.execute(
+                f"select pg_catalog.pg_create_logical_replication_slot('mysub{i}', 'pgoutput');"
+            )
+            publisher_cursor.execute(f"INSERT INTO t{i} VALUES ({i})")
+
+            with endpoint.cursor(dbname=f"db{i}") as cursor:
+                cursor.execute(f"CREATE TABLE t{i}(a int)")
+                cursor.execute(
+                    f"CREATE SUBSCRIPTION mysub{i} CONNECTION '{connstr}' PUBLICATION mypub{i}  WITH (create_slot = false) "
+                )
+
+    # wait for the subscription to be active
+    for i in range(NUMBER_OF_DBS):
+        logical_replication_sync(
+            endpoint,
+            endpoint,
+            f"mysub{i}",
+            sub_dbname=f"db{i}",
+            pub_dbname="publisher_db",
+        )
+
+    # Check that replication is working
+    for i in range(NUMBER_OF_DBS):
+        with endpoint.cursor(dbname=f"db{i}") as cursor:
+            cursor.execute(f"SELECT * FROM t{i}")
+            rows = cursor.fetchall()
+            assert len(rows) == 1
+            assert rows[0][0] == i
+
+            last_insert_lsn = query_scalar(cursor, "select pg_current_wal_insert_lsn();")
+
+    def start_publisher_workload(table_num: int, duration: int):
+        start = time.time()
+        with endpoint.cursor(dbname="publisher_db") as cur:
+            while time.time() - start < duration:
+                cur.execute(f"INSERT INTO t{i} SELECT FROM generate_series(1,1000)")
+
+    LOAD_DURATION = 5
+    threads = [
+        threading.Thread(target=start_publisher_workload, args=(i, LOAD_DURATION))
+        for i in range(NUMBER_OF_DBS)
+    ]
+
+    for thread in threads:
+        thread.start()
+
+    sub_child_1_timeline_id = env.create_branch(
+        "subscriber_child_1",
+        ancestor_branch_name="main",
+        ancestor_start_lsn=last_insert_lsn,
+    )
+
+    sub_child_1 = env.endpoints.create("subscriber_child_1")
+
+    sub_child_1.respec(
+        skip_pg_catalog_updates=False,
+        reconfigure_concurrency=5,
+        drop_subscriptions_before_start=True,
+        cluster={
+            "databases": TEST_DB_NAMES,
+            "roles": [],
+        },
+    )
+
+    sub_child_1.start()
+
+    # ensure that subscription deletion happened on this timeline
+    with sub_child_1.cursor() as scur_postgres:
+        scur_postgres.execute("SELECT timeline_id from neon.drop_subscriptions_done")
+        res = scur_postgres.fetchall()
+        log.info(f"res = {res}")
+        assert len(res) == 1
+        assert str(sub_child_1_timeline_id) == res[0][0]
+
+    # ensure that there are no subscriptions in the databases
+    for i in range(NUMBER_OF_DBS):
+        with sub_child_1.cursor(dbname=f"db{i}") as cursor:
+            cursor.execute("SELECT * FROM pg_catalog.pg_subscription")
+            res = cursor.fetchall()
+            assert len(res) == 0
+
+            # ensure that there are no unexpected rows in the tables
+            cursor.execute(f"SELECT * FROM t{i}")
+            rows = cursor.fetchall()
+            assert len(rows) == 1
+            assert rows[0][0] == i
+
+    for thread in threads:
+        thread.join()
+
+    # ensure that logical replication is still working in main endpoint
+    # wait for it to catch up
+    for i in range(NUMBER_OF_DBS):
+        logical_replication_sync(
+            endpoint,
+            endpoint,
+            f"mysub{i}",
+            sub_dbname=f"db{i}",
+            pub_dbname="publisher_db",
+        )
+
+    # verify that the data is the same in publisher and subscriber tables
+    with endpoint.cursor(dbname="publisher_db") as publisher_cursor:
+        for i in range(NUMBER_OF_DBS):
+            with endpoint.cursor(dbname=f"db{i}") as cursor:
+                publisher_cursor.execute(f"SELECT count(*) FROM t{i}")
+                cursor.execute(f"SELECT count(*) FROM t{i}")
+                pub_res = publisher_cursor.fetchone()
+                sub_res = cursor.fetchone()
+                log.info(f"for table t{i}: pub_res = {pub_res}, sub_res = {sub_res}")
+                assert pub_res == sub_res

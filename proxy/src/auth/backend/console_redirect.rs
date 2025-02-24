@@ -8,16 +8,16 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, info_span};
 
 use super::ComputeCredentialKeys;
-use crate::auth::backend::ComputeUserInfo;
 use crate::auth::IpPattern;
+use crate::auth::backend::ComputeUserInfo;
 use crate::cache::Cached;
 use crate::config::AuthenticationConfig;
 use crate::context::RequestContext;
 use crate::control_plane::client::cplane_proxy_v1;
 use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
 use crate::error::{ReportableError, UserFacingError};
-use crate::proxy::connect_compute::ComputeConnectBackend;
 use crate::proxy::NeonOptions;
+use crate::proxy::connect_compute::ComputeConnectBackend;
 use crate::stream::PqStream;
 use crate::types::RoleName;
 use crate::{auth, compute, waiters};

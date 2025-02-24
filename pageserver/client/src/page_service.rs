@@ -34,7 +34,8 @@ pub struct BasebackupRequest {
 
 impl Client {
     pub async fn new(connstring: String) -> anyhow::Result<Self> {
-        let (client, connection) = tokio_postgres::connect(&connstring, postgres::NoTls).await?;
+        let (client, connection) =
+            tokio_postgres::connect(&connstring, tokio_postgres::NoTls).await?;
 
         let conn_task_cancel = CancellationToken::new();
         let conn_task = tokio::spawn({

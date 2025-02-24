@@ -56,6 +56,7 @@ pub struct WalReceiverConf {
     pub auth_token: Option<Arc<String>>,
     pub availability_zone: Option<String>,
     pub ingest_batch_size: u64,
+    pub validate_wal_contiguity: bool,
 }
 
 pub struct WalReceiver {

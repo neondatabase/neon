@@ -171,10 +171,10 @@ impl PgConnectionConfig {
             tokio_postgres::Client,
             tokio_postgres::Connection<tokio_postgres::Socket, tokio_postgres::tls::NoTlsStream>,
         ),
-        postgres::Error,
+        tokio_postgres::Error,
     > {
         self.to_tokio_postgres_config()
-            .connect(postgres::NoTls)
+            .connect(tokio_postgres::NoTls)
             .await
     }
 }

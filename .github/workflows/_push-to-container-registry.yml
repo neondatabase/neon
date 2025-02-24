@@ -2,7 +2,7 @@ name: Push images to Container Registry
 on:
   workflow_call:
     inputs:
-      # Example: {"docker.io/neondatabase/neon:13196061314":["369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:13196061314","neoneastus2.azurecr.io/neondatabase/neon:13196061314"]}
+      # Example: {"docker.io/neondatabase/neon:13196061314":["${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/neon:13196061314","neoneastus2.azurecr.io/neondatabase/neon:13196061314"]}
       image-map:
         description: JSON map of images, mapping from a source image to an array of target images that should be pushed.
         required: true

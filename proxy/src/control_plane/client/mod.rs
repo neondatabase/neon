@@ -10,15 +10,15 @@ use clashmap::ClashMap;
 use tokio::time::Instant;
 use tracing::{debug, info};
 
-use crate::auth::backend::jwt::{AuthRule, FetchAuthRules, FetchAuthRulesError};
 use crate::auth::backend::ComputeUserInfo;
+use crate::auth::backend::jwt::{AuthRule, FetchAuthRules, FetchAuthRulesError};
 use crate::cache::endpoints::EndpointsCache;
 use crate::cache::project_info::ProjectInfoCacheImpl;
 use crate::config::{CacheOptions, EndpointCacheConfig, ProjectInfoCacheOptions};
 use crate::context::RequestContext;
 use crate::control_plane::{
-    errors, CachedAccessBlockerFlags, CachedAllowedIps, CachedAllowedVpcEndpointIds,
-    CachedNodeInfo, CachedRoleSecret, ControlPlaneApi, NodeInfoCache,
+    CachedAccessBlockerFlags, CachedAllowedIps, CachedAllowedVpcEndpointIds, CachedNodeInfo,
+    CachedRoleSecret, ControlPlaneApi, NodeInfoCache, errors,
 };
 use crate::error::ReportableError;
 use crate::metrics::ApiLockMetrics;

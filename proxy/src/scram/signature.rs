@@ -1,6 +1,6 @@
 //! Tools for client/server signature management.
 
-use super::key::{ScramKey, SCRAM_KEY_LEN};
+use super::key::{SCRAM_KEY_LEN, ScramKey};
 
 /// A collection of message parts needed to derive the client's signature.
 #[derive(Debug)]

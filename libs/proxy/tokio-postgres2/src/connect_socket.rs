@@ -1,10 +1,12 @@
-use crate::config::Host;
-use crate::Error;
 use std::future::Future;
 use std::io;
 use std::time::Duration;
+
 use tokio::net::{self, TcpStream};
 use tokio::time;
+
+use crate::Error;
+use crate::config::Host;
 
 pub(crate) async fn connect_socket(
     host: &Host,

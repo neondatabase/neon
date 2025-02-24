@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 
 use crate::auth::credentials::check_peer_addr_is_in_list;
 use crate::auth::{
-    self, validate_password_and_exchange, AuthError, ComputeUserInfoMaybeEndpoint, IpPattern,
+    self, AuthError, ComputeUserInfoMaybeEndpoint, IpPattern, validate_password_and_exchange,
 };
 use crate::cache::Cached;
 use crate::config::AuthenticationConfig;
@@ -32,8 +32,8 @@ use crate::control_plane::{
 use crate::intern::EndpointIdInt;
 use crate::metrics::Metrics;
 use crate::protocol2::ConnectionInfoExtra;
-use crate::proxy::connect_compute::ComputeConnectBackend;
 use crate::proxy::NeonOptions;
+use crate::proxy::connect_compute::ComputeConnectBackend;
 use crate::rate_limiter::{BucketRateLimiter, EndpointRateLimiter};
 use crate::stream::Stream;
 use crate::types::{EndpointCacheKey, EndpointId, RoleName};
@@ -308,10 +308,7 @@ async fn auth_quirks(
 
         let incoming_vpc_endpoint_id = match ctx.extra() {
             None => return Err(AuthError::MissingEndpointName),
-            Some(ConnectionInfoExtra::Aws { vpce_id }) => {
-                // Convert the vcpe_id to a string
-                String::from_utf8(vpce_id.to_vec()).unwrap_or_default()
-            }
+            Some(ConnectionInfoExtra::Aws { vpce_id }) => vpce_id.to_string(),
             Some(ConnectionInfoExtra::Azure { link_id }) => link_id.to_string(),
         };
         let allowed_vpc_endpoint_ids = api.get_allowed_vpc_endpoint_ids(ctx, &info).await?;
@@ -451,7 +448,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
                 Ok((Backend::ControlPlane(api, credentials), ip_allowlist))
             }
             Self::Local(_) => {
-                return Err(auth::AuthError::bad_auth_method("invalid for local proxy"))
+                return Err(auth::AuthError::bad_auth_method("invalid for local proxy"));
             }
         };
 
@@ -545,7 +542,7 @@ mod tests {
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
     use super::jwt::JwkCache;
-    use super::{auth_quirks, AuthRateLimiter};
+    use super::{AuthRateLimiter, auth_quirks};
     use crate::auth::backend::MaskedIp;
     use crate::auth::{ComputeUserInfoMaybeEndpoint, IpPattern};
     use crate::config::AuthenticationConfig;
@@ -556,8 +553,8 @@ mod tests {
     };
     use crate::proxy::NeonOptions;
     use crate::rate_limiter::{EndpointRateLimiter, RateBucketInfo};
-    use crate::scram::threadpool::ThreadPool;
     use crate::scram::ServerSecret;
+    use crate::scram::threadpool::ThreadPool;
     use crate::stream::{PqStream, Stream};
 
     struct Auth {

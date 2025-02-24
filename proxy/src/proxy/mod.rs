@@ -9,28 +9,28 @@ pub(crate) mod retry;
 pub(crate) mod wake_compute;
 use std::sync::Arc;
 
-pub use copy_bidirectional::{copy_bidirectional_client_compute, ErrorSource};
+pub use copy_bidirectional::{ErrorSource, copy_bidirectional_client_compute};
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pq_proto::{BeMessage as Be, CancelKeyData, StartupMessageParams};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use smol_str::{format_smolstr, SmolStr};
+use smol_str::{SmolStr, ToSmolStr, format_smolstr};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn, Instrument};
+use tracing::{Instrument, debug, error, info, warn};
 
-use self::connect_compute::{connect_to_compute, TcpMechanism};
+use self::connect_compute::{TcpMechanism, connect_to_compute};
 use self::passthrough::ProxyPassthrough;
 use crate::cancellation::{self, CancellationHandler};
 use crate::config::{ProxyConfig, ProxyProtocolV2, TlsConfig};
 use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
-use crate::protocol2::{read_proxy_protocol, ConnectHeader, ConnectionInfo};
-use crate::proxy::handshake::{handshake, HandshakeData};
+use crate::protocol2::{ConnectHeader, ConnectionInfo, ConnectionInfoExtra, read_proxy_protocol};
+use crate::proxy::handshake::{HandshakeData, handshake};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::stream::{PqStream, Stream};
 use crate::types::EndpointCacheKey;
@@ -100,22 +100,34 @@ pub async fn task_main(
                     debug!("healthcheck received");
                     return;
                 }
-                Ok((_socket, ConnectHeader::Missing)) if config.proxy_protocol_v2 == ProxyProtocolV2::Required => {
+                Ok((_socket, ConnectHeader::Missing))
+                    if config.proxy_protocol_v2 == ProxyProtocolV2::Required =>
+                {
                     warn!("missing required proxy protocol header");
                     return;
                 }
-                Ok((_socket, ConnectHeader::Proxy(_))) if config.proxy_protocol_v2 == ProxyProtocolV2::Rejected => {
+                Ok((_socket, ConnectHeader::Proxy(_)))
+                    if config.proxy_protocol_v2 == ProxyProtocolV2::Rejected =>
+                {
                     warn!("proxy protocol header not supported");
                     return;
                 }
                 Ok((socket, ConnectHeader::Proxy(info))) => (socket, info),
-                Ok((socket, ConnectHeader::Missing)) => (socket, ConnectionInfo { addr: peer_addr, extra: None }),
+                Ok((socket, ConnectHeader::Missing)) => (
+                    socket,
+                    ConnectionInfo {
+                        addr: peer_addr,
+                        extra: None,
+                    },
+                ),
             };
 
             match socket.inner.set_nodelay(true) {
                 Ok(()) => {}
                 Err(e) => {
-                    error!("per-client task finished with an error: failed to set socket option: {e:#}");
+                    error!(
+                        "per-client task finished with an error: failed to set socket option: {e:#}"
+                    );
                     return;
                 }
             }
@@ -156,10 +168,16 @@ pub async fn task_main(
                     match p.proxy_pass(&config.connect_to_compute).await {
                         Ok(()) => {}
                         Err(ErrorSource::Client(e)) => {
-                            warn!(?session_id, "per-client task finished with an IO error from the client: {e:#}");
+                            warn!(
+                                ?session_id,
+                                "per-client task finished with an IO error from the client: {e:#}"
+                            );
                         }
                         Err(ErrorSource::Compute(e)) => {
-                            error!(?session_id, "per-client task finished with an IO error from the compute: {e:#}");
+                            error!(
+                                ?session_id,
+                                "per-client task finished with an IO error from the compute: {e:#}"
+                            );
                         }
                     }
                 }
@@ -374,9 +392,16 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     let (stream, read_buf) = stream.into_inner();
     node.stream.write_all(&read_buf).await?;
 
+    let private_link_id = match ctx.extra() {
+        Some(ConnectionInfoExtra::Aws { vpce_id }) => Some(vpce_id.clone()),
+        Some(ConnectionInfoExtra::Azure { link_id }) => Some(link_id.to_smolstr()),
+        None => None,
+    };
+
     Ok(Some(ProxyPassthrough {
         client: stream,
         aux: node.aux.clone(),
+        private_link_id,
         compute: node,
         session_id: ctx.session_id(),
         cancel: session,

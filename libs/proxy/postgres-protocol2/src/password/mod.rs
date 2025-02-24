@@ -6,11 +6,12 @@
 //! side. This is good because it ensures the cleartext password won't
 //! end up in logs pg_stat displays, etc.
 
-use crate::authentication::sasl;
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha2::digest::FixedOutput;
 use sha2::{Digest, Sha256};
+
+use crate::authentication::sasl;
 
 #[cfg(test)]
 mod test;

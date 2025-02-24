@@ -6,9 +6,9 @@ use std::time::{Duration, SystemTime};
 use arc_swap::ArcSwapOption;
 use clashmap::ClashMap;
 use jose_jwk::crypto::KeyInfo;
-use reqwest::{redirect, Client};
-use reqwest_retry::policies::ExponentialBackoff;
+use reqwest::{Client, redirect};
 use reqwest_retry::RetryTransientMiddleware;
+use reqwest_retry::policies::ExponentialBackoff;
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
@@ -498,8 +498,8 @@ fn verify_rsa_signature(
     alg: &jose_jwa::Algorithm,
 ) -> Result<(), JwtError> {
     use jose_jwa::{Algorithm, Signing};
-    use rsa::pkcs1v15::{Signature, VerifyingKey};
     use rsa::RsaPublicKey;
+    use rsa::pkcs1v15::{Signature, VerifyingKey};
 
     let key = RsaPublicKey::try_from(key).map_err(JwtError::InvalidRsaKey)?;
 

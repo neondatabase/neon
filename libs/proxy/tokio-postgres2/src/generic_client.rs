@@ -1,9 +1,10 @@
 #![allow(async_fn_in_trait)]
 
+use postgres_protocol2::Oid;
+
 use crate::query::RowStream;
 use crate::types::Type;
 use crate::{Client, Error, Transaction};
-use postgres_protocol2::Oid;
 
 mod private {
     pub trait Sealed {}

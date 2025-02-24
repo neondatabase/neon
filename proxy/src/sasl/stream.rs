@@ -5,8 +5,8 @@ use std::io;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
 
-use super::messages::ServerMessage;
 use super::Mechanism;
+use super::messages::ServerMessage;
 use crate::stream::PqStream;
 
 /// Abstracts away all peculiarities of the libpq's protocol.

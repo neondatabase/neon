@@ -4,7 +4,7 @@ use std::fmt;
 use std::ops::Range;
 
 use super::base64_decode_array;
-use super::key::{ScramKey, SCRAM_KEY_LEN};
+use super::key::{SCRAM_KEY_LEN, ScramKey};
 use super::signature::SignatureBuilder;
 use crate::sasl::ChannelBinding;
 

@@ -9,8 +9,8 @@ use http_utils::json::json_response;
 use http_utils::{RouterBuilder, RouterService};
 use hyper0::header::CONTENT_TYPE;
 use hyper0::{Body, Request, Response, StatusCode};
-use measured::text::BufferedTextEncoder;
 use measured::MetricGroup;
+use measured::text::BufferedTextEncoder;
 use metrics::NeonMetrics;
 use tracing::{info, info_span};
 

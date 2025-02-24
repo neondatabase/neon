@@ -1,13 +1,13 @@
 #![allow(missing_docs)]
 
+use std::io::{self, Read};
+use std::ops::Range;
+use std::{cmp, str};
+
 use byteorder::{BigEndian, ByteOrder, ReadBytesExt};
 use bytes::{Bytes, BytesMut};
 use fallible_iterator::FallibleIterator;
 use memchr::memchr;
-use std::cmp;
-use std::io::{self, Read};
-use std::ops::Range;
-use std::str;
 
 use crate::Oid;
 

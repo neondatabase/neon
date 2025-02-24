@@ -6,11 +6,11 @@ use std::sync::Arc;
 use futures::TryFutureExt;
 use thiserror::Error;
 use tokio_postgres::Client;
-use tracing::{error, info, info_span, warn, Instrument};
+use tracing::{Instrument, error, info, info_span, warn};
 
-use crate::auth::backend::jwt::AuthRule;
-use crate::auth::backend::ComputeUserInfo;
 use crate::auth::IpPattern;
+use crate::auth::backend::ComputeUserInfo;
+use crate::auth::backend::jwt::AuthRule;
 use crate::cache::Cached;
 use crate::context::RequestContext;
 use crate::control_plane::client::{

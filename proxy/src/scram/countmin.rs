@@ -90,7 +90,7 @@ mod tests {
             // number of insert operations
             let m = rng.gen_range(1..100);
 
-            let id = uuid::Builder::from_random_bytes(rng.gen()).into_uuid();
+            let id = uuid::Builder::from_random_bytes(rng.r#gen()).into_uuid();
             ids.push((id, n, m));
 
             // N = sum(actual)

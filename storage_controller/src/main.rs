@@ -27,6 +27,16 @@ use utils::{project_build_tag, project_git_version, tcp_listener};
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
 
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+/// Configure jemalloc to profile heap allocations by sampling stack traces every 2 MB (1 << 21).
+/// This adds roughly 3% overhead for allocations on average, which is acceptable considering
+/// performance-sensitive code will avoid allocations as far as possible anyway.
+#[allow(non_upper_case_globals)]
+#[export_name = "malloc_conf"]
+pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:21\0";
+
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 #[command(arg_required_else_help(true))]
@@ -42,6 +52,10 @@ struct Cli {
     /// Token for authenticating this service with the pageservers it controls
     #[arg(long)]
     jwt_token: Option<String>,
+
+    /// Token for authenticating this service with the safekeepers it controls
+    #[arg(long)]
+    safekeeper_jwt_token: Option<String>,
 
     /// Token for authenticating this service with the control plane, when calling
     /// the compute notification endpoint
@@ -116,6 +130,10 @@ struct Cli {
 
     #[arg(long)]
     long_reconcile_threshold: Option<humantime::Duration>,
+
+    // Flag to use https for requests to pageserver API.
+    #[arg(long, default_value = "false")]
+    use_https_pageserver_api: bool,
 }
 
 enum StrictMode {
@@ -139,7 +157,8 @@ impl Default for StrictMode {
 struct Secrets {
     database_url: String,
     public_key: Option<JwtAuth>,
-    jwt_token: Option<String>,
+    pageserver_jwt_token: Option<String>,
+    safekeeper_jwt_token: Option<String>,
     control_plane_jwt_token: Option<String>,
     peer_jwt_token: Option<String>,
 }
@@ -147,6 +166,7 @@ struct Secrets {
 impl Secrets {
     const DATABASE_URL_ENV: &'static str = "DATABASE_URL";
     const PAGESERVER_JWT_TOKEN_ENV: &'static str = "PAGESERVER_JWT_TOKEN";
+    const SAFEKEEPER_JWT_TOKEN_ENV: &'static str = "SAFEKEEPER_JWT_TOKEN";
     const CONTROL_PLANE_JWT_TOKEN_ENV: &'static str = "CONTROL_PLANE_JWT_TOKEN";
     const PEER_JWT_TOKEN_ENV: &'static str = "PEER_JWT_TOKEN";
     const PUBLIC_KEY_ENV: &'static str = "PUBLIC_KEY";
@@ -170,7 +190,14 @@ impl Secrets {
         let this = Self {
             database_url,
             public_key,
-            jwt_token: Self::load_secret(&args.jwt_token, Self::PAGESERVER_JWT_TOKEN_ENV),
+            pageserver_jwt_token: Self::load_secret(
+                &args.jwt_token,
+                Self::PAGESERVER_JWT_TOKEN_ENV,
+            ),
+            safekeeper_jwt_token: Self::load_secret(
+                &args.safekeeper_jwt_token,
+                Self::SAFEKEEPER_JWT_TOKEN_ENV,
+            ),
             control_plane_jwt_token: Self::load_secret(
                 &args.control_plane_jwt_token,
                 Self::CONTROL_PLANE_JWT_TOKEN_ENV,
@@ -250,11 +277,17 @@ async fn async_main() -> anyhow::Result<()> {
 
     let secrets = Secrets::load(&args).await?;
 
+    // TODO: once we've rolled out the safekeeper JWT token everywhere, put it into the validation code below
+    tracing::info!(
+        "safekeeper_jwt_token set: {:?}",
+        secrets.safekeeper_jwt_token.is_some()
+    );
+
     // Validate required secrets and arguments are provided in strict mode
     match strict_mode {
         StrictMode::Strict
             if (secrets.public_key.is_none()
-                || secrets.jwt_token.is_none()
+                || secrets.pageserver_jwt_token.is_none()
                 || secrets.control_plane_jwt_token.is_none()) =>
         {
             // Production systems should always have secrets configured: if public_key was not set
@@ -279,7 +312,8 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     let config = Config {
-        jwt_token: secrets.jwt_token,
+        pageserver_jwt_token: secrets.pageserver_jwt_token,
+        safekeeper_jwt_token: secrets.safekeeper_jwt_token,
         control_plane_jwt_token: secrets.control_plane_jwt_token,
         peer_jwt_token: secrets.peer_jwt_token,
         compute_hook_url: args.compute_hook_url,
@@ -311,6 +345,7 @@ async fn async_main() -> anyhow::Result<()> {
         address_for_peers: args.address_for_peers,
         start_as_candidate: args.start_as_candidate,
         http_service_port: args.listen.port() as i32,
+        use_https_pageserver_api: args.use_https_pageserver_api,
     };
 
     // Validate that we can connect to the database

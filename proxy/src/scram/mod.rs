@@ -15,7 +15,7 @@ mod secret;
 mod signature;
 pub mod threadpool;
 
-pub(crate) use exchange::{exchange, Exchange};
+pub(crate) use exchange::{Exchange, exchange};
 use hmac::{Hmac, Mac};
 pub(crate) use key::ScramKey;
 pub(crate) use secret::ServerSecret;

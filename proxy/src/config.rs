@@ -2,18 +2,18 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, ensure, Context, Ok};
+use anyhow::{Context, Ok, bail, ensure};
 use clap::ValueEnum;
 use remote_storage::RemoteStorageConfig;
 
-use crate::auth::backend::jwt::JwkCache;
 use crate::auth::backend::AuthRateLimiter;
+use crate::auth::backend::jwt::JwkCache;
 use crate::control_plane::locks::ApiLocks;
 use crate::rate_limiter::{RateBucketInfo, RateLimitAlgorithm, RateLimiterConfig};
 use crate::scram::threadpool::ThreadPool;
-use crate::serverless::cancel_set::CancelSet;
 use crate::serverless::GlobalConnPoolOptions;
-pub use crate::tls::server_config::{configure_tls, TlsConfig};
+use crate::serverless::cancel_set::CancelSet;
+pub use crate::tls::server_config::{TlsConfig, configure_tls};
 use crate::types::Host;
 
 pub struct ProxyConfig {
@@ -97,8 +97,7 @@ pub struct EndpointCacheConfig {
 impl EndpointCacheConfig {
     /// Default options for [`crate::control_plane::NodeInfoCache`].
     /// Notice that by default the limiter is empty, which means that cache is disabled.
-    pub const CACHE_DEFAULT_OPTIONS: &'static str =
-        "initial_batch_size=1000,default_batch_size=10,xread_timeout=5m,stream_name=controlPlane,disable_cache=true,limiter_info=1000@1s,retry_interval=1s";
+    pub const CACHE_DEFAULT_OPTIONS: &'static str = "initial_batch_size=1000,default_batch_size=10,xread_timeout=5m,stream_name=controlPlane,disable_cache=true,limiter_info=1000@1s,retry_interval=1s";
 
     /// Parse cache options passed via cmdline.
     /// Example: [`Self::CACHE_DEFAULT_OPTIONS`].
