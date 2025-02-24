@@ -1064,6 +1064,6 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
     assert expected_locally > 0
 
     env.storage_controller.download_heatmap_layers(
-        TenantShardId(tenant_id, shard_number=0, shard_count=0), timeline_id
+        TenantShardId(tenant_id, shard_number=0, shard_count=0), child_timeline_id, recurse=True
     )
     wait_until(lambda: all_layers_downloaded(expected_locally))

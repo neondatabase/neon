@@ -1435,6 +1435,7 @@ async fn timeline_download_heatmap_layers_handler(
 
     let desired_concurrency =
         parse_query_param(&request, "concurrency")?.unwrap_or(DEFAULT_CONCURRENCY);
+    let recurse = parse_query_param(&request, "recurse")?.unwrap_or(false);
 
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
@@ -1451,9 +1452,7 @@ async fn timeline_download_heatmap_layers_handler(
         .unwrap_or(DEFAULT_MAX_CONCURRENCY);
     let concurrency = std::cmp::min(max_concurrency, desired_concurrency);
 
-    timeline
-        .start_heatmap_layers_download(concurrency, &ctx)
-        .await?;
+    timeline.start_heatmap_layers_download(concurrency, recurse, &ctx)?;
 
     json_response(StatusCode::ACCEPTED, ())
 }
