@@ -75,7 +75,13 @@ def test_perf_simple_many_relations_reldir_v2(
     Test creating many relations in a single database.
     """
     env = neon_env_builder.init_start(initial_tenant_conf={"rel_size_v2_enabled": "true"})
-    ep = env.endpoints.create_start("main")
+    ep = env.endpoints.create_start(
+        "main",
+        config_lines=[
+            "shared_buffers=1000MB",
+            "max_locks_per_transaction=16384",
+        ],
+    )
 
     n = 100000
     step = 5000
