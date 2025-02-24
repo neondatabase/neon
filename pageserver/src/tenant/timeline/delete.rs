@@ -137,6 +137,11 @@ async fn remove_maybe_offloaded_timeline_from_tenant(
             timelines.remove(&timeline.timeline_id).expect(
                 "timeline that we were deleting was concurrently removed from 'timelines' map",
             );
+            tenant
+                .scheduled_compaction_tasks
+                .lock()
+                .unwrap()
+                .remove(&timeline.timeline_id);
         }
         TimelineOrOffloaded::Offloaded(timeline) => {
             let offloaded_timeline = timelines_offloaded
@@ -300,6 +305,7 @@ impl DeleteTimelineFlow {
                 // Thus we need to skip the validation here.
                 CreateTimelineCause::Delete,
                 crate::tenant::CreateTimelineIdempotency::FailWithConflict, // doesn't matter what we put here
+                None, // doesn't matter what we put here
             )
             .context("create_timeline_struct")?;
 
