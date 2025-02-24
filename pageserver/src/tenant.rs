@@ -99,6 +99,8 @@ use self::timeline::TimelineDeleteProgress;
 use self::timeline::TimelineResources;
 use self::timeline::WaitLsnError;
 use crate::config::PageServerConf;
+use crate::context;
+use crate::context::RequestContextBuilder;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::deletion_queue::DeletionQueueError;
@@ -1331,6 +1333,8 @@ impl Tenant {
         // Do all the hard work in the background
         let tenant_clone = Arc::clone(&tenant);
         let ctx = ctx.detached_child(TaskKind::Attach, DownloadBehavior::Warn);
+        let ctx = RequestContextBuilder::extend(&ctx)
+            .scope(context::Scope::tenant_shard(tenant_shard_id));
         task_mgr::spawn(
             &tokio::runtime::Handle::current(),
             TaskKind::Attach,
@@ -1716,6 +1720,12 @@ impl Tenant {
         // layer file.
         let sorted_timelines = tree_sort_timelines(timeline_ancestors, |m| m.ancestor_timeline())?;
         for (timeline_id, remote_metadata) in sorted_timelines {
+            let ctx = RequestContextBuilder::extend(ctx)
+                .scope(context::Scope::timeline(
+                    self.tenant_shard_id,
+                    self.timeline_id,
+                ))
+                .build();
             let (index_part, remote_client, previous_heatmap) = remote_index_and_client
                 .remove(&timeline_id)
                 .expect("just put it in above");
@@ -1739,7 +1749,7 @@ impl Tenant {
                     previous_heatmap,
                     self.get_timeline_resources_for(remote_client),
                     LoadTimelineCause::Attach,
-                    ctx,
+                    &ctx,
                 )
                 .await
                 .with_context(|| {
@@ -1765,6 +1775,7 @@ impl Tenant {
                         import_pgdata,
                         ActivateTimelineArgs::No,
                         guard,
+                        &ctx,
                     ));
                 }
             }
@@ -2815,6 +2826,7 @@ impl Tenant {
         index_part: import_pgdata::index_part_format::Root,
         activate: ActivateTimelineArgs,
         timeline_create_guard: TimelineCreateGuard,
+        ctx: &RequestContext,
     ) {
         debug_assert_current_span_has_tenant_and_timeline_id();
         info!("starting");
@@ -2842,7 +2854,7 @@ impl Tenant {
         activate: ActivateTimelineArgs,
         timeline_create_guard: TimelineCreateGuard,
     ) -> Result<(), anyhow::Error> {
-        let ctx = RequestContext::new(TaskKind::ImportPgdata, DownloadBehavior::Warn);
+        let ctx = RequestContext::detached_child(TaskKind::ImportPgdata, DownloadBehavior::Warn);
 
         info!("importing pgdata");
         import_pgdata::doit(&timeline, index_part, &ctx, self.cancel.clone())
