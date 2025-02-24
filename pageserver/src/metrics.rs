@@ -29,7 +29,7 @@ use pq_proto::framed::ConnectionError;
 
 use strum::{EnumCount, IntoEnumIterator as _, VariantNames};
 use strum_macros::{IntoStaticStr, VariantNames};
-use utils::id::{TimelineId};
+use utils::id::TimelineId;
 
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext};

@@ -2267,8 +2267,8 @@ async fn timeline_compact_handler(
         .unwrap_or(false);
 
     async {
-        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
+        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download).with_scope_timeline(&timeline);
         if scheduled {
             let tenant = state
                 .tenant_manager
@@ -2375,8 +2375,8 @@ async fn timeline_checkpoint_handler(
         parse_query_param::<_, bool>(&request, "wait_until_uploaded")?.unwrap_or(false);
 
     async {
-        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
+        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download).with_scope_timeline(&timeline);
         if wait_until_flushed {
             timeline.freeze_and_flush().await
         } else {
@@ -3305,7 +3305,13 @@ async fn put_tenant_timeline_import_basebackup(
         info!("importing basebackup");
 
         timeline
-            .import_basebackup_from_tar(tenant.clone(), &mut body, base_lsn, broker_client, &timeline_ctx)
+            .import_basebackup_from_tar(
+                tenant.clone(),
+                &mut body,
+                base_lsn,
+                broker_client,
+                &timeline_ctx,
+            )
             .await
             .map_err(ApiError::InternalServerError)?;
 
@@ -3345,6 +3351,7 @@ async fn put_tenant_timeline_import_wal(
         let state = get_state(&request);
 
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, TenantShardId::unsharded(tenant_id), timeline_id).await?;
+        let ctx = RequestContextBuilder::extend(&ctx).scope(context::Scope::new_timeline(&timeline)).build();
 
         let mut body = StreamReader::new(request.into_body().map(|res| {
             res.map_err(|error| {

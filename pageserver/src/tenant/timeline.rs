@@ -1299,8 +1299,6 @@ impl Timeline {
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
-        ctx.assert_is_timeline_scoped("Timeline::get_vectored_impl");
-
         let read_path = if self.conf.enable_read_path_debugging || ctx.read_path_debug() {
             Some(ReadPath::new(keyspace.clone(), lsn))
         } else {
@@ -2822,7 +2820,7 @@ impl Timeline {
             "layer flush task",
             async move {
                 let _guard = guard;
-                let background_ctx = RequestContext::todo_child(TaskKind::LayerFlushTask, DownloadBehavior::Error);
+                let background_ctx = RequestContext::todo_child(TaskKind::LayerFlushTask, DownloadBehavior::Error).with_scope_timeline(&self_clone);
                 self_clone.flush_loop(layer_flush_start_rx, &background_ctx).await;
                 let mut flush_loop_state = self_clone.flush_loop_state.lock().unwrap();
                 assert!(matches!(*flush_loop_state, FlushLoopState::Running{..}));

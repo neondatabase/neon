@@ -94,10 +94,7 @@ use std::sync::Arc;
 use once_cell::sync::Lazy;
 use tracing::warn;
 
-use crate::{
-    task_mgr::TaskKind,
-    tenant::{Tenant, Timeline},
-};
+use crate::{metrics::StorageIoSizeMetrics, task_mgr::TaskKind, tenant::Timeline};
 
 // The main structure of this module, see module-level comment.
 pub struct RequestContext {
@@ -119,9 +116,6 @@ pub(crate) enum ScopeInner {
     Global {
         io_size_metrics: &'static crate::metrics::StorageIoSizeMetrics,
     },
-    Tenant {
-        tenant: Arc<Tenant>,
-    },
     Timeline {
         timeline: Arc<Timeline>,
     },
@@ -139,11 +133,6 @@ impl Scope {
             io_size_metrics: &&GLOBAL_IO_SIZE_METRICS,
         }))
     }
-    pub(crate) fn new_tenant(tenant: &Arc<Tenant>) -> Self {
-        Scope(Arc::new(ScopeInner::Tenant {
-            tenant: Arc::clone(tenant),
-        }))
-    }
     pub(crate) fn new_timeline(timeline: &Arc<Timeline>) -> Self {
         Scope(Arc::new(ScopeInner::Timeline {
             timeline: Arc::clone(timeline),
@@ -155,17 +144,6 @@ impl Scope {
         >,
     ) -> Self {
         Scope(Arc::new(ScopeInner::TimelineHandle { timeline_handle }))
-    }
-
-    pub(crate) fn io_size_metrics(&self) -> &crate::metrics::StorageIoSizeMetrics {
-        match &*self.0 {
-            ScopeInner::Global { io_size_metrics } => io_size_metrics,
-            ScopeInner::Tenant { tenant } => &tenant.virtual_file_io_metrics,
-            ScopeInner::Timeline { timeline } => &timeline.metrics.storage_io_size,
-            ScopeInner::TimelineHandle { timeline_handle } => {
-                &timeline_handle.metrics.storage_io_size
-            }
-        }
     }
 }
 
@@ -243,6 +221,11 @@ impl RequestContextBuilder {
                 scope: original.scope.clone(),
             },
         }
+    }
+
+    pub fn task_kind(mut self, k: TaskKind) -> Self {
+        self.inner.task_kind = k;
+        self
     }
 
     /// Configure the DownloadBehavior of the context: whether to
@@ -356,7 +339,27 @@ impl RequestContext {
     }
 
     fn child_impl(&self, task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
-        Self::new(task_kind, download_behavior)
+        RequestContextBuilder::extend(self)
+            .task_kind(task_kind)
+            .download_behavior(download_behavior)
+            .build()
+    }
+
+    pub fn with_scope_timeline(&self, timeline: &Arc<Timeline>) -> Self {
+        RequestContextBuilder::extend(self)
+            .scope(Scope::new_timeline(timeline))
+            .build()
+    }
+
+    pub fn with_scope_timeline_handle(
+        &self,
+        timeline_handle: crate::tenant::timeline::handle::Handle<
+            crate::page_service::TenantManagerTypes,
+        >,
+    ) -> Self {
+        RequestContextBuilder::extend(self)
+            .scope(Scope::new_timeline_handle(timeline_handle))
+            .build()
     }
 
     pub fn task_kind(&self) -> TaskKind {
@@ -379,31 +382,33 @@ impl RequestContext {
         self.read_path_debug
     }
 
-    pub(crate) fn scope(&self) -> &Scope {
-        &self.scope
-    }
+    pub(crate) fn io_size_metrics(&self) -> &StorageIoSizeMetrics {
+        match &*self.scope.0 {
+            ScopeInner::Global { io_size_metrics } => {
+                if cfg!(debug_assertions) || cfg!(feature = "testing") {
+                    panic!("all VirtualFile instances are timeline-scoped");
+                } else {
+                    use once_cell::sync::Lazy;
+                    use std::sync::Mutex;
+                    use std::time::Duration;
+                    use utils::rate_limit::RateLimit;
+                    static LIMIT: Lazy<Mutex<RateLimit>> =
+                        Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(1))));
+                    let mut guard = LIMIT.lock().unwrap();
+                    guard.call2(|rate_limit_stats| {
+                        warn!(
+                            %rate_limit_stats,
+                            "all VirtualFile instances are timeline-scoped",
+                        );
+                    });
 
-    pub(crate) fn assert_is_timeline_scoped(&self, what: &str) {
-        if let ScopeInner::Timeline { .. } = &*self.scope.0 {
-            return;
-        }
-        if cfg!(debug_assertions) || cfg!(feature = "testing") {
-            panic!("RequestContext must be timeline-scoped what={what}");
-        } else {
-            use once_cell::sync::Lazy;
-            use std::sync::Mutex;
-            use std::time::Duration;
-            use utils::rate_limit::RateLimit;
-            static LIMIT: Lazy<Mutex<RateLimit>> =
-                Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(1))));
-            let mut guard = LIMIT.lock().unwrap();
-            guard.call2(|rate_limit_stats| {
-                warn!(
-                    %rate_limit_stats,
-                    what,
-                    "RequestContext must be timeline-scoped",
-                );
-            });
+                    io_size_metrics
+                }
+            }
+            ScopeInner::Timeline { timeline } => &timeline.metrics.storage_io_size,
+            ScopeInner::TimelineHandle { timeline_handle } => {
+                &timeline_handle.metrics.storage_io_size
+            }
         }
     }
 }

@@ -11,12 +11,16 @@ use tracing::{error, info, info_span, instrument, Instrument};
 use utils::{crashsafe, fs_ext, id::TimelineId, pausable_failpoint};
 
 use crate::{
-    config::PageServerConf, context::RequestContext, task_mgr::{self, TaskKind}, tenant::{
+    config::PageServerConf,
+    context::RequestContext,
+    task_mgr::{self, TaskKind},
+    tenant::{
         metadata::TimelineMetadata,
         remote_timeline_client::{PersistIndexPartWithDeletedFlagError, RemoteTimelineClient},
         CreateTimelineCause, DeleteTimelineError, MaybeDeletedIndexPart, Tenant,
         TenantManifestError, Timeline, TimelineOrOffloaded,
-    }, virtual_file::MaybeFatalIo
+    },
+    virtual_file::MaybeFatalIo,
 };
 
 /// Mark timeline as deleted in S3 so we won't pick it up next time

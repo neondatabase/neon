@@ -387,8 +387,6 @@ pub struct Tenant {
 
     pub(crate) pagestream_throttle_metrics: Arc<crate::metrics::tenant_throttling::Pagestream>,
 
-    pub(crate) virtual_file_io_metrics: crate::metrics::StorageIoSizeMetrics,
-
     /// An ongoing timeline detach concurrency limiter.
     ///
     /// As a tenant will likely be restarted as part of timeline detach ancestor it makes no sense
@@ -1268,7 +1266,7 @@ impl Tenant {
                         match activate {
                             ActivateTimelineArgs::Yes { broker_client } => {
                                 info!("activating timeline after reload from pgdata import task");
-                                timeline.activate(self.clone(), broker_client, None, ctx);
+                                timeline.activate(self.clone(), broker_client, None, &timeline_ctx);
                             }
                             ActivateTimelineArgs::No => (),
                         }
@@ -1336,9 +1334,6 @@ impl Tenant {
         // Do all the hard work in the background
         let tenant_clone = Arc::clone(&tenant);
         let ctx = ctx.detached_child(TaskKind::Attach, DownloadBehavior::Warn);
-        let ctx = RequestContextBuilder::extend(&ctx)
-            .scope(context::Scope::new_tenant(&tenant))
-            .build();
         task_mgr::spawn(
             &tokio::runtime::Handle::current(),
             TaskKind::Attach,
@@ -1724,9 +1719,6 @@ impl Tenant {
         // layer file.
         let sorted_timelines = tree_sort_timelines(timeline_ancestors, |m| m.ancestor_timeline())?;
         for (timeline_id, remote_metadata) in sorted_timelines {
-            let ctx = RequestContextBuilder::extend(ctx)
-                .scope(context::Scope::new_tenant(self))
-                .build();
             let (index_part, remote_client, previous_heatmap) = remote_index_and_client
                 .remove(&timeline_id)
                 .expect("just put it in above");
@@ -2231,7 +2223,7 @@ impl Tenant {
                 self.clone(),
                 broker_client.clone(),
                 background_jobs_can_start,
-                &ctx,
+                &ctx.with_scope_timeline(&timeline),
             );
         }
 
@@ -2705,7 +2697,12 @@ impl Tenant {
         // doing stuff before the IndexPart is durable in S3, which is done by the previous section.
         let activated_timeline = match result {
             CreateTimelineResult::Created(timeline) => {
-                timeline.activate(self.clone(), broker_client, None, ctx);
+                timeline.activate(
+                    self.clone(),
+                    broker_client,
+                    None,
+                    &ctx.with_scope_timeline(&timeline),
+                );
                 timeline
             }
             CreateTimelineResult::Idempotent(timeline) => {
@@ -2816,7 +2813,7 @@ impl Tenant {
             index_part,
             activate,
             timeline_create_guard,
-            ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Warn),
+            timeline_ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Warn),
         ));
 
         // NB: the timeline doesn't exist in self.timelines at this point
@@ -3066,8 +3063,9 @@ impl Tenant {
 
             let mut has_pending_l0 = false;
             for timeline in compact_l0 {
+                let ctx = &ctx.with_scope_timeline(&timeline);
                 let outcome = timeline
-                    .compact(cancel, CompactFlags::OnlyL0Compaction.into(), ctx)
+                    .compact(cancel, CompactFlags::OnlyL0Compaction.into(), &ctx)
                     .instrument(info_span!("compact_timeline", timeline_id = %timeline.timeline_id))
                     .await
                     .inspect_err(|err| self.maybe_trip_compaction_breaker(err))?;
@@ -3099,6 +3097,7 @@ impl Tenant {
             if !timeline.is_active() {
                 continue;
             }
+            let ctx = &ctx.with_scope_timeline(&timeline);
 
             let mut outcome = timeline
                 .compact(cancel, EnumSet::default(), ctx)
@@ -3322,7 +3321,7 @@ impl Tenant {
                     self.clone(),
                     broker_client.clone(),
                     background_jobs_can_start,
-                    ctx,
+                    &ctx.with_scope_timeline(timeline),
                 );
                 activated_timelines += 1;
             }
@@ -4591,13 +4590,14 @@ impl Tenant {
         // Ensures all timelines use the same start time when computing the time cutoff.
         let now_ts_for_pitr_calc = SystemTime::now();
         for timeline in timelines.iter() {
+            let ctx = &ctx.with_scope_timeline(timeline);
             let cutoff = timeline
                 .get_last_record_lsn()
                 .checked_sub(horizon)
                 .unwrap_or(Lsn(0));
 
             let cutoffs = timeline
-                .find_gc_cutoffs(now_ts_for_pitr_calc, cutoff, pitr, cancel, ctx)
+                .find_gc_cutoffs(now_ts_for_pitr_calc, cutoff, pitr, cancel, &ctx)
                 .await?;
             let old = gc_cutoffs.insert(timeline.timeline_id, cutoffs);
             assert!(old.is_none());

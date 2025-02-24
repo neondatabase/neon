@@ -930,7 +930,7 @@ impl VirtualFileInner {
             let ((_file_guard, buf), res) = io_engine::get().read_at(file_guard, offset, buf).await;
             let res = res.maybe_fatal_err("io_engine read_at inside VirtualFileInner::read_at");
             if let Ok(size) = res {
-                ctx.scope().io_size_metrics().read.add(size.into_u64());
+                ctx.io_size_metrics().read.add(size.into_u64());
             }
             (buf, res)
         })
@@ -962,7 +962,7 @@ impl VirtualFileInner {
             let ((_file_guard, buf), result) =
                 io_engine::get().write_at(file_guard, offset, buf).await;
             if let Ok(size) = result {
-                ctx.scope().io_size_metrics().write.add(size.into_u64());
+                ctx.io_size_metrics().write.add(size.into_u64());
             }
             (buf, result)
         })

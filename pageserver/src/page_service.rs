@@ -1216,7 +1216,7 @@ impl PageServerHandler {
                         let npages = requests.len();
                         trace!(npages, "handling getpage request");
                         let res = self
-                            .handle_test_request_batch(&*shard, requests, ctx)
+                            .handle_test_request_batch(&*shard, requests, &ctx)
                             .instrument(span.clone())
                             .await;
                         assert_eq!(res.len(), npages);
@@ -2113,6 +2113,7 @@ impl PageServerHandler {
             .get(tenant_id, timeline_id, ShardSelector::Zero)
             .await?;
         set_tracing_field_shard_id(&timeline);
+        let ctx = ctx.with_scope_timeline(&*timeline);
 
         if timeline.is_archived() == Some(true) {
             // TODO after a grace period, turn this log line into a hard error
@@ -2129,7 +2130,7 @@ impl PageServerHandler {
                     lsn,
                     crate::tenant::timeline::WaitLsnWaiter::PageService,
                     crate::tenant::timeline::WaitLsnTimeout::Default,
-                    ctx,
+                    &ctx,
                 )
                 .await?;
             timeline
@@ -2155,7 +2156,7 @@ impl PageServerHandler {
                 prev_lsn,
                 full_backup,
                 replica,
-                ctx,
+                &ctx,
             )
             .await
             .map_err(map_basebackup_error)?;
@@ -2178,7 +2179,7 @@ impl PageServerHandler {
                     prev_lsn,
                     full_backup,
                     replica,
-                    ctx,
+                    &ctx,
                 )
                 .await
                 .map_err(map_basebackup_error)?;
@@ -2195,7 +2196,7 @@ impl PageServerHandler {
                     prev_lsn,
                     full_backup,
                     replica,
-                    ctx,
+                    &ctx,
                 )
                 .await
                 .map_err(map_basebackup_error)?;
