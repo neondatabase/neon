@@ -866,6 +866,9 @@ jobs:
   push-neon-image-dev:
     needs: [ generate-image-maps, neon-image ]
     uses: ./.github/workflows/_push-to-container-registry.yml
+    permissions:
+      id-token: write  # Required for aws/azure login
+      packages: write  # required for pushing to GHCR
     with:
       image-map: '${{ needs.generate-image-maps.outputs.neon-dev }}'
       aws-region: ${{ vars.AWS_ECR_REGION }}
@@ -878,10 +881,15 @@ jobs:
       aws-role-to-assume: "${{ vars.DEV_AWS_OIDC_ROLE_ARN }}"
       docker-hub-username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
       docker-hub-password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+      github-user: ${{ github.repository_owner }}
+      github-token: ${{ secrets.GITHUB_TOKEN }}
 
   push-compute-image-dev:
     needs: [ generate-image-maps, vm-compute-node-image ]
     uses: ./.github/workflows/_push-to-container-registry.yml
+    permissions:
+      id-token: write  # Required for aws/azure login
+      packages: write  # required for pushing to GHCR
     with:
       image-map: '${{ needs.generate-image-maps.outputs.compute-dev }}'
       aws-region: ${{ vars.AWS_ECR_REGION }}
@@ -894,11 +902,16 @@ jobs:
       aws-role-to-assume: "${{ vars.DEV_AWS_OIDC_ROLE_ARN }}"
       docker-hub-username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
       docker-hub-password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+      github-user: ${{ github.repository_owner }}
+      github-token: ${{ secrets.GITHUB_TOKEN }}
 
   push-neon-image-prod:
     if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
     needs: [ generate-image-maps, neon-image, test-images ]
     uses: ./.github/workflows/_push-to-container-registry.yml
+    permissions:
+      id-token: write  # Required for aws/azure login
+      packages: write  # required for pushing to GHCR
     with:
       image-map: '${{ needs.generate-image-maps.outputs.neon-prod }}'
       aws-region: ${{ vars.AWS_ECR_REGION }}
@@ -916,6 +929,9 @@ jobs:
     if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
     needs: [ generate-image-maps, vm-compute-node-image, test-images ]
     uses: ./.github/workflows/_push-to-container-registry.yml
+    permissions:
+      id-token: write  # Required for aws/azure login
+      packages: write  # required for pushing to GHCR
     with:
       image-map: '${{ needs.generate-image-maps.outputs.compute-prod }}'
       aws-region: ${{ vars.AWS_ECR_REGION }}

@@ -41,6 +41,12 @@ on:
       aws-role-to-assume:
         description: AWS role to assume. Required when pushing to ECR.
         required: false
+      github-user:
+        description: User to authenticate to ghcr with.
+        required: false
+      github-token:
+        description: Token to authenticate to ghcr with.
+        required: false
 
 permissions: {}
 
@@ -53,6 +59,7 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       id-token: write  # Required for aws/azure login
+      packages: write  # required for pushing to GHCR
     steps:
       - uses: actions/checkout@v4
         with:
@@ -88,6 +95,14 @@ jobs:
         if: contains(inputs.image-map, 'azurecr.io/')
         run: |
           az acr login --name=${{ inputs.acr-registry-name }}
+
+      - name: Login to GHCR
+        if: contains(inputs.image-map, 'ghcr.io/')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.github-user || github.repository_owner }}
+          password: ${{ secrets.github-token || secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
