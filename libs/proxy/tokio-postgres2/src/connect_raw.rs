@@ -1,9 +1,8 @@
-use crate::Error;
-use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, PostgresCodec};
-use crate::config::{self, AuthKeys, Config};
-use crate::connect_tls::connect_tls;
-use crate::maybe_tls_stream::MaybeTlsStream;
-use crate::tls::{TlsConnect, TlsStream};
+use std::collections::HashMap;
+use std::io;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
 use futures_util::{Sink, SinkExt, Stream, TryStreamExt, ready};
@@ -11,12 +10,15 @@ use postgres_protocol2::authentication::sasl;
 use postgres_protocol2::authentication::sasl::ScramSha256;
 use postgres_protocol2::message::backend::{AuthenticationSaslBody, Message, NoticeResponseBody};
 use postgres_protocol2::message::frontend;
-use std::collections::HashMap;
-use std::io;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::Framed;
+
+use crate::Error;
+use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, PostgresCodec};
+use crate::config::{self, AuthKeys, Config};
+use crate::connect_tls::connect_tls;
+use crate::maybe_tls_stream::MaybeTlsStream;
+use crate::tls::{TlsConnect, TlsStream};
 
 pub struct StartupStream<S, T> {
     inner: Framed<MaybeTlsStream<S, T>, PostgresCodec>,

@@ -1,8 +1,9 @@
-use crate::client::{InnerClient, Responses};
-use crate::codec::FrontendMessage;
-use crate::connection::RequestMessages;
-use crate::types::IsNull;
-use crate::{Column, Error, ReadyForQueryStatus, Row, Statement};
+use std::fmt;
+use std::marker::PhantomPinned;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+
 use bytes::{BufMut, Bytes, BytesMut};
 use fallible_iterator::FallibleIterator;
 use futures_util::{Stream, ready};
@@ -11,11 +12,12 @@ use pin_project_lite::pin_project;
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
 use postgres_types2::{Format, ToSql, Type};
-use std::fmt;
-use std::marker::PhantomPinned;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
+
+use crate::client::{InnerClient, Responses};
+use crate::codec::FrontendMessage;
+use crate::connection::RequestMessages;
+use crate::types::IsNull;
+use crate::{Column, Error, ReadyForQueryStatus, Row, Statement};
 
 struct BorrowToSqlParamsDebug<'a>(&'a [&'a (dyn ToSql + Sync)]);
 

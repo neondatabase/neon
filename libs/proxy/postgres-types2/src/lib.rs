@@ -4,19 +4,18 @@
 //! unless you want to define your own `ToSql` or `FromSql` definitions.
 #![warn(clippy::all, missing_docs)]
 
-use fallible_iterator::FallibleIterator;
-use postgres_protocol2::types;
 use std::any::type_name;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::type_gen::{Inner, Other};
-
+use bytes::BytesMut;
+use fallible_iterator::FallibleIterator;
 #[doc(inline)]
 pub use postgres_protocol2::Oid;
+use postgres_protocol2::types;
 
-use bytes::BytesMut;
+use crate::type_gen::{Inner, Other};
 
 /// Generates a simple implementation of `ToSql::accepts` which accepts the
 /// types passed to it.

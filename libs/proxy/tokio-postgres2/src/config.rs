@@ -1,20 +1,18 @@
 //! Connection configuration.
 
-use crate::connect::connect;
-use crate::connect_raw::RawConnection;
-use crate::connect_raw::connect_raw;
-use crate::tls::MakeTlsConnect;
-use crate::tls::TlsConnect;
-use crate::{Client, Connection, Error};
-use postgres_protocol2::message::frontend::StartupMessageParams;
-use serde::{Deserialize, Serialize};
-use std::fmt;
-use std::str;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWrite};
+use std::{fmt, str};
 
 pub use postgres_protocol2::authentication::sasl::ScramKeys;
+use postgres_protocol2::message::frontend::StartupMessageParams;
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
+
+use crate::connect::connect;
+use crate::connect_raw::{RawConnection, connect_raw};
+use crate::tls::{MakeTlsConnect, TlsConnect};
+use crate::{Client, Connection, Error};
 
 /// TLS configuration.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]

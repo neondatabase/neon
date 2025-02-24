@@ -1,7 +1,8 @@
-use crate::client::{InnerClient, Responses};
-use crate::codec::FrontendMessage;
-use crate::connection::RequestMessages;
-use crate::{Error, ReadyForQueryStatus, SimpleQueryMessage, SimpleQueryRow};
+use std::marker::PhantomPinned;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+
 use bytes::Bytes;
 use fallible_iterator::FallibleIterator;
 use futures_util::{Stream, ready};
@@ -9,10 +10,11 @@ use log::debug;
 use pin_project_lite::pin_project;
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
-use std::marker::PhantomPinned;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
+
+use crate::client::{InnerClient, Responses};
+use crate::codec::FrontendMessage;
+use crate::connection::RequestMessages;
+use crate::{Error, ReadyForQueryStatus, SimpleQueryMessage, SimpleQueryRow};
 
 /// Information about a column of a single query row.
 #[derive(Debug)]

@@ -1,21 +1,23 @@
-use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, PostgresCodec};
-use crate::error::DbError;
-use crate::maybe_tls_stream::MaybeTlsStream;
-use crate::{AsyncMessage, Error, Notification};
+use std::collections::{HashMap, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
 use futures_util::{Sink, Stream, ready};
 use log::{info, trace};
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
-use std::collections::{HashMap, VecDeque};
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio_util::codec::Framed;
 use tokio_util::sync::PollSender;
+
+use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, PostgresCodec};
+use crate::error::DbError;
+use crate::maybe_tls_stream::MaybeTlsStream;
+use crate::{AsyncMessage, Error, Notification};
 
 pub enum RequestMessages {
     Single(FrontendMessage),

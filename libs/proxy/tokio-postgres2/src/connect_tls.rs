@@ -1,11 +1,12 @@
+use bytes::BytesMut;
+use postgres_protocol2::message::frontend;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
 use crate::Error;
 use crate::config::SslMode;
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::tls::TlsConnect;
 use crate::tls::private::ForcePrivateApi;
-use bytes::BytesMut;
-use postgres_protocol2::message::frontend;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub async fn connect_tls<S, T>(
     mut stream: S,

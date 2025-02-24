@@ -1,11 +1,11 @@
 //! Frontend message serialization.
 #![allow(missing_docs)]
 
+use std::error::Error;
+use std::{io, marker};
+
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, BytesMut};
-use std::error::Error;
-use std::io;
-use std::marker;
 
 use crate::{FromUsize, IsNull, Oid, write_nullable};
 

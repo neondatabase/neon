@@ -1,31 +1,28 @@
-use crate::codec::{BackendMessages, FrontendMessage};
-
-use crate::config::Host;
-use crate::config::SslMode;
-use crate::connection::{Request, RequestMessages};
-
-use crate::query::RowStream;
-use crate::simple_query::SimpleQueryStream;
-
-use crate::types::{Oid, ToSql, Type};
-
-use crate::{
-    CancelToken, Error, ReadyForQueryStatus, Row, SimpleQueryMessage, Statement, Transaction,
-    TransactionBuilder, query, simple_query, slice_iter,
-};
-use bytes::BytesMut;
-use fallible_iterator::FallibleIterator;
-use futures_util::{TryStreamExt, future, ready};
-use parking_lot::Mutex;
-use postgres_protocol2::message::{backend::Message, frontend};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
+
+use bytes::BytesMut;
+use fallible_iterator::FallibleIterator;
+use futures_util::{TryStreamExt, future, ready};
+use parking_lot::Mutex;
+use postgres_protocol2::message::backend::Message;
+use postgres_protocol2::message::frontend;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use std::time::Duration;
+use crate::codec::{BackendMessages, FrontendMessage};
+use crate::config::{Host, SslMode};
+use crate::connection::{Request, RequestMessages};
+use crate::query::RowStream;
+use crate::simple_query::SimpleQueryStream;
+use crate::types::{Oid, ToSql, Type};
+use crate::{
+    CancelToken, Error, ReadyForQueryStatus, Row, SimpleQueryMessage, Statement, Transaction,
+    TransactionBuilder, query, simple_query, slice_iter,
+};
 
 pub struct Responses {
     receiver: mpsc::Receiver<BackendMessages>,

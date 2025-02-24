@@ -1,14 +1,12 @@
 //! SASL-based authentication support.
 
+use std::fmt::Write;
+use std::{io, iter, mem, str};
+
 use hmac::{Hmac, Mac};
 use rand::{self, Rng};
 use sha2::digest::FixedOutput;
 use sha2::{Digest, Sha256};
-use std::fmt::Write;
-use std::io;
-use std::iter;
-use std::mem;
-use std::str;
 use tokio::task::yield_now;
 
 const NONCE_LENGTH: usize = 24;
