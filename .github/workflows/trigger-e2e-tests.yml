@@ -5,6 +5,10 @@ on:
     types:
       - ready_for_review
   workflow_call:
+    inputs:
+      github-event-name:
+        type: string
+        required: true
 
 defaults:
   run:
@@ -19,7 +23,7 @@ jobs:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
     uses: ./.github/workflows/check-permissions.yml
     with:
-      github-event-name: ${{ github.event_name }}
+      github-event-name: ${{ inputs.github-event-name || github.event_name }}
 
   cancel-previous-e2e-tests:
     needs: [ check-permissions ]
@@ -35,46 +39,29 @@ jobs:
             run cancel-previous-in-concurrency-group.yml \
               --field concurrency_group="${{ env.E2E_CONCURRENCY_GROUP }}"
 
-  tag:
-    needs: [ check-permissions ]
-    runs-on: ubuntu-22.04
-    outputs:
-      build-tag: ${{ steps.build-tag.outputs.tag }}
-
-    steps:
-      # Need `fetch-depth: 0` to count the number of commits in the branch
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Get build tag
-        env:
-          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
-          CURRENT_BRANCH: ${{ github.head_ref || github.ref_name }}
-          CURRENT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            echo "tag=$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
-          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            echo "tag=release-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
-          elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
-            echo "tag=release-proxy-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
-          elif [[ "$GITHUB_REF_NAME" == "release-compute" ]]; then
-            echo "tag=release-compute-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
-          else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
-            BUILD_AND_TEST_RUN_ID=$(gh run list -b $CURRENT_BRANCH -c $CURRENT_SHA -w 'Build and Test' -L 1 --json databaseId --jq '.[].databaseId')
-            echo "tag=$BUILD_AND_TEST_RUN_ID" | tee -a $GITHUB_OUTPUT
-          fi
-        id: build-tag
+  meta:
+    uses: ./.github/workflows/_meta.yml
+    with:
+      github-event-name: ${{ inputs.github-event-name || github.event_name }}
 
   trigger-e2e-tests:
-    needs: [ tag ]
+    needs: [ meta ]
     runs-on: ubuntu-22.04
     env:
       EVENT_ACTION: ${{ github.event.action }}
       GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
-      TAG: ${{ needs.tag.outputs.build-tag }}
+      TAG: >-
+        ${{
+          contains(fromJSON('["compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind)
+          && needs.meta.outputs.previous-storage-release
+          || needs.meta.outputs.build-tag
+        }}
+      COMPUTE_TAG: >-
+        ${{
+          contains(fromJSON('["storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind)
+          && needs.meta.outputs.previous-compute-release
+          || needs.meta.outputs.build-tag
+        }}
     steps:
       - name: Wait for `push-{neon,compute}-image-dev` job to finish
         # It's important to have a timeout here, the script in the step can run infinitely
@@ -157,6 +144,6 @@ jobs:
               --raw-field "commit_hash=$COMMIT_SHA" \
               --raw-field "remote_repo=${GITHUB_REPOSITORY}" \
               --raw-field "storage_image_tag=${TAG}" \
-              --raw-field "compute_image_tag=${TAG}" \
+              --raw-field "compute_image_tag=${COMPUTE_TAG}" \
               --raw-field "concurrency_group=${E2E_CONCURRENCY_GROUP}" \
               --raw-field "e2e-platforms=${E2E_PLATFORMS}"
