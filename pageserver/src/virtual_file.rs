@@ -11,9 +11,10 @@
 //! This is similar to PostgreSQL's virtual file descriptor facility in
 //! src/backend/storage/file/fd.c
 //!
+use crate::assert_u64_eq_usize::UsizeIsU64;
 use crate::context::RequestContext;
-use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC};
 
+use crate::metrics::{StorageIoOperation, STORAGE_IO_TIME_METRIC};
 use crate::page_cache::{PageWriteGuard, PAGE_SZ};
 use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
@@ -120,7 +121,7 @@ impl VirtualFile {
     pub async fn open_with_options<P: AsRef<Utf8Path>>(
         path: P,
         open_options: &OpenOptions,
-        ctx: &RequestContext, /* TODO: carry a pointer to the metrics in the RequestContext instead of the parsing https://github.com/neondatabase/neon/issues/6107 */
+        ctx: &RequestContext,
     ) -> Result<Self, std::io::Error> {
         let inner = VirtualFileInner::open_with_options(path, open_options, ctx).await?;
         Ok(VirtualFile {
@@ -132,7 +133,7 @@ impl VirtualFile {
     pub async fn open_with_options_v2<P: AsRef<Utf8Path>>(
         path: P,
         open_options: &OpenOptions,
-        ctx: &RequestContext, /* TODO: carry a pointer to the metrics in the RequestContext instead of the parsing https://github.com/neondatabase/neon/issues/6107 */
+        ctx: &RequestContext,
     ) -> Result<Self, std::io::Error> {
         let file = match get_io_mode() {
             IoMode::Buffered => {
@@ -303,13 +304,6 @@ pub struct VirtualFileInner {
     /// storing it here.
     pub path: Utf8PathBuf,
     open_options: OpenOptions,
-
-    // These are strings becase we only use them for metrics, and those expect strings.
-    // It makes no sense for us to constantly turn the `TimelineId` and `TenantId` into
-    // strings.
-    tenant_id: String,
-    shard_id: String,
-    timeline_id: String,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -591,29 +585,11 @@ impl VirtualFileInner {
     pub async fn open_with_options<P: AsRef<Utf8Path>>(
         path: P,
         open_options: &OpenOptions,
-        _ctx: &RequestContext, /* TODO: carry a pointer to the metrics in the RequestContext instead of the parsing https://github.com/neondatabase/neon/issues/6107 */
+        _ctx: &RequestContext,
     ) -> Result<VirtualFileInner, std::io::Error> {
         let path_ref = path.as_ref();
         let path_str = path_ref.to_string();
         let parts = path_str.split('/').collect::<Vec<&str>>();
-        let (tenant_id, shard_id, timeline_id) =
-            if parts.len() > 5 && parts[parts.len() - 5] == TENANTS_SEGMENT_NAME {
-                let tenant_shard_part = parts[parts.len() - 4];
-                let (tenant_id, shard_id) = match tenant_shard_part.parse::<TenantShardId>() {
-                    Ok(tenant_shard_id) => (
-                        tenant_shard_id.tenant_id.to_string(),
-                        format!("{}", tenant_shard_id.shard_slug()),
-                    ),
-                    Err(_) => {
-                        // Malformed path: this ID is just for observability, so tolerate it
-                        // and pass through
-                        (tenant_shard_part.to_string(), "*".to_string())
-                    }
-                };
-                (tenant_id, shard_id, parts[parts.len() - 2].to_string())
-            } else {
-                ("*".to_string(), "*".to_string(), "*".to_string())
-            };
         let (handle, mut slot_guard) = get_open_files().find_victim_slot().await;
 
         // NB: there is also StorageIoOperation::OpenAfterReplace which is for the case
@@ -638,9 +614,6 @@ impl VirtualFileInner {
             pos: 0,
             path: path_ref.to_path_buf(),
             open_options: reopen_options,
-            tenant_id,
-            shard_id,
-            timeline_id,
         };
 
         // TODO: Under pressure, it's likely the slot will get re-used and
@@ -943,7 +916,7 @@ impl VirtualFileInner {
         &self,
         buf: tokio_epoll_uring::Slice<Buf>,
         offset: u64,
-        _ctx: &RequestContext, /* TODO: use for metrics: https://github.com/neondatabase/neon/issues/6107 */
+        ctx: &RequestContext,
     ) -> (tokio_epoll_uring::Slice<Buf>, Result<usize, Error>)
     where
         Buf: tokio_epoll_uring::IoBufMut + Send,
@@ -961,14 +934,7 @@ impl VirtualFileInner {
             let ((_file_guard, buf), res) = io_engine::get().read_at(file_guard, offset, buf).await;
             let res = res.maybe_fatal_err("io_engine read_at inside VirtualFileInner::read_at");
             if let Ok(size) = res {
-                STORAGE_IO_SIZE
-                    .with_label_values(&[
-                        "read",
-                        &self.tenant_id,
-                        &self.shard_id,
-                        &self.timeline_id,
-                    ])
-                    .add(size as i64);
+                ctx.scope().io_size_metrics().read.add(size.into_u64());
             }
             (buf, res)
         })
@@ -979,9 +945,9 @@ impl VirtualFileInner {
         &self,
         buf: FullSlice<B>,
         offset: u64,
-        _ctx: &RequestContext, /* TODO: use for metrics: https://github.com/neondatabase/neon/issues/6107 */
+        ctx: &RequestContext,
     ) -> (FullSlice<B>, Result<usize, Error>) {
-        let (slice, result) = self.write_at_inner(buf, offset, _ctx).await;
+        let (slice, result) = self.write_at_inner(buf, offset, ctx).await;
         let result = result.maybe_fatal_err("write_at");
         (slice, result)
     }
@@ -990,7 +956,7 @@ impl VirtualFileInner {
         &self,
         buf: FullSlice<B>,
         offset: u64,
-        _ctx: &RequestContext, /* TODO: use for metrics: https://github.com/neondatabase/neon/issues/6107 */
+        ctx: &RequestContext,
     ) -> (FullSlice<B>, Result<usize, Error>) {
         let file_guard = match self.lock_file().await {
             Ok(file_guard) => file_guard,
@@ -1000,14 +966,7 @@ impl VirtualFileInner {
             let ((_file_guard, buf), result) =
                 io_engine::get().write_at(file_guard, offset, buf).await;
             if let Ok(size) = result {
-                STORAGE_IO_SIZE
-                    .with_label_values(&[
-                        "write",
-                        &self.tenant_id,
-                        &self.shard_id,
-                        &self.timeline_id,
-                    ])
-                    .add(size as i64);
+                ctx.scope().io_size_metrics().write.add(size.into_u64());
             }
             (buf, result)
         })

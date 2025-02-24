@@ -29,7 +29,7 @@ use pq_proto::framed::ConnectionError;
 
 use strum::{EnumCount, IntoEnumIterator as _, VariantNames};
 use strum_macros::{IntoStaticStr, VariantNames};
-use utils::id::TimelineId;
+use utils::id::{TenantId, TimelineId};
 
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext};
@@ -1200,17 +1200,58 @@ impl StorageIoTime {
 
 pub(crate) static STORAGE_IO_TIME_METRIC: Lazy<StorageIoTime> = Lazy::new(StorageIoTime::new);
 
-const STORAGE_IO_SIZE_OPERATIONS: &[&str] = &["read", "write"];
+#[derive(Clone,Copy)]
+#[repr(usize)]
+enum StorageIoSizeOperation {
+    Read,
+    Write,
+}
+
+impl StorageIoSizeOperation {
+    const VARIANTS: &'static [&'static str] = &["read", "write"];
+
+    fn as_str(&self) -> &'static str {
+        Self::VARIANTS[*self as usize]
+    }
+}
 
 // Needed for the https://neonprod.grafana.net/d/5uK9tHL4k/picking-tenant-for-relocation?orgId=1
-pub(crate) static STORAGE_IO_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
-    register_int_gauge_vec!(
+static STORAGE_IO_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
         "pageserver_io_operations_bytes_total",
         "Total amount of bytes read/written in IO operations",
         &["operation", "tenant_id", "shard_id", "timeline_id"]
     )
     .expect("failed to define a metric")
 });
+
+#[derive(Clone, Debug)]
+pub(crate) struct StorageIoSizeMetrics {
+    pub read: UIntGauge,
+    pub write: UIntGauge,
+}
+
+impl StorageIoSizeMetrics {
+    pub(crate) fn new(tenant_id: &str, shard_id: &str, timeline_id: &str) -> Self {
+        let read = STORAGE_IO_SIZE
+            .get_metric_with_label_values(&[
+                StorageIoSizeOperation::Read.as_str(),
+                tenant_id,
+                shard_id,
+                timeline_id,
+            ])
+            .unwrap();
+        let write = STORAGE_IO_SIZE
+            .get_metric_with_label_values(&[
+                StorageIoSizeOperation::Write.as_str(),
+                tenant_id,
+                shard_id,
+                timeline_id,
+            ])
+            .unwrap();
+        Self { read, write }
+    }
+}
 
 #[cfg(not(test))]
 pub(crate) mod virtual_file_descriptor_cache {
@@ -2794,6 +2835,7 @@ pub(crate) struct TimelineMetrics {
     /// Number of valid LSN leases.
     pub valid_lsn_lease_count_gauge: UIntGauge,
     pub wal_records_received: IntCounter,
+    pub storage_io_size: StorageIoSizeMetrics,
     shutdown: std::sync::atomic::AtomicBool,
 }
 
@@ -2929,6 +2971,8 @@ impl TimelineMetrics {
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
 
+        let storage_io_size = StorageIoSizeMetrics::new(&tenant_id, &shard_id, &timeline_id);
+
         TimelineMetrics {
             tenant_id,
             shard_id,
@@ -2958,6 +3002,7 @@ impl TimelineMetrics {
             evictions_with_low_residence_duration: std::sync::RwLock::new(
                 evictions_with_low_residence_duration,
             ),
+            storage_io_size,
             valid_lsn_lease_count_gauge,
             wal_records_received,
             shutdown: std::sync::atomic::AtomicBool::default(),
@@ -3148,7 +3193,7 @@ impl TimelineMetrics {
             ]);
         }
 
-        for op in STORAGE_IO_SIZE_OPERATIONS {
+        for op in StorageIoSizeOperation::VARIANTS {
             let _ = STORAGE_IO_SIZE.remove_label_values(&[op, tenant_id, shard_id, timeline_id]);
         }
 

@@ -89,7 +89,10 @@
 //! [`RequestContext`] argument. Functions in the middle of the call chain
 //! only need to pass it on.
 
-use crate::task_mgr::TaskKind;
+use pageserver_api::shard::TenantShardId;
+use utils::id::TimelineId;
+
+use crate::{metrics::StorageIoSizeMetrics, task_mgr::TaskKind};
 
 // The main structure of this module, see module-level comment.
 #[derive(Debug)]
@@ -99,6 +102,64 @@ pub struct RequestContext {
     access_stats_behavior: AccessStatsBehavior,
     page_content_kind: PageContentKind,
     read_path_debug: bool,
+    scope: Scope,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum Scope {
+    Global {
+        io_size_metrics: crate::metrics::StorageIoSizeMetrics,
+    },
+    TenantShard {
+        tenant_shard_id: TenantShardId,
+        io_size_metrics: crate::metrics::StorageIoSizeMetrics,
+    },
+    Timeline {
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        io_size_metrics: crate::metrics::StorageIoSizeMetrics,
+    },
+}
+
+impl Scope {
+    pub(crate) fn global() -> Self {
+        Scope::Global {
+            io_size_metrics: StorageIoSizeMetrics::new("*", "*", "*"),
+        }
+    }
+    pub(crate) fn tenant_shard(tenant_shard_id: TenantShardId) -> Self {
+        Scope::TenantShard {
+            tenant_shard_id,
+            io_size_metrics: StorageIoSizeMetrics::new(
+                &tenant_shard_id.tenant_id.to_string(),
+                &tenant_shard_id.shard_slug().to_string(),
+                "*",
+            ),
+        }
+    }
+    pub(crate) fn timeline(tenant_shard_id: TenantShardId, timeline_id: TimelineId) -> Self {
+        Scope::Timeline {
+            tenant_shard_id,
+            timeline_id,
+            io_size_metrics: {
+                let tenant_id = tenant_shard_id.tenant_id.to_string();
+                let shard_slug = tenant_shard_id.shard_slug().to_string();
+                let timeline_id = timeline_id.to_string();
+                StorageIoSizeMetrics::new(&tenant_id, &shard_slug, &timeline_id)
+            },
+        }
+    }
+    pub(crate) fn io_size_metrics(&self) -> &crate::metrics::StorageIoSizeMetrics {
+        match self {
+            Scope::Global { io_size_metrics } => io_size_metrics,
+            Scope::TenantShard {
+                io_size_metrics, ..
+            } => io_size_metrics,
+            Scope::Timeline {
+                io_size_metrics, ..
+            } => io_size_metrics,
+        }
+    }
 }
 
 /// The kind of access to the page cache.
@@ -157,6 +218,7 @@ impl RequestContextBuilder {
                 access_stats_behavior: AccessStatsBehavior::Update,
                 page_content_kind: PageContentKind::Unknown,
                 read_path_debug: false,
+                scope: Scope::global(),
             },
         }
     }
@@ -171,6 +233,7 @@ impl RequestContextBuilder {
                 access_stats_behavior: original.access_stats_behavior,
                 page_content_kind: original.page_content_kind,
                 read_path_debug: original.read_path_debug,
+                scope: original.scope.clone(),
             },
         }
     }
@@ -196,6 +259,11 @@ impl RequestContextBuilder {
 
     pub(crate) fn read_path_debug(mut self, b: bool) -> Self {
         self.inner.read_path_debug = b;
+        self
+    }
+
+    pub(crate) fn scope(mut self, s: Scope) -> Self {
+        self.inner.scope = s;
         self
     }
 
@@ -302,5 +370,9 @@ impl RequestContext {
 
     pub(crate) fn read_path_debug(&self) -> bool {
         self.read_path_debug
+    }
+
+    pub(crate) fn scope(&self) -> &Scope {
+        &self.scope
     }
 }
