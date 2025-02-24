@@ -42,7 +42,7 @@ use crate::metrics::{HttpDirection, Metrics};
 use crate::proxy::{run_until_cancelled, NeonOptions};
 use crate::serverless::backend::HttpConnError;
 use crate::types::{DbName, RoleName};
-use crate::usage_metrics::{MetricCounter, MetricCounterRecorder};
+use crate::usage_metrics::{MetricCounter, MetricCounterRecorder, TrafficDirection};
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -209,7 +209,7 @@ fn get_conn_info(
             }
         }
         Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)) | None => {
-            return Err(ConnInfoError::MissingHostname)
+            return Err(ConnInfoError::MissingHostname);
         }
     };
     ctx.set_endpoint_id(endpoint.clone());
@@ -745,7 +745,7 @@ async fn handle_db_inner(
         }
     };
 
-    let metrics = client.metrics();
+    let metrics = client.metrics(TrafficDirection::Egress, ctx);
 
     let len = json_output.len();
     let response = response
@@ -818,7 +818,7 @@ async fn handle_auth_broker_inner(
         .expect("all headers and params received via hyper should be valid for request");
 
     // todo: map body to count egress
-    let _metrics = client.metrics();
+    let _metrics = client.metrics(TrafficDirection::Egress, ctx);
 
     Ok(client
         .inner
@@ -1118,10 +1118,10 @@ enum Discard<'a> {
 }
 
 impl Client {
-    fn metrics(&self) -> Arc<MetricCounter> {
+    fn metrics(&self, direction: TrafficDirection, ctx: &RequestContext) -> Arc<MetricCounter> {
         match self {
-            Client::Remote(client) => client.metrics(),
-            Client::Local(local_client) => local_client.metrics(),
+            Client::Remote(client) => client.metrics(direction, ctx),
+            Client::Local(local_client) => local_client.metrics(direction, ctx),
         }
     }
 

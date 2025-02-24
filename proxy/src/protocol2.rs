@@ -9,6 +9,7 @@ use std::task::{Context, Poll};
 
 use bytes::{Buf, Bytes, BytesMut};
 use pin_project_lite::pin_project;
+use smol_str::SmolStr;
 use strum_macros::FromRepr;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use zerocopy::{FromBytes, FromZeroes};
@@ -99,7 +100,7 @@ impl fmt::Display for ConnectionInfo {
 
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub enum ConnectionInfoExtra {
-    Aws { vpce_id: Bytes },
+    Aws { vpce_id: SmolStr },
     Azure { link_id: u32 },
 }
 
@@ -193,7 +194,7 @@ fn process_proxy_payload(
             return Err(io::Error::new(
                 io::ErrorKind::Other,
                 "invalid proxy protocol address family/transport protocol.",
-            ))
+            ));
         }
     };
 
@@ -207,9 +208,14 @@ fn process_proxy_payload(
                 }
                 let subtype = tlv.value.get_u8();
                 match Pp2AwsType::from_repr(subtype) {
-                    Some(Pp2AwsType::VpceId) => {
-                        extra = Some(ConnectionInfoExtra::Aws { vpce_id: tlv.value });
-                    }
+                    Some(Pp2AwsType::VpceId) => match std::str::from_utf8(&tlv.value) {
+                        Ok(s) => {
+                            extra = Some(ConnectionInfoExtra::Aws { vpce_id: s.into() });
+                        }
+                        Err(e) => {
+                            tracing::warn!("invalid aws vpce id: {e}");
+                        }
+                    },
                     None => {
                         tracing::warn!("unknown aws tlv: subtype={subtype}");
                     }

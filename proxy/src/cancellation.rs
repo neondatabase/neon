@@ -358,10 +358,7 @@ impl CancellationHandler {
 
             let incoming_vpc_endpoint_id = match ctx.extra() {
                 None => return Err(CancelError::AuthError(AuthError::MissingVPCEndpointId)),
-                Some(ConnectionInfoExtra::Aws { vpce_id }) => {
-                    // Convert the vcpe_id to a string
-                    String::from_utf8(vpce_id.to_vec()).unwrap_or_default()
-                }
+                Some(ConnectionInfoExtra::Aws { vpce_id }) => vpce_id.to_string(),
                 Some(ConnectionInfoExtra::Azure { link_id }) => link_id.to_string(),
             };
 
