@@ -11,9 +11,9 @@ pub(crate) mod errors;
 
 use std::sync::Arc;
 
+use crate::auth::IpPattern;
 use crate::auth::backend::jwt::AuthRule;
 use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
-use crate::auth::IpPattern;
 use crate::cache::project_info::ProjectInfoCacheImpl;
 use crate::cache::{Cached, TimedLru};
 use crate::config::ComputeConfig;

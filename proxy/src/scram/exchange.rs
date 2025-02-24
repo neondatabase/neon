@@ -5,6 +5,7 @@ use std::convert::Infallible;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
+use super::ScramKey;
 use super::messages::{
     ClientFinalMessage, ClientFirstMessage, OwnedServerFirstMessage, SCRAM_RAW_NONCE_LEN,
 };
@@ -12,7 +13,6 @@ use super::pbkdf2::Pbkdf2;
 use super::secret::ServerSecret;
 use super::signature::SignatureBuilder;
 use super::threadpool::ThreadPool;
-use super::ScramKey;
 use crate::intern::EndpointIdInt;
 use crate::sasl::{self, ChannelBinding, Error as SaslError};
 
@@ -208,8 +208,8 @@ impl sasl::Mechanism for Exchange<'_> {
     type Output = super::ScramKey;
 
     fn exchange(mut self, input: &str) -> sasl::Result<sasl::Step<Self, Self::Output>> {
-        use sasl::Step;
         use ExchangeState;
+        use sasl::Step;
         match &self.state {
             ExchangeState::Initial(init) => {
                 match init.transition(self.secret, &self.tls_server_end_point, input)? {

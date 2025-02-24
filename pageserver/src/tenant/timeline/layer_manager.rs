@@ -15,8 +15,8 @@ use crate::{
     tenant::{
         layer_map::{BatchedUpdates, LayerMap},
         storage_layer::{
-            AsLayerDesc, InMemoryLayer, Layer, PersistentLayerDesc, PersistentLayerKey,
-            ResidentLayer,
+            AsLayerDesc, InMemoryLayer, Layer, LayerVisibilityHint, PersistentLayerDesc,
+            PersistentLayerKey, ResidentLayer,
         },
     },
 };
@@ -116,6 +116,12 @@ impl LayerManager {
 
     pub(crate) fn likely_resident_layers(&self) -> impl Iterator<Item = &'_ Layer> + '_ {
         self.layers().values().filter(|l| l.is_likely_resident())
+    }
+
+    pub(crate) fn visible_layers(&self) -> impl Iterator<Item = &'_ Layer> + '_ {
+        self.layers()
+            .values()
+            .filter(|l| l.visibility() == LayerVisibilityHint::Visible)
     }
 
     pub(crate) fn contains(&self, layer: &Layer) -> bool {

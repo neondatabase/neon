@@ -785,7 +785,7 @@ retry:
 		CHECK_FOR_INTERRUPTS();
 
 		/* Data available in socket? */
-		if (noccurred > 0 && occurred_event.events & WL_SOCKET_READABLE)
+		if (noccurred > 0 && (occurred_event.events & WL_SOCKET_READABLE) != 0)
 		{
 			int			sndbuf;
 			int			recvbuf;

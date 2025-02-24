@@ -1,6 +1,8 @@
-use crate::{FromSql, Type};
-pub use bytes::BytesMut;
 use std::error::Error;
+
+pub use bytes::BytesMut;
+
+use crate::{FromSql, Type};
 
 pub fn read_be_i32(buf: &mut &[u8]) -> Result<i32, Box<dyn Error + Sync + Send>> {
     if buf.len() < 4 {

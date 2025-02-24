@@ -3,16 +3,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ::http::header::AUTHORIZATION;
 use ::http::HeaderName;
+use ::http::header::AUTHORIZATION;
 use futures::TryFutureExt;
 use postgres_client::config::SslMode;
 use tokio::time::Instant;
-use tracing::{debug, info, info_span, warn, Instrument};
+use tracing::{Instrument, debug, info, info_span, warn};
 
 use super::super::messages::{ControlPlaneErrorMessage, GetEndpointAccessControl, WakeCompute};
-use crate::auth::backend::jwt::AuthRule;
 use crate::auth::backend::ComputeUserInfo;
+use crate::auth::backend::jwt::AuthRule;
 use crate::cache::Cached;
 use crate::context::RequestContext;
 use crate::control_plane::caches::ApiCaches;

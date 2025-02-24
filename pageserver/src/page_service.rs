@@ -2100,9 +2100,8 @@ impl PageServerHandler {
         set_tracing_field_shard_id(&timeline);
 
         if timeline.is_archived() == Some(true) {
-            // TODO after a grace period, turn this log line into a hard error
-            tracing::warn!("timeline {tenant_id}/{timeline_id} is archived, but got basebackup request for it.");
-            //return Err(QueryError::NotFound("timeline is archived".into()))
+            tracing::info!("timeline {tenant_id}/{timeline_id} is archived, but got basebackup request for it.");
+            return Err(QueryError::NotFound("timeline is archived".into()));
         }
 
         let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
