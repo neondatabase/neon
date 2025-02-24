@@ -387,6 +387,8 @@ pub struct Tenant {
 
     pub(crate) pagestream_throttle_metrics: Arc<crate::metrics::tenant_throttling::Pagestream>,
 
+    pub(crate) virtual_file_io_metrics: crate::metrics::StorageIoSizeMetrics,
+
     /// An ongoing timeline detach concurrency limiter.
     ///
     /// As a tenant will likely be restarted as part of timeline detach ancestor it makes no sense
@@ -1334,7 +1336,8 @@ impl Tenant {
         let tenant_clone = Arc::clone(&tenant);
         let ctx = ctx.detached_child(TaskKind::Attach, DownloadBehavior::Warn);
         let ctx = RequestContextBuilder::extend(&ctx)
-            .scope(context::Scope::tenant_shard(tenant_shard_id));
+            .scope(context::Scope::new_tenant(&tenant))
+            .build();
         task_mgr::spawn(
             &tokio::runtime::Handle::current(),
             TaskKind::Attach,
@@ -1721,10 +1724,7 @@ impl Tenant {
         let sorted_timelines = tree_sort_timelines(timeline_ancestors, |m| m.ancestor_timeline())?;
         for (timeline_id, remote_metadata) in sorted_timelines {
             let ctx = RequestContextBuilder::extend(ctx)
-                .scope(context::Scope::timeline(
-                    self.tenant_shard_id,
-                    self.timeline_id,
-                ))
+                .scope(context::Scope::new_tenant(self))
                 .build();
             let (index_part, remote_client, previous_heatmap) = remote_index_and_client
                 .remove(&timeline_id)
@@ -1775,7 +1775,7 @@ impl Tenant {
                         import_pgdata,
                         ActivateTimelineArgs::No,
                         guard,
-                        &ctx,
+                        ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Warn),
                     ));
                 }
             }
@@ -2813,6 +2813,7 @@ impl Tenant {
             index_part,
             activate,
             timeline_create_guard,
+            ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Warn),
         ));
 
         // NB: the timeline doesn't exist in self.timelines at this point
@@ -2826,7 +2827,7 @@ impl Tenant {
         index_part: import_pgdata::index_part_format::Root,
         activate: ActivateTimelineArgs,
         timeline_create_guard: TimelineCreateGuard,
-        ctx: &RequestContext,
+        ctx: RequestContext,
     ) {
         debug_assert_current_span_has_tenant_and_timeline_id();
         info!("starting");
@@ -2838,6 +2839,7 @@ impl Tenant {
                 index_part,
                 activate,
                 timeline_create_guard,
+                ctx,
             )
             .await;
         if let Err(err) = &res {
@@ -2853,9 +2855,8 @@ impl Tenant {
         index_part: import_pgdata::index_part_format::Root,
         activate: ActivateTimelineArgs,
         timeline_create_guard: TimelineCreateGuard,
+        ctx: RequestContext,
     ) -> Result<(), anyhow::Error> {
-        let ctx = RequestContext::detached_child(TaskKind::ImportPgdata, DownloadBehavior::Warn);
-
         info!("importing pgdata");
         import_pgdata::doit(&timeline, index_part, &ctx, self.cancel.clone())
             .await
@@ -4282,6 +4283,7 @@ impl Tenant {
             pagestream_throttle_metrics: Arc::new(
                 crate::metrics::tenant_throttling::Pagestream::new(&tenant_shard_id),
             ),
+            virtual_file_io_metrics: crate::metrics::StorageIoSizeMetrics::new_tenant(&tenant_shard_id),
             tenant_conf: Arc::new(ArcSwap::from_pointee(attached_conf)),
             ongoing_timeline_detach: std::sync::Mutex::default(),
             gc_block: Default::default(),

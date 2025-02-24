@@ -29,7 +29,7 @@ use pq_proto::framed::ConnectionError;
 
 use strum::{EnumCount, IntoEnumIterator as _, VariantNames};
 use strum_macros::{IntoStaticStr, VariantNames};
-use utils::id::{TenantId, TimelineId};
+use utils::id::{TimelineId};
 
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext};
@@ -1200,7 +1200,7 @@ impl StorageIoTime {
 
 pub(crate) static STORAGE_IO_TIME_METRIC: Lazy<StorageIoTime> = Lazy::new(StorageIoTime::new);
 
-#[derive(Clone,Copy)]
+#[derive(Clone, Copy)]
 #[repr(usize)]
 enum StorageIoSizeOperation {
     Read,
@@ -1250,6 +1250,25 @@ impl StorageIoSizeMetrics {
             ])
             .unwrap();
         Self { read, write }
+    }
+
+    pub(crate) fn new_tenant(tenant_shard_id: &TenantShardId) -> Self {
+        Self::new(
+            &tenant_shard_id.tenant_id.to_string(),
+            &tenant_shard_id.shard_slug().to_string(),
+            "*",
+        )
+    }
+
+    fn remove_per_tenant_metrics(tenant_shard_id: &TenantShardId) {
+        for operation in StorageIoSizeOperation::VARIANTS {
+            let _ = STORAGE_IO_SIZE.remove_label_values(&[
+                operation,
+                &tenant_shard_id.tenant_id.to_string(),
+                &tenant_shard_id.shard_slug().to_string(),
+                "*",
+            ]);
+        }
     }
 }
 
@@ -3240,6 +3259,8 @@ pub(crate) fn remove_tenant_metrics(tenant_shard_id: &TenantShardId) {
     }
 
     tenant_throttling::remove_tenant_metrics(tenant_shard_id);
+
+    StorageIoSizeMetrics::remove_per_tenant_metrics(&tenant_shard_id);
 
     // we leave the BROKEN_TENANTS_SET entry if any
 }

@@ -89,10 +89,14 @@
 //! [`RequestContext`] argument. Functions in the middle of the call chain
 //! only need to pass it on.
 
-use pageserver_api::shard::TenantShardId;
-use utils::id::TimelineId;
+use std::sync::Arc;
 
-use crate::{metrics::StorageIoSizeMetrics, task_mgr::TaskKind};
+use once_cell::sync::Lazy;
+
+use crate::{
+    task_mgr::TaskKind,
+    tenant::{Tenant, Timeline},
+};
 
 // The main structure of this module, see module-level comment.
 #[derive(Debug)]
@@ -108,57 +112,44 @@ pub struct RequestContext {
 #[derive(Clone, Debug)]
 pub(crate) enum Scope {
     Global {
-        io_size_metrics: crate::metrics::StorageIoSizeMetrics,
+        io_size_metrics: &'static crate::metrics::StorageIoSizeMetrics,
     },
-    TenantShard {
-        tenant_shard_id: TenantShardId,
-        io_size_metrics: crate::metrics::StorageIoSizeMetrics,
+    Tenant {
+        tenant: Arc<Tenant>,
     },
     Timeline {
-        tenant_shard_id: TenantShardId,
-        timeline_id: TimelineId,
-        io_size_metrics: crate::metrics::StorageIoSizeMetrics,
+        timeline: Arc<Timeline>,
     },
 }
 
 impl Scope {
-    pub(crate) fn global() -> Self {
+    pub(crate) fn new_global() -> Self {
+        static GLOBAL_IO_SIZE_METRICS: Lazy<crate::metrics::StorageIoSizeMetrics> =
+            Lazy::new(|| crate::metrics::StorageIoSizeMetrics::new("*", "*", "*"));
         Scope::Global {
-            io_size_metrics: StorageIoSizeMetrics::new("*", "*", "*"),
+            io_size_metrics: &&GLOBAL_IO_SIZE_METRICS,
         }
     }
-    pub(crate) fn tenant_shard(tenant_shard_id: TenantShardId) -> Self {
-        Scope::TenantShard {
-            tenant_shard_id,
-            io_size_metrics: StorageIoSizeMetrics::new(
-                &tenant_shard_id.tenant_id.to_string(),
-                &tenant_shard_id.shard_slug().to_string(),
-                "*",
-            ),
+    pub(crate) fn new_tenant(tenant: &Arc<Tenant>) -> Self {
+        Scope::Tenant {
+            tenant: Arc::clone(tenant),
         }
     }
-    pub(crate) fn timeline(tenant_shard_id: TenantShardId, timeline_id: TimelineId) -> Self {
+    pub(crate) fn new_timeline(timeline: &Arc<Timeline>) -> Self {
         Scope::Timeline {
-            tenant_shard_id,
-            timeline_id,
-            io_size_metrics: {
-                let tenant_id = tenant_shard_id.tenant_id.to_string();
-                let shard_slug = tenant_shard_id.shard_slug().to_string();
-                let timeline_id = timeline_id.to_string();
-                StorageIoSizeMetrics::new(&tenant_id, &shard_slug, &timeline_id)
-            },
+            timeline: Arc::clone(timeline),
         }
     }
+
     pub(crate) fn io_size_metrics(&self) -> &crate::metrics::StorageIoSizeMetrics {
         match self {
             Scope::Global { io_size_metrics } => io_size_metrics,
-            Scope::TenantShard {
-                io_size_metrics, ..
-            } => io_size_metrics,
-            Scope::Timeline {
-                io_size_metrics, ..
-            } => io_size_metrics,
+            Scope::Tenant { tenant } => &tenant.virtual_file_io_metrics,
+            Scope::Timeline { timeline } => &timeline.metrics.storage_io_size,
         }
+    }
+    pub(crate) fn is_timeline(&self) -> bool {
+        matches!(self, Scope::Timeline { .. })
     }
 }
 
@@ -218,7 +209,7 @@ impl RequestContextBuilder {
                 access_stats_behavior: AccessStatsBehavior::Update,
                 page_content_kind: PageContentKind::Unknown,
                 read_path_debug: false,
-                scope: Scope::global(),
+                scope: Scope::new_global(),
             },
         }
     }

@@ -16,7 +16,6 @@ use crate::context::RequestContext;
 
 use crate::metrics::{StorageIoOperation, STORAGE_IO_TIME_METRIC};
 use crate::page_cache::{PageWriteGuard, PAGE_SZ};
-use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
 use owned_buffers_io::aligned_buffer::buffer::AlignedBuffer;
@@ -24,7 +23,6 @@ use owned_buffers_io::aligned_buffer::{AlignedBufferMut, AlignedSlice, ConstAlig
 use owned_buffers_io::io_buf_aligned::{IoBufAligned, IoBufAlignedMut};
 use owned_buffers_io::io_buf_ext::FullSlice;
 use pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
-use pageserver_api::shard::TenantShardId;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
 #[cfg(target_os = "linux")]
@@ -587,16 +585,14 @@ impl VirtualFileInner {
         open_options: &OpenOptions,
         _ctx: &RequestContext,
     ) -> Result<VirtualFileInner, std::io::Error> {
-        let path_ref = path.as_ref();
-        let path_str = path_ref.to_string();
-        let parts = path_str.split('/').collect::<Vec<&str>>();
+        let path = path.as_ref();
         let (handle, mut slot_guard) = get_open_files().find_victim_slot().await;
 
         // NB: there is also StorageIoOperation::OpenAfterReplace which is for the case
         // where our caller doesn't get to use the returned VirtualFile before its
         // slot gets re-used by someone else.
         let file = observe_duration!(StorageIoOperation::Open, {
-            open_options.open(path_ref.as_std_path()).await?
+            open_options.open(path.as_std_path()).await?
         });
 
         // Strip all options other than read and write.
@@ -612,7 +608,7 @@ impl VirtualFileInner {
         let vfile = VirtualFileInner {
             handle: RwLock::new(handle),
             pos: 0,
-            path: path_ref.to_path_buf(),
+            path: path.to_owned(),
             open_options: reopen_options,
         };
 

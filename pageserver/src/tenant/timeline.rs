@@ -323,7 +323,7 @@ pub struct Timeline {
     ancestor_timeline: Option<Arc<Timeline>>,
     ancestor_lsn: Lsn,
 
-    pub(super) metrics: TimelineMetrics,
+    pub(crate) metrics: TimelineMetrics,
 
     // `Timeline` doesn't write these metrics itself, but it manages the lifetime.  Code
     // in `crate::page_service` writes these metrics.
@@ -1131,6 +1131,21 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
+        if !ctx.scope().is_timeline() {
+            if cfg!(debug_assertions) || cfg!(feature = "testing") {
+                panic!("get() called with RequestContext in non-timeline scope");
+            } else {
+                static LIMIT: Lazy<Mutex<RateLimit>> =
+                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(1))));
+                let mut guard = LIMIT.lock().unwrap();
+                guard.call2(|rate_limit_stats| {
+                    warn!(
+                        %rate_limit_stats,
+                        "get() called with RequestContext in non-timeline scope",
+                    );
+                });
+            }
+        }
         if !lsn.is_valid() {
             return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
         }
