@@ -291,7 +291,7 @@ impl DeleteTimelineFlow {
     ) -> anyhow::Result<()> {
         // Note: here we even skip populating layer map. Timeline is essentially uninitialized.
         // RemoteTimelineClient is the only functioning part.
-        let (timeline, timeline_ctx) = tenant
+        let (timeline, _timeline_ctx) = tenant
             .create_timeline_struct(
                 timeline_id,
                 local_metadata,

@@ -130,7 +130,7 @@ impl Scope {
         static GLOBAL_IO_SIZE_METRICS: Lazy<crate::metrics::StorageIoSizeMetrics> =
             Lazy::new(|| crate::metrics::StorageIoSizeMetrics::new("*", "*", "*"));
         Scope(Arc::new(ScopeInner::Global {
-            io_size_metrics: &&GLOBAL_IO_SIZE_METRICS,
+            io_size_metrics: &GLOBAL_IO_SIZE_METRICS,
         }))
     }
     pub(crate) fn new_timeline(timeline: &Arc<Timeline>) -> Self {
@@ -351,7 +351,7 @@ impl RequestContext {
             .build()
     }
 
-    pub fn with_scope_timeline_handle(
+    pub(crate) fn with_scope_timeline_handle(
         &self,
         timeline_handle: crate::tenant::timeline::handle::Handle<
             crate::page_service::TenantManagerTypes,
@@ -385,7 +385,12 @@ impl RequestContext {
     pub(crate) fn io_size_metrics(&self) -> &StorageIoSizeMetrics {
         match &*self.scope.0 {
             ScopeInner::Global { io_size_metrics } => {
-                if cfg!(debug_assertions) || cfg!(feature = "testing") {
+                let is_unit_test = cfg!(test);
+                let is_regress_test_build = cfg!(feature = "testing");
+                if is_unit_test {
+                    // TODO: We haven't converted all the unit tests to set timeline scope yet.
+                    io_size_metrics
+                } else if is_regress_test_build {
                     panic!("all VirtualFile instances are timeline-scoped");
                 } else {
                     use once_cell::sync::Lazy;

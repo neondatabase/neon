@@ -1742,7 +1742,7 @@ impl Tenant {
                     previous_heatmap,
                     self.get_timeline_resources_for(remote_client),
                     LoadTimelineCause::Attach,
-                    &ctx,
+                    ctx,
                 )
                 .await
                 .with_context(|| {
@@ -2783,7 +2783,7 @@ impl Tenant {
                     timeline_create_guard,
                     initdb_lsn,
                     None,
-                    &ctx,
+                    ctx,
                 )
                 .await
             }
@@ -3065,7 +3065,7 @@ impl Tenant {
             for timeline in compact_l0 {
                 let ctx = &ctx.with_scope_timeline(&timeline);
                 let outcome = timeline
-                    .compact(cancel, CompactFlags::OnlyL0Compaction.into(), &ctx)
+                    .compact(cancel, CompactFlags::OnlyL0Compaction.into(), ctx)
                     .instrument(info_span!("compact_timeline", timeline_id = %timeline.timeline_id))
                     .await
                     .inspect_err(|err| self.maybe_trip_compaction_breaker(err))?;
@@ -4290,9 +4290,6 @@ impl Tenant {
             pagestream_throttle_metrics: Arc::new(
                 crate::metrics::tenant_throttling::Pagestream::new(&tenant_shard_id),
             ),
-            virtual_file_io_metrics: crate::metrics::StorageIoSizeMetrics::new_tenant(
-                &tenant_shard_id,
-            ),
             tenant_conf: Arc::new(ArcSwap::from_pointee(attached_conf)),
             ongoing_timeline_detach: std::sync::Mutex::default(),
             gc_block: Default::default(),
@@ -4597,7 +4594,7 @@ impl Tenant {
                 .unwrap_or(Lsn(0));
 
             let cutoffs = timeline
-                .find_gc_cutoffs(now_ts_for_pitr_calc, cutoff, pitr, cancel, &ctx)
+                .find_gc_cutoffs(now_ts_for_pitr_calc, cutoff, pitr, cancel, ctx)
                 .await?;
             let old = gc_cutoffs.insert(timeline.timeline_id, cutoffs);
             assert!(old.is_none());
@@ -4871,7 +4868,7 @@ impl Tenant {
                 timeline_create_guard,
                 start_lsn + 1,
                 Some(Arc::clone(src_timeline)),
-                &ctx,
+                ctx,
             )
             .await?;
 
@@ -6820,7 +6817,7 @@ mod tests {
 
         let (tenant, ctx) = harness.load().await;
         let io_concurrency = IoConcurrency::spawn_for_test();
-        let tline = tenant
+        let (tline, ctx) = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
             .await?;
         let tline = tline.raw_timeline().unwrap();
@@ -7442,7 +7439,7 @@ mod tests {
             .await;
 
         let initdb_lsn = Lsn(0x20);
-        let utline = tenant
+        let (utline, ctx) = tenant
             .create_empty_timeline(TIMELINE_ID, initdb_lsn, DEFAULT_PG_VERSION, &ctx)
             .await?;
         let tline = utline.raw_timeline().unwrap();
@@ -7509,7 +7506,7 @@ mod tests {
         let harness = TenantHarness::create(name).await?;
         {
             let (tenant, ctx) = harness.load().await;
-            let tline = tenant
+            let (tline, _ctx) = tenant
                 .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
                 .await?;
             // Leave the timeline ID in [`Tenant::timelines_creating`] to exclude attempting to create it again

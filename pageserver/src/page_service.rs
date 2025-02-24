@@ -53,7 +53,7 @@ use utils::{
 use crate::auth::check_permission;
 use crate::basebackup::BasebackupError;
 use crate::config::PageServerConf;
-use crate::context::{self, DownloadBehavior, RequestContext, RequestContextBuilder};
+use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::{self, SmgrOpTimer};
 use crate::metrics::{ComputeCommandKind, COMPUTE_COMMANDS_COUNTERS, LIVE_CONNECTIONS};
 use crate::pgdatadir_mapping::Version;
@@ -1091,9 +1091,7 @@ impl PageServerHandler {
                 let weak_handle = &$shard;
                 let strong1 = weak_handle.upgrade()?;
                 let strong2 = weak_handle.upgrade()?;
-                let ctx = RequestContextBuilder::extend(ctx)
-                    .scope(context::Scope::new_timeline_handle(strong1))
-                    .build();
+                let ctx = ctx.with_scope_timeline_handle(strong1);
                 (strong2, ctx)
             }};
         }
@@ -1113,7 +1111,7 @@ impl PageServerHandler {
                 let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
                     vec![self
-                        .handle_get_rel_exists_request(&*shard, &req, &ctx)
+                        .handle_get_rel_exists_request(&shard, &req, &ctx)
                         .instrument(span.clone())
                         .await
                         .map(|msg| (msg, timer))
@@ -1131,7 +1129,7 @@ impl PageServerHandler {
                 let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
                     vec![self
-                        .handle_get_nblocks_request(&*shard, &req, &ctx)
+                        .handle_get_nblocks_request(&shard, &req, &ctx)
                         .instrument(span.clone())
                         .await
                         .map(|msg| (msg, timer))
@@ -1153,7 +1151,7 @@ impl PageServerHandler {
                         trace!(npages, "handling getpage request");
                         let res = self
                             .handle_get_page_at_lsn_request_batched(
-                                &*shard,
+                                &shard,
                                 effective_request_lsn,
                                 pages,
                                 io_concurrency,
@@ -1177,7 +1175,7 @@ impl PageServerHandler {
                 let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
                     vec![self
-                        .handle_db_size_request(&*shard, &req, &ctx)
+                        .handle_db_size_request(&shard, &req, &ctx)
                         .instrument(span.clone())
                         .await
                         .map(|msg| (msg, timer))
@@ -1195,7 +1193,7 @@ impl PageServerHandler {
                 let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
                     vec![self
-                        .handle_get_slru_segment_request(&*shard, &req, &ctx)
+                        .handle_get_slru_segment_request(&shard, &req, &ctx)
                         .instrument(span.clone())
                         .await
                         .map(|msg| (msg, timer))
@@ -1216,7 +1214,7 @@ impl PageServerHandler {
                         let npages = requests.len();
                         trace!(npages, "handling getpage request");
                         let res = self
-                            .handle_test_request_batch(&*shard, requests, &ctx)
+                            .handle_test_request_batch(&shard, requests, &ctx)
                             .instrument(span.clone())
                             .await;
                         assert_eq!(res.len(), npages);
@@ -1649,7 +1647,7 @@ impl PageServerHandler {
         //
 
         let executor = pipeline_stage!("executor", self.cancel.clone(), move |cancel| {
-            let mut ctx = ctx.attached_child();
+            let ctx = ctx.attached_child();
             async move {
                 let _cancel_batcher = cancel_batcher.drop_guard();
                 loop {
@@ -1676,7 +1674,7 @@ impl PageServerHandler {
                             io_concurrency.clone(),
                             &cancel,
                             protocol_version,
-                            &mut ctx,
+                            &ctx,
                         ),
                     )
                     .await?;
@@ -2113,7 +2111,7 @@ impl PageServerHandler {
             .get(tenant_id, timeline_id, ShardSelector::Zero)
             .await?;
         set_tracing_field_shard_id(&timeline);
-        let ctx = ctx.with_scope_timeline(&*timeline);
+        let ctx = ctx.with_scope_timeline(&timeline);
 
         if timeline.is_archived() == Some(true) {
             // TODO after a grace period, turn this log line into a hard error
