@@ -11,24 +11,24 @@
 
 use std::collections::HashMap;
 use std::pin::pin;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
-use std::task::{ready, Poll};
+use std::sync::atomic::AtomicUsize;
+use std::task::{Poll, ready};
 use std::time::Duration;
 
 use ed25519_dalek::{Signature, Signer, SigningKey};
-use futures::future::poll_fn;
 use futures::Future;
+use futures::future::poll_fn;
 use indexmap::IndexMap;
 use jose_jwk::jose_b64::base64ct::{Base64UrlUnpadded, Encoding};
 use parking_lot::RwLock;
-use postgres_client::tls::NoTlsStream;
 use postgres_client::AsyncMessage;
+use postgres_client::tls::NoTlsStream;
 use serde_json::value::RawValue;
 use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, info_span, warn, Instrument};
+use tracing::{Instrument, debug, error, info, info_span, warn};
 
 use super::backend::HttpConnError;
 use super::conn_pool_lib::{
@@ -389,6 +389,9 @@ mod tests {
         // });
         // println!("{}", serde_json::to_string(&jwk).unwrap());
 
-        assert_eq!(jwt, "eyJhbGciOiJFZERTQSJ9.eyJmb28iOiJiYXIiLCJqdGkiOjIsIm5lc3RlZCI6eyJqdGkiOiJ0cmlja3kgbmVzdGluZyJ9fQ.Cvyc2By33KI0f0obystwdy8PN111L3Sc9_Mr2CU3XshtSqSdxuRxNEZGbb_RvyJf2IzheC_s7aBZ-jLeQ9N0Bg");
+        assert_eq!(
+            jwt,
+            "eyJhbGciOiJFZERTQSJ9.eyJmb28iOiJiYXIiLCJqdGkiOjIsIm5lc3RlZCI6eyJqdGkiOiJ0cmlja3kgbmVzdGluZyJ9fQ.Cvyc2By33KI0f0obystwdy8PN111L3Sc9_Mr2CU3XshtSqSdxuRxNEZGbb_RvyJf2IzheC_s7aBZ-jLeQ9N0Bg"
+        );
     }
 }

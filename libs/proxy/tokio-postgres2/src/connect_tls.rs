@@ -1,11 +1,12 @@
-use crate::config::SslMode;
-use crate::maybe_tls_stream::MaybeTlsStream;
-use crate::tls::private::ForcePrivateApi;
-use crate::tls::TlsConnect;
-use crate::Error;
 use bytes::BytesMut;
 use postgres_protocol2::message::frontend;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+use crate::Error;
+use crate::config::SslMode;
+use crate::maybe_tls_stream::MaybeTlsStream;
+use crate::tls::TlsConnect;
+use crate::tls::private::ForcePrivateApi;
 
 pub async fn connect_tls<S, T>(
     mut stream: S,
@@ -19,7 +20,7 @@ where
     match mode {
         SslMode::Disable => return Ok(MaybeTlsStream::Raw(stream)),
         SslMode::Prefer if !tls.can_connect(ForcePrivateApi) => {
-            return Ok(MaybeTlsStream::Raw(stream))
+            return Ok(MaybeTlsStream::Raw(stream));
         }
         SslMode::Prefer | SslMode::Require => {}
     }
