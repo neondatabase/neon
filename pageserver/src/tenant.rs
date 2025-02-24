@@ -1164,7 +1164,7 @@ impl Tenant {
             }
         };
 
-        let timeline = self.create_timeline_struct(
+        let (timeline, timeline_ctx) = self.create_timeline_struct(
             timeline_id,
             &metadata,
             previous_heatmap,
@@ -1172,6 +1172,7 @@ impl Tenant {
             resources,
             CreateTimelineCause::Load,
             idempotency.clone(),
+            ctx,
         )?;
         let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
         anyhow::ensure!(
@@ -1793,6 +1794,7 @@ impl Tenant {
                 timeline_id,
                 &index_part.metadata,
                 remote_timeline_client,
+                ctx,
             )
             .instrument(tracing::info_span!("timeline_delete", %timeline_id))
             .await
@@ -2426,8 +2428,8 @@ impl Tenant {
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
         pg_version: u32,
-        _ctx: &RequestContext,
-    ) -> anyhow::Result<UninitializedTimeline> {
+        ctx: &RequestContext,
+    ) -> anyhow::Result<(UninitializedTimeline, RequestContext)> {
         anyhow::ensure!(
             self.is_active(),
             "Cannot create empty timelines on inactive tenant"
@@ -2461,6 +2463,7 @@ impl Tenant {
             create_guard,
             initdb_lsn,
             None,
+            ctx,
         )
         .await
     }
@@ -2478,7 +2481,7 @@ impl Tenant {
         pg_version: u32,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
-        let uninit_tl = self
+        let (uninit_tl, ctx) = self
             .create_empty_timeline(new_timeline_id, initdb_lsn, pg_version, ctx)
             .await?;
         let tline = uninit_tl.raw_timeline().expect("we just created it");
@@ -2490,7 +2493,7 @@ impl Tenant {
             .init_empty_test_timeline()
             .context("init_empty_test_timeline")?;
         modification
-            .commit(ctx)
+            .commit(&ctx)
             .await
             .context("commit init_empty_test_timeline modification")?;
 
@@ -2762,10 +2765,9 @@ impl Tenant {
             }
         };
 
-        let mut uninit_timeline = {
+        let (mut uninit_timeline, timeline_ctx) = {
             let this = &self;
             let initdb_lsn = Lsn(0);
-            let _ctx = ctx;
             async move {
                 let new_metadata = TimelineMetadata::new(
                     // Initialize disk_consistent LSN to 0, The caller must import some data to
@@ -2784,6 +2786,7 @@ impl Tenant {
                     timeline_create_guard,
                     initdb_lsn,
                     None,
+                    &ctx,
                 )
                 .await
             }
@@ -4130,7 +4133,8 @@ impl Tenant {
         resources: TimelineResources,
         cause: CreateTimelineCause,
         create_idempotency: CreateTimelineIdempotency,
-    ) -> anyhow::Result<Arc<Timeline>> {
+        ctx: &RequestContext,
+    ) -> anyhow::Result<(Arc<Timeline>, RequestContext)> {
         let state = match cause {
             CreateTimelineCause::Load => {
                 let ancestor_id = new_metadata.ancestor_timeline();
@@ -4164,7 +4168,11 @@ impl Tenant {
             self.cancel.child_token(),
         );
 
-        Ok(timeline)
+        let timeline_ctx = RequestContextBuilder::extend(ctx)
+            .scope(context::Scope::new_timeline(&timeline))
+            .build();
+
+        Ok((timeline, timeline_ctx))
     }
 
     /// [`Tenant::shutdown`] must be called before dropping the returned [`Tenant`] object
@@ -4283,7 +4291,9 @@ impl Tenant {
             pagestream_throttle_metrics: Arc::new(
                 crate::metrics::tenant_throttling::Pagestream::new(&tenant_shard_id),
             ),
-            virtual_file_io_metrics: crate::metrics::StorageIoSizeMetrics::new_tenant(&tenant_shard_id),
+            virtual_file_io_metrics: crate::metrics::StorageIoSizeMetrics::new_tenant(
+                &tenant_shard_id,
+            ),
             tenant_conf: Arc::new(ArcSwap::from_pointee(attached_conf)),
             ongoing_timeline_detach: std::sync::Mutex::default(),
             gc_block: Default::default(),
@@ -4754,7 +4764,7 @@ impl Tenant {
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
-        _ctx: &RequestContext,
+        ctx: &RequestContext,
     ) -> Result<CreateTimelineResult, CreateTimelineError> {
         let src_id = src_timeline.timeline_id;
 
@@ -4854,13 +4864,14 @@ impl Tenant {
             src_timeline.pg_version,
         );
 
-        let uninitialized_timeline = self
+        let (uninitialized_timeline, _timeline_ctx) = self
             .prepare_new_timeline(
                 dst_id,
                 &metadata,
                 timeline_create_guard,
                 start_lsn + 1,
                 Some(Arc::clone(src_timeline)),
+                &ctx,
             )
             .await?;
 
@@ -5125,13 +5136,14 @@ impl Tenant {
             pgdata_lsn,
             pg_version,
         );
-        let mut raw_timeline = self
+        let (mut raw_timeline, timeline_ctx) = self
             .prepare_new_timeline(
                 timeline_id,
                 &new_metadata,
                 timeline_create_guard,
                 pgdata_lsn,
                 None,
+                ctx,
             )
             .await?;
 
@@ -5142,7 +5154,7 @@ impl Tenant {
                     &unfinished_timeline,
                     &pgdata_path,
                     pgdata_lsn,
-                    ctx,
+                    &timeline_ctx,
                 )
                 .await
                 .with_context(|| {
@@ -5210,7 +5222,8 @@ impl Tenant {
         create_guard: TimelineCreateGuard,
         start_lsn: Lsn,
         ancestor: Option<Arc<Timeline>>,
-    ) -> anyhow::Result<UninitializedTimeline<'a>> {
+        ctx: &RequestContext,
+    ) -> anyhow::Result<(UninitializedTimeline<'a>, RequestContext)> {
         let tenant_shard_id = self.tenant_shard_id;
 
         let resources = self.build_timeline_resources(new_timeline_id);
@@ -5218,7 +5231,7 @@ impl Tenant {
             .remote_client
             .init_upload_queue_for_empty_remote(new_metadata)?;
 
-        let timeline_struct = self
+        let (timeline_struct, timeline_ctx) = self
             .create_timeline_struct(
                 new_timeline_id,
                 new_metadata,
@@ -5227,6 +5240,7 @@ impl Tenant {
                 resources,
                 CreateTimelineCause::Load,
                 create_guard.idempotency.clone(),
+                ctx,
             )
             .context("Failed to create timeline data structure")?;
 
@@ -5245,10 +5259,13 @@ impl Tenant {
             "Successfully created initial files for timeline {tenant_shard_id}/{new_timeline_id}"
         );
 
-        Ok(UninitializedTimeline::new(
-            self,
-            new_timeline_id,
-            Some((timeline_struct, create_guard)),
+        Ok((
+            UninitializedTimeline::new(
+                self,
+                new_timeline_id,
+                Some((timeline_struct, create_guard)),
+            ),
+            timeline_ctx,
         ))
     }
 

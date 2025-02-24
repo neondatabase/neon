@@ -6,20 +6,18 @@ use std::{
 use anyhow::Context;
 use pageserver_api::{models::TimelineState, shard::TenantShardId};
 use remote_storage::DownloadError;
+use reqwest::Request;
 use tokio::sync::OwnedMutexGuard;
 use tracing::{error, info, info_span, instrument, Instrument};
 use utils::{crashsafe, fs_ext, id::TimelineId, pausable_failpoint};
 
 use crate::{
-    config::PageServerConf,
-    task_mgr::{self, TaskKind},
-    tenant::{
+    config::PageServerConf, context::RequestContext, task_mgr::{self, TaskKind}, tenant::{
         metadata::TimelineMetadata,
         remote_timeline_client::{PersistIndexPartWithDeletedFlagError, RemoteTimelineClient},
         CreateTimelineCause, DeleteTimelineError, MaybeDeletedIndexPart, Tenant,
         TenantManifestError, Timeline, TimelineOrOffloaded,
-    },
-    virtual_file::MaybeFatalIo,
+    }, virtual_file::MaybeFatalIo
 };
 
 /// Mark timeline as deleted in S3 so we won't pick it up next time
@@ -286,10 +284,11 @@ impl DeleteTimelineFlow {
         timeline_id: TimelineId,
         local_metadata: &TimelineMetadata,
         remote_client: RemoteTimelineClient,
+        ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // Note: here we even skip populating layer map. Timeline is essentially uninitialized.
         // RemoteTimelineClient is the only functioning part.
-        let timeline = tenant
+        let (timeline, timeline_ctx) = tenant
             .create_timeline_struct(
                 timeline_id,
                 local_metadata,
@@ -300,6 +299,7 @@ impl DeleteTimelineFlow {
                 // Thus we need to skip the validation here.
                 CreateTimelineCause::Delete,
                 crate::tenant::CreateTimelineIdempotency::FailWithConflict, // doesn't matter what we put here
+                ctx,
             )
             .context("create_timeline_struct")?;
 

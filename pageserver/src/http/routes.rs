@@ -3286,7 +3286,7 @@ async fn put_tenant_timeline_import_basebackup(
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
-        let timeline = tenant
+        let (timeline, timeline_ctx) = tenant
             .create_empty_timeline(timeline_id, base_lsn, pg_version, &ctx)
             .map_err(ApiError::InternalServerError)
             .await?;
@@ -3305,7 +3305,7 @@ async fn put_tenant_timeline_import_basebackup(
         info!("importing basebackup");
 
         timeline
-            .import_basebackup_from_tar(tenant.clone(), &mut body, base_lsn, broker_client, &ctx)
+            .import_basebackup_from_tar(tenant.clone(), &mut body, base_lsn, broker_client, &timeline_ctx)
             .await
             .map_err(ApiError::InternalServerError)?;
 

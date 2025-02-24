@@ -92,6 +92,7 @@
 use std::sync::Arc;
 
 use once_cell::sync::Lazy;
+use tracing::warn;
 
 use crate::{
     task_mgr::TaskKind,
@@ -120,6 +121,10 @@ pub(crate) enum Scope {
     Timeline {
         timeline: Arc<Timeline>,
     },
+    TimelineHandle {
+        timeline_handle:
+            crate::tenant::timeline::handle::Handle<crate::page_service::TenantManagerTypes>,
+    },
 }
 
 impl Scope {
@@ -140,16 +145,21 @@ impl Scope {
             timeline: Arc::clone(timeline),
         }
     }
+    pub(crate) fn new_timeline_handle(
+        timeline_handle: crate::tenant::timeline::handle::Handle<
+            crate::page_service::TenantManagerTypes,
+        >,
+    ) -> Self {
+        Scope::TimelineHandle { timeline_handle }
+    }
 
     pub(crate) fn io_size_metrics(&self) -> &crate::metrics::StorageIoSizeMetrics {
         match self {
             Scope::Global { io_size_metrics } => io_size_metrics,
             Scope::Tenant { tenant } => &tenant.virtual_file_io_metrics,
             Scope::Timeline { timeline } => &timeline.metrics.storage_io_size,
+            Scope::TimelineHandle { timeline_handle } => &timeline_handle.metrics.storage_io_size,
         }
-    }
-    pub(crate) fn is_timeline(&self) -> bool {
-        matches!(self, Scope::Timeline { .. })
     }
 }
 
@@ -365,5 +375,33 @@ impl RequestContext {
 
     pub(crate) fn scope(&self) -> &Scope {
         &self.scope
+    }
+
+    pub(crate) fn scope_mut(&mut self) -> &mut Scope {
+        &mut self.scope
+    }
+
+    pub(crate) fn assert_is_timeline_scoped(&self, what: &str) {
+        if let Scope::Timeline { .. } = self.scope() {
+            return;
+        }
+        if cfg!(debug_assertions) || cfg!(feature = "testing") {
+            panic!("RequestContext must be timeline-scoped what={what}");
+        } else {
+            use once_cell::sync::Lazy;
+            use std::sync::Mutex;
+            use std::time::Duration;
+            use utils::rate_limit::RateLimit;
+            static LIMIT: Lazy<Mutex<RateLimit>> =
+                Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(1))));
+            let mut guard = LIMIT.lock().unwrap();
+            guard.call2(|rate_limit_stats| {
+                warn!(
+                    %rate_limit_stats,
+                    what,
+                    "RequestContext must be timeline-scoped",
+                );
+            });
+        }
     }
 }
