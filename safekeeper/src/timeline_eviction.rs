@@ -1,8 +1,8 @@
 //! Code related to evicting WAL files to remote storage.
 //!
-//! The actual upload is done by the partial WAL backup code. This file has
+//! The actual upload is done by the partial WAL upload code. This file has
 //! code to delete and re-download WAL files, cross-validate with partial WAL
-//! backup if local file is still present.
+//! upload if local file is still present.
 
 use anyhow::Context;
 use camino::Utf8PathBuf;
@@ -20,8 +20,8 @@ use crate::{
     },
     rate_limit::rand_duration,
     timeline_manager::{Manager, StateSnapshot},
-    wal_backup,
-    wal_backup_partial::{self, PartialRemoteSegment},
+    wal_upload,
+    wal_upload_partial::{self, PartialRemoteSegment},
     wal_storage::wal_file_paths,
 };
 
@@ -39,15 +39,15 @@ impl Manager {
         next_event: &Option<tokio::time::Instant>,
         state: &StateSnapshot,
     ) -> bool {
-        let ready = self.backup_task.is_none()
+        let ready = self.upload_task.is_none()
             && self.recovery_task.is_none()
             && self.wal_removal_task.is_none()
-            && self.partial_backup_task.is_none()
+            && self.partial_upload_task.is_none()
             && next_event.is_none()
             && self.access_service.is_empty()
             && !self.tli_broker_active.get()
             // Partial segment of current flush_lsn is uploaded up to this flush_lsn.
-            && !wal_backup_partial::needs_uploading(state, &self.partial_backup_uploaded)
+            && !wal_upload_partial::needs_uploading(state, &self.partial_upload)
             // And it is the next one after the last removed. Given that local
             // WAL is removed only after it is uploaded to s3 (and pageserver
             // advancing remote_consistent_lsn) which happens only after WAL is
@@ -60,7 +60,7 @@ impl Manager {
             // **Note** pull_timeline functionality assumes that evicted timelines always have
             // a partial segment: if we ever change this condition, must also update that code.
             && self
-                .partial_backup_uploaded
+                .partial_upload
                 .as_ref()
                 .unwrap()
                 .flush_lsn
@@ -73,15 +73,15 @@ impl Manager {
     #[instrument(name = "evict_timeline", skip_all)]
     pub(crate) async fn evict_timeline(&mut self) -> bool {
         assert!(!self.is_offloaded);
-        let partial_backup_uploaded = match &self.partial_backup_uploaded {
+        let partial_segment_uploaded = match &self.partial_upload {
             Some(p) => p.clone(),
             None => {
-                warn!("no partial backup uploaded, skipping eviction");
+                warn!("no partial segment uploaded, skipping eviction");
                 return false;
             }
         };
 
-        info!("starting eviction, using {:?}", partial_backup_uploaded);
+        info!("starting eviction, using {:?}", partial_segment_uploaded);
 
         EVICTION_EVENTS_STARTED
             .with_label_values(&[EvictionEvent::Evict.into()])
@@ -92,7 +92,7 @@ impl Manager {
                 .inc();
         });
 
-        if let Err(e) = do_eviction(self, &partial_backup_uploaded).await {
+        if let Err(e) = do_eviction(self, &partial_segment_uploaded).await {
             warn!("failed to evict timeline: {:?}", e);
             return false;
         }
@@ -107,15 +107,15 @@ impl Manager {
     #[instrument(name = "unevict_timeline", skip_all)]
     pub(crate) async fn unevict_timeline(&mut self) {
         assert!(self.is_offloaded);
-        let partial_backup_uploaded = match &self.partial_backup_uploaded {
+        let partial_segment_uploaded = match &self.partial_upload {
             Some(p) => p.clone(),
             None => {
-                warn!("no partial backup uploaded, cannot unevict");
+                warn!("no partial segment uploaded, cannot unevict");
                 return;
             }
         };
 
-        info!("starting uneviction, using {:?}", partial_backup_uploaded);
+        info!("starting uneviction, using {:?}", partial_segment_uploaded);
 
         EVICTION_EVENTS_STARTED
             .with_label_values(&[EvictionEvent::Restore.into()])
@@ -126,7 +126,7 @@ impl Manager {
                 .inc();
         });
 
-        if let Err(e) = do_uneviction(self, &partial_backup_uploaded).await {
+        if let Err(e) = do_uneviction(self, &partial_segment_uploaded).await {
             warn!("failed to unevict timeline: {:?}", e);
             return;
         }
@@ -139,7 +139,7 @@ impl Manager {
     }
 }
 
-/// Ensure that content matches the remote partial backup, if local segment exists.
+/// Ensure that content matches the remote partial upload, if local segment exists.
 /// Then change state in control file and in-memory. If `delete_offloaded_wal` is set,
 /// delete the local segment.
 async fn do_eviction(mgr: &mut Manager, partial: &PartialRemoteSegment) -> anyhow::Result<()> {
@@ -156,7 +156,7 @@ async fn do_eviction(mgr: &mut Manager, partial: &PartialRemoteSegment) -> anyho
     Ok(())
 }
 
-/// Ensure that content matches the remote partial backup, if local segment exists.
+/// Ensure that content matches the remote partial upload, if local segment exists.
 /// Then download segment to local disk and change state in control file and in-memory.
 async fn do_uneviction(mgr: &mut Manager, partial: &PartialRemoteSegment) -> anyhow::Result<()> {
     // if the local segment is present, validate it
@@ -195,7 +195,7 @@ async fn redownload_partial_segment(
         remote_segfile, tmp_file
     );
 
-    let mut reader = wal_backup::read_object(&remote_segfile, 0).await?;
+    let mut reader = wal_upload::read_object(&remote_segfile, 0).await?;
     let mut file = File::create(&tmp_file).await?;
 
     let actual_len = tokio::io::copy(&mut reader, &mut file).await?;
@@ -233,7 +233,7 @@ async fn redownload_partial_segment(
     Ok(())
 }
 
-/// Compare local WAL segment with partial WAL backup in remote storage.
+/// Compare local WAL segment with partial WAL upload in remote storage.
 /// If the local segment is not present, the function does nothing.
 /// If the local segment is present, it compares the local segment with the remote one.
 async fn compare_local_segment_with_remote(
@@ -256,7 +256,7 @@ async fn compare_local_segment_with_remote(
     }
 }
 
-/// Compare opened local WAL segment with partial WAL backup in remote storage.
+/// Compare opened local WAL segment with partial WAL upload in remote storage.
 /// Validate full content of both files.
 async fn do_validation(
     mgr: &Manager,
@@ -275,7 +275,7 @@ async fn do_validation(
 
     let remote_segfile = remote_segment_path(mgr, partial);
     let mut remote_reader: std::pin::Pin<Box<dyn AsyncRead + Send + Sync>> =
-        wal_backup::read_object(&remote_segfile, 0).await?;
+        wal_upload::read_object(&remote_segfile, 0).await?;
 
     // remote segment should have bytes excatly up to `flush_lsn`
     let expected_remote_size = partial.flush_lsn.segment_offset(mgr.wal_seg_size);

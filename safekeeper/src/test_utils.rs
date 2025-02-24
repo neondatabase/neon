@@ -10,7 +10,7 @@ use crate::send_wal::EndWatch;
 use crate::state::{TimelinePersistentState, TimelineState};
 use crate::timeline::{get_timeline_dir, SharedState, StateSK, Timeline};
 use crate::timelines_set::TimelinesSet;
-use crate::wal_backup::remote_timeline_path;
+use crate::wal_upload::remote_timeline_path;
 use crate::{control_file, receive_wal, wal_storage, SafeKeeperConf};
 use camino_tempfile::Utf8TempDir;
 use postgres_ffi::v17::wal_generator::{LogicalMessageGenerator, WalGenerator};

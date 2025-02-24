@@ -198,7 +198,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
         timeline_start_lsn: state.timeline_start_lsn,
         local_start_lsn: state.local_start_lsn,
         commit_lsn: inmem.commit_lsn,
-        backup_lsn: inmem.backup_lsn,
+        backup_lsn: inmem.upload_lsn,
         peer_horizon_lsn: inmem.peer_horizon_lsn,
         remote_consistent_lsn: inmem.remote_consistent_lsn,
         peers: tli.get_peers(conf).await,
@@ -410,7 +410,7 @@ async fn timeline_backup_partial_reset(request: Request<Body>) -> Result<Respons
     let tli = global_timelines.get(ttid).map_err(ApiError::from)?;
 
     let response = tli
-        .backup_partial_reset()
+        .upload_partial_reset()
         .await
         .map_err(ApiError::InternalServerError)?;
     json_response(StatusCode::OK, response)

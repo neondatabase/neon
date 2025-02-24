@@ -19,7 +19,7 @@ pub(crate) fn calc_horizon_lsn(state: &StateSnapshot, extra_horizon_lsn: Option<
 
     let mut horizon_lsn = state.cfile_remote_consistent_lsn;
     // we don't want to remove WAL that is not yet offloaded to s3
-    horizon_lsn = min(horizon_lsn, state.cfile_backup_lsn);
+    horizon_lsn = min(horizon_lsn, state.cfile_upload_lsn);
     // Min by local commit_lsn to be able to begin reading WAL from somewhere on
     // sk start. Technically we don't allow local commit_lsn to be higher than
     // flush_lsn, but let's be double safe by including it as well.
