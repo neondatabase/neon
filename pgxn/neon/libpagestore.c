@@ -14,6 +14,8 @@
  */
 #include "postgres.h"
 
+#include <math.h>
+
 #include "access/xlog.h"
 #include "common/hashfn.h"
 #include "fmgr.h"
@@ -737,9 +739,9 @@ retry:
 	if (ret == 0)
 	{
 		WaitEvent	event;
-		long		log_timeout,
-					disconnect_timeout,
-					timeout;
+		double		log_timeout,
+					disconnect_timeout;
+		long		timeout;
 
 		/*
 		 * Calculate time elapsed since the start, and since the last progress
@@ -763,9 +765,10 @@ retry:
 		}
 
 		/* Sleep until the log or disconnect timeout is reached. */
-		log_timeout = Max(0, pageserver_response_log_timeout - INSTR_TIME_GET_MILLISEC(since_last_log));
-		disconnect_timeout = Max(0, pageserver_response_disconnect_timeout - INSTR_TIME_GET_MILLISEC(since_start));
-		timeout = Min(log_timeout, disconnect_timeout);
+		log_timeout = Max(0, (double) pageserver_response_log_timeout - INSTR_TIME_GET_MILLISEC(since_last_log));
+		disconnect_timeout = Max(0, (double) pageserver_response_disconnect_timeout - INSTR_TIME_GET_MILLISEC(since_start));
+		timeout = (long) ceil(Min(log_timeout, disconnect_timeout));
+
 		(void) WaitEventSetWait(shard->wes_read, timeout, &event, 1,
 								WAIT_EVENT_NEON_PS_READ);
 		ResetLatch(MyLatch);
