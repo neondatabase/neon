@@ -1672,6 +1672,7 @@ COPY --from=pg_roaringbitmap-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_semver-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_embedding-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=wal2json-build /usr/local/pgsql /usr/local/pgsql
+COPY --from=pg_anon-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_ivm-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_partman-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_mooncake-build /usr/local/pgsql/ /usr/local/pgsql/
