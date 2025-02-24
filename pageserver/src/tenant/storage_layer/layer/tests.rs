@@ -100,7 +100,7 @@ async fn smoke_test() {
                 controlfile_keyspace.clone(),
                 Lsn(0x10)..Lsn(0x11),
                 &mut data,
-                &ctx,
+                ctx,
             )
             .await
             .unwrap();
@@ -135,7 +135,7 @@ async fn smoke_test() {
                 controlfile_keyspace.clone(),
                 Lsn(0x10)..Lsn(0x11),
                 &mut data,
-                &ctx,
+                ctx,
             )
             .instrument(download_span.clone())
             .await

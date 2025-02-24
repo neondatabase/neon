@@ -120,6 +120,7 @@ pub(crate) enum ScopeInner {
         timeline: Arc<Timeline>,
     },
     TimelineHandle {
+        #[allow(clippy::redundant_allocation)]
         arc_arc_timeline: Arc<Arc<Timeline>>,
     },
 }
@@ -140,7 +141,7 @@ impl Scope {
     pub(crate) fn new_timeline_handle(
         handle: &crate::tenant::timeline::handle::Handle<crate::page_service::TenantManagerTypes>,
     ) -> Self {
-        let arc_arc_timeline = crate::tenant::timeline::handle::Handle::clone_timeline(&handle);
+        let arc_arc_timeline = crate::tenant::timeline::handle::Handle::clone_timeline(handle);
         Scope(Arc::new(ScopeInner::TimelineHandle { arc_arc_timeline }))
     }
 }
