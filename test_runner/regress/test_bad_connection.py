@@ -126,6 +126,7 @@ def test_compute_pageserver_hung_connections(neon_env_builder: NeonEnvBuilder):
     # Print the backend PID so that it can be compared with the logs easily
     cur.execute("SELECT pg_backend_pid()")
     row = cur.fetchone()
+    assert row is not None
     log.info(f"running test workload in backend PID {row[0]}")
 
     def run_workload(duration: float):
