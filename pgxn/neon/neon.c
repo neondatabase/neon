@@ -12,6 +12,7 @@
 #include "fmgr.h"
 
 #include "miscadmin.h"
+#include "pgstat.h"
 #include "access/subtrans.h"
 #include "access/twophase.h"
 #include "access/xlog.h"
@@ -410,6 +411,16 @@ ReportSearchPath(void)
 	}
 }
 
+#if PG_VERSION_NUM < 150000
+/*
+ * PG14 uses separate backend for stats collector having no access to shaerd memory.
+ * As far as AUX mechanism requires access to shared memory, persisting pgstat.stat file
+ * is not supported at pg14. And so there is no definition of neon_pgstat_file_size_limit
+ * variable, so we have to declare it here.
+ */
+static int neon_pgstat_file_size_limit;
+#endif
+
 void
 _PG_init(void)
 {
@@ -465,6 +476,15 @@ _PG_init(void)
 							running_xacts_overflow_policies,
 							PGC_POSTMASTER,
 							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("neon.pgstat_file_size_limit",
+							"Maximal size of pgstat.stat file saved in Neon storage",
+							"Zero value disables persisting pgstat.stat file",
+							&neon_pgstat_file_size_limit,
+							0, 0, 1000000, /* disabled by default */
+							PGC_SIGHUP,
+							GUC_UNIT_KB,
 							NULL, NULL, NULL);
 
 	/*
