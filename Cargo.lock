@@ -1547,12 +1547,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "cron-parser"
-version = "0.10.0"
+name = "cron"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baa5650eabdaa360e2c240c2a5f544f10185b439cd76d748e44e3f28128a016b"
+checksum = "5877d3fbf742507b66bc2a1945106bd30dd8504019d596901ddd012a4dd01740"
 dependencies = [
  "chrono",
+ "once_cell",
+ "winnow",
 ]
 
 [[package]]
@@ -6459,7 +6461,7 @@ dependencies = [
  "chrono",
  "clap",
  "control_plane",
- "cron-parser",
+ "cron",
  "diesel",
  "diesel-async",
  "diesel_migrations",
@@ -8152,9 +8154,9 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "winnow"
-version = "0.6.13"
+version = "0.6.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59b5e5f6c299a3c7890b876a2a587f3115162487e704907d9b6cd29473052ba1"
+checksum = "1e90edd2ac1aa278a5c4599b1d89cf03074b610800f866d4026dc199d7929a28"
 dependencies = [
  "memchr",
 ]

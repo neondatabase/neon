@@ -16,11 +16,12 @@ use super::{Node, Scheduler, Service, TenantShard};
 pub struct ChaosInjector {
     service: Arc<Service>,
     interval: Duration,
+    chaos_exit_crontab: Option<cron::Schedule>,
 }
 
-fn cron_to_next_duration(cron: &str) -> anyhow::Result<tokio::time::Sleep> {
+fn cron_to_next_duration(cron: &cron::Schedule) -> anyhow::Result<tokio::time::Sleep> {
     use chrono::Utc;
-    let next = cron_parser::parse(cron, &Utc::now())?;
+    let next = cron.upcoming(Utc).next().unwrap();
     let duration = (next - Utc::now()).to_std()?;
     Ok(tokio::time::sleep(duration))
 }
@@ -35,20 +36,31 @@ async fn maybe_sleep(sleep: Option<tokio::time::Sleep>) -> Option<()> {
 }
 
 impl ChaosInjector {
-    pub fn new(service: Arc<Service>, interval: Duration) -> Self {
-        Self { service, interval }
+    pub fn new(
+        service: Arc<Service>,
+        interval: Duration,
+        chaos_exit_crontab: Option<cron::Schedule>,
+    ) -> Self {
+        Self {
+            service,
+            interval,
+            chaos_exit_crontab,
+        }
     }
 
     pub async fn run(&mut self, cancel: CancellationToken) {
         let mut interval = tokio::time::interval(self.interval);
         let cron_interval = {
-            // TODO: make this configurable
-            match cron_to_next_duration("0 0 * * *") {
-                Ok(interval_exit) => Some(interval_exit),
-                Err(e) => {
-                    tracing::error!("Error parsing cron interval: {e}");
-                    None
+            if let Some(ref chaos_exit_crontab) = self.chaos_exit_crontab {
+                match cron_to_next_duration(chaos_exit_crontab) {
+                    Ok(interval_exit) => Some(interval_exit),
+                    Err(e) => {
+                        tracing::error!("Error processing the cron schedule: {e}");
+                        None
+                    }
                 }
+            } else {
+                None
             }
         };
         enum ChaosEvent {
