@@ -550,7 +550,7 @@ async fn get_operations<'a>(
                                     Operation {
                                         query: format!(
                                             include_str!("sql/pre_drop_role_revoke_privileges.sql"),
-                                            role_name = quoted,
+                                            role_name = op.name,
                                         ),
                                         comment: None,
                                     },
