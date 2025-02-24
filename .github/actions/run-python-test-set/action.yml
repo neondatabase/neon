@@ -40,6 +40,14 @@ inputs:
     description: 'Whether to rerun failed tests'
     required: false
     default: 'false'
+  run_count:
+    description: 'Number of test runs to perform'
+    required: false
+    default: ''
+  testing_mode:
+    description: 'Set to a specific string, e. g. test_stability, to distinguish this test run from usual runs'
+    required: false
+    default: ''
   pg_version:
     description: 'Postgres version to use for tests'
     required: false
@@ -111,6 +119,8 @@ runs:
         ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE: contains(github.event.pull_request.labels.*.name, 'backward compatibility breakage')
         ALLOW_FORWARD_COMPATIBILITY_BREAKAGE: contains(github.event.pull_request.labels.*.name, 'forward compatibility breakage')
         RERUN_FAILED: ${{ inputs.rerun_failed }}
+        RUN_COUNT: ${{ inputs.run_count }}
+        TESTING_MODE: ${{ inputs.testing_mode }}
         PG_VERSION: ${{ inputs.pg_version }}
       shell: bash -euxo pipefail {0}
       run: |
@@ -160,6 +170,10 @@ runs:
 
         if [ "${RERUN_FAILED}" == "true" ]; then
           EXTRA_PARAMS="--reruns 2 $EXTRA_PARAMS"
+        fi
+
+        if [ -n "${RUN_COUNT}" ]; then
+          EXTRA_PARAMS="--count $RUN_COUNT $EXTRA_PARAMS"
         fi
 
         # We use pytest-split plugin to run benchmarks in parallel on different CI runners
