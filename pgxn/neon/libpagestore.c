@@ -716,20 +716,21 @@ retry:
 
 	if (ret == 0)
 	{
-		WaitEvent	event;
+		WaitEvent	occurred_event;
+		int			noccurred;
 		long		timeout;
 
 		timeout = Max(0, LOG_INTERVAL_MS - INSTR_TIME_GET_MILLISEC(since_last_log));
 
 		/* Sleep until there's something to do */
-		(void) WaitEventSetWait(shard->wes_read, timeout, &event, 1,
-								WAIT_EVENT_NEON_PS_READ);
+		noccurred = WaitEventSetWait(shard->wes_read, timeout, &occurred_event, 1,
+									 WAIT_EVENT_NEON_PS_READ);
 		ResetLatch(MyLatch);
 
 		CHECK_FOR_INTERRUPTS();
 
 		/* Data available in socket? */
-		if (event.events & WL_SOCKET_READABLE)
+		if (noccurred > 0 && (occurred_event.events & WL_SOCKET_READABLE) != 0)
 		{
 			if (!PQconsumeInput(pageserver_conn))
 			{
