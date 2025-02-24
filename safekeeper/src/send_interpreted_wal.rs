@@ -157,6 +157,17 @@ impl InterpretedWalReaderState {
         }
     }
 
+    #[cfg(test)]
+    fn current_batch_wal_start(&self) -> Option<Lsn> {
+        match self {
+            InterpretedWalReaderState::Running {
+                current_batch_wal_start_lsn,
+                ..
+            } => *current_batch_wal_start_lsn,
+            InterpretedWalReaderState::Done => None,
+        }
+    }
+
     // Reset the current position of the WAL reader if the requested starting position
     // of the new shard is smaller than the current value.
     fn maybe_reset(&mut self, new_shard_start_pos: Lsn) -> CurrentPositionUpdate {
@@ -295,6 +306,9 @@ impl InterpretedWalReader {
         tx: tokio::sync::mpsc::Sender<Batch>,
         shard: ShardIdentity,
         pg_version: u32,
+        shard_notification_rx: Option<
+            tokio::sync::mpsc::UnboundedReceiver<AttachShardNotification>,
+        >,
     ) -> InterpretedWalReader {
         let state = Arc::new(std::sync::RwLock::new(InterpretedWalReaderState::Running {
             current_position: start_pos,
@@ -311,7 +325,7 @@ impl InterpretedWalReader {
                     next_record_lsn: start_pos,
                 }],
             )]),
-            shard_notification_rx: None,
+            shard_notification_rx,
             state: state.clone(),
             pg_version,
         }
@@ -545,6 +559,11 @@ impl InterpretedWalReader {
             }
         }
     }
+
+    #[cfg(test)]
+    fn state(&self) -> Arc<std::sync::RwLock<InterpretedWalReaderState>> {
+        self.state.clone()
+    }
 }
 
 impl InterpretedWalReaderHandle {
@@ -682,7 +701,7 @@ mod tests {
     };
 
     use crate::{
-        send_interpreted_wal::{Batch, InterpretedWalReader},
+        send_interpreted_wal::{AttachShardNotification, Batch, InterpretedWalReader},
         test_utils::Env,
         wal_reader_stream::StreamingWalReader,
     };
@@ -960,6 +979,125 @@ mod tests {
                 .copied()
                 .collect::<Vec<_>>();
             assert_eq!(sender.received_next_record_lsns, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batch_start_tracking_on_reset() {
+        // When the WAL stream is reset to an older LSN,
+        // the current batch start LSN should be invalidated.
+        // This test constructs such a scenario:
+        // 1. Shard 0 is reading somewhere ahead
+        // 2. Reader reads some WAL, but does not decode a full record (partial read)
+        // 3. Shard 1 attaches to the reader and resets it to an older LSN
+        // 4. Shard 1 should get the correct batch WAL start LSN
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        const SIZE: usize = 64 * 1024;
+        const MSG_COUNT: usize = 10;
+        const PG_VERSION: u32 = 17;
+        const SHARD_COUNT: u8 = 2;
+        const WAL_READER_BATCH_SIZE: usize = 8192;
+
+        let start_lsn = Lsn::from_str("0/149FD18").unwrap();
+        let shard_0_start_lsn = Lsn::from_str("0/14AFE10").unwrap();
+        let env = Env::new(true).unwrap();
+        let tli = env
+            .make_timeline(NodeId(1), TenantTimelineId::generate(), start_lsn)
+            .await
+            .unwrap();
+
+        let resident_tli = tli.wal_residence_guard().await.unwrap();
+        let end_watch = Env::write_wal(tli, start_lsn, SIZE, MSG_COUNT, None)
+            .await
+            .unwrap();
+        let end_pos = end_watch.get();
+
+        let streaming_wal_reader = StreamingWalReader::new(
+            resident_tli,
+            None,
+            shard_0_start_lsn,
+            end_pos,
+            end_watch,
+            WAL_READER_BATCH_SIZE,
+        );
+
+        let shard_0 = ShardIdentity::new(
+            ShardNumber(0),
+            ShardCount(SHARD_COUNT),
+            ShardStripeSize::default(),
+        )
+        .unwrap();
+
+        let shard_1 = ShardIdentity::new(
+            ShardNumber(1),
+            ShardCount(SHARD_COUNT),
+            ShardStripeSize::default(),
+        )
+        .unwrap();
+
+        let mut shards = HashMap::new();
+
+        for shard_number in 0..SHARD_COUNT {
+            let shard_id = ShardIdentity::new(
+                ShardNumber(shard_number),
+                ShardCount(SHARD_COUNT),
+                ShardStripeSize::default(),
+            )
+            .unwrap();
+            let (tx, rx) = tokio::sync::mpsc::channel::<Batch>(MSG_COUNT * 2);
+            shards.insert(shard_id, (Some(tx), Some(rx)));
+        }
+
+        let shard_0_tx = shards.get_mut(&shard_0).unwrap().0.take().unwrap();
+
+        let (shard_notification_tx, shard_notification_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let reader = InterpretedWalReader::new(
+            streaming_wal_reader,
+            shard_0_start_lsn,
+            shard_0_tx,
+            shard_0,
+            PG_VERSION,
+            Some(shard_notification_rx),
+        );
+
+        let reader_state = reader.state();
+        let mut reader_fut = std::pin::pin!(reader.run(start_lsn, &None));
+        loop {
+            let poll = futures::poll!(reader_fut.as_mut());
+            assert!(poll.is_pending());
+
+            let guard = reader_state.read().unwrap();
+            if guard.current_batch_wal_start().is_some() {
+                break;
+            }
+        }
+
+        shard_notification_tx
+            .send(AttachShardNotification {
+                shard_id: shard_1,
+                sender: shards.get_mut(&shard_1).unwrap().0.take().unwrap(),
+                start_pos: start_lsn,
+            })
+            .unwrap();
+
+        let mut shard_1_rx = shards.get_mut(&shard_1).unwrap().1.take().unwrap();
+        loop {
+            let poll = futures::poll!(reader_fut.as_mut());
+            assert!(poll.is_pending());
+
+            let try_recv_res = shard_1_rx.try_recv();
+            match try_recv_res {
+                Ok(batch) => {
+                    assert_eq!(batch.records.raw_wal_start_lsn.unwrap(), start_lsn);
+                    break;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    unreachable!();
+                }
+            }
         }
     }
 }
