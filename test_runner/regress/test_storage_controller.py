@@ -182,6 +182,13 @@ def test_storage_controller_smoke(neon_env_builder: NeonEnvBuilder, combination)
     time.sleep(1)
     assert get_node_shard_counts(env, tenant_ids)[env.pageservers[0].id] == 0
 
+    # Exercise live migration of a tenant back to the original pageserver
+    migrate_tenant = env.pageservers[1].http_client().tenant_list_locations()["tenant_shards"][0][0]
+    env.storage_controller.tenant_shard_migrate(
+        TenantShardId.parse(migrate_tenant), env.pageservers[0].id
+    )
+    assert get_node_shard_counts(env, tenant_ids)[env.pageservers[0].id] == 1
+
     # Restarting a pageserver should not detach any tenants (i.e. /re-attach works)
     before_restart = env.pageservers[1].http_client().tenant_list_locations()
     env.pageservers[1].stop()
@@ -2139,8 +2146,9 @@ def test_tenant_import(neon_env_builder: NeonEnvBuilder, shard_count, remote_sto
         workload.validate()
 
 
+@pytest.mark.parametrize(**fixtures.utils.allpairs_versions())
 @pytest.mark.parametrize("num_azs", [1, 2])
-def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder, num_azs: int):
+def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder, num_azs: int, combination):
     """
     Graceful reststart of storage controller clusters use the drain and
     fill hooks in order to migrate attachments away from pageservers before

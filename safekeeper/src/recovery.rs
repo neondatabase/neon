@@ -343,8 +343,11 @@ async fn recovery_stream(
     cfg.replication_mode(tokio_postgres::config::ReplicationMode::Physical);
 
     let connect_timeout = Duration::from_millis(10000);
-    let (client, connection) = match time::timeout(connect_timeout, cfg.connect(postgres::NoTls))
-        .await
+    let (client, connection) = match time::timeout(
+        connect_timeout,
+        cfg.connect(tokio_postgres::NoTls),
+    )
+    .await
     {
         Ok(client_and_conn) => client_and_conn?,
         Err(_elapsed) => {

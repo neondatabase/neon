@@ -13,12 +13,12 @@ use bytes::BytesMut;
 use chrono::{NaiveDateTime, Utc};
 use fail::fail_point;
 use futures::StreamExt;
-use postgres::{error::SqlState, SimpleQueryMessage, SimpleQueryRow};
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use postgres_ffi::{v14::xlog_utils::normalize_lsn, waldecoder::WalDecodeError};
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
 use tokio::{select, sync::watch, time};
+use tokio_postgres::{error::SqlState, SimpleQueryMessage, SimpleQueryRow};
 use tokio_postgres::{replication::ReplicationStream, Client};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn, Instrument};
@@ -64,7 +64,7 @@ pub(super) struct WalConnectionStatus {
 
 pub(super) enum WalReceiverError {
     /// An error of a type that does not indicate an issue, e.g. a connection closing
-    ExpectedSafekeeperError(postgres::Error),
+    ExpectedSafekeeperError(tokio_postgres::Error),
     /// An "error" message that carries a SUCCESSFUL_COMPLETION status code.  Carries
     /// the message part of the original postgres error
     SuccessfulCompletion(String),
@@ -143,7 +143,7 @@ pub(super) async fn handle_walreceiver_connection(
         let mut config = wal_source_connconf.to_tokio_postgres_config();
         config.application_name(format!("pageserver-{}", timeline.conf.id.0).as_str());
         config.replication_mode(tokio_postgres::config::ReplicationMode::Physical);
-        match time::timeout(connect_timeout, config.connect(postgres::NoTls)).await {
+        match time::timeout(connect_timeout, config.connect(tokio_postgres::NoTls)).await {
             Ok(client_and_conn) => client_and_conn?,
             Err(_elapsed) => {
                 // Timing out to connect to a safekeeper node could happen long time, due to
