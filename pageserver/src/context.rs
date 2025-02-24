@@ -121,10 +121,6 @@ pub(crate) enum Scope {
     Timeline {
         timeline: Arc<Timeline>,
     },
-    TimelineHandle {
-        timeline_handle:
-            crate::tenant::timeline::handle::Handle<crate::page_service::TenantManagerTypes>,
-    },
 }
 
 impl Scope {
@@ -145,20 +141,13 @@ impl Scope {
             timeline: Arc::clone(timeline),
         }
     }
-    pub(crate) fn new_timeline_handle(
-        timeline_handle: crate::tenant::timeline::handle::Handle<
-            crate::page_service::TenantManagerTypes,
-        >,
-    ) -> Self {
-        Scope::TimelineHandle { timeline_handle }
-    }
+
 
     pub(crate) fn io_size_metrics(&self) -> &crate::metrics::StorageIoSizeMetrics {
         match self {
             Scope::Global { io_size_metrics } => io_size_metrics,
             Scope::Tenant { tenant } => &tenant.virtual_file_io_metrics,
             Scope::Timeline { timeline } => &timeline.metrics.storage_io_size,
-            Scope::TimelineHandle { timeline_handle } => &timeline_handle.metrics.storage_io_size,
         }
     }
 }
