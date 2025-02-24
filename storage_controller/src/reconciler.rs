@@ -305,9 +305,9 @@ impl Reconciler {
             )
             .await
         {
-            Some(Ok(_)) => {}
-            Some(Err(e)) => return Err(e.into()),
-            None => return Err(ReconcileError::Cancel),
+            Ok(_) => {}
+            Err(mgmt_api::Error::Cancelled) => return Err(ReconcileError::Cancel),
+            Err(e) => return Err(e.into()),
         };
         tracing::info!("location_config({node}) complete: {:?}", config);
 
@@ -487,9 +487,9 @@ impl Reconciler {
                 )
                 .await
             {
-                None => Err(ReconcileError::Cancel),
-                Some(Ok(v)) => Ok(v),
-                Some(Err(e)) => {
+                Err(mgmt_api::Error::Cancelled) => Err(ReconcileError::Cancel),
+                Ok(v) => Ok(v),
+                Err(e) => {
                     // Give up, but proceed: it's unfortunate if we couldn't freshen the destination before
                     // attaching, but we should not let an issue with a secondary location stop us proceeding
                     // with a live migration.
@@ -780,14 +780,12 @@ impl Reconciler {
                 )
                 .await
             {
-                Some(Ok(observed)) => Some(observed),
-                Some(Err(mgmt_api::Error::ApiError(status, _msg)))
-                    if status == StatusCode::NOT_FOUND =>
-                {
+                Ok(observed) => Some(observed),
+                Err(mgmt_api::Error::ApiError(status, _msg)) if status == StatusCode::NOT_FOUND => {
                     None
                 }
-                Some(Err(e)) => return Err(e.into()),
-                None => return Err(ReconcileError::Cancel),
+                Err(mgmt_api::Error::Cancelled) => return Err(ReconcileError::Cancel),
+                Err(e) => return Err(e.into()),
             };
             tracing::info!("Scanned location configuration on {attached_node}: {observed_conf:?}");
             match observed_conf {
@@ -1128,7 +1126,7 @@ impl Reconciler {
                 )
                 .await
             {
-                Some(Ok(Some(location_conf))) => {
+                Ok(Some(location_conf)) => {
                     if matches!(
                         location_conf.mode,
                         LocationConfigMode::AttachedMulti
@@ -1147,13 +1145,13 @@ impl Reconciler {
                     }
                     // Fall through
                 }
-                Some(Ok(None)) => {
+                Ok(None) => {
                     tracing::info!(
                         "No longer attached to {origin}, giving up on compute notification"
                     );
                     return Ok(());
                 }
-                Some(Err(e)) => {
+                Err(e) => {
                     match e {
                         mgmt_api::Error::Cancelled => {
                             tracing::info!(
@@ -1175,7 +1173,6 @@ impl Reconciler {
                         }
                     }
                 }
-                None => return Err(ReconcileError::Cancel),
             };
 
             exponential_backoff(
