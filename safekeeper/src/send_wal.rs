@@ -624,8 +624,9 @@ impl SafekeeperPostgresHandler {
                         MAX_SEND_SIZE,
                     );
 
-                    let reader =
-                        InterpretedWalReader::new(wal_reader, start_pos, tx, shard, pg_version);
+                    let reader = InterpretedWalReader::new(
+                        wal_reader, start_pos, tx, shard, pg_version, None,
+                    );
 
                     let sender = InterpretedWalSender {
                         format,
