@@ -402,6 +402,7 @@ impl RequestContext {
                     guard.call2(|rate_limit_stats| {
                         warn!(
                             %rate_limit_stats,
+                            backtrace=%std::backtrace::Backtrace::force_capture(),
                             "all VirtualFile instances are timeline-scoped",
                         );
                     });
