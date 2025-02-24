@@ -223,21 +223,21 @@ impl HeartBeat<Node, PageserverState> for HeartbeaterTask<Node, PageserverState>
                     Some((*node_id, status))
                 }
             });
+        }
 
-            loop {
-                let maybe_status = tokio::select! {
-                    next = heartbeat_futs.next() => {
-                        match next {
-                            Some(result) => result,
-                            None => { break; }
-                        }
-                    },
-                    _ = self.cancel.cancelled() => { return Err(HeartbeaterError::Cancel); }
-                };
+        loop {
+            let maybe_status = tokio::select! {
+                next = heartbeat_futs.next() => {
+                    match next {
+                        Some(result) => result,
+                        None => { break; }
+                    }
+                },
+                _ = self.cancel.cancelled() => { return Err(HeartbeaterError::Cancel); }
+            };
 
-                if let Some((node_id, status)) = maybe_status {
-                    new_state.insert(node_id, status);
-                }
+            if let Some((node_id, status)) = maybe_status {
+                new_state.insert(node_id, status);
             }
         }
 
@@ -363,21 +363,21 @@ impl HeartBeat<Safekeeper, SafekeeperState> for HeartbeaterTask<Safekeeper, Safe
                     Some((*node_id, status))
                 }
             });
+        }
 
-            loop {
-                let maybe_status = tokio::select! {
-                    next = heartbeat_futs.next() => {
-                        match next {
-                            Some(result) => result,
-                            None => { break; }
-                        }
-                    },
-                    _ = self.cancel.cancelled() => { return Err(HeartbeaterError::Cancel); }
-                };
+        loop {
+            let maybe_status = tokio::select! {
+                next = heartbeat_futs.next() => {
+                    match next {
+                        Some(result) => result,
+                        None => { break; }
+                    }
+                },
+                _ = self.cancel.cancelled() => { return Err(HeartbeaterError::Cancel); }
+            };
 
-                if let Some((node_id, status)) = maybe_status {
-                    new_state.insert(node_id, status);
-                }
+            if let Some((node_id, status)) = maybe_status {
+                new_state.insert(node_id, status);
             }
         }
 
