@@ -543,6 +543,11 @@ impl<T: Types> Handle<T> {
             inner: Arc::downgrade(&self.inner),
         }
     }
+    /// Get a clone of our long-lived strong ref to the `Arc<Timeline>`.
+    /// Does not keep the gate open.
+    pub(crate) fn clone_timeline(&self) -> Arc<T::Timeline> {
+        Arc::clone(&self.timeline)
+    }
 }
 
 impl<T: Types> PerTimelineState<T> {

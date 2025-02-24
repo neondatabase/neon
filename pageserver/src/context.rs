@@ -120,8 +120,7 @@ pub(crate) enum ScopeInner {
         timeline: Arc<Timeline>,
     },
     TimelineHandle {
-        timeline_handle:
-            crate::tenant::timeline::handle::Handle<crate::page_service::TenantManagerTypes>,
+        arc_arc_timeline: Arc<Arc<Timeline>>,
     },
 }
 
@@ -139,11 +138,10 @@ impl Scope {
         }))
     }
     pub(crate) fn new_timeline_handle(
-        timeline_handle: crate::tenant::timeline::handle::Handle<
-            crate::page_service::TenantManagerTypes,
-        >,
+        handle: &crate::tenant::timeline::handle::Handle<crate::page_service::TenantManagerTypes>,
     ) -> Self {
-        Scope(Arc::new(ScopeInner::TimelineHandle { timeline_handle }))
+        let arc_arc_timeline = crate::tenant::timeline::handle::Handle::clone_timeline(&handle);
+        Scope(Arc::new(ScopeInner::TimelineHandle { arc_arc_timeline }))
     }
 }
 
@@ -353,7 +351,7 @@ impl RequestContext {
 
     pub(crate) fn with_scope_timeline_handle(
         &self,
-        timeline_handle: crate::tenant::timeline::handle::Handle<
+        timeline_handle: &crate::tenant::timeline::handle::Handle<
             crate::page_service::TenantManagerTypes,
         >,
     ) -> Self {
@@ -411,8 +409,8 @@ impl RequestContext {
                 }
             }
             ScopeInner::Timeline { timeline } => &timeline.metrics.storage_io_size,
-            ScopeInner::TimelineHandle { timeline_handle } => {
-                &timeline_handle.metrics.storage_io_size
+            ScopeInner::TimelineHandle { arc_arc_timeline } => {
+                &arc_arc_timeline.metrics.storage_io_size
             }
         }
     }

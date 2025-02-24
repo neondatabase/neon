@@ -1230,10 +1230,9 @@ impl PageServerHandler {
         macro_rules! upgrade_handle_and_set_context {
             ($shard:ident) => {{
                 let weak_handle = &$shard;
-                let strong1 = weak_handle.upgrade()?;
-                let strong2 = weak_handle.upgrade()?;
-                let ctx = ctx.with_scope_timeline_handle(strong1);
-                (strong2, ctx)
+                let handle = weak_handle.upgrade()?;
+                let ctx = ctx.with_scope_timeline_handle(&handle);
+                (handle, ctx)
             }};
         }
         Ok(match batch {
