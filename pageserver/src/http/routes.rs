@@ -969,11 +969,10 @@ async fn get_lsn_by_timestamp_handler(
 
     let with_lease = parse_query_param(&request, "with_lease")?.unwrap_or(false);
 
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
     let result = timeline
         .find_lsn_for_timestamp(timestamp_pg, &cancel, &ctx)
         .await?;
@@ -1042,10 +1041,10 @@ async fn get_timestamp_of_lsn_handler(
         .with_context(|| format!("Invalid LSN: {lsn_str:?}"))
         .map_err(ApiError::BadRequest)?;
 
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
     let result = timeline.get_timestamp_for_lsn(lsn, &ctx).await?;
 
     match result {
@@ -1410,7 +1409,7 @@ async fn timeline_layer_scan_disposable_keys(
     };
 
     let resident_layer = layer
-        .download_and_keep_resident()
+        .download_and_keep_resident(&ctx)
         .await
         .map_err(|err| match err {
             tenant::storage_layer::layer::DownloadError::TimelineShutdown
@@ -1485,6 +1484,7 @@ async fn timeline_download_heatmap_layers_handler(
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
 
     let max_concurrency = get_config(&request)
         .remote_storage_config
@@ -1493,7 +1493,9 @@ async fn timeline_download_heatmap_layers_handler(
         .unwrap_or(DEFAULT_MAX_CONCURRENCY);
     let concurrency = std::cmp::min(max_concurrency, desired_concurrency);
 
-    timeline.start_heatmap_layers_download(concurrency).await?;
+    timeline
+        .start_heatmap_layers_download(concurrency, &ctx)
+        .await?;
 
     json_response(StatusCode::ACCEPTED, ())
 }
@@ -1532,8 +1534,9 @@ async fn layer_download_handler(
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
     let downloaded = timeline
-        .download_layer(&layer_name)
+        .download_layer(&layer_name, &ctx)
         .await
         .map_err(|e| match e {
             tenant::storage_layer::layer::DownloadError::TimelineShutdown
@@ -2430,7 +2433,8 @@ async fn timeline_download_remote_layers_handler_post(
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
-    match timeline.spawn_download_all_remote_layers(body).await {
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+    match timeline.spawn_download_all_remote_layers(body, &ctx).await {
         Ok(st) => json_response(StatusCode::ACCEPTED, st),
         Err(st) => json_response(StatusCode::CONFLICT, st),
     }

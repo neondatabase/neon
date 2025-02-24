@@ -324,16 +324,16 @@ impl Layer {
         reconstruct_data: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
-        let downloaded = self
-            .0
-            .get_or_maybe_download(true, Some(ctx))
-            .await
-            .map_err(|err| match err {
-                DownloadError::TimelineShutdown | DownloadError::DownloadCancelled => {
-                    GetVectoredError::Cancelled
-                }
-                other => GetVectoredError::Other(anyhow::anyhow!(other)),
-            })?;
+        let downloaded =
+            self.0
+                .get_or_maybe_download(true, ctx)
+                .await
+                .map_err(|err| match err {
+                    DownloadError::TimelineShutdown | DownloadError::DownloadCancelled => {
+                        GetVectoredError::Cancelled
+                    }
+                    other => GetVectoredError::Other(anyhow::anyhow!(other)),
+                })?;
         let this = ResidentLayer {
             downloaded: downloaded.clone(),
             owner: self.clone(),
@@ -356,8 +356,8 @@ impl Layer {
     /// Download the layer if evicted.
     ///
     /// Will not error when the layer is already downloaded.
-    pub(crate) async fn download(&self) -> Result<(), DownloadError> {
-        self.0.get_or_maybe_download(true, None).await?;
+    pub(crate) async fn download(&self, ctx: &RequestContext) -> Result<(), DownloadError> {
+        self.0.get_or_maybe_download(true, ctx).await?;
         Ok(())
     }
 
@@ -392,8 +392,11 @@ impl Layer {
     }
 
     /// Downloads if necessary and creates a guard, which will keep this layer from being evicted.
-    pub(crate) async fn download_and_keep_resident(&self) -> Result<ResidentLayer, DownloadError> {
-        let downloaded = self.0.get_or_maybe_download(true, None).await?;
+    pub(crate) async fn download_and_keep_resident(
+        &self,
+        ctx: &RequestContext,
+    ) -> Result<ResidentLayer, DownloadError> {
+        let downloaded = self.0.get_or_maybe_download(true, ctx).await?;
 
         Ok(ResidentLayer {
             downloaded,
@@ -446,7 +449,7 @@ impl Layer {
 
         if verbose {
             // for now, unconditionally download everything, even if that might not be wanted.
-            let l = self.0.get_or_maybe_download(true, Some(ctx)).await?;
+            let l = self.0.get_or_maybe_download(true, ctx).await?;
             l.dump(&self.0, ctx).await?
         }
 
@@ -945,7 +948,7 @@ impl LayerInner {
     async fn get_or_maybe_download(
         self: &Arc<Self>,
         allow_download: bool,
-        ctx: Option<&RequestContext>,
+        ctx: &RequestContext,
     ) -> Result<Arc<DownloadedLayer>, DownloadError> {
         let (weak, permit) = {
             // get_or_init_detached can:
@@ -1035,21 +1038,14 @@ impl LayerInner {
             return Err(DownloadError::NotFile(ft));
         }
 
-        if let Some(ctx) = ctx {
-            self.check_expected_download(ctx)?;
-        }
+        self.check_expected_download(ctx)?;
 
         if !allow_download {
             // this is only used from tests, but it is hard to test without the boolean
             return Err(DownloadError::DownloadRequired);
         }
 
-        let download_ctx = ctx
-            .map(|ctx| ctx.detached_child(TaskKind::LayerDownload, DownloadBehavior::Download))
-            .unwrap_or(RequestContext::new(
-                TaskKind::LayerDownload,
-                DownloadBehavior::Download,
-            ));
+        let download_ctx = ctx.detached_child(TaskKind::LayerDownload, DownloadBehavior::Download);
 
         async move {
             tracing::info!(%reason, "downloading on-demand");

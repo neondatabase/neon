@@ -307,7 +307,7 @@ where
                 let mut layer_ids: Vec<LayerId> = Vec::new();
                 for layer_id in &job.input_layers {
                     let layer = &self.layers[layer_id.0].layer;
-                    if let Some(dl) = self.executor.downcast_delta_layer(layer).await? {
+                    if let Some(dl) = self.executor.downcast_delta_layer(layer, ctx).await? {
                         deltas.push(dl.clone());
                         layer_ids.push(*layer_id);
                     }
@@ -536,7 +536,7 @@ where
         let mut deltas: Vec<E::DeltaLayer> = Vec::new();
         for layer_id in &job.input_layers {
             let l = &self.layers[layer_id.0];
-            if let Some(dl) = self.executor.downcast_delta_layer(&l.layer).await? {
+            if let Some(dl) = self.executor.downcast_delta_layer(&l.layer, ctx).await? {
                 deltas.push(dl.clone());
             }
         }
