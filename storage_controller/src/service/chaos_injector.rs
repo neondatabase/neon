@@ -16,29 +16,80 @@ use super::{Node, Scheduler, Service, TenantShard};
 pub struct ChaosInjector {
     service: Arc<Service>,
     interval: Duration,
+    chaos_exit_crontab: Option<cron::Schedule>,
+}
+
+fn cron_to_next_duration(cron: &cron::Schedule) -> anyhow::Result<tokio::time::Sleep> {
+    use chrono::Utc;
+    let next = cron.upcoming(Utc).next().unwrap();
+    let duration = (next - Utc::now()).to_std()?;
+    Ok(tokio::time::sleep(duration))
+}
+
+async fn maybe_sleep(sleep: Option<tokio::time::Sleep>) -> Option<()> {
+    if let Some(sleep) = sleep {
+        sleep.await;
+        Some(())
+    } else {
+        None
+    }
 }
 
 impl ChaosInjector {
-    pub fn new(service: Arc<Service>, interval: Duration) -> Self {
-        Self { service, interval }
+    pub fn new(
+        service: Arc<Service>,
+        interval: Duration,
+        chaos_exit_crontab: Option<cron::Schedule>,
+    ) -> Self {
+        Self {
+            service,
+            interval,
+            chaos_exit_crontab,
+        }
     }
 
     pub async fn run(&mut self, cancel: CancellationToken) {
         let mut interval = tokio::time::interval(self.interval);
-
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {}
-                _ = cancel.cancelled() => {
-                    tracing::info!("Shutting down");
-                    return;
+        let cron_interval = {
+            if let Some(ref chaos_exit_crontab) = self.chaos_exit_crontab {
+                match cron_to_next_duration(chaos_exit_crontab) {
+                    Ok(interval_exit) => Some(interval_exit),
+                    Err(e) => {
+                        tracing::error!("Error processing the cron schedule: {e}");
+                        None
+                    }
                 }
+            } else {
+                None
             }
-
-            self.inject_chaos().await;
-
-            tracing::info!("Chaos iteration...");
+        };
+        enum ChaosEvent {
+            ShuffleTenant,
+            ForceKill,
         }
+        let chaos_type = tokio::select! {
+            _ = interval.tick() => {
+                ChaosEvent::ShuffleTenant
+            }
+            Some(_) = maybe_sleep(cron_interval) => {
+                ChaosEvent::ForceKill
+            }
+            _ = cancel.cancelled() => {
+                tracing::info!("Shutting down");
+                return;
+            }
+        };
+
+        match chaos_type {
+            ChaosEvent::ShuffleTenant => {
+                self.inject_chaos().await;
+            }
+            ChaosEvent::ForceKill => {
+                self.force_kill().await;
+            }
+        }
+
+        tracing::info!("Chaos iteration...");
     }
 
     /// If a shard has a secondary and attached location, then re-assign the secondary to be
@@ -93,6 +144,11 @@ impl ChaosInjector {
             nodes,
             crate::reconciler::ReconcilerPriority::Normal,
         );
+    }
+
+    async fn force_kill(&mut self) {
+        tracing::warn!("Injecting chaos: force kill");
+        std::process::exit(1);
     }
 
     async fn inject_chaos(&mut self) {

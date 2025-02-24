@@ -3,7 +3,7 @@ use std::sync::Arc;
 use futures::{FutureExt, TryFutureExt};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, Instrument};
+use tracing::{Instrument, debug, error, info};
 
 use crate::auth::backend::ConsoleRedirectBackend;
 use crate::cancellation::CancellationHandler;
@@ -11,12 +11,12 @@ use crate::config::{ProxyConfig, ProxyProtocolV2};
 use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
-use crate::protocol2::{read_proxy_protocol, ConnectHeader, ConnectionInfo};
-use crate::proxy::connect_compute::{connect_to_compute, TcpMechanism};
-use crate::proxy::handshake::{handshake, HandshakeData};
+use crate::protocol2::{ConnectHeader, ConnectionInfo, read_proxy_protocol};
+use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute};
+use crate::proxy::handshake::{HandshakeData, handshake};
 use crate::proxy::passthrough::ProxyPassthrough;
 use crate::proxy::{
-    prepare_client_connection, run_until_cancelled, ClientRequestError, ErrorSource,
+    ClientRequestError, ErrorSource, prepare_client_connection, run_until_cancelled,
 };
 
 pub async fn task_main(
@@ -64,22 +64,34 @@ pub async fn task_main(
                     debug!("healthcheck received");
                     return;
                 }
-                Ok((_socket, ConnectHeader::Missing)) if config.proxy_protocol_v2 == ProxyProtocolV2::Required => {
+                Ok((_socket, ConnectHeader::Missing))
+                    if config.proxy_protocol_v2 == ProxyProtocolV2::Required =>
+                {
                     error!("missing required proxy protocol header");
                     return;
                 }
-                Ok((_socket, ConnectHeader::Proxy(_))) if config.proxy_protocol_v2 == ProxyProtocolV2::Rejected => {
+                Ok((_socket, ConnectHeader::Proxy(_)))
+                    if config.proxy_protocol_v2 == ProxyProtocolV2::Rejected =>
+                {
                     error!("proxy protocol header not supported");
                     return;
                 }
                 Ok((socket, ConnectHeader::Proxy(info))) => (socket, info),
-                Ok((socket, ConnectHeader::Missing)) => (socket, ConnectionInfo{ addr: peer_addr, extra: None }),
+                Ok((socket, ConnectHeader::Missing)) => (
+                    socket,
+                    ConnectionInfo {
+                        addr: peer_addr,
+                        extra: None,
+                    },
+                ),
             };
 
             match socket.inner.set_nodelay(true) {
                 Ok(()) => {}
                 Err(e) => {
-                    error!("per-client task finished with an error: failed to set socket option: {e:#}");
+                    error!(
+                        "per-client task finished with an error: failed to set socket option: {e:#}"
+                    );
                     return;
                 }
             }
@@ -118,10 +130,16 @@ pub async fn task_main(
                     match p.proxy_pass(&config.connect_to_compute).await {
                         Ok(()) => {}
                         Err(ErrorSource::Client(e)) => {
-                            error!(?session_id, "per-client task finished with an IO error from the client: {e:#}");
+                            error!(
+                                ?session_id,
+                                "per-client task finished with an IO error from the client: {e:#}"
+                            );
                         }
                         Err(ErrorSource::Compute(e)) => {
-                            error!(?session_id, "per-client task finished with an IO error from the compute: {e:#}");
+                            error!(
+                                ?session_id,
+                                "per-client task finished with an IO error from the compute: {e:#}"
+                            );
                         }
                     }
                 }

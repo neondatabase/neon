@@ -3,8 +3,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
-use postgres_client::tls::MakeTlsConnect;
 use postgres_client::CancelToken;
+use postgres_client::tls::MakeTlsConnect;
 use pq_proto::CancelKeyData;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info};
 
 use crate::auth::backend::ComputeUserInfo;
-use crate::auth::{check_peer_addr_is_in_list, AuthError};
+use crate::auth::{AuthError, check_peer_addr_is_in_list};
 use crate::config::ComputeConfig;
 use crate::context::RequestContext;
 use crate::control_plane::ControlPlaneApi;

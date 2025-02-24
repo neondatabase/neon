@@ -10,7 +10,7 @@ use parking_lot::RwLock;
 use postgres_client::ReadyForQueryStatus;
 use rand::Rng;
 use smol_str::ToSmolStr;
-use tracing::{debug, info, Span};
+use tracing::{Span, debug, info};
 
 use super::backend::HttpConnError;
 use super::conn_pool::ClientDataRemote;
