@@ -742,7 +742,8 @@ retry:
 
 	if (ret == 0)
 	{
-		WaitEvent	event;
+		WaitEvent	occurred_event;
+		int			noccurred;
 		double		log_timeout,
 					disconnect_timeout;
 		long		timeout;
@@ -777,14 +778,14 @@ retry:
 			 timeout, log_timeout, disconnect_timeout,
 			 pageserver_conn->inStart, pageserver_conn->inCursor, pageserver_conn->inEnd
 			);
-		(void) WaitEventSetWait(shard->wes_read, timeout, &event, 1,
-								WAIT_EVENT_NEON_PS_READ);
+		noccurred = WaitEventSetWait(shard->wes_read, timeout, &occurred_event, 1,
+									 WAIT_EVENT_NEON_PS_READ);
 		ResetLatch(MyLatch);
 
 		CHECK_FOR_INTERRUPTS();
 
 		/* Data available in socket? */
-		if (event.events & WL_SOCKET_READABLE)
+		if (noccurred > 0 && occurred_event.events & WL_SOCKET_READABLE)
 		{
 			int			sndbuf;
 			int			recvbuf;
