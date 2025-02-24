@@ -132,6 +132,7 @@ impl EphemeralFile {
         srcbuf: &[u8],
         ctx: &RequestContext,
     ) -> std::io::Result<u64> {
+        ctx.assert_is_timeline_scoped("EphemeralFile::write_raw");
         let (pos, control) = self.write_raw_controlled(srcbuf, ctx).await?;
         if let Some(control) = control {
             control.release().await;
