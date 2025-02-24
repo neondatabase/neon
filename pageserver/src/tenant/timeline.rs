@@ -148,6 +148,7 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
+use super::remote_timeline_client::index::GcCompactionState;
 use super::{
     config::TenantConf, storage_layer::LayerVisibilityHint, upload_queue::NotInitialized,
     MaybeOffloaded,
@@ -324,7 +325,7 @@ pub struct Timeline {
     ancestor_lsn: Lsn,
 
     // The LSN of gc-compaction that was last applied to this timeline.
-    l2_lsn: AtomicLsn,
+    gc_compaction_state: ArcSwap<Option<GcCompactionState>>,
 
     pub(super) metrics: TimelineMetrics,
 
@@ -2638,7 +2639,7 @@ impl Timeline {
         state: TimelineState,
         attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
         create_idempotency: crate::tenant::CreateTimelineIdempotency,
-        l2_lsn: Option<Lsn>,
+        gc_compaction_state: Option<GcCompactionState>,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -2697,7 +2698,7 @@ impl Timeline {
                 }),
                 disk_consistent_lsn: AtomicLsn::new(disk_consistent_lsn.0),
 
-                l2_lsn: AtomicLsn::new(l2_lsn.unwrap_or(Lsn(0)).0),
+                gc_compaction_state: ArcSwap::new(Arc::new(gc_compaction_state)),
 
                 last_freeze_at: AtomicLsn::new(disk_consistent_lsn.0),
                 last_freeze_ts: RwLock::new(Instant::now()),
@@ -2863,14 +2864,18 @@ impl Timeline {
         );
     }
 
-    pub(crate) fn update_l2_lsn(&self, l2_lsn: Lsn) -> anyhow::Result<()> {
-        self.l2_lsn.store(l2_lsn);
+    pub(crate) fn update_gc_compaction_state(
+        &self,
+        gc_compaction_state: GcCompactionState,
+    ) -> anyhow::Result<()> {
+        self.gc_compaction_state
+            .store(Arc::new(Some(gc_compaction_state.clone())));
         self.remote_client
-            .schedule_index_upload_for_l2_lsn_update(l2_lsn)
+            .schedule_index_upload_for_gc_compaction_state_update(gc_compaction_state)
     }
 
-    pub(crate) fn get_l2_lsn(&self) -> Lsn {
-        self.l2_lsn.load()
+    pub(crate) fn get_gc_compaction_state(&self) -> Option<GcCompactionState> {
+        self.gc_compaction_state.load_full().as_ref().clone()
     }
 
     /// Creates and starts the wal receiver.

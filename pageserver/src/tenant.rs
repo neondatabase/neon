@@ -34,6 +34,7 @@ use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeoutOrCancel;
+use remote_timeline_client::index::GcCompactionState;
 use remote_timeline_client::manifest::{
     OffloadedTimelineManifest, TenantManifest, LATEST_TENANT_MANIFEST_VERSION,
 };
@@ -1168,7 +1169,7 @@ impl Tenant {
             resources,
             CreateTimelineCause::Load,
             idempotency.clone(),
-            index_part.l2_lsn,
+            index_part.gc_compaction.clone(),
         )?;
         let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
         anyhow::ensure!(
@@ -4118,7 +4119,7 @@ impl Tenant {
         resources: TimelineResources,
         cause: CreateTimelineCause,
         create_idempotency: CreateTimelineIdempotency,
-        l2_lsn: Option<Lsn>,
+        gc_compaction_state: Option<GcCompactionState>,
     ) -> anyhow::Result<Arc<Timeline>> {
         let state = match cause {
             CreateTimelineCause::Load => {
@@ -4150,7 +4151,7 @@ impl Tenant {
             state,
             self.attach_wal_lag_cooldown.clone(),
             create_idempotency,
-            l2_lsn,
+            gc_compaction_state,
             self.cancel.child_token(),
         );
 

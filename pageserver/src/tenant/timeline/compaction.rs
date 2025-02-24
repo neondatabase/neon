@@ -39,6 +39,7 @@ use crate::statvfs::Statvfs;
 use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::gc_block::GcBlock;
 use crate::tenant::layer_map::LayerMap;
+use crate::tenant::remote_timeline_client::index::GcCompactionState;
 use crate::tenant::remote_timeline_client::WaitCompletionError;
 use crate::tenant::storage_layer::batch_split_writer::{
     BatchWriterResult, SplitDeltaLayerWriter, SplitImageLayerWriter,
@@ -240,7 +241,10 @@ impl GcCompactionQueue {
             return;
         };
 
-        let l2_lsn = timeline.get_l2_lsn();
+        let gc_compaction_state = timeline.get_gc_compaction_state();
+        let l2_lsn = gc_compaction_state
+            .map(|x| x.last_completed_lsn)
+            .unwrap_or(Lsn::INVALID);
 
         let layers = {
             let guard = timeline.layers.read().await;
@@ -482,16 +486,21 @@ impl GcCompactionQueue {
             GcCompactionQueueItem::Notify(id, l2_lsn) => {
                 self.notify_and_unblock(id);
                 if let Some(l2_lsn) = l2_lsn {
-                    if l2_lsn >= timeline.get_l2_lsn() {
+                    let current_l2_lsn = timeline
+                        .get_gc_compaction_state()
+                        .map(|x| x.last_completed_lsn)
+                        .unwrap_or(Lsn::INVALID);
+                    if l2_lsn >= current_l2_lsn {
                         info!("l2_lsn updated to {}", l2_lsn);
                         timeline
-                            .update_l2_lsn(l2_lsn)
+                            .update_gc_compaction_state(GcCompactionState {
+                                last_completed_lsn: l2_lsn,
+                            })
                             .map_err(CompactionError::Other)?;
                     } else {
                         warn!(
                             "l2_lsn updated to {} but it is less than the current l2_lsn {}",
-                            l2_lsn,
-                            timeline.get_l2_lsn()
+                            l2_lsn, current_l2_lsn
                         );
                     }
                 }
