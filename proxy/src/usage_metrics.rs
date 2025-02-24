@@ -16,6 +16,7 @@ use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_S
 use once_cell::sync::Lazy;
 use remote_storage::{GenericRemoteStorage, RemotePath, TimeoutOrCancel};
 use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, trace, warn};
@@ -43,6 +44,37 @@ const HTTP_REPORTING_RETRY_DURATION: Duration = Duration::from_secs(60);
 pub(crate) struct Ids {
     pub(crate) endpoint_id: EndpointIdInt,
     pub(crate) branch_id: BranchIdInt,
+    pub(crate) direction: TrafficDirection,
+    #[serde(with = "none_as_empty_string")]
+    pub(crate) private_link_id: Option<SmolStr>,
+}
+
+mod none_as_empty_string {
+    use serde::Deserialize;
+    use smol_str::SmolStr;
+
+    #[allow(clippy::ref_option)]
+    pub fn serialize<S: serde::Serializer>(t: &Option<SmolStr>, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(t.as_deref().unwrap_or(""))
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<SmolStr>, D::Error> {
+        let s = SmolStr::deserialize(d)?;
+        if s.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(s))
+        }
+    }
+}
+
+#[derive(Eq, Hash, PartialEq, Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum TrafficDirection {
+    Ingress,
+    Egress,
 }
 
 pub(crate) trait MetricCounterRecorder {
@@ -505,6 +537,8 @@ mod tests {
         let counter = metrics.register(Ids {
             endpoint_id: (&EndpointId::from("e1")).into(),
             branch_id: (&BranchId::from("b1")).into(),
+            direction: TrafficDirection::Egress,
+            private_link_id: None,
         });
 
         // the counter should be observed despite 0 egress

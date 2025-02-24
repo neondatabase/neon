@@ -308,10 +308,7 @@ async fn auth_quirks(
 
         let incoming_vpc_endpoint_id = match ctx.extra() {
             None => return Err(AuthError::MissingEndpointName),
-            Some(ConnectionInfoExtra::Aws { vpce_id }) => {
-                // Convert the vcpe_id to a string
-                String::from_utf8(vpce_id.to_vec()).unwrap_or_default()
-            }
+            Some(ConnectionInfoExtra::Aws { vpce_id }) => vpce_id.to_string(),
             Some(ConnectionInfoExtra::Azure { link_id }) => link_id.to_string(),
         };
         let allowed_vpc_endpoint_ids = api.get_allowed_vpc_endpoint_ids(ctx, &info).await?;
@@ -451,7 +448,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
                 Ok((Backend::ControlPlane(api, credentials), ip_allowlist))
             }
             Self::Local(_) => {
-                return Err(auth::AuthError::bad_auth_method("invalid for local proxy"))
+                return Err(auth::AuthError::bad_auth_method("invalid for local proxy"));
             }
         };
 
