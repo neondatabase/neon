@@ -487,6 +487,12 @@ impl GcCompactionQueue {
                         timeline
                             .update_l2_lsn(l2_lsn)
                             .map_err(CompactionError::Other)?;
+                    } else {
+                        warn!(
+                            "l2_lsn updated to {} but it is less than the current l2_lsn {}",
+                            l2_lsn,
+                            timeline.get_l2_lsn()
+                        );
                     }
                 }
             }
