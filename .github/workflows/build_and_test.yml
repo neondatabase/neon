@@ -866,68 +866,72 @@ jobs:
   push-neon-image-dev:
     needs: [ generate-image-maps, neon-image ]
     uses: ./.github/workflows/_push-to-container-registry.yml
+    permissions:
+      id-token: write  # Required for aws/azure login
+      packages: write  # required for pushing to GHCR
     with:
       image-map: '${{ needs.generate-image-maps.outputs.neon-dev }}'
       aws-region: ${{ vars.AWS_ECR_REGION }}
-      aws-account-ids: "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}"
+      aws-account-id: "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}"
+      aws-role-to-assume: "gha-oidc-neon-admin"
       azure-client-id: ${{ vars.AZURE_DEV_CLIENT_ID }}
       azure-subscription-id: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
       azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
       acr-registry-name: ${{ vars.AZURE_DEV_REGISTRY_NAME }}
-    secrets:
-      aws-role-to-assume: "${{ vars.DEV_AWS_OIDC_ROLE_ARN }}"
-      docker-hub-username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-      docker-hub-password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+    secrets: inherit
 
   push-compute-image-dev:
     needs: [ generate-image-maps, vm-compute-node-image ]
     uses: ./.github/workflows/_push-to-container-registry.yml
+    permissions:
+      id-token: write  # Required for aws/azure login
+      packages: write  # required for pushing to GHCR
     with:
       image-map: '${{ needs.generate-image-maps.outputs.compute-dev }}'
       aws-region: ${{ vars.AWS_ECR_REGION }}
-      aws-account-ids: "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}"
+      aws-account-id: "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}"
+      aws-role-to-assume: "gha-oidc-neon-admin"
       azure-client-id: ${{ vars.AZURE_DEV_CLIENT_ID }}
       azure-subscription-id: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
       azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
       acr-registry-name: ${{ vars.AZURE_DEV_REGISTRY_NAME }}
-    secrets:
-      aws-role-to-assume: "${{ vars.DEV_AWS_OIDC_ROLE_ARN }}"
-      docker-hub-username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-      docker-hub-password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+    secrets: inherit
 
   push-neon-image-prod:
     if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
     needs: [ generate-image-maps, neon-image, test-images ]
     uses: ./.github/workflows/_push-to-container-registry.yml
+    permissions:
+      id-token: write  # Required for aws/azure login
+      packages: write  # required for pushing to GHCR
     with:
       image-map: '${{ needs.generate-image-maps.outputs.neon-prod }}'
       aws-region: ${{ vars.AWS_ECR_REGION }}
-      aws-account-ids: "${{ vars.NEON_PROD_AWS_ACCOUNT_ID }}"
+      aws-account-id: "${{ vars.NEON_PROD_AWS_ACCOUNT_ID }}"
+      aws-role-to-assume: "gha-oidc-neon-admin"
       azure-client-id: ${{ vars.AZURE_PROD_CLIENT_ID }}
       azure-subscription-id: ${{ vars.AZURE_PROD_SUBSCRIPTION_ID }}
       azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
       acr-registry-name: ${{ vars.AZURE_PROD_REGISTRY_NAME }}
-    secrets:
-      aws-role-to-assume: "${{ secrets.PROD_GHA_OIDC_ROLE }}"
-      docker-hub-username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-      docker-hub-password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+    secrets: inherit
 
   push-compute-image-prod:
     if: github.ref_name == 'release' || github.ref_name == 'release-proxy' || github.ref_name == 'release-compute'
     needs: [ generate-image-maps, vm-compute-node-image, test-images ]
     uses: ./.github/workflows/_push-to-container-registry.yml
+    permissions:
+      id-token: write  # Required for aws/azure login
+      packages: write  # required for pushing to GHCR
     with:
       image-map: '${{ needs.generate-image-maps.outputs.compute-prod }}'
       aws-region: ${{ vars.AWS_ECR_REGION }}
-      aws-account-ids: "${{ vars.NEON_PROD_AWS_ACCOUNT_ID }}"
+      aws-account-id: "${{ vars.NEON_PROD_AWS_ACCOUNT_ID }}"
+      aws-role-to-assume: "gha-oidc-neon-admin"
       azure-client-id: ${{ vars.AZURE_PROD_CLIENT_ID }}
       azure-subscription-id: ${{ vars.AZURE_PROD_SUBSCRIPTION_ID }}
       azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
       acr-registry-name: ${{ vars.AZURE_PROD_REGISTRY_NAME }}
-    secrets:
-      aws-role-to-assume: "${{ secrets.PROD_GHA_OIDC_ROLE }}"
-      docker-hub-username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-      docker-hub-password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+    secrets: inherit
 
   # This is a bit of a special case so we're not using a generated image map.
   add-latest-tag-to-neon-extensions-test-image:
@@ -940,9 +944,7 @@ jobs:
           "docker.io/neondatabase/neon-test-extensions-v16:${{ needs.tag.outputs.build-tag }}": ["docker.io/neondatabase/neon-test-extensions-v16:latest"],
           "docker.io/neondatabase/neon-test-extensions-v17:${{ needs.tag.outputs.build-tag }}": ["docker.io/neondatabase/neon-test-extensions-v17:latest"]
         }
-    secrets:
-      docker-hub-username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-      docker-hub-password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+    secrets: inherit
 
   trigger-custom-extensions-build-and-wait:
     needs: [ check-permissions, tag ]

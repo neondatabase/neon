@@ -27,6 +27,7 @@ components = {
 registries = {
     "dev": [
         "docker.io/neondatabase",
+        "ghcr.io/neondatabase",
         f"{dev_aws}.dkr.ecr.{aws_region}.amazonaws.com",
         f"{dev_acr}.azurecr.io/neondatabase",
     ],
