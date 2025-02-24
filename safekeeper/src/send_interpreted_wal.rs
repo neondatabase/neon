@@ -122,14 +122,21 @@ pub enum InterpretedWalReaderError {
 }
 
 enum CurrentPositionUpdate {
-    Reset(Lsn),
+    Reset { from: Lsn, to: Lsn },
     NotReset(Lsn),
 }
 
 impl CurrentPositionUpdate {
     fn current_position(&self) -> Lsn {
         match self {
-            CurrentPositionUpdate::Reset(lsn) => *lsn,
+            CurrentPositionUpdate::Reset { from: _, to } => *to,
+            CurrentPositionUpdate::NotReset(lsn) => *lsn,
+        }
+    }
+
+    fn previous_position(&self) -> Lsn {
+        match self {
+            CurrentPositionUpdate::Reset { from, to: _ } => *from,
             CurrentPositionUpdate::NotReset(lsn) => *lsn,
         }
     }
@@ -153,8 +160,12 @@ impl InterpretedWalReaderState {
                 current_position, ..
             } => {
                 if new_shard_start_pos < *current_position {
+                    let from = *current_position;
                     *current_position = new_shard_start_pos;
-                    CurrentPositionUpdate::Reset(*current_position)
+                    CurrentPositionUpdate::Reset {
+                        from,
+                        to: *current_position,
+                    }
                 } else {
                     CurrentPositionUpdate::NotReset(*current_position)
                 }
@@ -480,7 +491,7 @@ impl InterpretedWalReader {
                         // anything outside the select statement.
                         let position_reset = self.state.write().unwrap().maybe_reset(start_pos);
                         match position_reset {
-                            CurrentPositionUpdate::Reset(to) => {
+                            CurrentPositionUpdate::Reset { from: _, to } => {
                                 self.wal_stream.reset(to).await;
                                 wal_decoder = WalStreamDecoder::new(to, self.pg_version);
                             },
@@ -488,8 +499,11 @@ impl InterpretedWalReader {
                         };
 
                         tracing::info!(
-                            "Added shard sender {} with start_pos={} current_pos={}",
-                            ShardSenderId::new(shard_id, new_sender_id), start_pos, position_reset.current_position()
+                            "Added shard sender {} with start_pos={} previous_pos={} current_pos={}",
+                            ShardSenderId::new(shard_id, new_sender_id),
+                            start_pos,
+                            position_reset.previous_position(),
+                            position_reset.current_position(),
                         );
                     }
                 }
