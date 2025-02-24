@@ -71,7 +71,7 @@ impl ChaosInjector {
             _ = interval.tick() => {
                 ChaosEvent::ShuffleTenant
             }
-            _ = maybe_sleep(cron_interval) => {
+            Some(_) = maybe_sleep(cron_interval) => {
                 ChaosEvent::ForceKill
             }
             _ = cancel.cancelled() => {
