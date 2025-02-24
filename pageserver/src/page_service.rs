@@ -40,7 +40,7 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::logging::warn_slow;
+use utils::logging::log_slow;
 use utils::sync::gate::{Gate, GateGuard};
 use utils::sync::spsc_fold;
 use utils::{
@@ -84,8 +84,8 @@ use std::os::fd::AsRawFd;
 /// NB: this is a different value than [`crate::http::routes::ACTIVE_TENANT_TIMEOUT`].
 const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
 
-/// Threshold at which to log a warning about slow GetPage requests.
-const WARN_SLOW_GETPAGE_THRESHOLD: Duration = Duration::from_secs(30);
+/// Threshold at which to log slow GetPage requests.
+const LOG_SLOW_GETPAGE_THRESHOLD: Duration = Duration::from_secs(30);
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -1091,129 +1091,132 @@ impl PageServerHandler {
         let (mut handler_results, span): (
             Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>>,
             _,
-        ) = match batch {
-            BatchedFeMessage::Exists {
-                span,
-                timer,
-                shard,
-                req,
-            } => {
-                fail::fail_point!("ps::handle-pagerequest-message::exists");
-                (
-                    vec![self
-                        .handle_get_rel_exists_request(&*shard.upgrade()?, &req, ctx)
-                        .instrument(span.clone())
-                        .await
-                        .map(|msg| (msg, timer))
-                        .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
+        ) = log_slow(batch.as_static_str(), LOG_SLOW_GETPAGE_THRESHOLD, async {
+            Ok::<_, QueryError>(match batch {
+                BatchedFeMessage::Exists {
                     span,
-                )
-            }
-            BatchedFeMessage::Nblocks {
-                span,
-                timer,
-                shard,
-                req,
-            } => {
-                fail::fail_point!("ps::handle-pagerequest-message::nblocks");
-                (
-                    vec![self
-                        .handle_get_nblocks_request(&*shard.upgrade()?, &req, ctx)
-                        .instrument(span.clone())
-                        .await
-                        .map(|msg| (msg, timer))
-                        .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
-                    span,
-                )
-            }
-            BatchedFeMessage::GetPage {
-                span,
-                shard,
-                effective_request_lsn,
-                pages,
-            } => {
-                fail::fail_point!("ps::handle-pagerequest-message::getpage");
-                (
-                    {
-                        let npages = pages.len();
-                        trace!(npages, "handling getpage request");
-                        let res = self
-                            .handle_get_page_at_lsn_request_batched(
-                                &*shard.upgrade()?,
-                                effective_request_lsn,
-                                pages,
-                                io_concurrency,
-                                ctx,
-                            )
+                    timer,
+                    shard,
+                    req,
+                } => {
+                    fail::fail_point!("ps::handle-pagerequest-message::exists");
+                    (
+                        vec![self
+                            .handle_get_rel_exists_request(&*shard.upgrade()?, &req, ctx)
                             .instrument(span.clone())
-                            .await;
-                        assert_eq!(res.len(), npages);
-                        res
-                    },
+                            .await
+                            .map(|msg| (msg, timer))
+                            .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
+                        span,
+                    )
+                }
+                BatchedFeMessage::Nblocks {
                     span,
-                )
-            }
-            BatchedFeMessage::DbSize {
-                span,
-                timer,
-                shard,
-                req,
-            } => {
-                fail::fail_point!("ps::handle-pagerequest-message::dbsize");
-                (
-                    vec![self
-                        .handle_db_size_request(&*shard.upgrade()?, &req, ctx)
-                        .instrument(span.clone())
-                        .await
-                        .map(|msg| (msg, timer))
-                        .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
-                    span,
-                )
-            }
-            BatchedFeMessage::GetSlruSegment {
-                span,
-                timer,
-                shard,
-                req,
-            } => {
-                fail::fail_point!("ps::handle-pagerequest-message::slrusegment");
-                (
-                    vec![self
-                        .handle_get_slru_segment_request(&*shard.upgrade()?, &req, ctx)
-                        .instrument(span.clone())
-                        .await
-                        .map(|msg| (msg, timer))
-                        .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
-                    span,
-                )
-            }
-            #[cfg(feature = "testing")]
-            BatchedFeMessage::Test {
-                span,
-                shard,
-                requests,
-            } => {
-                fail::fail_point!("ps::handle-pagerequest-message::test");
-                (
-                    {
-                        let npages = requests.len();
-                        trace!(npages, "handling getpage request");
-                        let res = self
-                            .handle_test_request_batch(&*shard.upgrade()?, requests, ctx)
+                    timer,
+                    shard,
+                    req,
+                } => {
+                    fail::fail_point!("ps::handle-pagerequest-message::nblocks");
+                    (
+                        vec![self
+                            .handle_get_nblocks_request(&*shard.upgrade()?, &req, ctx)
                             .instrument(span.clone())
-                            .await;
-                        assert_eq!(res.len(), npages);
-                        res
-                    },
+                            .await
+                            .map(|msg| (msg, timer))
+                            .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
+                        span,
+                    )
+                }
+                BatchedFeMessage::GetPage {
                     span,
-                )
-            }
-            BatchedFeMessage::RespondError { span, error } => {
-                // We've already decided to respond with an error, so we don't need to
-                // call the handler.
-                (vec![Err(error)], span)
-            }
-        };
+                    shard,
+                    effective_request_lsn,
+                    pages,
+                } => {
+                    fail::fail_point!("ps::handle-pagerequest-message::getpage");
+                    (
+                        {
+                            let npages = pages.len();
+                            trace!(npages, "handling getpage request");
+                            let res = self
+                                .handle_get_page_at_lsn_request_batched(
+                                    &*shard.upgrade()?,
+                                    effective_request_lsn,
+                                    pages,
+                                    io_concurrency,
+                                    ctx,
+                                )
+                                .instrument(span.clone())
+                                .await;
+                            assert_eq!(res.len(), npages);
+                            res
+                        },
+                        span,
+                    )
+                }
+                BatchedFeMessage::DbSize {
+                    span,
+                    timer,
+                    shard,
+                    req,
+                } => {
+                    fail::fail_point!("ps::handle-pagerequest-message::dbsize");
+                    (
+                        vec![self
+                            .handle_db_size_request(&*shard.upgrade()?, &req, ctx)
+                            .instrument(span.clone())
+                            .await
+                            .map(|msg| (msg, timer))
+                            .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
+                        span,
+                    )
+                }
+                BatchedFeMessage::GetSlruSegment {
+                    span,
+                    timer,
+                    shard,
+                    req,
+                } => {
+                    fail::fail_point!("ps::handle-pagerequest-message::slrusegment");
+                    (
+                        vec![self
+                            .handle_get_slru_segment_request(&*shard.upgrade()?, &req, ctx)
+                            .instrument(span.clone())
+                            .await
+                            .map(|msg| (msg, timer))
+                            .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
+                        span,
+                    )
+                }
+                #[cfg(feature = "testing")]
+                BatchedFeMessage::Test {
+                    span,
+                    shard,
+                    requests,
+                } => {
+                    fail::fail_point!("ps::handle-pagerequest-message::test");
+                    (
+                        {
+                            let npages = requests.len();
+                            trace!(npages, "handling getpage request");
+                            let res = self
+                                .handle_test_request_batch(&*shard.upgrade()?, requests, ctx)
+                                .instrument(span.clone())
+                                .await;
+                            assert_eq!(res.len(), npages);
+                            res
+                        },
+                        span,
+                    )
+                }
+                BatchedFeMessage::RespondError { span, error } => {
+                    // We've already decided to respond with an error, so we don't need to
+                    // call the handler.
+                    (vec![Err(error)], span)
+                }
+            })
+        })
+        .await?;
 
         // We purposefully don't count flush time into the smgr operation timer.
         //
@@ -1476,19 +1479,16 @@ impl PageServerHandler {
                 }
             };
 
-            let result = warn_slow(
-                msg.as_static_str(),
-                WARN_SLOW_GETPAGE_THRESHOLD,
-                self.pagesteam_handle_batched_message(
+            let result = self
+                .pagesteam_handle_batched_message(
                     pgb_writer,
                     msg,
                     io_concurrency.clone(),
                     &cancel,
                     protocol_version,
                     ctx,
-                ),
-            )
-            .await;
+                )
+                .await;
             match result {
                 Ok(()) => {}
                 Err(e) => break e,
@@ -1652,17 +1652,13 @@ impl PageServerHandler {
                             return Err(e);
                         }
                     };
-                    warn_slow(
-                        batch.as_static_str(),
-                        WARN_SLOW_GETPAGE_THRESHOLD,
-                        self.pagesteam_handle_batched_message(
-                            pgb_writer,
-                            batch,
-                            io_concurrency.clone(),
-                            &cancel,
-                            protocol_version,
-                            &ctx,
-                        ),
+                    self.pagesteam_handle_batched_message(
+                        pgb_writer,
+                        batch,
+                        io_concurrency.clone(),
+                        &cancel,
+                        protocol_version,
+                        &ctx,
                     )
                     .await?;
                 }
