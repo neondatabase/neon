@@ -61,6 +61,7 @@ async fn smoke_test() {
         )
         .await
         .unwrap();
+    let ctx = &ctx.with_scope_timeline(&timeline);
 
     // Grab one of the timeline's layers to exercise in the test, and the other layer that is just
     // there to avoid the timeline being illegally empty
@@ -184,7 +185,7 @@ async fn smoke_test() {
 
     // plain downloading is rarely needed
     layer
-        .download_and_keep_resident()
+        .download_and_keep_resident(Some(ctx))
         .instrument(download_span)
         .await
         .unwrap();

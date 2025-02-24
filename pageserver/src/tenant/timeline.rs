@@ -6914,6 +6914,7 @@ mod tests {
             )
             .await
             .unwrap();
+        let ctx = &ctx.with_scope_timeline(&timeline);
 
         // Layer visibility is an input to heatmap generation, so refresh it first
         timeline.update_layer_visibility().await.unwrap();
@@ -6978,7 +6979,7 @@ mod tests {
             eprintln!("Downloading {layer} and re-generating heatmap");
 
             let _resident = layer
-                .download_and_keep_resident()
+                .download_and_keep_resident(Some(ctx))
                 .instrument(tracing::info_span!(
                     parent: None,
                     "download_layer",
