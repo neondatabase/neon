@@ -2829,8 +2829,17 @@ impl Timeline {
             "layer flush task",
             async move {
                 let _guard = guard;
-                let background_ctx = RequestContext::todo_child(TaskKind::LayerFlushTask, DownloadBehavior::Error);
-                self_clone.flush_loop(layer_flush_start_rx, &background_ctx).await;
+                let ctx = RequestContext::todo_child(TaskKind::LayerFlushTask, DownloadBehavior::Error);
+
+                let prev_scope = std::mem::replace(
+                    &mut *ctx.scope.lock().unwrap(),
+                    context::Scope::new_timeline(&self_clone),
+                );
+                scopeguard::defer! {
+                    *ctx.scope.lock().unwrap() = prev_scope;
+                }
+
+                self_clone.flush_loop(layer_flush_start_rx, &ctx).await;
                 let mut flush_loop_state = self_clone.flush_loop_state.lock().unwrap();
                 assert!(matches!(*flush_loop_state, FlushLoopState::Running{..}));
                 *flush_loop_state  = FlushLoopState::Exited;
@@ -4528,7 +4537,14 @@ impl Timeline {
         let self_clone = Arc::clone(self);
         let frozen_layer = Arc::clone(frozen_layer);
         let ctx = ctx.attached_child();
+        let timeline_scope = context::Scope::new_timeline(self);
         let work = async move {
+            let ctx = ctx;
+            let prev_scope = std::mem::replace(&mut *ctx.scope.lock().unwrap(), timeline_scope);
+            scopeguard::defer! {
+                *ctx.scope.lock().unwrap() = prev_scope;
+            }
+
             let Some((desc, path)) = frozen_layer
                 .write_to_disk(&ctx, key_range, self_clone.l0_flush_global_state.inner())
                 .await?
@@ -6688,6 +6704,14 @@ impl TimelineWriter<'_> {
         if !batch.has_data() {
             return Ok(());
         }
+
+        let prev_scope = std::mem::replace(
+            &mut *ctx.scope.lock().unwrap(),
+            context::Scope::new_timeline(self),
+        );
+        scopeguard::defer! {
+            *ctx.scope.lock().unwrap() = prev_scope;
+        };
 
         // In debug builds, assert that we don't write any keys that don't belong to this shard.
         // We don't assert this in release builds, since key ownership policies may change over
