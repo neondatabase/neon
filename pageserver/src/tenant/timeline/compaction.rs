@@ -79,6 +79,12 @@ impl std::fmt::Display for GcCompactionJobId {
     }
 }
 
+pub struct GcCompactionCombinedSettings {
+    pub gc_compaction_enabled: bool,
+    pub gc_compaction_initial_threshold_kb: u64,
+    pub gc_compaction_ratio_percent: u64,
+}
+
 #[derive(Debug, Clone)]
 pub enum GcCompactionQueueItem {
     MetaJob {
@@ -214,11 +220,11 @@ impl GcCompactionQueue {
 
     /// Trigger an auto compaction.
     pub async fn trigger_auto_compaction(&self, timeline: &Arc<Timeline>) {
-        let (
+        let GcCompactionCombinedSettings {
             gc_compaction_enabled,
             gc_compaction_initial_threshold_kb,
             gc_compaction_ratio_percent,
-        ) = timeline.get_gc_compaction_settings();
+        } = timeline.get_gc_compaction_settings();
         if !gc_compaction_enabled {
             return;
         }

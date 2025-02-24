@@ -19,7 +19,7 @@ use arc_swap::{ArcSwap, ArcSwapOption};
 use bytes::Bytes;
 use camino::Utf8Path;
 use chrono::{DateTime, Utc};
-use compaction::CompactionOutcome;
+use compaction::{CompactionOutcome, GcCompactionCombinedSettings};
 use enumset::EnumSet;
 use fail::fail_point;
 use futures::FutureExt;
@@ -2534,7 +2534,7 @@ impl Timeline {
             )
     }
 
-    fn get_gc_compaction_settings(&self) -> (bool, u64, u64) {
+    fn get_gc_compaction_settings(&self) -> GcCompactionCombinedSettings {
         let tenant_conf = &self.tenant_conf.load();
         let gc_compaction_enabled = tenant_conf
             .tenant_conf
@@ -2552,11 +2552,11 @@ impl Timeline {
             .tenant_conf
             .gc_compaction_ratio_percent
             .unwrap_or(self.conf.default_tenant_conf.gc_compaction_ratio_percent);
-        (
+        GcCompactionCombinedSettings {
             gc_compaction_enabled,
             gc_compaction_initial_threshold_kb,
             gc_compaction_ratio_percent,
-        )
+        }
     }
 
     fn get_image_creation_preempt_threshold(&self) -> usize {

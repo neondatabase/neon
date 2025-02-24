@@ -371,8 +371,6 @@ def test_pageserver_gc_compaction_interrupt(neon_env_builder: NeonEnvBuilder):
         "pitr_interval": "0s",
         "gc_horizon": "1024",
         "lsn_lease_length": "0s",
-        # Do not generate image layers with create_image_layers
-        "image_layer_creation_check_threshold": "100",
     }
 
     env = neon_env_builder.init_start(initial_tenant_conf=SMOKE_CONF)
@@ -481,6 +479,8 @@ def test_pageserver_gc_compaction_trigger(neon_env_builder: NeonEnvBuilder):
         "gc_compaction_enabled": "true",
         "gc_compaction_initial_threshold_kb": "16",
         "gc_compaction_ratio_percent": "50",
+        # Do not generate image layers with create_image_layers
+        "image_layer_creation_check_threshold": "100",
     }
 
     env = neon_env_builder.init_start(initial_tenant_conf=SMOKE_CONF)
