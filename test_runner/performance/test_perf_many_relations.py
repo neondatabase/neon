@@ -88,6 +88,8 @@ def test_perf_simple_many_relations_reldir_v2(
     # Create many relations
     log.info(f"Creating {n} relations...")
     begin = 0
+    with zenbenchmark.record_duration("create_first_relation"):
+        ep.safe_psql("CREATE TABLE IF NOT EXISTS table_begin (id SERIAL PRIMARY KEY, data TEXT)")
     with zenbenchmark.record_duration("create_many_relations"):
         while True:
             end = begin + step
@@ -111,3 +113,5 @@ def test_perf_simple_many_relations_reldir_v2(
             begin = end
             if begin >= n:
                 break
+    with zenbenchmark.record_duration("create_last_relation"):
+        ep.safe_psql(f"CREATE TABLE IF NOT EXISTS table_{begin} (id SERIAL PRIMARY KEY, data TEXT)")
