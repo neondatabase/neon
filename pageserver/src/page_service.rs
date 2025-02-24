@@ -40,7 +40,7 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::logging::warn_slow;
+use utils::logging::log_slow;
 use utils::sync::gate::{Gate, GateGuard};
 use utils::sync::spsc_fold;
 use utils::{
@@ -83,8 +83,8 @@ use std::os::fd::AsRawFd;
 /// NB: this is a different value than [`crate::http::routes::ACTIVE_TENANT_TIMEOUT`].
 const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
 
-/// Threshold at which to log a warning about slow GetPage requests.
-const WARN_SLOW_GETPAGE_THRESHOLD: Duration = Duration::from_secs(30);
+/// Threshold at which to log slow GetPage requests.
+const LOG_SLOW_GETPAGE_THRESHOLD: Duration = Duration::from_secs(30);
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -1086,11 +1086,145 @@ impl PageServerHandler {
             batch
         };
 
-        // invoke handler function
-        let (mut handler_results, span): (
+        // Dispatch the batch to the appropriate request handler.
+        let (mut handler_results, span) = log_slow(
+            batch.as_static_str(),
+            LOG_SLOW_GETPAGE_THRESHOLD,
+            self.pagestream_dispatch_batched_message(batch, io_concurrency, ctx),
+        )
+        .await?;
+
+        // We purposefully don't count flush time into the smgr operation timer.
+        //
+        // The reason is that current compute client will not perform protocol processing
+        // if the postgres backend process is doing things other than `->smgr_read()`.
+        // This is especially the case for prefetch.
+        //
+        // If the compute doesn't read from the connection, eventually TCP will backpressure
+        // all the way into our flush call below.
+        //
+        // The timer's underlying metric is used for a storage-internal latency SLO and
+        // we don't want to include latency in it that we can't control.
+        // And as pointed out above, in this case, we don't control the time that flush will take.
+        //
+        // We put each response in the batch onto the wire in a separate pgb_writer.flush()
+        // call, which (all unmeasured) adds syscall overhead but reduces time to first byte
+        // and avoids building up a "giant" contiguous userspace buffer to hold the entire response.
+        // TODO: vectored socket IO would be great, but pgb_writer doesn't support that.
+        let flush_timers = {
+            let flushing_start_time = Instant::now();
+            let mut flush_timers = Vec::with_capacity(handler_results.len());
+            for handler_result in &mut handler_results {
+                let flush_timer = match handler_result {
+                    Ok((_, timer)) => Some(
+                        timer
+                            .observe_execution_end(flushing_start_time)
+                            .expect("we are the first caller"),
+                    ),
+                    Err(_) => {
+                        // TODO: measure errors
+                        None
+                    }
+                };
+                flush_timers.push(flush_timer);
+            }
+            assert_eq!(flush_timers.len(), handler_results.len());
+            flush_timers
+        };
+
+        // Map handler result to protocol behavior.
+        // Some handler errors cause exit from pagestream protocol.
+        // Other handler errors are sent back as an error message and we stay in pagestream protocol.
+        for (handler_result, flushing_timer) in handler_results.into_iter().zip(flush_timers) {
+            let response_msg = match handler_result {
+                Err(e) => match &e.err {
+                    PageStreamError::Shutdown => {
+                        // If we fail to fulfil a request during shutdown, which may be _because_ of
+                        // shutdown, then do not send the error to the client.  Instead just drop the
+                        // connection.
+                        span.in_scope(|| info!("dropping connection due to shutdown"));
+                        return Err(QueryError::Shutdown);
+                    }
+                    PageStreamError::Reconnect(reason) => {
+                        span.in_scope(|| info!("handler requested reconnect: {reason}"));
+                        return Err(QueryError::Reconnect);
+                    }
+                    PageStreamError::Read(_)
+                    | PageStreamError::LsnTimeout(_)
+                    | PageStreamError::NotFound(_)
+                    | PageStreamError::BadRequest(_) => {
+                        // print the all details to the log with {:#}, but for the client the
+                        // error message is enough.  Do not log if shutting down, as the anyhow::Error
+                        // here includes cancellation which is not an error.
+                        let full = utils::error::report_compact_sources(&e.err);
+                        span.in_scope(|| {
+                            error!("error reading relation or page version: {full:#}")
+                        });
+
+                        PagestreamBeMessage::Error(PagestreamErrorResponse {
+                            req: e.req,
+                            message: e.err.to_string(),
+                        })
+                    }
+                },
+                Ok((response_msg, _op_timer_already_observed)) => response_msg,
+            };
+
+            //
+            // marshal & transmit response message
+            //
+
+            pgb_writer.write_message_noflush(&BeMessage::CopyData(
+                &response_msg.serialize(protocol_version),
+            ))?;
+
+            // what we want to do
+            let socket_fd = pgb_writer.socket_fd;
+            let flush_fut = pgb_writer.flush();
+            // metric for how long flushing takes
+            let flush_fut = match flushing_timer {
+                Some(flushing_timer) => futures::future::Either::Left(flushing_timer.measure(
+                    Instant::now(),
+                    flush_fut,
+                    socket_fd,
+                )),
+                None => futures::future::Either::Right(flush_fut),
+            };
+            // do it while respecting cancellation
+            let _: () = async move {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        // We were requested to shut down.
+                        info!("shutdown request received in page handler");
+                        return Err(QueryError::Shutdown)
+                    }
+                    res = flush_fut => {
+                        res?;
+                    }
+                }
+                Ok(())
+            }
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Helper which dispatches a batched message to the appropriate handler.
+    /// Returns a vec of results, along with the extracted trace span.
+    async fn pagestream_dispatch_batched_message(
+        &mut self,
+        batch: BatchedFeMessage,
+        io_concurrency: IoConcurrency,
+        ctx: &RequestContext,
+    ) -> Result<
+        (
             Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>>,
-            _,
-        ) = match batch {
+            Span,
+        ),
+        QueryError,
+    > {
+        Ok(match batch {
             BatchedFeMessage::Exists {
                 span,
                 timer,
@@ -1212,122 +1346,7 @@ impl PageServerHandler {
                 // call the handler.
                 (vec![Err(error)], span)
             }
-        };
-
-        // We purposefully don't count flush time into the smgr operation timer.
-        //
-        // The reason is that current compute client will not perform protocol processing
-        // if the postgres backend process is doing things other than `->smgr_read()`.
-        // This is especially the case for prefetch.
-        //
-        // If the compute doesn't read from the connection, eventually TCP will backpressure
-        // all the way into our flush call below.
-        //
-        // The timer's underlying metric is used for a storage-internal latency SLO and
-        // we don't want to include latency in it that we can't control.
-        // And as pointed out above, in this case, we don't control the time that flush will take.
-        //
-        // We put each response in the batch onto the wire in a separate pgb_writer.flush()
-        // call, which (all unmeasured) adds syscall overhead but reduces time to first byte
-        // and avoids building up a "giant" contiguous userspace buffer to hold the entire response.
-        // TODO: vectored socket IO would be great, but pgb_writer doesn't support that.
-        let flush_timers = {
-            let flushing_start_time = Instant::now();
-            let mut flush_timers = Vec::with_capacity(handler_results.len());
-            for handler_result in &mut handler_results {
-                let flush_timer = match handler_result {
-                    Ok((_, timer)) => Some(
-                        timer
-                            .observe_execution_end(flushing_start_time)
-                            .expect("we are the first caller"),
-                    ),
-                    Err(_) => {
-                        // TODO: measure errors
-                        None
-                    }
-                };
-                flush_timers.push(flush_timer);
-            }
-            assert_eq!(flush_timers.len(), handler_results.len());
-            flush_timers
-        };
-
-        // Map handler result to protocol behavior.
-        // Some handler errors cause exit from pagestream protocol.
-        // Other handler errors are sent back as an error message and we stay in pagestream protocol.
-        for (handler_result, flushing_timer) in handler_results.into_iter().zip(flush_timers) {
-            let response_msg = match handler_result {
-                Err(e) => match &e.err {
-                    PageStreamError::Shutdown => {
-                        // If we fail to fulfil a request during shutdown, which may be _because_ of
-                        // shutdown, then do not send the error to the client.  Instead just drop the
-                        // connection.
-                        span.in_scope(|| info!("dropping connection due to shutdown"));
-                        return Err(QueryError::Shutdown);
-                    }
-                    PageStreamError::Reconnect(reason) => {
-                        span.in_scope(|| info!("handler requested reconnect: {reason}"));
-                        return Err(QueryError::Reconnect);
-                    }
-                    PageStreamError::Read(_)
-                    | PageStreamError::LsnTimeout(_)
-                    | PageStreamError::NotFound(_)
-                    | PageStreamError::BadRequest(_) => {
-                        // print the all details to the log with {:#}, but for the client the
-                        // error message is enough.  Do not log if shutting down, as the anyhow::Error
-                        // here includes cancellation which is not an error.
-                        let full = utils::error::report_compact_sources(&e.err);
-                        span.in_scope(|| {
-                            error!("error reading relation or page version: {full:#}")
-                        });
-
-                        PagestreamBeMessage::Error(PagestreamErrorResponse {
-                            req: e.req,
-                            message: e.err.to_string(),
-                        })
-                    }
-                },
-                Ok((response_msg, _op_timer_already_observed)) => response_msg,
-            };
-
-            //
-            // marshal & transmit response message
-            //
-
-            pgb_writer.write_message_noflush(&BeMessage::CopyData(
-                &response_msg.serialize(protocol_version),
-            ))?;
-
-            // what we want to do
-            let socket_fd = pgb_writer.socket_fd;
-            let flush_fut = pgb_writer.flush();
-            // metric for how long flushing takes
-            let flush_fut = match flushing_timer {
-                Some(flushing_timer) => futures::future::Either::Left(flushing_timer.measure(
-                    Instant::now(),
-                    flush_fut,
-                    socket_fd,
-                )),
-                None => futures::future::Either::Right(flush_fut),
-            };
-            // do it while respecting cancellation
-            let _: () = async move {
-                tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => {
-                        // We were requested to shut down.
-                        info!("shutdown request received in page handler");
-                        return Err(QueryError::Shutdown)
-                    }
-                    res = flush_fut => {
-                        res?;
-                    }
-                }
-                Ok(())
-            }
-            .await?;
-        }
-        Ok(())
+        })
     }
 
     /// Pagestream sub-protocol handler.
@@ -1473,19 +1492,16 @@ impl PageServerHandler {
                 }
             };
 
-            let result = warn_slow(
-                msg.as_static_str(),
-                WARN_SLOW_GETPAGE_THRESHOLD,
-                self.pagesteam_handle_batched_message(
+            let result = self
+                .pagesteam_handle_batched_message(
                     pgb_writer,
                     msg,
                     io_concurrency.clone(),
                     &cancel,
                     protocol_version,
                     ctx,
-                ),
-            )
-            .await;
+                )
+                .await;
             match result {
                 Ok(()) => {}
                 Err(e) => break e,
@@ -1649,17 +1665,13 @@ impl PageServerHandler {
                             return Err(e);
                         }
                     };
-                    warn_slow(
-                        batch.as_static_str(),
-                        WARN_SLOW_GETPAGE_THRESHOLD,
-                        self.pagesteam_handle_batched_message(
-                            pgb_writer,
-                            batch,
-                            io_concurrency.clone(),
-                            &cancel,
-                            protocol_version,
-                            &ctx,
-                        ),
+                    self.pagesteam_handle_batched_message(
+                        pgb_writer,
+                        batch,
+                        io_concurrency.clone(),
+                        &cancel,
+                        protocol_version,
+                        &ctx,
                     )
                     .await?;
                 }
