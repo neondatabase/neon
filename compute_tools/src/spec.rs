@@ -3,13 +3,12 @@ use reqwest::StatusCode;
 use std::fs::File;
 use std::path::Path;
 use tokio_postgres::Client;
-use tracing::{error, info, instrument, warn};
+use tracing::{error, info, instrument};
 
 use crate::config;
 use crate::metrics::{CPlaneRequestRPC, CPLANE_REQUESTS_TOTAL, UNKNOWN_HTTP_STATUS};
 use crate::migration::MigrationRunner;
 use crate::params::PG_HBA_ALL_MD5;
-use crate::pg_helpers::*;
 
 use compute_api::responses::{
     ComputeCtlConfig, ControlPlaneComputeStatus, ControlPlaneSpecResponse,

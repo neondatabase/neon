@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::compute::construct_superuser_query;
 use crate::pg_helpers::{escape_literal, DatabaseExt, Escaping, GenericOptionsSearch, RoleExt};
 use anyhow::Result;
-use compute_api::spec::{ComputeFeature, ComputeSpec, Database, PgIdent, Role};
+use compute_api::spec::{ComputeSpec, Database, PgIdent, Role};
 use futures::future::join_all;
 use tokio::sync::RwLock;
 use tokio_postgres::Client;
