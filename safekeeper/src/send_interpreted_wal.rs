@@ -104,7 +104,7 @@ pub(crate) enum InterpretedWalReaderState {
         current_position: Lsn,
         /// Tracks the start of the PG WAL LSN from which the current batch of
         /// interpreted records originated.
-        current_batch_wal_start_lsn: Option<Lsn>,
+        current_batch_wal_start: Option<Lsn>,
     },
     Done,
 }
@@ -161,9 +161,9 @@ impl InterpretedWalReaderState {
     fn current_batch_wal_start(&self) -> Option<Lsn> {
         match self {
             InterpretedWalReaderState::Running {
-                current_batch_wal_start_lsn,
+                current_batch_wal_start,
                 ..
-            } => *current_batch_wal_start_lsn,
+            } => *current_batch_wal_start,
             InterpretedWalReaderState::Done => None,
         }
     }
@@ -174,12 +174,12 @@ impl InterpretedWalReaderState {
         match self {
             InterpretedWalReaderState::Running {
                 current_position,
-                current_batch_wal_start_lsn,
+                current_batch_wal_start,
             } => {
                 if new_shard_start_pos < *current_position {
                     let from = *current_position;
                     *current_position = new_shard_start_pos;
-                    *current_batch_wal_start_lsn = None;
+                    *current_batch_wal_start = None;
                     CurrentPositionUpdate::Reset {
                         from,
                         to: *current_position,
@@ -197,11 +197,11 @@ impl InterpretedWalReaderState {
     fn update_current_batch_wal_start(&mut self, lsn: Lsn) {
         match self {
             InterpretedWalReaderState::Running {
-                current_batch_wal_start_lsn,
+                current_batch_wal_start,
                 ..
             } => {
-                if current_batch_wal_start_lsn.is_none() {
-                    *current_batch_wal_start_lsn = Some(lsn);
+                if current_batch_wal_start.is_none() {
+                    *current_batch_wal_start = Some(lsn);
                 }
             }
             InterpretedWalReaderState::Done => {
@@ -213,9 +213,9 @@ impl InterpretedWalReaderState {
     fn take_current_batch_wal_start(&mut self) -> Lsn {
         match self {
             InterpretedWalReaderState::Running {
-                current_batch_wal_start_lsn,
+                current_batch_wal_start,
                 ..
-            } => current_batch_wal_start_lsn.take().unwrap(),
+            } => current_batch_wal_start.take().unwrap(),
             InterpretedWalReaderState::Done => {
                 panic!("take_current_batch_wal_start called on finished reader")
             }
@@ -254,7 +254,7 @@ impl InterpretedWalReader {
     ) -> InterpretedWalReaderHandle {
         let state = Arc::new(std::sync::RwLock::new(InterpretedWalReaderState::Running {
             current_position: start_pos,
-            current_batch_wal_start_lsn: None,
+            current_batch_wal_start: None,
         }));
 
         let (shard_notification_tx, shard_notification_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -314,7 +314,7 @@ impl InterpretedWalReader {
     ) -> InterpretedWalReader {
         let state = Arc::new(std::sync::RwLock::new(InterpretedWalReaderState::Running {
             current_position: start_pos,
-            current_batch_wal_start_lsn: None,
+            current_batch_wal_start: None,
         }));
 
         InterpretedWalReader {
