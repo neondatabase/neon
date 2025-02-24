@@ -173,11 +173,13 @@ impl InterpretedWalReaderState {
     fn maybe_reset(&mut self, new_shard_start_pos: Lsn) -> CurrentPositionUpdate {
         match self {
             InterpretedWalReaderState::Running {
-                current_position, ..
+                current_position,
+                current_batch_wal_start_lsn,
             } => {
                 if new_shard_start_pos < *current_position {
                     let from = *current_position;
                     *current_position = new_shard_start_pos;
+                    *current_batch_wal_start_lsn = None;
                     CurrentPositionUpdate::Reset {
                         from,
                         to: *current_position,
