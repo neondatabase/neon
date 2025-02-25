@@ -347,6 +347,7 @@ fn read_wins_pending_eviction() {
             .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
             .await
             .unwrap();
+        let ctx = ctx.with_scope_timeline(&timeline);
 
         let layer = {
             let mut layers = {
@@ -386,7 +387,7 @@ fn read_wins_pending_eviction() {
         // because no actual eviction happened, we get to just reinitialize the DownloadedLayer
         layer
             .0
-            .get_or_maybe_download(false, None)
+            .get_or_maybe_download(false, Some(&ctx))
             .instrument(download_span)
             .await
             .expect("should had reinitialized without downloading");
@@ -479,6 +480,7 @@ fn multiple_pending_evictions_scenario(name: &'static str, in_order: bool) {
             .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
             .await
             .unwrap();
+        let ctx = ctx.with_scope_timeline(&timeline);
 
         let layer = {
             let mut layers = {
@@ -521,7 +523,7 @@ fn multiple_pending_evictions_scenario(name: &'static str, in_order: bool) {
         // because no actual eviction happened, we get to just reinitialize the DownloadedLayer
         layer
             .0
-            .get_or_maybe_download(false, None)
+            .get_or_maybe_download(false, Some(&ctx))
             .instrument(download_span)
             .await
             .expect("should had reinitialized without downloading");
@@ -648,6 +650,7 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
         .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
         .await
         .unwrap();
+    let ctx = ctx.with_scope_timeline(&timeline);
 
     let layer = {
         let mut layers = {
@@ -681,7 +684,7 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
     // simulate a cancelled read which is cancelled before it gets to re-initialize
     let e = layer
         .0
-        .get_or_maybe_download(false, None)
+        .get_or_maybe_download(false, Some(&ctx))
         .await
         .unwrap_err();
     assert!(
@@ -728,6 +731,12 @@ async fn evict_and_wait_does_not_wait_for_download() {
         .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
         .await
         .unwrap();
+    let ctx = ctx.with_scope_timeline(&timeline);
+
+    // This test does downloads
+    let ctx = RequestContextBuilder::extend(&ctx)
+        .download_behavior(DownloadBehavior::Download)
+        .build();
 
     let layer = {
         let mut layers = {
@@ -774,7 +783,7 @@ async fn evict_and_wait_does_not_wait_for_download() {
 
     let mut download = std::pin::pin!(layer
         .0
-        .get_or_maybe_download(true, None)
+        .get_or_maybe_download(true, Some(&ctx))
         .instrument(download_span));
 
     assert!(
