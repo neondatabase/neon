@@ -37,8 +37,8 @@ pub mod timeline_eviction;
 pub mod timeline_guard;
 pub mod timeline_manager;
 pub mod timelines_set;
-pub mod wal_backup;
-pub mod wal_backup_partial;
+pub mod wal_upload;
+pub mod wal_upload_partial;
 pub mod wal_reader_stream;
 pub mod wal_service;
 pub mod wal_storage;
@@ -92,8 +92,8 @@ pub struct SafeKeeperConf {
     pub peer_recovery_enabled: bool,
     pub remote_storage: Option<RemoteStorageConfig>,
     pub max_offloader_lag_bytes: u64,
-    pub backup_parallel_jobs: usize,
-    pub wal_backup_enabled: bool,
+    pub upload_parallel_jobs: usize,
+    pub wal_upload_enabled: bool,
     pub pg_auth: Option<Arc<JwtAuth>>,
     pub pg_tenant_only_auth: Option<Arc<JwtAuth>>,
     pub http_auth: Option<Arc<SwappableJwtAuth>>,
@@ -101,20 +101,20 @@ pub struct SafeKeeperConf {
     pub sk_auth_token: Option<SecretString>,
     pub current_thread_runtime: bool,
     pub walsenders_keep_horizon: bool,
-    pub partial_backup_timeout: Duration,
+    pub partial_upload_timeout: Duration,
     pub disable_periodic_broker_push: bool,
     pub enable_offload: bool,
     pub delete_offloaded_wal: bool,
     pub control_file_save_interval: Duration,
-    pub partial_backup_concurrency: usize,
+    pub partial_upload_concurrency: usize,
     pub eviction_min_resident: Duration,
     pub wal_reader_fanout: bool,
     pub max_delta_for_fanout: Option<u64>,
 }
 
 impl SafeKeeperConf {
-    pub fn is_wal_backup_enabled(&self) -> bool {
-        self.remote_storage.is_some() && self.wal_backup_enabled
+    pub fn is_wal_upload_enabled(&self) -> bool {
+        self.remote_storage.is_some() && self.wal_upload_enabled
     }
 }
 
@@ -135,8 +135,8 @@ impl SafeKeeperConf {
                 .expect("failed to parse default broker endpoint"),
             broker_keepalive_interval: Duration::from_secs(5),
             peer_recovery_enabled: true,
-            wal_backup_enabled: true,
-            backup_parallel_jobs: 1,
+            wal_upload_enabled: true,
+            upload_parallel_jobs: 1,
             pg_auth: None,
             pg_tenant_only_auth: None,
             http_auth: None,
@@ -145,12 +145,12 @@ impl SafeKeeperConf {
             max_offloader_lag_bytes: defaults::DEFAULT_MAX_OFFLOADER_LAG_BYTES,
             current_thread_runtime: false,
             walsenders_keep_horizon: false,
-            partial_backup_timeout: Duration::from_secs(0),
+            partial_upload_timeout: Duration::from_secs(0),
             disable_periodic_broker_push: false,
             enable_offload: false,
             delete_offloaded_wal: false,
             control_file_save_interval: Duration::from_secs(1),
-            partial_backup_concurrency: 1,
+            partial_upload_concurrency: 1,
             eviction_min_resident: Duration::ZERO,
             wal_reader_fanout: false,
             max_delta_for_fanout: None,
@@ -184,10 +184,10 @@ pub static BROKER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .expect("Failed to create broker runtime")
 });
 
-pub static WAL_BACKUP_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+pub static WAL_UPLOAD_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
-        .thread_name("WAL backup worker")
+        .thread_name("WAL upload worker")
         .enable_all()
         .build()
-        .expect("Failed to create WAL backup runtime")
+        .expect("Failed to create WAL upload runtime")
 });

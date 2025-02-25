@@ -30,7 +30,7 @@ use crate::{
     state::{EvictionState, TimelinePersistentState},
     timeline::{Timeline, WalResidentTimeline},
     timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline},
-    wal_backup,
+    wal_upload,
     wal_storage::open_wal_file,
     GlobalTimelines,
 };
@@ -207,7 +207,7 @@ impl Timeline {
         // Modify the partial segment of the in-memory copy for the control file to
         // point to the destination safekeeper.
         let replace = control_file
-            .partial_backup
+            .partial_upload
             .replace_uploaded_segment(source, destination)?;
 
         let Some(replace) = replace else {
@@ -221,7 +221,7 @@ impl Timeline {
         // Optimistically try to copy the partial segment to the destination's path: this
         // can fail if the timeline was un-evicted and modified in the background.
         let remote_timeline_path = &self.remote_path;
-        wal_backup::copy_partial_segment(
+        wal_upload::copy_partial_segment(
             &replace.previous.remote_path(remote_timeline_path),
             &replace.current.remote_path(remote_timeline_path),
         )
@@ -276,7 +276,7 @@ impl WalResidentTimeline {
         // Modify the partial segment of the in-memory copy for the control file to
         // point to the destination safekeeper.
         let replace = control_store
-            .partial_backup
+            .partial_upload
             .replace_uploaded_segment(source, destination)?;
 
         if let Some(replace) = replace {
@@ -288,7 +288,7 @@ impl WalResidentTimeline {
             );
 
             let remote_timeline_path = &self.tli.remote_path;
-            wal_backup::copy_partial_segment(
+            wal_upload::copy_partial_segment(
                 &replace.previous.remote_path(remote_timeline_path),
                 &replace.current.remote_path(remote_timeline_path),
             )
@@ -308,12 +308,12 @@ impl WalResidentTimeline {
         // still needs. This duplicates calc_horizon_lsn logic.
         //
         // We know that WAL wasn't removed up to this point because it cannot be
-        // removed further than `backup_lsn`. Since we're holding shared_state
+        // removed further than `upload_lsn`. Since we're holding shared_state
         // lock and setting `wal_removal_on_hold` later, it guarantees that WAL
         // won't be removed until we're done.
         let from_lsn = min(
             shared_state.sk.state().remote_consistent_lsn,
-            shared_state.sk.state().backup_lsn,
+            shared_state.sk.state().upload_lsn,
         );
         if from_lsn == Lsn::INVALID {
             // this is possible if snapshot is called before handling first
@@ -499,7 +499,7 @@ async fn pull_timeline(
             }
             _ => {
                 bail!(
-                    "entry {} in backup tar archive is of unexpected type: {:?}",
+                    "entry {} in upload tar archive is of unexpected type: {:?}",
                     file_path.display(),
                     header.entry_type()
                 );

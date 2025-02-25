@@ -37,7 +37,7 @@ use safekeeper::GlobalTimelines;
 use safekeeper::SafeKeeperConf;
 use safekeeper::{broker, WAL_SERVICE_RUNTIME};
 use safekeeper::{control_file, BROKER_RUNTIME};
-use safekeeper::{wal_backup, HTTP_RUNTIME};
+use safekeeper::{wal_upload, HTTP_RUNTIME};
 use storage_broker::DEFAULT_ENDPOINT;
 use utils::auth::{JwtAuth, Scope, SwappableJwtAuth};
 use utils::{
@@ -133,7 +133,7 @@ struct Args {
     /// Enable/disable peer recovery.
     #[arg(long, default_value = "false", action=ArgAction::Set)]
     peer_recovery: bool,
-    /// Remote storage configuration for WAL backup (offloading to s3) as TOML
+    /// Remote storage configuration for WAL upload (offloading to s3) as TOML
     /// inline table, e.g.
     ///   {max_concurrent_syncs = 17, max_sync_errors = 13, bucket_name = "<BUCKETNAME>", bucket_region = "<REGION>", concurrency_limit = 119}
     /// Safekeeper offloads WAL to
@@ -146,11 +146,11 @@ struct Args {
     max_offloader_lag: u64,
     /// Number of max parallel WAL segments to be offloaded to remote storage.
     #[arg(long, default_value = "5")]
-    wal_backup_parallel_jobs: usize,
-    /// Disable WAL backup to s3. When disabled, safekeeper removes WAL ignoring
-    /// WAL backup horizon.
+    wal_upload_parallel_jobs: usize,
+    /// Disable WAL upload to s3. When disabled, safekeeper removes WAL ignoring
+    /// WAL upload horizon.
     #[arg(long)]
-    disable_wal_backup: bool,
+    disable_wal_upload: bool,
     /// If given, enables auth on incoming connections to WAL service endpoint
     /// (--listen-pg). Value specifies path to a .pem public key used for
     /// validations of JWT tokens. Empty string is allowed and means disabling
@@ -180,9 +180,9 @@ struct Args {
     /// still needed for existing replication connection.
     #[arg(long)]
     walsenders_keep_horizon: bool,
-    /// Controls how long backup will wait until uploading the partial segment.
+    /// Controls how long the upload will wait until uploading the partial segment.
     #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_PARTIAL_BACKUP_TIMEOUT, verbatim_doc_comment)]
-    partial_backup_timeout: Duration,
+    partial_upload_timeout: Duration,
     /// Disable task to push messages to broker every second. Supposed to
     /// be used in tests.
     #[arg(long)]
@@ -198,9 +198,9 @@ struct Args {
     control_file_save_interval: Duration,
     /// Number of allowed concurrent uploads of partial segments to remote storage.
     #[arg(long, default_value = DEFAULT_PARTIAL_BACKUP_CONCURRENCY)]
-    partial_backup_concurrency: usize,
+    partial_upload_concurrency: usize,
     /// How long a timeline must be resident before it is eligible for eviction.
-    /// Usually, timeline eviction has to wait for `partial_backup_timeout` before being eligible for eviction,
+    /// Usually, timeline eviction has to wait for `partial_upload_timeout` before being eligible for eviction,
     /// but if a timeline is un-evicted and then _not_ written to, it would immediately flap to evicting again,
     /// if it weren't for `eviction_min_resident` preventing that.
     ///
@@ -362,20 +362,20 @@ async fn main() -> anyhow::Result<()> {
         peer_recovery_enabled: args.peer_recovery,
         remote_storage: args.remote_storage,
         max_offloader_lag_bytes: args.max_offloader_lag,
-        wal_backup_enabled: !args.disable_wal_backup,
-        backup_parallel_jobs: args.wal_backup_parallel_jobs,
+        wal_upload_enabled: !args.disable_wal_upload,
+        upload_parallel_jobs: args.wal_upload_parallel_jobs,
         pg_auth,
         pg_tenant_only_auth,
         http_auth,
         sk_auth_token,
         current_thread_runtime: args.current_thread_runtime,
         walsenders_keep_horizon: args.walsenders_keep_horizon,
-        partial_backup_timeout: args.partial_backup_timeout,
+        partial_upload_timeout: args.partial_upload_timeout,
         disable_periodic_broker_push: args.disable_periodic_broker_push,
         enable_offload: args.enable_offload,
         delete_offloaded_wal: args.delete_offloaded_wal,
         control_file_save_interval: args.control_file_save_interval,
-        partial_backup_concurrency: args.partial_backup_concurrency,
+        partial_upload_concurrency: args.partial_upload_concurrency,
         eviction_min_resident: args.eviction_min_resident,
         wal_reader_fanout: args.wal_reader_fanout,
         max_delta_for_fanout: args.max_delta_for_fanout,
@@ -446,13 +446,13 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
     let timeline_collector = safekeeper::metrics::TimelineCollector::new(global_timelines.clone());
     metrics::register_internal(Box::new(timeline_collector))?;
 
-    wal_backup::init_remote_storage(&conf).await;
+    wal_upload::init_remote_storage(&conf).await;
 
     // Keep handles to main tasks to die if any of them disappears.
     let mut tasks_handles: FuturesUnordered<BoxFuture<(String, JoinTaskRes)>> =
         FuturesUnordered::new();
 
-    // Start wal backup launcher before loading timelines as we'll notify it
+    // Start wal upload launcher before loading timelines as we'll notify it
     // through the channel about timelines which need offloading, not draining
     // the channel would cause deadlock.
     let current_thread_rt = conf
