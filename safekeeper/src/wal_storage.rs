@@ -7,32 +7,32 @@
 //!
 //! Note that last file has `.partial` suffix, that's different from postgres.
 
+use std::cmp::{max, min};
+use std::future::Future;
+use std::io::{self, SeekFrom};
+use std::pin::Pin;
+
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::future::BoxFuture;
 use postgres_ffi::v14::xlog_utils::{IsPartialXLogFileName, IsXLogFileName, XLogFromFileName};
-use postgres_ffi::{PG_TLI, XLogSegNo, dispatch_pgversion};
+use postgres_ffi::waldecoder::WalStreamDecoder;
+use postgres_ffi::{PG_TLI, XLogFileName, XLogSegNo, dispatch_pgversion};
+use pq_proto::SystemId;
 use remote_storage::RemotePath;
-use std::cmp::{max, min};
-use std::future::Future;
-use std::io::{self, SeekFrom};
-use std::pin::Pin;
 use tokio::fs::{self, File, OpenOptions, remove_file};
-use tokio::io::{AsyncRead, AsyncWriteExt};
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tracing::*;
 use utils::crashsafe::durable_rename;
+use utils::id::TenantTimelineId;
+use utils::lsn::Lsn;
 
 use crate::metrics::{
     REMOVED_WAL_SEGMENTS, WAL_STORAGE_OPERATION_SECONDS, WalStorageMetrics, time_io_closure,
 };
 use crate::state::TimelinePersistentState;
 use crate::wal_backup::{read_object, remote_timeline_path};
-use postgres_ffi::XLogFileName;
-use postgres_ffi::waldecoder::WalStreamDecoder;
-use pq_proto::SystemId;
-use utils::{id::TenantTimelineId, lsn::Lsn};
 
 pub trait Storage {
     // Last written LSN.

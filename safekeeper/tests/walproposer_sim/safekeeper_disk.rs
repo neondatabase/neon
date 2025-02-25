@@ -1,21 +1,22 @@
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::Arc;
-
-use parking_lot::Mutex;
-use safekeeper::state::TimelinePersistentState;
-use utils::id::TenantTimelineId;
-
-use super::block_storage::BlockStorage;
-
-use std::{ops::Deref, time::Instant};
+use std::time::Instant;
 
 use anyhow::Result;
 use bytes::{Buf, BytesMut};
 use futures::future::BoxFuture;
-use postgres_ffi::{XLogSegNo, waldecoder::WalStreamDecoder};
-use safekeeper::{control_file, metrics::WalStorageMetrics, wal_storage};
+use parking_lot::Mutex;
+use postgres_ffi::XLogSegNo;
+use postgres_ffi::waldecoder::WalStreamDecoder;
+use safekeeper::metrics::WalStorageMetrics;
+use safekeeper::state::TimelinePersistentState;
+use safekeeper::{control_file, wal_storage};
 use tracing::{debug, info};
+use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
+
+use super::block_storage::BlockStorage;
 
 /// All safekeeper state that is usually saved to disk.
 pub struct SafekeeperDisk {

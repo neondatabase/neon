@@ -1,16 +1,13 @@
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, RwLock},
-};
+use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock};
 
 use itertools::Itertools;
 use tokio_epoll_uring::{BoundedBuf, IoBufMut, Slice};
 
-use crate::{
-    assert_u64_eq_usize::{U64IsUsize, UsizeIsU64},
-    context::RequestContext,
-    virtual_file::{IoBufferMut, owned_buffers_io::io_buf_aligned::IoBufAlignedMut},
-};
+use crate::assert_u64_eq_usize::{U64IsUsize, UsizeIsU64};
+use crate::context::RequestContext;
+use crate::virtual_file::IoBufferMut;
+use crate::virtual_file::owned_buffers_io::io_buf_aligned::IoBufAlignedMut;
 
 /// The file interface we require. At runtime, this is a [`crate::tenant::ephemeral_file::EphemeralFile`].
 pub trait File: Send {
@@ -426,15 +423,15 @@ impl Buffer for Vec<u8> {
 #[cfg(test)]
 #[allow(clippy::assertions_on_constants)]
 mod tests {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
     use rand::Rng;
 
-    use crate::{
-        context::DownloadBehavior, task_mgr::TaskKind,
-        virtual_file::owned_buffers_io::slice::SliceMutExt,
-    };
-
     use super::*;
-    use std::{cell::RefCell, collections::VecDeque};
+    use crate::context::DownloadBehavior;
+    use crate::task_mgr::TaskKind;
+    use crate::virtual_file::owned_buffers_io::slice::SliceMutExt;
 
     struct InMemoryFile {
         content: Vec<u8>,

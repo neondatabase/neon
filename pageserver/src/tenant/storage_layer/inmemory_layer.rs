@@ -4,38 +4,39 @@
 //! held in an ephemeral file, not in memory. The metadata for each page version, i.e.
 //! its position in the file, is kept in memory, though.
 //!
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write;
+use std::ops::Range;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
+
+use anyhow::Result;
+use camino::Utf8PathBuf;
+use pageserver_api::key::{CompactKey, Key};
+use pageserver_api::keyspace::KeySpace;
+use pageserver_api::models::InMemoryLayerInfo;
+use pageserver_api::shard::TenantShardId;
+use tokio::sync::RwLock;
+use tracing::*;
+use utils::id::TimelineId;
+use utils::lsn::Lsn;
+use utils::vec_map::VecMap;
+use wal_decoder::serialized_batch::{SerializedValueBatch, SerializedValueMeta, ValueMeta};
+
+use super::{DeltaLayerWriter, PersistentLayerDesc, ValuesReconstructState};
 use crate::assert_u64_eq_usize::{U64IsUsize, UsizeIsU64, u64_to_usize};
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
+// avoid binding to Write (conflicts with std::io::Write)
+// while being able to use std::fmt::Write's methods
+use crate::metrics::TIMELINE_EPHEMERAL_BYTES;
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::{OnDiskValue, OnDiskValueIo};
 use crate::tenant::timeline::GetVectoredError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::{l0_flush, page_cache};
-use anyhow::Result;
-use camino::Utf8PathBuf;
-use pageserver_api::key::CompactKey;
-use pageserver_api::key::Key;
-use pageserver_api::keyspace::KeySpace;
-use pageserver_api::models::InMemoryLayerInfo;
-use pageserver_api::shard::TenantShardId;
-use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, OnceLock};
-use std::time::Instant;
-use tracing::*;
-use utils::{id::TimelineId, lsn::Lsn, vec_map::VecMap};
-use wal_decoder::serialized_batch::{SerializedValueBatch, SerializedValueMeta, ValueMeta};
-// avoid binding to Write (conflicts with std::io::Write)
-// while being able to use std::fmt::Write's methods
-use crate::metrics::TIMELINE_EPHEMERAL_BYTES;
-use std::cmp::Ordering;
-use std::fmt::Write;
-use std::ops::Range;
-use std::sync::atomic::Ordering as AtomicOrdering;
-use std::sync::atomic::{AtomicU64, AtomicUsize};
-use tokio::sync::RwLock;
-
-use super::{DeltaLayerWriter, PersistentLayerDesc, ValuesReconstructState};
 
 pub(crate) mod vectored_dio_read;
 
@@ -818,8 +819,7 @@ mod tests {
     #[test]
     fn test_index_entry() {
         const MAX_SUPPORTED_POS: usize = IndexEntry::MAX_SUPPORTED_POS;
-        use IndexEntryNewArgs as Args;
-        use IndexEntryUnpacked as Unpacked;
+        use {IndexEntryNewArgs as Args, IndexEntryUnpacked as Unpacked};
 
         let roundtrip = |args, expect: Unpacked| {
             let res = IndexEntry::new(args).expect("this tests expects no errors");

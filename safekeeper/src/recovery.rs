@@ -1,8 +1,9 @@
 //! This module implements pulling WAL from peer safekeepers if compute can't
 //! provide it, i.e. safekeeper lags too much.
 
+use std::fmt;
+use std::pin::pin;
 use std::time::SystemTime;
-use std::{fmt, pin::pin};
 
 use anyhow::{Context, bail};
 use futures::StreamExt;
@@ -10,30 +11,25 @@ use postgres_protocol::message::backend::ReplicationMessage;
 use safekeeper_api::Term;
 use safekeeper_api::membership::INVALID_GENERATION;
 use safekeeper_api::models::{PeerInfo, TimelineStatus};
+use tokio::select;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
-use tokio::time::timeout;
-use tokio::{
-    select,
-    time::sleep,
-    time::{self, Duration},
-};
+use tokio::time::{self, Duration, sleep, timeout};
 use tokio_postgres::replication::ReplicationStream;
 use tokio_postgres::types::PgLsn;
 use tracing::*;
-use utils::postgres_client::{ConnectionConfigArgs, PostgresClientProtocol};
-use utils::{id::NodeId, lsn::Lsn, postgres_client::wal_stream_connection_config};
-
-use crate::receive_wal::{REPLY_QUEUE_SIZE, WalAcceptor};
-use crate::safekeeper::{AppendRequest, AppendRequestHeader};
-use crate::timeline::WalResidentTimeline;
-use crate::{
-    SafeKeeperConf,
-    receive_wal::MSG_QUEUE_SIZE,
-    safekeeper::{
-        AcceptorProposerMessage, ProposerAcceptorMessage, ProposerElected, TermHistory, TermLsn,
-        VoteRequest,
-    },
+use utils::id::NodeId;
+use utils::lsn::Lsn;
+use utils::postgres_client::{
+    ConnectionConfigArgs, PostgresClientProtocol, wal_stream_connection_config,
 };
+
+use crate::SafeKeeperConf;
+use crate::receive_wal::{MSG_QUEUE_SIZE, REPLY_QUEUE_SIZE, WalAcceptor};
+use crate::safekeeper::{
+    AcceptorProposerMessage, AppendRequest, AppendRequestHeader, ProposerAcceptorMessage,
+    ProposerElected, TermHistory, TermLsn, VoteRequest,
+};
+use crate::timeline::WalResidentTimeline;
 
 /// Entrypoint for per timeline task which always runs, checking whether
 /// recovery for this safekeeper is needed and starting it if so.

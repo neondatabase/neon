@@ -7,9 +7,10 @@ use remote_storage::{GenericRemoteStorage, RemotePath};
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
-
-use super::{Cache, MetricsKey, NewRawMetric, RawMetric, metrics::Name};
 use utils::id::{TenantId, TimelineId};
+
+use super::metrics::Name;
+use super::{Cache, MetricsKey, NewRawMetric, RawMetric};
 
 /// How the metrics from pageserver are identified.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq)]
@@ -438,13 +439,12 @@ async fn upload(
 
 #[cfg(test)]
 mod tests {
-    use crate::consumption_metrics::{
-        NewMetricsRefRoot, disk_cache::read_metrics_from_serde_value,
-    };
-
-    use super::*;
     use chrono::{DateTime, Utc};
     use once_cell::sync::Lazy;
+
+    use super::*;
+    use crate::consumption_metrics::NewMetricsRefRoot;
+    use crate::consumption_metrics::disk_cache::read_metrics_from_serde_value;
 
     #[test]
     fn chunked_serialization() {

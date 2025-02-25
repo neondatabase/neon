@@ -3,19 +3,16 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 
-use super::remote_timeline_client::is_same_remote_layer_path;
-use super::storage_layer::AsLayerDesc as _;
-use super::storage_layer::LayerName;
-use super::storage_layer::ResidentLayer;
-use crate::tenant::metadata::TimelineMetadata;
-use crate::tenant::remote_timeline_client::index::IndexPart;
-use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
-use utils::generation::Generation;
-use utils::lsn::{AtomicLsn, Lsn};
-
 use chrono::NaiveDateTime;
 use once_cell::sync::Lazy;
 use tracing::info;
+use utils::generation::Generation;
+use utils::lsn::{AtomicLsn, Lsn};
+
+use super::remote_timeline_client::is_same_remote_layer_path;
+use super::storage_layer::{AsLayerDesc as _, LayerName, ResidentLayer};
+use crate::tenant::metadata::TimelineMetadata;
+use crate::tenant::remote_timeline_client::index::{IndexPart, LayerFileMetadata};
 
 /// Kill switch for upload queue reordering in case it causes problems.
 /// TODO: remove this once we have confidence in it.
@@ -562,15 +559,17 @@ impl UploadOp {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr as _;
+
+    use itertools::Itertools as _;
+    use utils::shard::{ShardCount, ShardIndex, ShardNumber};
+
     use super::*;
     use crate::DEFAULT_PG_VERSION;
     use crate::tenant::Timeline;
     use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
     use crate::tenant::storage_layer::Layer;
     use crate::tenant::storage_layer::layer::local_layer_path;
-    use itertools::Itertools as _;
-    use std::str::FromStr as _;
-    use utils::shard::{ShardCount, ShardIndex, ShardNumber};
 
     /// Test helper which asserts that two operations are the same, in lieu of UploadOp PartialEq.
     #[track_caller]

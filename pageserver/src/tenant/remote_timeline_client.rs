@@ -179,36 +179,47 @@ pub mod index;
 pub mod manifest;
 pub(crate) mod upload;
 
-use anyhow::Context;
-use camino::Utf8Path;
-use chrono::{NaiveDateTime, Utc};
-
-pub(crate) use download::download_initdb_tar_zst;
-use index::GcCompactionState;
-use pageserver_api::models::TimelineArchivalState;
-use pageserver_api::shard::{ShardIndex, TenantShardId};
-use regex::Regex;
-use scopeguard::ScopeGuard;
-use tokio_util::sync::CancellationToken;
-use utils::backoff::{
-    self, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS, exponential_backoff,
-};
-use utils::pausable_failpoint;
-use utils::shard::ShardNumber;
-
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::ops::DerefMut;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use anyhow::Context;
+use camino::Utf8Path;
+use chrono::{NaiveDateTime, Utc};
+pub(crate) use download::{
+    download_index_part, download_initdb_tar_zst, download_tenant_manifest, is_temp_download_file,
+    list_remote_tenant_shards, list_remote_timelines,
+};
+use index::GcCompactionState;
+pub(crate) use index::LayerFileMetadata;
+use pageserver_api::models::TimelineArchivalState;
+use pageserver_api::shard::{ShardIndex, TenantShardId};
+use regex::Regex;
 use remote_storage::{
     DownloadError, GenericRemoteStorage, ListingMode, RemotePath, TimeoutOrCancel,
 };
-use std::ops::DerefMut;
-use tracing::{Instrument, info_span};
-use tracing::{debug, error, info, instrument, warn};
+use scopeguard::ScopeGuard;
+use tokio_util::sync::CancellationToken;
+use tracing::{Instrument, debug, error, info, info_span, instrument, warn};
+pub(crate) use upload::upload_initdb_dir;
+use utils::backoff::{
+    self, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS, exponential_backoff,
+};
+use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
+use utils::pausable_failpoint;
+use utils::shard::ShardNumber;
 
+use self::index::IndexPart;
+use super::config::AttachedLocationConfig;
+use super::metadata::MetadataUpdate;
+use super::storage_layer::{Layer, LayerName, ResidentLayer};
+use super::timeline::import_pgdata;
+use super::upload_queue::{NotInitialized, SetDeletedFlagProgress};
+use super::{DeleteTimelineError, Generation};
+use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::deletion_queue::{DeletionQueueClient, DeletionQueueError};
 use crate::metrics::{
@@ -216,41 +227,16 @@ use crate::metrics::{
     RemoteOpFileKind, RemoteOpKind, RemoteTimelineClientMetrics,
     RemoteTimelineClientMetricsCallTrackSize,
 };
-use crate::task_mgr::shutdown_token;
-use crate::tenant::TIMELINES_SEGMENT_NAME;
-use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
+use crate::task_mgr::{BACKGROUND_RUNTIME, TaskKind, shutdown_token};
+use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::remote_timeline_client::download::download_retry;
 use crate::tenant::storage_layer::AsLayerDesc;
-use crate::tenant::upload_queue::{Delete, OpType, UploadQueueStoppedDeletable};
-use crate::{
-    TENANT_HEATMAP_BASENAME,
-    config::PageServerConf,
-    task_mgr,
-    task_mgr::BACKGROUND_RUNTIME,
-    task_mgr::TaskKind,
-    tenant::metadata::TimelineMetadata,
-    tenant::upload_queue::{
-        UploadOp, UploadQueue, UploadQueueInitialized, UploadQueueStopped, UploadTask,
-    },
+use crate::tenant::upload_queue::{
+    Delete, OpType, UploadOp, UploadQueue, UploadQueueInitialized, UploadQueueStopped,
+    UploadQueueStoppedDeletable, UploadTask,
 };
-
-use utils::id::{TenantId, TimelineId};
-
-use self::index::IndexPart;
-
-use super::config::AttachedLocationConfig;
-use super::metadata::MetadataUpdate;
-use super::storage_layer::{Layer, LayerName, ResidentLayer};
-use super::timeline::import_pgdata;
-use super::upload_queue::{NotInitialized, SetDeletedFlagProgress};
-use super::{DeleteTimelineError, Generation};
-
-pub(crate) use download::{
-    download_index_part, download_tenant_manifest, is_temp_download_file,
-    list_remote_tenant_shards, list_remote_timelines,
-};
-pub(crate) use index::LayerFileMetadata;
-pub(crate) use upload::upload_initdb_dir;
+use crate::tenant::{TIMELINES_SEGMENT_NAME, debug_assert_current_span_has_tenant_and_timeline_id};
+use crate::{TENANT_HEATMAP_BASENAME, task_mgr};
 
 // Occasional network issues and such can cause remote operations to fail, and
 // that's expected. If a download fails, we log it at info-level, and retry.
@@ -2672,19 +2658,15 @@ pub fn parse_remote_tenant_manifest_path(path: RemotePath) -> Option<Generation>
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{
-        DEFAULT_PG_VERSION,
-        context::RequestContext,
-        tenant::{
-            Tenant, Timeline,
-            config::AttachmentMode,
-            harness::{TIMELINE_ID, TenantHarness},
-            storage_layer::layer::local_layer_path,
-        },
-    };
-
     use std::collections::HashSet;
+
+    use super::*;
+    use crate::DEFAULT_PG_VERSION;
+    use crate::context::RequestContext;
+    use crate::tenant::config::AttachmentMode;
+    use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
+    use crate::tenant::storage_layer::layer::local_layer_path;
+    use crate::tenant::{Tenant, Timeline};
 
     pub(super) fn dummy_contents(name: &str) -> Vec<u8> {
         format!("contents for {name}").into()

@@ -2,31 +2,30 @@
 //! Gets messages from the network, passes them down to consensus module and
 //! sends replies back.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use bytes::{Bytes, BytesMut};
 use camino::Utf8PathBuf;
-use desim::{
-    executor::{self, PollSome},
-    network::TCP,
-    node_os::NodeOs,
-    proto::{AnyMessage, NetEvent, NodeEvent},
-};
+use desim::executor::{self, PollSome};
+use desim::network::TCP;
+use desim::node_os::NodeOs;
+use desim::proto::{AnyMessage, NetEvent, NodeEvent};
 use http::Uri;
-use safekeeper::{
-    SafeKeeperConf,
-    safekeeper::{ProposerAcceptorMessage, SK_PROTO_VERSION_3, SafeKeeper, UNKNOWN_SERVER_VERSION},
-    state::{TimelinePersistentState, TimelineState},
-    timeline::TimelineError,
-    wal_storage::Storage,
+use safekeeper::SafeKeeperConf;
+use safekeeper::safekeeper::{
+    ProposerAcceptorMessage, SK_PROTO_VERSION_3, SafeKeeper, UNKNOWN_SERVER_VERSION,
 };
-use safekeeper_api::{ServerInfo, membership::Configuration};
+use safekeeper::state::{TimelinePersistentState, TimelineState};
+use safekeeper::timeline::TimelineError;
+use safekeeper::wal_storage::Storage;
+use safekeeper_api::ServerInfo;
+use safekeeper_api::membership::Configuration;
 use tracing::{debug, info_span, warn};
-use utils::{
-    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
-    lsn::Lsn,
-};
+use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
+use utils::lsn::Lsn;
 
 use super::safekeeper_disk::{DiskStateStorage, DiskWALStorage, SafekeeperDisk, TimelineDisk};
 

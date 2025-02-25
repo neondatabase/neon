@@ -67,23 +67,18 @@
 //! mapping is automatically removed and the slot is marked free.
 //!
 
-use std::{
-    collections::{HashMap, hash_map::Entry},
-    sync::{
-        Arc, Weak,
-        atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use anyhow::Context;
 use once_cell::sync::OnceCell;
 
-use crate::{
-    context::RequestContext,
-    metrics::{PageCacheSizeMetrics, page_cache_eviction_metrics},
-    virtual_file::{IoBufferMut, IoPageSlice},
-};
+use crate::context::RequestContext;
+use crate::metrics::{PageCacheSizeMetrics, page_cache_eviction_metrics};
+use crate::virtual_file::{IoBufferMut, IoPageSlice};
 
 static PAGE_CACHE: OnceCell<PageCache> = OnceCell::new();
 const TEST_PAGE_CACHE_SIZE: usize = 50;

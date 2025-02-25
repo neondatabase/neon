@@ -1,13 +1,12 @@
+use std::collections::HashSet;
 use std::env;
 use std::fmt::{Debug, Display};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
-use std::{collections::HashSet, time::SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::common::{download_to_vec, upload_stream};
 use anyhow::Context;
 use camino::Utf8Path;
 use futures_util::StreamExt;
@@ -15,11 +14,12 @@ use remote_storage::{
     DownloadError, DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath,
     RemoteStorageConfig, RemoteStorageKind, S3Config,
 };
-use test_context::AsyncTestContext;
-use test_context::test_context;
+use test_context::{AsyncTestContext, test_context};
 use tokio::io::AsyncBufReadExt;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
+
+use crate::common::{download_to_vec, upload_stream};
 
 mod common;
 

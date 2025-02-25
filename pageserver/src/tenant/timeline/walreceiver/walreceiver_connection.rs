@@ -1,46 +1,48 @@
 //! Actual Postgres connection handler to stream WAL to the server.
 
-use std::{
-    error::Error,
-    pin::pin,
-    str::FromStr,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::error::Error;
+use std::pin::pin;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, anyhow};
 use bytes::BytesMut;
 use chrono::{NaiveDateTime, Utc};
 use fail::fail_point;
 use futures::StreamExt;
-use postgres_ffi::WAL_SEGMENT_SIZE;
-use postgres_ffi::{v14::xlog_utils::normalize_lsn, waldecoder::WalDecodeError};
-use postgres_protocol::message::backend::ReplicationMessage;
-use postgres_types::PgLsn;
-use tokio::{select, sync::watch, time};
-use tokio_postgres::{Client, replication::ReplicationStream};
-use tokio_postgres::{SimpleQueryMessage, SimpleQueryRow, error::SqlState};
-use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, debug, error, info, trace, warn};
-use wal_decoder::{
-    models::{FlushUncommittedRecords, InterpretedWalRecord, InterpretedWalRecords},
-    wire_format::FromWireFormat,
-};
-
-use super::TaskStateUpdate;
-use crate::{
-    context::RequestContext,
-    metrics::{LIVE_CONNECTIONS, WAL_INGEST, WALRECEIVER_STARTED_CONNECTIONS},
-    pgdatadir_mapping::DatadirModification,
-    task_mgr::{TaskKind, WALRECEIVER_RUNTIME},
-    tenant::{Timeline, WalReceiverInfo, debug_assert_current_span_has_tenant_and_timeline_id},
-    walingest::WalIngest,
-};
 use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
-use postgres_ffi::waldecoder::WalStreamDecoder;
-use utils::{critical, id::NodeId, lsn::Lsn, postgres_client::PostgresClientProtocol};
-use utils::{pageserver_feedback::PageserverFeedback, sync::gate::GateError};
+use postgres_ffi::WAL_SEGMENT_SIZE;
+use postgres_ffi::v14::xlog_utils::normalize_lsn;
+use postgres_ffi::waldecoder::{WalDecodeError, WalStreamDecoder};
+use postgres_protocol::message::backend::ReplicationMessage;
+use postgres_types::PgLsn;
+use tokio::sync::watch;
+use tokio::{select, time};
+use tokio_postgres::error::SqlState;
+use tokio_postgres::replication::ReplicationStream;
+use tokio_postgres::{Client, SimpleQueryMessage, SimpleQueryRow};
+use tokio_util::sync::CancellationToken;
+use tracing::{Instrument, debug, error, info, trace, warn};
+use utils::critical;
+use utils::id::NodeId;
+use utils::lsn::Lsn;
+use utils::pageserver_feedback::PageserverFeedback;
+use utils::postgres_client::PostgresClientProtocol;
+use utils::sync::gate::GateError;
+use wal_decoder::models::{FlushUncommittedRecords, InterpretedWalRecord, InterpretedWalRecords};
+use wal_decoder::wire_format::FromWireFormat;
+
+use super::TaskStateUpdate;
+use crate::context::RequestContext;
+use crate::metrics::{LIVE_CONNECTIONS, WAL_INGEST, WALRECEIVER_STARTED_CONNECTIONS};
+use crate::pgdatadir_mapping::DatadirModification;
+use crate::task_mgr::{TaskKind, WALRECEIVER_RUNTIME};
+use crate::tenant::{
+    Timeline, WalReceiverInfo, debug_assert_current_span_has_tenant_and_timeline_id,
+};
+use crate::walingest::WalIngest;
 
 /// Status of the connection.
 #[derive(Debug, Clone, Copy)]

@@ -3,15 +3,15 @@ use std::str::FromStr;
 use anyhow::{Context, anyhow};
 use async_stream::{stream, try_stream};
 use futures::StreamExt;
+use pageserver_api::shard::TenantShardId;
 use remote_storage::{GenericRemoteStorage, ListingMode, ListingObject, RemotePath};
 use tokio_stream::Stream;
+use utils::id::{TenantId, TimelineId};
 
 use crate::{
     RootTarget, S3Target, TenantShardTimelineId, list_objects_with_retries,
     stream_objects_with_retries,
 };
-use pageserver_api::shard::TenantShardId;
-use utils::id::{TenantId, TimelineId};
 
 /// Given a remote storage and a target, output a stream of TenantIds discovered via listing prefixes
 pub fn stream_tenants<'a>(

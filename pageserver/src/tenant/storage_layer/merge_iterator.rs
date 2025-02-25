@@ -1,21 +1,16 @@
-use std::{
-    cmp::Ordering,
-    collections::{BinaryHeap, binary_heap},
-    sync::Arc,
-};
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, binary_heap};
+use std::sync::Arc;
 
 use anyhow::bail;
 use pageserver_api::key::Key;
+use pageserver_api::value::Value;
 use utils::lsn::Lsn;
 
+use super::delta_layer::{DeltaLayerInner, DeltaLayerIterator};
+use super::image_layer::{ImageLayerInner, ImageLayerIterator};
+use super::{PersistentLayerDesc, PersistentLayerKey};
 use crate::context::RequestContext;
-use pageserver_api::value::Value;
-
-use super::{
-    PersistentLayerDesc, PersistentLayerKey,
-    delta_layer::{DeltaLayerInner, DeltaLayerIterator},
-    image_layer::{ImageLayerInner, ImageLayerIterator},
-};
 
 #[derive(Clone, Copy)]
 pub(crate) enum LayerRef<'a> {
@@ -349,24 +344,18 @@ impl<'a> MergeIterator<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use itertools::Itertools;
     use pageserver_api::key::Key;
-    use utils::lsn::Lsn;
-
-    use crate::{
-        DEFAULT_PG_VERSION,
-        tenant::{
-            harness::{TIMELINE_ID, TenantHarness},
-            storage_layer::delta_layer::test::{produce_delta_layer, sort_delta},
-        },
-    };
-
-    #[cfg(feature = "testing")]
-    use crate::tenant::storage_layer::delta_layer::test::sort_delta_value;
     #[cfg(feature = "testing")]
     use pageserver_api::record::NeonWalRecord;
+    use utils::lsn::Lsn;
+
+    use super::*;
+    use crate::DEFAULT_PG_VERSION;
+    use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
+    #[cfg(feature = "testing")]
+    use crate::tenant::storage_layer::delta_layer::test::sort_delta_value;
+    use crate::tenant::storage_layer::delta_layer::test::{produce_delta_layer, sort_delta};
 
     async fn assert_merge_iter_equal(
         merge_iter: &mut MergeIterator<'_>,

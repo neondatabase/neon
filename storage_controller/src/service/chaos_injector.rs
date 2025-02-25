@@ -1,8 +1,6 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-    time::Duration,
-};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+use std::time::Duration;
 
 use pageserver_api::controller_api::ShardSchedulingPolicy;
 use rand::seq::SliceRandom;

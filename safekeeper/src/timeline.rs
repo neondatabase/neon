@@ -1,37 +1,32 @@
 //! This module implements Timeline lifecycle management and has all necessary code
 //! to glue together SafeKeeper and all other background services.
 
+use std::cmp::max;
+use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
+
 use anyhow::{Result, anyhow, bail};
 use camino::{Utf8Path, Utf8PathBuf};
+use http_utils::error::ApiError;
 use remote_storage::RemotePath;
 use safekeeper_api::Term;
 use safekeeper_api::membership::Configuration;
 use safekeeper_api::models::{
     PeerInfo, TimelineMembershipSwitchResponse, TimelineTermBumpResponse,
 };
+use storage_broker::proto::{SafekeeperTimelineInfo, TenantTimelineId as ProtoTenantTimelineId};
 use tokio::fs::{self};
+use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, watch};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use utils::id::TenantId;
+use tracing::*;
+use utils::id::{NodeId, TenantId, TenantTimelineId};
+use utils::lsn::Lsn;
 use utils::sync::gate::Gate;
 
-use http_utils::error::ApiError;
-use std::cmp::max;
-use std::ops::{Deref, DerefMut};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
-use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use tokio::{sync::watch, time::Instant};
-use tracing::*;
-use utils::{
-    id::{NodeId, TenantTimelineId},
-    lsn::Lsn,
-};
-
-use storage_broker::proto::SafekeeperTimelineInfo;
-use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
-
-use crate::control_file;
+use crate::metrics::{FullTimelineInfo, MISC_OPERATION_SECONDS, WalStorageMetrics};
 use crate::rate_limit::RateLimiter;
 use crate::receive_wal::WalReceivers;
 use crate::safekeeper::{AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, TermLsn};
@@ -42,11 +37,8 @@ use crate::timeline_manager::{AtomicStatus, ManagerCtl};
 use crate::timelines_set::TimelinesSet;
 use crate::wal_backup::{self, remote_timeline_path};
 use crate::wal_backup_partial::PartialRemoteSegment;
-
-use crate::SafeKeeperConf;
-use crate::metrics::{FullTimelineInfo, MISC_OPERATION_SECONDS, WalStorageMetrics};
 use crate::wal_storage::{Storage as wal_storage_iface, WalReader};
-use crate::{debug_dump, timeline_manager, wal_storage};
+use crate::{SafeKeeperConf, control_file, debug_dump, timeline_manager, wal_storage};
 
 fn peer_info_from_sk_info(sk_info: &SafekeeperTimelineInfo, ts: Instant) -> PeerInfo {
     PeerInfo {

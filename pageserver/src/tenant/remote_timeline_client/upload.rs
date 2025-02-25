@@ -1,15 +1,19 @@
 //! Helper functions to upload files to remote storage with a RemoteStorage
 
+use std::io::{ErrorKind, SeekFrom};
+use std::time::SystemTime;
+
 use anyhow::{Context, bail};
 use bytes::Bytes;
 use camino::Utf8Path;
 use fail::fail_point;
 use pageserver_api::shard::TenantShardId;
-use std::io::{ErrorKind, SeekFrom};
-use std::time::SystemTime;
+use remote_storage::{GenericRemoteStorage, RemotePath, TimeTravelError};
 use tokio::fs::{self, File};
 use tokio::io::AsyncSeekExt;
 use tokio_util::sync::CancellationToken;
+use tracing::info;
+use utils::id::{TenantId, TimelineId};
 use utils::{backoff, pausable_failpoint};
 
 use super::Generation;
@@ -19,10 +23,6 @@ use crate::tenant::remote_timeline_client::{
     remote_index_path, remote_initdb_archive_path, remote_initdb_preserved_archive_path,
     remote_tenant_manifest_path,
 };
-use remote_storage::{GenericRemoteStorage, RemotePath, TimeTravelError};
-use utils::id::{TenantId, TimelineId};
-
-use tracing::info;
 
 /// Serializes and uploads the given index part data to the remote storage.
 pub(crate) async fn upload_index_part(

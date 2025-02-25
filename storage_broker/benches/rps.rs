@@ -3,16 +3,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-
-use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::{
-    FilterTenantTimelineId, MessageType, SubscribeByFilterRequest,
+    FilterTenantTimelineId, MessageType, SafekeeperTimelineInfo, SubscribeByFilterRequest,
     TenantTimelineId as ProtoTenantTimelineId, TypeSubscription, TypedMessage,
 };
-
 use storage_broker::{BrokerClientChannel, DEFAULT_ENDPOINT};
 use tokio::time;
-
 use tonic::Request;
 
 const ABOUT: &str = r#"

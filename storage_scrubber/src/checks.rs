@@ -1,12 +1,19 @@
 use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
 
+use futures_util::StreamExt;
 use itertools::Itertools;
+use pageserver::tenant::IndexPart;
 use pageserver::tenant::checks::check_valid_layermap;
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver::tenant::remote_timeline_client::manifest::TenantManifest;
+use pageserver::tenant::remote_timeline_client::{
+    parse_remote_index_path, parse_remote_tenant_manifest_path, remote_layer_path,
+};
+use pageserver::tenant::storage_layer::LayerName;
 use pageserver_api::shard::ShardIndex;
+use remote_storage::{GenericRemoteStorage, ListingObject, RemotePath};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use utils::generation::Generation;
@@ -16,13 +23,6 @@ use utils::shard::TenantShardId;
 use crate::cloud_admin_api::BranchData;
 use crate::metadata_stream::stream_listing;
 use crate::{RootTarget, TenantShardTimelineId, download_object_with_retries};
-use futures_util::StreamExt;
-use pageserver::tenant::IndexPart;
-use pageserver::tenant::remote_timeline_client::{
-    parse_remote_index_path, parse_remote_tenant_manifest_path, remote_layer_path,
-};
-use pageserver::tenant::storage_layer::LayerName;
-use remote_storage::{GenericRemoteStorage, ListingObject, RemotePath};
 
 pub(crate) struct TimelineAnalysis {
     /// Anomalies detected

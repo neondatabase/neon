@@ -9,9 +9,35 @@
 //! then a (re)connection happens, if necessary.
 //! Only WAL streaming task expects to be finished, other loops (storage broker, connection management) never exit unless cancelled explicitly via the dedicated channel.
 
-use std::{collections::HashMap, num::NonZeroU64, ops::ControlFlow, sync::Arc, time::Duration};
+use std::collections::HashMap;
+use std::num::NonZeroU64;
+use std::ops::ControlFlow;
+use std::sync::Arc;
+use std::time::Duration;
 
-use super::{TaskStateUpdate, WalReceiverConf};
+use anyhow::Context;
+use chrono::{NaiveDateTime, Utc};
+use pageserver_api::models::TimelineState;
+use postgres_connection::PgConnectionConfig;
+use storage_broker::proto::{
+    FilterTenantTimelineId, MessageType, SafekeeperDiscoveryRequest, SafekeeperDiscoveryResponse,
+    SubscribeByFilterRequest, TenantTimelineId as ProtoTenantTimelineId, TypeSubscription,
+    TypedMessage,
+};
+use storage_broker::{BrokerClientChannel, Code, Streaming};
+use tokio_util::sync::CancellationToken;
+use tracing::*;
+use utils::backoff::{
+    DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS, exponential_backoff,
+};
+use utils::id::{NodeId, TenantTimelineId};
+use utils::lsn::Lsn;
+use utils::postgres_client::{
+    ConnectionConfigArgs, PostgresClientProtocol, wal_stream_connection_config,
+};
+
+use super::walreceiver_connection::{WalConnectionStatus, WalReceiverError};
+use super::{TaskEvent, TaskHandle, TaskStateUpdate, WalReceiverConf};
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::{
     WALRECEIVER_ACTIVE_MANAGERS, WALRECEIVER_BROKER_UPDATES, WALRECEIVER_CANDIDATES_ADDED,
@@ -19,35 +45,6 @@ use crate::metrics::{
 };
 use crate::task_mgr::TaskKind;
 use crate::tenant::{Timeline, debug_assert_current_span_has_tenant_and_timeline_id};
-use anyhow::Context;
-use chrono::{NaiveDateTime, Utc};
-use pageserver_api::models::TimelineState;
-
-use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
-use storage_broker::proto::{
-    FilterTenantTimelineId, MessageType, SafekeeperDiscoveryRequest, SafekeeperDiscoveryResponse,
-    SubscribeByFilterRequest, TypeSubscription, TypedMessage,
-};
-use storage_broker::{BrokerClientChannel, Code, Streaming};
-use tokio_util::sync::CancellationToken;
-use tracing::*;
-
-use postgres_connection::PgConnectionConfig;
-use utils::backoff::{
-    DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS, exponential_backoff,
-};
-use utils::postgres_client::{
-    ConnectionConfigArgs, PostgresClientProtocol, wal_stream_connection_config,
-};
-use utils::{
-    id::{NodeId, TenantTimelineId},
-    lsn::Lsn,
-};
-
-use super::{
-    TaskEvent, TaskHandle, walreceiver_connection::WalConnectionStatus,
-    walreceiver_connection::WalReceiverError,
-};
 
 pub(crate) struct Cancelled;
 
@@ -1122,10 +1119,11 @@ impl ReconnectReason {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
     use pageserver_api::config::defaults::DEFAULT_WAL_RECEIVER_PROTOCOL;
     use url::Host;
+
+    use super::*;
+    use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
 
     fn dummy_broker_sk_timeline(
         commit_lsn: u64,

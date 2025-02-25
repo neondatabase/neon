@@ -1,27 +1,22 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use anyhow::{Context, bail, ensure};
 use itertools::Itertools;
 use pageserver_api::shard::TenantShardId;
-use std::{collections::HashMap, sync::Arc};
 use tracing::trace;
-use utils::{
-    id::TimelineId,
-    lsn::{AtomicLsn, Lsn},
-};
-
-use crate::{
-    config::PageServerConf,
-    context::RequestContext,
-    metrics::TimelineMetrics,
-    tenant::{
-        layer_map::{BatchedUpdates, LayerMap},
-        storage_layer::{
-            AsLayerDesc, InMemoryLayer, Layer, LayerVisibilityHint, PersistentLayerDesc,
-            PersistentLayerKey, ResidentLayer,
-        },
-    },
-};
+use utils::id::TimelineId;
+use utils::lsn::{AtomicLsn, Lsn};
 
 use super::TimelineWriterState;
+use crate::config::PageServerConf;
+use crate::context::RequestContext;
+use crate::metrics::TimelineMetrics;
+use crate::tenant::layer_map::{BatchedUpdates, LayerMap};
+use crate::tenant::storage_layer::{
+    AsLayerDesc, InMemoryLayer, Layer, LayerVisibilityHint, PersistentLayerDesc,
+    PersistentLayerKey, ResidentLayer,
+};
 
 /// Provides semantic APIs to manipulate the layer map.
 pub(crate) enum LayerManager {

@@ -7,26 +7,23 @@
 //!
 
 use anyhow::Context;
-use postgres_backend::QueryError;
+use postgres_backend::{PostgresBackend, QueryError};
+use postgres_ffi::{WAL_SEGMENT_SIZE, encode_logical_message};
+use pq_proto::{BeMessage, RowDescriptor, TEXT_OID};
 use safekeeper_api::membership::{Configuration, INVALID_GENERATION};
 use safekeeper_api::{ServerInfo, Term};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::*;
+use utils::lsn::Lsn;
 
 use crate::handler::SafekeeperPostgresHandler;
-use crate::safekeeper::{AcceptorProposerMessage, AppendResponse};
 use crate::safekeeper::{
-    AppendRequest, AppendRequestHeader, ProposerAcceptorMessage, ProposerElected,
+    AcceptorProposerMessage, AppendRequest, AppendRequestHeader, AppendResponse,
+    ProposerAcceptorMessage, ProposerElected, TermHistory, TermLsn,
 };
-use crate::safekeeper::{TermHistory, TermLsn};
 use crate::state::TimelinePersistentState;
 use crate::timeline::WalResidentTimeline;
-use postgres_backend::PostgresBackend;
-use postgres_ffi::WAL_SEGMENT_SIZE;
-use postgres_ffi::encode_logical_message;
-use pq_proto::{BeMessage, RowDescriptor, TEXT_OID};
-use utils::lsn::Lsn;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AppendLogicalMessage {

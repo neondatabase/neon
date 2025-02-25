@@ -18,39 +18,34 @@ mod s3_bucket;
 mod simulate_failures;
 mod support;
 
-use std::{
-    collections::HashMap,
-    fmt::Debug,
-    num::NonZeroU32,
-    ops::Bound,
-    pin::{Pin, pin},
-    sync::Arc,
-    time::SystemTime,
-};
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::num::NonZeroU32;
+use std::ops::Bound;
+use std::pin::{Pin, pin};
+use std::sync::Arc;
+use std::time::SystemTime;
 
 use anyhow::Context;
-use camino::{Utf8Path, Utf8PathBuf};
-
+/// Azure SDK's ETag type is a simple String wrapper: we use this internally instead of repeating it here.
+pub use azure_core::Etag;
 use bytes::Bytes;
-use futures::{StreamExt, stream::Stream};
+use camino::{Utf8Path, Utf8PathBuf};
+pub use error::{DownloadError, TimeTravelError, TimeoutOrCancel};
+use futures::StreamExt;
+use futures::stream::Stream;
 use itertools::Itertools as _;
+use s3_bucket::RequestKind;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-pub use self::{
-    azure_blob::AzureBlobStorage, local_fs::LocalFs, s3_bucket::S3Bucket,
-    simulate_failures::UnreliableWrapper,
-};
-use s3_bucket::RequestKind;
-
+pub use self::azure_blob::AzureBlobStorage;
+pub use self::local_fs::LocalFs;
+pub use self::s3_bucket::S3Bucket;
+pub use self::simulate_failures::UnreliableWrapper;
 pub use crate::config::{AzureConfig, RemoteStorageConfig, RemoteStorageKind, S3Config};
-
-/// Azure SDK's ETag type is a simple String wrapper: we use this internally instead of repeating it here.
-pub use azure_core::Etag;
-
-pub use error::{DownloadError, TimeTravelError, TimeoutOrCancel};
 
 /// Default concurrency limit for S3 operations
 ///

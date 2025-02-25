@@ -1,11 +1,9 @@
 use rand::Rng;
 use tracing::{info, warn};
 
-use crate::walproposer_sim::{
-    log::{init_logger, init_tracing_logger},
-    simulation::{TestConfig, generate_network_opts, generate_schedule},
-    simulation_logs::validate_events,
-};
+use crate::walproposer_sim::log::{init_logger, init_tracing_logger};
+use crate::walproposer_sim::simulation::{TestConfig, generate_network_opts, generate_schedule};
+use crate::walproposer_sim::simulation_logs::validate_events;
 
 pub mod walproposer_sim;
 

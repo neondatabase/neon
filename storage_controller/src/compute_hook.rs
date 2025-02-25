@@ -1,7 +1,8 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::error::Error as _;
 use std::sync::Arc;
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 
 use control_plane::endpoint::{ComputeControlPlane, EndpointStatus};
 use control_plane::local_env::LocalEnv;
@@ -13,10 +14,8 @@ use postgres_connection::parse_host_port;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span};
-use utils::{
-    backoff::{self},
-    id::{NodeId, TenantId},
-};
+use utils::backoff::{self};
+use utils::id::{NodeId, TenantId};
 
 use crate::service::Config;
 

@@ -1,10 +1,16 @@
-use crate::{metrics::NodeLabelGroup, node::Node, tenant_shard::TenantShard};
+use std::collections::HashMap;
+use std::fmt::Debug;
+
 use http_utils::error::ApiError;
 use itertools::Itertools;
-use pageserver_api::{controller_api::AvailabilityZone, models::PageserverUtilization};
+use pageserver_api::controller_api::AvailabilityZone;
+use pageserver_api::models::PageserverUtilization;
 use serde::Serialize;
-use std::{collections::HashMap, fmt::Debug};
 use utils::id::NodeId;
+
+use crate::metrics::NodeLabelGroup;
+use crate::node::Node;
+use crate::tenant_shard::TenantShard;
 
 /// Scenarios in which we cannot find a suitable location for a tenant shard
 #[derive(thiserror::Error, Debug)]
@@ -906,13 +912,13 @@ impl Scheduler {
 #[cfg(test)]
 pub(crate) mod test_utils {
 
-    use crate::node::Node;
-    use pageserver_api::{
-        controller_api::{AvailabilityZone, NodeAvailability},
-        models::utilization::test_utilization,
-    };
     use std::collections::HashMap;
+
+    use pageserver_api::controller_api::{AvailabilityZone, NodeAvailability};
+    use pageserver_api::models::utilization::test_utilization;
     use utils::id::NodeId;
+
+    use crate::node::Node;
 
     /// Test helper: synthesize the requested number of nodes, all in active state.
     ///
@@ -951,17 +957,13 @@ pub(crate) mod test_utils {
 
 #[cfg(test)]
 mod tests {
-    use pageserver_api::{
-        controller_api::NodeAvailability, models::utilization::test_utilization,
-        shard::ShardIdentity,
-    };
-    use utils::{
-        id::TenantId,
-        shard::{ShardCount, ShardNumber, TenantShardId},
-    };
+    use pageserver_api::controller_api::NodeAvailability;
+    use pageserver_api::models::utilization::test_utilization;
+    use pageserver_api::shard::ShardIdentity;
+    use utils::id::TenantId;
+    use utils::shard::{ShardCount, ShardNumber, TenantShardId};
 
     use super::*;
-
     use crate::tenant_shard::IntentState;
     #[test]
     fn scheduler_basic() -> anyhow::Result<()> {

@@ -8,30 +8,35 @@ use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::ops::{Deref, Range};
 use std::sync::Arc;
 
-use super::layer_manager::LayerManager;
-use super::{
-    CompactFlags, CompactOptions, CreateImageLayersError, DurationRecorder, GetVectoredError,
-    ImageLayerCreationMode, LastImageLayerCreationStatus, PageReconstructError, RecordedDuration,
-    Timeline,
-};
-
 use anyhow::{Context, anyhow, bail};
 use bytes::Bytes;
 use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
-use pageserver_api::key::KEY_SIZE;
-use pageserver_api::keyspace::ShardedRange;
+use pageserver_api::config::tenant_conf_defaults::DEFAULT_CHECKPOINT_DISTANCE;
+use pageserver_api::key::{KEY_SIZE, Key};
+use pageserver_api::keyspace::{KeySpace, ShardedRange};
 use pageserver_api::models::CompactInfoResponse;
+use pageserver_api::record::NeonWalRecord;
 use pageserver_api::shard::{ShardCount, ShardIdentity, TenantShardId};
+use pageserver_api::value::Value;
+use pageserver_compaction::helpers::{fully_contains, overlaps_with};
+use pageserver_compaction::interface::*;
 use serde::Serialize;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, info_span, trace, warn};
 use utils::critical;
 use utils::id::TimelineId;
+use utils::lsn::Lsn;
 
+use super::layer_manager::LayerManager;
+use super::{
+    CompactFlags, CompactOptions, CompactionError, CreateImageLayersError, DurationRecorder,
+    GetVectoredError, ImageLayerCreationMode, LastImageLayerCreationStatus, PageReconstructError,
+    RecordedDuration, Timeline,
+};
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
 use crate::pgdatadir_mapping::CollectKeySpaceError;
@@ -49,24 +54,12 @@ use crate::tenant::storage_layer::merge_iterator::MergeIterator;
 use crate::tenant::storage_layer::{
     AsLayerDesc, PersistentLayerDesc, PersistentLayerKey, ValueReconstructState,
 };
-use crate::tenant::timeline::{DeltaLayerWriter, ImageLayerWriter, drop_rlock};
-use crate::tenant::timeline::{ImageLayerCreationOutcome, IoConcurrency};
-use crate::tenant::timeline::{Layer, ResidentLayer};
+use crate::tenant::timeline::{
+    DeltaLayerWriter, ImageLayerCreationOutcome, ImageLayerWriter, IoConcurrency, Layer,
+    ResidentLayer, drop_rlock,
+};
 use crate::tenant::{DeltaLayer, MaybeOffloaded, gc_block};
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
-use pageserver_api::config::tenant_conf_defaults::DEFAULT_CHECKPOINT_DISTANCE;
-
-use pageserver_api::key::Key;
-use pageserver_api::keyspace::KeySpace;
-use pageserver_api::record::NeonWalRecord;
-use pageserver_api::value::Value;
-
-use utils::lsn::Lsn;
-
-use pageserver_compaction::helpers::{fully_contains, overlaps_with};
-use pageserver_compaction::interface::*;
-
-use super::CompactionError;
 
 /// Maximum number of deltas before generating an image layer in bottom-most compaction.
 const COMPACTION_DELTA_THRESHOLD: usize = 5;

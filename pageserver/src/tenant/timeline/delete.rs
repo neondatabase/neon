@@ -1,26 +1,26 @@
-use std::{
-    ops::{Deref, DerefMut},
-    sync::Arc,
-};
+use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 
 use anyhow::Context;
-use pageserver_api::{models::TimelineState, shard::TenantShardId};
+use pageserver_api::models::TimelineState;
+use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use tokio::sync::OwnedMutexGuard;
 use tracing::{Instrument, error, info, info_span, instrument};
-use utils::{crashsafe, fs_ext, id::TimelineId, pausable_failpoint};
+use utils::id::TimelineId;
+use utils::{crashsafe, fs_ext, pausable_failpoint};
 
-use crate::{
-    config::PageServerConf,
-    task_mgr::{self, TaskKind},
-    tenant::{
-        CreateTimelineCause, DeleteTimelineError, MaybeDeletedIndexPart, Tenant,
-        TenantManifestError, Timeline, TimelineOrOffloaded,
-        metadata::TimelineMetadata,
-        remote_timeline_client::{PersistIndexPartWithDeletedFlagError, RemoteTimelineClient},
-    },
-    virtual_file::MaybeFatalIo,
+use crate::config::PageServerConf;
+use crate::task_mgr::{self, TaskKind};
+use crate::tenant::metadata::TimelineMetadata;
+use crate::tenant::remote_timeline_client::{
+    PersistIndexPartWithDeletedFlagError, RemoteTimelineClient,
 };
+use crate::tenant::{
+    CreateTimelineCause, DeleteTimelineError, MaybeDeletedIndexPart, Tenant, TenantManifestError,
+    Timeline, TimelineOrOffloaded,
+};
+use crate::virtual_file::MaybeFatalIo;
 
 /// Mark timeline as deleted in S3 so we won't pick it up next time
 /// during attach or pageserver restart.

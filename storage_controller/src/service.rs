@@ -1,112 +1,95 @@
 pub mod chaos_injector;
 mod context_iterator;
 
-use hyper::Uri;
-use safekeeper_api::models::SafekeeperUtilization;
-use std::{
-    borrow::Cow,
-    cmp::Ordering,
-    collections::{BTreeMap, HashMap, HashSet},
-    error::Error,
-    ops::Deref,
-    path::PathBuf,
-    str::FromStr,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::borrow::Cow;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::error::Error;
+use std::ops::Deref;
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use crate::{
-    background_node_operations::{
-        Drain, Fill, MAX_RECONCILES_PER_OPERATION, Operation, OperationError, OperationHandler,
-    },
-    compute_hook::{self, NotifyError},
-    drain_utils::{self, TenantShardDrain, TenantShardIterator},
-    heartbeater::SafekeeperState,
-    id_lock_map::{IdLockMap, TracingExclusiveGuard, trace_exclusive_lock, trace_shared_lock},
-    leadership::Leadership,
-    metrics,
-    peer_client::GlobalObservedState,
-    persistence::{
-        AbortShardSplitStatus, ControllerPersistence, DatabaseResult, MetadataHealthPersistence,
-        ShardGenerationState, TenantFilter,
-    },
-    reconciler::{
-        ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder,
-        ReconcilerPriority,
-    },
-    safekeeper::Safekeeper,
-    scheduler::{MaySchedule, ScheduleContext, ScheduleError, ScheduleMode},
-    tenant_shard::{
-        MigrateAttachment, ObservedStateDelta, ReconcileNeeded, ReconcilerStatus,
-        ScheduleOptimization, ScheduleOptimizationAction,
-    },
-};
 use anyhow::Context;
+use context_iterator::TenantShardContextIterator;
 use control_plane::storage_controller::{
     AttachHookRequest, AttachHookResponse, InspectRequest, InspectResponse,
 };
 use diesel::result::DatabaseErrorKind;
-use futures::{StreamExt, stream::FuturesUnordered};
-use itertools::Itertools;
-use pageserver_api::{
-    controller_api::{
-        AvailabilityZone, MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability,
-        NodeRegisterRequest, NodeSchedulingPolicy, NodeShard, NodeShardResponse, PlacementPolicy,
-        SafekeeperDescribeResponse, ShardSchedulingPolicy, ShardsPreferredAzsRequest,
-        ShardsPreferredAzsResponse, SkSchedulingPolicy, TenantCreateRequest, TenantCreateResponse,
-        TenantCreateResponseShard, TenantDescribeResponse, TenantDescribeResponseShard,
-        TenantLocateResponse, TenantPolicyRequest, TenantShardMigrateRequest,
-        TenantShardMigrateResponse,
-    },
-    models::{
-        SecondaryProgress, TenantConfigPatchRequest, TenantConfigRequest,
-        TimelineArchivalConfigRequest, TopTenantShardsRequest,
-    },
-};
-use reqwest::StatusCode;
-use tracing::{Instrument, instrument};
-
-use crate::pageserver_client::PageserverClient;
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use http_utils::error::ApiError;
-use pageserver_api::{
-    models::{
-        self, LocationConfig, LocationConfigListResponse, LocationConfigMode,
-        PageserverUtilization, ShardParameters, TenantConfig, TenantLocationConfigRequest,
-        TenantLocationConfigResponse, TenantShardLocation, TenantShardSplitRequest,
-        TenantShardSplitResponse, TenantTimeTravelRequest, TimelineCreateRequest, TimelineInfo,
-    },
-    shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId},
-    upcall_api::{
-        ReAttachRequest, ReAttachResponse, ReAttachResponseTenant, ValidateRequest,
-        ValidateResponse, ValidateResponseTenant,
-    },
+use hyper::Uri;
+use itertools::Itertools;
+use pageserver_api::controller_api::{
+    AvailabilityZone, MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability,
+    NodeRegisterRequest, NodeSchedulingPolicy, NodeShard, NodeShardResponse, PlacementPolicy,
+    SafekeeperDescribeResponse, ShardSchedulingPolicy, ShardsPreferredAzsRequest,
+    ShardsPreferredAzsResponse, SkSchedulingPolicy, TenantCreateRequest, TenantCreateResponse,
+    TenantCreateResponseShard, TenantDescribeResponse, TenantDescribeResponseShard,
+    TenantLocateResponse, TenantPolicyRequest, TenantShardMigrateRequest,
+    TenantShardMigrateResponse,
+};
+use pageserver_api::models::{
+    self, LocationConfig, LocationConfigListResponse, LocationConfigMode, PageserverUtilization,
+    SecondaryProgress, ShardParameters, TenantConfig, TenantConfigPatchRequest,
+    TenantConfigRequest, TenantLocationConfigRequest, TenantLocationConfigResponse,
+    TenantShardLocation, TenantShardSplitRequest, TenantShardSplitResponse,
+    TenantTimeTravelRequest, TimelineArchivalConfigRequest, TimelineCreateRequest, TimelineInfo,
+    TopTenantShardsRequest,
+};
+use pageserver_api::shard::{
+    ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId,
+};
+use pageserver_api::upcall_api::{
+    ReAttachRequest, ReAttachResponse, ReAttachResponseTenant, ValidateRequest, ValidateResponse,
+    ValidateResponseTenant,
 };
 use pageserver_client::{BlockUnblock, mgmt_api};
-use tokio::sync::{TryAcquireError, mpsc::error::TrySendError};
+use reqwest::StatusCode;
+use safekeeper_api::models::SafekeeperUtilization;
+use tokio::sync::TryAcquireError;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::sync::CancellationToken;
-use utils::{
-    completion::Barrier,
-    failpoint_support,
-    generation::Generation,
-    id::{NodeId, TenantId, TimelineId},
-    pausable_failpoint,
-    sync::gate::Gate,
-};
+use tracing::{Instrument, instrument};
+use utils::completion::Barrier;
+use utils::generation::Generation;
+use utils::id::{NodeId, TenantId, TimelineId};
+use utils::sync::gate::Gate;
+use utils::{failpoint_support, pausable_failpoint};
 
-use crate::{
-    compute_hook::ComputeHook,
-    heartbeater::{Heartbeater, PageserverState},
-    node::{AvailabilityTransition, Node},
-    persistence::{DatabaseError, Persistence, TenantShardPersistence, split_state::SplitState},
-    reconciler::attached_location_conf,
-    scheduler::Scheduler,
-    tenant_shard::{
-        IntentState, ObservedState, ObservedStateLocation, ReconcileResult, ReconcileWaitError,
-        ReconcilerWaiter, TenantShard,
-    },
+use crate::background_node_operations::{
+    Drain, Fill, MAX_RECONCILES_PER_OPERATION, Operation, OperationError, OperationHandler,
 };
-
-use context_iterator::TenantShardContextIterator;
+use crate::compute_hook::{self, ComputeHook, NotifyError};
+use crate::drain_utils::{self, TenantShardDrain, TenantShardIterator};
+use crate::heartbeater::{Heartbeater, PageserverState, SafekeeperState};
+use crate::id_lock_map::{
+    IdLockMap, TracingExclusiveGuard, trace_exclusive_lock, trace_shared_lock,
+};
+use crate::leadership::Leadership;
+use crate::metrics;
+use crate::node::{AvailabilityTransition, Node};
+use crate::pageserver_client::PageserverClient;
+use crate::peer_client::GlobalObservedState;
+use crate::persistence::split_state::SplitState;
+use crate::persistence::{
+    AbortShardSplitStatus, ControllerPersistence, DatabaseError, DatabaseResult,
+    MetadataHealthPersistence, Persistence, ShardGenerationState, TenantFilter,
+    TenantShardPersistence,
+};
+use crate::reconciler::{
+    ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder, ReconcilerPriority,
+    attached_location_conf,
+};
+use crate::safekeeper::Safekeeper;
+use crate::scheduler::{MaySchedule, ScheduleContext, ScheduleError, ScheduleMode, Scheduler};
+use crate::tenant_shard::{
+    IntentState, MigrateAttachment, ObservedState, ObservedStateDelta, ObservedStateLocation,
+    ReconcileNeeded, ReconcileResult, ReconcileWaitError, ReconcilerStatus, ReconcilerWaiter,
+    ScheduleOptimization, ScheduleOptimizationAction, TenantShard,
+};
 
 const WAITER_FILL_DRAIN_POLL_TIMEOUT: Duration = Duration::from_millis(500);
 

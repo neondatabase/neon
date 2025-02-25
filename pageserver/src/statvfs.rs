@@ -73,10 +73,9 @@ impl Statvfs {
 
 pub mod mock {
     use camino::Utf8Path;
+    pub use pageserver_api::config::statvfs::mock::Behavior;
     use regex::Regex;
     use tracing::log::info;
-
-    pub use pageserver_api::config::statvfs::mock::Behavior;
 
     pub fn get(tenants_dir: &Utf8Path, behavior: &Behavior) -> nix::Result<Statvfs> {
         info!("running mocked statvfs");

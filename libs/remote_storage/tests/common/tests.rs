@@ -1,19 +1,20 @@
+use std::collections::HashSet;
+use std::num::NonZeroU32;
+use std::ops::Bound;
+use std::sync::Arc;
+
 use anyhow::Context;
 use camino::Utf8Path;
 use futures::StreamExt;
 use remote_storage::{DownloadError, DownloadOpts, ListingMode, ListingObject, RemotePath};
-use std::ops::Bound;
-use std::sync::Arc;
-use std::{collections::HashSet, num::NonZeroU32};
 use test_context::test_context;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
-use crate::common::{download_to_vec, upload_stream, wrap_stream};
-
 use super::{
     MaybeEnabledStorage, MaybeEnabledStorageWithSimpleTestBlobs, MaybeEnabledStorageWithTestBlobs,
 };
+use crate::common::{download_to_vec, upload_stream, wrap_stream};
 
 /// Tests that S3 client can list all prefixes, even if the response come paginated and requires multiple S3 queries.
 /// Uses real S3 and requires [`ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME`] and related S3 cred env vars specified.

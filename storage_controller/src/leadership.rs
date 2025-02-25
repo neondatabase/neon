@@ -3,11 +3,9 @@ use std::sync::Arc;
 use hyper::Uri;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    peer_client::{GlobalObservedState, PeerClient},
-    persistence::{ControllerPersistence, DatabaseError, DatabaseResult, Persistence},
-    service::Config,
-};
+use crate::peer_client::{GlobalObservedState, PeerClient};
+use crate::persistence::{ControllerPersistence, DatabaseError, DatabaseResult, Persistence};
+use crate::service::Config;
 
 /// Helper for storage controller leadership acquisition
 pub(crate) struct Leadership {

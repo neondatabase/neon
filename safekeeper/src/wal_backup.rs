@@ -1,34 +1,29 @@
-use anyhow::{Context, Result};
-
-use camino::{Utf8Path, Utf8PathBuf};
-use futures::StreamExt;
-use futures::stream::FuturesOrdered;
-use safekeeper_api::models::PeerInfo;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
-use utils::backoff;
-use utils::id::NodeId;
-
 use std::cmp::min;
 use std::collections::HashSet;
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::time::Duration;
 
-use postgres_ffi::XLogFileName;
+use anyhow::{Context, Result};
+use camino::{Utf8Path, Utf8PathBuf};
+use futures::StreamExt;
+use futures::stream::FuturesOrdered;
 use postgres_ffi::v14::xlog_utils::XLogSegNoOffsetToRecPtr;
-use postgres_ffi::{PG_TLI, XLogSegNo};
+use postgres_ffi::{PG_TLI, XLogFileName, XLogSegNo};
 use remote_storage::{
     DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath, StorageMetadata,
 };
+use safekeeper_api::models::PeerInfo;
 use tokio::fs::File;
-
 use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::{OnceCell, watch};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
-
-use utils::{id::TenantTimelineId, lsn::Lsn};
+use utils::backoff;
+use utils::id::{NodeId, TenantTimelineId};
+use utils::lsn::Lsn;
 
 use crate::metrics::{BACKED_UP_SEGMENTS, BACKUP_ERRORS, WAL_BACKUP_TASKS};
 use crate::timeline::WalResidentTimeline;

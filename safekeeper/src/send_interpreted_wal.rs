@@ -8,8 +8,8 @@ use futures::StreamExt;
 use futures::future::Either;
 use pageserver_api::shard::ShardIdentity;
 use postgres_backend::{CopyStreamHandlerEnd, PostgresBackend};
-use postgres_ffi::waldecoder::WalDecodeError;
-use postgres_ffi::{get_current_timestamp, waldecoder::WalStreamDecoder};
+use postgres_ffi::get_current_timestamp;
+use postgres_ffi::waldecoder::{WalDecodeError, WalStreamDecoder};
 use pq_proto::{BeMessage, InterpretedWalRecordsBody, WalSndKeepAlive};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::error::SendError;
@@ -18,8 +18,7 @@ use tokio::time::MissedTickBehavior;
 use tracing::{Instrument, error, info, info_span};
 use utils::critical;
 use utils::lsn::Lsn;
-use utils::postgres_client::Compression;
-use utils::postgres_client::InterpretedFormat;
+use utils::postgres_client::{Compression, InterpretedFormat};
 use wal_decoder::models::{InterpretedWalRecord, InterpretedWalRecords};
 use wal_decoder::wire_format::ToWireFormat;
 
@@ -691,22 +690,20 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
 }
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, str::FromStr, time::Duration};
+    use std::collections::HashMap;
+    use std::str::FromStr;
+    use std::time::Duration;
 
     use pageserver_api::shard::{ShardIdentity, ShardStripeSize};
     use postgres_ffi::MAX_SEND_SIZE;
     use tokio::sync::mpsc::error::TryRecvError;
-    use utils::{
-        id::{NodeId, TenantTimelineId},
-        lsn::Lsn,
-        shard::{ShardCount, ShardNumber},
-    };
+    use utils::id::{NodeId, TenantTimelineId};
+    use utils::lsn::Lsn;
+    use utils::shard::{ShardCount, ShardNumber};
 
-    use crate::{
-        send_interpreted_wal::{AttachShardNotification, Batch, InterpretedWalReader},
-        test_utils::Env,
-        wal_reader_stream::StreamingWalReader,
-    };
+    use crate::send_interpreted_wal::{AttachShardNotification, Batch, InterpretedWalReader};
+    use crate::test_utils::Env;
+    use crate::wal_reader_stream::StreamingWalReader;
 
     #[tokio::test]
     async fn test_interpreted_wal_reader_fanout() {

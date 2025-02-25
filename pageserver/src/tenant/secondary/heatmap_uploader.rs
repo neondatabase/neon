@@ -1,42 +1,33 @@
-use std::{
-    collections::HashMap,
-    pin::Pin,
-    sync::{Arc, Weak},
-    time::{Duration, Instant},
-};
-
-use crate::{
-    TEMP_FILE_SUFFIX,
-    metrics::SECONDARY_MODE,
-    tenant::{
-        Tenant,
-        config::AttachmentMode,
-        mgr::{GetTenantError, TenantManager},
-        remote_timeline_client::remote_heatmap_path,
-        span::debug_assert_current_span_has_tenant_id,
-        tasks::{BackgroundLoopKind, warn_when_period_overrun},
-    },
-    virtual_file::VirtualFile,
-};
+use std::collections::HashMap;
+use std::pin::Pin;
+use std::sync::{Arc, Weak};
+use std::time::{Duration, Instant};
 
 use futures::Future;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::{GenericRemoteStorage, TimeoutOrCancel};
-
-use super::{
-    CommandRequest, SecondaryTenantError, UploadCommand,
-    heatmap::HeatMapTenant,
-    scheduler::{
-        self, JobGenerator, RunningJob, SchedulingResult, TenantBackgroundJobs, period_jitter,
-        period_warmup,
-    },
-};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span, instrument};
-use utils::{
-    backoff, completion::Barrier, crashsafe::path_with_suffix_extension,
-    yielding_loop::yielding_loop,
+use utils::backoff;
+use utils::completion::Barrier;
+use utils::crashsafe::path_with_suffix_extension;
+use utils::yielding_loop::yielding_loop;
+
+use super::heatmap::HeatMapTenant;
+use super::scheduler::{
+    self, JobGenerator, RunningJob, SchedulingResult, TenantBackgroundJobs, period_jitter,
+    period_warmup,
 };
+use super::{CommandRequest, SecondaryTenantError, UploadCommand};
+use crate::TEMP_FILE_SUFFIX;
+use crate::metrics::SECONDARY_MODE;
+use crate::tenant::Tenant;
+use crate::tenant::config::AttachmentMode;
+use crate::tenant::mgr::{GetTenantError, TenantManager};
+use crate::tenant::remote_timeline_client::remote_heatmap_path;
+use crate::tenant::span::debug_assert_current_span_has_tenant_id;
+use crate::tenant::tasks::{BackgroundLoopKind, warn_when_period_overrun};
+use crate::virtual_file::VirtualFile;
 
 pub(super) async fn heatmap_uploader_task(
     tenant_manager: Arc<TenantManager>,

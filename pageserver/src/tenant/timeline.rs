@@ -14,55 +14,6 @@ pub mod span;
 pub mod uninit;
 mod walreceiver;
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
-use arc_swap::{ArcSwap, ArcSwapOption};
-use bytes::Bytes;
-use camino::Utf8Path;
-use chrono::{DateTime, Utc};
-use compaction::{CompactionOutcome, GcCompactionCombinedSettings};
-use enumset::EnumSet;
-use fail::fail_point;
-use futures::FutureExt;
-use futures::{StreamExt, stream::FuturesUnordered};
-use handle::ShardTimelineId;
-use layer_manager::Shutdown;
-use offload::OffloadError;
-use once_cell::sync::Lazy;
-use pageserver_api::models::PageTraceEvent;
-use pageserver_api::{
-    key::{
-        KEY_SIZE, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX, NON_INHERITED_RANGE,
-        SPARSE_RANGE,
-    },
-    keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning},
-    models::{
-        CompactKeyRange, CompactLsnRange, CompactionAlgorithm, CompactionAlgorithmSettings,
-        DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
-        InMemoryLayerInfo, LayerMapInfo, LsnLease, TimelineState,
-    },
-    reltag::BlockNumber,
-    shard::{ShardIdentity, ShardNumber, TenantShardId},
-};
-use rand::Rng;
-use remote_storage::DownloadError;
-use serde_with::serde_as;
-use storage_broker::BrokerClientChannel;
-use tokio::runtime::Handle;
-use tokio::sync::mpsc::Sender;
-use tokio::sync::{Notify, oneshot, watch};
-use tokio_util::sync::CancellationToken;
-use tracing::*;
-use utils::critical;
-use utils::rate_limit::RateLimit;
-use utils::{
-    fs_ext,
-    guard_arc_swap::GuardArcSwap,
-    pausable_failpoint,
-    postgres_client::PostgresClientProtocol,
-    sync::gate::{Gate, GateGuard},
-};
-use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
-
 use std::array;
 use std::cmp::{max, min};
 use std::collections::btree_map::Entry;
@@ -72,74 +23,58 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::l0_flush::{self, L0FlushGlobalState};
-use crate::tenant::storage_layer::ImageLayerName;
-use crate::{
-    aux_file::AuxFileSizeEstimator,
-    page_service::TenantManagerTypes,
-    tenant::{
-        config::AttachmentMode,
-        layer_map::{LayerMap, SearchResult},
-        metadata::TimelineMetadata,
-        storage_layer::{
-            BatchLayerWriter, IoConcurrency, PersistentLayerDesc, ValueReconstructSituation,
-            inmemory_layer::IndexEntry,
-        },
-    },
-    walingest::WalLagCooldown,
-    walredo,
-};
-use crate::{
-    context::{DownloadBehavior, RequestContext},
-    disk_usage_eviction_task::DiskUsageEvictionInfo,
-    pgdatadir_mapping::CollectKeySpaceError,
-};
-use crate::{
-    disk_usage_eviction_task::EvictionCandidate, tenant::storage_layer::delta_layer::DeltaEntry,
-};
-use crate::{
-    disk_usage_eviction_task::finite_f32,
-    tenant::storage_layer::{
-        AsLayerDesc, DeltaLayerWriter, EvictionError, ImageLayerWriter, InMemoryLayer, Layer,
-        LayerAccessStatsReset, LayerName, ResidentLayer, ValueReconstructState,
-        ValuesReconstructState,
-    },
-};
-use crate::{
-    metrics::ScanLatencyOngoingRecording, tenant::timeline::logical_size::CurrentLogicalSize,
-};
-use crate::{
-    pgdatadir_mapping::DirectoryKind,
-    virtual_file::{MaybeFatalIo, VirtualFile},
-};
-use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
-use crate::{pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS, tenant::storage_layer::PersistentLayerKey};
+use anyhow::{Context, Result, anyhow, bail, ensure};
+use arc_swap::{ArcSwap, ArcSwapOption};
+use bytes::Bytes;
+use camino::Utf8Path;
+use chrono::{DateTime, Utc};
+use compaction::{CompactionOutcome, GcCompactionCombinedSettings};
+use enumset::EnumSet;
+use fail::fail_point;
+use futures::stream::FuturesUnordered;
+use futures::{FutureExt, StreamExt};
+use handle::ShardTimelineId;
+use layer_manager::Shutdown;
+use offload::OffloadError;
+use once_cell::sync::Lazy;
 use pageserver_api::config::tenant_conf_defaults::DEFAULT_PITR_INTERVAL;
-
-use crate::config::PageServerConf;
-use crate::keyspace::{KeyPartitioning, KeySpace};
-use crate::metrics::{DELTAS_PER_READ_GLOBAL, LAYERS_PER_READ_GLOBAL, TimelineMetrics};
-use crate::pgdatadir_mapping::{CalculateLogicalSizeError, MetricsUpdate};
-use crate::tenant::config::TenantConfOpt;
-use pageserver_api::reltag::RelTag;
-use pageserver_api::shard::ShardIndex;
-
-use postgres_connection::PgConnectionConfig;
-use postgres_ffi::{WAL_SEGMENT_SIZE, to_pg_timestamp, v14::xlog_utils};
-use utils::{
-    completion,
-    generation::Generation,
-    id::TimelineId,
-    lsn::{AtomicLsn, Lsn, RecordLsn},
-    seqwait::SeqWait,
-    simple_rcu::{Rcu, RcuReadGuard},
+use pageserver_api::key::{
+    KEY_SIZE, Key, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX, NON_INHERITED_RANGE,
+    SPARSE_RANGE,
 };
-
-use crate::ZERO_PAGE;
-use crate::task_mgr;
-use crate::task_mgr::TaskKind;
-use crate::tenant::gc_result::GcResult;
-use pageserver_api::key::Key;
+use pageserver_api::keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning};
+use pageserver_api::models::{
+    CompactKeyRange, CompactLsnRange, CompactionAlgorithm, CompactionAlgorithmSettings,
+    DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
+    InMemoryLayerInfo, LayerMapInfo, LsnLease, PageTraceEvent, TimelineState,
+};
+use pageserver_api::reltag::{BlockNumber, RelTag};
+use pageserver_api::shard::{ShardIdentity, ShardIndex, ShardNumber, TenantShardId};
+#[cfg(test)]
+use pageserver_api::value::Value;
+use postgres_connection::PgConnectionConfig;
+use postgres_ffi::v14::xlog_utils;
+use postgres_ffi::{WAL_SEGMENT_SIZE, to_pg_timestamp};
+use rand::Rng;
+use remote_storage::DownloadError;
+use serde_with::serde_as;
+use storage_broker::BrokerClientChannel;
+use tokio::runtime::Handle;
+use tokio::sync::mpsc::Sender;
+use tokio::sync::{Notify, oneshot, watch};
+use tokio_util::sync::CancellationToken;
+use tracing::*;
+use utils::generation::Generation;
+use utils::guard_arc_swap::GuardArcSwap;
+use utils::id::TimelineId;
+use utils::lsn::{AtomicLsn, Lsn, RecordLsn};
+use utils::postgres_client::PostgresClientProtocol;
+use utils::rate_limit::RateLimit;
+use utils::seqwait::SeqWait;
+use utils::simple_rcu::{Rcu, RcuReadGuard};
+use utils::sync::gate::{Gate, GateGuard};
+use utils::{completion, critical, fs_ext, pausable_failpoint};
+use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 
 use self::delete::DeleteTimelineFlow;
 pub(super) use self::eviction_task::EvictionTaskTenantState;
@@ -147,24 +82,48 @@ use self::eviction_task::EvictionTaskTimelineState;
 use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
-
-use super::remote_timeline_client::index::GcCompactionState;
+use super::config::TenantConf;
+use super::remote_timeline_client::index::{GcCompactionState, IndexPart};
+use super::remote_timeline_client::{RemoteTimelineClient, WaitCompletionError};
+use super::secondary::heatmap::HeatMapLayer;
+use super::storage_layer::{LayerFringe, LayerVisibilityHint, ReadableLayer};
+use super::upload_queue::NotInitialized;
 use super::{
-    AttachedTenantConf, HeatMapTimeline, debug_assert_current_span_has_tenant_and_timeline_id,
+    AttachedTenantConf, GcError, HeatMapTimeline, MaybeOffloaded,
+    debug_assert_current_span_has_tenant_and_timeline_id,
 };
-use super::{GcError, secondary::heatmap::HeatMapLayer};
-use super::{
-    MaybeOffloaded, config::TenantConf, storage_layer::LayerVisibilityHint,
-    upload_queue::NotInitialized,
+use crate::aux_file::AuxFileSizeEstimator;
+use crate::config::PageServerConf;
+use crate::context::{DownloadBehavior, RequestContext};
+use crate::disk_usage_eviction_task::{DiskUsageEvictionInfo, EvictionCandidate, finite_f32};
+use crate::keyspace::{KeyPartitioning, KeySpace};
+use crate::l0_flush::{self, L0FlushGlobalState};
+use crate::metrics::{
+    DELTAS_PER_READ_GLOBAL, LAYERS_PER_READ_GLOBAL, ScanLatencyOngoingRecording, TimelineMetrics,
 };
-use super::{
-    remote_timeline_client::RemoteTimelineClient, remote_timeline_client::WaitCompletionError,
-    storage_layer::ReadableLayer,
+use crate::page_service::TenantManagerTypes;
+use crate::pgdatadir_mapping::{
+    CalculateLogicalSizeError, CollectKeySpaceError, DirectoryKind, LsnForTimestamp,
+    MAX_AUX_FILE_V2_DELTAS, MetricsUpdate,
 };
-use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
-
-#[cfg(test)]
-use pageserver_api::value::Value;
+use crate::task_mgr::TaskKind;
+use crate::tenant::config::{AttachmentMode, TenantConfOpt};
+use crate::tenant::gc_result::GcResult;
+use crate::tenant::layer_map::{LayerMap, SearchResult};
+use crate::tenant::metadata::TimelineMetadata;
+use crate::tenant::storage_layer::delta_layer::DeltaEntry;
+use crate::tenant::storage_layer::inmemory_layer::IndexEntry;
+use crate::tenant::storage_layer::{
+    AsLayerDesc, BatchLayerWriter, DeltaLayerWriter, EvictionError, ImageLayerName,
+    ImageLayerWriter, InMemoryLayer, IoConcurrency, Layer, LayerAccessStatsReset, LayerName,
+    PersistentLayerDesc, PersistentLayerKey, ResidentLayer, ValueReconstructSituation,
+    ValueReconstructState, ValuesReconstructState,
+};
+use crate::tenant::tasks::BackgroundLoopKind;
+use crate::tenant::timeline::logical_size::CurrentLogicalSize;
+use crate::virtual_file::{MaybeFatalIo, VirtualFile};
+use crate::walingest::WalLagCooldown;
+use crate::{ZERO_PAGE, task_mgr, walredo};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum FlushLoopState {
@@ -2972,7 +2931,8 @@ impl Timeline {
         index_part: IndexPart,
     ) -> anyhow::Result<()> {
         use LayerName::*;
-        use init::{Decision::*, Discovered, DismissedLayer};
+        use init::Decision::*;
+        use init::{Discovered, DismissedLayer};
 
         let mut guard = self.layers.write().await;
 
@@ -6933,17 +6893,15 @@ mod tests {
     use pageserver_api::key::Key;
     use pageserver_api::value::Value;
     use tracing::Instrument;
-    use utils::{id::TimelineId, lsn::Lsn};
-
-    use crate::tenant::{
-        PreviousHeatmap, Timeline,
-        harness::{TenantHarness, test_img},
-        layer_map::LayerMap,
-        storage_layer::{Layer, LayerName, LayerVisibilityHint},
-        timeline::{DeltaLayerTestDesc, EvictionError},
-    };
+    use utils::id::TimelineId;
+    use utils::lsn::Lsn;
 
     use super::HeatMapTimeline;
+    use crate::tenant::harness::{TenantHarness, test_img};
+    use crate::tenant::layer_map::LayerMap;
+    use crate::tenant::storage_layer::{Layer, LayerName, LayerVisibilityHint};
+    use crate::tenant::timeline::{DeltaLayerTestDesc, EvictionError};
+    use crate::tenant::{PreviousHeatmap, Timeline};
 
     fn assert_heatmaps_have_same_layers(lhs: &HeatMapTimeline, rhs: &HeatMapTimeline) {
         assert_eq!(lhs.layers.len(), rhs.layers.len());

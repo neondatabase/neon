@@ -1,14 +1,15 @@
-use std::{
-    pin::Pin,
-    task::{Context, Poll},
-};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use futures::{Stream, StreamExt, stream::BoxStream};
+use futures::stream::BoxStream;
+use futures::{Stream, StreamExt};
+use safekeeper_api::Term;
 use utils::lsn::Lsn;
 
-use crate::{send_wal::EndWatch, timeline::WalResidentTimeline, wal_storage::WalReader};
-use safekeeper_api::Term;
+use crate::send_wal::EndWatch;
+use crate::timeline::WalResidentTimeline;
+use crate::wal_storage::WalReader;
 
 #[derive(PartialEq, Eq, Debug)]
 pub(crate) struct WalBytes {
@@ -224,12 +225,11 @@ mod tests {
 
     use futures::StreamExt;
     use postgres_ffi::MAX_SEND_SIZE;
-    use utils::{
-        id::{NodeId, TenantTimelineId},
-        lsn::Lsn,
-    };
+    use utils::id::{NodeId, TenantTimelineId};
+    use utils::lsn::Lsn;
 
-    use crate::{test_utils::Env, wal_reader_stream::StreamingWalReader};
+    use crate::test_utils::Env;
+    use crate::wal_reader_stream::StreamingWalReader;
 
     #[tokio::test]
     async fn test_streaming_wal_reader_reset() {

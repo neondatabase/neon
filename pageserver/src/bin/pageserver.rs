@@ -12,40 +12,32 @@ use std::time::Duration;
 use anyhow::{Context, anyhow};
 use camino::Utf8Path;
 use clap::{Arg, ArgAction, Command};
-
 use metrics::launch_timestamp::{LaunchTimestamp, set_launch_timestamp_metric};
-use pageserver::config::PageserverIdentity;
+use metrics::set_build_info_metric;
+use pageserver::config::{PageServerConf, PageserverIdentity};
 use pageserver::controller_upcall_client::ControllerUpcallClient;
+use pageserver::deletion_queue::DeletionQueue;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
-use pageserver::task_mgr::{COMPUTE_REQUEST_RUNTIME, WALRECEIVER_RUNTIME};
-use pageserver::tenant::{TenantSharedResources, secondary};
-use pageserver::{CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener};
+use pageserver::task_mgr::{
+    BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
+};
+use pageserver::tenant::{TenantSharedResources, mgr, secondary};
+use pageserver::{
+    CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener, http, page_cache, page_service,
+    task_mgr, virtual_file,
+};
+use postgres_backend::AuthType;
 use remote_storage::GenericRemoteStorage;
 use tokio::signal::unix::SignalKind;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-
-use metrics::set_build_info_metric;
-use pageserver::{
-    config::PageServerConf,
-    deletion_queue::DeletionQueue,
-    http, page_cache, page_service, task_mgr,
-    task_mgr::{BACKGROUND_RUNTIME, MGMT_REQUEST_RUNTIME},
-    tenant::mgr,
-    virtual_file,
-};
-use postgres_backend::AuthType;
+use utils::auth::{JwtAuth, SwappableJwtAuth};
 use utils::crashsafe::syncfs;
-use utils::failpoint_support;
 use utils::logging::TracingErrorLayerEnablement;
-use utils::{
-    auth::{JwtAuth, SwappableJwtAuth},
-    logging, project_build_tag, project_git_version,
-    sentry_init::init_sentry,
-    tcp_listener,
-};
+use utils::sentry_init::init_sentry;
+use utils::{failpoint_support, logging, project_build_tag, project_git_version, tcp_listener};
 
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);

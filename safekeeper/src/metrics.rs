@@ -1,31 +1,28 @@
 //! Global safekeeper mertics and per-timeline safekeeper metrics.
 
-use std::{
-    sync::{Arc, RwLock},
-    time::{Instant, SystemTime},
-};
+use std::sync::{Arc, RwLock};
+use std::time::{Instant, SystemTime};
 
 use anyhow::Result;
 use futures::Future;
+use metrics::core::{AtomicU64, Collector, Desc, GenericCounter, GenericGaugeVec, Opts};
+use metrics::proto::MetricFamily;
 use metrics::{
     DISK_FSYNC_SECONDS_BUCKETS, Gauge, GaugeVec, Histogram, HistogramVec, IntCounter,
-    IntCounterPair, IntCounterPairVec, IntCounterVec, IntGauge, IntGaugeVec,
-    core::{AtomicU64, Collector, Desc, GenericCounter, GenericGaugeVec, Opts},
-    pow2_buckets,
-    proto::MetricFamily,
+    IntCounterPair, IntCounterPairVec, IntCounterVec, IntGauge, IntGaugeVec, pow2_buckets,
     register_histogram, register_histogram_vec, register_int_counter, register_int_counter_pair,
     register_int_counter_pair_vec, register_int_counter_vec, register_int_gauge,
     register_int_gauge_vec,
 };
 use once_cell::sync::Lazy;
 use postgres_ffi::XLogSegNo;
-use utils::{id::TenantTimelineId, lsn::Lsn, pageserver_feedback::PageserverFeedback};
+use utils::id::TenantTimelineId;
+use utils::lsn::Lsn;
+use utils::pageserver_feedback::PageserverFeedback;
 
-use crate::{
-    GlobalTimelines,
-    receive_wal::MSG_QUEUE_SIZE,
-    state::{TimelineMemState, TimelinePersistentState},
-};
+use crate::GlobalTimelines;
+use crate::receive_wal::MSG_QUEUE_SIZE;
+use crate::state::{TimelineMemState, TimelinePersistentState};
 
 // Global metrics across all timelines.
 pub static WRITE_WAL_BYTES: Lazy<Histogram> = Lazy::new(|| {

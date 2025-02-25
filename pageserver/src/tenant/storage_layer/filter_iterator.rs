@@ -1,18 +1,14 @@
-use std::{ops::Range, sync::Arc};
+use std::ops::Range;
+use std::sync::Arc;
 
 use anyhow::bail;
-use pageserver_api::{
-    key::Key,
-    keyspace::{KeySpace, SparseKeySpace},
-};
+use pageserver_api::key::Key;
+use pageserver_api::keyspace::{KeySpace, SparseKeySpace};
+use pageserver_api::value::Value;
 use utils::lsn::Lsn;
 
-use pageserver_api::value::Value;
-
-use super::{
-    PersistentLayerKey,
-    merge_iterator::{MergeIterator, MergeIteratorItem},
-};
+use super::PersistentLayerKey;
+use super::merge_iterator::{MergeIterator, MergeIteratorItem};
 
 /// A filter iterator over merge iterators (and can be easily extended to other types of iterators).
 ///
@@ -98,19 +94,14 @@ impl<'a> FilterIterator<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use itertools::Itertools;
     use pageserver_api::key::Key;
     use utils::lsn::Lsn;
 
-    use crate::{
-        DEFAULT_PG_VERSION,
-        tenant::{
-            harness::{TIMELINE_ID, TenantHarness},
-            storage_layer::delta_layer::test::produce_delta_layer,
-        },
-    };
+    use super::*;
+    use crate::DEFAULT_PG_VERSION;
+    use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
+    use crate::tenant::storage_layer::delta_layer::test::produce_delta_layer;
 
     async fn assert_filter_iter_equal(
         filter_iter: &mut FilterIterator<'_>,

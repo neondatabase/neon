@@ -2,12 +2,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::checks::{
-    BlobDataParseResult, ListTenantManifestResult, RemoteTenantManifestInfo, list_tenant_manifests,
-    list_timeline_blobs,
-};
-use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
-use crate::{BucketConfig, MAX_RETRIES, NodeKind, RootTarget, TenantShardTimelineId, init_remote};
 use async_stream::try_stream;
 use futures::future::Either;
 use futures_util::{StreamExt, TryStreamExt};
@@ -29,6 +23,13 @@ use tracing::{Instrument, info_span};
 use utils::backoff;
 use utils::generation::Generation;
 use utils::id::{TenantId, TenantTimelineId};
+
+use crate::checks::{
+    BlobDataParseResult, ListTenantManifestResult, RemoteTenantManifestInfo, list_tenant_manifests,
+    list_timeline_blobs,
+};
+use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
+use crate::{BucketConfig, MAX_RETRIES, NodeKind, RootTarget, TenantShardTimelineId, init_remote};
 
 #[derive(Serialize, Default)]
 pub struct GcSummary {

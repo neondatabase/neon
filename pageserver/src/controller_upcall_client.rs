@@ -1,21 +1,23 @@
 use std::collections::HashMap;
 
 use futures::Future;
-use pageserver_api::{
-    controller_api::{AvailabilityZone, NodeRegisterRequest},
-    shard::TenantShardId,
-    upcall_api::{
-        ReAttachRequest, ReAttachResponse, ReAttachResponseTenant, ValidateRequest,
-        ValidateRequestTenant, ValidateResponse,
-    },
+use pageserver_api::config::NodeMetadata;
+use pageserver_api::controller_api::{AvailabilityZone, NodeRegisterRequest};
+use pageserver_api::shard::TenantShardId;
+use pageserver_api::upcall_api::{
+    ReAttachRequest, ReAttachResponse, ReAttachResponseTenant, ValidateRequest,
+    ValidateRequestTenant, ValidateResponse,
 };
-use serde::{Serialize, de::DeserializeOwned};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tokio_util::sync::CancellationToken;
 use url::Url;
-use utils::{backoff, failpoint_support, generation::Generation, id::NodeId};
+use utils::generation::Generation;
+use utils::id::NodeId;
+use utils::{backoff, failpoint_support};
 
-use crate::{config::PageServerConf, virtual_file::on_fatal_io_error};
-use pageserver_api::config::NodeMetadata;
+use crate::config::PageServerConf;
+use crate::virtual_file::on_fatal_io_error;
 
 /// The Pageserver's client for using the storage controller upcall API: this is a small API
 /// for dealing with generations (see docs/rfcs/025-generation-numbers.md).

@@ -2,14 +2,16 @@
 //! Low-level Block-oriented I/O functions
 //!
 
+use std::ops::Deref;
+
+use bytes::Bytes;
+
 use super::storage_layer::delta_layer::{Adapter, DeltaLayerInner};
 use crate::context::RequestContext;
 use crate::page_cache::{self, FileId, PAGE_SZ, PageReadGuard, PageWriteGuard, ReadBufResult};
 #[cfg(test)]
 use crate::virtual_file::IoBufferMut;
 use crate::virtual_file::VirtualFile;
-use bytes::Bytes;
-use std::ops::Deref;
 
 /// This is implemented by anything that can read 8 kB (PAGE_SZ)
 /// blocks, using the page cache

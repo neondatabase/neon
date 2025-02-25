@@ -7,16 +7,16 @@ use std::collections::HashMap;
 
 use chrono::NaiveDateTime;
 use pageserver_api::models::AuxFilePolicy;
+use pageserver_api::shard::ShardIndex;
 use serde::{Deserialize, Serialize};
+use utils::id::TimelineId;
+use utils::lsn::Lsn;
 
 use super::is_same_remote_layer_path;
 use crate::tenant::Generation;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::storage_layer::LayerName;
 use crate::tenant::timeline::import_pgdata;
-use pageserver_api::shard::ShardIndex;
-use utils::id::TimelineId;
-use utils::lsn::Lsn;
 
 /// In-memory representation of an `index_part.json` file
 ///
@@ -435,9 +435,11 @@ impl GcBlocking {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::str::FromStr;
+
     use utils::id::TimelineId;
+
+    use super::*;
 
     #[test]
     fn v1_indexpart_is_parsed() {

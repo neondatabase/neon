@@ -4,31 +4,26 @@
 //! This storage used in tests, but can also be used in cases when a certain persistent
 //! volume is mounted to the local FS.
 
-use std::{
-    collections::HashSet,
-    io::ErrorKind,
-    num::NonZeroU32,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::collections::HashSet;
+use std::io::ErrorKind;
+use std::num::NonZeroU32;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail, ensure};
 use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::stream::Stream;
-use tokio::{
-    fs,
-    io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-};
-use tokio_util::{io::ReaderStream, sync::CancellationToken};
+use tokio::fs;
+use tokio::io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio_util::io::ReaderStream;
+use tokio_util::sync::CancellationToken;
 use utils::crashsafe::path_with_suffix_extension;
 
+use super::{RemoteStorage, StorageMetadata};
 use crate::{
-    Download, DownloadError, DownloadOpts, Listing, ListingMode, ListingObject,
+    Download, DownloadError, DownloadOpts, Etag, Listing, ListingMode, ListingObject,
     REMOTE_STORAGE_PREFIX_SEPARATOR, RemotePath, TimeTravelError, TimeoutOrCancel,
 };
-
-use super::{RemoteStorage, StorageMetadata};
-use crate::Etag;
 
 const LOCAL_FS_TEMP_FILE_SUFFIX: &str = "___temp";
 
@@ -91,7 +86,8 @@ impl LocalFs {
 
     #[cfg(test)]
     async fn list_all(&self) -> anyhow::Result<Vec<RemotePath>> {
-        use std::{future::Future, pin::Pin};
+        use std::future::Future;
+        use std::pin::Pin;
         fn get_all_files<'a, P>(
             directory_path: P,
         ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<Utf8PathBuf>>> + Send + Sync + 'a>>
@@ -644,10 +640,13 @@ fn mock_etag(meta: &std::fs::Metadata) -> Etag {
 
 #[cfg(test)]
 mod fs_tests {
-    use super::*;
+    use std::collections::HashMap;
+    use std::io::Write;
+    use std::ops::Bound;
 
     use camino_tempfile::tempdir;
-    use std::{collections::HashMap, io::Write, ops::Bound};
+
+    use super::*;
 
     async fn read_and_check_metadata(
         storage: &LocalFs,

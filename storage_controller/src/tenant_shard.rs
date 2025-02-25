@@ -1,51 +1,39 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-    time::Duration,
-};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
 
-use crate::{
-    metrics::{
-        self, ReconcileCompleteLabelGroup, ReconcileLongRunningLabelGroup, ReconcileOutcome,
-    },
-    persistence::TenantShardPersistence,
-    reconciler::{ReconcileUnits, ReconcilerConfig},
-    scheduler::{
-        AffinityScore, AttachedShardTag, NodeSchedulingScore, NodeSecondarySchedulingScore,
-        RefCountUpdate, ScheduleContext, SecondaryShardTag, ShardTag,
-    },
-    service::ReconcileResultRequest,
-};
 use futures::future::{self, Either};
 use itertools::Itertools;
 use pageserver_api::controller_api::{AvailabilityZone, PlacementPolicy, ShardSchedulingPolicy};
-use pageserver_api::{
-    models::{LocationConfig, LocationConfigMode, TenantConfig},
-    shard::{ShardIdentity, TenantShardId},
-};
+use pageserver_api::models::{LocationConfig, LocationConfigMode, TenantConfig};
+use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, instrument};
-use utils::{
-    generation::Generation,
-    id::NodeId,
-    seqwait::{SeqWait, SeqWaitError},
-    shard::ShardCount,
-    sync::gate::GateGuard,
-};
+use utils::generation::Generation;
+use utils::id::NodeId;
+use utils::seqwait::{SeqWait, SeqWaitError};
+use utils::shard::ShardCount;
+use utils::sync::gate::GateGuard;
 
-use crate::{
-    Sequence,
-    compute_hook::ComputeHook,
-    node::Node,
-    persistence::{Persistence, split_state::SplitState},
-    reconciler::{
-        ReconcileError, Reconciler, TargetState, attached_location_conf, secondary_location_conf,
-    },
-    scheduler::{ScheduleError, Scheduler},
-    service,
+use crate::compute_hook::ComputeHook;
+use crate::metrics::{
+    self, ReconcileCompleteLabelGroup, ReconcileLongRunningLabelGroup, ReconcileOutcome,
 };
+use crate::node::Node;
+use crate::persistence::split_state::SplitState;
+use crate::persistence::{Persistence, TenantShardPersistence};
+use crate::reconciler::{
+    ReconcileError, ReconcileUnits, Reconciler, ReconcilerConfig, TargetState,
+    attached_location_conf, secondary_location_conf,
+};
+use crate::scheduler::{
+    AffinityScore, AttachedShardTag, NodeSchedulingScore, NodeSecondarySchedulingScore,
+    RefCountUpdate, ScheduleContext, ScheduleError, Scheduler, SecondaryShardTag, ShardTag,
+};
+use crate::service::ReconcileResultRequest;
+use crate::{Sequence, service};
 
 /// Serialization helper
 fn read_last_error<S, T>(v: &std::sync::Mutex<Option<T>>, serializer: S) -> Result<S::Ok, S::Error>
@@ -1903,18 +1891,17 @@ impl Drop for TenantShard {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::{cell::RefCell, rc::Rc};
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
-    use pageserver_api::{
-        controller_api::NodeAvailability,
-        shard::{ShardCount, ShardNumber},
-    };
-    use rand::{SeedableRng, rngs::StdRng};
+    use pageserver_api::controller_api::NodeAvailability;
+    use pageserver_api::shard::{ShardCount, ShardNumber};
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
     use utils::id::TenantId;
 
-    use crate::scheduler::test_utils::make_test_nodes;
-
     use super::*;
+    use crate::scheduler::test_utils::make_test_nodes;
 
     fn make_test_tenant_shard(policy: PlacementPolicy) -> TenantShard {
         let tenant_id = TenantId::generate();

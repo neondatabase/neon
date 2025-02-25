@@ -6,9 +6,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info, info_span};
 use utils::lsn::Lsn;
 
-use crate::{context::RequestContext, tenant::metadata::TimelineMetadata};
-
 use super::Timeline;
+use crate::context::RequestContext;
+use crate::tenant::metadata::TimelineMetadata;
 
 mod flow;
 mod importbucket_client;
