@@ -399,7 +399,7 @@ impl BytesF for Bytes {
         Ok(self.get_u8())
     }
     fn get_u16_f(&mut self) -> Result<u16> {
-        if self.is_empty() {
+        if self.remaining() < 2 {
             bail!("no bytes left, expected 2");
         }
         Ok(self.get_u16())
