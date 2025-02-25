@@ -407,6 +407,16 @@ fn start_postgres(
 ) -> Result<(Option<PostgresHandle>, StartPostgresResult)> {
     // We got all we need, update the state.
     let mut state = compute.state.lock().unwrap();
+
+    // If we're being configured from a /configure HTTP request, consider this operation
+    // to be part of that request.
+    let _this_entered = {
+        // Temporarily enter the parent span, so that the new span becomes its child.
+        let _parent_entered = state.startup_span.take().map(|p| p.entered());
+        tracing::info_span!("start_postgres")
+    }
+    .entered();
+
     state.set_status(ComputeStatus::Init, &compute.state_changed);
 
     info!(

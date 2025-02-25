@@ -117,6 +117,7 @@ pub struct ComputeState {
     pub last_active: Option<DateTime<Utc>>,
     pub error: Option<String>,
     pub pspec: Option<ParsedSpec>,
+    pub startup_span: Option<tracing::span::Span>,
     pub metrics: ComputeMetrics,
 }
 
@@ -128,6 +129,7 @@ impl ComputeState {
             last_active: None,
             error: None,
             pspec: None,
+            startup_span: None,
             metrics: ComputeMetrics::default(),
         }
     }

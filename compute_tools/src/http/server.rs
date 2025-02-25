@@ -124,6 +124,7 @@ impl From<Server> for Router<Arc<ComputeNode>> {
                 )
                 .layer(PropagateRequestIdLayer::x_request_id()),
         )
+            .layer(tower_otel::trace::HttpLayer::server(tracing::Level::INFO))
     }
 }
 
