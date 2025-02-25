@@ -13,7 +13,7 @@ use crate::{
     },
     virtual_file::{MaybeFatalIo, VirtualFile},
 };
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use http_utils::error::ApiError;
 use pageserver_api::{models::detach_ancestor::AncestorDetached, shard::ShardIdentity};
 use tokio::sync::Semaphore;
@@ -384,7 +384,7 @@ pub(super) async fn prepare(
     }
 
     fn delete_layers(timeline: &Timeline, layers: Vec<Layer>) -> Result<(), Error> {
-        // Delete the layers
+        // We are deleting layers, so we must hold the gate
         let _gate = timeline.gate.enter().map_err(|e| match e {
             GateError::GateClosed => Error::ShuttingDown,
         })?;
@@ -407,11 +407,11 @@ pub(super) async fn prepare(
                 new_layers.push(owned);
             }
             Ok(Err(failed)) => {
-                delete_layers(&detached, new_layers)?;
+                delete_layers(detached, new_layers)?;
                 return Err(failed);
             }
             Err(je) => {
-                delete_layers(&detached, new_layers)?;
+                delete_layers(detached, new_layers)?;
                 return Err(Error::Prepare(je.into()));
             }
         }
