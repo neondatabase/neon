@@ -785,6 +785,7 @@ impl<'a> TenantDownloader<'a> {
 
         // Download the layers in the heatmap
         for timeline in heatmap.timelines {
+            let ctx = &ctx.with_scope_secondary(tenant_shard_id, &timeline.timeline_id);
             let timeline_state = timeline_states
                 .remove(&timeline.timeline_id)
                 .expect("Just populated above");

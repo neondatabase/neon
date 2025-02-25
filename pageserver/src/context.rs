@@ -93,6 +93,7 @@ use std::sync::Arc;
 
 use once_cell::sync::Lazy;
 use tracing::warn;
+use utils::{id::TimelineId, shard::TenantShardId};
 
 use crate::{metrics::StorageIoSizeMetrics, task_mgr::TaskKind, tenant::Timeline};
 
@@ -115,6 +116,9 @@ pub(crate) struct Scope(Arc<ScopeInner>);
 pub(crate) enum ScopeInner {
     Global {
         io_size_metrics: &'static crate::metrics::StorageIoSizeMetrics,
+    },
+    Secondary {
+        io_size_metrics: crate::metrics::StorageIoSizeMetrics,
     },
     Timeline {
         timeline: Arc<Timeline>,
@@ -143,6 +147,17 @@ impl Scope {
     ) -> Self {
         let arc_arc_timeline = crate::tenant::timeline::handle::Handle::clone_timeline(handle);
         Scope(Arc::new(ScopeInner::TimelineHandle { arc_arc_timeline }))
+    }
+    pub(crate) fn new_secondary(tenant_shard_id: &TenantShardId, timeline_id: &TimelineId) -> Self {
+        // NB: Secondaries never took proper care of metrics lifecycle, and we don't start doing it now.
+
+        let tenant_id = tenant_shard_id.tenant_id.to_string();
+        let shard_id = tenant_shard_id.shard_slug().to_string();
+        let timeline_id = timeline_id.to_string();
+
+        let io_size_metrics =
+            crate::metrics::StorageIoSizeMetrics::new(&tenant_id, &shard_id, &timeline_id);
+        Scope(Arc::new(ScopeInner::Secondary { io_size_metrics }))
     }
 }
 
@@ -361,6 +376,16 @@ impl RequestContext {
             .build()
     }
 
+    pub fn with_scope_secondary(
+        &self,
+        tenant_shard_id: &TenantShardId,
+        timeline_id: &TimelineId,
+    ) -> Self {
+        RequestContextBuilder::extend(self)
+            .scope(Scope::new_secondary(tenant_shard_id, timeline_id))
+            .build()
+    }
+
     pub fn task_kind(&self) -> TaskKind {
         self.task_kind
     }
@@ -414,6 +439,7 @@ impl RequestContext {
             ScopeInner::TimelineHandle { arc_arc_timeline } => {
                 &arc_arc_timeline.metrics.storage_io_size
             }
+            ScopeInner::Secondary { io_size_metrics } => io_size_metrics,
         }
     }
 }
