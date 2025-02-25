@@ -3,7 +3,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use rustls::crypto::ring;
 
 /// We use an internal certificate authority when establishing a TLS connection with compute.

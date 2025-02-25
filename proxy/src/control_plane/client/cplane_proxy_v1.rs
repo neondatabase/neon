@@ -278,23 +278,25 @@ impl NeonControlPlaneClient {
 
             let host_addr = IpAddr::from_str(host).ok();
 
-            let host = if host_addr.is_some() {
-                format!("{}.default.svc.cluster.local", body.aux.compute_id)
-            } else {
-                host.to_owned()
+            let ssl_mode = match &body.server_name {
+                Some(_) => SslMode::Require,
+                None => SslMode::Disable,
+            };
+            let host_name = match body.server_name {
+                Some(host) => host,
+                None => host.to_owned(),
             };
 
             // Don't set anything but host and port! This config will be cached.
             // We'll set username and such later using the startup message.
             // TODO: add more type safety (in progress).
-            let mut config = compute::ConnCfg::new(host, port);
+            let mut config = compute::ConnCfg::new(host_name, port);
 
             if let Some(addr) = host_addr {
                 config.set_host_addr(addr);
             }
 
-            // TLS is not yet configured on compute nodes, but it will be soon.
-            config.ssl_mode(SslMode::Prefer);
+            config.ssl_mode(ssl_mode);
 
             let node = NodeInfo {
                 config,

@@ -11,7 +11,7 @@ use postgres_protocol::message::backend::NoticeResponseBody;
 use pq_proto::StartupMessageParams;
 use rustls::pki_types::InvalidDnsNameError;
 use thiserror::Error;
-use tokio::net::{lookup_host, TcpStream};
+use tokio::net::{TcpStream, lookup_host};
 use tracing::{debug, error, info, warn};
 
 use crate::auth::backend::ComputeUserInfo;
@@ -281,6 +281,7 @@ impl ConnCfg {
         } = connection;
 
         tracing::Span::current().record("pid", tracing::field::display(process_id));
+        tracing::Span::current().record("compute_id", tracing::field::display(&aux.compute_id));
         let stream = stream.into_inner();
 
         // TODO: lots of useful info but maybe we can move it elsewhere (eg traces?)

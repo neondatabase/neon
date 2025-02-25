@@ -191,7 +191,11 @@ impl PoolingBackend {
     // Wake up the destination if needed. Code here is a bit involved because
     // we reuse the code from the usual proxy and we need to prepare few structures
     // that this code expects.
-    #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
+    #[tracing::instrument(skip_all, fields(
+        pid = tracing::field::Empty,
+        compute_id = tracing::field::Empty,
+        conn_id = tracing::field::Empty,
+    ))]
     pub(crate) async fn connect_to_compute(
         &self,
         ctx: &RequestContext,
@@ -230,7 +234,10 @@ impl PoolingBackend {
     }
 
     // Wake up the destination if needed
-    #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
+    #[tracing::instrument(skip_all, fields(
+        compute_id = tracing::field::Empty,
+        conn_id = tracing::field::Empty,
+    ))]
     pub(crate) async fn connect_to_local_proxy(
         &self,
         ctx: &RequestContext,
@@ -277,7 +284,10 @@ impl PoolingBackend {
     /// # Panics
     ///
     /// Panics if called with a non-local_proxy backend.
-    #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
+    #[tracing::instrument(skip_all, fields(
+        pid = tracing::field::Empty,
+        conn_id = tracing::field::Empty,
+    ))]
     pub(crate) async fn connect_to_local_postgres(
         &self,
         ctx: &RequestContext,
@@ -553,6 +563,10 @@ impl ConnectMechanism for TokioMechanism {
         let (client, connection) = permit.release_result(res)?;
 
         tracing::Span::current().record("pid", tracing::field::display(client.get_process_id()));
+        tracing::Span::current().record(
+            "compute_id",
+            tracing::field::display(&node_info.aux.compute_id),
+        );
         Ok(poll_client(
             self.pool.clone(),
             ctx,
@@ -598,6 +612,11 @@ impl ConnectMechanism for HyperMechanism {
         let res = connect_http2(host_addr, &host, port, config.timeout).await;
         drop(pause);
         let (client, connection) = permit.release_result(res)?;
+
+        tracing::Span::current().record(
+            "compute_id",
+            tracing::field::display(&node_info.aux.compute_id),
+        );
 
         Ok(poll_http2_client(
             self.pool.clone(),

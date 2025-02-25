@@ -240,6 +240,7 @@ pub(crate) struct GetEndpointAccessControl {
 #[derive(Debug, Deserialize)]
 pub(crate) struct WakeCompute {
     pub(crate) address: Box<str>,
+    pub(crate) server_name: Option<String>,
     pub(crate) aux: MetricsAuxInfo,
 }
 
