@@ -62,7 +62,7 @@ use utils::lsn::Lsn;
 
 use super::storage_layer::{LayerVisibilityHint, PersistentLayerDesc};
 use crate::context::RequestContext;
-use crate::tenant::storage_layer::InMemoryLayer;
+use crate::tenant::storage_layer::{InMemoryLayer, ReadableLayerWeak};
 
 ///
 /// LayerMap tracks what layers exist on a timeline.
@@ -166,7 +166,7 @@ impl Drop for BatchedUpdates<'_> {
 /// Return value of LayerMap::search
 #[derive(Eq, PartialEq, Debug, Hash)]
 pub struct SearchResult {
-    pub layer: Arc<PersistentLayerDesc>,
+    pub layer: ReadableLayerWeak,
     pub lsn_floor: Lsn,
 }
 
@@ -346,6 +346,24 @@ where
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+pub(crate) struct InMemoryLayerDesc {
+    handle: InMemoryLayerHandle,
+    lsn_range: Range<Lsn>,
+}
+
+impl InMemoryLayerDesc {
+    pub(crate) fn get_lsn_range(&self) -> Range<Lsn> {
+        self.lsn_range.clone()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+enum InMemoryLayerHandle {
+    Open,
+    Frozen(usize),
+}
+
 impl LayerMap {
     ///
     /// Find the latest layer (by lsn.end) that covers the given
@@ -399,14 +417,14 @@ impl LayerMap {
             (None, Some(image)) => {
                 let lsn_floor = image.get_lsn_range().start;
                 Some(SearchResult {
-                    layer: image,
+                    layer: ReadableLayerWeak::PersistentLayer(image),
                     lsn_floor,
                 })
             }
             (Some(delta), None) => {
                 let lsn_floor = delta.get_lsn_range().start;
                 Some(SearchResult {
-                    layer: delta,
+                    layer: ReadableLayerWeak::PersistentLayer(delta),
                     lsn_floor,
                 })
             }
@@ -416,14 +434,14 @@ impl LayerMap {
                 let image_exact_match = img_lsn + 1 == end_lsn;
                 if image_is_newer || image_exact_match {
                     Some(SearchResult {
-                        layer: image,
+                        layer: ReadableLayerWeak::PersistentLayer(image),
                         lsn_floor: img_lsn,
                     })
                 } else {
                     let lsn_floor =
                         std::cmp::max(delta.get_lsn_range().start, image.get_lsn_range().start + 1);
                     Some(SearchResult {
-                        layer: delta,
+                        layer: ReadableLayerWeak::PersistentLayer(delta),
                         lsn_floor,
                     })
                 }
@@ -550,7 +568,7 @@ impl LayerMap {
     }
 
     /// Get a ref counted pointer for the first in memory layer that matches the provided predicate.
-    pub fn search_in_memory_layer(&self, below: Lsn) -> Option<Arc<InMemoryLayer>> {
+    pub(crate) fn search_in_memory_layer(&self, below: Lsn) -> Option<InMemoryLayerDesc> {
         let is_below = |l: &Arc<InMemoryLayer>| {
             let start_lsn = l.get_lsn_range().start;
             below > start_lsn
@@ -558,11 +576,28 @@ impl LayerMap {
 
         if let Some(open) = &self.open_layer {
             if is_below(open) {
-                return Some(open.clone());
+                return Some(InMemoryLayerDesc {
+                    handle: InMemoryLayerHandle::Open,
+                    lsn_range: open.get_lsn_range(),
+                });
             }
         }
 
-        self.frozen_layers.iter().rfind(|l| is_below(l)).cloned()
+        self.frozen_layers
+            .iter()
+            .enumerate()
+            .rfind(|(_idx, l)| is_below(l))
+            .map(|(idx, l)| InMemoryLayerDesc {
+                handle: InMemoryLayerHandle::Frozen(idx),
+                lsn_range: l.get_lsn_range(),
+            })
+    }
+
+    pub(crate) fn in_memory_layer(&self, desc: &InMemoryLayerDesc) -> Arc<InMemoryLayer> {
+        match desc.handle {
+            InMemoryLayerHandle::Open => self.open_layer.as_ref().unwrap().clone(),
+            InMemoryLayerHandle::Frozen(idx) => self.frozen_layers[idx].clone(),
+        }
     }
 
     ///
@@ -1330,11 +1365,18 @@ mod tests {
 
         // Sanity: the layer that holds latest data for the DBDIR key should always be visible
         // (just using this key as a key that will always exist for any layermap fixture)
-        let dbdir_layer = layer_map
-            .search(DBDIR_KEY, index.metadata.disk_consistent_lsn())
-            .unwrap();
+        let dbdir_layer = {
+            let readable_layer = layer_map
+                .search(DBDIR_KEY, index.metadata.disk_consistent_lsn())
+                .unwrap();
+
+            match readable_layer.layer {
+                ReadableLayerWeak::PersistentLayer(desc) => desc,
+                ReadableLayerWeak::InMemoryLayer(_) => unreachable!(""),
+            }
+        };
         assert!(matches!(
-            layer_visibilities.get(&dbdir_layer.layer).unwrap(),
+            layer_visibilities.get(&dbdir_layer).unwrap(),
             LayerVisibilityHint::Visible
         ));
     }

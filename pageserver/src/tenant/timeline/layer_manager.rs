@@ -8,14 +8,14 @@ use tracing::trace;
 use utils::id::TimelineId;
 use utils::lsn::{AtomicLsn, Lsn};
 
-use super::TimelineWriterState;
+use super::{ReadableLayer, TimelineWriterState};
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::metrics::TimelineMetrics;
 use crate::tenant::layer_map::{BatchedUpdates, LayerMap};
 use crate::tenant::storage_layer::{
     AsLayerDesc, InMemoryLayer, Layer, LayerVisibilityHint, PersistentLayerDesc,
-    PersistentLayerKey, ResidentLayer,
+    PersistentLayerKey, ReadableLayerWeak, ResidentLayer,
 };
 
 /// Provides semantic APIs to manipulate the layer map.
@@ -37,6 +37,21 @@ impl Default for LayerManager {
 }
 
 impl LayerManager {
+    pub(crate) fn upgrade(&self, weak: ReadableLayerWeak) -> ReadableLayer {
+        match weak {
+            ReadableLayerWeak::PersistentLayer(desc) => {
+                ReadableLayer::PersistentLayer(self.get_from_desc(&desc))
+            }
+            ReadableLayerWeak::InMemoryLayer(desc) => {
+                let inmem = self
+                    .layer_map()
+                    .expect("no concurrent shutdown")
+                    .in_memory_layer(&desc);
+                ReadableLayer::InMemoryLayer(inmem)
+            }
+        }
+    }
+
     pub(crate) fn get_from_key(&self, key: &PersistentLayerKey) -> Layer {
         // The assumption for the `expect()` is that all code maintains the following invariant:
         // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.

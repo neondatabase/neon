@@ -40,6 +40,7 @@ use utils::sync::gate::GateGuard;
 
 use self::inmemory_layer::InMemoryLayerFileId;
 use super::PageReconstructError;
+use super::layer_map::InMemoryLayerDesc;
 use super::timeline::{GetVectoredError, ReadPath};
 use crate::config::PageServerConf;
 use crate::context::{AccessStatsBehavior, RequestContext};
@@ -719,6 +720,12 @@ pub(crate) enum LayerId {
 struct LayerToVisitId {
     layer_id: LayerId,
     lsn_floor: Lsn,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ReadableLayerWeak {
+    PersistentLayer(Arc<PersistentLayerDesc>),
+    InMemoryLayer(InMemoryLayerDesc),
 }
 
 /// Layer wrapper for the read path. Note that it is valid

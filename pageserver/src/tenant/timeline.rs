@@ -3912,7 +3912,8 @@ impl Timeline {
                     Some(l) => {
                         let lsn_range = l.get_lsn_range().start..cont_lsn;
                         fringe.update(
-                            ReadableLayer::InMemoryLayer(l),
+                            guard
+                                .upgrade(super::storage_layer::ReadableLayerWeak::InMemoryLayer(l)),
                             unmapped_keyspace.clone(),
                             lsn_range,
                         );
@@ -3926,7 +3927,7 @@ impl Timeline {
                                 .into_iter()
                                 .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
                                     (
-                                        ReadableLayer::PersistentLayer(guard.get_from_desc(&layer)),
+                                        guard.upgrade(layer),
                                         keyspace_accum.to_keyspace(),
                                         lsn_floor..cont_lsn,
                                     )
