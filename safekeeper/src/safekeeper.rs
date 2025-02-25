@@ -6,8 +6,8 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use postgres_ffi::{TimeLineID, MAX_SEND_SIZE};
 use safekeeper_api::membership;
-use safekeeper_api::membership::Generation;
 use safekeeper_api::membership::MemberSet;
+use safekeeper_api::membership::SafekeeperGeneration as Generation;
 use safekeeper_api::membership::SafekeeperId;
 use safekeeper_api::membership::INVALID_GENERATION;
 use safekeeper_api::models::HotStandbyFeedback;
@@ -435,7 +435,7 @@ impl ProposerAcceptorMessage {
 
     /// Read membership::Configuration from Bytes.
     fn get_mconf(buf: &mut Bytes) -> Result<membership::Configuration> {
-        let generation = buf.get_u32_f().with_context(|| "reading generation")?;
+        let generation = Generation::new(buf.get_u32_f().with_context(|| "reading generation")?);
         let members_len = buf.get_u32_f().with_context(|| "reading members_len")?;
         // Main member set must have at least someone in valid configuration.
         // Empty conf is allowed until we fully migrate.
@@ -528,17 +528,21 @@ impl ProposerAcceptorMessage {
                     Ok(ProposerAcceptorMessage::Greeting(g))
                 }
                 'v' => {
-                    let generation = msg_bytes
-                        .get_u32_f()
-                        .with_context(|| "reading generation")?;
+                    let generation = Generation::new(
+                        msg_bytes
+                            .get_u32_f()
+                            .with_context(|| "reading generation")?,
+                    );
                     let term = msg_bytes.get_u64_f().with_context(|| "reading term")?;
                     let v = VoteRequest { generation, term };
                     Ok(ProposerAcceptorMessage::VoteRequest(v))
                 }
                 'e' => {
-                    let generation = msg_bytes
-                        .get_u32_f()
-                        .with_context(|| "reading generation")?;
+                    let generation = Generation::new(
+                        msg_bytes
+                            .get_u32_f()
+                            .with_context(|| "reading generation")?,
+                    );
                     let term = msg_bytes.get_u64_f().with_context(|| "reading term")?;
                     let start_streaming_at: Lsn = msg_bytes
                         .get_u64_f()
@@ -554,9 +558,11 @@ impl ProposerAcceptorMessage {
                     Ok(ProposerAcceptorMessage::Elected(msg))
                 }
                 'a' => {
-                    let generation = msg_bytes
-                        .get_u32_f()
-                        .with_context(|| "reading generation")?;
+                    let generation = Generation::new(
+                        msg_bytes
+                            .get_u32_f()
+                            .with_context(|| "reading generation")?,
+                    );
                     let term = msg_bytes.get_u64_f().with_context(|| "reading term")?;
                     let begin_lsn: Lsn = msg_bytes
                         .get_u64_f()
@@ -760,7 +766,7 @@ impl AcceptorProposerMessage {
 
     /// Serialize membership::Configuration into buf.
     fn serialize_mconf(buf: &mut BytesMut, mconf: &membership::Configuration) {
-        buf.put_u32(mconf.generation);
+        buf.put_u32(mconf.generation.into_inner());
         buf.put_u32(mconf.members.m.len() as u32);
         for sk in &mconf.members.m {
             buf.put_u64(sk.id.0);
@@ -791,7 +797,7 @@ impl AcceptorProposerMessage {
                 }
                 AcceptorProposerMessage::VoteResponse(msg) => {
                     buf.put_u8(b'v');
-                    buf.put_u32(msg.generation);
+                    buf.put_u32(msg.generation.into_inner());
                     buf.put_u64(msg.term);
                     buf.put_u8(msg.vote_given as u8);
                     buf.put_u64(msg.flush_lsn.into());
@@ -804,7 +810,7 @@ impl AcceptorProposerMessage {
                 }
                 AcceptorProposerMessage::AppendResponse(msg) => {
                     buf.put_u8(b'a');
-                    buf.put_u32(msg.generation);
+                    buf.put_u32(msg.generation.into_inner());
                     buf.put_u64(msg.term);
                     buf.put_u64(msg.flush_lsn.into());
                     buf.put_u64(msg.commit_lsn.into());
@@ -1465,7 +1471,7 @@ mod tests {
 
         // check voting for 1 is ok
         let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest {
-            generation: 0,
+            generation: Generation::new(0),
             term: 1,
         });
         let mut vote_resp = sk.process_msg(&vote_request).await;
@@ -1500,7 +1506,7 @@ mod tests {
         let mut sk = SafeKeeper::new(TimelineState::new(storage), wal_store, NodeId(0)).unwrap();
 
         let mut ar_hdr = AppendRequestHeader {
-            generation: 0,
+            generation: Generation::new(0),
             term: 2,
             begin_lsn: Lsn(1),
             end_lsn: Lsn(2),
@@ -1513,7 +1519,7 @@ mod tests {
         };
 
         let pem = ProposerElected {
-            generation: 0,
+            generation: Generation::new(0),
             term: 2,
             start_streaming_at: Lsn(1),
             term_history: TermHistory(vec![
@@ -1560,7 +1566,7 @@ mod tests {
         let mut sk = SafeKeeper::new(TimelineState::new(storage), wal_store, NodeId(0)).unwrap();
 
         let pem = ProposerElected {
-            generation: 0,
+            generation: Generation::new(0),
             term: 1,
             start_streaming_at: Lsn(1),
             term_history: TermHistory(vec![TermLsn {
@@ -1573,7 +1579,7 @@ mod tests {
             .unwrap();
 
         let ar_hdr = AppendRequestHeader {
-            generation: 0,
+            generation: Generation::new(0),
             term: 1,
             begin_lsn: Lsn(1),
             end_lsn: Lsn(2),

@@ -13,6 +13,7 @@ use safekeeper::safekeeper::{
     AcceptorProposerMessage, AppendRequest, AppendRequestHeader, ProposerAcceptorMessage,
 };
 use safekeeper::test_utils::Env;
+use safekeeper_api::membership::SafekeeperGeneration as Generation;
 use tokio::io::AsyncWriteExt as _;
 use utils::id::{NodeId, TenantTimelineId};
 use utils::lsn::Lsn;
@@ -88,7 +89,7 @@ fn bench_process_msg(c: &mut Criterion) {
                 let (lsn, record) = walgen.next().expect("endless WAL");
                 ProposerAcceptorMessage::AppendRequest(AppendRequest {
                     h: AppendRequestHeader {
-                        generation: 0,
+                        generation: Generation::new(0),
                         term: 1,
                         begin_lsn: lsn,
                         end_lsn: lsn + record.len() as u64,
@@ -159,7 +160,7 @@ fn bench_wal_acceptor(c: &mut Criterion) {
                     .take(n)
                     .map(|(lsn, record)| AppendRequest {
                         h: AppendRequestHeader {
-                            generation: 0,
+                            generation: Generation::new(0),
                             term: 1,
                             begin_lsn: lsn,
                             end_lsn: lsn + record.len() as u64,
@@ -260,7 +261,7 @@ fn bench_wal_acceptor_throughput(c: &mut Criterion) {
             runtime.block_on(async {
                 let reqgen = walgen.take(count).map(|(lsn, record)| AppendRequest {
                     h: AppendRequestHeader {
-                        generation: 0,
+                        generation: Generation::new(0),
                         term: 1,
                         begin_lsn: lsn,
                         end_lsn: lsn + record.len() as u64,
