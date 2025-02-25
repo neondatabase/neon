@@ -356,8 +356,8 @@ impl Layer {
     /// Download the layer if evicted.
     ///
     /// Will not error when the layer is already downloaded.
-    pub(crate) async fn download(&self) -> Result<(), DownloadError> {
-        self.0.get_or_maybe_download(true, None).await?;
+    pub(crate) async fn download(&self, ctx: &RequestContext) -> Result<(), DownloadError> {
+        self.0.get_or_maybe_download(true, Some(ctx)).await?;
         Ok(())
     }
 

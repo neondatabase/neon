@@ -2199,6 +2199,7 @@ impl Timeline {
     pub(crate) async fn download_layer(
         &self,
         layer_file_name: &LayerName,
+        ctx: &RequestContext,
     ) -> Result<Option<bool>, super::storage_layer::layer::DownloadError> {
         let Some(layer) = self
             .find_layer(layer_file_name)
@@ -2212,7 +2213,7 @@ impl Timeline {
             return Ok(None);
         };
 
-        layer.download().await?;
+        layer.download(ctx).await?;
 
         Ok(Some(true))
     }
@@ -6131,6 +6132,7 @@ impl Timeline {
     pub(crate) async fn spawn_download_all_remote_layers(
         self: Arc<Self>,
         request: DownloadRemoteLayersTaskSpawnRequest,
+        ctx: &RequestContext,
     ) -> Result<DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskInfo> {
         use pageserver_api::models::DownloadRemoteLayersTaskState;
 
@@ -6151,6 +6153,10 @@ impl Timeline {
         }
 
         let self_clone = Arc::clone(&self);
+        let task_ctx = ctx.detached_child(
+            TaskKind::DownloadAllRemoteLayers,
+            DownloadBehavior::Download,
+        );
         let task_id = task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::DownloadAllRemoteLayers,
@@ -6158,7 +6164,7 @@ impl Timeline {
             Some(self.timeline_id),
             "download all remote layers task",
             async move {
-                self_clone.download_all_remote_layers(request).await;
+                self_clone.download_all_remote_layers(request, &task_ctx).await;
                 let mut status_guard = self_clone.download_all_remote_layers_task_info.write().unwrap();
                  match &mut *status_guard {
                     None => {
@@ -6193,6 +6199,7 @@ impl Timeline {
     async fn download_all_remote_layers(
         self: &Arc<Self>,
         request: DownloadRemoteLayersTaskSpawnRequest,
+        ctx: &RequestContext,
     ) {
         use pageserver_api::models::DownloadRemoteLayersTaskState;
 
@@ -6249,9 +6256,10 @@ impl Timeline {
 
                 let span = tracing::info_span!("download", layer = %next);
 
+                let ctx = ctx.attached_child();
                 js.spawn(
                     async move {
-                        let res = next.download().await;
+                        let res = next.download(&ctx).await;
                         (next, res)
                     }
                     .instrument(span),
