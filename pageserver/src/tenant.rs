@@ -3141,12 +3141,13 @@ impl Tenant {
     /// Trips the compaction circuit breaker if appropriate.
     pub(crate) fn maybe_trip_compaction_breaker(&self, err: &CompactionError) {
         match err {
+            err if err.is_cancel() => {}
             CompactionError::ShuttingDown => (),
             // Offload failures don't trip the circuit breaker, since they're cheap to retry and
             // shouldn't block compaction.
             CompactionError::Offload(_) => {}
-            e @ CompactionError::CollectKeySpaceError(_) if e.is_cancel() => {}
             CompactionError::CollectKeySpaceError(err) => {
+                // CollectKeySpaceError::Cancelled and PageRead::Cancelled are handled in `err.is_cancel` branch.
                 self.compaction_circuit_breaker
                     .lock()
                     .unwrap()

@@ -1866,13 +1866,18 @@ impl Timeline {
         // Signal compaction failure to avoid L0 flush stalls when it's broken.
         match &result {
             Ok(_) => self.compaction_failed.store(false, AtomicOrdering::Relaxed),
-            Err(CompactionError::ShuttingDown) => {}
-            Err(CompactionError::AlreadyRunning(_)) => {}
+            Err(e) if e.is_cancel() => {}
+            Err(CompactionError::ShuttingDown) => {
+                // Covered by the `Err(e) if e.is_cancel()` branch.
+            }
+            Err(CompactionError::AlreadyRunning(_)) => {
+                // Covered by the `Err(e) if e.is_cancel()` branch.
+            }
             Err(CompactionError::Other(_)) => {
                 self.compaction_failed.store(true, AtomicOrdering::Relaxed)
             }
-            Err(e @ CompactionError::CollectKeySpaceError(_)) if e.is_cancel() => {}
             Err(CompactionError::CollectKeySpaceError(_)) => {
+                // Cancelled errors are covered by the `Err(e) if e.is_cancel()` branch.
                 self.compaction_failed.store(true, AtomicOrdering::Relaxed)
             }
             // Don't change the current value on offload failure or shutdown. We don't want to

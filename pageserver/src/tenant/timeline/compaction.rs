@@ -10,8 +10,9 @@ use std::sync::Arc;
 
 use super::layer_manager::LayerManager;
 use super::{
-    CompactFlags, CompactOptions, CreateImageLayersError, DurationRecorder, GetVectoredError,
-    ImageLayerCreationMode, LastImageLayerCreationStatus, RecordedDuration, Timeline,
+    CompactFlags, CompactOptions, CompactionError, CreateImageLayersError, DurationRecorder,
+    GetVectoredError, ImageLayerCreationMode, LastImageLayerCreationStatus, RecordedDuration,
+    Timeline,
 };
 
 use anyhow::{Context, anyhow, bail};
@@ -37,12 +38,6 @@ use utils::critical;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
 
-use super::layer_manager::LayerManager;
-use super::{
-    CompactFlags, CompactOptions, CompactionError, CreateImageLayersError, DurationRecorder,
-    GetVectoredError, ImageLayerCreationMode, LastImageLayerCreationStatus, PageReconstructError,
-    RecordedDuration, Timeline,
-};
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
 use crate::statvfs::Statvfs;

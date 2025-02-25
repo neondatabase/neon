@@ -293,11 +293,10 @@ fn log_compaction_error(
     use crate::tenant::upload_queue::NotInitialized;
 
     let level = match err {
+        e if e.is_cancel() => return,
         ShuttingDown => return,
-        e @ Offload(_) if e.is_cancel() => return,
         Offload(_) => Level::ERROR,
         AlreadyRunning(_) => Level::ERROR,
-        e @ CollectKeySpaceError(_) if e.is_cancel() => return,
         CollectKeySpaceError(_) => Level::ERROR,
         _ if task_cancelled => Level::INFO,
         Other(err) => {
