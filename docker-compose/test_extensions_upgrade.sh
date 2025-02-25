@@ -12,6 +12,7 @@ if [ -z ${OLDTAG+x} ] || [ -z ${NEWTAG+x} ] || [ -z "${OLDTAG}" ] || [ -z "${NEW
 fi
 export PG_VERSION=${PG_VERSION:-16}
 export PG_TEST_VERSION=${PG_VERSION}
+# Waits for compute node is ready
 function wait_for_ready {
   TIME=0
   while ! docker compose logs compute_is_ready | grep -q "accepting connections" && [ ${TIME} -le 300 ] ; do
@@ -23,11 +24,14 @@ function wait_for_ready {
     exit 2
   fi
 }
+# Creates extensions. Gets a string with space-separated extensions as a parameter
 function create_extensions() {
   for ext in ${1}; do
     docker compose exec neon-test-extensions psql -X -v ON_ERROR_STOP=1 -d contrib_regression -c "CREATE EXTENSION IF NOT EXISTS ${ext} CASCADE"
   done
 }
+# Creates a new timeline. Gets the parent ID and an extension name as parameters.
+# Saves the timeline ID in the variable EXT_TIMELINE
 function create_timeline() {
   generate_id new_timeline_id
 
@@ -42,7 +46,7 @@ function create_timeline() {
   echo $result | jq .
   EXT_TIMELINE[${2}]=${new_timeline_id}
 }
-
+# Checks if the timeline ID of the compute node is expected. Gets the timeline ID as a parameter
 function check_timeline() {
     TID=$(docker compose exec neon-test-extensions psql -Aqt -c "SHOW neon.timeline_id")
     if [ "${TID}" != "${1}" ]; then
@@ -50,7 +54,8 @@ function check_timeline() {
       exit 1
     fi
 }
-
+# Restarts the compute node with the required compute tag and timeline.
+# Accepts the tag for the compute node and the timeline as parameters.
 function restart_compute() {
   docker compose down compute compute_is_ready
   COMPUTE_TAG=${1} TAG=${OLDTAG} TENANT_ID=${tenant_id} TIMELINE_ID=${2} docker compose up --quiet-pull -d --build compute compute_is_ready
