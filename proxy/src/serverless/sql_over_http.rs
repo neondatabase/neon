@@ -40,7 +40,6 @@ use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::http::{ReadBodyError, read_body_with_limit};
 use crate::metrics::{HttpDirection, Metrics};
 use crate::proxy::{NeonOptions, run_until_cancelled};
-use crate::serverless::USER_AGENT_MAX_LENGTH;
 use crate::serverless::backend::HttpConnError;
 use crate::types::{DbName, RoleName};
 use crate::usage_metrics::{MetricCounter, MetricCounterRecorder, TrafficDirection};
@@ -233,8 +232,7 @@ fn get_conn_info(
         headers
             .get(hyper::header::USER_AGENT)
             .and_then(|h| h.to_str().ok())
-            .map(|h| &h[..USER_AGENT_MAX_LENGTH])
-            .map(|s| s.to_string()),
+            .map(Into::into),
     );
 
     let user_info = ComputeUserInfo {

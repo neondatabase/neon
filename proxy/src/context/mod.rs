@@ -55,7 +55,7 @@ struct RequestContextInner {
     dbname: Option<DbName>,
     user: Option<RoleName>,
     application: Option<SmolStr>,
-    user_agent: Option<String>,
+    user_agent: Option<SmolStr>,
     error_kind: Option<ErrorKind>,
     pub(crate) auth_method: Option<AuthMethod>,
     jwt_issuer: Option<String>,
@@ -248,7 +248,7 @@ impl RequestContext {
             .set_user(user);
     }
 
-    pub(crate) fn set_user_agent(&self, user_agent: Option<String>) {
+    pub(crate) fn set_user_agent(&self, user_agent: Option<SmolStr>) {
         self.0
             .try_lock()
             .expect("should not deadlock")
@@ -394,7 +394,7 @@ impl RequestContextInner {
         }
     }
 
-    fn set_user_agent(&mut self, user_agent: Option<String>) {
+    fn set_user_agent(&mut self, user_agent: Option<SmolStr>) {
         self.user_agent = user_agent;
     }
 

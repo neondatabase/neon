@@ -55,7 +55,6 @@ use crate::serverless::backend::PoolingBackend;
 use crate::serverless::http_util::{api_error_into_response, json_response};
 
 pub(crate) const SERVERLESS_DRIVER_SNI: &str = "api";
-const USER_AGENT_MAX_LENGTH: usize = 100;
 
 pub async fn task_main(
     config: &'static ProxyConfig,
@@ -444,8 +443,7 @@ async fn request_handler(
                 .headers()
                 .get(hyper::header::USER_AGENT)
                 .and_then(|h| h.to_str().ok())
-                .map(|h| &h[..USER_AGENT_MAX_LENGTH])
-                .map(|s| s.to_string()),
+                .map(Into::into),
         );
 
         let span = ctx.span();
