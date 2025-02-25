@@ -51,8 +51,6 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
     done
 
     if [ $pg_version -ge 16 ]; then
-        docker cp ext-src $TEST_CONTAINER_NAME:/
-        docker exec $TEST_CONTAINER_NAME bash -c "apt update && apt install -y libtap-parser-sourcehandler-pgtap-perl"
         # This is required for the pg_hint_plan test, to prevent flaky log message causing the test to fail
         # It cannot be moved to Dockerfile now because the database directory is created after the start of the container
         echo Adding dummy config
