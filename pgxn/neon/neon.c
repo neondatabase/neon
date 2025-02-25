@@ -413,7 +413,7 @@ ReportSearchPath(void)
 
 #if PG_VERSION_NUM < 150000
 /*
- * PG14 uses separate backend for stats collector having no access to shaerd memory.
+ * PG14 uses separate backend for stats collector having no access to shared memory.
  * As far as AUX mechanism requires access to shared memory, persisting pgstat.stat file
  * is not supported at pg14. And so there is no definition of neon_pgstat_file_size_limit
  * variable, so we have to declare it here.
