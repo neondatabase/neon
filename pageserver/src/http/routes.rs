@@ -1413,12 +1413,10 @@ async fn timeline_layer_scan_disposable_keys(
         ));
     };
 
-    let resident_layer =
-        layer
-            .download_and_keep_resident(Some(&ctx))
-            .await
-            .map_err(|err| {
-                match err {
+    let resident_layer = layer
+        .download_and_keep_resident(&ctx)
+        .await
+        .map_err(|err| match err {
             tenant::storage_layer::layer::DownloadError::TimelineShutdown
             | tenant::storage_layer::layer::DownloadError::DownloadCancelled => {
                 ApiError::ShuttingDown
@@ -1434,8 +1432,7 @@ async fn timeline_layer_scan_disposable_keys(
             tenant::storage_layer::layer::DownloadError::Failpoint(_) => {
                 ApiError::InternalServerError(err.into())
             }
-        }
-            })?;
+        })?;
 
     let keys = resident_layer
         .load_keys(&ctx)

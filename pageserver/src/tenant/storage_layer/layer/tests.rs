@@ -185,7 +185,7 @@ async fn smoke_test() {
 
     // plain downloading is rarely needed
     layer
-        .download_and_keep_resident(Some(ctx))
+        .download_and_keep_resident(ctx)
         .instrument(download_span)
         .await
         .unwrap();

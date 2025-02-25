@@ -2088,10 +2088,7 @@ pub(crate) mod test {
             .await
             .unwrap();
 
-            let new_layer = new_layer
-                .download_and_keep_resident(Some(ctx))
-                .await
-                .unwrap();
+            let new_layer = new_layer.download_and_keep_resident(ctx).await.unwrap();
 
             new_layer
                 .copy_delta_prefix(&mut writer, truncate_at, ctx)

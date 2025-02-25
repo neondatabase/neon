@@ -6987,7 +6987,7 @@ mod tests {
                 .build();
 
             let _resident = layer
-                .download_and_keep_resident(Some(ctx))
+                .download_and_keep_resident(ctx)
                 .instrument(tracing::info_span!(
                     parent: None,
                     "download_layer",
