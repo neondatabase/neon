@@ -679,6 +679,7 @@ async fn remote_copy(
         Ok(()) => owned,
         Err(e) => {
             {
+                // Clean up the layer so that on a retry we don't get errors that the file already exists
                 owned.delete_on_drop();
                 std::mem::drop(owned);
             }
