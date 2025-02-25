@@ -40,6 +40,7 @@ use pageserver_api::models::{
 use pageserver_api::shard::{ShardIdentity, ShardStripeSize, TenantShardId};
 use remote_storage::{DownloadError, GenericRemoteStorage, TimeoutOrCancel};
 use remote_timeline_client::index::GcCompactionState;
+use remote_timeline_client::index::RelSizeMigration;
 use remote_timeline_client::manifest::{
     LATEST_TENANT_MANIFEST_VERSION, OffloadedTimelineManifest, TenantManifest,
 };
@@ -1123,6 +1124,7 @@ impl Tenant {
             CreateTimelineCause::Load,
             idempotency.clone(),
             index_part.gc_compaction.clone(),
+            index_part.rel_size_migration.clone(),
         )?;
         let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
         anyhow::ensure!(
@@ -4122,6 +4124,7 @@ impl Tenant {
         cause: CreateTimelineCause,
         create_idempotency: CreateTimelineIdempotency,
         gc_compaction_state: Option<GcCompactionState>,
+        rel_size_v2_status: Option<RelSizeMigration>,
     ) -> anyhow::Result<Arc<Timeline>> {
         let state = match cause {
             CreateTimelineCause::Load => {
@@ -4154,6 +4157,7 @@ impl Tenant {
             self.attach_wal_lag_cooldown.clone(),
             create_idempotency,
             gc_compaction_state,
+            rel_size_v2_status,
             self.cancel.child_token(),
         );
 
@@ -5224,6 +5228,7 @@ impl Tenant {
                 resources,
                 CreateTimelineCause::Load,
                 create_guard.idempotency.clone(),
+                None,
                 None,
             )
             .context("Failed to create timeline data structure")?;

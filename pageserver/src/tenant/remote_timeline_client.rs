@@ -192,7 +192,7 @@ pub(crate) use download::{
     download_index_part, download_initdb_tar_zst, download_tenant_manifest, is_temp_download_file,
     list_remote_tenant_shards, list_remote_timelines,
 };
-use index::GcCompactionState;
+use index::{GcCompactionState, RelSizeMigration};
 pub(crate) use index::LayerFileMetadata;
 use pageserver_api::models::TimelineArchivalState;
 use pageserver_api::shard::{ShardIndex, TenantShardId};
@@ -908,6 +908,18 @@ impl RemoteTimelineClient {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
         upload_queue.dirty.gc_compaction = Some(gc_compaction_state);
+        self.schedule_index_upload(upload_queue);
+        Ok(())
+    }
+
+    /// Launch an index-file upload operation in the background, setting `rel_size_v2_status` field.
+    pub(crate) fn schedule_index_upload_for_rel_size_v2_status_update(
+        self: &Arc<Self>,
+        rel_size_v2_status: RelSizeMigration,
+    ) -> anyhow::Result<()> {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+        upload_queue.dirty.rel_size_migration = Some(rel_size_v2_status);
         self.schedule_index_upload(upload_queue);
         Ok(())
     }

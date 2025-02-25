@@ -83,7 +83,7 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 use super::config::TenantConf;
-use super::remote_timeline_client::index::{GcCompactionState, IndexPart};
+use super::remote_timeline_client::index::{GcCompactionState, IndexPart, RelSizeMigration};
 use super::remote_timeline_client::{RemoteTimelineClient, WaitCompletionError};
 use super::secondary::heatmap::HeatMapLayer;
 use super::storage_layer::{LayerFringe, LayerVisibilityHint, ReadableLayer};
@@ -436,6 +436,8 @@ pub struct Timeline {
     /// May host a background Tokio task which downloads all the layers from the current
     /// heatmap on demand.
     heatmap_layers_downloader: Mutex<Option<heatmap_layers_downloader::HeatmapLayersDownloader>>,
+
+    pub(crate) rel_size_v2_status: ArcSwapOption<RelSizeMigration>,
 }
 
 pub(crate) enum PreviousHeatmap {
@@ -2368,12 +2370,22 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
     }
 
+    /// Returns `true` if the rel_size_v2 config is enabled. NOTE: the write path and read path
+    /// should look at `get_rel_size_v2_status()` to get the actual status of the timeline. It is
+    /// possible that the index part persists the state while the config doesn't get persisted.
     pub(crate) fn get_rel_size_v2_enabled(&self) -> bool {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
             .tenant_conf
             .rel_size_v2_enabled
             .unwrap_or(self.conf.default_tenant_conf.rel_size_v2_enabled)
+    }
+
+    pub(crate) fn get_rel_size_v2_status(&self) -> Option<RelSizeMigration> {
+        self.rel_size_v2_status
+            .load()
+            .as_ref()
+            .map(|s| s.as_ref().clone())
     }
 
     fn get_compaction_upper_limit(&self) -> usize {
@@ -2636,6 +2648,7 @@ impl Timeline {
         attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
         create_idempotency: crate::tenant::CreateTimelineIdempotency,
         gc_compaction_state: Option<GcCompactionState>,
+        rel_size_v2_status: Option<RelSizeMigration>,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -2794,6 +2807,8 @@ impl Timeline {
                 previous_heatmap: ArcSwapOption::from_pointee(previous_heatmap),
 
                 heatmap_layers_downloader: Mutex::new(None),
+
+                rel_size_v2_status: ArcSwapOption::from_pointee(rel_size_v2_status),
             };
 
             result.repartition_threshold =
@@ -2868,6 +2883,16 @@ impl Timeline {
             .store(Arc::new(Some(gc_compaction_state.clone())));
         self.remote_client
             .schedule_index_upload_for_gc_compaction_state_update(gc_compaction_state)
+    }
+
+    pub(crate) fn update_rel_size_v2_status(
+        &self,
+        rel_size_v2_status: RelSizeMigration,
+    ) -> anyhow::Result<()> {
+        self.rel_size_v2_status
+            .store(Some(Arc::new(rel_size_v2_status.clone())));
+        self.remote_client
+            .schedule_index_upload_for_rel_size_v2_status_update(rel_size_v2_status)
     }
 
     pub(crate) fn get_gc_compaction_state(&self) -> Option<GcCompactionState> {

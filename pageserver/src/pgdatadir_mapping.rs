@@ -47,6 +47,7 @@ use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id,
     debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id,
 };
+use crate::tenant::remote_timeline_client::index::RelSizeMigration;
 use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::timeline::GetVectoredError;
 
@@ -492,7 +493,9 @@ impl Timeline {
         // Otherwise, read the old reldir keyspace.
         // TODO: if IndexPart::rel_size_migration is `Migrated`, we only need to read from v2.
 
-        if self.get_rel_size_v2_enabled() {
+        if let Some(RelSizeMigration::Migrated | RelSizeMigration::Migrating) =
+            self.get_rel_size_v2_status()
+        {
             // fetch directory listing (new)
             let key = rel_tag_sparse_key(tag.spcnode, tag.dbnode, tag.relnode, tag.forknum);
             let buf = RelDirExists::decode_option(version.sparse_get(self, key, ctx).await?)
@@ -544,7 +547,7 @@ impl Timeline {
                 forknum: *forknum,
             }));
 
-        if !self.get_rel_size_v2_enabled() {
+        if let Some(RelSizeMigration::Legacy) | None = self.get_rel_size_v2_status() {
             return Ok(rels_v1);
         }
 
@@ -1720,6 +1723,34 @@ impl DatadirModification<'_> {
         Ok(())
     }
 
+    /// Returns `true` if the rel_size_v2 write path is enabled. If it is the first time that
+    /// we enable it, we also need to persist it in `index_part.json`.
+    pub fn do_enable_rel_size_v2(&mut self) -> anyhow::Result<bool> {
+        let status = self.tline.get_rel_size_v2_status();
+        let config = self.tline.get_rel_size_v2_enabled();
+        match (config, status) {
+            (false, None | Some(RelSizeMigration::Legacy)) => {
+                // tenant config didn't enable it and we didn't write any reldir_v2 key yet
+                Ok(false)
+            }
+            (false, Some(RelSizeMigration::Migrating) | Some(RelSizeMigration::Migrated)) => {
+                // index_part already persisted that the timeline has enabled rel_size_v2
+                Ok(true)
+            }
+            (true, None | Some(RelSizeMigration::Legacy)) => {
+                // The first time we enable it, we need to persist it in `index_part.json`
+                self.tline
+                    .update_rel_size_v2_status(RelSizeMigration::Migrating)?;
+                Ok(true)
+            }
+            (true, Some(RelSizeMigration::Migrating) | Some(RelSizeMigration::Migrated)) => {
+                // index_part already persisted that the timeline has enabled rel_size_v2
+                // and we don't need to do anything
+                Ok(true)
+            }
+        }
+    }
+
     /// Store a relmapper file (pg_filenode.map) in the repository
     pub async fn put_relmap_file(
         &mut self,
@@ -1728,6 +1759,8 @@ impl DatadirModification<'_> {
         img: Bytes,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        let v2_enabled = self.do_enable_rel_size_v2()?;
+
         // Add it to the directory (if it doesn't exist already)
         let buf = self.get(DBDIR_KEY, ctx).await?;
         let mut dbdir = DbDirectory::des(&buf)?;
@@ -1748,7 +1781,7 @@ impl DatadirModification<'_> {
             })?;
             self.pending_directory_entries
                 .push((DirectoryKind::Rel, MetricsUpdate::Set(0)));
-            if self.tline.get_rel_size_v2_enabled() {
+            if v2_enabled {
                 self.pending_directory_entries
                     .push((DirectoryKind::RelV2, MetricsUpdate::Set(0)));
             }
@@ -1905,7 +1938,9 @@ impl DatadirModification<'_> {
             return Err(RelationError::AlreadyExists);
         }
 
-        if self.tline.get_rel_size_v2_enabled() {
+        let v2_enabled = self.do_enable_rel_size_v2()?;
+
+        if v2_enabled {
             let sparse_rel_dir_key =
                 rel_tag_sparse_key(rel.spcnode, rel.dbnode, rel.relnode, rel.forknum);
             // check if the rel_dir_key exists in v2
@@ -2031,6 +2066,7 @@ impl DatadirModification<'_> {
         drop_relations: HashMap<(u32, u32), Vec<RelTag>>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        let v2_enabled = self.do_enable_rel_size_v2()?;
         for ((spc_node, db_node), rel_tags) in drop_relations {
             let dir_key = rel_dir_to_key(spc_node, db_node);
             let buf = self.get(dir_key, ctx).await?;
@@ -2043,7 +2079,7 @@ impl DatadirModification<'_> {
                         .push((DirectoryKind::Rel, MetricsUpdate::Sub(1)));
                     dirty = true;
                     true
-                } else if self.tline.get_rel_size_v2_enabled() {
+                } else if v2_enabled {
                     // The rel is not found in the old reldir key, so we need to check the new sparse keyspace.
                     // Note that a relation can only exist in one of the two keyspaces (guaranteed by the ingestion
                     // logic).
