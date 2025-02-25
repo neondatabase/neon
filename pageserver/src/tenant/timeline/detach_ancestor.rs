@@ -19,7 +19,7 @@ use pageserver_api::{models::detach_ancestor::AncestorDetached, shard::ShardIden
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
-use utils::{completion, generation::Generation, id::TimelineId, lsn::Lsn};
+use utils::{completion, generation::Generation, id::TimelineId, lsn::Lsn, sync::gate::GateError};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
@@ -646,6 +646,11 @@ async fn remote_copy(
     let conf = adoptee.conf;
     let file_name = adopted.layer_desc().layer_name();
 
+    // We don't want to shut the timeline down during this operation because we do `delete_on_drop` below
+    let _gate = adoptee.gate.enter().map_err(|e| match e {
+        GateError::GateClosed => Error::ShuttingDown,
+    })?;
+
     // depending if Layer::keep_resident, do a hardlink
     let did_hardlink;
     let owned = if let Some(adopted_resident) = adopted.keep_resident().await {
@@ -666,12 +671,20 @@ async fn remote_copy(
         Layer::for_evicted(conf, adoptee, file_name, metadata)
     };
 
-    let layer = adoptee
+    let layer = match adoptee
         .remote_client
         .copy_timeline_layer(adopted, &owned, cancel)
         .await
-        .map(move |()| owned)
-        .map_err(|e| Error::launder(e, Error::Prepare))?;
+    {
+        Ok(()) => owned,
+        Err(e) => {
+            {
+                owned.delete_on_drop();
+                std::mem::drop(owned);
+            }
+            return Err(Error::launder(e, Error::Prepare));
+        }
+    };
 
     Ok((layer, did_hardlink))
 }
