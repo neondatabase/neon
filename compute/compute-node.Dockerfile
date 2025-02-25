@@ -395,15 +395,22 @@ RUN case "${PG_VERSION:?}" in \
     cd plv8-src && \
     if [[ "${PG_VERSION:?}" < "v17" ]]; then patch -p1 < /ext-src/plv8-3.1.10.patch; fi
 
-FROM pg-build AS plv8-build
+# Step 1: Build the vendored V8 engine. It doesn't depend on PostgreSQL, so use
+# 'build-deps' as the base. This enables caching and avoids unnecessary rebuilds.
+# (The V8 engine takes a very long time to build)
+FROM build-deps AS plv8-build
 ARG PG_VERSION
+WORKDIR /ext-src/plv8-src
 RUN apt update && \
     apt install --no-install-recommends --no-install-suggests -y \
     ninja-build python3-dev libncurses5 binutils clang \
     && apt clean && rm -rf /var/lib/apt/lists/*
-
 COPY --from=plv8-src /ext-src/ /ext-src/
-WORKDIR /ext-src/plv8-src
+RUN make DOCKER=1 -j $(getconf _NPROCESSORS_ONLN) v8
+
+# Step 2: Build the PostgreSQL-dependent parts
+COPY --from=pg-build /usr/local/pgsql /usr/local/pgsql
+ENV PATH="/usr/local/pgsql/bin:$PATH"
 RUN \
     # generate and copy upgrade scripts
     make generate_upgrades && \
@@ -1451,9 +1458,11 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) && \
 FROM build-deps AS pg_mooncake-src
 ARG PG_VERSION
 WORKDIR /ext-src
+COPY compute/patches/duckdb_v113.patch .
 RUN wget https://github.com/Mooncake-Labs/pg_mooncake/releases/download/v0.1.2/pg_mooncake-0.1.2.tar.gz -O pg_mooncake.tar.gz && \
     echo "4550473784fcdd2e1e18062bc01eb9c286abd27cdf5e11a4399be6c0a426ba90 pg_mooncake.tar.gz" | sha256sum --check && \
     mkdir pg_mooncake-src && cd pg_mooncake-src && tar xzf ../pg_mooncake.tar.gz --strip-components=1 -C . && \
+    cd third_party/duckdb && patch -p1 < /ext-src/duckdb_v113.patch && cd ../.. && \
     echo "make -f pg_mooncake-src/Makefile.build installcheck TEST_DIR=./test SQL_DIR=./sql SRC_DIR=./src" > neon-test.sh && \
     chmod a+x neon-test.sh
 
@@ -1473,6 +1482,7 @@ RUN make release -j $(getconf _NPROCESSORS_ONLN) && \
 FROM build-deps AS pg_duckdb-src
 WORKDIR /ext-src
 COPY compute/patches/pg_duckdb_v031.patch .
+COPY compute/patches/duckdb_v120.patch .
 # pg_duckdb build requires source dir to be a git repo to get submodules
 # allow neon_superuser to execute some functions that in pg_duckdb are available to superuser only: 
 # - extension management function duckdb.install_extension()
@@ -1480,7 +1490,9 @@ COPY compute/patches/pg_duckdb_v031.patch .
 RUN git clone --depth 1 --branch v0.3.1 https://github.com/duckdb/pg_duckdb.git pg_duckdb-src && \
     cd pg_duckdb-src && \
     git submodule update --init --recursive && \
-    patch -p1 < /ext-src/pg_duckdb_v031.patch
+    patch -p1 < /ext-src/pg_duckdb_v031.patch && \
+    cd third_party/duckdb && \
+    patch -p1 < /ext-src/duckdb_v120.patch
 
 FROM pg-build AS pg_duckdb-build
 ARG PG_VERSION
@@ -1806,7 +1818,7 @@ RUN make PG_VERSION="${PG_VERSION:?}" -C compute
 
 FROM pg-build AS extension-tests
 ARG PG_VERSION
-RUN mkdir /ext-src
+COPY docker-compose/ext-src/ /ext-src/
 
 COPY --from=pg-build /postgres /postgres
 #COPY --from=postgis-src /ext-src/ /ext-src/

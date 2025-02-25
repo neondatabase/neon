@@ -2,8 +2,8 @@ use std::convert::TryFrom;
 use std::sync::Arc;
 
 use postgres_client::tls::MakeTlsConnect;
-use rustls::pki_types::ServerName;
 use rustls::ClientConfig;
+use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 mod private {
@@ -15,8 +15,8 @@ mod private {
     use postgres_client::tls::{ChannelBinding, TlsConnect};
     use rustls::pki_types::ServerName;
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-    use tokio_rustls::client::TlsStream;
     use tokio_rustls::TlsConnector;
+    use tokio_rustls::client::TlsStream;
 
     use crate::tls::TlsServerEndPoint;
 

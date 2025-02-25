@@ -468,7 +468,7 @@ pub struct Timeline {
     /// If Some, collects GetPage metadata for an ongoing PageTrace.
     pub(crate) page_trace: ArcSwapOption<Sender<PageTraceEvent>>,
 
-    previous_heatmap: ArcSwapOption<PreviousHeatmap>,
+    pub(super) previous_heatmap: ArcSwapOption<PreviousHeatmap>,
 
     /// May host a background Tokio task which downloads all the layers from the current
     /// heatmap on demand.
@@ -2874,6 +2874,7 @@ impl Timeline {
                 auth_token: crate::config::SAFEKEEPER_AUTH_TOKEN.get().cloned(),
                 availability_zone: self.conf.availability_zone.clone(),
                 ingest_batch_size: self.conf.ingest_batch_size,
+                validate_wal_contiguity: self.conf.validate_wal_contiguity,
             },
             broker_client,
             ctx,
@@ -3523,6 +3524,14 @@ impl Timeline {
         Ok(layer)
     }
 
+    pub(super) fn is_previous_heatmap_active(&self) -> bool {
+        self.previous_heatmap
+            .load()
+            .as_ref()
+            .map(|prev| matches!(**prev, PreviousHeatmap::Active { .. }))
+            .unwrap_or(false)
+    }
+
     /// The timeline heatmap is a hint to secondary locations from the primary location,
     /// indicating which layers are currently on-disk on the primary.
     ///
@@ -3595,6 +3604,7 @@ impl Timeline {
             Some(non_resident) => {
                 let mut non_resident = non_resident.peekable();
                 if non_resident.peek().is_none() {
+                    tracing::info!(timeline_id=%self.timeline_id, "Previous heatmap now obsolete");
                     self.previous_heatmap
                         .store(Some(PreviousHeatmap::Obsolete.into()));
                 }
@@ -3624,6 +3634,36 @@ impl Timeline {
             .collect();
 
         Some(HeatMapTimeline::new(self.timeline_id, layers))
+    }
+
+    pub(super) async fn generate_unarchival_heatmap(&self, end_lsn: Lsn) -> PreviousHeatmap {
+        let guard = self.layers.read().await;
+
+        let now = SystemTime::now();
+        let mut heatmap_layers = Vec::default();
+        for vl in guard.visible_layers() {
+            if vl.layer_desc().get_lsn_range().start >= end_lsn {
+                continue;
+            }
+
+            let hl = HeatMapLayer {
+                name: vl.layer_desc().layer_name(),
+                metadata: vl.metadata(),
+                access_time: now,
+            };
+            heatmap_layers.push(hl);
+        }
+
+        tracing::info!(
+            "Generating unarchival heatmap with {} layers",
+            heatmap_layers.len()
+        );
+
+        let heatmap = HeatMapTimeline::new(self.timeline_id, heatmap_layers);
+        PreviousHeatmap::Active {
+            heatmap,
+            read_at: Instant::now(),
+        }
     }
 
     /// Returns true if the given lsn is or was an ancestor branchpoint.
@@ -5344,12 +5384,6 @@ impl From<OffloadError> for CompactionError {
     }
 }
 
-impl CompactionError {
-    pub fn is_cancelled(&self) -> bool {
-        matches!(self, CompactionError::ShuttingDown)
-    }
-}
-
 impl From<CollectKeySpaceError> for CompactionError {
     fn from(err: CollectKeySpaceError) -> Self {
         match err {
@@ -6614,7 +6648,7 @@ impl TimelineWriter<'_> {
 
         if let Some(wait_threshold) = wait_threshold {
             if l0_count >= wait_threshold {
-                info!("layer roll waiting for flush due to compaction backpressure at {l0_count} L0 layers");
+                debug!("layer roll waiting for flush due to compaction backpressure at {l0_count} L0 layers");
                 self.tl.wait_flush_completion(flush_id).await?;
             }
         }

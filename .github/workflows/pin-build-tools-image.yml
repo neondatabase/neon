@@ -65,6 +65,7 @@ jobs:
 
     permissions:
       id-token: write  # Required for aws/azure login
+      packages: write  # required for pushing to GHCR
 
     uses: ./.github/workflows/_push-to-container-registry.yml
     with:
@@ -72,12 +73,15 @@ jobs:
         {
           "docker.io/neondatabase/build-tools:${{ inputs.from-tag }}-bullseye": [
             "docker.io/neondatabase/build-tools:pinned-bullseye",
+            "ghcr.io/neondatabase/build-tools:pinned-bullseye",
             "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/build-tools:pinned-bullseye",
             "${{ vars.AZURE_DEV_REGISTRY_NAME }}.azurecr.io/neondatabase/build-tools:pinned-bullseye"
           ],
           "docker.io/neondatabase/build-tools:${{ inputs.from-tag }}-bookworm": [
             "docker.io/neondatabase/build-tools:pinned-bookworm",
             "docker.io/neondatabase/build-tools:pinned",
+            "ghcr.io/neondatabase/build-tools:pinned-bookworm",
+            "ghcr.io/neondatabase/build-tools:pinned",
             "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/build-tools:pinned-bookworm",
             "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/build-tools:pinned",
             "${{ vars.AZURE_DEV_REGISTRY_NAME }}.azurecr.io/neondatabase/build-tools:pinned-bookworm",
@@ -85,12 +89,10 @@ jobs:
           ]
         }
       aws-region: ${{ vars.AWS_ECR_REGION }}
-      aws-account-ids: "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}"
+      aws-account-id: "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}"
+      aws-role-to-assume: "gha-oidc-neon-admin"
       azure-client-id: ${{ vars.AZURE_DEV_CLIENT_ID }}
       azure-subscription-id: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
       azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
       acr-registry-name: ${{ vars.AZURE_DEV_REGISTRY_NAME }}
-    secrets:
-      aws-role-to-assume: "${{ vars.DEV_AWS_OIDC_ROLE_ARN }}"
-      docker-hub-username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-      docker-hub-password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+    secrets: inherit

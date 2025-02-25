@@ -1,17 +1,17 @@
 use std::fmt;
 use std::pin::pin;
 use std::sync::{Arc, Weak};
-use std::task::{ready, Poll};
+use std::task::{Poll, ready};
 
-use futures::future::poll_fn;
 use futures::Future;
-use postgres_client::tls::NoTlsStream;
+use futures::future::poll_fn;
 use postgres_client::AsyncMessage;
+use postgres_client::tls::NoTlsStream;
 use smallvec::SmallVec;
 use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, info_span, warn, Instrument};
+use tracing::{Instrument, error, info, info_span, warn};
 #[cfg(test)]
 use {
     super::conn_pool_lib::GlobalConnPoolOptions,

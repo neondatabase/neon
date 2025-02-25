@@ -335,13 +335,21 @@ impl PageServerNode {
                 .map(|x| x.parse::<u64>())
                 .transpose()
                 .context("Failed to parse 'checkpoint_distance' as an integer")?,
-            checkpoint_timeout: settings.remove("checkpoint_timeout").map(|x| x.to_string()),
+            checkpoint_timeout: settings
+                .remove("checkpoint_timeout")
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'checkpoint_timeout' as duration")?,
             compaction_target_size: settings
                 .remove("compaction_target_size")
                 .map(|x| x.parse::<u64>())
                 .transpose()
                 .context("Failed to parse 'compaction_target_size' as an integer")?,
-            compaction_period: settings.remove("compaction_period").map(|x| x.to_string()),
+            compaction_period: settings
+                .remove("compaction_period")
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'compaction_period' as duration")?,
             compaction_threshold: settings
                 .remove("compaction_threshold")
                 .map(|x| x.parse::<usize>())
@@ -387,7 +395,10 @@ impl PageServerNode {
                 .map(|x| x.parse::<u64>())
                 .transpose()
                 .context("Failed to parse 'gc_horizon' as an integer")?,
-            gc_period: settings.remove("gc_period").map(|x| x.to_string()),
+            gc_period: settings.remove("gc_period")
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'gc_period' as duration")?,
             image_creation_threshold: settings
                 .remove("image_creation_threshold")
                 .map(|x| x.parse::<usize>())
@@ -403,13 +414,20 @@ impl PageServerNode {
                 .map(|x| x.parse::<usize>())
                 .transpose()
                 .context("Failed to parse 'image_creation_preempt_threshold' as integer")?,
-            pitr_interval: settings.remove("pitr_interval").map(|x| x.to_string()),
+            pitr_interval: settings.remove("pitr_interval")
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'pitr_interval' as duration")?,
             walreceiver_connect_timeout: settings
                 .remove("walreceiver_connect_timeout")
-                .map(|x| x.to_string()),
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'walreceiver_connect_timeout' as duration")?,
             lagging_wal_timeout: settings
                 .remove("lagging_wal_timeout")
-                .map(|x| x.to_string()),
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'lagging_wal_timeout' as duration")?,
             max_lsn_wal_lag: settings
                 .remove("max_lsn_wal_lag")
                 .map(|x| x.parse::<NonZeroU64>())
@@ -427,8 +445,14 @@ impl PageServerNode {
                 .context("Failed to parse 'min_resident_size_override' as integer")?,
             evictions_low_residence_duration_metric_threshold: settings
                 .remove("evictions_low_residence_duration_metric_threshold")
-                .map(|x| x.to_string()),
-            heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'evictions_low_residence_duration_metric_threshold' as duration")?,
+            heatmap_period: settings
+                .remove("heatmap_period")
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'heatmap_period' as duration")?,
             lazy_slru_download: settings
                 .remove("lazy_slru_download")
                 .map(|x| x.parse::<bool>())
@@ -439,10 +463,15 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("parse `timeline_get_throttle` from json")?,
-            lsn_lease_length: settings.remove("lsn_lease_length").map(|x| x.to_string()),
+            lsn_lease_length: settings.remove("lsn_lease_length")
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'lsn_lease_length' as duration")?,
             lsn_lease_length_for_ts: settings
                 .remove("lsn_lease_length_for_ts")
-                .map(|x| x.to_string()),
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'lsn_lease_length_for_ts' as duration")?,
             timeline_offloading: settings
                 .remove("timeline_offloading")
                 .map(|x| x.parse::<bool>())
