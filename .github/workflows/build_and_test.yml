@@ -722,7 +722,7 @@ jobs:
           - pg: v17
             debian: bookworm
     env:
-      VM_BUILDER_VERSION: v0.37.1
+      VM_BUILDER_VERSION: v0.42.2
 
     steps:
       - uses: actions/checkout@v4
