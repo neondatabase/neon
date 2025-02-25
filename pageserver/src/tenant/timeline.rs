@@ -19,7 +19,7 @@ use arc_swap::{ArcSwap, ArcSwapOption};
 use bytes::Bytes;
 use camino::Utf8Path;
 use chrono::{DateTime, Utc};
-use compaction::CompactionOutcome;
+use compaction::{CompactionOutcome, GcCompactionCombinedSettings};
 use enumset::EnumSet;
 use fail::fail_point;
 use futures::FutureExt;
@@ -148,6 +148,7 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
+use super::remote_timeline_client::index::GcCompactionState;
 use super::{
     config::TenantConf, storage_layer::LayerVisibilityHint, upload_queue::NotInitialized,
     MaybeOffloaded,
@@ -322,6 +323,9 @@ pub struct Timeline {
     // of the branch point.
     ancestor_timeline: Option<Arc<Timeline>>,
     ancestor_lsn: Lsn,
+
+    // The LSN of gc-compaction that was last applied to this timeline.
+    gc_compaction_state: ArcSwap<Option<GcCompactionState>>,
 
     pub(super) metrics: TimelineMetrics,
 
@@ -1889,6 +1893,7 @@ impl Timeline {
             // abruptly stall nor resume L0 flushes in these cases.
             Err(CompactionError::Offload(_)) => {}
             Err(CompactionError::ShuttingDown) => {}
+            Err(CompactionError::AlreadyRunning(_)) => {}
         };
 
         result
@@ -2531,6 +2536,31 @@ impl Timeline {
             )
     }
 
+    fn get_gc_compaction_settings(&self) -> GcCompactionCombinedSettings {
+        let tenant_conf = &self.tenant_conf.load();
+        let gc_compaction_enabled = tenant_conf
+            .tenant_conf
+            .gc_compaction_enabled
+            .unwrap_or(self.conf.default_tenant_conf.gc_compaction_enabled);
+        let gc_compaction_initial_threshold_kb = tenant_conf
+            .tenant_conf
+            .gc_compaction_initial_threshold_kb
+            .unwrap_or(
+                self.conf
+                    .default_tenant_conf
+                    .gc_compaction_initial_threshold_kb,
+            );
+        let gc_compaction_ratio_percent = tenant_conf
+            .tenant_conf
+            .gc_compaction_ratio_percent
+            .unwrap_or(self.conf.default_tenant_conf.gc_compaction_ratio_percent);
+        GcCompactionCombinedSettings {
+            gc_compaction_enabled,
+            gc_compaction_initial_threshold_kb,
+            gc_compaction_ratio_percent,
+        }
+    }
+
     fn get_image_creation_preempt_threshold(&self) -> usize {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -2609,6 +2639,7 @@ impl Timeline {
         state: TimelineState,
         attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
         create_idempotency: crate::tenant::CreateTimelineIdempotency,
+        gc_compaction_state: Option<GcCompactionState>,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -2666,6 +2697,8 @@ impl Timeline {
                     prev: metadata.prev_record_lsn().unwrap_or(Lsn(0)),
                 }),
                 disk_consistent_lsn: AtomicLsn::new(disk_consistent_lsn.0),
+
+                gc_compaction_state: ArcSwap::new(Arc::new(gc_compaction_state)),
 
                 last_freeze_at: AtomicLsn::new(disk_consistent_lsn.0),
                 last_freeze_ts: RwLock::new(Instant::now()),
@@ -2829,6 +2862,20 @@ impl Timeline {
             }
             .instrument(info_span!(parent: None, "layer flush task", tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id))
         );
+    }
+
+    pub(crate) fn update_gc_compaction_state(
+        &self,
+        gc_compaction_state: GcCompactionState,
+    ) -> anyhow::Result<()> {
+        self.gc_compaction_state
+            .store(Arc::new(Some(gc_compaction_state.clone())));
+        self.remote_client
+            .schedule_index_upload_for_gc_compaction_state_update(gc_compaction_state)
+    }
+
+    pub(crate) fn get_gc_compaction_state(&self) -> Option<GcCompactionState> {
+        self.gc_compaction_state.load_full().as_ref().clone()
     }
 
     /// Creates and starts the wal receiver.
@@ -5373,6 +5420,8 @@ pub(crate) enum CompactionError {
     CollectKeySpaceError(CollectKeySpaceError),
     #[error(transparent)]
     Other(anyhow::Error),
+    #[error("Compaction already running: {0}")]
+    AlreadyRunning(&'static str),
 }
 
 impl From<OffloadError> for CompactionError {
