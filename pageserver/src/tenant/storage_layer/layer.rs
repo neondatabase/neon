@@ -1049,10 +1049,10 @@ impl LayerInner {
 
         let download_ctx = ctx
             .map(|ctx| ctx.detached_child(TaskKind::LayerDownload, DownloadBehavior::Download))
-            .unwrap_or(RequestContext::new(
-                TaskKind::LayerDownload,
-                DownloadBehavior::Download,
-            ));
+            .unwrap_or(
+                RequestContext::new(TaskKind::LayerDownload, DownloadBehavior::Download)
+                    .with_scope_timeline(&timeline),
+            );
 
         async move {
             tracing::info!(%reason, "downloading on-demand");
