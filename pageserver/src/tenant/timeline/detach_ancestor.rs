@@ -680,8 +680,32 @@ async fn remote_copy(
             &file_name,
             &metadata.generation,
         );
-        std::fs::hard_link(adopted_path, &adoptee_path)
-            .map_err(|e| Error::launder(e.into(), Error::Prepare))?;
+
+        match std::fs::hard_link(adopted_path, &adoptee_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // In theory we should not get into this situation as we are doing cleanups of the layer file after errors.
+                // However, we don't do cleanups for errors past `prepare`, so there is the slight chance to get to this branch.
+
+                // Double check that the file is orphan (probably from an earlier attempt), then delete it
+                let key = file_name.clone().into();
+                if adoptee.layers.read().await.contains_key(&key) {
+                    // We are supposed to filter out such cases before coming to this function
+                    return Err(Error::Prepare(anyhow::anyhow!(
+                        "layer file {file_name} already present and inside layer map"
+                    )));
+                }
+                tracing::info!("Deleting orphan layer file to make way for hard linking");
+                // Delete orphan layer file and try again, to ensure this layer has a well understood source
+                std::fs::remove_file(adopted_path)
+                    .map_err(|e| Error::launder(e.into(), Error::Prepare))?;
+                std::fs::hard_link(adopted_path, &adoptee_path)
+                    .map_err(|e| Error::launder(e.into(), Error::Prepare))?;
+            }
+            Err(e) => {
+                return Err(Error::launder(e.into(), Error::Prepare));
+            }
+        };
         did_hardlink = true;
         Layer::for_resident(conf, adoptee, adoptee_path, file_name, metadata).drop_eviction_guard()
     } else {
