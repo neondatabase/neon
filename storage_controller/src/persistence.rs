@@ -1536,28 +1536,28 @@ pub(crate) struct SafekeeperPersistence {
     pub(crate) port: i32,
     pub(crate) http_port: i32,
     pub(crate) availability_zone_id: String,
-    pub(crate) scheduling_policy: SkSchedulingPolicyWrapper,
+    pub(crate) scheduling_policy: SkSchedulingPolicyFromSql,
 }
 
 /// Wrapper struct around [`SkSchedulingPolicy`] because both it and [`FromSql`] are from foreign crates,
 /// and we don't want to make [`safekeeper_api`] depend on [`diesel`].
 #[derive(Serialize, Deserialize, FromSqlRow, Eq, PartialEq, Debug, Copy, Clone)]
-pub(crate) struct SkSchedulingPolicyWrapper(pub(crate) SkSchedulingPolicy);
+pub(crate) struct SkSchedulingPolicyFromSql(pub(crate) SkSchedulingPolicy);
 
-impl From<SkSchedulingPolicy> for SkSchedulingPolicyWrapper {
+impl From<SkSchedulingPolicy> for SkSchedulingPolicyFromSql {
     fn from(value: SkSchedulingPolicy) -> Self {
-        SkSchedulingPolicyWrapper(value)
+        SkSchedulingPolicyFromSql(value)
     }
 }
 
-impl FromSql<diesel::sql_types::VarChar, Pg> for SkSchedulingPolicyWrapper {
+impl FromSql<diesel::sql_types::VarChar, Pg> for SkSchedulingPolicyFromSql {
     fn from_sql(
         bytes: <Pg as diesel::backend::Backend>::RawValue<'_>,
     ) -> diesel::deserialize::Result<Self> {
         let bytes = bytes.as_bytes();
         match core::str::from_utf8(bytes) {
             Ok(s) => match SkSchedulingPolicy::from_str(s) {
-                Ok(policy) => Ok(SkSchedulingPolicyWrapper(policy)),
+                Ok(policy) => Ok(SkSchedulingPolicyFromSql(policy)),
                 Err(e) => Err(format!("can't parse: {e}").into()),
             },
             Err(e) => Err(format!("invalid UTF-8 for scheduling policy: {e}").into()),
