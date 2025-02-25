@@ -5588,7 +5588,8 @@ impl Timeline {
                 // because we have not implemented L0 => L0 compaction.
                 duplicated_layers.insert(l.layer_desc().key());
             } else if LayerMap::is_l0(&l.layer_desc().key_range, l.layer_desc().is_delta) {
-                return Err(CompactionError::Other(anyhow::anyhow!("compaction generates a L0 layer file as output, which will cause infinite compaction.")));
+                // This is not an error any more because we allow L0-L0 compaction.
+                // return Err(CompactionError::Other(anyhow::anyhow!("compaction generates a L0 layer file as output, which will cause infinite compaction.")));
             } else {
                 insert_layers.push(l.clone());
             }
