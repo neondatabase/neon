@@ -175,19 +175,16 @@ pub struct SearchResult {
 ///
 /// Contains a mapping from a layer description to a keyspace
 /// accumulator that contains all the keys which intersect the layer
-/// from the original search space. Keys that were not found are accumulated
-/// in a separate key space accumulator.
+/// from the original search space.
 #[derive(Debug)]
 pub struct RangeSearchResult {
     pub found: HashMap<SearchResult, KeySpaceAccum>,
-    pub not_found: KeySpaceAccum,
 }
 
 impl RangeSearchResult {
     fn new() -> Self {
         Self {
             found: HashMap::new(),
-            not_found: KeySpaceAccum::new(),
         }
     }
 }
@@ -257,21 +254,15 @@ where
         let mut current_range_start = match next_layer_type {
             None => {
                 // No changes for the range
-                self.pad_range(self.key_range.clone());
                 return self.result;
             }
             Some(layer_type) if self.key_range.end <= layer_type.next_change_at_key() => {
                 // Changes only after the end of the range
-                self.pad_range(self.key_range.clone());
                 return self.result;
             }
             Some(layer_type) => {
-                // Changes for the range exist. Record anything before the first
-                // coverage change as not found.
+                // Changes for the range exist.
                 let coverage_start = layer_type.next_change_at_key();
-                let range_before = self.key_range.start..coverage_start;
-                self.pad_range(range_before);
-
                 self.advance(&layer_type);
                 coverage_start
             }
@@ -297,13 +288,6 @@ where
         self.result
     }
 
-    /// Mark a range as not found (i.e. no layers intersect it)
-    fn pad_range(&mut self, key_range: Range<Key>) {
-        if !key_range.is_empty() {
-            self.result.not_found.add_range(key_range);
-        }
-    }
-
     /// Select the appropiate layer for the given range and update
     /// the collector.
     fn add_range(&mut self, covered_range: Range<Key>) {
@@ -313,14 +297,12 @@ where
             self.end_lsn,
         );
 
-        match selected {
-            Some(search_result) => self
-                .result
+        if let Some(search_result) = selected {
+            self.result
                 .found
                 .entry(search_result)
                 .or_default()
-                .add_range(covered_range),
-            None => self.pad_range(covered_range),
+                .add_range(covered_range);
         }
     }
 
@@ -454,9 +436,7 @@ impl LayerMap {
         let version = match self.historic.get().unwrap().get_version(end_lsn.0 - 1) {
             Some(version) => version,
             None => {
-                let mut result = RangeSearchResult::new();
-                result.not_found.add_range(key_range);
-                return result;
+                return RangeSearchResult::new();
             }
         };
 
@@ -1101,7 +1081,6 @@ mod tests {
     }
 
     fn assert_range_search_result_eq(lhs: RangeSearchResult, rhs: RangeSearchResult) {
-        assert_eq!(lhs.not_found.to_keyspace(), rhs.not_found.to_keyspace());
         let lhs: HashMap<SearchResult, KeySpace> = lhs
             .found
             .into_iter()
@@ -1127,17 +1106,12 @@ mod tests {
         let mut key = key_range.start;
         while key != key_range.end {
             let res = layer_map.search(key, end_lsn);
-            match res {
-                Some(res) => {
-                    range_search_result
-                        .found
-                        .entry(res)
-                        .or_default()
-                        .add_key(key);
-                }
-                None => {
-                    range_search_result.not_found.add_key(key);
-                }
+            if let Some(res) = res {
+                range_search_result
+                    .found
+                    .entry(res)
+                    .or_default()
+                    .add_key(key);
             }
 
             key = key.next();
@@ -1152,12 +1126,7 @@ mod tests {
         let range = Key::from_i128(100)..Key::from_i128(200);
 
         let res = layer_map.range_search(range.clone(), Lsn(100));
-        assert_eq!(
-            res.not_found.to_keyspace(),
-            KeySpace {
-                ranges: vec![range]
-            }
-        );
+        assert_range_search_result_eq(res, RangeSearchResult::new());
     }
 
     #[test]
