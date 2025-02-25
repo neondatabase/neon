@@ -197,7 +197,10 @@ impl<'de> serde::de::Deserialize<'de> for IpPattern {
             type Value = IpPattern;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(formatter, "comma separated list with ip address, ip address range, or ip address subnet mask")
+                write!(
+                    formatter,
+                    "comma separated list with ip address, ip address range, or ip address subnet mask"
+                )
             }
 
             fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
@@ -252,8 +255,8 @@ fn project_name_valid(name: &str) -> bool {
 #[cfg(test)]
 #[expect(clippy::unwrap_used)]
 mod tests {
-    use serde_json::json;
     use ComputeUserInfoParseError::*;
+    use serde_json::json;
 
     use super::*;
 

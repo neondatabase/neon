@@ -1,12 +1,12 @@
 use std::collections::HashSet;
 use std::convert::Infallible;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use clashmap::ClashMap;
-use rand::{thread_rng, Rng};
+use rand::{Rng, thread_rng};
 use smol_str::SmolStr;
 use tokio::sync::Mutex;
 use tokio::time::Instant;

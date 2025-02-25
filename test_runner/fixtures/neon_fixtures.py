@@ -1167,15 +1167,15 @@ class NeonEnv:
                 "max_batch_size": 32,
             }
 
-            # Concurrent IO (https://github.com/neondatabase/neon/issues/9378):
-            # enable concurrent IO by default in tests and benchmarks.
-            # Compat tests are exempt because old versions fail to parse the new config.
-            get_vectored_concurrent_io = self.pageserver_get_vectored_concurrent_io
             if config.test_may_use_compatibility_snapshot_binaries:
                 log.info(
-                    "Forcing use of binary-built-in default to avoid forward-compatibility related test failures"
+                    "Skipping WAL contiguity validation to avoid forward-compatibility related test failures"
                 )
-                get_vectored_concurrent_io = None
+            else:
+                # Look for gaps in WAL received from safekeepeers
+                ps_cfg["validate_wal_contiguity"] = True
+
+            get_vectored_concurrent_io = self.pageserver_get_vectored_concurrent_io
             if get_vectored_concurrent_io is not None:
                 ps_cfg["get_vectored_concurrent_io"] = {
                     "mode": self.pageserver_get_vectored_concurrent_io,
@@ -1630,6 +1630,7 @@ def neon_env_builder(
 class PageserverPort:
     pg: int
     http: int
+    https: int | None = None
 
 
 class LogUtils:
@@ -1886,6 +1887,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
             "node_id": int(node.id),
             "listen_http_addr": "localhost",
             "listen_http_port": node.service_port.http,
+            "listen_https_port": node.service_port.https,
             "listen_pg_addr": "localhost",
             "listen_pg_port": node.service_port.pg,
             "availability_zone_id": node.az_id,

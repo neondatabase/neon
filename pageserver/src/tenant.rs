@@ -34,6 +34,7 @@ use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeoutOrCancel;
+use remote_timeline_client::index::GcCompactionState;
 use remote_timeline_client::manifest::{
     OffloadedTimelineManifest, TenantManifest, LATEST_TENANT_MANIFEST_VERSION,
 };
@@ -1168,6 +1169,7 @@ impl Tenant {
             resources,
             CreateTimelineCause::Load,
             idempotency.clone(),
+            index_part.gc_compaction.clone(),
         )?;
         let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
         anyhow::ensure!(
@@ -1188,6 +1190,39 @@ impl Tenant {
             .with_context(|| {
                 format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
             })?;
+
+        // When unarchiving, we've mostly likely lost the heatmap generated prior
+        // to the archival operation. To allow warming this timeline up, generate
+        // a previous heatmap which contains all visible layers in the layer map.
+        // This previous heatmap will be used whenever a fresh heatmap is generated
+        // for the timeline.
+        if matches!(cause, LoadTimelineCause::Unoffload) {
+            let mut tline_ending_at = Some((&timeline, timeline.get_last_record_lsn()));
+            while let Some((tline, end_lsn)) = tline_ending_at {
+                let unarchival_heatmap = tline.generate_unarchival_heatmap(end_lsn).await;
+                if !tline.is_previous_heatmap_active() {
+                    tline
+                        .previous_heatmap
+                        .store(Some(Arc::new(unarchival_heatmap)));
+                } else {
+                    tracing::info!("Previous heatmap still active. Dropping unarchival heatmap.")
+                }
+
+                match tline.ancestor_timeline() {
+                    Some(ancestor) => {
+                        if ancestor.update_layer_visibility().await.is_err() {
+                            // Ancestor timeline is shutting down.
+                            break;
+                        }
+
+                        tline_ending_at = Some((ancestor, tline.get_ancestor_lsn()));
+                    }
+                    None => {
+                        tline_ending_at = None;
+                    }
+                }
+            }
+        }
 
         match import_pgdata {
             Some(import_pgdata) if !import_pgdata.is_done() => {
@@ -3092,20 +3127,19 @@ impl Tenant {
 
             // If we're done compacting, check the scheduled GC compaction queue for more work.
             if outcome == CompactionOutcome::Done {
-                let queue = self
-                    .scheduled_compaction_tasks
-                    .lock()
-                    .unwrap()
-                    .get(&timeline.timeline_id)
-                    .cloned();
-                if let Some(queue) = queue {
-                    outcome = queue
-                        .iteration(cancel, ctx, &self.gc_block, &timeline)
-                        .instrument(
-                            info_span!("gc_compact_timeline", timeline_id = %timeline.timeline_id),
-                        )
-                        .await?;
-                }
+                let queue = {
+                    let mut guard = self.scheduled_compaction_tasks.lock().unwrap();
+                    guard
+                        .entry(timeline.timeline_id)
+                        .or_insert_with(|| Arc::new(GcCompactionQueue::new()))
+                        .clone()
+                };
+                outcome = queue
+                    .iteration(cancel, ctx, &self.gc_block, &timeline)
+                    .instrument(
+                        info_span!("gc_compact_timeline", timeline_id = %timeline.timeline_id),
+                    )
+                    .await?;
             }
 
             // If we're done compacting, offload the timeline if requested.
@@ -3162,6 +3196,7 @@ impl Tenant {
                     .unwrap()
                     .fail(&CIRCUIT_BREAKERS_BROKEN, err);
             }
+            CompactionError::AlreadyRunning(_) => {}
         }
     }
 
@@ -4117,6 +4152,7 @@ impl Tenant {
         resources: TimelineResources,
         cause: CreateTimelineCause,
         create_idempotency: CreateTimelineIdempotency,
+        gc_compaction_state: Option<GcCompactionState>,
     ) -> anyhow::Result<Arc<Timeline>> {
         let state = match cause {
             CreateTimelineCause::Load => {
@@ -4148,6 +4184,7 @@ impl Tenant {
             state,
             self.attach_wal_lag_cooldown.clone(),
             create_idempotency,
+            gc_compaction_state,
             self.cancel.child_token(),
         );
 
@@ -5213,6 +5250,7 @@ impl Tenant {
                 resources,
                 CreateTimelineCause::Load,
                 create_guard.idempotency.clone(),
+                None,
             )
             .context("Failed to create timeline data structure")?;
 

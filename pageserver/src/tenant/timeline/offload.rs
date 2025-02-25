@@ -143,5 +143,12 @@ fn remove_timeline_from_tenant(
         .remove(&timeline.timeline_id)
         .expect("timeline that we were deleting was concurrently removed from 'timelines' map");
 
+    // Clear the compaction queue for this timeline
+    tenant
+        .scheduled_compaction_tasks
+        .lock()
+        .unwrap()
+        .remove(&timeline.timeline_id);
+
     Arc::strong_count(&timeline)
 }
