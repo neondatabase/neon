@@ -295,6 +295,7 @@ fn log_compaction_error(
     let level = match err {
         ShuttingDown => return,
         Offload(_) => Level::ERROR,
+        AlreadyRunning(_) => Level::ERROR,
         CollectKeySpaceError(CollectKeySpaceError::Cancelled) => Level::INFO,
         CollectKeySpaceError(_) => Level::ERROR,
         _ if task_cancelled => Level::INFO,
