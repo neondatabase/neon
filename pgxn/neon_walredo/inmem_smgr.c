@@ -285,14 +285,14 @@ inmem_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		 * WARN_PAGES, print a warning so that we get alerted and get to
 		 * investigate why we're accessing so many buffers.
 		 */
-		elog(used_pages >= WARN_PAGES ? WARNING : DEBUG1,
-			 "inmem_write() called for %u/%u/%u.%u blk %u: used_pages %u",
-			 RelFileInfoFmt(InfoFromSMgrRel(reln)),
-			 forknum,
-			 blocknum,
-			 used_pages);
+		if (used_pages >= WARN_PAGES)
+			ereport(ERROR, (errmsg("inmem_write() called for %u/%u/%u.%u blk %u: used_pages %u",
+								   RelFileInfoFmt(InfoFromSMgrRel(reln)),
+								   forknum,
+								   blocknum,
+								   used_pages), errbacktrace()));
 		if (used_pages == MAX_PAGES)
-			ereport(ERROR, (errmsg("Inmem storage overflow"), errbacktrace()));
+			elog(ERROR, "Inmem storage overflow");
 
 		pg = used_pages;
 		used_pages++;
