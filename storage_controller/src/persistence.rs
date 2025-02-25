@@ -1539,6 +1539,8 @@ pub(crate) struct SafekeeperPersistence {
     pub(crate) scheduling_policy: SkSchedulingPolicyWrapper,
 }
 
+/// Wrapper struct around [`SkSchedulingPolicy`] because both it and [`FromSql`] are from foreign crates,
+/// and we don't want to make [`safekeeper_api`] depend on [`diesel`].
 #[derive(Serialize, Deserialize, FromSqlRow, Eq, PartialEq, Debug, Copy, Clone)]
 pub(crate) struct SkSchedulingPolicyWrapper(pub(crate) SkSchedulingPolicy);
 
