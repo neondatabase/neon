@@ -4692,7 +4692,7 @@ impl Timeline {
             ));
         }
 
-        let (dense_ks, sparse_ks) = self.collect_keyspace(lsn, ctx).await?; // Use `?` instead of `map_err` to normalize shutdown and cancel errors.
+        let (dense_ks, sparse_ks) = self.collect_keyspace(lsn, ctx).await?;
         let dense_partitioning = dense_ks.partition(&self.shard_identity, partition_size);
         let sparse_partitioning = SparseKeyPartitioning {
             parts: vec![sparse_ks],
