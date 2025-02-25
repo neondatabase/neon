@@ -20,7 +20,7 @@
 //! This way control file stores information about all potentially existing
 //! remote partial segments and can clean them up after uploading a newer version.
 use camino::Utf8PathBuf;
-use postgres_ffi::{XLogFileName, XLogSegNo, PG_TLI};
+use postgres_ffi::{PG_TLI, XLogFileName, XLogSegNo};
 use remote_storage::RemotePath;
 use safekeeper_api::Term;
 use serde::{Deserialize, Serialize};
@@ -30,12 +30,12 @@ use tracing::{debug, error, info, instrument, warn};
 use utils::{id::NodeId, lsn::Lsn};
 
 use crate::{
+    SafeKeeperConf,
     metrics::{MISC_OPERATION_SECONDS, PARTIAL_BACKUP_UPLOADED_BYTES, PARTIAL_BACKUP_UPLOADS},
-    rate_limit::{rand_duration, RateLimiter},
+    rate_limit::{RateLimiter, rand_duration},
     timeline::WalResidentTimeline,
     timeline_manager::StateSnapshot,
     wal_backup::{self},
-    SafeKeeperConf,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

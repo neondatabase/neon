@@ -14,24 +14,24 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use anyhow::{anyhow, Context as _};
+use anyhow::{Context as _, anyhow};
 use aws_config::{
+    BehaviorVersion,
     default_provider::credentials::DefaultCredentialsChain,
     retry::{RetryConfigBuilder, RetryMode},
-    BehaviorVersion,
 };
 use aws_sdk_s3::{
+    Client,
     config::{AsyncSleep, IdentityCache, Region, SharedAsyncSleep},
     error::SdkError,
     operation::{get_object::GetObjectError, head_object::HeadObjectError},
     types::{Delete, DeleteMarkerEntry, ObjectIdentifier, ObjectVersion, StorageClass},
-    Client,
 };
 use aws_smithy_async::rt::sleep::TokioSleep;
 use http_body_util::StreamBody;
 use http_types::StatusCode;
 
-use aws_smithy_types::{body::SdkBody, DateTime};
+use aws_smithy_types::{DateTime, body::SdkBody};
 use aws_smithy_types::{byte_stream::ByteStream, date_time::ConversionError};
 use bytes::Bytes;
 use futures::stream::Stream;
@@ -43,13 +43,13 @@ use utils::backoff;
 
 use super::StorageMetadata;
 use crate::{
+    ConcurrencyLimiter, Download, DownloadError, DownloadOpts, Listing, ListingMode, ListingObject,
+    MAX_KEYS_PER_DELETE_S3, REMOTE_STORAGE_PREFIX_SEPARATOR, RemotePath, RemoteStorage,
+    TimeTravelError, TimeoutOrCancel,
     config::S3Config,
     error::Cancelled,
     metrics::{start_counting_cancelled_wait, start_measuring_requests},
     support::PermitCarrying,
-    ConcurrencyLimiter, Download, DownloadError, DownloadOpts, Listing, ListingMode, ListingObject,
-    RemotePath, RemoteStorage, TimeTravelError, TimeoutOrCancel, MAX_KEYS_PER_DELETE_S3,
-    REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
 use crate::metrics::AttemptOutcome;
@@ -958,8 +958,10 @@ impl RemoteStorage for S3Bucket {
                 version_id, key, ..
             } = &vd;
             if version_id == "null" {
-                return Err(TimeTravelError::Other(anyhow!("Received ListVersions response for key={key} with version_id='null', \
-                    indicating either disabled versioning, or legacy objects with null version id values")));
+                return Err(TimeTravelError::Other(anyhow!(
+                    "Received ListVersions response for key={key} with version_id='null', \
+                    indicating either disabled versioning, or legacy objects with null version id values"
+                )));
             }
             tracing::trace!(
                 "Parsing version key={key} version_id={version_id} kind={:?}",

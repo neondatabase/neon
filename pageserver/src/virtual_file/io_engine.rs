@@ -80,7 +80,9 @@ pub(crate) fn get() -> IoEngine {
                     Ok(v) => match v.parse::<IoEngineKind>() {
                         Ok(engine_kind) => engine_kind,
                         Err(e) => {
-                            panic!("invalid VirtualFile io engine for env var {env_var_name}: {e:#}: {v:?}")
+                            panic!(
+                                "invalid VirtualFile io engine for env var {env_var_name}: {e:#}: {v:?}"
+                            )
                         }
                     },
                     Err(std::env::VarError::NotPresent) => {
@@ -113,8 +115,8 @@ use std::{
 };
 
 use super::{
-    owned_buffers_io::{io_buf_ext::FullSlice, slice::SliceMutExt},
     FileGuard, Metadata,
+    owned_buffers_io::{io_buf_ext::FullSlice, slice::SliceMutExt},
 };
 
 #[cfg(target_os = "linux")]

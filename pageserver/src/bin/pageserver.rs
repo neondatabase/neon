@@ -3,23 +3,23 @@
 //! Main entry point for the Page Server executable.
 
 use std::env;
-use std::env::{var, VarError};
+use std::env::{VarError, var};
 use std::io::Read;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use camino::Utf8Path;
 use clap::{Arg, ArgAction, Command};
 
-use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
+use metrics::launch_timestamp::{LaunchTimestamp, set_launch_timestamp_metric};
 use pageserver::config::PageserverIdentity;
 use pageserver::controller_upcall_client::ControllerUpcallClient;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
 use pageserver::task_mgr::{COMPUTE_REQUEST_RUNTIME, WALRECEIVER_RUNTIME};
-use pageserver::tenant::{secondary, TenantSharedResources};
+use pageserver::tenant::{TenantSharedResources, secondary};
 use pageserver::{CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener};
 use remote_storage::GenericRemoteStorage;
 use tokio::signal::unix::SignalKind;
@@ -217,7 +217,9 @@ fn initialize_config(
         Ok(mut f) => {
             let md = f.metadata().context("stat config file")?;
             if !md.is_file() {
-                anyhow::bail!("Pageserver found identity file but it is a dir entry: {identity_file_path}. Aborting start up ...");
+                anyhow::bail!(
+                    "Pageserver found identity file but it is a dir entry: {identity_file_path}. Aborting start up ..."
+                );
             }
 
             let mut s = String::new();
@@ -225,7 +227,9 @@ fn initialize_config(
             toml_edit::de::from_str::<PageserverIdentity>(&s)?
         }
         Err(e) => {
-            anyhow::bail!("Pageserver could not read identity file: {identity_file_path}: {e}. Aborting start up ...");
+            anyhow::bail!(
+                "Pageserver could not read identity file: {identity_file_path}: {e}. Aborting start up ..."
+            );
         }
     };
 
@@ -401,11 +405,9 @@ fn start_pageserver(
         Err(VarError::NotPresent) => {
             info!("No JWT token for authentication with Safekeeper detected");
         }
-        Err(e) => {
-            return Err(e).with_context(|| {
-                "Failed to either load to detect non-present NEON_AUTH_TOKEN environment variable"
-            })
-        }
+        Err(e) => return Err(e).with_context(
+            || "Failed to either load to detect non-present NEON_AUTH_TOKEN environment variable",
+        ),
     };
 
     // Top-level cancellation token for the process
@@ -711,7 +713,9 @@ async fn create_remote_storage_client(
     // wrapper that simulates failures.
     if conf.test_remote_failures > 0 {
         if !cfg!(feature = "testing") {
-            anyhow::bail!("test_remote_failures option is not available because pageserver was compiled without the 'testing' feature");
+            anyhow::bail!(
+                "test_remote_failures option is not available because pageserver was compiled without the 'testing' feature"
+            );
         }
         info!(
             "Simulating remote failures for first {} attempts of each op",

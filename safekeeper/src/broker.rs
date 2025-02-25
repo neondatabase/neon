@@ -1,15 +1,15 @@
 //! Communication with the broker, providing safekeeper peers and pageserver coordination.
 
+use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::bail;
-use anyhow::Context;
 
 use anyhow::Error;
 use anyhow::Result;
 
 use storage_broker::parse_proto_ttid;
 
-use storage_broker::proto::subscribe_safekeeper_info_request::SubscriptionKey as ProtoSubscriptionKey;
+use storage_broker::Request;
 use storage_broker::proto::FilterTenantTimelineId;
 use storage_broker::proto::MessageType;
 use storage_broker::proto::SafekeeperDiscoveryResponse;
@@ -17,10 +17,10 @@ use storage_broker::proto::SubscribeByFilterRequest;
 use storage_broker::proto::SubscribeSafekeeperInfoRequest;
 use storage_broker::proto::TypeSubscription;
 use storage_broker::proto::TypedMessage;
-use storage_broker::Request;
+use storage_broker::proto::subscribe_safekeeper_info_request::SubscriptionKey as ProtoSubscriptionKey;
 
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::UNIX_EPOCH;
@@ -28,12 +28,12 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::*;
 
-use crate::metrics::BROKER_ITERATION_TIMELINES;
-use crate::metrics::BROKER_PULLED_UPDATES;
-use crate::metrics::BROKER_PUSHED_UPDATES;
-use crate::metrics::BROKER_PUSH_ALL_UPDATES_SECONDS;
 use crate::GlobalTimelines;
 use crate::SafeKeeperConf;
+use crate::metrics::BROKER_ITERATION_TIMELINES;
+use crate::metrics::BROKER_PULLED_UPDATES;
+use crate::metrics::BROKER_PUSH_ALL_UPDATES_SECONDS;
+use crate::metrics::BROKER_PUSHED_UPDATES;
 
 const RETRY_INTERVAL_MSEC: u64 = 1000;
 const PUSH_INTERVAL_MSEC: u64 = 1000;

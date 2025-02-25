@@ -8,7 +8,7 @@ use std::future::Future;
 use std::str::FromStr;
 use std::time::SystemTime;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::shard::TenantShardId;
 use tokio::fs::{self, File, OpenOptions};
@@ -18,16 +18,16 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use utils::backoff;
 
+use crate::TEMP_FILE_SUFFIX;
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id, debug_assert_current_span_has_tenant_id,
 };
+use crate::tenant::Generation;
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::LayerName;
-use crate::tenant::Generation;
-use crate::virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile};
-use crate::TEMP_FILE_SUFFIX;
+use crate::virtual_file::{MaybeFatalIo, VirtualFile, on_fatal_io_error};
 use remote_storage::{
     DownloadError, DownloadKind, DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath,
 };
@@ -38,10 +38,10 @@ use utils::pausable_failpoint;
 use super::index::{IndexPart, LayerFileMetadata};
 use super::manifest::TenantManifest;
 use super::{
-    parse_remote_index_path, parse_remote_tenant_manifest_path, remote_index_path,
-    remote_initdb_archive_path, remote_initdb_preserved_archive_path, remote_tenant_manifest_path,
-    remote_tenant_manifest_prefix, remote_tenant_path, FAILED_DOWNLOAD_WARN_THRESHOLD,
-    FAILED_REMOTE_OP_RETRIES, INITDB_PATH,
+    FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES, INITDB_PATH, parse_remote_index_path,
+    parse_remote_tenant_manifest_path, remote_index_path, remote_initdb_archive_path,
+    remote_initdb_preserved_archive_path, remote_tenant_manifest_path,
+    remote_tenant_manifest_prefix, remote_tenant_path,
 };
 
 ///
@@ -207,8 +207,8 @@ async fn download_object(
         }
         #[cfg(target_os = "linux")]
         crate::virtual_file::io_engine::IoEngine::TokioEpollUring => {
-            use crate::virtual_file::owned_buffers_io;
             use crate::virtual_file::IoBufferMut;
+            use crate::virtual_file::owned_buffers_io;
             use std::sync::Arc;
             async {
                 let destination_file = Arc::new(

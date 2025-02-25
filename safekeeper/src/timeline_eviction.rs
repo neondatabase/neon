@@ -16,7 +16,7 @@ use utils::crashsafe::durable_rename;
 
 use crate::{
     metrics::{
-        EvictionEvent, EVICTION_EVENTS_COMPLETED, EVICTION_EVENTS_STARTED, NUM_EVICTED_TIMELINES,
+        EVICTION_EVENTS_COMPLETED, EVICTION_EVENTS_STARTED, EvictionEvent, NUM_EVICTED_TIMELINES,
     },
     rate_limit::rand_duration,
     timeline_manager::{Manager, StateSnapshot},

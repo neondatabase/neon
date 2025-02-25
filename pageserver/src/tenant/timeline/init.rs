@@ -12,7 +12,7 @@ use crate::{
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use std::{
-    collections::{hash_map, HashMap},
+    collections::{HashMap, hash_map},
     str::FromStr,
 };
 use utils::lsn::Lsn;

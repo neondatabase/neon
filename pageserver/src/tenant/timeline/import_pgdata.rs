@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use remote_storage::RemotePath;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, info_span, Instrument};
+use tracing::{Instrument, info, info_span};
 use utils::lsn::Lsn;
 
 use crate::{context::RequestContext, tenant::metadata::TimelineMetadata};

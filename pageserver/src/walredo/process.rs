@@ -5,7 +5,7 @@ mod protocol;
 use self::no_leak_child::NoLeakChild;
 use crate::{
     config::PageServerConf,
-    metrics::{WalRedoKillCause, WAL_REDO_PROCESS_COUNTERS, WAL_REDO_RECORD_COUNTER},
+    metrics::{WAL_REDO_PROCESS_COUNTERS, WAL_REDO_RECORD_COUNTER, WalRedoKillCause},
     page_cache::PAGE_SZ,
     span::debug_assert_current_span_has_tenant_id,
 };
@@ -22,7 +22,7 @@ use std::{
     time::Duration,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{debug, error, instrument, Instrument};
+use tracing::{Instrument, debug, error, instrument};
 use utils::{lsn::Lsn, poison::Poison};
 
 pub struct WalRedoProcess {

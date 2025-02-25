@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use crate::controller_upcall_client::ControlPlaneGenerationsApi;
 use crate::metrics;
-use crate::tenant::remote_timeline_client::remote_timeline_path;
 use crate::tenant::remote_timeline_client::LayerFileMetadata;
+use crate::tenant::remote_timeline_client::remote_timeline_path;
 use crate::virtual_file::MaybeFatalIo;
 use crate::virtual_file::VirtualFile;
 use anyhow::Context;

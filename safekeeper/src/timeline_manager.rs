@@ -8,29 +8,30 @@
 //! Also, if it will stuck in some branch, it will prevent any further progress in the timeline.
 
 use std::{
-    sync::{atomic::AtomicUsize, Arc},
+    sync::{Arc, atomic::AtomicUsize},
     time::Duration,
 };
 
 use futures::channel::oneshot;
 use postgres_ffi::XLogSegNo;
-use safekeeper_api::{models::PeerInfo, Term};
+use safekeeper_api::{Term, models::PeerInfo};
 use serde::{Deserialize, Serialize};
 use tokio::{
     task::{JoinError, JoinHandle},
     time::Instant,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, info_span, instrument, warn, Instrument};
+use tracing::{Instrument, debug, info, info_span, instrument, warn};
 use utils::lsn::Lsn;
 
 use crate::{
+    SafeKeeperConf,
     control_file::{FileStorage, Storage},
     metrics::{
         MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL, MISC_OPERATION_SECONDS,
         NUM_EVICTED_TIMELINES,
     },
-    rate_limit::{rand_duration, RateLimiter},
+    rate_limit::{RateLimiter, rand_duration},
     recovery::recovery_main,
     remove_wal::calc_horizon_lsn,
     send_wal::WalSenders,
@@ -40,7 +41,6 @@ use crate::{
     timelines_set::{TimelineSetGuard, TimelinesSet},
     wal_backup::{self, WalBackupTaskHandle},
     wal_backup_partial::{self, PartialBackup, PartialRemoteSegment},
-    SafeKeeperConf,
 };
 
 pub(crate) struct StateSnapshot {

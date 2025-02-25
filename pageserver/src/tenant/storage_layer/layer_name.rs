@@ -305,7 +305,7 @@ impl FromStr for LayerName {
             (None, None) => {
                 return Err(format!(
                     "neither delta nor image layer file name: {value:?}"
-                ))
+                ));
             }
             (Some(delta), None) => Self::Delta(delta),
             (None, Some(image)) => Self::Image(image),

@@ -1,12 +1,12 @@
 use http_utils::failpoints::failpoints_handler;
 use hyper::{Body, Request, Response, StatusCode};
+use safekeeper_api::ServerInfo;
 use safekeeper_api::models;
 use safekeeper_api::models::AcceptorStateStatus;
 use safekeeper_api::models::PullTimelineRequest;
 use safekeeper_api::models::SafekeeperStatus;
 use safekeeper_api::models::TermSwitchApiEntry;
 use safekeeper_api::models::TimelineStatus;
-use safekeeper_api::ServerInfo;
 use std::collections::HashMap;
 use std::fmt;
 use std::io::Write as _;
@@ -18,17 +18,17 @@ use tokio::sync::mpsc;
 use tokio::task;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
-use tracing::{info_span, Instrument};
+use tracing::{Instrument, info_span};
 
 use http_utils::endpoint::{
     profile_cpu_handler, profile_heap_handler, prometheus_metrics_handler, request_span,
 };
 use http_utils::{
-    endpoint::{self, auth_middleware, check_permission_with, ChannelWriter},
+    RequestExt, RouterBuilder,
+    endpoint::{self, ChannelWriter, auth_middleware, check_permission_with},
     error::ApiError,
     json::{json_request, json_response},
     request::{ensure_no_body, parse_query_param, parse_request_param},
-    RequestExt, RouterBuilder,
 };
 
 use postgres_ffi::WAL_SEGMENT_SIZE;
@@ -40,11 +40,11 @@ use utils::{
     lsn::Lsn,
 };
 
+use crate::GlobalTimelines;
+use crate::SafeKeeperConf;
 use crate::debug_dump::TimelineDigestRequest;
 use crate::safekeeper::TermLsn;
 use crate::timelines_global_map::TimelineDeleteForceResult;
-use crate::GlobalTimelines;
-use crate::SafeKeeperConf;
 use crate::{copy_timeline, debug_dump, patch_control_file, pull_timeline};
 
 /// Healthcheck handler.

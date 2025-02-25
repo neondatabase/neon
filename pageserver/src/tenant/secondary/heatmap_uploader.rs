@@ -6,17 +6,17 @@ use std::{
 };
 
 use crate::{
+    TEMP_FILE_SUFFIX,
     metrics::SECONDARY_MODE,
     tenant::{
+        Tenant,
         config::AttachmentMode,
         mgr::{GetTenantError, TenantManager},
         remote_timeline_client::remote_heatmap_path,
         span::debug_assert_current_span_has_tenant_id,
-        tasks::{warn_when_period_overrun, BackgroundLoopKind},
-        Tenant,
+        tasks::{BackgroundLoopKind, warn_when_period_overrun},
     },
     virtual_file::VirtualFile,
-    TEMP_FILE_SUFFIX,
 };
 
 use futures::Future;
@@ -24,15 +24,15 @@ use pageserver_api::shard::TenantShardId;
 use remote_storage::{GenericRemoteStorage, TimeoutOrCancel};
 
 use super::{
+    CommandRequest, SecondaryTenantError, UploadCommand,
     heatmap::HeatMapTenant,
     scheduler::{
-        self, period_jitter, period_warmup, JobGenerator, RunningJob, SchedulingResult,
-        TenantBackgroundJobs,
+        self, JobGenerator, RunningJob, SchedulingResult, TenantBackgroundJobs, period_jitter,
+        period_warmup,
     },
-    CommandRequest, SecondaryTenantError, UploadCommand,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{info_span, instrument, Instrument};
+use tracing::{Instrument, info_span, instrument};
 use utils::{
     backoff, completion::Barrier, crashsafe::path_with_suffix_extension,
     yielding_loop::yielding_loop,

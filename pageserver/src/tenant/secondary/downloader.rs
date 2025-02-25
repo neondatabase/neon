@@ -7,10 +7,11 @@ use std::{
 };
 
 use crate::{
+    TEMP_FILE_SUFFIX,
     config::PageServerConf,
     context::RequestContext,
     disk_usage_eviction_task::{
-        finite_f32, DiskUsageEvictionInfo, EvictionCandidate, EvictionLayer, EvictionSecondaryLayer,
+        DiskUsageEvictionInfo, EvictionCandidate, EvictionLayer, EvictionSecondaryLayer, finite_f32,
     },
     metrics::SECONDARY_MODE,
     tenant::{
@@ -18,24 +19,23 @@ use crate::{
         debug_assert_current_span_has_tenant_and_timeline_id,
         ephemeral_file::is_ephemeral_file,
         remote_timeline_client::{
-            index::LayerFileMetadata, is_temp_download_file, FAILED_DOWNLOAD_WARN_THRESHOLD,
-            FAILED_REMOTE_OP_RETRIES,
+            FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES, index::LayerFileMetadata,
+            is_temp_download_file,
         },
         span::debug_assert_current_span_has_tenant_id,
-        storage_layer::{layer::local_layer_path, LayerName, LayerVisibilityHint},
-        tasks::{warn_when_period_overrun, BackgroundLoopKind},
+        storage_layer::{LayerName, LayerVisibilityHint, layer::local_layer_path},
+        tasks::{BackgroundLoopKind, warn_when_period_overrun},
     },
-    virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile},
-    TEMP_FILE_SUFFIX,
+    virtual_file::{MaybeFatalIo, VirtualFile, on_fatal_io_error},
 };
 
 use super::{
+    GetTenantError, SecondaryTenant, SecondaryTenantError,
     heatmap::HeatMapLayer,
     scheduler::{
-        self, period_jitter, period_warmup, Completion, JobGenerator, SchedulingResult,
-        TenantBackgroundJobs,
+        self, Completion, JobGenerator, SchedulingResult, TenantBackgroundJobs, period_jitter,
+        period_warmup,
     },
-    GetTenantError, SecondaryTenant, SecondaryTenantError,
 };
 
 use crate::tenant::{
@@ -52,15 +52,15 @@ use pageserver_api::shard::TenantShardId;
 use remote_storage::{DownloadError, DownloadKind, DownloadOpts, Etag, GenericRemoteStorage};
 
 use tokio_util::sync::CancellationToken;
-use tracing::{info_span, instrument, warn, Instrument};
+use tracing::{Instrument, info_span, instrument, warn};
 use utils::{
     backoff, completion::Barrier, crashsafe::path_with_suffix_extension, failpoint_support, fs_ext,
     id::TimelineId, pausable_failpoint, serde_system_time,
 };
 
 use super::{
-    heatmap::{HeatMapTenant, HeatMapTimeline},
     CommandRequest, DownloadCommand,
+    heatmap::{HeatMapTenant, HeatMapTimeline},
 };
 
 /// For each tenant, default period for how long must have passed since the last download_tenant call before

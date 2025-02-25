@@ -12,7 +12,7 @@ use std::{ops::Deref, time::Instant};
 use anyhow::Result;
 use bytes::{Buf, BytesMut};
 use futures::future::BoxFuture;
-use postgres_ffi::{waldecoder::WalStreamDecoder, XLogSegNo};
+use postgres_ffi::{XLogSegNo, waldecoder::WalStreamDecoder};
 use safekeeper::{control_file, metrics::WalStorageMetrics, wal_storage};
 use tracing::{debug, info};
 use utils::lsn::Lsn;

@@ -1,7 +1,7 @@
 use std::{future::Future, ops::Range, sync::Arc};
 
 use bytes::Bytes;
-use pageserver_api::key::{Key, KEY_SIZE};
+use pageserver_api::key::{KEY_SIZE, Key};
 use utils::{id::TimelineId, lsn::Lsn, shard::TenantShardId};
 
 use crate::tenant::storage_layer::Layer;
@@ -424,11 +424,11 @@ mod tests {
     use rand::{RngCore, SeedableRng};
 
     use crate::{
+        DEFAULT_PG_VERSION,
         tenant::{
-            harness::{TenantHarness, TIMELINE_ID},
+            harness::{TIMELINE_ID, TenantHarness},
             storage_layer::AsLayerDesc,
         },
-        DEFAULT_PG_VERSION,
     };
 
     use super::*;

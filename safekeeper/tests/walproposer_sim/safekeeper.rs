@@ -4,7 +4,7 @@
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use bytes::{Bytes, BytesMut};
 use camino::Utf8PathBuf;
 use desim::{
@@ -15,13 +15,13 @@ use desim::{
 };
 use http::Uri;
 use safekeeper::{
-    safekeeper::{ProposerAcceptorMessage, SafeKeeper, SK_PROTO_VERSION_3, UNKNOWN_SERVER_VERSION},
+    SafeKeeperConf,
+    safekeeper::{ProposerAcceptorMessage, SK_PROTO_VERSION_3, SafeKeeper, UNKNOWN_SERVER_VERSION},
     state::{TimelinePersistentState, TimelineState},
     timeline::TimelineError,
     wal_storage::Storage,
-    SafeKeeperConf,
 };
-use safekeeper_api::{membership::Configuration, ServerInfo};
+use safekeeper_api::{ServerInfo, membership::Configuration};
 use tracing::{debug, info_span, warn};
 use utils::{
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},

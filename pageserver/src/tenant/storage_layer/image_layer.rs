@@ -38,21 +38,21 @@ use crate::tenant::vectored_blob_io::{
     BlobFlag, BufView, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadPlanner,
 };
-use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::virtual_file::IoBufferMut;
+use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use hex;
 use itertools::Itertools;
 use pageserver_api::config::MaxVectoredReadBytes;
-use pageserver_api::key::{Key, DBDIR_KEY, KEY_SIZE};
+use pageserver_api::key::{DBDIR_KEY, KEY_SIZE, Key};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use pageserver_api::value::Value;
-use rand::{distributions::Alphanumeric, Rng};
+use rand::{Rng, distributions::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
@@ -1151,15 +1151,15 @@ mod test {
     };
 
     use crate::{
+        DEFAULT_PG_VERSION,
         context::RequestContext,
         tenant::{
+            Tenant, Timeline,
             config::TenantConf,
-            harness::{TenantHarness, TIMELINE_ID},
+            harness::{TIMELINE_ID, TenantHarness},
             storage_layer::{Layer, ResidentLayer},
             vectored_blob_io::StreamingVectoredReadPlanner,
-            Tenant, Timeline,
         },
-        DEFAULT_PG_VERSION,
     };
 
     use super::{ImageLayerIterator, ImageLayerWriter};

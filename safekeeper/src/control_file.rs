@@ -1,6 +1,6 @@
 //! Control file serialization, deserialization and persistence.
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use camino::{Utf8Path, Utf8PathBuf};
 use safekeeper_api::membership::INVALID_GENERATION;

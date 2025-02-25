@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use futures::stream::FuturesOrdered;
 use futures::StreamExt;
+use futures::stream::FuturesOrdered;
 use safekeeper_api::models::PeerInfo;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -15,9 +15,9 @@ use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::time::Duration;
 
-use postgres_ffi::v14::xlog_utils::XLogSegNoOffsetToRecPtr;
 use postgres_ffi::XLogFileName;
-use postgres_ffi::{XLogSegNo, PG_TLI};
+use postgres_ffi::v14::xlog_utils::XLogSegNoOffsetToRecPtr;
+use postgres_ffi::{PG_TLI, XLogSegNo};
 use remote_storage::{
     DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath, StorageMetadata,
 };
@@ -25,7 +25,7 @@ use tokio::fs::File;
 
 use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::sync::{watch, OnceCell};
+use tokio::sync::{OnceCell, watch};
 use tracing::*;
 
 use utils::{id::TenantTimelineId, lsn::Lsn};

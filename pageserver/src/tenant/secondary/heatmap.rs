@@ -3,7 +3,7 @@ use std::{collections::HashMap, time::SystemTime};
 use crate::tenant::{remote_timeline_client::index::LayerFileMetadata, storage_layer::LayerName};
 
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr, TimestampSeconds};
+use serde_with::{DisplayFromStr, TimestampSeconds, serde_as};
 
 use utils::{generation::Generation, id::TimelineId};
 

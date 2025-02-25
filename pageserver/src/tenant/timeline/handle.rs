@@ -202,8 +202,8 @@
 //! to the parent shard during a shard split. Eventually, the shard split task will
 //! shut down the parent => case (1).
 
-use std::collections::hash_map;
 use std::collections::HashMap;
+use std::collections::hash_map;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Weak;
@@ -632,7 +632,7 @@ mod tests {
     use std::sync::Weak;
 
     use pageserver_api::{
-        key::{rel_block_to_key, Key, DBDIR_KEY},
+        key::{DBDIR_KEY, Key, rel_block_to_key},
         models::ShardParameters,
         reltag::RelTag,
         shard::ShardStripeSize,

@@ -15,9 +15,9 @@ use utils::{auth::Scope, measured_stream::MeasuredStream};
 
 use std::os::fd::AsRawFd;
 
-use crate::metrics::TrafficMetrics;
 use crate::SafeKeeperConf;
-use crate::{handler::SafekeeperPostgresHandler, GlobalTimelines};
+use crate::metrics::TrafficMetrics;
+use crate::{GlobalTimelines, handler::SafekeeperPostgresHandler};
 use postgres_backend::{AuthType, PostgresBackend};
 
 /// Accept incoming TCP connections and spawn them into a background thread.

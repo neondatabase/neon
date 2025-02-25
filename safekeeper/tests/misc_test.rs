@@ -5,7 +5,7 @@ use utils::lsn::Lsn;
 
 use crate::walproposer_sim::{
     log::{init_logger, init_tracing_logger},
-    simulation::{generate_network_opts, generate_schedule, Schedule, TestAction, TestConfig},
+    simulation::{Schedule, TestAction, TestConfig, generate_network_opts, generate_schedule},
 };
 
 pub mod walproposer_sim;

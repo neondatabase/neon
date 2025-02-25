@@ -3,7 +3,7 @@ use tracing::{info, warn};
 
 use crate::walproposer_sim::{
     log::{init_logger, init_tracing_logger},
-    simulation::{generate_network_opts, generate_schedule, TestConfig},
+    simulation::{TestConfig, generate_network_opts, generate_schedule},
     simulation_logs::validate_events,
 };
 

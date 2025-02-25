@@ -10,11 +10,11 @@ use std::time::{Duration, Instant};
 use enum_map::{Enum as _, EnumMap};
 use futures::Future;
 use metrics::{
+    Counter, CounterVec, Gauge, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPair,
+    IntCounterPairVec, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
     register_int_counter, register_int_counter_pair_vec, register_int_counter_vec,
     register_int_gauge, register_int_gauge_vec, register_uint_gauge, register_uint_gauge_vec,
-    Counter, CounterVec, Gauge, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPair,
-    IntCounterPairVec, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
 use pageserver_api::config::{
@@ -24,7 +24,7 @@ use pageserver_api::config::{
 use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
 use pin_project_lite::pin_project;
-use postgres_backend::{is_expected_io_error, QueryError};
+use postgres_backend::{QueryError, is_expected_io_error};
 use pq_proto::framed::ConnectionError;
 
 use strum::{EnumCount, IntoEnumIterator as _, VariantNames};
@@ -35,12 +35,12 @@ use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext};
 use crate::pgdatadir_mapping::DatadirModificationStats;
 use crate::task_mgr::TaskKind;
+use crate::tenant::Timeline;
 use crate::tenant::layer_map::LayerMap;
 use crate::tenant::mgr::TenantSlot;
 use crate::tenant::storage_layer::{InMemoryLayer, PersistentLayerDesc};
 use crate::tenant::tasks::BackgroundLoopKind;
 use crate::tenant::throttle::ThrottleResult;
-use crate::tenant::Timeline;
 
 /// Prometheus histogram buckets (in seconds) for operations in the critical
 /// path. In other words, operations that directly affect that latency of user
@@ -363,7 +363,7 @@ pub(crate) static PAGE_CACHE_SIZE: Lazy<PageCacheSizeMetrics> =
 pub(crate) mod page_cache_eviction_metrics {
     use std::num::NonZeroUsize;
 
-    use metrics::{register_int_counter_vec, IntCounter, IntCounterVec};
+    use metrics::{IntCounter, IntCounterVec, register_int_counter_vec};
     use once_cell::sync::Lazy;
 
     #[derive(Clone, Copy)]
@@ -722,7 +722,7 @@ pub(crate) static RELSIZE_CACHE_MISSES_OLD: Lazy<IntCounter> = Lazy::new(|| {
 });
 
 pub(crate) mod initial_logical_size {
-    use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
+    use metrics::{IntCounter, IntCounterVec, register_int_counter, register_int_counter_vec};
     use once_cell::sync::Lazy;
 
     pub(crate) struct StartCalculation(IntCounterVec);
@@ -1105,12 +1105,17 @@ impl EvictionsWithLowResidenceDuration {
                 // - future "drop panick => abort"
                 //
                 // so just nag: (the error has the labels)
-                tracing::warn!("failed to remove EvictionsWithLowResidenceDuration, it was already removed? {e:#?}");
+                tracing::warn!(
+                    "failed to remove EvictionsWithLowResidenceDuration, it was already removed? {e:#?}"
+                );
             }
             Ok(()) => {
                 // to help identify cases where we double-remove the same values, let's log all
                 // deletions?
-                tracing::info!("removed EvictionsWithLowResidenceDuration with {tenant_id}, {timeline_id}, {}, {threshold}", self.data_source);
+                tracing::info!(
+                    "removed EvictionsWithLowResidenceDuration with {tenant_id}, {timeline_id}, {}, {threshold}",
+                    self.data_source
+                );
             }
         }
     }
@@ -3579,7 +3584,7 @@ pub mod tokio_epoll_uring {
         sync::{Arc, Mutex},
     };
 
-    use metrics::{register_histogram, register_int_counter, Histogram, LocalHistogram, UIntGauge};
+    use metrics::{Histogram, LocalHistogram, UIntGauge, register_histogram, register_int_counter};
     use once_cell::sync::Lazy;
 
     /// Shared storage for tokio-epoll-uring thread local metrics.
@@ -3588,7 +3593,9 @@ pub mod tokio_epoll_uring {
             let slots_submission_queue_depth = register_histogram!(
                 "pageserver_tokio_epoll_uring_slots_submission_queue_depth",
                 "The slots waiters queue depth of each tokio_epoll_uring system",
-                vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
+                vec![
+                    1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0
+                ],
             )
             .expect("failed to define a metric");
             ThreadLocalMetricsStorage {
@@ -3765,7 +3772,7 @@ pub mod tokio_epoll_uring {
 }
 
 pub(crate) mod tenant_throttling {
-    use metrics::{register_int_counter_vec, IntCounter};
+    use metrics::{IntCounter, register_int_counter_vec};
     use once_cell::sync::Lazy;
     use utils::shard::TenantShardId;
 

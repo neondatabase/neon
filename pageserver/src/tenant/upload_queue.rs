@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
-use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 
 use super::remote_timeline_client::is_same_remote_layer_path;
 use super::storage_layer::AsLayerDesc as _;
@@ -563,11 +563,11 @@ impl UploadOp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tenant::harness::{TenantHarness, TIMELINE_ID};
-    use crate::tenant::storage_layer::layer::local_layer_path;
-    use crate::tenant::storage_layer::Layer;
-    use crate::tenant::Timeline;
     use crate::DEFAULT_PG_VERSION;
+    use crate::tenant::Timeline;
+    use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
+    use crate::tenant::storage_layer::Layer;
+    use crate::tenant::storage_layer::layer::local_layer_path;
     use itertools::Itertools as _;
     use std::str::FromStr as _;
     use utils::shard::{ShardCount, ShardIndex, ShardNumber};
@@ -690,10 +690,22 @@ mod tests {
         let tli = make_timeline();
 
         let index = Box::new(queue.clean.0.clone()); // empty, doesn't matter
-        let layer0 = make_layer(&tli, "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let layer1 = make_layer(&tli, "100000000000000000000000000000000000-200000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let layer2 = make_layer(&tli, "200000000000000000000000000000000000-300000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let layer3 = make_layer(&tli, "300000000000000000000000000000000000-400000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
+        let layer0 = make_layer(
+            &tli,
+            "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
+        let layer1 = make_layer(
+            &tli,
+            "100000000000000000000000000000000000-200000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
+        let layer2 = make_layer(
+            &tli,
+            "200000000000000000000000000000000000-300000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
+        let layer3 = make_layer(
+            &tli,
+            "300000000000000000000000000000000000-400000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
         let (barrier, _) = tokio::sync::watch::channel(());
 
         // Enqueue non-conflicting upload, delete, and index before and after a barrier.
@@ -757,10 +769,22 @@ mod tests {
         let tli = make_timeline();
 
         // Enqueue a bunch of deletes, some with conflicting names.
-        let layer0 = make_layer(&tli, "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let layer1 = make_layer(&tli, "100000000000000000000000000000000000-200000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let layer2 = make_layer(&tli, "200000000000000000000000000000000000-300000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let layer3 = make_layer(&tli, "300000000000000000000000000000000000-400000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
+        let layer0 = make_layer(
+            &tli,
+            "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
+        let layer1 = make_layer(
+            &tli,
+            "100000000000000000000000000000000000-200000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
+        let layer2 = make_layer(
+            &tli,
+            "200000000000000000000000000000000000-300000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
+        let layer3 = make_layer(
+            &tli,
+            "300000000000000000000000000000000000-400000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
 
         let ops = [
             UploadOp::Delete(Delete {
@@ -802,9 +826,21 @@ mod tests {
         let tli = make_timeline();
 
         // Enqueue three versions of the same layer, with different file sizes.
-        let layer0a = make_layer_with_size(&tli, "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51", 1);
-        let layer0b = make_layer_with_size(&tli, "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51", 2);
-        let layer0c = make_layer_with_size(&tli, "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51", 3);
+        let layer0a = make_layer_with_size(
+            &tli,
+            "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+            1,
+        );
+        let layer0b = make_layer_with_size(
+            &tli,
+            "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+            2,
+        );
+        let layer0c = make_layer_with_size(
+            &tli,
+            "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+            3,
+        );
 
         let ops = [
             UploadOp::UploadLayer(layer0a.clone(), layer0a.metadata(), None),
@@ -836,8 +872,14 @@ mod tests {
 
         // Enqueue two layer uploads, with a delete of both layers in between them. These should be
         // scheduled one at a time, since deletes can't bypass uploads and vice versa.
-        let layer0 = make_layer(&tli, "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let layer1 = make_layer(&tli, "100000000000000000000000000000000000-200000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
+        let layer0 = make_layer(
+            &tli,
+            "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
+        let layer1 = make_layer(
+            &tli,
+            "100000000000000000000000000000000000-200000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
 
         let ops = [
             UploadOp::UploadLayer(layer0.clone(), layer0.metadata(), None),
@@ -878,10 +920,22 @@ mod tests {
         //
         // Also enqueue non-conflicting uploads and deletes at the end. These can bypass the queue
         // and run immediately.
-        let layer0 = make_layer(&tli, "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let layer1 = make_layer(&tli, "100000000000000000000000000000000000-200000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let layer2 = make_layer(&tli, "200000000000000000000000000000000000-300000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let layer3 = make_layer(&tli, "300000000000000000000000000000000000-400000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
+        let layer0 = make_layer(
+            &tli,
+            "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
+        let layer1 = make_layer(
+            &tli,
+            "100000000000000000000000000000000000-200000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
+        let layer2 = make_layer(
+            &tli,
+            "200000000000000000000000000000000000-300000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
+        let layer3 = make_layer(
+            &tli,
+            "300000000000000000000000000000000000-400000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
 
         let ops = [
             UploadOp::UploadLayer(layer0.clone(), layer0.metadata(), None),
@@ -916,9 +970,18 @@ mod tests {
         let tli = make_timeline();
 
         // Enqueue three different layer uploads.
-        let layer0 = make_layer(&tli, "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let layer1 = make_layer(&tli, "100000000000000000000000000000000000-200000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let layer2 = make_layer(&tli, "200000000000000000000000000000000000-300000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
+        let layer0 = make_layer(
+            &tli,
+            "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
+        let layer1 = make_layer(
+            &tli,
+            "100000000000000000000000000000000000-200000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
+        let layer2 = make_layer(
+            &tli,
+            "200000000000000000000000000000000000-300000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
 
         let ops = [
             UploadOp::UploadLayer(layer0.clone(), layer0.metadata(), None),
@@ -981,11 +1044,20 @@ mod tests {
 
         // Enqueue three uploads of the current empty index.
         let index = Box::new(queue.clean.0.clone());
-        let layer0 = make_layer(&tli, "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
+        let layer0 = make_layer(
+            &tli,
+            "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
         let index0 = index_with(&index, &layer0);
-        let layer1 = make_layer(&tli, "100000000000000000000000000000000000-200000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
+        let layer1 = make_layer(
+            &tli,
+            "100000000000000000000000000000000000-200000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
         let index1 = index_with(&index0, &layer1);
-        let layer2 = make_layer(&tli, "200000000000000000000000000000000000-300000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
+        let layer2 = make_layer(
+            &tli,
+            "200000000000000000000000000000000000-300000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
         let index2 = index_with(&index1, &layer2);
 
         let ops = [
@@ -1045,7 +1117,10 @@ mod tests {
         let tli = make_timeline();
 
         // Create a layer to upload.
-        let layer = make_layer(&tli, "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
+        let layer = make_layer(
+            &tli,
+            "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
         let index_upload = index_with(&queue.clean.0, &layer);
 
         // Remove the layer reference in a new index, then delete the layer.
@@ -1090,7 +1165,10 @@ mod tests {
         let tli = make_timeline();
 
         // Create a layer to upload.
-        let layer = make_layer(&tli, "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
+        let layer = make_layer(
+            &tli,
+            "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
 
         // Upload the layer. Then dereference the layer, and upload/reference it again.
         let index_upload = index_with(&queue.clean.0, &layer);
@@ -1138,10 +1216,22 @@ mod tests {
         let tli = make_timeline();
 
         let index = Box::new(queue.clean.0.clone()); // empty, doesn't matter
-        let layer0 = make_layer(&tli, "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let layer1 = make_layer(&tli, "100000000000000000000000000000000000-200000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let layer2 = make_layer(&tli, "200000000000000000000000000000000000-300000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let layer3 = make_layer(&tli, "300000000000000000000000000000000000-400000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
+        let layer0 = make_layer(
+            &tli,
+            "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
+        let layer1 = make_layer(
+            &tli,
+            "100000000000000000000000000000000000-200000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
+        let layer2 = make_layer(
+            &tli,
+            "200000000000000000000000000000000000-300000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
+        let layer3 = make_layer(
+            &tli,
+            "300000000000000000000000000000000000-400000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
 
         // Enqueue non-conflicting upload, delete, and index before and after a shutdown.
         let ops = [
@@ -1197,10 +1287,22 @@ mod tests {
         let tli = make_timeline();
 
         // Enqueue a bunch of uploads.
-        let layer0 = make_layer(&tli, "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let layer1 = make_layer(&tli, "100000000000000000000000000000000000-200000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let layer2 = make_layer(&tli, "200000000000000000000000000000000000-300000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
-        let layer3 = make_layer(&tli, "300000000000000000000000000000000000-400000000000000000000000000000000000__00000000016B59D8-00000000016B5A51");
+        let layer0 = make_layer(
+            &tli,
+            "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
+        let layer1 = make_layer(
+            &tli,
+            "100000000000000000000000000000000000-200000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
+        let layer2 = make_layer(
+            &tli,
+            "200000000000000000000000000000000000-300000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
+        let layer3 = make_layer(
+            &tli,
+            "300000000000000000000000000000000000-400000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
 
         let ops = [
             UploadOp::UploadLayer(layer0.clone(), layer0.metadata(), None),

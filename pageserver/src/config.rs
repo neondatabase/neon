@@ -4,7 +4,7 @@
 //! file, or on the command line.
 //! See also `settings.md` for better description on every parameter.
 
-use anyhow::{bail, ensure, Context};
+use anyhow::{Context, bail, ensure};
 use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::{
     config::{DiskUsageEvictionTaskConfig, MaxVectoredReadBytes},
@@ -440,7 +440,9 @@ impl PageServerConf {
                     io_engine::FeatureTestResult::PlatformPreferred(v) => v, // make no noise
                     io_engine::FeatureTestResult::Worse { engine, remark } => {
                         // TODO: bubble this up to the caller so we can tracing::warn! it.
-                        eprintln!("auto-detected IO engine is not platform-preferred: engine={engine:?} remark={remark:?}");
+                        eprintln!(
+                            "auto-detected IO engine is not platform-preferred: engine={engine:?} remark={remark:?}"
+                        );
                         engine
                     }
                 },

@@ -4,7 +4,7 @@ use std::io::Write as _;
 
 use bytes::BytesMut;
 use camino_tempfile::tempfile;
-use criterion::{criterion_group, criterion_main, BatchSize, Bencher, Criterion};
+use criterion::{BatchSize, Bencher, Criterion, criterion_group, criterion_main};
 use itertools::Itertools as _;
 use postgres_ffi::v17::wal_generator::{LogicalMessageGenerator, WalGenerator};
 use pprof::criterion::{Output, PProfProfiler};

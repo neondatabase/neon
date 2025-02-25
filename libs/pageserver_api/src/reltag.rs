@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt;
 
-use postgres_ffi::pg_constants::GLOBALTABLESPACE_OID;
-use postgres_ffi::relfile_utils::{forkname_to_number, forknumber_to_name, MAIN_FORKNUM};
 use postgres_ffi::Oid;
+use postgres_ffi::pg_constants::GLOBALTABLESPACE_OID;
+use postgres_ffi::relfile_utils::{MAIN_FORKNUM, forkname_to_number, forknumber_to_name};
 
 ///
 /// Relation data file segment id throughout the Postgres cluster.

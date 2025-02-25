@@ -19,7 +19,7 @@
 //!   'visit' function
 //!
 use async_stream::try_stream;
-use byteorder::{ReadBytesExt, BE};
+use byteorder::{BE, ReadBytesExt};
 use bytes::{BufMut, Bytes, BytesMut};
 use either::Either;
 use futures::{Stream, StreamExt};

@@ -1,7 +1,7 @@
 //
 // Main entry point for the safekeeper executable
 //
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::{ArgAction, Parser};
 use futures::future::BoxFuture;
@@ -10,11 +10,11 @@ use futures::{FutureExt, StreamExt};
 use remote_storage::RemoteStorageConfig;
 use sd_notify::NotifyState;
 use tokio::runtime::Handle;
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::task::JoinError;
 use utils::logging::SecretString;
 
-use std::env::{var, VarError};
+use std::env::{VarError, var};
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::str::FromStr;
@@ -26,6 +26,8 @@ use tracing::*;
 use utils::pid_file;
 
 use metrics::set_build_info_metric;
+use safekeeper::GlobalTimelines;
+use safekeeper::SafeKeeperConf;
 use safekeeper::defaults::{
     DEFAULT_CONTROL_FILE_SAVE_INTERVAL, DEFAULT_EVICTION_MIN_RESIDENT, DEFAULT_HEARTBEAT_TIMEOUT,
     DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_MAX_OFFLOADER_LAG_BYTES, DEFAULT_PARTIAL_BACKUP_CONCURRENCY,
@@ -33,11 +35,9 @@ use safekeeper::defaults::{
 };
 use safekeeper::http;
 use safekeeper::wal_service;
-use safekeeper::GlobalTimelines;
-use safekeeper::SafeKeeperConf;
-use safekeeper::{broker, WAL_SERVICE_RUNTIME};
-use safekeeper::{control_file, BROKER_RUNTIME};
-use safekeeper::{wal_backup, HTTP_RUNTIME};
+use safekeeper::{BROKER_RUNTIME, control_file};
+use safekeeper::{HTTP_RUNTIME, wal_backup};
+use safekeeper::{WAL_SERVICE_RUNTIME, broker};
 use storage_broker::DEFAULT_ENDPOINT;
 use utils::auth::{JwtAuth, Scope, SwappableJwtAuth};
 use utils::{

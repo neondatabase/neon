@@ -23,8 +23,8 @@ use crate::safekeeper::{TermHistory, TermLsn};
 use crate::state::TimelinePersistentState;
 use crate::timeline::WalResidentTimeline;
 use postgres_backend::PostgresBackend;
-use postgres_ffi::encode_logical_message;
 use postgres_ffi::WAL_SEGMENT_SIZE;
+use postgres_ffi::encode_logical_message;
 use pq_proto::{BeMessage, RowDescriptor, TEXT_OID};
 use utils::lsn::Lsn;
 

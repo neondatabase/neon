@@ -18,7 +18,7 @@ use crate::metrics::{
     WALRECEIVER_CANDIDATES_REMOVED, WALRECEIVER_SWITCHES,
 };
 use crate::task_mgr::TaskKind;
-use crate::tenant::{debug_assert_current_span_has_tenant_and_timeline_id, Timeline};
+use crate::tenant::{Timeline, debug_assert_current_span_has_tenant_and_timeline_id};
 use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
 use pageserver_api::models::TimelineState;
@@ -34,10 +34,10 @@ use tracing::*;
 
 use postgres_connection::PgConnectionConfig;
 use utils::backoff::{
-    exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
+    DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS, exponential_backoff,
 };
 use utils::postgres_client::{
-    wal_stream_connection_config, ConnectionConfigArgs, PostgresClientProtocol,
+    ConnectionConfigArgs, PostgresClientProtocol, wal_stream_connection_config,
 };
 use utils::{
     id::{NodeId, TenantTimelineId},
@@ -45,8 +45,8 @@ use utils::{
 };
 
 use super::{
-    walreceiver_connection::WalConnectionStatus, walreceiver_connection::WalReceiverError,
-    TaskEvent, TaskHandle,
+    TaskEvent, TaskHandle, walreceiver_connection::WalConnectionStatus,
+    walreceiver_connection::WalReceiverError,
 };
 
 pub(crate) struct Cancelled;
@@ -349,7 +349,9 @@ async fn subscribe_for_timeline_updates(
             Err(e) => {
                 // Safekeeper nodes can stop pushing timeline updates to the broker, when no new writes happen and
                 // entire WAL is streamed. Keep this noticeable with logging, but do not warn/error.
-                info!("Attempt #{attempt}, failed to subscribe for timeline {id} updates in broker: {e:#}");
+                info!(
+                    "Attempt #{attempt}, failed to subscribe for timeline {id} updates in broker: {e:#}"
+                );
                 continue;
             }
         }
@@ -512,11 +514,11 @@ impl ConnectionManagerState {
     fn spawn<Fut>(
         &self,
         task: impl FnOnce(
-                tokio::sync::watch::Sender<TaskStateUpdate<WalConnectionStatus>>,
-                CancellationToken,
-            ) -> Fut
-            + Send
-            + 'static,
+            tokio::sync::watch::Sender<TaskStateUpdate<WalConnectionStatus>>,
+            CancellationToken,
+        ) -> Fut
+        + Send
+        + 'static,
     ) -> TaskHandle<WalConnectionStatus>
     where
         Fut: std::future::Future<Output = anyhow::Result<()>> + Send,
@@ -880,8 +882,7 @@ impl ConnectionManagerState {
                     discovered_new_wal = if candidate_commit_lsn > current_commit_lsn {
                         trace!(
                             "New candidate has commit_lsn {}, higher than current_commit_lsn {}",
-                            candidate_commit_lsn,
-                            current_commit_lsn
+                            candidate_commit_lsn, current_commit_lsn
                         );
                         Some(NewCommittedWAL {
                             lsn: candidate_commit_lsn,
@@ -1048,7 +1049,9 @@ impl ConnectionManagerState {
 
         if !node_ids_to_remove.is_empty() {
             for node_id in node_ids_to_remove {
-                info!("Safekeeper node {node_id} did not send events for over {lagging_wal_timeout:?}, not retrying the connections");
+                info!(
+                    "Safekeeper node {node_id} did not send events for over {lagging_wal_timeout:?}, not retrying the connections"
+                );
                 self.wal_connection_retries.remove(&node_id);
                 WALRECEIVER_CANDIDATES_REMOVED.inc();
             }
@@ -1120,7 +1123,7 @@ impl ReconnectReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tenant::harness::{TenantHarness, TIMELINE_ID};
+    use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
     use pageserver_api::config::defaults::DEFAULT_WAL_RECEIVER_PROTOCOL;
     use url::Host;
 

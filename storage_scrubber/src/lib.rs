@@ -17,15 +17,15 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
 use aws_config::retry::{RetryConfigBuilder, RetryMode};
+use aws_sdk_s3::Client;
 use aws_sdk_s3::config::Region;
 use aws_sdk_s3::error::DisplayErrorContext;
-use aws_sdk_s3::Client;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::ValueEnum;
 use futures::{Stream, StreamExt};
-use pageserver::tenant::remote_timeline_client::{remote_tenant_path, remote_timeline_path};
 use pageserver::tenant::TENANTS_SEGMENT_NAME;
+use pageserver::tenant::remote_timeline_client::{remote_tenant_path, remote_timeline_path};
 use pageserver_api::shard::TenantShardId;
 use remote_storage::{
     DownloadOpts, GenericRemoteStorage, Listing, ListingMode, RemotePath, RemoteStorageConfig,
@@ -38,7 +38,7 @@ use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 use utils::fs_ext;
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 

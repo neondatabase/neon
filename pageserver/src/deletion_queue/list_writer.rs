@@ -32,11 +32,11 @@ use utils::id::TimelineId;
 use crate::config::PageServerConf;
 use crate::deletion_queue::TEMP_SUFFIX;
 use crate::metrics;
-use crate::tenant::remote_timeline_client::remote_layer_path;
 use crate::tenant::remote_timeline_client::LayerFileMetadata;
+use crate::tenant::remote_timeline_client::remote_layer_path;
 use crate::tenant::storage_layer::LayerName;
-use crate::virtual_file::on_fatal_io_error;
 use crate::virtual_file::MaybeFatalIo;
+use crate::virtual_file::on_fatal_io_error;
 
 // The number of keys in a DeletionList before we will proactively persist it
 // (without reaching a flush deadline).  This aims to deliver objects of the order

@@ -8,22 +8,23 @@ use std::{
 use anyhow::Result;
 use futures::Future;
 use metrics::{
+    DISK_FSYNC_SECONDS_BUCKETS, Gauge, GaugeVec, Histogram, HistogramVec, IntCounter,
+    IntCounterPair, IntCounterPairVec, IntCounterVec, IntGauge, IntGaugeVec,
     core::{AtomicU64, Collector, Desc, GenericCounter, GenericGaugeVec, Opts},
     pow2_buckets,
     proto::MetricFamily,
     register_histogram, register_histogram_vec, register_int_counter, register_int_counter_pair,
     register_int_counter_pair_vec, register_int_counter_vec, register_int_gauge,
-    register_int_gauge_vec, Gauge, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPair,
-    IntCounterPairVec, IntCounterVec, IntGauge, IntGaugeVec, DISK_FSYNC_SECONDS_BUCKETS,
+    register_int_gauge_vec,
 };
 use once_cell::sync::Lazy;
 use postgres_ffi::XLogSegNo;
 use utils::{id::TenantTimelineId, lsn::Lsn, pageserver_feedback::PageserverFeedback};
 
 use crate::{
+    GlobalTimelines,
     receive_wal::MSG_QUEUE_SIZE,
     state::{TimelineMemState, TimelinePersistentState},
-    GlobalTimelines,
 };
 
 // Global metrics across all timelines.

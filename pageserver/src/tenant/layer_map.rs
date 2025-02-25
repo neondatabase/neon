@@ -1066,7 +1066,7 @@ impl LayerMap {
 
 #[cfg(test)]
 mod tests {
-    use crate::tenant::{storage_layer::LayerName, IndexPart};
+    use crate::tenant::{IndexPart, storage_layer::LayerName};
     use pageserver_api::{
         key::DBDIR_KEY,
         keyspace::{KeySpace, KeySpaceRandomAccum},
@@ -1417,9 +1417,11 @@ mod tests {
         assert!(!shadow.ranges.is_empty());
 
         // At least some layers should be marked covered
-        assert!(layer_visibilities
-            .iter()
-            .any(|i| matches!(i.1, LayerVisibilityHint::Covered)));
+        assert!(
+            layer_visibilities
+                .iter()
+                .any(|i| matches!(i.1, LayerVisibilityHint::Covered))
+        );
 
         let layer_visibilities = layer_visibilities.into_iter().collect::<HashMap<_, _>>();
 

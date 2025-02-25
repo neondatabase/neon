@@ -134,7 +134,7 @@ pub mod mock {
                 }
                 Err(e) => {
                     return Err(anyhow::Error::new(e)
-                        .context(format!("get metadata of {:?}", entry.path())))
+                        .context(format!("get metadata of {:?}", entry.path())));
                 }
             };
             total += m.len();

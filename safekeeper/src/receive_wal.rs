@@ -2,16 +2,16 @@
 //! Gets messages from the network, passes them down to consensus module and
 //! sends replies back.
 
+use crate::GlobalTimelines;
 use crate::handler::SafekeeperPostgresHandler;
 use crate::metrics::{
-    WAL_RECEIVERS, WAL_RECEIVER_QUEUE_DEPTH, WAL_RECEIVER_QUEUE_DEPTH_TOTAL,
-    WAL_RECEIVER_QUEUE_SIZE_TOTAL,
+    WAL_RECEIVER_QUEUE_DEPTH, WAL_RECEIVER_QUEUE_DEPTH_TOTAL, WAL_RECEIVER_QUEUE_SIZE_TOTAL,
+    WAL_RECEIVERS,
 };
 use crate::safekeeper::AcceptorProposerMessage;
 use crate::safekeeper::ProposerAcceptorMessage;
 use crate::timeline::WalResidentTimeline;
-use crate::GlobalTimelines;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use bytes::BytesMut;
 use parking_lot::MappedMutexGuard;
 use parking_lot::Mutex;
@@ -21,16 +21,16 @@ use postgres_backend::PostgresBackend;
 use postgres_backend::PostgresBackendReader;
 use postgres_backend::QueryError;
 use pq_proto::BeMessage;
+use safekeeper_api::ServerInfo;
 use safekeeper_api::membership::Configuration;
 use safekeeper_api::models::{ConnectionId, WalReceiverState, WalReceiverStatus};
-use safekeeper_api::ServerInfo;
 use std::future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::sync::mpsc::error::SendTimeoutError;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::task;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, MissedTickBehavior};
@@ -371,7 +371,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'_, IO> {
             _ => {
                 return Err(CopyStreamHandlerEnd::Other(anyhow::anyhow!(
                     "unexpected message {next_msg:?} instead of greeting"
-                )))
+                )));
             }
         };
         Ok((tli, next_msg))

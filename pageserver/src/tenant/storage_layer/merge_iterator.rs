@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{binary_heap, BinaryHeap},
+    collections::{BinaryHeap, binary_heap},
     sync::Arc,
 };
 
@@ -12,9 +12,9 @@ use crate::context::RequestContext;
 use pageserver_api::value::Value;
 
 use super::{
+    PersistentLayerDesc, PersistentLayerKey,
     delta_layer::{DeltaLayerInner, DeltaLayerIterator},
     image_layer::{ImageLayerInner, ImageLayerIterator},
-    PersistentLayerDesc, PersistentLayerKey,
 };
 
 #[derive(Clone, Copy)]
@@ -356,11 +356,11 @@ mod tests {
     use utils::lsn::Lsn;
 
     use crate::{
+        DEFAULT_PG_VERSION,
         tenant::{
-            harness::{TenantHarness, TIMELINE_ID},
+            harness::{TIMELINE_ID, TenantHarness},
             storage_layer::delta_layer::test::{produce_delta_layer, sort_delta},
         },
-        DEFAULT_PG_VERSION,
     };
 
     #[cfg(feature = "testing")]

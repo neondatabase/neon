@@ -6,11 +6,11 @@ use crate::{
     state::{EvictionState, TimelinePersistentState},
     wal_backup_partial,
 };
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use pq_proto::SystemId;
 use safekeeper_api::{
-    membership::{Configuration, INVALID_GENERATION},
     ServerInfo, Term,
+    membership::{Configuration, INVALID_GENERATION},
 };
 use serde::{Deserialize, Serialize};
 use tracing::*;
@@ -552,7 +552,7 @@ pub fn downgrade_v10_to_v9(state: &TimelinePersistentState) -> TimelinePersisten
 mod tests {
     use std::str::FromStr;
 
-    use utils::{id::NodeId, Hex};
+    use utils::{Hex, id::NodeId};
 
     use crate::control_file_upgrade::PersistedPeerInfo;
 

@@ -8,7 +8,7 @@
 //! The rest of the code defines label group types and deals with converting outer types to labels.
 //!
 use bytes::Bytes;
-use measured::{label::LabelValue, metric::histogram, FixedCardinalityLabel, MetricGroup};
+use measured::{FixedCardinalityLabel, MetricGroup, label::LabelValue, metric::histogram};
 use metrics::NeonMetrics;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;

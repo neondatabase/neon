@@ -12,7 +12,7 @@ use pageserver_api::shard::{ShardCount, ShardNumber, ShardStripeSize, TenantShar
 use postgres_connection::parse_host_port;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
-use tracing::{info_span, Instrument};
+use tracing::{Instrument, info_span};
 use utils::{
     backoff::{self},
     id::{NodeId, TenantId},

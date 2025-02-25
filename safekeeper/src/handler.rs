@@ -4,26 +4,26 @@
 use anyhow::Context;
 use pageserver_api::models::ShardParameters;
 use pageserver_api::shard::{ShardIdentity, ShardStripeSize};
-use safekeeper_api::models::ConnectionId;
 use safekeeper_api::Term;
+use safekeeper_api::models::ConnectionId;
 use std::future::Future;
 use std::str::{self, FromStr};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{debug, info, info_span, Instrument};
+use tracing::{Instrument, debug, info, info_span};
 use utils::postgres_client::PostgresClientProtocol;
 use utils::shard::{ShardCount, ShardNumber};
 
 use crate::auth::check_permission;
-use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
+use crate::json_ctrl::{AppendLogicalMessage, handle_json_ctrl};
 
-use crate::metrics::{TrafficMetrics, PG_QUERIES_GAUGE};
+use crate::metrics::{PG_QUERIES_GAUGE, TrafficMetrics};
 use crate::timeline::TimelineError;
 use crate::{GlobalTimelines, SafeKeeperConf};
 use postgres_backend::PostgresBackend;
 use postgres_backend::QueryError;
 use postgres_ffi::PG_TLI;
-use pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID};
+use pq_proto::{BeMessage, FeStartupPacket, INT4_OID, RowDescriptor, TEXT_OID};
 use regex::Regex;
 use utils::auth::{Claims, JwtAuth, Scope};
 use utils::{

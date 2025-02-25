@@ -1,4 +1,4 @@
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::{StreamExt, stream::FuturesUnordered};
 use safekeeper_api::models::SafekeeperUtilization;
 use safekeeper_client::mgmt_api;
 use std::{

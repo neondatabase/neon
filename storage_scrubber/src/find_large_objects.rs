@@ -6,8 +6,8 @@ use remote_storage::ListingMode;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    checks::parse_layer_object_name, init_remote, metadata_stream::stream_tenants,
-    stream_objects_with_retries, BucketConfig, NodeKind,
+    BucketConfig, NodeKind, checks::parse_layer_object_name, init_remote,
+    metadata_stream::stream_tenants, stream_objects_with_retries,
 };
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]

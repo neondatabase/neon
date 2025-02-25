@@ -1,10 +1,10 @@
 use std::{collections::HashSet, str::FromStr, sync::Arc};
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use futures::stream::{StreamExt, TryStreamExt};
 use once_cell::sync::OnceCell;
 use pageserver_api::shard::TenantShardId;
-use postgres_ffi::{XLogFileName, PG_TLI};
+use postgres_ffi::{PG_TLI, XLogFileName};
 use remote_storage::GenericRemoteStorage;
 use rustls::crypto::ring;
 use serde::Serialize;
@@ -16,8 +16,8 @@ use utils::{
 };
 
 use crate::{
-    cloud_admin_api::CloudAdminApiClient, init_remote, metadata_stream::stream_listing,
     BucketConfig, ConsoleConfig, NodeKind, RootTarget, TenantShardTimelineId,
+    cloud_admin_api::CloudAdminApiClient, init_remote, metadata_stream::stream_listing,
 };
 
 /// Generally we should ask safekeepers, but so far we use everywhere default 16MB.

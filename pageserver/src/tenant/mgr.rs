@@ -10,7 +10,7 @@ use pageserver_api::shard::{
     ShardCount, ShardIdentity, ShardIndex, ShardNumber, ShardStripeSize, TenantShardId,
 };
 use pageserver_api::upcall_api::ReAttachResponseTenant;
-use rand::{distributions::Alphanumeric, Rng};
+use rand::{Rng, distributions::Alphanumeric};
 use remote_storage::TimeoutOrCancel;
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -37,7 +37,7 @@ use crate::controller_upcall_client::{
 use crate::deletion_queue::DeletionQueueClient;
 use crate::http::routes::ACTIVE_TENANT_TIMEOUT;
 use crate::metrics::{TENANT, TENANT_MANAGER as METRICS};
-use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
+use crate::task_mgr::{BACKGROUND_RUNTIME, TaskKind};
 use crate::tenant::config::{
     AttachedLocationConfig, AttachmentMode, LocationConf, LocationMode, SecondaryLocationConfig,
 };
@@ -502,7 +502,9 @@ pub async fn init_tenant_mgr(
             .total_memory();
     let max_ephemeral_layer_bytes =
         conf.ephemeral_bytes_per_memory_kb as u64 * (system_memory / 1024);
-    tracing::info!("Initialized ephemeral layer size limit to {max_ephemeral_layer_bytes}, for {system_memory} bytes of memory");
+    tracing::info!(
+        "Initialized ephemeral layer size limit to {max_ephemeral_layer_bytes}, for {system_memory} bytes of memory"
+    );
     inmemory_layer::GLOBAL_RESOURCES.max_dirty_bytes.store(
         max_ephemeral_layer_bytes,
         std::sync::atomic::Ordering::Relaxed,
@@ -700,10 +702,11 @@ fn tenant_spawn(
     // to avoid impacting prod runtime performance.
     assert!(!crate::is_temporary(tenant_path));
     debug_assert!(tenant_path.is_dir());
-    debug_assert!(conf
-        .tenant_location_config_path(&tenant_shard_id)
-        .try_exists()
-        .unwrap());
+    debug_assert!(
+        conf.tenant_location_config_path(&tenant_shard_id)
+            .try_exists()
+            .unwrap()
+    );
 
     Tenant::spawn(
         conf,
@@ -791,7 +794,9 @@ async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
                 (total_in_progress, total_attached)
             }
             TenantsMap::ShuttingDown(_) => {
-                error!("already shutting down, this function isn't supposed to be called more than once");
+                error!(
+                    "already shutting down, this function isn't supposed to be called more than once"
+                );
                 return;
             }
         }
@@ -1016,9 +1021,9 @@ impl TenantManager {
                             Ok(Ok(_)) => return Ok(Some(tenant)),
                             Err(_) => {
                                 tracing::warn!(
-                                timeout_ms = flush_timeout.as_millis(),
-                                "Timed out waiting for flush to remote storage, proceeding anyway."
-                            )
+                                    timeout_ms = flush_timeout.as_millis(),
+                                    "Timed out waiting for flush to remote storage, proceeding anyway."
+                                )
                             }
                         }
                     }
@@ -1194,7 +1199,9 @@ impl TenantManager {
                     }
                     TenantSlot::Attached(tenant) => {
                         let (_guard, progress) = utils::completion::channel();
-                        info!("Shutting down just-spawned tenant, because tenant manager is shut down");
+                        info!(
+                            "Shutting down just-spawned tenant, because tenant manager is shut down"
+                        );
                         match tenant.shutdown(progress, ShutdownMode::Hard).await {
                             Ok(()) => {
                                 info!("Finished shutting down just-spawned tenant");
@@ -1784,7 +1791,7 @@ impl TenantManager {
                             _ => {
                                 return Err(anyhow::anyhow!(e).context(format!(
                                     "Hard linking {relative_layer} into {child_prefix}"
-                                )))
+                                )));
                             }
                         }
                     }
@@ -2025,8 +2032,8 @@ impl TenantManager {
                 .wait_to_become_active(std::time::Duration::from_secs(9999))
                 .await
                 .map_err(|e| {
-                    use pageserver_api::models::TenantState;
                     use GetActiveTenantError::{Cancelled, WillNotBecomeActive};
+                    use pageserver_api::models::TenantState;
                     match e {
                         Cancelled | WillNotBecomeActive(TenantState::Stopping { .. }) => {
                             Error::ShuttingDown
@@ -2089,7 +2096,7 @@ impl TenantManager {
 
                     match selector {
                         ShardSelector::Zero if slot.0.shard_number == ShardNumber(0) => {
-                            return ShardResolveResult::Found(tenant.clone())
+                            return ShardResolveResult::Found(tenant.clone());
                         }
                         ShardSelector::Page(key) => {
                             // First slot we see for this tenant, calculate the expected shard number
@@ -2486,7 +2493,7 @@ impl SlotGuard {
                 TenantsMap::Initializing => {
                     return Err(TenantSlotUpsertError::MapState(
                         TenantMapError::StillInitializing,
-                    ))
+                    ));
                 }
                 TenantsMap::ShuttingDown(_) => {
                     return Err(TenantSlotUpsertError::ShuttingDown((
