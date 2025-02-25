@@ -779,6 +779,7 @@ impl Timeline {
             // Suppress errors when cancelled.
             Err(_) if self.cancel.is_cancelled() => {}
             Err(CompactionError::ShuttingDown) => {}
+            Err(CompactionError::CollectKeySpaceError(CollectKeySpaceError::Cancelled)) => {}
 
             // Alert on critical errors that indicate data corruption.
             Err(
