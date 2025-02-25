@@ -28,6 +28,36 @@ function create_extensions() {
     docker compose exec neon-test-extensions psql -X -v ON_ERROR_STOP=1 -d contrib_regression -c "CREATE EXTENSION IF NOT EXISTS ${ext} CASCADE"
   done
 }
+function create_timeline() {
+  generate_id new_timeline_id
+
+  PARAMS=(
+      -sbf
+      -X POST
+      -H "Content-Type: application/json"
+      -d "{\"new_timeline_id\": \"${new_timeline_id}\", \"pg_version\": ${PG_VERSION}, \"ancestor_timeline_id\": \"${1}\"}"
+      "http://127.0.0.1:9898/v1/tenant/${tenant_id}/timeline/"
+  )
+  result=$(curl "${PARAMS[@]}")
+  echo $result | jq .
+  EXT_TIMELINE[${2}]=${new_timeline_id}
+}
+
+function check_timeline() {
+    TID=$(docker compose exec neon-test-extensions psql -Aqt -c "SHOW neon.timeline_id")
+    if [ "${TID}" != "${1}" ]; then
+      echo Timeline mismatch
+      exit 1
+    fi
+}
+
+function restart_compute() {
+  docker compose down compute compute_is_ready
+  COMPUTE_TAG=${1} TAG=${OLDTAG} TENANT_ID=${tenant_id} TIMELINE_ID=${2} docker compose up --quiet-pull -d --build compute compute_is_ready
+  wait_for_ready
+  check_timeline ${2}
+}
+declare -A EXT_TIMELINE
 EXTENSIONS='[
 {"extname": "plv8", "extdir": "plv8-src"},
 {"extname": "vector", "extdir": "pgvector-src"},
@@ -60,8 +90,10 @@ wait_for_ready
 docker compose cp  ext-src neon-test-extensions:/
 docker compose exec neon-test-extensions psql -c "DROP DATABASE IF EXISTS contrib_regression"
 docker compose exec neon-test-extensions psql -c "CREATE DATABASE contrib_regression"
-docker compose exec neon-test-extensions psql -c "CREATE DATABASE pgtap_regression"
-docker compose exec neon-test-extensions psql -d pgtap_regression -c "CREATE EXTENSION pgtap"
+tenant_id=$(docker compose exec neon-test-extensions psql -Aqt -c "SHOW neon.tenant_id")
+EXT_TIMELINE["main"]=$(docker compose exec neon-test-extensions psql -Aqt -c "SHOW neon.timeline_id")
+create_timeline "${EXT_TIMELINE["main"]}" init
+restart_compute "${OLDTAG}" "${EXT_TIMELINE["init"]}"
 create_extensions "${EXTNAMES}"
 if [ "${FORCE_ALL_UPGRADE_TESTS:-false}" = true ]; then
   exts="${EXTNAMES}"
@@ -72,29 +104,13 @@ fi
 if [ -z "${exts}" ]; then
   echo "No extensions were upgraded"
 else
-  tenant_id=$(docker compose exec neon-test-extensions psql -Aqt -c "SHOW neon.tenant_id")
-  timeline_id=$(docker compose exec neon-test-extensions psql -Aqt -c "SHOW neon.timeline_id")
   for ext in ${exts}; do
     echo Testing ${ext}...
+    create_timeline "${EXT_TIMELINE["main"]}" ${ext}
     EXTDIR=$(echo ${EXTENSIONS} | jq -r '.[] | select(.extname=="'${ext}'") | .extdir')
-    generate_id new_timeline_id
-    PARAMS=(
-        -sbf
-        -X POST
-        -H "Content-Type: application/json"
-        -d "{\"new_timeline_id\": \"${new_timeline_id}\", \"pg_version\": ${PG_VERSION}, \"ancestor_timeline_id\": \"${timeline_id}\"}"
-        "http://127.0.0.1:9898/v1/tenant/${tenant_id}/timeline/"
-    )
-    result=$(curl "${PARAMS[@]}")
-    echo $result | jq .
-    TENANT_ID=${tenant_id} TIMELINE_ID=${new_timeline_id} TAG=${OLDTAG} docker compose down compute compute_is_ready
-    COMPUTE_TAG=${NEWTAG} TAG=${OLDTAG} TENANT_ID=${tenant_id} TIMELINE_ID=${new_timeline_id} docker compose up --quiet-pull -d --build compute compute_is_ready
-    wait_for_ready
-    TID=$(docker compose exec neon-test-extensions psql -Aqt -c "SHOW neon.timeline_id")
-    if [ ${TID} != ${new_timeline_id} ]; then
-      echo Timeline mismatch
-      exit 1
-    fi
+    restart_compute "${OLDTAG}" "${EXT_TIMELINE[${ext}]}"
+    docker compose exec neon-test-extensions psql -d contrib_regression -c "CREATE EXTENSION ${ext} CASCADE"
+    restart_compute "${NEWTAG}" "${EXT_TIMELINE[${ext}]}"
     docker compose exec neon-test-extensions psql -d contrib_regression -c "\dx ${ext}"
     if ! docker compose exec neon-test-extensions sh -c /ext-src/${EXTDIR}/test-upgrade.sh; then
       docker  compose exec neon-test-extensions  cat /ext-src/${EXTDIR}/regression.diffs
