@@ -117,7 +117,10 @@ pub(crate) enum ScopeInner {
     Global {
         io_size_metrics: &'static crate::metrics::StorageIoSizeMetrics,
     },
-    Secondary {
+    SecondaryTenant {
+        io_size_metrics: &'static crate::metrics::StorageIoSizeMetrics,
+    },
+    SecondaryTimeline {
         io_size_metrics: crate::metrics::StorageIoSizeMetrics,
     },
     Timeline {
@@ -129,10 +132,11 @@ pub(crate) enum ScopeInner {
     },
 }
 
+static GLOBAL_IO_SIZE_METRICS: Lazy<crate::metrics::StorageIoSizeMetrics> =
+    Lazy::new(|| crate::metrics::StorageIoSizeMetrics::new("*", "*", "*"));
+
 impl Scope {
     pub(crate) fn new_global() -> Self {
-        static GLOBAL_IO_SIZE_METRICS: Lazy<crate::metrics::StorageIoSizeMetrics> =
-            Lazy::new(|| crate::metrics::StorageIoSizeMetrics::new("*", "*", "*"));
         Scope(Arc::new(ScopeInner::Global {
             io_size_metrics: &GLOBAL_IO_SIZE_METRICS,
         }))
@@ -148,7 +152,10 @@ impl Scope {
         let arc_arc_timeline = crate::tenant::timeline::handle::Handle::clone_timeline(handle);
         Scope(Arc::new(ScopeInner::TimelineHandle { arc_arc_timeline }))
     }
-    pub(crate) fn new_secondary(tenant_shard_id: &TenantShardId, timeline_id: &TimelineId) -> Self {
+    pub(crate) fn new_secondary_timeline(
+        tenant_shard_id: &TenantShardId,
+        timeline_id: &TimelineId,
+    ) -> Self {
         // NB: Secondaries never took proper care of metrics lifecycle, and we don't start doing it now.
 
         let tenant_id = tenant_shard_id.tenant_id.to_string();
@@ -157,7 +164,21 @@ impl Scope {
 
         let io_size_metrics =
             crate::metrics::StorageIoSizeMetrics::new(&tenant_id, &shard_id, &timeline_id);
-        Scope(Arc::new(ScopeInner::Secondary { io_size_metrics }))
+        Scope(Arc::new(ScopeInner::SecondaryTimeline { io_size_metrics }))
+    }
+    pub(crate) fn new_secondary_tenant(_tenant_shard_id: &TenantShardId) -> Self {
+        // Before propagating metrics via RequestContext, the labels were inferred from file path.
+        // The only user of VirtualFile at tenant scope is the heatmap download & read.
+        // The inferred labels for the path of the heatmap file on local disk were that of the global metric (*,*,*).
+        // Thus, we do the same here, and extend that for anything secondary-tenant scoped.
+        //
+        // If we want to have (tenant_id, shard_id, '*') labels for secondary tenants in the future,
+        // we will need to think about the metric lifecycle, i.e., remove them during secondary tenant shutdown,
+        // like we do for attached timelines. (We don't have attached-tenant-scoped usage of VirtualFile
+        // at this point, so, we were able to completely side-step tenant-scoped stuff there).
+        Scope(Arc::new(ScopeInner::SecondaryTenant {
+            io_size_metrics: &GLOBAL_IO_SIZE_METRICS,
+        }))
     }
 }
 
@@ -376,13 +397,19 @@ impl RequestContext {
             .build()
     }
 
-    pub fn with_scope_secondary(
+    pub fn with_scope_secondary_timeline(
         &self,
         tenant_shard_id: &TenantShardId,
         timeline_id: &TimelineId,
     ) -> Self {
         RequestContextBuilder::extend(self)
-            .scope(Scope::new_secondary(tenant_shard_id, timeline_id))
+            .scope(Scope::new_secondary_timeline(tenant_shard_id, timeline_id))
+            .build()
+    }
+
+    pub fn with_scope_secondary_tenant(&self, tenant_shard_id: &TenantShardId) -> Self {
+        RequestContextBuilder::extend(self)
+            .scope(Scope::new_secondary_tenant(tenant_shard_id))
             .build()
     }
 
@@ -439,7 +466,8 @@ impl RequestContext {
             ScopeInner::TimelineHandle { arc_arc_timeline } => {
                 &arc_arc_timeline.metrics.storage_io_size
             }
-            ScopeInner::Secondary { io_size_metrics } => io_size_metrics,
+            ScopeInner::SecondaryTimeline { io_size_metrics } => io_size_metrics,
+            ScopeInner::SecondaryTenant { io_size_metrics } => io_size_metrics,
         }
     }
 }

@@ -505,7 +505,10 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
         let remote_storage = self.remote_storage.clone();
         let conf = self.tenant_manager.get_conf();
         let tenant_shard_id = *secondary_state.get_tenant_shard_id();
-        let download_ctx = self.root_ctx.attached_child();
+        let download_ctx = self
+            .root_ctx
+            .attached_child()
+            .with_scope_secondary_tenant(&tenant_shard_id);
         (RunningDownload { barrier }, Box::pin(async move {
             let _completion = completion;
 
@@ -785,7 +788,7 @@ impl<'a> TenantDownloader<'a> {
 
         // Download the layers in the heatmap
         for timeline in heatmap.timelines {
-            let ctx = &ctx.with_scope_secondary(tenant_shard_id, &timeline.timeline_id);
+            let ctx = &ctx.with_scope_secondary_timeline(tenant_shard_id, &timeline.timeline_id);
             let timeline_state = timeline_states
                 .remove(&timeline.timeline_id)
                 .expect("Just populated above");

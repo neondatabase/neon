@@ -2660,8 +2660,8 @@ async fn timeline_collect_keyspace(
     let at_lsn: Option<Lsn> = parse_query_param(&request, "at_lsn")?;
 
     async {
-        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
+        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download).with_scope_timeline(&timeline);
         let at_lsn = at_lsn.unwrap_or_else(|| timeline.get_last_record_lsn());
         let (dense_ks, sparse_ks) = timeline
             .collect_keyspace(at_lsn, &ctx)
