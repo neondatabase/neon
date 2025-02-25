@@ -138,6 +138,39 @@ class NeonAPI:
         )
         return cast("dict[str, Any]", resp.json())
 
+    def restore_branch(
+        self,
+        project_id: str,
+        branch_id: str,
+        source_branch_id: str,
+        source_lsn: str | None,
+        source_timestamp: str | None,
+        preserve_under_name: str | None,
+    ):
+        data = {"source_branch_id": source_branch_id}
+        if source_lsn:
+            data["source_lsn"] = source_lsn
+        if source_timestamp:
+            data["source_timestamp"] = source_timestamp
+        if preserve_under_name:
+            data["preserve_under_name"] = preserve_under_name
+        resp = self.__request("POST", f"/{project_id}/branches/{branch_id}",
+                              headers={
+                                  "Accept": "application/json",
+                              },
+                              json=data)
+        return cast("dict[str, Any]", resp.json())
+
+    def reset_branch_to_parent(self, project_id: str, branch_id: str) -> dict[str, Any]:
+        resp = self.__request(
+            "POST",
+            f"/projects/{project_id}/{branch_id}",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+        return cast("dict[str, Any]", resp.json())
+
     def start_endpoint(
         self,
         project_id: str,

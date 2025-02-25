@@ -14,6 +14,21 @@ from fixtures.log_helper import log
 from fixtures.pg_version import PgVersion
 from fixtures.neon_api import NeonAPI
 
+class NeonEndpoint:
+    def __init__(self):
+        self.en
+class NeonBranch:
+    def __init__(self, project, branch: dict[str, Any]):
+        self.id = branch["id"]
+        self.desc = branch
+        self.project = project
+        self.project_id = branch["project_id"]
+
+    def create_ro_endpoint(self):
+        return self.project.neon_api.create_endpoint(self.project_id, self.id, "read_only", {})[
+            "endpoint"
+        ]["id"]
+
 
 class RandomNeonProject:
     def __init__(self, project_id: str, neon_api: NeonAPI):
@@ -23,33 +38,36 @@ class RandomNeonProject:
     def __get_branches_info(self) -> list[Any]:
         return self.neon_api.get_branches(self.project_id)["branches"]
 
-    def get_main_branch_id(self) -> str:
+    def get_main_branch(self) -> NeonBranch:
         for branch in self.__get_branches_info():
             if "parent_id" not in branch:
-                return branch["id"]
+                return NeonBranch(self, branch)
         raise RuntimeError(f"The main branch is not found for the project {self.project_id}")
 
-    def get_leaf_branches(self) -> list[str]:
+    def get_leaf_branches(self) -> list[NeonBranch]:
         parents, branches, main = set(), set(), set()
-        for branch in self.__get_branches_info():
+        branches_raw = self.__get_branches_info()
+        for branch in branches_raw:
             branches.add(branch["id"])
             if "parent_id" in branch:
                 parents.add(branch["parent_id"])
             else:
                 main.add(branch["id"])
-        return list(branches - parents - main)
+        leafs = branches - parents - main
+        return [NeonBranch(self, branch) for branch in branches_raw if branch["id"] in leafs]
 
-    def get_branches(self) -> list[str]:
-        return [_["id"] for _ in self.__get_branches_info()]
+    def get_branches(self) -> list[NeonBranch]:
+        return [NeonBranch(self, branch) for branch in self.__get_branches_info()]
 
-    def create_branch(self, parent_id: str | None = None):
-        return self.neon_api.create_branch(self.project_id, parent_id=parent_id)["branch"]["id"]
-
-    def create_ro_endpoint(self, branch_id):
-        return self.neon_api.create_endpoint(self.project_id, branch_id,"read_only",{})["endpoint"]["id"]
+    def create_branch(self, parent_id: str | None = None) -> NeonBranch:
+        return NeonBranch(self, self.neon_api.create_branch(self.project_id, parent_id=parent_id)["branch"])
 
     def get_ro_endpoints(self):
-        return [_["id"] for _ in self.neon_api.get_endpoints(self.project_id)["endpoints"] if _["type"] == "read_only"]
+        return [
+            _["id"]
+            for _ in self.neon_api.get_endpoints(self.project_id)["endpoints"]
+            if _["type"] == "read_only"
+        ]
 
     def wait(self):
         return self.neon_api.wait_for_operation_to_finish(self.project_id)
