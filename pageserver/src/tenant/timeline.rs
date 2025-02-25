@@ -7038,8 +7038,7 @@ mod tests {
 
             eprintln!("Downloading {layer} and re-generating heatmap");
 
-            // unit tests don't allow on-demand downloads by default
-            let ctx = &RequestContextBuilder::extend(ctx)
+            let ctx = &RequestContextBuilder::extend(&ctx)
                 .download_behavior(crate::context::DownloadBehavior::Download)
                 .build();
 

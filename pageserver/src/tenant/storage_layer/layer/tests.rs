@@ -657,6 +657,11 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
         .download_behavior(DownloadBehavior::Download)
         .build();
 
+    // This test does downloads
+    let ctx = RequestContextBuilder::extend(&ctx)
+        .download_behavior(DownloadBehavior::Download)
+        .build();
+
     let layer = {
         let mut layers = {
             let layers = timeline.layers.read().await;
@@ -737,6 +742,11 @@ async fn evict_and_wait_does_not_wait_for_download() {
         .await
         .unwrap();
     let ctx = ctx.with_scope_timeline(&timeline);
+
+    // This test does downloads
+    let ctx = RequestContextBuilder::extend(&ctx)
+        .download_behavior(DownloadBehavior::Download)
+        .build();
 
     // This test does downloads
     let ctx = RequestContextBuilder::extend(&ctx)
