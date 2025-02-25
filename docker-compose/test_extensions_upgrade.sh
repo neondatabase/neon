@@ -87,7 +87,6 @@ new_vers=$(docker compose exec neon-test-extensions psql -Aqt -d contrib_regress
 docker compose --profile test-extensions down
 TAG=${OLDTAG} docker compose --profile test-extensions up --quiet-pull --build -d --force-recreate
 wait_for_ready
-docker compose cp  ext-src neon-test-extensions:/
 docker compose exec neon-test-extensions psql -c "DROP DATABASE IF EXISTS contrib_regression"
 docker compose exec neon-test-extensions psql -c "CREATE DATABASE contrib_regression"
 tenant_id=$(docker compose exec neon-test-extensions psql -Aqt -c "SHOW neon.tenant_id")

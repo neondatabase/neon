@@ -1818,7 +1818,7 @@ RUN make PG_VERSION="${PG_VERSION:?}" -C compute
 
 FROM pg-build AS extension-tests
 ARG PG_VERSION
-RUN mkdir /ext-src
+COPY docker-compose/ext-src/ /ext-src/
 
 COPY --from=pg-build /postgres /postgres
 #COPY --from=postgis-src /ext-src/ /ext-src/

@@ -29,12 +29,12 @@ def colorify(
     return f"{color.value}{s}{NC}"
 
 
-def rustfmt(fix_inplace: bool = False, no_color: bool = False) -> str:
-    cmd = "rustfmt --edition=2021"
+def cargo_fmt(fix_inplace: bool = False, no_color: bool = False) -> str:
+    cmd = "cargo fmt"
     if not fix_inplace:
         cmd += " --check"
     if no_color:
-        cmd += " --color=never"
+        cmd += " -- --color=never"
     return cmd
 
 
@@ -61,14 +61,23 @@ def get_commit_files() -> list[str]:
     return files.decode().splitlines()
 
 
-def check(name: str, suffix: str, cmd: str, changed_files: list[str], no_color: bool = False):
+def check(
+    name: str,
+    suffix: str,
+    cmd: str,
+    changed_files: list[str],
+    no_color: bool = False,
+    append_files_to_cmd: bool = True,
+):
     print(f"Checking: {name} ", end="")
     applicable_files = list(filter(lambda fname: fname.strip().endswith(suffix), changed_files))
     if not applicable_files:
         print(colorify("[NOT APPLICABLE]", Color.CYAN, no_color))
         return
 
-    cmd = f'{cmd} {" ".join(applicable_files)}'
+    if append_files_to_cmd:
+        cmd = f"{cmd} {' '.join(applicable_files)}"
+
     res = subprocess.run(cmd.split(), capture_output=True)
     if res.returncode != 0:
         print(colorify("[FAILED]", Color.RED, no_color))
@@ -100,15 +109,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     files = get_commit_files()
-    # we use rustfmt here because cargo fmt does not accept list of files
-    # it internally gathers project files and feeds them to rustfmt
-    # so because we want to check only files included in the commit we use rustfmt directly
     check(
-        name="rustfmt",
+        name="cargo fmt",
         suffix=".rs",
-        cmd=rustfmt(fix_inplace=args.fix_inplace, no_color=args.no_color),
+        cmd=cargo_fmt(fix_inplace=args.fix_inplace, no_color=args.no_color),
         changed_files=files,
         no_color=args.no_color,
+        append_files_to_cmd=False,
     )
     check(
         name="ruff check",

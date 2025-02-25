@@ -14,6 +14,7 @@ use crate::wal_backup::remote_timeline_path;
 use crate::{control_file, receive_wal, wal_storage, SafeKeeperConf};
 use camino_tempfile::Utf8TempDir;
 use postgres_ffi::v17::wal_generator::{LogicalMessageGenerator, WalGenerator};
+use safekeeper_api::membership::SafekeeperGeneration as Generation;
 use tokio::fs::create_dir_all;
 use utils::id::{NodeId, TenantTimelineId};
 use utils::lsn::Lsn;
@@ -73,10 +74,10 @@ impl Env {
         // Emulate an initial election.
         safekeeper
             .process_msg(&ProposerAcceptorMessage::Elected(ProposerElected {
+                generation: Generation::new(0),
                 term: 1,
                 start_streaming_at: start_lsn,
                 term_history: TermHistory(vec![(1, start_lsn).into()]),
-                timeline_start_lsn: start_lsn,
             }))
             .await?;
 
@@ -146,13 +147,12 @@ impl Env {
 
             let req = AppendRequest {
                 h: AppendRequestHeader {
+                    generation: Generation::new(0),
                     term: 1,
-                    term_start_lsn: start_lsn,
                     begin_lsn: lsn,
                     end_lsn: lsn + record.len() as u64,
                     commit_lsn: lsn,
                     truncate_lsn: Lsn(0),
-                    proposer_uuid: [0; 16],
                 },
                 wal_data: record,
             };
