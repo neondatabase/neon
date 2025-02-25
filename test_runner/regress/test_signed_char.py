@@ -50,6 +50,7 @@ def test_signed_char(neon_simple_env: NeonEnv):
         ses1.execute(
             "INSERT INTO test SELECT '123456789BV' || CHR(127153) /* ace of spades, a multibyte character */ || i::text from generate_series(1, 40) as i(i);"
         )
+        ses1.execute("INSERT INTO test SELECT 'Bóbr';")
         # Clean pending list to flush data to pages
         ses1.execute("select gin_clean_pending_list('test_payload_idx'::regclass);")
         ses1.execute(SIGNED_CHAR_EXTRACT)
