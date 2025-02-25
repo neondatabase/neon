@@ -551,17 +551,19 @@ impl LayerMap {
     }
 
     /// Get a ref counted pointer for the first in memory layer that matches the provided predicate.
-    pub fn find_in_memory_layer<Pred>(&self, mut pred: Pred) -> Option<Arc<InMemoryLayer>>
-    where
-        Pred: FnMut(&Arc<InMemoryLayer>) -> bool,
-    {
+    pub fn search_in_memory_layer(&self, below: Lsn) -> Option<Arc<InMemoryLayer>> {
+        let is_below = |l: &Arc<InMemoryLayer>| {
+            let start_lsn = l.get_lsn_range().start;
+            below > start_lsn
+        };
+
         if let Some(open) = &self.open_layer {
-            if pred(open) {
+            if is_below(open) {
                 return Some(open.clone());
             }
         }
 
-        self.frozen_layers.iter().rfind(|l| pred(l)).cloned()
+        self.frozen_layers.iter().rfind(|l| is_below(l)).cloned()
     }
 
     ///

@@ -3906,10 +3906,7 @@ impl Timeline {
                 let guard = timeline.layers.read().await;
                 let layers = guard.layer_map()?;
 
-                let in_memory_layer = layers.find_in_memory_layer(|l| {
-                    let start_lsn = l.get_lsn_range().start;
-                    cont_lsn > start_lsn
-                });
+                let in_memory_layer = layers.search_in_memory_layer(cont_lsn);
 
                 match in_memory_layer {
                     Some(l) => {
