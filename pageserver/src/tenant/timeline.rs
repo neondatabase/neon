@@ -72,6 +72,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::context::{self};
 use crate::l0_flush::{self, L0FlushGlobalState};
 use crate::tenant::storage_layer::ImageLayerName;
 use crate::{
@@ -323,7 +324,7 @@ pub struct Timeline {
     ancestor_timeline: Option<Arc<Timeline>>,
     ancestor_lsn: Lsn,
 
-    pub(super) metrics: TimelineMetrics,
+    pub(crate) metrics: TimelineMetrics,
 
     // `Timeline` doesn't write these metrics itself, but it manages the lifetime.  Code
     // in `crate::page_service` writes these metrics.
@@ -1299,6 +1300,14 @@ impl Timeline {
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
+        let prev_scope = std::mem::replace(
+            &mut *ctx.scope.lock().unwrap(),
+            context::Scope::new_timeline(self),
+        );
+        scopeguard::defer! {
+            *ctx.scope.lock().unwrap() = prev_scope;
+        }
+
         let read_path = if self.conf.enable_read_path_debugging || ctx.read_path_debug() {
             Some(ReadPath::new(keyspace.clone(), lsn))
         } else {
@@ -2820,8 +2829,17 @@ impl Timeline {
             "layer flush task",
             async move {
                 let _guard = guard;
-                let background_ctx = RequestContext::todo_child(TaskKind::LayerFlushTask, DownloadBehavior::Error);
-                self_clone.flush_loop(layer_flush_start_rx, &background_ctx).await;
+                let ctx = RequestContext::todo_child(TaskKind::LayerFlushTask, DownloadBehavior::Error);
+
+                let prev_scope = std::mem::replace(
+                    &mut *ctx.scope.lock().unwrap(),
+                    context::Scope::new_timeline(&self_clone),
+                );
+                scopeguard::defer! {
+                    *ctx.scope.lock().unwrap() = prev_scope;
+                }
+
+                self_clone.flush_loop(layer_flush_start_rx, &ctx).await;
                 let mut flush_loop_state = self_clone.flush_loop_state.lock().unwrap();
                 assert!(matches!(*flush_loop_state, FlushLoopState::Running{..}));
                 *flush_loop_state  = FlushLoopState::Exited;
@@ -4558,7 +4576,14 @@ impl Timeline {
         let self_clone = Arc::clone(self);
         let frozen_layer = Arc::clone(frozen_layer);
         let ctx = ctx.attached_child();
+        let timeline_scope = context::Scope::new_timeline(self);
         let work = async move {
+            let ctx = ctx;
+            let prev_scope = std::mem::replace(&mut *ctx.scope.lock().unwrap(), timeline_scope);
+            scopeguard::defer! {
+                *ctx.scope.lock().unwrap() = prev_scope;
+            }
+
             let Some((desc, path)) = frozen_layer
                 .write_to_disk(&ctx, key_range, self_clone.l0_flush_global_state.inner())
                 .await?
@@ -6718,6 +6743,14 @@ impl TimelineWriter<'_> {
         if !batch.has_data() {
             return Ok(());
         }
+
+        let prev_scope = std::mem::replace(
+            &mut *ctx.scope.lock().unwrap(),
+            context::Scope::new_timeline(self),
+        );
+        scopeguard::defer! {
+            *ctx.scope.lock().unwrap() = prev_scope;
+        };
 
         // In debug builds, assert that we don't write any keys that don't belong to this shard.
         // We don't assert this in release builds, since key ownership policies may change over
