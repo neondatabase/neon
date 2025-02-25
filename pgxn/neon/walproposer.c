@@ -606,7 +606,7 @@ SendStartWALPush(Safekeeper *sk)
 	snprintf(cmd, CMD_LEN, "START_WAL_PUSH (proto_version '%d')", wp->config->proto_version);
 	if (!wp->api.conn_send_query(sk, cmd))
 	{
-		wp_log(WARNING, "failed to send %s query to safekeeper %s:%s: %s",
+		wp_log(WARNING, "failed to send '%s' query to safekeeper %s:%s: %s",
 			   cmd, sk->host, sk->port, wp->api.conn_error_message(sk));
 		ShutdownConnection(sk);
 		return;
