@@ -415,7 +415,7 @@ ReportSearchPath(void)
 /*
  * PG14 uses separate backend for stats collector having no access to shared memory.
  * As far as AUX mechanism requires access to shared memory, persisting pgstat.stat file
- * is not supported at pg14. And so there is no definition of neon_pgstat_file_size_limit
+ * is not supported in PG14. And so there is no definition of neon_pgstat_file_size_limit
  * variable, so we have to declare it here.
  */
 static int neon_pgstat_file_size_limit;
