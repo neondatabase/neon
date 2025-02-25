@@ -34,6 +34,7 @@ use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeoutOrCancel;
+use remote_timeline_client::index::GcCompactionState;
 use remote_timeline_client::manifest::{
     OffloadedTimelineManifest, TenantManifest, LATEST_TENANT_MANIFEST_VERSION,
 };
@@ -1170,6 +1171,7 @@ impl Tenant {
             resources,
             CreateTimelineCause::Load,
             idempotency.clone(),
+            index_part.gc_compaction.clone(),
             ctx,
         )?;
         let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
@@ -3140,20 +3142,19 @@ impl Tenant {
 
             // If we're done compacting, check the scheduled GC compaction queue for more work.
             if outcome == CompactionOutcome::Done {
-                let queue = self
-                    .scheduled_compaction_tasks
-                    .lock()
-                    .unwrap()
-                    .get(&timeline.timeline_id)
-                    .cloned();
-                if let Some(queue) = queue {
-                    outcome = queue
-                        .iteration(cancel, ctx, &self.gc_block, &timeline)
-                        .instrument(
-                            info_span!("gc_compact_timeline", timeline_id = %timeline.timeline_id),
-                        )
-                        .await?;
-                }
+                let queue = {
+                    let mut guard = self.scheduled_compaction_tasks.lock().unwrap();
+                    guard
+                        .entry(timeline.timeline_id)
+                        .or_insert_with(|| Arc::new(GcCompactionQueue::new()))
+                        .clone()
+                };
+                outcome = queue
+                    .iteration(cancel, ctx, &self.gc_block, &timeline)
+                    .instrument(
+                        info_span!("gc_compact_timeline", timeline_id = %timeline.timeline_id),
+                    )
+                    .await?;
             }
 
             // If we're done compacting, offload the timeline if requested.
@@ -3210,6 +3211,7 @@ impl Tenant {
                     .unwrap()
                     .fail(&CIRCUIT_BREAKERS_BROKEN, err);
             }
+            CompactionError::AlreadyRunning(_) => {}
         }
     }
 
@@ -4165,6 +4167,7 @@ impl Tenant {
         resources: TimelineResources,
         cause: CreateTimelineCause,
         create_idempotency: CreateTimelineIdempotency,
+        gc_compaction_state: Option<GcCompactionState>,
         ctx: &RequestContext,
     ) -> anyhow::Result<(Arc<Timeline>, RequestContext)> {
         let state = match cause {
@@ -4197,6 +4200,7 @@ impl Tenant {
             state,
             self.attach_wal_lag_cooldown.clone(),
             create_idempotency,
+            gc_compaction_state,
             self.cancel.child_token(),
         );
 
@@ -5270,6 +5274,7 @@ impl Tenant {
                 resources,
                 CreateTimelineCause::Load,
                 create_guard.idempotency.clone(),
+                None,
                 ctx,
             )
             .context("Failed to create timeline data structure")?;
