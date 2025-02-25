@@ -41,6 +41,7 @@ use crate::rsyslog::configure_audit_rsyslog;
 use crate::spec::*;
 use crate::swap::resize_swap;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
+use crate::tls::watch_cert_for_changes;
 use crate::{config, extension_server, local_proxy};
 
 pub static SYNC_SAFEKEEPERS_PID: AtomicU32 = AtomicU32::new(0);
@@ -112,6 +113,7 @@ pub struct ComputeNode {
 
     // key: ext_archive_name, value: started download time, download_completed?
     pub ext_download_progress: RwLock<HashMap<String, (DateTime<Utc>, bool)>>,
+    pub compute_ctl_config: ComputeCtlConfig,
 }
 
 // store some metrics about download size that might impact startup time
@@ -134,8 +136,6 @@ pub struct ComputeState {
     /// Compute spec. This can be received from the CLI or - more likely -
     /// passed by the control plane with a /configure HTTP request.
     pub pspec: Option<ParsedSpec>,
-
-    pub compute_ctl_config: ComputeCtlConfig,
 
     /// If the spec is passed by a /configure request, 'startup_span' is the
     /// /configure request's tracing span. The main thread enters it when it
@@ -160,7 +160,6 @@ impl ComputeState {
             last_active: None,
             error: None,
             pspec: None,
-            compute_ctl_config: ComputeCtlConfig::default(),
             startup_span: None,
             metrics: ComputeMetrics::default(),
         }
@@ -314,7 +313,6 @@ impl ComputeNode {
             let pspec = ParsedSpec::try_from(cli_spec).map_err(|msg| anyhow::anyhow!(msg))?;
             new_state.pspec = Some(pspec);
         }
-        new_state.compute_ctl_config = compute_ctl_config;
 
         Ok(ComputeNode {
             params,
@@ -323,6 +321,7 @@ impl ComputeNode {
             state: Mutex::new(new_state),
             state_changed: Condvar::new(),
             ext_download_progress: RwLock::new(HashMap::new()),
+            compute_ctl_config,
         })
     }
 
@@ -341,11 +340,13 @@ impl ComputeNode {
             this.prewarm_postgres()?;
         }
 
+        this.watch_cert_for_changes();
+
         // Launch the external HTTP server first, so that we can serve control plane
         // requests while configuration is still in progress.
         crate::http::server::Server::External {
             port: this.params.external_http_port,
-            jwks: this.state.lock().unwrap().compute_ctl_config.jwks.clone(),
+            config: this.compute_ctl_config.clone(),
             compute_id: this.params.compute_id.clone(),
         }
         .launch(&this);
@@ -1108,6 +1109,7 @@ impl ComputeNode {
             &pgdata_path.join("postgresql.conf"),
             &pspec.spec,
             self.params.internal_http_port,
+            &self.compute_ctl_config.tls,
         )?;
 
         // Syncing safekeepers is only safe with primary nodes: if a primary
@@ -1516,7 +1518,12 @@ impl ComputeNode {
         // Write new config
         let pgdata_path = Path::new(&self.params.pgdata);
         let postgresql_conf_path = pgdata_path.join("postgresql.conf");
-        config::write_postgres_conf(&postgresql_conf_path, &spec, self.params.internal_http_port)?;
+        config::write_postgres_conf(
+            &postgresql_conf_path,
+            &spec,
+            self.params.internal_http_port,
+            &self.compute_ctl_config.tls,
+        )?;
 
         if !spec.skip_pg_catalog_updates {
             let max_concurrent_connections = spec.reconfigure_concurrency;
@@ -1585,6 +1592,45 @@ impl ComputeNode {
         self.post_apply_config()?;
 
         Ok(())
+    }
+
+    pub fn watch_cert_for_changes(self: &Arc<Self>) {
+        // update status on cert renewal
+        if let Some(tls_config) = &self.compute_ctl_config.tls {
+            let compute = self.clone();
+            let tls_config = tls_config.clone();
+            tokio::spawn(async move {
+                let mut cert_watch = watch_cert_for_changes(tls_config).await;
+                // wait for certificate update
+                while let Ok(()) = cert_watch.changed().await {
+                    let mut state = loop {
+                        {
+                            let state = compute.state.lock().unwrap();
+                            match state.status {
+                                // let's update the state to config pending
+                                ComputeStatus::ConfigurationPending | ComputeStatus::Running => {
+                                    break state;
+                                }
+
+                                // exit loop
+                                ComputeStatus::Failed
+                                | ComputeStatus::TerminationPending
+                                | ComputeStatus::Terminated => return,
+
+                                // drop the lock and sleep
+                                ComputeStatus::Init
+                                | ComputeStatus::Configuration
+                                | ComputeStatus::Empty => {}
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    };
+
+                    // tell compute to reload
+                    state.set_status(ComputeStatus::ConfigurationPending, &compute.state_changed);
+                }
+            });
+        }
     }
 
     /// Update the `last_active` in the shared state, but ensure that it's a more recent one.

@@ -1352,6 +1352,7 @@ dependencies = [
  "regex",
  "remote_storage",
  "reqwest",
+ "ring",
  "rlimit",
  "rust-ini",
  "serde",

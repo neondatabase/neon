@@ -36,6 +36,8 @@ opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 postgres.workspace = true
 regex.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+ring = "0.17"
 serde.workspace = true
 serde_with.workspace = true
 serde_json.workspace = true
@@ -43,7 +45,6 @@ signal-hook.workspace = true
 tar.workspace = true
 tower.workspace = true
 tower-http.workspace = true
-reqwest = { workspace = true, features = ["json"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 tokio-postgres.workspace = true
 tokio-util.workspace = true
