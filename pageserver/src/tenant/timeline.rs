@@ -5418,7 +5418,7 @@ pub(crate) enum CompactionError {
     Offload(OffloadError),
     /// Compaction cannot be done right now; page reconstruction and so on.
     #[error("Failed to collect keyspace: {0}")]
-    CollectKeySpaceError(CollectKeySpaceError),
+    CollectKeySpaceError(#[from] CollectKeySpaceError),
     #[error(transparent)]
     Other(anyhow::Error),
     #[error("Compaction already running: {0}")]
@@ -5432,8 +5432,6 @@ impl CompactionError {
             self,
             Self::ShuttingDown
                 | Self::AlreadyRunning(_)
-                // In theory, the below errors should have been normalized to `Cancelled` when converted to `CompactionError`,
-                // but we check them here to be more robust.
                 | Self::CollectKeySpaceError(CollectKeySpaceError::Cancelled)
                 | Self::CollectKeySpaceError(CollectKeySpaceError::PageRead(
                     PageReconstructError::Cancelled
@@ -5460,19 +5458,7 @@ impl From<OffloadError> for CompactionError {
     fn from(e: OffloadError) -> Self {
         match e {
             OffloadError::Cancelled => Self::ShuttingDown,
-            e => Self::Offload(e),
-        }
-    }
-}
-
-impl From<CollectKeySpaceError> for CompactionError {
-    fn from(err: CollectKeySpaceError) -> Self {
-        match err {
-            CollectKeySpaceError::Cancelled
-            | CollectKeySpaceError::PageRead(PageReconstructError::Cancelled) => {
-                CompactionError::ShuttingDown
-            }
-            e => CompactionError::CollectKeySpaceError(e),
+            _ => Self::Offload(e),
         }
     }
 }
