@@ -1610,7 +1610,7 @@ impl SafekeeperPersistence {
             port: upsert.port,
             http_port: upsert.http_port,
             availability_zone_id: upsert.availability_zone_id,
-            scheduling_policy: SkSchedulingPolicyWrapper(scheduling_policy),
+            scheduling_policy: SkSchedulingPolicyFromSql(scheduling_policy),
         }
     }
     pub(crate) fn as_describe_response(&self) -> Result<SafekeeperDescribeResponse, DatabaseError> {
