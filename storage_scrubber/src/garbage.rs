@@ -3,11 +3,9 @@
 //! Garbage means S3 objects which are either not referenced by any metadata,
 //! or are referenced by a control plane tenant/timeline in a deleted state.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-    time::Duration,
-};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use futures_util::TryStreamExt;
@@ -16,13 +14,14 @@ use remote_storage::{GenericRemoteStorage, ListingMode, ListingObject, RemotePat
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
-use utils::{backoff, id::TenantId};
+use utils::backoff;
+use utils::id::TenantId;
 
+use crate::cloud_admin_api::{CloudAdminApiClient, MaybeDeleted, ProjectData};
+use crate::metadata_stream::{stream_tenant_timelines, stream_tenants_maybe_prefix};
 use crate::{
-    cloud_admin_api::{CloudAdminApiClient, MaybeDeleted, ProjectData},
+    BucketConfig, ConsoleConfig, MAX_RETRIES, NodeKind, TenantShardTimelineId, TraversingDepth,
     init_remote, list_objects_with_retries,
-    metadata_stream::{stream_tenant_timelines, stream_tenants_maybe_prefix},
-    BucketConfig, ConsoleConfig, NodeKind, TenantShardTimelineId, TraversingDepth, MAX_RETRIES,
 };
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -259,14 +258,21 @@ async fn find_garbage_inner(
                 .await?;
                 if let Some(object) = tenant_objects.keys.first() {
                     if object.key.get_path().as_str().ends_with("heatmap-v1.json") {
-                        tracing::info!("Tenant {tenant_shard_id}: is missing in console and is only a heatmap (known historic deletion bug)");
+                        tracing::info!(
+                            "Tenant {tenant_shard_id}: is missing in console and is only a heatmap (known historic deletion bug)"
+                        );
                         garbage.append_buggy(GarbageEntity::Tenant(tenant_shard_id));
                         continue;
                     } else {
-                        tracing::info!("Tenant {tenant_shard_id} is missing in console and contains one object: {}", object.key);
+                        tracing::info!(
+                            "Tenant {tenant_shard_id} is missing in console and contains one object: {}",
+                            object.key
+                        );
                     }
                 } else {
-                    tracing::info!("Tenant {tenant_shard_id} is missing in console appears to have been deleted while we ran");
+                    tracing::info!(
+                        "Tenant {tenant_shard_id} is missing in console appears to have been deleted while we ran"
+                    );
                 }
             } else {
                 // A console-unknown tenant with timelines: check if these timelines only contain initdb.tar.zst, from the initial
@@ -295,9 +301,13 @@ async fn find_garbage_inner(
                 }
 
                 if any_non_initdb {
-                    tracing::info!("Tenant {tenant_shard_id}: is missing in console and contains timelines, one or more of which are more than just initdb");
+                    tracing::info!(
+                        "Tenant {tenant_shard_id}: is missing in console and contains timelines, one or more of which are more than just initdb"
+                    );
                 } else {
-                    tracing::info!("Tenant {tenant_shard_id}: is missing in console and contains only timelines that only contain initdb");
+                    tracing::info!(
+                        "Tenant {tenant_shard_id}: is missing in console and contains only timelines that only contain initdb"
+                    );
                     garbage.append_buggy(GarbageEntity::Tenant(tenant_shard_id));
                     continue;
                 }
@@ -546,7 +556,9 @@ pub async fn purge_garbage(
         .any(|g| matches!(g.entity, GarbageEntity::Timeline(_)))
         && garbage_list.active_timeline_count == 0
     {
-        anyhow::bail!("Refusing to purge a garbage list containing garbage timelines that reports 0 active timelines");
+        anyhow::bail!(
+            "Refusing to purge a garbage list containing garbage timelines that reports 0 active timelines"
+        );
     }
 
     let filtered_items = garbage_list

@@ -1,52 +1,41 @@
 //
 // Main entry point for the safekeeper executable
 //
-use anyhow::{bail, Context, Result};
-use camino::{Utf8Path, Utf8PathBuf};
-use clap::{ArgAction, Parser};
-use futures::future::BoxFuture;
-use futures::stream::FuturesUnordered;
-use futures::{FutureExt, StreamExt};
-use remote_storage::RemoteStorageConfig;
-use sd_notify::NotifyState;
-use tokio::runtime::Handle;
-use tokio::signal::unix::{signal, SignalKind};
-use tokio::task::JoinError;
-use utils::logging::SecretString;
-
-use std::env::{var, VarError};
+use std::env::{VarError, var};
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use storage_broker::Uri;
 
-use tracing::*;
-use utils::pid_file;
-
+use anyhow::{Context, Result, bail};
+use camino::{Utf8Path, Utf8PathBuf};
+use clap::{ArgAction, Parser};
+use futures::future::BoxFuture;
+use futures::stream::FuturesUnordered;
+use futures::{FutureExt, StreamExt};
 use metrics::set_build_info_metric;
+use remote_storage::RemoteStorageConfig;
 use safekeeper::defaults::{
     DEFAULT_CONTROL_FILE_SAVE_INTERVAL, DEFAULT_EVICTION_MIN_RESIDENT, DEFAULT_HEARTBEAT_TIMEOUT,
     DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_MAX_OFFLOADER_LAG_BYTES, DEFAULT_PARTIAL_BACKUP_CONCURRENCY,
     DEFAULT_PARTIAL_BACKUP_TIMEOUT, DEFAULT_PG_LISTEN_ADDR,
 };
-use safekeeper::http;
-use safekeeper::wal_service;
-use safekeeper::GlobalTimelines;
-use safekeeper::SafeKeeperConf;
-use safekeeper::{broker, WAL_SERVICE_RUNTIME};
-use safekeeper::{control_file, BROKER_RUNTIME};
-use safekeeper::{wal_backup, HTTP_RUNTIME};
-use storage_broker::DEFAULT_ENDPOINT;
-use utils::auth::{JwtAuth, Scope, SwappableJwtAuth};
-use utils::{
-    id::NodeId,
-    logging::{self, LogFormat},
-    project_build_tag, project_git_version,
-    sentry_init::init_sentry,
-    tcp_listener,
+use safekeeper::{
+    BROKER_RUNTIME, GlobalTimelines, HTTP_RUNTIME, SafeKeeperConf, WAL_SERVICE_RUNTIME, broker,
+    control_file, http, wal_backup, wal_service,
 };
+use sd_notify::NotifyState;
+use storage_broker::{DEFAULT_ENDPOINT, Uri};
+use tokio::runtime::Handle;
+use tokio::signal::unix::{SignalKind, signal};
+use tokio::task::JoinError;
+use tracing::*;
+use utils::auth::{JwtAuth, Scope, SwappableJwtAuth};
+use utils::id::NodeId;
+use utils::logging::{self, LogFormat, SecretString};
+use utils::sentry_init::init_sentry;
+use utils::{pid_file, project_build_tag, project_git_version, tcp_listener};
 
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -55,7 +44,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 /// This adds roughly 3% overhead for allocations on average, which is acceptable considering
 /// performance-sensitive code will avoid allocations as far as possible anyway.
 #[allow(non_upper_case_globals)]
-#[export_name = "malloc_conf"]
+#[unsafe(export_name = "malloc_conf")]
 pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:21\0";
 
 const PID_FILE_NAME: &str = "safekeeper.pid";

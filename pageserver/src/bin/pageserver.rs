@@ -3,49 +3,41 @@
 //! Main entry point for the Page Server executable.
 
 use std::env;
-use std::env::{var, VarError};
+use std::env::{VarError, var};
 use std::io::Read;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use camino::Utf8Path;
 use clap::{Arg, ArgAction, Command};
-
-use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
-use pageserver::config::PageserverIdentity;
+use metrics::launch_timestamp::{LaunchTimestamp, set_launch_timestamp_metric};
+use metrics::set_build_info_metric;
+use pageserver::config::{PageServerConf, PageserverIdentity};
 use pageserver::controller_upcall_client::ControllerUpcallClient;
+use pageserver::deletion_queue::DeletionQueue;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
-use pageserver::task_mgr::{COMPUTE_REQUEST_RUNTIME, WALRECEIVER_RUNTIME};
-use pageserver::tenant::{secondary, TenantSharedResources};
-use pageserver::{CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener};
+use pageserver::task_mgr::{
+    BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
+};
+use pageserver::tenant::{TenantSharedResources, mgr, secondary};
+use pageserver::{
+    CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener, http, page_cache, page_service,
+    task_mgr, virtual_file,
+};
+use postgres_backend::AuthType;
 use remote_storage::GenericRemoteStorage;
 use tokio::signal::unix::SignalKind;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-
-use metrics::set_build_info_metric;
-use pageserver::{
-    config::PageServerConf,
-    deletion_queue::DeletionQueue,
-    http, page_cache, page_service, task_mgr,
-    task_mgr::{BACKGROUND_RUNTIME, MGMT_REQUEST_RUNTIME},
-    tenant::mgr,
-    virtual_file,
-};
-use postgres_backend::AuthType;
+use utils::auth::{JwtAuth, SwappableJwtAuth};
 use utils::crashsafe::syncfs;
-use utils::failpoint_support;
 use utils::logging::TracingErrorLayerEnablement;
-use utils::{
-    auth::{JwtAuth, SwappableJwtAuth},
-    logging, project_build_tag, project_git_version,
-    sentry_init::init_sentry,
-    tcp_listener,
-};
+use utils::sentry_init::init_sentry;
+use utils::{failpoint_support, logging, project_build_tag, project_git_version, tcp_listener};
 
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
@@ -57,7 +49,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 /// This adds roughly 3% overhead for allocations on average, which is acceptable considering
 /// performance-sensitive code will avoid allocations as far as possible anyway.
 #[allow(non_upper_case_globals)]
-#[export_name = "malloc_conf"]
+#[unsafe(export_name = "malloc_conf")]
 pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:21\0";
 
 const PID_FILE_NAME: &str = "pageserver.pid";
@@ -84,6 +76,9 @@ fn main() -> anyhow::Result<()> {
         println!("{{\"features\": {FEATURES:?} }}");
         return Ok(());
     }
+
+    // Initialize up failpoints support
+    let scenario = failpoint_support::init();
 
     let workdir = arg_matches
         .get_one::<String>("workdir")
@@ -178,9 +173,6 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Initialize up failpoints support
-    let scenario = failpoint_support::init();
-
     // Basic initialization of things that don't change after startup
     tracing::info!("Initializing virtual_file...");
     virtual_file::init(
@@ -217,7 +209,9 @@ fn initialize_config(
         Ok(mut f) => {
             let md = f.metadata().context("stat config file")?;
             if !md.is_file() {
-                anyhow::bail!("Pageserver found identity file but it is a dir entry: {identity_file_path}. Aborting start up ...");
+                anyhow::bail!(
+                    "Pageserver found identity file but it is a dir entry: {identity_file_path}. Aborting start up ..."
+                );
             }
 
             let mut s = String::new();
@@ -225,7 +219,9 @@ fn initialize_config(
             toml_edit::de::from_str::<PageserverIdentity>(&s)?
         }
         Err(e) => {
-            anyhow::bail!("Pageserver could not read identity file: {identity_file_path}: {e}. Aborting start up ...");
+            anyhow::bail!(
+                "Pageserver could not read identity file: {identity_file_path}: {e}. Aborting start up ..."
+            );
         }
     };
 
@@ -401,11 +397,9 @@ fn start_pageserver(
         Err(VarError::NotPresent) => {
             info!("No JWT token for authentication with Safekeeper detected");
         }
-        Err(e) => {
-            return Err(e).with_context(|| {
-                "Failed to either load to detect non-present NEON_AUTH_TOKEN environment variable"
-            })
-        }
+        Err(e) => return Err(e).with_context(
+            || "Failed to either load to detect non-present NEON_AUTH_TOKEN environment variable",
+        ),
     };
 
     // Top-level cancellation token for the process
@@ -711,7 +705,9 @@ async fn create_remote_storage_client(
     // wrapper that simulates failures.
     if conf.test_remote_failures > 0 {
         if !cfg!(feature = "testing") {
-            anyhow::bail!("test_remote_failures option is not available because pageserver was compiled without the 'testing' feature");
+            anyhow::bail!(
+                "test_remote_failures option is not available because pageserver was compiled without the 'testing' feature"
+            );
         }
         info!(
             "Simulating remote failures for first {} attempts of each op",

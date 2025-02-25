@@ -1,39 +1,31 @@
 //! Acceptor part of proposer-acceptor consensus algorithm.
 
-use anyhow::{bail, Context, Result};
-use byteorder::{LittleEndian, ReadBytesExt};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-
-use postgres_ffi::{TimeLineID, MAX_SEND_SIZE};
-use safekeeper_api::membership;
-use safekeeper_api::membership::MemberSet;
-use safekeeper_api::membership::SafekeeperGeneration as Generation;
-use safekeeper_api::membership::SafekeeperId;
-use safekeeper_api::membership::INVALID_GENERATION;
-use safekeeper_api::models::HotStandbyFeedback;
-use safekeeper_api::Term;
-use serde::{Deserialize, Serialize};
-use std::cmp::max;
-use std::cmp::min;
+use std::cmp::{max, min};
 use std::fmt;
 use std::io::Read;
 use std::str::FromStr;
-use storage_broker::proto::SafekeeperTimelineInfo;
 
-use tracing::*;
-
-use crate::control_file;
-use crate::metrics::MISC_OPERATION_SECONDS;
-
-use crate::state::TimelineState;
-use crate::wal_storage;
+use anyhow::{Context, Result, bail};
+use byteorder::{LittleEndian, ReadBytesExt};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use postgres_ffi::{MAX_SEND_SIZE, TimeLineID};
 use pq_proto::SystemId;
-use utils::pageserver_feedback::PageserverFeedback;
-use utils::{
-    bin_ser::LeSer,
-    id::{NodeId, TenantId, TimelineId},
-    lsn::Lsn,
+use safekeeper_api::membership::{
+    INVALID_GENERATION, MemberSet, SafekeeperGeneration as Generation, SafekeeperId,
 };
+use safekeeper_api::models::HotStandbyFeedback;
+use safekeeper_api::{Term, membership};
+use serde::{Deserialize, Serialize};
+use storage_broker::proto::SafekeeperTimelineInfo;
+use tracing::*;
+use utils::bin_ser::LeSer;
+use utils::id::{NodeId, TenantId, TimelineId};
+use utils::lsn::Lsn;
+use utils::pageserver_feedback::PageserverFeedback;
+
+use crate::metrics::MISC_OPERATION_SECONDS;
+use crate::state::TimelineState;
+use crate::{control_file, wal_storage};
 
 pub const SK_PROTO_VERSION_2: u32 = 2;
 pub const SK_PROTO_VERSION_3: u32 = 3;
@@ -1137,9 +1129,14 @@ where
         // and walproposer recalculates the streaming point. OTOH repeating
         // error indicates a serious bug.
         if last_common_point.lsn != msg.start_streaming_at {
-            bail!("refusing ProposerElected with unexpected truncation point: lcp={:?} start_streaming_at={}, term={}, sk_th={:?} flush_lsn={}, wp_th={:?}",
-                    last_common_point, msg.start_streaming_at,
-                    self.state.acceptor_state.term, sk_th, self.flush_lsn(), msg.term_history,
+            bail!(
+                "refusing ProposerElected with unexpected truncation point: lcp={:?} start_streaming_at={}, term={}, sk_th={:?} flush_lsn={}, wp_th={:?}",
+                last_common_point,
+                msg.start_streaming_at,
+                self.state.acceptor_state.term,
+                sk_th,
+                self.flush_lsn(),
+                msg.term_history,
             );
         }
 
@@ -1147,8 +1144,12 @@ where
         assert!(
             msg.start_streaming_at >= self.state.inmem.commit_lsn,
             "attempt to truncate committed data: start_streaming_at={}, commit_lsn={}, term={}, sk_th={:?} flush_lsn={}, wp_th={:?}",
-            msg.start_streaming_at, self.state.inmem.commit_lsn,
-            self.state.acceptor_state.term, sk_th, self.flush_lsn(), msg.term_history,
+            msg.start_streaming_at,
+            self.state.inmem.commit_lsn,
+            self.state.acceptor_state.term,
+            sk_th,
+            self.flush_lsn(),
+            msg.term_history,
         );
 
         // Before first WAL write initialize its segment. It makes first segment
@@ -1373,21 +1374,19 @@ where
 
 #[cfg(test)]
 mod tests {
-    use futures::future::BoxFuture;
+    use std::ops::Deref;
+    use std::str::FromStr;
+    use std::time::{Instant, UNIX_EPOCH};
 
-    use postgres_ffi::{XLogSegNo, WAL_SEGMENT_SIZE};
-    use safekeeper_api::{
-        membership::{Configuration, MemberSet, SafekeeperGeneration, SafekeeperId},
-        ServerInfo,
+    use futures::future::BoxFuture;
+    use postgres_ffi::{WAL_SEGMENT_SIZE, XLogSegNo};
+    use safekeeper_api::ServerInfo;
+    use safekeeper_api::membership::{
+        Configuration, MemberSet, SafekeeperGeneration, SafekeeperId,
     };
 
     use super::*;
     use crate::state::{EvictionState, TimelinePersistentState};
-    use std::{
-        ops::Deref,
-        str::FromStr,
-        time::{Instant, UNIX_EPOCH},
-    };
 
     // fake storage for tests
     struct InMemoryState {

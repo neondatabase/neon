@@ -1,15 +1,16 @@
-use crate::tenant::mgr::TenantManager;
-use crate::{context::RequestContext, tenant::timeline::logical_size::CurrentLogicalSize};
+use std::sync::Arc;
+use std::time::SystemTime;
+
 use chrono::{DateTime, Utc};
 use consumption_metrics::EventType;
 use futures::stream::StreamExt;
-use std::{sync::Arc, time::SystemTime};
-use utils::{
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
+use utils::id::{TenantId, TimelineId};
+use utils::lsn::Lsn;
 
 use super::{Cache, NewRawMetric};
+use crate::context::RequestContext;
+use crate::tenant::mgr::TenantManager;
+use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 
 /// Name of the metric, used by `MetricsKey` factory methods and `deserialize_cached_events`
 /// instead of static str.
