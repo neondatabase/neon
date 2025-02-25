@@ -27,7 +27,7 @@ humantime.workspace = true
 fail.workspace = true
 futures = { workspace = true }
 jsonwebtoken.workspace = true
-nix = {workspace = true, features = [ "ioctl" ] }
+nix = { workspace = true, features = ["ioctl"] }
 once_cell.workspace = true
 pin-project-lite.workspace = true
 regex.workspace = true
@@ -61,6 +61,7 @@ bytes.workspace = true
 criterion.workspace = true
 hex-literal.workspace = true
 camino-tempfile.workspace = true
+pprof.workspace = true
 serde_assert.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 

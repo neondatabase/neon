@@ -60,7 +60,11 @@ pub struct InterpretedWalRecords {
     pub records: Vec<InterpretedWalRecord>,
     // Start LSN of the next record after the batch.
     // Note that said record may not belong to the current shard.
-    pub next_record_lsn: Option<Lsn>,
+    pub next_record_lsn: Lsn,
+    // Inclusive start LSN of the PG WAL from which the interpreted
+    // WAL records were extracted. Note that this is not necessarily the
+    // start LSN of the first interpreted record in the batch.
+    pub raw_wal_start_lsn: Option<Lsn>,
 }
 
 /// An interpreted Postgres WAL record, ready to be handled by the pageserver

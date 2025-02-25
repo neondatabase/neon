@@ -348,7 +348,12 @@ pub struct Config {
     // All pageservers managed by one instance of this service must have
     // the same public key.  This JWT token will be used to authenticate
     // this service to the pageservers it manages.
-    pub jwt_token: Option<String>,
+    pub pageserver_jwt_token: Option<String>,
+
+    // All safekeepers managed by one instance of this service must have
+    // the same public key. This JWT token will be used to authenticate
+    // this service to the safekeepers it manages.
+    pub safekeeper_jwt_token: Option<String>,
 
     // This JWT token will be used to authenticate this service to the control plane.
     pub control_plane_jwt_token: Option<String>,
@@ -399,6 +404,8 @@ pub struct Config {
     pub http_service_port: i32,
 
     pub long_reconcile_threshold: Duration,
+
+    pub use_https_pageserver_api: bool,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -815,11 +822,12 @@ impl Service {
         };
 
         tracing::info!("Sending initial heartbeats...");
-        let res_ps = self
-            .heartbeater_ps
-            .heartbeat(Arc::new(nodes_to_heartbeat))
-            .await;
-        let res_sk = self.heartbeater_sk.heartbeat(all_sks).await;
+        // Put a small, but reasonable timeout to get the initial heartbeats of the safekeepers to avoid a storage controller downtime
+        const SK_TIMEOUT: Duration = Duration::from_secs(5);
+        let (res_ps, res_sk) = tokio::join!(
+            self.heartbeater_ps.heartbeat(Arc::new(nodes_to_heartbeat)),
+            tokio::time::timeout(SK_TIMEOUT, self.heartbeater_sk.heartbeat(all_sks))
+        );
 
         let mut online_nodes = HashMap::new();
         if let Ok(deltas) = res_ps {
@@ -837,7 +845,7 @@ impl Service {
         }
 
         let mut online_sks = HashMap::new();
-        if let Ok(deltas) = res_sk {
+        if let Ok(Ok(deltas)) = res_sk {
             for (node_id, status) in deltas.0 {
                 match status {
                     SafekeeperState::Available {
@@ -879,7 +887,7 @@ impl Service {
                     let response = node
                         .with_client_retries(
                             |client| async move { client.list_location_config().await },
-                            &self.config.jwt_token,
+                            &self.config.pageserver_jwt_token,
                             1,
                             5,
                             timeout,
@@ -980,7 +988,7 @@ impl Service {
             let client = PageserverClient::new(
                 node.get_id(),
                 node.base_url(),
-                self.config.jwt_token.as_deref(),
+                self.config.pageserver_jwt_token.as_deref(),
             );
             match client
                 .location_config(
@@ -1062,8 +1070,12 @@ impl Service {
                 locked.safekeepers.clone()
             };
 
-            let res_ps = self.heartbeater_ps.heartbeat(nodes).await;
-            let res_sk = self.heartbeater_sk.heartbeat(safekeepers).await;
+            const SK_TIMEOUT: Duration = Duration::from_secs(3);
+            let (res_ps, res_sk) = tokio::join!(
+                self.heartbeater_ps.heartbeat(nodes),
+                tokio::time::timeout(SK_TIMEOUT, self.heartbeater_sk.heartbeat(safekeepers))
+            );
+
             if let Ok(deltas) = res_ps {
                 let mut to_handle = Vec::default();
 
@@ -1165,7 +1177,7 @@ impl Service {
                     }
                 }
             }
-            if let Ok(deltas) = res_sk {
+            if let Ok(Ok(deltas)) = res_sk {
                 let mut locked = self.inner.write().unwrap();
                 let mut safekeepers = (*locked.safekeepers).clone();
                 for (id, state) in deltas.0 {
@@ -1396,8 +1408,8 @@ impl Service {
             .list_nodes()
             .await?
             .into_iter()
-            .map(Node::from_persistent)
-            .collect::<Vec<_>>();
+            .map(|x| Node::from_persistent(x, config.use_https_pageserver_api))
+            .collect::<anyhow::Result<Vec<Node>>>()?;
         let nodes: HashMap<NodeId, Node> = nodes.into_iter().map(|n| (n.get_id(), n)).collect();
         tracing::info!("Loaded {} nodes from database.", nodes.len());
         metrics::METRICS_REGISTRY
@@ -1496,10 +1508,13 @@ impl Service {
                     NodeId(node_id as u64),
                     "".to_string(),
                     123,
+                    None,
                     "".to_string(),
                     123,
                     AvailabilityZone("test_az".to_string()),
-                );
+                    false,
+                )
+                .unwrap();
 
                 scheduler.node_upsert(&node);
             }
@@ -1543,14 +1558,14 @@ impl Service {
         let reconcilers_cancel = cancel.child_token();
 
         let heartbeater_ps = Heartbeater::new(
-            config.jwt_token.clone(),
+            config.pageserver_jwt_token.clone(),
             config.max_offline_interval,
             config.max_warming_up_interval,
             cancel.clone(),
         );
 
         let heartbeater_sk = Heartbeater::new(
-            config.jwt_token.clone(),
+            config.safekeeper_jwt_token.clone(),
             config.max_offline_interval,
             config.max_warming_up_interval,
             cancel.clone(),
@@ -1897,7 +1912,7 @@ impl Service {
         let configs = match node
             .with_client_retries(
                 |client| async move { client.list_location_config().await },
-                &self.config.jwt_token,
+                &self.config.pageserver_jwt_token,
                 1,
                 5,
                 SHORT_RECONCILE_TIMEOUT,
@@ -1955,7 +1970,7 @@ impl Service {
                             .location_config(tenant_shard_id, config, None, false)
                             .await
                     },
-                    &self.config.jwt_token,
+                    &self.config.pageserver_jwt_token,
                     1,
                     5,
                     SHORT_RECONCILE_TIMEOUT,
@@ -2911,7 +2926,9 @@ impl Service {
             first
         };
 
-        let updated_config = base.apply_patch(patch);
+        let updated_config = base
+            .apply_patch(patch)
+            .map_err(|err| ApiError::BadRequest(anyhow::anyhow!(err)))?;
         self.set_tenant_config_and_reconcile(tenant_id, updated_config)
             .await
     }
@@ -3090,7 +3107,7 @@ impl Service {
                 let client = PageserverClient::new(
                     node.get_id(),
                     node.base_url(),
-                    self.config.jwt_token.as_deref(),
+                    self.config.pageserver_jwt_token.as_deref(),
                 );
 
                 tracing::info!("Doing time travel recovery for shard {tenant_shard_id}",);
@@ -3151,7 +3168,7 @@ impl Service {
             let client = PageserverClient::new(
                 node.get_id(),
                 node.base_url(),
-                self.config.jwt_token.as_deref(),
+                self.config.pageserver_jwt_token.as_deref(),
             );
             futs.push(async move {
                 let result = client
@@ -3274,7 +3291,7 @@ impl Service {
                         .tenant_delete(TenantShardId::unsharded(tenant_id))
                         .await
                 },
-                &self.config.jwt_token,
+                &self.config.pageserver_jwt_token,
                 1,
                 3,
                 RECONCILE_TIMEOUT,
@@ -3493,7 +3510,7 @@ impl Service {
             let timeline_info = create_one(
                 shard_zero_tid,
                 shard_zero_locations,
-                self.config.jwt_token.clone(),
+                self.config.pageserver_jwt_token.clone(),
                 create_req.clone(),
             )
             .await?;
@@ -3509,7 +3526,7 @@ impl Service {
             // Create timeline on remaining shards with number >0
             if !targets.0.is_empty() {
                 // If we had multiple shards, issue requests for the remainder now.
-                let jwt = &self.config.jwt_token;
+                let jwt = &self.config.pageserver_jwt_token;
                 self.tenant_for_shards(
                     targets
                         .0
@@ -3592,7 +3609,7 @@ impl Service {
                         tenant_shard_id,
                         timeline_id,
                         node,
-                        self.config.jwt_token.clone(),
+                        self.config.pageserver_jwt_token.clone(),
                         req.clone(),
                     ))
                 })
@@ -3673,7 +3690,7 @@ impl Service {
                         tenant_shard_id,
                         timeline_id,
                         node,
-                        self.config.jwt_token.clone(),
+                        self.config.pageserver_jwt_token.clone(),
                     ))
                 })
                 .await?;
@@ -3747,7 +3764,7 @@ impl Service {
                     tenant_shard_id,
                     timeline_id,
                     node,
-                    self.config.jwt_token.clone(),
+                    self.config.pageserver_jwt_token.clone(),
                     dir,
                 ))
             })
@@ -3862,7 +3879,7 @@ impl Service {
             futs.push(async move {
                 node.with_client_retries(
                     |client| op(tenant_shard_id, client),
-                    &self.config.jwt_token,
+                    &self.config.pageserver_jwt_token,
                     warn_threshold,
                     max_retries,
                     timeout,
@@ -4111,7 +4128,7 @@ impl Service {
                         tenant_shard_id,
                         timeline_id,
                         node,
-                        self.config.jwt_token.clone(),
+                        self.config.pageserver_jwt_token.clone(),
                     ))
                 })
                 .await?;
@@ -4133,7 +4150,7 @@ impl Service {
                 shard_zero_tid,
                 timeline_id,
                 shard_zero_locations.latest.node,
-                self.config.jwt_token.clone(),
+                self.config.pageserver_jwt_token.clone(),
             )
             .await?;
             Ok(shard_zero_status)
@@ -4532,7 +4549,7 @@ impl Service {
 
                         client.location_config(child_id, config, None, false).await
                     },
-                    &self.config.jwt_token,
+                    &self.config.pageserver_jwt_token,
                     1,
                     10,
                     Duration::from_secs(5),
@@ -5132,7 +5149,7 @@ impl Service {
             let client = PageserverClient::new(
                 node.get_id(),
                 node.base_url(),
-                self.config.jwt_token.as_deref(),
+                self.config.pageserver_jwt_token.as_deref(),
             );
             let response = client
                 .tenant_shard_split(
@@ -5458,7 +5475,7 @@ impl Service {
         let client = PageserverClient::new(
             node.get_id(),
             node.base_url(),
-            self.config.jwt_token.as_deref(),
+            self.config.pageserver_jwt_token.as_deref(),
         );
 
         let scan_result = client
@@ -5902,8 +5919,10 @@ impl Service {
         )
         .await;
 
+        #[derive(PartialEq)]
         enum RegistrationStatus {
-            Matched,
+            UpToDate,
+            NeedUpdate,
             Mismatched,
             New,
         }
@@ -5912,7 +5931,11 @@ impl Service {
             let locked = self.inner.read().unwrap();
             if let Some(node) = locked.nodes.get(&register_req.node_id) {
                 if node.registration_match(&register_req) {
-                    RegistrationStatus::Matched
+                    if node.need_update(&register_req) {
+                        RegistrationStatus::NeedUpdate
+                    } else {
+                        RegistrationStatus::UpToDate
+                    }
                 } else {
                     RegistrationStatus::Mismatched
                 }
@@ -5922,9 +5945,9 @@ impl Service {
         };
 
         match registration_status {
-            RegistrationStatus::Matched => {
+            RegistrationStatus::UpToDate => {
                 tracing::info!(
-                    "Node {} re-registered with matching address",
+                    "Node {} re-registered with matching address and is up to date",
                     register_req.node_id
                 );
 
@@ -5942,7 +5965,7 @@ impl Service {
                     "Node is already registered with different address".to_string(),
                 ));
             }
-            RegistrationStatus::New => {
+            RegistrationStatus::New | RegistrationStatus::NeedUpdate => {
                 // fallthrough
             }
         }
@@ -5971,6 +5994,16 @@ impl Service {
             ));
         }
 
+        if self.config.use_https_pageserver_api && register_req.listen_https_port.is_none() {
+            return Err(ApiError::PreconditionFailed(
+                format!(
+                    "Node {} has no https port, but use_https is enabled",
+                    register_req.node_id
+                )
+                .into(),
+            ));
+        }
+
         // Ordering: we must persist the new node _before_ adding it to in-memory state.
         // This ensures that before we use it for anything or expose it via any external
         // API, it is guaranteed to be available after a restart.
@@ -5978,13 +6011,29 @@ impl Service {
             register_req.node_id,
             register_req.listen_http_addr,
             register_req.listen_http_port,
+            register_req.listen_https_port,
             register_req.listen_pg_addr,
             register_req.listen_pg_port,
             register_req.availability_zone_id.clone(),
+            self.config.use_https_pageserver_api,
         );
+        let new_node = match new_node {
+            Ok(new_node) => new_node,
+            Err(error) => return Err(ApiError::InternalServerError(error)),
+        };
 
-        // TODO: idempotency if the node already exists in the database
-        self.persistence.insert_node(&new_node).await?;
+        match registration_status {
+            RegistrationStatus::New => self.persistence.insert_node(&new_node).await?,
+            RegistrationStatus::NeedUpdate => {
+                self.persistence
+                    .update_node_on_registration(
+                        register_req.node_id,
+                        register_req.listen_https_port,
+                    )
+                    .await?
+            }
+            _ => unreachable!("Other statuses have been processed earlier"),
+        }
 
         let mut locked = self.inner.write().unwrap();
         let mut new_nodes = (*locked.nodes).clone();
@@ -5999,12 +6048,24 @@ impl Service {
             .storage_controller_pageserver_nodes
             .set(locked.nodes.len() as i64);
 
-        tracing::info!(
-            "Registered pageserver {} ({}), now have {} pageservers",
-            register_req.node_id,
-            register_req.availability_zone_id,
-            locked.nodes.len()
-        );
+        match registration_status {
+            RegistrationStatus::New => {
+                tracing::info!(
+                    "Registered pageserver {} ({}), now have {} pageservers",
+                    register_req.node_id,
+                    register_req.availability_zone_id,
+                    locked.nodes.len()
+                );
+            }
+            RegistrationStatus::NeedUpdate => {
+                tracing::info!(
+                    "Re-registered and updated node {} ({})",
+                    register_req.node_id,
+                    register_req.availability_zone_id,
+                );
+            }
+            _ => unreachable!("Other statuses have been processed earlier"),
+        }
         Ok(())
     }
 
@@ -6022,7 +6083,9 @@ impl Service {
         if let Some(scheduling) = scheduling {
             // Scheduling is a persistent part of Node: we must write updates to the database before
             // applying them in memory
-            self.persistence.update_node(node_id, scheduling).await?;
+            self.persistence
+                .update_node_scheduling_policy(node_id, scheduling)
+                .await?;
         }
 
         // If we're activating a node, then before setting it active we must reconcile any shard locations
@@ -6593,11 +6656,12 @@ impl Service {
     ) -> Option<ReconcilerWaiter> {
         let reconcile_needed = shard.get_reconcile_needed(nodes);
 
-        match reconcile_needed {
+        let reconcile_reason = match reconcile_needed {
             ReconcileNeeded::No => return None,
             ReconcileNeeded::WaitExisting(waiter) => return Some(waiter),
-            ReconcileNeeded::Yes => {
+            ReconcileNeeded::Yes(reason) => {
                 // Fall through to try and acquire units for spawning reconciler
+                reason
             }
         };
 
@@ -6636,6 +6700,7 @@ impl Service {
         };
 
         shard.spawn_reconciler(
+            reconcile_reason,
             &self.result_tx,
             nodes,
             &self.compute_hook,
@@ -6760,7 +6825,7 @@ impl Service {
         // with the frequency of background calls, this acts as an implicit rate limit that runs a small
         // trickle of optimizations in the background, rather than executing a large number in parallel
         // when a change occurs.
-        const MAX_OPTIMIZATIONS_EXEC_PER_PASS: usize = 2;
+        const MAX_OPTIMIZATIONS_EXEC_PER_PASS: usize = 16;
 
         // Synchronous prepare: scan shards for possible scheduling optimizations
         let candidate_work = self.optimize_all_plan();
@@ -6811,7 +6876,7 @@ impl Service {
         // How many candidate optimizations we will generate, before evaluating them for readniess: setting
         // this higher than the execution limit gives us a chance to execute some work even if the first
         // few optimizations we find are not ready.
-        const MAX_OPTIMIZATIONS_PLAN_PER_PASS: usize = 8;
+        const MAX_OPTIMIZATIONS_PLAN_PER_PASS: usize = 64;
 
         let mut work = Vec::new();
         let mut locked = self.inner.write().unwrap();
@@ -7038,7 +7103,7 @@ impl Service {
         match attached_node
             .with_client_retries(
                 |client| async move { client.tenant_heatmap_upload(tenant_shard_id).await },
-                &self.config.jwt_token,
+                &self.config.pageserver_jwt_token,
                 3,
                 10,
                 SHORT_RECONCILE_TIMEOUT,
@@ -7074,7 +7139,7 @@ impl Service {
                             )
                             .await
                     },
-                    &self.config.jwt_token,
+                    &self.config.pageserver_jwt_token,
                     3,
                     10,
                     SHORT_RECONCILE_TIMEOUT,
@@ -7129,7 +7194,7 @@ impl Service {
                         let request = request_ref.clone();
                         client.top_tenant_shards(request.clone()).await
                     },
-                    &self.config.jwt_token,
+                    &self.config.pageserver_jwt_token,
                     3,
                     3,
                     Duration::from_secs(5),
@@ -7302,7 +7367,7 @@ impl Service {
         match node
             .with_client_retries(
                 |client| async move { client.tenant_secondary_status(tenant_shard_id).await },
-                &self.config.jwt_token,
+                &self.config.pageserver_jwt_token,
                 1,
                 3,
                 Duration::from_millis(250),
@@ -7960,7 +8025,7 @@ impl Service {
             let sk = safekeepers
                 .get_mut(&node_id)
                 .ok_or(DatabaseError::Logical("Not found".to_string()))?;
-            sk.skp.scheduling_policy = String::from(scheduling_policy);
+            sk.set_scheduling_policy(scheduling_policy);
 
             locked.safekeepers = Arc::new(safekeepers);
         }

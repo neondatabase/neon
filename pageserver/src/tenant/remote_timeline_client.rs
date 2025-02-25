@@ -184,6 +184,7 @@ use camino::Utf8Path;
 use chrono::{NaiveDateTime, Utc};
 
 pub(crate) use download::download_initdb_tar_zst;
+use index::GcCompactionState;
 use pageserver_api::models::TimelineArchivalState;
 use pageserver_api::shard::{ShardIndex, TenantShardId};
 use regex::Regex;
@@ -909,6 +910,18 @@ impl RemoteTimelineClient {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
         upload_queue.dirty.import_pgdata = state;
+        self.schedule_index_upload(upload_queue);
+        Ok(())
+    }
+
+    /// Launch an index-file upload operation in the background, setting `import_pgdata` field.
+    pub(crate) fn schedule_index_upload_for_gc_compaction_state_update(
+        self: &Arc<Self>,
+        gc_compaction_state: GcCompactionState,
+    ) -> anyhow::Result<()> {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+        upload_queue.dirty.gc_compaction = Some(gc_compaction_state);
         self.schedule_index_upload(upload_queue);
         Ok(())
     }

@@ -2,8 +2,10 @@ import os
 from pathlib import Path
 
 import pytest
+from fixtures.benchmark_fixture import NeonBenchmarker
 from fixtures.compare_fixtures import RemoteCompare
 from fixtures.log_helper import log
+from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 def get_num_relations(default: int = 1000) -> list[int]:
@@ -64,3 +66,52 @@ def test_perf_many_relations(remote_compare: RemoteCompare, num_relations: int):
             env.pg_bin.run_capture(
                 ["psql", env.pg.connstr(options="-cstatement_timeout=1000s "), "-c", sql]
             )
+
+
+def test_perf_simple_many_relations_reldir_v2(
+    neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchmarker
+):
+    """
+    Test creating many relations in a single database.
+    """
+    env = neon_env_builder.init_start(initial_tenant_conf={"rel_size_v2_enabled": "true"})
+    ep = env.endpoints.create_start(
+        "main",
+        config_lines=[
+            "shared_buffers=1000MB",
+            "max_locks_per_transaction=16384",
+        ],
+    )
+
+    n = 100000
+    step = 5000
+    # Create many relations
+    log.info(f"Creating {n} relations...")
+    begin = 0
+    with zenbenchmark.record_duration("create_first_relation"):
+        ep.safe_psql("CREATE TABLE IF NOT EXISTS table_begin (id SERIAL PRIMARY KEY, data TEXT)")
+    with zenbenchmark.record_duration("create_many_relations"):
+        while True:
+            end = begin + step
+            ep.safe_psql_many(
+                [
+                    "BEGIN",
+                    f"""DO $$
+                DECLARE
+                    i INT;
+                    table_name TEXT;
+                BEGIN
+                    FOR i IN {begin}..{end} LOOP
+                        table_name := 'table_' || i;
+                        EXECUTE 'CREATE TABLE IF NOT EXISTS ' || table_name || ' (id SERIAL PRIMARY KEY, data TEXT)';
+                    END LOOP;
+                END $$;
+                """,
+                    "COMMIT",
+                ]
+            )
+            begin = end
+            if begin >= n:
+                break
+    with zenbenchmark.record_duration("create_last_relation"):
+        ep.safe_psql(f"CREATE TABLE IF NOT EXISTS table_{begin} (id SERIAL PRIMARY KEY, data TEXT)")

@@ -197,6 +197,10 @@ pub struct PageServerConf {
     /// Enable read path debugging. If enabled, read key errors will print a backtrace of the layer
     /// files read.
     pub enable_read_path_debugging: bool,
+
+    /// Interpreted protocol feature: if enabled, validate that the logical WAL received from
+    /// safekeepers does not have gaps.
+    pub validate_wal_contiguity: bool,
 }
 
 /// Token for authentication to safekeepers
@@ -360,6 +364,7 @@ impl PageServerConf {
             page_service_pipelining,
             get_vectored_concurrent_io,
             enable_read_path_debugging,
+            validate_wal_contiguity,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -446,6 +451,7 @@ impl PageServerConf {
             virtual_file_io_mode: virtual_file_io_mode.unwrap_or(virtual_file::IoMode::preferred()),
             no_sync: no_sync.unwrap_or(false),
             enable_read_path_debugging: enable_read_path_debugging.unwrap_or(false),
+            validate_wal_contiguity: validate_wal_contiguity.unwrap_or(false),
         };
 
         // ------------------------------------------------------------

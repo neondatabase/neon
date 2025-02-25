@@ -19,7 +19,7 @@ use arc_swap::{ArcSwap, ArcSwapOption};
 use bytes::Bytes;
 use camino::Utf8Path;
 use chrono::{DateTime, Utc};
-use compaction::CompactionOutcome;
+use compaction::{CompactionOutcome, GcCompactionCombinedSettings};
 use enumset::EnumSet;
 use fail::fail_point;
 use futures::FutureExt;
@@ -148,6 +148,7 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
+use super::remote_timeline_client::index::GcCompactionState;
 use super::{
     config::TenantConf, storage_layer::LayerVisibilityHint, upload_queue::NotInitialized,
     MaybeOffloaded,
@@ -323,6 +324,9 @@ pub struct Timeline {
     ancestor_timeline: Option<Arc<Timeline>>,
     ancestor_lsn: Lsn,
 
+    // The LSN of gc-compaction that was last applied to this timeline.
+    gc_compaction_state: ArcSwap<Option<GcCompactionState>>,
+
     pub(super) metrics: TimelineMetrics,
 
     // `Timeline` doesn't write these metrics itself, but it manages the lifetime.  Code
@@ -468,7 +472,7 @@ pub struct Timeline {
     /// If Some, collects GetPage metadata for an ongoing PageTrace.
     pub(crate) page_trace: ArcSwapOption<Sender<PageTraceEvent>>,
 
-    previous_heatmap: ArcSwapOption<PreviousHeatmap>,
+    pub(super) previous_heatmap: ArcSwapOption<PreviousHeatmap>,
 
     /// May host a background Tokio task which downloads all the layers from the current
     /// heatmap on demand.
@@ -1889,6 +1893,7 @@ impl Timeline {
             // abruptly stall nor resume L0 flushes in these cases.
             Err(CompactionError::Offload(_)) => {}
             Err(CompactionError::ShuttingDown) => {}
+            Err(CompactionError::AlreadyRunning(_)) => {}
         };
 
         result
@@ -2531,6 +2536,31 @@ impl Timeline {
             )
     }
 
+    fn get_gc_compaction_settings(&self) -> GcCompactionCombinedSettings {
+        let tenant_conf = &self.tenant_conf.load();
+        let gc_compaction_enabled = tenant_conf
+            .tenant_conf
+            .gc_compaction_enabled
+            .unwrap_or(self.conf.default_tenant_conf.gc_compaction_enabled);
+        let gc_compaction_initial_threshold_kb = tenant_conf
+            .tenant_conf
+            .gc_compaction_initial_threshold_kb
+            .unwrap_or(
+                self.conf
+                    .default_tenant_conf
+                    .gc_compaction_initial_threshold_kb,
+            );
+        let gc_compaction_ratio_percent = tenant_conf
+            .tenant_conf
+            .gc_compaction_ratio_percent
+            .unwrap_or(self.conf.default_tenant_conf.gc_compaction_ratio_percent);
+        GcCompactionCombinedSettings {
+            gc_compaction_enabled,
+            gc_compaction_initial_threshold_kb,
+            gc_compaction_ratio_percent,
+        }
+    }
+
     fn get_image_creation_preempt_threshold(&self) -> usize {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -2609,6 +2639,7 @@ impl Timeline {
         state: TimelineState,
         attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
         create_idempotency: crate::tenant::CreateTimelineIdempotency,
+        gc_compaction_state: Option<GcCompactionState>,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -2666,6 +2697,8 @@ impl Timeline {
                     prev: metadata.prev_record_lsn().unwrap_or(Lsn(0)),
                 }),
                 disk_consistent_lsn: AtomicLsn::new(disk_consistent_lsn.0),
+
+                gc_compaction_state: ArcSwap::new(Arc::new(gc_compaction_state)),
 
                 last_freeze_at: AtomicLsn::new(disk_consistent_lsn.0),
                 last_freeze_ts: RwLock::new(Instant::now()),
@@ -2831,6 +2864,20 @@ impl Timeline {
         );
     }
 
+    pub(crate) fn update_gc_compaction_state(
+        &self,
+        gc_compaction_state: GcCompactionState,
+    ) -> anyhow::Result<()> {
+        self.gc_compaction_state
+            .store(Arc::new(Some(gc_compaction_state.clone())));
+        self.remote_client
+            .schedule_index_upload_for_gc_compaction_state_update(gc_compaction_state)
+    }
+
+    pub(crate) fn get_gc_compaction_state(&self) -> Option<GcCompactionState> {
+        self.gc_compaction_state.load_full().as_ref().clone()
+    }
+
     /// Creates and starts the wal receiver.
     ///
     /// This function is expected to be called at most once per Timeline's lifecycle
@@ -2874,6 +2921,7 @@ impl Timeline {
                 auth_token: crate::config::SAFEKEEPER_AUTH_TOKEN.get().cloned(),
                 availability_zone: self.conf.availability_zone.clone(),
                 ingest_batch_size: self.conf.ingest_batch_size,
+                validate_wal_contiguity: self.conf.validate_wal_contiguity,
             },
             broker_client,
             ctx,
@@ -3523,6 +3571,14 @@ impl Timeline {
         Ok(layer)
     }
 
+    pub(super) fn is_previous_heatmap_active(&self) -> bool {
+        self.previous_heatmap
+            .load()
+            .as_ref()
+            .map(|prev| matches!(**prev, PreviousHeatmap::Active { .. }))
+            .unwrap_or(false)
+    }
+
     /// The timeline heatmap is a hint to secondary locations from the primary location,
     /// indicating which layers are currently on-disk on the primary.
     ///
@@ -3595,6 +3651,7 @@ impl Timeline {
             Some(non_resident) => {
                 let mut non_resident = non_resident.peekable();
                 if non_resident.peek().is_none() {
+                    tracing::info!(timeline_id=%self.timeline_id, "Previous heatmap now obsolete");
                     self.previous_heatmap
                         .store(Some(PreviousHeatmap::Obsolete.into()));
                 }
@@ -3624,6 +3681,36 @@ impl Timeline {
             .collect();
 
         Some(HeatMapTimeline::new(self.timeline_id, layers))
+    }
+
+    pub(super) async fn generate_unarchival_heatmap(&self, end_lsn: Lsn) -> PreviousHeatmap {
+        let guard = self.layers.read().await;
+
+        let now = SystemTime::now();
+        let mut heatmap_layers = Vec::default();
+        for vl in guard.visible_layers() {
+            if vl.layer_desc().get_lsn_range().start >= end_lsn {
+                continue;
+            }
+
+            let hl = HeatMapLayer {
+                name: vl.layer_desc().layer_name(),
+                metadata: vl.metadata(),
+                access_time: now,
+            };
+            heatmap_layers.push(hl);
+        }
+
+        tracing::info!(
+            "Generating unarchival heatmap with {} layers",
+            heatmap_layers.len()
+        );
+
+        let heatmap = HeatMapTimeline::new(self.timeline_id, heatmap_layers);
+        PreviousHeatmap::Active {
+            heatmap,
+            read_at: Instant::now(),
+        }
     }
 
     /// Returns true if the given lsn is or was an ancestor branchpoint.
@@ -5333,6 +5420,8 @@ pub(crate) enum CompactionError {
     CollectKeySpaceError(CollectKeySpaceError),
     #[error(transparent)]
     Other(anyhow::Error),
+    #[error("Compaction already running: {0}")]
+    AlreadyRunning(&'static str),
 }
 
 impl From<OffloadError> for CompactionError {
@@ -5341,12 +5430,6 @@ impl From<OffloadError> for CompactionError {
             OffloadError::Cancelled => Self::ShuttingDown,
             _ => Self::Offload(e),
         }
-    }
-}
-
-impl CompactionError {
-    pub fn is_cancelled(&self) -> bool {
-        matches!(self, CompactionError::ShuttingDown)
     }
 }
 
@@ -6614,7 +6697,7 @@ impl TimelineWriter<'_> {
 
         if let Some(wait_threshold) = wait_threshold {
             if l0_count >= wait_threshold {
-                info!("layer roll waiting for flush due to compaction backpressure at {l0_count} L0 layers");
+                debug!("layer roll waiting for flush due to compaction backpressure at {l0_count} L0 layers");
                 self.tl.wait_flush_completion(flush_id).await?;
             }
         }
