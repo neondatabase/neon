@@ -1864,16 +1864,20 @@ impl Timeline {
         };
 
         // Signal compaction failure to avoid L0 flush stalls when it's broken.
-        match result {
+        match &result {
             Ok(_) => self.compaction_failed.store(false, AtomicOrdering::Relaxed),
-            Err(CompactionError::Other(_)) | Err(CompactionError::CollectKeySpaceError(_)) => {
+            Err(CompactionError::ShuttingDown) => {}
+            Err(CompactionError::AlreadyRunning(_)) => {}
+            Err(CompactionError::Other(_)) => {
+                self.compaction_failed.store(true, AtomicOrdering::Relaxed)
+            }
+            Err(e @ CompactionError::CollectKeySpaceError(_)) if e.is_cancel() => {}
+            Err(CompactionError::CollectKeySpaceError(_)) => {
                 self.compaction_failed.store(true, AtomicOrdering::Relaxed)
             }
             // Don't change the current value on offload failure or shutdown. We don't want to
             // abruptly stall nor resume L0 flushes in these cases.
             Err(CompactionError::Offload(_)) => {}
-            Err(CompactionError::ShuttingDown) => {}
-            Err(CompactionError::AlreadyRunning(_)) => {}
         };
 
         result
@@ -4688,10 +4692,7 @@ impl Timeline {
             ));
         }
 
-        let (dense_ks, sparse_ks) = self
-            .collect_keyspace(lsn, ctx)
-            .await
-            .map_err(CompactionError::CollectKeySpaceError)?;
+        let (dense_ks, sparse_ks) = self.collect_keyspace(lsn, ctx).await?; // Use `?` instead of `map_err` to normalize shutdown and cancel errors.
         let dense_partitioning = dense_ks.partition(&self.shard_identity, partition_size);
         let sparse_partitioning = SparseKeyPartitioning {
             parts: vec![sparse_ks],
@@ -5424,11 +5425,42 @@ pub(crate) enum CompactionError {
     AlreadyRunning(&'static str),
 }
 
+impl CompactionError {
+    /// Errors that can be ignored, i.e., cancel and shutdown.
+    pub fn is_cancel(&self) -> bool {
+        matches!(
+            self,
+            Self::ShuttingDown
+                | Self::AlreadyRunning(_)
+                // In theory, the below errors should have been normalized to `Cancelled` when converted to `CompactionError`,
+                // but we check them here to be more robust.
+                | Self::CollectKeySpaceError(CollectKeySpaceError::Cancelled)
+                | Self::CollectKeySpaceError(CollectKeySpaceError::PageRead(
+                    PageReconstructError::Cancelled
+                ))
+                | Self::Offload(OffloadError::Cancelled)
+        )
+    }
+
+    /// Critical errors that indicate data corruption.
+    pub fn is_critical(&self) -> bool {
+        matches!(
+            self,
+            Self::CollectKeySpaceError(
+                CollectKeySpaceError::Decode(_)
+                    | CollectKeySpaceError::PageRead(
+                        PageReconstructError::MissingKey(_) | PageReconstructError::WalRedo(_),
+                    )
+            )
+        )
+    }
+}
+
 impl From<OffloadError> for CompactionError {
     fn from(e: OffloadError) -> Self {
         match e {
             OffloadError::Cancelled => Self::ShuttingDown,
-            _ => Self::Offload(e),
+            e => Self::Offload(e),
         }
     }
 }
@@ -5440,7 +5472,7 @@ impl From<CollectKeySpaceError> for CompactionError {
             | CollectKeySpaceError::PageRead(PageReconstructError::Cancelled) => {
                 CompactionError::ShuttingDown
             }
-            e => CompactionError::Other(e.into()),
+            e => CompactionError::CollectKeySpaceError(e),
         }
     }
 }

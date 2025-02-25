@@ -8,6 +8,12 @@ use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::ops::{Deref, Range};
 use std::sync::Arc;
 
+use super::layer_manager::LayerManager;
+use super::{
+    CompactFlags, CompactOptions, CreateImageLayersError, DurationRecorder, GetVectoredError,
+    ImageLayerCreationMode, LastImageLayerCreationStatus, RecordedDuration, Timeline,
+};
+
 use anyhow::{Context, anyhow, bail};
 use bytes::Bytes;
 use enumset::EnumSet;
@@ -39,7 +45,6 @@ use super::{
 };
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
-use crate::pgdatadir_mapping::CollectKeySpaceError;
 use crate::statvfs::Statvfs;
 use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::gc_block::GcBlock;
@@ -975,18 +980,12 @@ impl Timeline {
 
             // Suppress errors when cancelled.
             Err(_) if self.cancel.is_cancelled() => {}
-            Err(CompactionError::ShuttingDown) => {}
-            Err(CompactionError::CollectKeySpaceError(CollectKeySpaceError::Cancelled)) => {}
+            Err(err) if err.is_cancel() => {}
 
             // Alert on critical errors that indicate data corruption.
-            Err(
-                err @ CompactionError::CollectKeySpaceError(
-                    CollectKeySpaceError::Decode(_)
-                    | CollectKeySpaceError::PageRead(
-                        PageReconstructError::MissingKey(_) | PageReconstructError::WalRedo(_),
-                    ),
-                ),
-            ) => critical!("could not compact, repartitioning keyspace failed: {err:?}"),
+            Err(err) if err.is_critical() => {
+                critical!("could not compact, repartitioning keyspace failed: {err:?}");
+            }
 
             // Log other errors. No partitioning? This is normal, if the timeline was just created
             // as an empty timeline. Also in unit tests, when we use the timeline as a simple

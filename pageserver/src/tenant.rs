@@ -3145,6 +3145,7 @@ impl Tenant {
             // Offload failures don't trip the circuit breaker, since they're cheap to retry and
             // shouldn't block compaction.
             CompactionError::Offload(_) => {}
+            e @ CompactionError::CollectKeySpaceError(_) if e.is_cancel() => {}
             CompactionError::CollectKeySpaceError(err) => {
                 self.compaction_circuit_breaker
                     .lock()
