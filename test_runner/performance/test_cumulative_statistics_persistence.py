@@ -11,6 +11,7 @@ from fixtures.neon_api import connection_parameters_to_env
 from fixtures.pg_version import PgVersion
 
 if TYPE_CHECKING:
+
     from fixtures.benchmark_fixture import NeonBenchmarker
     from fixtures.neon_api import NeonAPI
     from fixtures.neon_fixtures import PgBin
@@ -71,7 +72,7 @@ def insert_second_chunk_and_verify_autovacuum_is_now_running(
 
 @pytest.mark.remote_cluster
 @pytest.mark.timeout(60 * 60)
-def test_replication_start_stop(
+def test_cumulative_statistics_persistence(
     pg_bin: PgBin,
     test_output_dir: Path,
     neon_api: NeonAPI,
