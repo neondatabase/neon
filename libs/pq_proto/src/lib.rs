@@ -1035,7 +1035,7 @@ impl BeMessage<'_> {
                 buf.put_u8(b'd');
                 write_body(buf, |buf| {
                     buf.put_u8(b'0'); // matches INTERPRETED_WAL_RECORD_TAG in postgres-protocol
-                                      // dependency
+                    // dependency
                     buf.put_u64(rec.streaming_lsn);
                     buf.put_u64(rec.commit_lsn);
                     buf.put_slice(rec.data);

@@ -1,8 +1,9 @@
 use std::{
     panic::AssertUnwindSafe,
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering},
-        mpsc, Arc, OnceLock,
+        Arc, OnceLock,
+        atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
+        mpsc,
     },
     thread::JoinHandle,
 };

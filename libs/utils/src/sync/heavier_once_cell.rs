@@ -1,6 +1,6 @@
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc, Mutex, MutexGuard,
+    atomic::{AtomicUsize, Ordering},
 };
 use tokio::sync::Semaphore;
 
@@ -306,7 +306,7 @@ mod tests {
     use super::*;
     use std::{
         convert::Infallible,
-        pin::{pin, Pin},
+        pin::{Pin, pin},
         time::Duration,
     };
 

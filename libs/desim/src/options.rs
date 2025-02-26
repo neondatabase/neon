@@ -1,4 +1,4 @@
-use rand::{rngs::StdRng, Rng};
+use rand::{Rng, rngs::StdRng};
 
 /// Describes random delays and failures. Delay will be uniformly distributed in [min, max].
 /// Connection failure will occur with the probablity fail_prob.

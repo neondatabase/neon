@@ -3,13 +3,13 @@
 //!
 //! TODO: Generate separate types for each supported PG version
 
-use crate::pg_constants;
 use crate::XLogRecord;
+use crate::pg_constants;
+use crate::{BLCKSZ, XLOG_SIZE_OF_XLOG_RECORD};
 use crate::{
     BlockNumber, MultiXactId, MultiXactOffset, MultiXactStatus, Oid, RepOriginId, TimestampTz,
     TransactionId,
 };
-use crate::{BLCKSZ, XLOG_SIZE_OF_XLOG_RECORD};
 use bytes::{Buf, Bytes};
 use serde::{Deserialize, Serialize};
 use utils::bin_ser::DeserializeError;

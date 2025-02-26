@@ -15,13 +15,13 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use camino::Utf8PathBuf;
 use pageserver_api::models::{self, TenantInfo, TimelineInfo};
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use postgres_backend::AuthType;
-use postgres_connection::{parse_host_port, PgConnectionConfig};
+use postgres_connection::{PgConnectionConfig, parse_host_port};
 use utils::auth::{Claims, Scope};
 use utils::id::NodeId;
 use utils::{
@@ -81,7 +81,11 @@ impl PageServerNode {
         &self,
         conf: NeonLocalInitPageserverConf,
     ) -> anyhow::Result<toml_edit::DocumentMut> {
-        assert_eq!(&PageServerConf::from(&conf), &self.conf, "during neon_local init, we derive the runtime state of ps conf (self.conf) from the --config flag fully");
+        assert_eq!(
+            &PageServerConf::from(&conf),
+            &self.conf,
+            "during neon_local init, we derive the runtime state of ps conf (self.conf) from the --config flag fully"
+        );
 
         // TODO(christian): instead of what we do here, create a pageserver_api::config::ConfigToml (PR #7656)
 

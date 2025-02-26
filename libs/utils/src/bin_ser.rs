@@ -14,7 +14,7 @@
 #![warn(missing_docs)]
 
 use bincode::Options;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::io::{self, Read, Write};
 use thiserror::Error;
 

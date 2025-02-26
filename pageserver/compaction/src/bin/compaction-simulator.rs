@@ -157,8 +157,8 @@ async fn run_suite() -> anyhow::Result<()> {
 use std::fs::File;
 use std::io::Stdout;
 use std::sync::Mutex;
-use tracing_subscriber::fmt::writer::EitherWriter;
 use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::fmt::writer::EitherWriter;
 
 static LOG_FILE: OnceLock<Mutex<EitherWriter<File, Stdout>>> = OnceLock::new();
 fn get_log_output() -> &'static Mutex<EitherWriter<File, Stdout>> {

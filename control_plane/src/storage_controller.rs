@@ -19,7 +19,7 @@ use pageserver_api::{
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
 use reqwest::Method;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     ffi::OsStr,
     fs,
@@ -34,7 +34,7 @@ use tokio::process::Command;
 use tracing::instrument;
 use url::Url;
 use utils::{
-    auth::{encode_from_key_file, Claims, Scope},
+    auth::{Claims, Scope, encode_from_key_file},
     id::{NodeId, TenantId},
 };
 use whoami::username;
@@ -96,7 +96,7 @@ pub struct AttachHookRequest {
 
 #[derive(Serialize, Deserialize)]
 pub struct AttachHookResponse {
-    #[serde(rename="gen")]
+    #[serde(rename = "gen")]
     pub generation: Option<u32>,
 }
 

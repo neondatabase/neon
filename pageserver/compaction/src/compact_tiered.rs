@@ -25,7 +25,7 @@ use std::collections::{HashSet, VecDeque};
 use std::ops::Range;
 
 use crate::helpers::{
-    accum_key_values, keyspace_total_size, merge_delta_keys_buffered, overlaps_with, PAGE_SZ,
+    PAGE_SZ, accum_key_values, keyspace_total_size, merge_delta_keys_buffered, overlaps_with,
 };
 use crate::interface::*;
 use utils::lsn::Lsn;
@@ -541,10 +541,11 @@ where
             }
         }
         // Open stream
-        let key_value_stream =
-            std::pin::pin!(merge_delta_keys_buffered::<E>(deltas.as_slice(), ctx)
+        let key_value_stream = std::pin::pin!(
+            merge_delta_keys_buffered::<E>(deltas.as_slice(), ctx)
                 .await?
-                .map(Result::<_, anyhow::Error>::Ok));
+                .map(Result::<_, anyhow::Error>::Ok)
+        );
         let mut new_jobs = Vec::new();
 
         // Slide a window through the keyspace

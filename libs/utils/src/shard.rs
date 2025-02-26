@@ -59,11 +59,7 @@ impl ShardCount {
     /// This method returns the actual number of shards, i.e. if our internal value is
     /// zero, we return 1 (unsharded tenants have 1 shard).
     pub fn count(&self) -> u8 {
-        if self.0 > 0 {
-            self.0
-        } else {
-            1
-        }
+        if self.0 > 0 { self.0 } else { 1 }
     }
 
     /// The literal internal value: this is **not** the number of shards in the

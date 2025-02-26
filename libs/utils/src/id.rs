@@ -215,7 +215,7 @@ macro_rules! id_newtype {
 
         impl AsRef<[u8]> for $t {
             fn as_ref(&self) -> &[u8] {
-                &self.0 .0
+                &self.0.0
             }
         }
 

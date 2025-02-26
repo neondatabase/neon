@@ -36,11 +36,11 @@
 
 pub mod http;
 
-use opentelemetry::trace::TracerProvider;
 use opentelemetry::KeyValue;
+use opentelemetry::trace::TracerProvider;
 use tracing::Subscriber;
-use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
+use tracing_subscriber::registry::LookupSpan;
 
 /// Set up OpenTelemetry exporter, using configuration from environment variables.
 ///

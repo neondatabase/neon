@@ -60,7 +60,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Range,
 };
-use svg_fmt::{rectangle, rgb, BeginSvg, EndSvg, Fill, Stroke};
+use svg_fmt::{BeginSvg, EndSvg, Fill, Stroke, rectangle, rgb};
 use utils::{lsn::Lsn, project_git_version};
 
 project_git_version!(GIT_VERSION);

@@ -15,7 +15,7 @@ use pageserver_api::reltag::RelTag;
 use pageserver_api::shard::ShardIdentity;
 use pageserver_api::{key::CompactKey, value::Value};
 use postgres_ffi::walrecord::{DecodedBkpBlock, DecodedWALRecord};
-use postgres_ffi::{page_is_new, page_set_lsn, pg_constants, BLCKSZ};
+use postgres_ffi::{BLCKSZ, page_is_new, page_set_lsn, pg_constants};
 use serde::{Deserialize, Serialize};
 use utils::bin_ser::BeSer;
 use utils::lsn::Lsn;
@@ -515,10 +515,11 @@ impl SerializedValueBatch {
         let empty = self.raw.is_empty();
 
         if cfg!(debug_assertions) && empty {
-            assert!(self
-                .metadata
-                .iter()
-                .all(|meta| matches!(meta, ValueMeta::Observed(_))));
+            assert!(
+                self.metadata
+                    .iter()
+                    .all(|meta| matches!(meta, ValueMeta::Observed(_)))
+            );
         }
 
         !empty

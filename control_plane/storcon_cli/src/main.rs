@@ -921,7 +921,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::TenantDrop { tenant_id, unclean } => {
             if !unclean {
-                anyhow::bail!("This command is not a tenant deletion, and uncleanly drops all controller state for the tenant.  If you know what you're doing, add `--unclean` to proceed.")
+                anyhow::bail!(
+                    "This command is not a tenant deletion, and uncleanly drops all controller state for the tenant.  If you know what you're doing, add `--unclean` to proceed."
+                )
             }
             storcon_client
                 .dispatch::<(), ()>(
@@ -933,7 +935,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::NodeDrop { node_id, unclean } => {
             if !unclean {
-                anyhow::bail!("This command is not a clean node decommission, and uncleanly drops all controller state for the node, without checking if any tenants still refer to it.  If you know what you're doing, add `--unclean` to proceed.")
+                anyhow::bail!(
+                    "This command is not a clean node decommission, and uncleanly drops all controller state for the node, without checking if any tenants still refer to it.  If you know what you're doing, add `--unclean` to proceed."
+                )
             }
             storcon_client
                 .dispatch::<(), ()>(Method::POST, format!("debug/v1/node/{node_id}/drop"), None)

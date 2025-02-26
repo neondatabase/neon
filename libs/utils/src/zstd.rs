@@ -2,9 +2,9 @@ use std::io::SeekFrom;
 
 use anyhow::{Context, Result};
 use async_compression::{
+    Level,
     tokio::{bufread::ZstdDecoder, write::ZstdEncoder},
     zstd::CParameter,
-    Level,
 };
 use camino::Utf8Path;
 use nix::NixPath;

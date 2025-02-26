@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use futures::{
-    stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
+    stream::{SplitSink, SplitStream},
 };
 use pageserver_api::{
     models::{

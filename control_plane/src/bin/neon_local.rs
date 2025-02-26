@@ -5,7 +5,7 @@
 //! easier to work with locally. The python tests in `test_runner`
 //! rely on `neon_local` to set up the environment for each test.
 //!
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use compute_api::spec::ComputeMode;
 use control_plane::endpoint::ComputeControlPlane;
@@ -19,7 +19,7 @@ use control_plane::storage_controller::{
     NeonStorageControllerStartArgs, NeonStorageControllerStopArgs, StorageController,
 };
 use control_plane::{broker, local_env};
-use nix::fcntl::{flock, FlockArg};
+use nix::fcntl::{FlockArg, flock};
 use pageserver_api::config::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
@@ -921,7 +921,9 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
     let init_conf: NeonLocalInitConf = if let Some(config_path) = &args.config {
         // User (likely the Python test suite) provided a description of the environment.
         if args.num_pageservers.is_some() {
-            bail!("Cannot specify both --num-pageservers and --config, use key `pageservers` in the --config file instead");
+            bail!(
+                "Cannot specify both --num-pageservers and --config, use key `pageservers` in the --config file instead"
+            );
         }
         // load and parse the file
         let contents = std::fs::read_to_string(config_path).with_context(|| {
@@ -1315,10 +1317,14 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
 
             match (mode, args.hot_standby) {
                 (ComputeMode::Static(_), true) => {
-                    bail!("Cannot start a node in hot standby mode when it is already configured as a static replica")
+                    bail!(
+                        "Cannot start a node in hot standby mode when it is already configured as a static replica"
+                    )
                 }
                 (ComputeMode::Primary, true) => {
-                    bail!("Cannot start a node as a hot standby replica, it is already configured as primary node")
+                    bail!(
+                        "Cannot start a node as a hot standby replica, it is already configured as primary node"
+                    )
                 }
                 _ => {}
             }

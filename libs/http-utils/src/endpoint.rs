@@ -1,23 +1,23 @@
-use crate::error::{api_error_handler, route_error_handler, ApiError};
+use crate::error::{ApiError, api_error_handler, route_error_handler};
 use crate::pprof;
 use crate::request::{get_query_param, parse_query_param};
-use ::pprof::protos::Message as _;
 use ::pprof::ProfilerGuardBuilder;
-use anyhow::{anyhow, Context};
+use ::pprof::protos::Message as _;
+use anyhow::{Context, anyhow};
 use bytes::{Bytes, BytesMut};
-use hyper::header::{HeaderName, AUTHORIZATION, CONTENT_DISPOSITION};
-use hyper::http::HeaderValue;
 use hyper::Method;
-use hyper::{header::CONTENT_TYPE, Body, Request, Response};
-use metrics::{register_int_counter, Encoder, IntCounter, TextEncoder};
+use hyper::header::{AUTHORIZATION, CONTENT_DISPOSITION, HeaderName};
+use hyper::http::HeaderValue;
+use hyper::{Body, Request, Response, header::CONTENT_TYPE};
+use metrics::{Encoder, IntCounter, TextEncoder, register_int_counter};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use routerify::ext::RequestExt;
 use routerify::{Middleware, RequestInfo, Router, RouterBuilder};
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::sync::{Mutex, Notify, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::io::ReaderStream;
-use tracing::{debug, info, info_span, warn, Instrument};
+use tracing::{Instrument, debug, info, info_span, warn};
 use utils::auth::{AuthError, Claims, SwappableJwtAuth};
 
 use std::future::Future;
@@ -375,7 +375,7 @@ pub async fn profile_cpu_handler(req: Request<Body>) -> Result<Response<Body>, A
                 Err(_) => {
                     return Err(ApiError::Conflict(
                         "profiler already running (use ?force=true to cancel it)".into(),
-                    ))
+                    ));
                 }
             }
             tokio::time::sleep(Duration::from_millis(1)).await; // don't busy-wait
@@ -539,8 +539,8 @@ pub async fn profile_heap_handler(req: Request<Body>) -> Result<Response<Body>, 
     }
 }
 
-pub fn add_request_id_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
-) -> Middleware<B, ApiError> {
+pub fn add_request_id_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>()
+-> Middleware<B, ApiError> {
     Middleware::pre(move |req| async move {
         let request_id = match req.headers().get(&X_REQUEST_ID_HEADER) {
             Some(request_id) => request_id
@@ -664,7 +664,7 @@ pub fn auth_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
                 None => {
                     return Err(ApiError::Unauthorized(
                         "missing authorization header".to_string(),
-                    ))
+                    ));
                 }
             }
         }

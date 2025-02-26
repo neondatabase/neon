@@ -1,8 +1,8 @@
 use parking_lot::Mutex;
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 use std::{
     ops::DerefMut,
-    sync::{mpsc, Arc},
+    sync::{Arc, mpsc},
 };
 
 use crate::{

@@ -3,7 +3,7 @@
 //! Now it also provides init method which acts like a stub for proper installation
 //! script which will use local paths.
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 
 use clap::ValueEnum;
 use postgres_backend::AuthType;
@@ -19,12 +19,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 use utils::{
-    auth::{encode_from_key_file, Claims},
+    auth::{Claims, encode_from_key_file},
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
 };
 
-use crate::pageserver::PageServerNode;
 use crate::pageserver::PAGESERVER_REMOTE_STORAGE_DIR;
+use crate::pageserver::PageServerNode;
 use crate::safekeeper::SafekeeperNode;
 
 pub const DEFAULT_PG_VERSION: u32 = 16;
@@ -465,7 +465,9 @@ impl LocalEnv {
             if old_timeline_id == &timeline_id {
                 Ok(())
             } else {
-                bail!("branch '{branch_name}' is already mapped to timeline {old_timeline_id}, cannot map to another timeline {timeline_id}");
+                bail!(
+                    "branch '{branch_name}' is already mapped to timeline {old_timeline_id}, cannot map to another timeline {timeline_id}"
+                );
             }
         } else {
             existing_values.push((tenant_id, timeline_id));

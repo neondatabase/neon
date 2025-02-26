@@ -13,7 +13,7 @@ use std::os::fd::AsRawFd;
 use std::os::fd::RawFd;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{ready, Poll};
+use std::task::{Poll, ready};
 use std::{fmt, io};
 use std::{future::Future, str::FromStr};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -746,7 +746,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
                     match e {
                         QueryError::Shutdown => return Ok(ProcessMsgResult::Break),
                         QueryError::SimulatedConnectionError => {
-                            return Err(QueryError::SimulatedConnectionError)
+                            return Err(QueryError::SimulatedConnectionError);
                         }
                         err @ QueryError::Reconnect => {
                             // Instruct the client to reconnect, stop processing messages
@@ -1020,7 +1020,9 @@ fn log_query_error(query: &str, e: &QueryError) {
             }
         }
         QueryError::Disconnected(other_connection_error) => {
-            error!("query handler for '{query}' failed with connection error: {other_connection_error:?}")
+            error!(
+                "query handler for '{query}' failed with connection error: {other_connection_error:?}"
+            )
         }
         QueryError::SimulatedConnectionError => {
             error!("query handler for query '{query}' failed due to a simulated connection error")

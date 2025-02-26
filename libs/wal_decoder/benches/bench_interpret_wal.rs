@@ -1,8 +1,8 @@
 use anyhow::Context;
-use criterion::{criterion_group, criterion_main, Criterion};
-use futures::{stream::FuturesUnordered, StreamExt};
+use criterion::{Criterion, criterion_group, criterion_main};
+use futures::{StreamExt, stream::FuturesUnordered};
 use pageserver_api::shard::{ShardIdentity, ShardStripeSize};
-use postgres_ffi::{waldecoder::WalStreamDecoder, MAX_SEND_SIZE, WAL_SEGMENT_SIZE};
+use postgres_ffi::{MAX_SEND_SIZE, WAL_SEGMENT_SIZE, waldecoder::WalStreamDecoder};
 use pprof::criterion::{Output, PProfProfiler};
 use serde::Deserialize;
 use std::{env, num::NonZeroUsize, sync::Arc};

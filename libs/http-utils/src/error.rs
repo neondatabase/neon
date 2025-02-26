@@ -1,4 +1,4 @@
-use hyper::{header, Body, Response, StatusCode};
+use hyper::{Body, Response, StatusCode, header};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::error::Error as StdError;

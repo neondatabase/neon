@@ -60,7 +60,11 @@ where
         if l.lsn_range().start < end_lsn && l.lsn_range().end > end_lsn {
             // shouldn't happen. Indicates that the caller passed a bogus
             // end_lsn.
-            bail!("identify_level() called with end_lsn that does not partition the LSN space: end_lsn {} intersects with layer {}", end_lsn, l.short_id());
+            bail!(
+                "identify_level() called with end_lsn that does not partition the LSN space: end_lsn {} intersects with layer {}",
+                end_lsn,
+                l.short_id()
+            );
         }
         // include image layers sitting exacty at `end_lsn`.
         let is_image = !l.is_delta();

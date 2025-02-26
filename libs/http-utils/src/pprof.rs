@@ -1,6 +1,6 @@
 use anyhow::bail;
-use flate2::write::{GzDecoder, GzEncoder};
 use flate2::Compression;
+use flate2::write::{GzDecoder, GzEncoder};
 use itertools::Itertools as _;
 use pprof::protos::{Function, Line, Location, Message as _, Profile};
 use regex::Regex;

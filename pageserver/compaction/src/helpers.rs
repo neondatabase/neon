@@ -13,7 +13,7 @@ use std::fmt::Display;
 use std::future::Future;
 use std::ops::{DerefMut, Range};
 use std::pin::Pin;
-use std::task::{ready, Poll};
+use std::task::{Poll, ready};
 use utils::lsn::Lsn;
 
 pub const PAGE_SZ: u64 = 8192;

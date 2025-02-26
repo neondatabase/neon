@@ -3,12 +3,12 @@ use std::{
     collections::{BinaryHeap, VecDeque},
     fmt::{self, Debug},
     ops::DerefMut,
-    sync::{mpsc, Arc},
+    sync::{Arc, mpsc},
 };
 
 use parking_lot::{
-    lock_api::{MappedMutexGuard, MutexGuard},
     Mutex, RawMutex,
+    lock_api::{MappedMutexGuard, MutexGuard},
 };
 use rand::rngs::StdRng;
 use tracing::debug;

@@ -1,6 +1,6 @@
 #![warn(missing_docs)]
 
-use serde::{de::Visitor, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::Visitor};
 use std::fmt;
 use std::ops::{Add, AddAssign};
 use std::str::FromStr;

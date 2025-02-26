@@ -3,7 +3,7 @@
 
 use std::{env, path::PathBuf, process::Command};
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 
 const WALPROPOSER_PG_VERSION: &str = "v17";
 

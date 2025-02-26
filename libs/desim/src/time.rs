@@ -3,8 +3,8 @@ use std::{
     collections::BinaryHeap,
     ops::DerefMut,
     sync::{
-        atomic::{AtomicU32, AtomicU64},
         Arc,
+        atomic::{AtomicU32, AtomicU64},
     },
 };
 

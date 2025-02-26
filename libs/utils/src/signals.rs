@@ -1,6 +1,6 @@
 use signal_hook::iterator::Signals;
 
-pub use signal_hook::consts::{signal::*, TERM_SIGNALS};
+pub use signal_hook::consts::{TERM_SIGNALS, signal::*};
 
 pub enum Signal {
     Quit,

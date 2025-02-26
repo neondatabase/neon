@@ -8,7 +8,7 @@ use utils::id::{TenantTimelineId, TimelineId};
 
 use std::{f64, sync::Arc};
 use tokio::{
-    sync::{mpsc, OwnedSemaphorePermit},
+    sync::{OwnedSemaphorePermit, mpsc},
     task::JoinSet,
 };
 

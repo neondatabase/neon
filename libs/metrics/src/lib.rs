@@ -5,37 +5,37 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 use measured::{
+    FixedCardinalityLabel, LabelGroup, MetricGroup,
     label::{LabelGroupSet, LabelGroupVisitor, LabelName, NoLabels},
     metric::{
+        MetricEncoding, MetricFamilyEncoding,
         counter::CounterState,
         gauge::GaugeState,
         group::Encoding,
         name::{MetricName, MetricNameEncoder},
-        MetricEncoding, MetricFamilyEncoding,
     },
-    FixedCardinalityLabel, LabelGroup, MetricGroup,
 };
 use once_cell::sync::Lazy;
+pub use prometheus::Error;
+use prometheus::Registry;
 use prometheus::core::{
     Atomic, AtomicU64, Collector, GenericCounter, GenericCounterVec, GenericGauge, GenericGaugeVec,
 };
 pub use prometheus::local::LocalHistogram;
 pub use prometheus::opts;
 pub use prometheus::register;
-pub use prometheus::Error;
-use prometheus::Registry;
+pub use prometheus::{Counter, CounterVec, register_counter_vec};
+pub use prometheus::{Encoder, TextEncoder};
+pub use prometheus::{Gauge, register_gauge};
+pub use prometheus::{GaugeVec, register_gauge_vec};
+pub use prometheus::{Histogram, register_histogram};
+pub use prometheus::{HistogramVec, register_histogram_vec};
+pub use prometheus::{IntCounter, register_int_counter};
+pub use prometheus::{IntCounterVec, register_int_counter_vec};
+pub use prometheus::{IntGauge, register_int_gauge};
+pub use prometheus::{IntGaugeVec, register_int_gauge_vec};
 pub use prometheus::{core, default_registry, proto};
 pub use prometheus::{exponential_buckets, linear_buckets};
-pub use prometheus::{register_counter_vec, Counter, CounterVec};
-pub use prometheus::{register_gauge, Gauge};
-pub use prometheus::{register_gauge_vec, GaugeVec};
-pub use prometheus::{register_histogram, Histogram};
-pub use prometheus::{register_histogram_vec, HistogramVec};
-pub use prometheus::{register_int_counter, IntCounter};
-pub use prometheus::{register_int_counter_vec, IntCounterVec};
-pub use prometheus::{register_int_gauge, IntGauge};
-pub use prometheus::{register_int_gauge_vec, IntGaugeVec};
-pub use prometheus::{Encoder, TextEncoder};
 
 pub mod launch_timestamp;
 mod wrappers;

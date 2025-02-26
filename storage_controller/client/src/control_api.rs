@@ -1,6 +1,6 @@
 use pageserver_client::mgmt_api::{self, ResponseErrorMessageExt};
 use reqwest::{Method, Url};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 pub struct Client {
     base_url: Url,

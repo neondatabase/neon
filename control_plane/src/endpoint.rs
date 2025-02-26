@@ -49,15 +49,15 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use compute_api::requests::ConfigurationRequest;
 use compute_api::responses::ComputeCtlConfig;
 use compute_api::spec::Database;
 use compute_api::spec::PgIdent;
 use compute_api::spec::RemoteExtSpec;
 use compute_api::spec::Role;
-use nix::sys::signal::kill;
 use nix::sys::signal::Signal;
+use nix::sys::signal::kill;
 use pageserver_api::shard::ShardStripeSize;
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
@@ -237,7 +237,9 @@ impl ComputeControlPlane {
             });
 
             if let Some((key, _)) = duplicates.next() {
-                bail!("attempting to create a duplicate primary endpoint on tenant {tenant_id}, timeline {timeline_id}: endpoint {key:?} exists already. please don't do this, it is not supported.");
+                bail!(
+                    "attempting to create a duplicate primary endpoint on tenant {tenant_id}, timeline {timeline_id}: endpoint {key:?} exists already. please don't do this, it is not supported."
+                );
             }
         }
         Ok(())

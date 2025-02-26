@@ -248,11 +248,7 @@ where
         let internal = self.internal.lock().unwrap();
         let cnt = internal.current.cnt_value();
         drop(internal);
-        if cnt >= num {
-            Ok(())
-        } else {
-            Err(cnt)
-        }
+        if cnt >= num { Ok(()) } else { Err(cnt) }
     }
 
     /// Register and return a channel that will be notified when a number arrives,

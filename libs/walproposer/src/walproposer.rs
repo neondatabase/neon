@@ -3,7 +3,7 @@
 use std::ffi::CString;
 
 use crate::{
-    api_bindings::{create_api, take_vec_u8, Level},
+    api_bindings::{Level, create_api, take_vec_u8},
     bindings::{
         NeonWALReadResult, Safekeeper, WalProposer, WalProposerBroadcast, WalProposerConfig,
         WalProposerCreate, WalProposerFree, WalProposerPoll, WalProposerStart,

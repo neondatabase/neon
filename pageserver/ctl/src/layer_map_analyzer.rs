@@ -2,7 +2,7 @@
 //!
 //! Currently it only analyzes holes, which are regions within the layer range that the layer contains no updates for. In the future it might do more analysis (maybe key quantiles?) but it should never return sensitive data.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver::context::{DownloadBehavior, RequestContext};
 use pageserver::task_mgr::TaskKind;
@@ -17,10 +17,10 @@ use std::{fs, str};
 use pageserver::page_cache::{self, PAGE_SZ};
 use pageserver::tenant::block_io::FileBlockReader;
 use pageserver::tenant::disk_btree::{DiskBtreeReader, VisitDirection};
-use pageserver::tenant::storage_layer::delta_layer::{Summary, DELTA_KEY_SIZE};
-use pageserver::tenant::storage_layer::{range_overlaps, LayerName};
+use pageserver::tenant::storage_layer::delta_layer::{DELTA_KEY_SIZE, Summary};
+use pageserver::tenant::storage_layer::{LayerName, range_overlaps};
 use pageserver::virtual_file::{self, VirtualFile};
-use pageserver_api::key::{Key, KEY_SIZE};
+use pageserver_api::key::{KEY_SIZE, Key};
 
 use utils::{bin_ser::BeSer, lsn::Lsn};
 

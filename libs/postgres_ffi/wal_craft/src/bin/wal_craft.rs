@@ -1,5 +1,5 @@
 use anyhow::*;
-use clap::{value_parser, Arg, ArgMatches, Command};
+use clap::{Arg, ArgMatches, Command, value_parser};
 use postgres::Client;
 use std::{path::PathBuf, str::FromStr};
 use wal_craft::*;

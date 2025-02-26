@@ -224,9 +224,9 @@ pub mod walrecord;
 
 // Export some widely used datatypes that are unlikely to change across Postgres versions
 pub use v14::bindings::RepOriginId;
-pub use v14::bindings::{uint32, uint64, Oid};
 pub use v14::bindings::{BlockNumber, OffsetNumber};
 pub use v14::bindings::{MultiXactId, TransactionId};
+pub use v14::bindings::{Oid, uint32, uint64};
 pub use v14::bindings::{TimeLineID, TimestampTz, XLogRecPtr, XLogSegNo};
 
 // Likewise for these, although the assumption that these don't change is a little more iffy.
@@ -248,11 +248,11 @@ pub const WAL_SEGMENT_SIZE: usize = 16 * 1024 * 1024;
 pub const MAX_SEND_SIZE: usize = XLOG_BLCKSZ * 16;
 
 // Export some version independent functions that are used outside of this mod
+pub use v14::xlog_utils::XLogFileName;
 pub use v14::xlog_utils::encode_logical_message;
 pub use v14::xlog_utils::get_current_timestamp;
 pub use v14::xlog_utils::to_pg_timestamp;
 pub use v14::xlog_utils::try_from_pg_timestamp;
-pub use v14::xlog_utils::XLogFileName;
 
 pub use v14::bindings::DBState_DB_SHUTDOWNED;
 

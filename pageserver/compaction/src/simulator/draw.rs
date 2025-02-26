@@ -6,7 +6,7 @@ use std::{
     fmt::Write,
     ops::Range,
 };
-use svg_fmt::{rgb, BeginSvg, EndSvg, Fill, Stroke, Style};
+use svg_fmt::{BeginSvg, EndSvg, Fill, Stroke, Style, rgb};
 use utils::lsn::Lsn;
 
 // Map values to their compressed coordinate - the index the value

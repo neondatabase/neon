@@ -1,8 +1,8 @@
 use anyhow::{bail, ensure};
-use camino_tempfile::{tempdir, Utf8TempDir};
+use camino_tempfile::{Utf8TempDir, tempdir};
 use log::*;
-use postgres::types::PgLsn;
 use postgres::Client;
+use postgres::types::PgLsn;
 use postgres_ffi::{WAL_SEGMENT_SIZE, XLOG_BLCKSZ};
 use postgres_ffi::{
     XLOG_SIZE_OF_XLOG_LONG_PHD, XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD,

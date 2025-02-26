@@ -6,7 +6,7 @@ use std::{borrow::Cow, fmt::Display, fs, sync::Arc};
 use anyhow::Result;
 use camino::Utf8Path;
 use jsonwebtoken::{
-    decode, encode, Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation,
+    Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation, decode, encode,
 };
 use serde::{Deserialize, Serialize};
 
@@ -129,7 +129,9 @@ impl JwtAuth {
             anyhow::bail!("path is neither a directory or a file")
         };
         if decoding_keys.is_empty() {
-            anyhow::bail!("Configured for JWT auth with zero decoding keys. All JWT gated requests would be rejected.");
+            anyhow::bail!(
+                "Configured for JWT auth with zero decoding keys. All JWT gated requests would be rejected."
+            );
         }
         Ok(Self::new(decoding_keys))
     }
@@ -215,7 +217,9 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
         let encoded_eddsa = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzY29wZSI6InRlbmFudCIsInRlbmFudF9pZCI6IjNkMWY3NTk1YjQ2ODIzMDMwNGUwYjczY2VjYmNiMDgxIiwiaXNzIjoibmVvbi5jb250cm9scGxhbmUiLCJpYXQiOjE2Nzg0NDI0Nzl9.rNheBnluMJNgXzSTTJoTNIGy4P_qe0JUHl_nVEGuDCTgHOThPVr552EnmKccrCKquPeW3c2YUk0Y9Oh4KyASAw";
 
         // Check it can be validated with the public key
-        let auth = JwtAuth::new(vec![DecodingKey::from_ed_pem(TEST_PUB_KEY_ED25519).unwrap()]);
+        let auth = JwtAuth::new(vec![
+            DecodingKey::from_ed_pem(TEST_PUB_KEY_ED25519).unwrap(),
+        ]);
         let claims_from_token = auth.decode(encoded_eddsa).unwrap().claims;
         assert_eq!(claims_from_token, expected_claims);
     }
@@ -230,7 +234,9 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
         let encoded = encode_from_key_file(&claims, TEST_PRIV_KEY_ED25519).unwrap();
 
         // decode it back
-        let auth = JwtAuth::new(vec![DecodingKey::from_ed_pem(TEST_PUB_KEY_ED25519).unwrap()]);
+        let auth = JwtAuth::new(vec![
+            DecodingKey::from_ed_pem(TEST_PUB_KEY_ED25519).unwrap(),
+        ]);
         let decoded = auth.decode(&encoded).unwrap();
 
         assert_eq!(decoded.claims, claims);

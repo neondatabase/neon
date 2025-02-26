@@ -6,8 +6,6 @@
 use std::ffi::CStr;
 use std::ffi::CString;
 
-use crate::bindings::uint32;
-use crate::bindings::walproposer_api;
 use crate::bindings::NeonWALReadResult;
 use crate::bindings::PGAsyncReadResult;
 use crate::bindings::PGAsyncWriteResult;
@@ -21,6 +19,8 @@ use crate::bindings::WalProposerConnectPollStatusType;
 use crate::bindings::WalProposerExecStatusType;
 use crate::bindings::WalproposerShmemState;
 use crate::bindings::XLogRecPtr;
+use crate::bindings::uint32;
+use crate::bindings::walproposer_api;
 use crate::walproposer::ApiImpl;
 use crate::walproposer::StreamingCallback;
 use crate::walproposer::WaitResult;

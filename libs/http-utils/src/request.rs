@@ -3,7 +3,7 @@ use std::{borrow::Cow, str::FromStr};
 
 use super::error::ApiError;
 use anyhow::anyhow;
-use hyper::{body::HttpBody, Body, Request};
+use hyper::{Body, Request, body::HttpBody};
 use routerify::ext::RequestExt;
 
 pub fn get_request_param<'a>(
