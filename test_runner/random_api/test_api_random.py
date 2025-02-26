@@ -130,7 +130,10 @@ def test_api_random(
     Run the random API tests
     """
     project = setup_class
-    project.main_branch.create_branch().create_branch()
+    br = project.main_branch.create_branch()
+    project.wait()
+    br.create_branch()
+    project.wait()
     q = [project.main_branch]
     while q:
         br = q.pop()
