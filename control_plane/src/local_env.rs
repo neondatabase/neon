@@ -3,28 +3,22 @@
 //! Now it also provides init method which acts like a stub for proper installation
 //! script which will use local paths.
 
-use anyhow::{Context, bail};
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+use std::{env, fs};
 
+use anyhow::{Context, bail};
 use clap::ValueEnum;
 use postgres_backend::AuthType;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::env;
-use std::fs;
-use std::net::IpAddr;
-use std::net::Ipv4Addr;
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Duration;
-use utils::{
-    auth::{Claims, encode_from_key_file},
-    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
-};
+use utils::auth::{Claims, encode_from_key_file};
+use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 
-use crate::pageserver::PAGESERVER_REMOTE_STORAGE_DIR;
-use crate::pageserver::PageServerNode;
+use crate::pageserver::{PAGESERVER_REMOTE_STORAGE_DIR, PageServerNode};
 use crate::safekeeper::SafekeeperNode;
 
 pub const DEFAULT_PG_VERSION: u32 = 16;

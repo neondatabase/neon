@@ -1,9 +1,12 @@
 // For details about authentication see docs/authentication.md
 
-use arc_swap::ArcSwap;
-use std::{borrow::Cow, fmt::Display, fs, sync::Arc};
+use std::borrow::Cow;
+use std::fmt::Display;
+use std::fs;
+use std::sync::Arc;
 
 use anyhow::Result;
+use arc_swap::ArcSwap;
 use camino::Utf8Path;
 use jsonwebtoken::{
     Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation, decode, encode,
@@ -177,8 +180,9 @@ pub fn encode_from_key_file(claims: &Claims, key_data: &[u8]) -> Result<String> 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::str::FromStr;
+
+    use super::*;
 
     // Generated with:
     //

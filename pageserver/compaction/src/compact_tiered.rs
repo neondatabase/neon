@@ -17,20 +17,19 @@
 //! distance of image layers in LSN dimension is roughly equal to the logical
 //! database size. For example, if the logical database size is 10 GB, we would
 //! generate new image layers every 10 GB of WAL.
+use std::collections::{HashSet, VecDeque};
+use std::ops::Range;
+
 use futures::StreamExt;
 use pageserver_api::shard::ShardIdentity;
 use tracing::{debug, info};
-
-use std::collections::{HashSet, VecDeque};
-use std::ops::Range;
+use utils::lsn::Lsn;
 
 use crate::helpers::{
     PAGE_SZ, accum_key_values, keyspace_total_size, merge_delta_keys_buffered, overlaps_with,
 };
-use crate::interface::*;
-use utils::lsn::Lsn;
-
 use crate::identify_levels::identify_level;
+use crate::interface::*;
 
 /// Main entry point to compaction.
 ///

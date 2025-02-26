@@ -1,16 +1,17 @@
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, Instant};
+
 use anyhow::{bail, ensure};
 use camino_tempfile::{Utf8TempDir, tempdir};
 use log::*;
 use postgres::Client;
 use postgres::types::PgLsn;
-use postgres_ffi::{WAL_SEGMENT_SIZE, XLOG_BLCKSZ};
 use postgres_ffi::{
-    XLOG_SIZE_OF_XLOG_LONG_PHD, XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD,
+    WAL_SEGMENT_SIZE, XLOG_BLCKSZ, XLOG_SIZE_OF_XLOG_LONG_PHD, XLOG_SIZE_OF_XLOG_RECORD,
+    XLOG_SIZE_OF_XLOG_SHORT_PHD,
 };
-use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{Duration, Instant};
 
 macro_rules! xlog_utils_test {
     ($version:ident) => {

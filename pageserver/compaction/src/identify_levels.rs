@@ -26,14 +26,14 @@
 //! file size, the file will still be considered to be part of L0 at the next
 //! iteration.
 
-use anyhow::bail;
 use std::collections::BTreeSet;
 use std::ops::Range;
+
+use anyhow::bail;
+use tracing::{info, trace};
 use utils::lsn::Lsn;
 
 use crate::interface::*;
-
-use tracing::{info, trace};
 
 pub struct Level<L> {
     pub lsn_range: Range<Lsn>,
@@ -250,9 +250,10 @@ impl<L> Level<L> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
     use crate::simulator::{Key, MockDeltaLayer, MockImageLayer, MockLayer};
-    use std::sync::{Arc, Mutex};
 
     fn delta(key_range: Range<Key>, lsn_range: Range<Lsn>) -> MockLayer {
         MockLayer::Delta(Arc::new(MockDeltaLayer {

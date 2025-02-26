@@ -5,6 +5,15 @@
 //! easier to work with locally. The python tests in `test_runner`
 //! rely on `neon_local` to set up the environment for each test.
 //!
+use std::borrow::Cow;
+use std::collections::{BTreeSet, HashMap};
+use std::fs::File;
+use std::os::fd::AsRawFd;
+use std::path::PathBuf;
+use std::process::exit;
+use std::str::FromStr;
+use std::time::Duration;
+
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use compute_api::spec::ComputeMode;
@@ -35,23 +44,13 @@ use safekeeper_api::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_SAFEKEEPER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
 };
-use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap};
-use std::fs::File;
-use std::os::fd::AsRawFd;
-use std::path::PathBuf;
-use std::process::exit;
-use std::str::FromStr;
-use std::time::Duration;
 use storage_broker::DEFAULT_LISTEN_ADDR as DEFAULT_BROKER_ADDR;
 use tokio::task::JoinSet;
 use url::Host;
-use utils::{
-    auth::{Claims, Scope},
-    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
-    lsn::Lsn,
-    project_git_version,
-};
+use utils::auth::{Claims, Scope};
+use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
+use utils::lsn::Lsn;
+use utils::project_git_version;
 
 // Default id of a safekeeper node, if not specified on the command line.
 const DEFAULT_SAFEKEEPER_ID: NodeId = NodeId(1);

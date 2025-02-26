@@ -6,17 +6,15 @@
 //! Probabilistic cardinality estimators, such as the HyperLogLog algorithm,
 //! use significantly less memory than this, but can only approximate the cardinality.
 
-use std::{
-    hash::{BuildHasher, BuildHasherDefault, Hash},
-    sync::atomic::AtomicU8,
-};
+use std::hash::{BuildHasher, BuildHasherDefault, Hash};
+use std::sync::atomic::AtomicU8;
 
-use measured::{
-    LabelGroup,
-    label::{LabelGroupVisitor, LabelName, LabelValue, LabelVisitor},
-    metric::{Metric, MetricType, MetricVec, counter::CounterState, name::MetricNameEncoder},
-    text::TextEncoder,
-};
+use measured::LabelGroup;
+use measured::label::{LabelGroupVisitor, LabelName, LabelValue, LabelVisitor};
+use measured::metric::counter::CounterState;
+use measured::metric::name::MetricNameEncoder;
+use measured::metric::{Metric, MetricType, MetricVec};
+use measured::text::TextEncoder;
 use twox_hash::xxh3;
 
 /// Create an [`HyperLogLogVec`] and registers to default registry.
@@ -191,8 +189,10 @@ impl<W: std::io::Write, const N: usize> measured::metric::MetricEncoding<TextEnc
 mod tests {
     use std::collections::HashSet;
 
-    use measured::{FixedCardinalityLabel, label::StaticLabelSet};
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use measured::FixedCardinalityLabel;
+    use measured::label::StaticLabelSet;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
     use rand_distr::{Distribution, Zipf};
 
     use crate::HyperLogLogVec;

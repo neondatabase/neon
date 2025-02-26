@@ -4,38 +4,26 @@
 //! a default registry.
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-use measured::{
-    FixedCardinalityLabel, LabelGroup, MetricGroup,
-    label::{LabelGroupSet, LabelGroupVisitor, LabelName, NoLabels},
-    metric::{
-        MetricEncoding, MetricFamilyEncoding,
-        counter::CounterState,
-        gauge::GaugeState,
-        group::Encoding,
-        name::{MetricName, MetricNameEncoder},
-    },
-};
+use measured::label::{LabelGroupSet, LabelGroupVisitor, LabelName, NoLabels};
+use measured::metric::counter::CounterState;
+use measured::metric::gauge::GaugeState;
+use measured::metric::group::Encoding;
+use measured::metric::name::{MetricName, MetricNameEncoder};
+use measured::metric::{MetricEncoding, MetricFamilyEncoding};
+use measured::{FixedCardinalityLabel, LabelGroup, MetricGroup};
 use once_cell::sync::Lazy;
-pub use prometheus::Error;
 use prometheus::Registry;
 use prometheus::core::{
     Atomic, AtomicU64, Collector, GenericCounter, GenericCounterVec, GenericGauge, GenericGaugeVec,
 };
 pub use prometheus::local::LocalHistogram;
-pub use prometheus::opts;
-pub use prometheus::register;
-pub use prometheus::{Counter, CounterVec, register_counter_vec};
-pub use prometheus::{Encoder, TextEncoder};
-pub use prometheus::{Gauge, register_gauge};
-pub use prometheus::{GaugeVec, register_gauge_vec};
-pub use prometheus::{Histogram, register_histogram};
-pub use prometheus::{HistogramVec, register_histogram_vec};
-pub use prometheus::{IntCounter, register_int_counter};
-pub use prometheus::{IntCounterVec, register_int_counter_vec};
-pub use prometheus::{IntGauge, register_int_gauge};
-pub use prometheus::{IntGaugeVec, register_int_gauge_vec};
-pub use prometheus::{core, default_registry, proto};
-pub use prometheus::{exponential_buckets, linear_buckets};
+pub use prometheus::{
+    Counter, CounterVec, Encoder, Error, Gauge, GaugeVec, Histogram, HistogramVec, IntCounter,
+    IntCounterVec, IntGauge, IntGaugeVec, TextEncoder, core, default_registry, exponential_buckets,
+    linear_buckets, opts, proto, register, register_counter_vec, register_gauge,
+    register_gauge_vec, register_histogram, register_histogram_vec, register_int_counter,
+    register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
+};
 
 pub mod launch_timestamp;
 mod wrappers;

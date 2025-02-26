@@ -1,11 +1,11 @@
-use clap::{Parser, Subcommand};
-use pageserver_compaction::helpers::PAGE_SZ;
-use pageserver_compaction::simulator::MockTimeline;
-use rand::Rng;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use clap::{Parser, Subcommand};
+use pageserver_compaction::helpers::PAGE_SZ;
+use pageserver_compaction::simulator::MockTimeline;
+use rand::Rng;
 use utils::project_git_version;
 
 project_git_version!(GIT_VERSION);
@@ -157,6 +157,7 @@ async fn run_suite() -> anyhow::Result<()> {
 use std::fs::File;
 use std::io::Stdout;
 use std::sync::Mutex;
+
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::fmt::writer::EitherWriter;
 

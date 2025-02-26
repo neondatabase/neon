@@ -3,9 +3,12 @@
 //!
 //! All the heavy lifting is done by the create_image and create_delta
 //! functions that the implementor provides.
-use futures::Future;
-use pageserver_api::{key::Key, keyspace::ShardedRange, shard::ShardIdentity};
 use std::ops::Range;
+
+use futures::Future;
+use pageserver_api::key::Key;
+use pageserver_api::keyspace::ShardedRange;
+use pageserver_api::shard::ShardIdentity;
 use utils::lsn::Lsn;
 
 /// Public interface. This is the main thing that the implementor needs to provide

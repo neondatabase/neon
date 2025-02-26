@@ -2,15 +2,15 @@
 
 use std::ffi::CString;
 
-use crate::{
-    api_bindings::{Level, create_api, take_vec_u8},
-    bindings::{
-        NeonWALReadResult, Safekeeper, WalProposer, WalProposerBroadcast, WalProposerConfig,
-        WalProposerCreate, WalProposerFree, WalProposerPoll, WalProposerStart,
-    },
-};
 use postgres_ffi::WAL_SEGMENT_SIZE;
-use utils::{id::TenantTimelineId, lsn::Lsn};
+use utils::id::TenantTimelineId;
+use utils::lsn::Lsn;
+
+use crate::api_bindings::{Level, create_api, take_vec_u8};
+use crate::bindings::{
+    NeonWALReadResult, Safekeeper, WalProposer, WalProposerBroadcast, WalProposerConfig,
+    WalProposerCreate, WalProposerFree, WalProposerPoll, WalProposerStart,
+};
 
 /// Rust high-level wrapper for C walproposer API. Many methods are not required
 /// for simple cases, hence todo!() in default implementations.
@@ -275,22 +275,17 @@ impl StreamingCallback {
 #[cfg(test)]
 mod tests {
     use core::panic;
-    use std::{
-        cell::Cell,
-        ffi::CString,
-        sync::{atomic::AtomicUsize, mpsc::sync_channel},
-    };
+    use std::cell::{Cell, UnsafeCell};
+    use std::ffi::CString;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc::sync_channel;
 
-    use std::cell::UnsafeCell;
     use utils::id::TenantTimelineId;
 
-    use crate::{
-        api_bindings::Level,
-        bindings::{NeonWALReadResult, PG_VERSION_NUM},
-        walproposer::Wrapper,
-    };
-
     use super::ApiImpl;
+    use crate::api_bindings::Level;
+    use crate::bindings::{NeonWALReadResult, PG_VERSION_NUM};
+    use crate::walproposer::Wrapper;
 
     #[derive(Clone, Copy, Debug)]
     struct WaitEventsData {

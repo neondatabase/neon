@@ -1,34 +1,27 @@
-use futures::StreamExt;
-use std::{
-    collections::{HashMap, HashSet},
-    str::FromStr,
-    time::Duration,
-};
+use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use pageserver_api::{
-    controller_api::{
-        AvailabilityZone, NodeAvailabilityWrapper, NodeDescribeResponse, NodeShardResponse,
-        SafekeeperDescribeResponse, SafekeeperSchedulingPolicyRequest, ShardSchedulingPolicy,
-        ShardsPreferredAzsRequest, ShardsPreferredAzsResponse, SkSchedulingPolicy,
-        TenantCreateRequest, TenantDescribeResponse, TenantPolicyRequest,
-    },
-    models::{
-        EvictionPolicy, EvictionPolicyLayerAccessThreshold, LocationConfigSecondary,
-        ShardParameters, TenantConfig, TenantConfigPatchRequest, TenantConfigRequest,
-        TenantShardSplitRequest, TenantShardSplitResponse,
-    },
-    shard::{ShardStripeSize, TenantShardId},
+use futures::StreamExt;
+use pageserver_api::controller_api::{
+    AvailabilityZone, NodeAvailabilityWrapper, NodeConfigureRequest, NodeDescribeResponse,
+    NodeRegisterRequest, NodeSchedulingPolicy, NodeShardResponse, PlacementPolicy,
+    SafekeeperDescribeResponse, SafekeeperSchedulingPolicyRequest, ShardSchedulingPolicy,
+    ShardsPreferredAzsRequest, ShardsPreferredAzsResponse, SkSchedulingPolicy, TenantCreateRequest,
+    TenantDescribeResponse, TenantPolicyRequest, TenantShardMigrateRequest,
+    TenantShardMigrateResponse,
 };
+use pageserver_api::models::{
+    EvictionPolicy, EvictionPolicyLayerAccessThreshold, LocationConfigSecondary, ShardParameters,
+    TenantConfig, TenantConfigPatchRequest, TenantConfigRequest, TenantShardSplitRequest,
+    TenantShardSplitResponse,
+};
+use pageserver_api::shard::{ShardStripeSize, TenantShardId};
 use pageserver_client::mgmt_api::{self};
 use reqwest::{Method, StatusCode, Url};
-use utils::id::{NodeId, TenantId, TimelineId};
-
-use pageserver_api::controller_api::{
-    NodeConfigureRequest, NodeRegisterRequest, NodeSchedulingPolicy, PlacementPolicy,
-    TenantShardMigrateRequest, TenantShardMigrateResponse,
-};
 use storage_controller_client::control_api::Client;
+use utils::id::{NodeId, TenantId, TimelineId};
 
 #[derive(Subcommand, Debug)]
 enum Command {

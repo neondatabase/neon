@@ -3,27 +3,14 @@
 
 #![allow(dead_code)]
 
-use std::ffi::CStr;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 
-use crate::bindings::NeonWALReadResult;
-use crate::bindings::PGAsyncReadResult;
-use crate::bindings::PGAsyncWriteResult;
-use crate::bindings::Safekeeper;
-use crate::bindings::Size;
-use crate::bindings::StringInfoData;
-use crate::bindings::TimestampTz;
-use crate::bindings::WalProposer;
-use crate::bindings::WalProposerConnStatusType;
-use crate::bindings::WalProposerConnectPollStatusType;
-use crate::bindings::WalProposerExecStatusType;
-use crate::bindings::WalproposerShmemState;
-use crate::bindings::XLogRecPtr;
-use crate::bindings::uint32;
-use crate::bindings::walproposer_api;
-use crate::walproposer::ApiImpl;
-use crate::walproposer::StreamingCallback;
-use crate::walproposer::WaitResult;
+use crate::bindings::{
+    NeonWALReadResult, PGAsyncReadResult, PGAsyncWriteResult, Safekeeper, Size, StringInfoData,
+    TimestampTz, WalProposer, WalProposerConnStatusType, WalProposerConnectPollStatusType,
+    WalProposerExecStatusType, WalproposerShmemState, XLogRecPtr, uint32, walproposer_api,
+};
+use crate::walproposer::{ApiImpl, StreamingCallback, WaitResult};
 
 extern "C" fn get_shmem_state(wp: *mut WalProposer) -> *mut WalproposerShmemState {
     unsafe {

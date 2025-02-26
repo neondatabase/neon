@@ -7,14 +7,11 @@ use utils::lsn::Lsn;
 use utils::postgres_client::{Compression, InterpretedFormat};
 
 use crate::models::{
-    FlushUncommittedRecords, InterpretedWalRecord, InterpretedWalRecords, MetadataRecord,
+    FlushUncommittedRecords, InterpretedWalRecord, InterpretedWalRecords, MetadataRecord, proto,
 };
-
 use crate::serialized_batch::{
     ObservedValueMeta, SerializedValueBatch, SerializedValueMeta, ValueMeta,
 };
-
-use crate::models::proto;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToWireFormatError {

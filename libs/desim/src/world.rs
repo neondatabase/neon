@@ -1,19 +1,18 @@
+use std::ops::DerefMut;
+use std::sync::{Arc, mpsc};
+
 use parking_lot::Mutex;
-use rand::{SeedableRng, rngs::StdRng};
-use std::{
-    ops::DerefMut,
-    sync::{Arc, mpsc},
-};
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 
-use crate::{
-    executor::{ExternalHandle, Runtime},
-    network::NetworkTask,
-    options::NetworkOptions,
-    proto::{NodeEvent, SimEvent},
-    time::Timing,
-};
-
-use super::{chan::Chan, network::TCP, node_os::NodeOs};
+use super::chan::Chan;
+use super::network::TCP;
+use super::node_os::NodeOs;
+use crate::executor::{ExternalHandle, Runtime};
+use crate::network::NetworkTask;
+use crate::options::NetworkOptions;
+use crate::proto::{NodeEvent, SimEvent};
+use crate::time::Timing;
 
 pub type NodeId = u32;
 

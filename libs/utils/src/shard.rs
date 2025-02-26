@@ -1,6 +1,7 @@
 //! See `pageserver_api::shard` for description on sharding.
 
-use std::{ops::RangeInclusive, str::FromStr};
+use std::ops::RangeInclusive;
+use std::str::FromStr;
 
 use hex::FromHex;
 use serde::{Deserialize, Serialize};

@@ -1,11 +1,10 @@
+use std::str::FromStr;
+
 use anyhow::Context;
 use clap::Parser;
-use pageserver_api::{
-    key::Key,
-    reltag::{BlockNumber, RelTag, SlruKind},
-    shard::{ShardCount, ShardStripeSize},
-};
-use std::str::FromStr;
+use pageserver_api::key::Key;
+use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
+use pageserver_api::shard::{ShardCount, ShardStripeSize};
 
 #[derive(Parser)]
 pub(super) struct DescribeKeyCommand {

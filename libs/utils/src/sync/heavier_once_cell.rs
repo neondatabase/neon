@@ -1,7 +1,6 @@
-use std::sync::{
-    Arc, Mutex, MutexGuard,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+
 use tokio::sync::Semaphore;
 
 /// Custom design like [`tokio::sync::OnceCell`] but using [`OwnedSemaphorePermit`] instead of
@@ -301,14 +300,13 @@ impl Drop for InitPermit {
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
+    use std::pin::{Pin, pin};
+    use std::time::Duration;
+
     use futures::Future;
 
     use super::*;
-    use std::{
-        convert::Infallible,
-        pin::{Pin, pin},
-        time::Duration,
-    };
 
     #[tokio::test]
     async fn many_initializers() {

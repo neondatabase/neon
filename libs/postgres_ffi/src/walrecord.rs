@@ -3,17 +3,15 @@
 //!
 //! TODO: Generate separate types for each supported PG version
 
-use crate::XLogRecord;
-use crate::pg_constants;
-use crate::{BLCKSZ, XLOG_SIZE_OF_XLOG_RECORD};
-use crate::{
-    BlockNumber, MultiXactId, MultiXactOffset, MultiXactStatus, Oid, RepOriginId, TimestampTz,
-    TransactionId,
-};
 use bytes::{Buf, Bytes};
 use serde::{Deserialize, Serialize};
 use utils::bin_ser::DeserializeError;
 use utils::lsn::Lsn;
+
+use crate::{
+    BLCKSZ, BlockNumber, MultiXactId, MultiXactOffset, MultiXactStatus, Oid, RepOriginId,
+    TimestampTz, TransactionId, XLOG_SIZE_OF_XLOG_RECORD, XLogRecord, pg_constants,
+};
 
 #[repr(C)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -508,8 +506,9 @@ pub fn decode_wal_record(
 }
 
 pub mod v14 {
-    use crate::{OffsetNumber, TransactionId};
     use bytes::{Buf, Bytes};
+
+    use crate::{OffsetNumber, TransactionId};
 
     #[repr(C)]
     #[derive(Debug)]
@@ -678,9 +677,10 @@ pub mod v15 {
 }
 
 pub mod v16 {
+    use bytes::{Buf, Bytes};
+
     pub use super::v14::{XlHeapInsert, XlHeapLockUpdated, XlHeapMultiInsert, XlParameterChange};
     use crate::{OffsetNumber, TransactionId};
-    use bytes::{Buf, Bytes};
 
     pub struct XlHeapDelete {
         pub xmax: TransactionId,
@@ -746,8 +746,9 @@ pub mod v16 {
 
     /* Since PG16, we have the Neon RMGR (RM_NEON_ID) to manage Neon-flavored WAL. */
     pub mod rm_neon {
-        use crate::{OffsetNumber, TransactionId};
         use bytes::{Buf, Bytes};
+
+        use crate::{OffsetNumber, TransactionId};
 
         #[repr(C)]
         #[derive(Debug)]
@@ -858,14 +859,14 @@ pub mod v16 {
 }
 
 pub mod v17 {
-    pub use super::v14::XlHeapLockUpdated;
-    pub use crate::{TimeLineID, TimestampTz};
     use bytes::{Buf, Bytes};
 
-    pub use super::v16::rm_neon;
+    pub use super::v14::XlHeapLockUpdated;
     pub use super::v16::{
         XlHeapDelete, XlHeapInsert, XlHeapLock, XlHeapMultiInsert, XlHeapUpdate, XlParameterChange,
+        rm_neon,
     };
+    pub use crate::{TimeLineID, TimestampTz};
 
     #[repr(C)]
     #[derive(Debug)]

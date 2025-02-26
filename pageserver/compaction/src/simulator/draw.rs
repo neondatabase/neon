@@ -1,13 +1,13 @@
-use super::Key;
-use anyhow::Result;
 use std::cmp::Ordering;
-use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
-    fmt::Write,
-    ops::Range,
-};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::fmt::Write;
+use std::ops::Range;
+
+use anyhow::Result;
 use svg_fmt::{BeginSvg, EndSvg, Fill, Stroke, Style, rgb};
 use utils::lsn::Lsn;
+
+use super::Key;
 
 // Map values to their compressed coordinate - the index the value
 // would have in a sorted and deduplicated list of all values.

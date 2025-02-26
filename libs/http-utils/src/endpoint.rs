@@ -1,14 +1,15 @@
-use crate::error::{ApiError, api_error_handler, route_error_handler};
-use crate::pprof;
-use crate::request::{get_query_param, parse_query_param};
+use std::future::Future;
+use std::io::Write as _;
+use std::str::FromStr;
+use std::time::Duration;
+
 use ::pprof::ProfilerGuardBuilder;
 use ::pprof::protos::Message as _;
 use anyhow::{Context, anyhow};
 use bytes::{Bytes, BytesMut};
-use hyper::Method;
-use hyper::header::{AUTHORIZATION, CONTENT_DISPOSITION, HeaderName};
+use hyper::header::{AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_TYPE, HeaderName};
 use hyper::http::HeaderValue;
-use hyper::{Body, Request, Response, header::CONTENT_TYPE};
+use hyper::{Body, Method, Request, Response};
 use metrics::{Encoder, IntCounter, TextEncoder, register_int_counter};
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -20,10 +21,9 @@ use tokio_util::io::ReaderStream;
 use tracing::{Instrument, debug, info, info_span, warn};
 use utils::auth::{AuthError, Claims, SwappableJwtAuth};
 
-use std::future::Future;
-use std::io::Write as _;
-use std::str::FromStr;
-use std::time::Duration;
+use crate::error::{ApiError, api_error_handler, route_error_handler};
+use crate::pprof;
+use crate::request::{get_query_param, parse_query_param};
 
 static SERVE_METRICS_COUNT: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
@@ -717,11 +717,13 @@ pub fn check_permission_with(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use hyper::service::Service;
-    use routerify::RequestServiceBuilder;
     use std::future::poll_fn;
     use std::net::{IpAddr, SocketAddr};
+
+    use hyper::service::Service;
+    use routerify::RequestServiceBuilder;
+
+    use super::*;
 
     #[tokio::test]
     async fn test_request_id_returned() {

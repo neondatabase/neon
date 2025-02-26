@@ -13,9 +13,11 @@
 
 #![warn(missing_docs)]
 
-use bincode::Options;
-use serde::{Serialize, de::DeserializeOwned};
 use std::io::{self, Read, Write};
+
+use bincode::Options;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 /// An error that occurred during a deserialize operation
@@ -261,9 +263,11 @@ impl<T> LeSer for T {}
 
 #[cfg(test)]
 mod tests {
-    use super::DeserializeError;
-    use serde::{Deserialize, Serialize};
     use std::io::Cursor;
+
+    use serde::{Deserialize, Serialize};
+
+    use super::DeserializeError;
 
     #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct ShortStruct {

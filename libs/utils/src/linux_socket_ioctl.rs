@@ -2,11 +2,10 @@
 //!
 //! <https://elixir.bootlin.com/linux/v6.1.128/source/include/uapi/linux/sockios.h#L25-L27>
 
-use std::{
-    io,
-    mem::MaybeUninit,
-    os::{fd::RawFd, raw::c_int},
-};
+use std::io;
+use std::mem::MaybeUninit;
+use std::os::fd::RawFd;
+use std::os::raw::c_int;
 
 use nix::libc::{FIONREAD, TIOCOUTQ};
 

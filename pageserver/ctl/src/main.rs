@@ -11,33 +11,29 @@ mod layer_map_analyzer;
 mod layers;
 mod page_trace;
 
-use page_trace::PageTraceCmd;
-use std::{
-    str::FromStr,
-    time::{Duration, SystemTime},
-};
+use std::str::FromStr;
+use std::time::{Duration, SystemTime};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::{Parser, Subcommand};
 use index_part::IndexPartCmd;
 use layers::LayerCmd;
-use pageserver::{
-    context::{DownloadBehavior, RequestContext},
-    page_cache,
-    task_mgr::TaskKind,
-    tenant::{dump_layerfile_from_path, metadata::TimelineMetadata},
-    virtual_file::{self, api::IoMode},
-};
+use page_trace::PageTraceCmd;
+use pageserver::context::{DownloadBehavior, RequestContext};
+use pageserver::page_cache;
+use pageserver::task_mgr::TaskKind;
+use pageserver::tenant::dump_layerfile_from_path;
+use pageserver::tenant::metadata::TimelineMetadata;
+use pageserver::virtual_file::api::IoMode;
+use pageserver::virtual_file::{self};
 use pageserver_api::shard::TenantShardId;
 use postgres_ffi::ControlFileData;
 use remote_storage::{RemotePath, RemoteStorageConfig};
 use tokio_util::sync::CancellationToken;
-use utils::{
-    id::TimelineId,
-    logging::{self, LogFormat, TracingErrorLayerEnablement},
-    lsn::Lsn,
-    project_git_version,
-};
+use utils::id::TimelineId;
+use utils::logging::{self, LogFormat, TracingErrorLayerEnablement};
+use utils::lsn::Lsn;
+use utils::project_git_version;
 
 project_git_version!(GIT_VERSION);
 

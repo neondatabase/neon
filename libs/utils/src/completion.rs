@@ -1,4 +1,5 @@
-use tokio_util::task::{TaskTracker, task_tracker::TaskTrackerToken};
+use tokio_util::task::TaskTracker;
+use tokio_util::task::task_tracker::TaskTrackerToken;
 
 /// While a reference is kept around, the associated [`Barrier::wait`] will wait.
 ///

@@ -50,18 +50,18 @@
 //! ```
 //!
 
-use anyhow::{Context, Result};
-use pageserver_api::key::Key;
 use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead};
+use std::ops::Range;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    ops::Range,
-};
+
+use anyhow::{Context, Result};
+use pageserver_api::key::Key;
 use svg_fmt::{BeginSvg, EndSvg, Fill, Stroke, rectangle, rgb};
-use utils::{lsn::Lsn, project_git_version};
+use utils::lsn::Lsn;
+use utils::project_git_version;
 
 project_git_version!(GIT_VERSION);
 

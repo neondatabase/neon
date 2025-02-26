@@ -1,23 +1,25 @@
-use anyhow::Context;
-use criterion::{Criterion, criterion_group, criterion_main};
-use futures::{StreamExt, stream::FuturesUnordered};
-use pageserver_api::shard::{ShardIdentity, ShardStripeSize};
-use postgres_ffi::{MAX_SEND_SIZE, WAL_SEGMENT_SIZE, waldecoder::WalStreamDecoder};
-use pprof::criterion::{Output, PProfProfiler};
-use serde::Deserialize;
-use std::{env, num::NonZeroUsize, sync::Arc};
+use std::env;
+use std::num::NonZeroUsize;
+use std::sync::Arc;
 
+use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use camino_tempfile::Utf8TempDir;
+use criterion::{Criterion, criterion_group, criterion_main};
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
+use pageserver_api::shard::{ShardIdentity, ShardStripeSize};
+use postgres_ffi::waldecoder::WalStreamDecoder;
+use postgres_ffi::{MAX_SEND_SIZE, WAL_SEGMENT_SIZE};
+use pprof::criterion::{Output, PProfProfiler};
 use remote_storage::{
     DownloadOpts, GenericRemoteStorage, ListingMode, RemoteStorageConfig, RemoteStorageKind,
     S3Config,
 };
+use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
-use utils::{
-    lsn::Lsn,
-    shard::{ShardCount, ShardNumber},
-};
+use utils::lsn::Lsn;
+use utils::shard::{ShardCount, ShardNumber};
 use wal_decoder::models::InterpretedWalRecord;
 
 const S3_BUCKET: &str = "neon-github-public-dev";

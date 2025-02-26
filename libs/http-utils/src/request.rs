@@ -1,10 +1,13 @@
 use core::fmt;
-use std::{borrow::Cow, str::FromStr};
+use std::borrow::Cow;
+use std::str::FromStr;
+
+use anyhow::anyhow;
+use hyper::body::HttpBody;
+use hyper::{Body, Request};
+use routerify::ext::RequestExt;
 
 use super::error::ApiError;
-use anyhow::anyhow;
-use hyper::{Body, Request, body::HttpBody};
-use routerify::ext::RequestExt;
 
 pub fn get_request_param<'a>(
     request: &'a Request<Body>,

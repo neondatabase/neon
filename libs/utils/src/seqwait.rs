@@ -5,6 +5,7 @@ use std::collections::BinaryHeap;
 use std::mem;
 use std::sync::Mutex;
 use std::time::Duration;
+
 use tokio::sync::watch::{self, channel};
 use tokio::time::timeout;
 
@@ -321,8 +322,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Arc;
+
+    use super::*;
 
     impl MonotonicCounter<i32> for i32 {
         fn cnt_advance(&mut self, val: i32) {

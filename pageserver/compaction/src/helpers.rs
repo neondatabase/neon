@@ -1,20 +1,20 @@
 //! This file contains generic utility functions over the interface types,
 //! which could be handy for any compaction implementation.
-use crate::interface::*;
+use std::collections::{BinaryHeap, VecDeque};
+use std::fmt::Display;
+use std::future::Future;
+use std::ops::{DerefMut, Range};
+use std::pin::Pin;
+use std::task::{Poll, ready};
 
 use futures::future::BoxFuture;
 use futures::{Stream, StreamExt};
 use itertools::Itertools;
 use pageserver_api::shard::ShardIdentity;
 use pin_project_lite::pin_project;
-use std::collections::BinaryHeap;
-use std::collections::VecDeque;
-use std::fmt::Display;
-use std::future::Future;
-use std::ops::{DerefMut, Range};
-use std::pin::Pin;
-use std::task::{Poll, ready};
 use utils::lsn::Lsn;
+
+use crate::interface::*;
 
 pub const PAGE_SZ: u64 = 8192;
 

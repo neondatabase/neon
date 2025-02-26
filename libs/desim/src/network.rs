@@ -1,26 +1,19 @@
-use std::{
-    cmp::Ordering,
-    collections::{BinaryHeap, VecDeque},
-    fmt::{self, Debug},
-    ops::DerefMut,
-    sync::{Arc, mpsc},
-};
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, VecDeque};
+use std::fmt::{self, Debug};
+use std::ops::DerefMut;
+use std::sync::{Arc, mpsc};
 
-use parking_lot::{
-    Mutex, RawMutex,
-    lock_api::{MappedMutexGuard, MutexGuard},
-};
+use parking_lot::lock_api::{MappedMutexGuard, MutexGuard};
+use parking_lot::{Mutex, RawMutex};
 use rand::rngs::StdRng;
 use tracing::debug;
 
-use crate::{
-    executor::{self, ThreadContext},
-    options::NetworkOptions,
-    proto::NetEvent,
-    proto::NodeEvent,
-};
-
-use super::{chan::Chan, proto::AnyMessage};
+use super::chan::Chan;
+use super::proto::AnyMessage;
+use crate::executor::{self, ThreadContext};
+use crate::options::NetworkOptions;
+use crate::proto::{NetEvent, NodeEvent};
 
 pub struct NetworkTask {
     options: Arc<NetworkOptions>,

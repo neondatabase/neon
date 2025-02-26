@@ -363,7 +363,8 @@ pub async fn log_slow<O>(name: &str, threshold: Duration, f: impl Future<Output 
 
 #[cfg(test)]
 mod tests {
-    use metrics::{IntCounterVec, core::Opts};
+    use metrics::IntCounterVec;
+    use metrics::core::Opts;
 
     use crate::logging::{TracingEventCountLayer, TracingEventCountMetric};
 

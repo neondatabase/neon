@@ -1,19 +1,14 @@
 use std::io::SeekFrom;
 
 use anyhow::{Context, Result};
-use async_compression::{
-    Level,
-    tokio::{bufread::ZstdDecoder, write::ZstdEncoder},
-    zstd::CParameter,
-};
+use async_compression::Level;
+use async_compression::tokio::bufread::ZstdDecoder;
+use async_compression::tokio::write::ZstdEncoder;
+use async_compression::zstd::CParameter;
 use camino::Utf8Path;
 use nix::NixPath;
-use tokio::{
-    fs::{File, OpenOptions},
-    io::AsyncBufRead,
-    io::AsyncSeekExt,
-    io::AsyncWriteExt,
-};
+use tokio::fs::{File, OpenOptions};
+use tokio::io::{AsyncBufRead, AsyncSeekExt, AsyncWriteExt};
 use tokio_tar::{Archive, Builder, HeaderMode};
 use walkdir::WalkDir;
 

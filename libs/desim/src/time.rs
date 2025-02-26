@@ -1,12 +1,8 @@
-use std::{
-    cmp::Ordering,
-    collections::BinaryHeap,
-    ops::DerefMut,
-    sync::{
-        Arc,
-        atomic::{AtomicU32, AtomicU64},
-    },
-};
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
+use std::ops::DerefMut;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64};
 
 use parking_lot::Mutex;
 use tracing::trace;

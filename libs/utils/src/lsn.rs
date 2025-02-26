@@ -1,10 +1,12 @@
 #![warn(missing_docs)]
 
-use serde::{Deserialize, Serialize, de::Visitor};
 use std::fmt;
 use std::ops::{Add, AddAssign};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use serde::de::Visitor;
+use serde::{Deserialize, Serialize};
 
 use crate::seqwait::MonotonicCounter;
 
@@ -407,11 +409,10 @@ impl rand::distributions::uniform::UniformSampler for LsnSampler {
 
 #[cfg(test)]
 mod tests {
-    use crate::bin_ser::BeSer;
+    use serde_assert::{Deserializer, Serializer, Token, Tokens};
 
     use super::*;
-
-    use serde_assert::{Deserializer, Serializer, Token, Tokens};
+    use crate::bin_ser::BeSer;
 
     #[test]
     fn test_lsn_strings() {

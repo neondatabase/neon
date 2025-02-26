@@ -1,10 +1,10 @@
-use hyper::{Body, Response, StatusCode, header};
-use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::error::Error as StdError;
+
+use hyper::{Body, Response, StatusCode, header};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{error, info, warn};
-
 use utils::auth::AuthError;
 
 #[derive(Debug, Error)]
