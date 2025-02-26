@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::os::unix::fs::{PermissionsExt, symlink};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -41,7 +41,7 @@ use crate::rsyslog::configure_audit_rsyslog;
 use crate::spec::*;
 use crate::swap::resize_swap;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
-use crate::tls::watch_cert_for_changes;
+use crate::tls::{update_key_path, watch_cert_for_changes};
 use crate::{config, extension_server, local_proxy};
 
 pub static SYNC_SAFEKEEPERS_PID: AtomicU32 = AtomicU32::new(0);
@@ -1599,10 +1599,13 @@ impl ComputeNode {
         if let Some(tls_config) = &self.compute_ctl_config.tls {
             let compute = self.clone();
             let tls_config = tls_config.clone();
+            let pg_data = PathBuf::from(&self.params.pgdata);
             tokio::spawn(async move {
-                let mut cert_watch = watch_cert_for_changes(tls_config).await;
+                let mut cert_watch = watch_cert_for_changes(tls_config.cert_path).await;
+                update_key_path(&pg_data, &tls_config.key_path).await;
                 // wait for certificate update
                 while let Ok(()) = cert_watch.changed().await {
+                    update_key_path(&pg_data, &tls_config.key_path).await;
                     let mut state = loop {
                         {
                             let state = compute.state.lock().unwrap();
