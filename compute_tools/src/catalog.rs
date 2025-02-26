@@ -55,7 +55,7 @@ pub enum SchemaDumpError {
 pub async fn get_database_schema(
     compute: &Arc<ComputeNode>,
     dbname: &str,
-) -> Result<impl Stream<Item = Result<bytes::Bytes, std::io::Error>>, SchemaDumpError> {
+) -> Result<impl Stream<Item = Result<bytes::Bytes, std::io::Error>> + use<>, SchemaDumpError> {
     let pgbin = &compute.pgbin;
     let basepath = Path::new(pgbin).parent().unwrap();
     let pgdump = basepath.join("pg_dump");

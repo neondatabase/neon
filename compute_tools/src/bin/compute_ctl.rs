@@ -149,6 +149,8 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    let scenario = failpoint_support::init();
+
     // For historical reasons, the main thread that processes the spec and launches postgres
     // is synchronous, but we always have this tokio runtime available and we "enter" it so
     // that you can use tokio::spawn() and tokio::runtime::Handle::current().block_on(...)
@@ -159,8 +161,6 @@ fn main() -> Result<()> {
     let _rt_guard = runtime.enter();
 
     let build_tag = runtime.block_on(init())?;
-
-    let scenario = failpoint_support::init();
 
     // enable core dumping for all child processes
     setrlimit(Resource::CORE, rlimit::INFINITY, rlimit::INFINITY)?;
