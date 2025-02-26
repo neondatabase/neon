@@ -2281,6 +2281,57 @@ def test_membership_api(neon_env_builder: NeonEnvBuilder):
         http_cli.timeline_status(tenant_id, timeline_id)
 
 
+def test_explicit_timeline_creation(neon_env_builder: NeonEnvBuilder):
+    """
+    Test that having neon.safekeepers starting with g#n: with non zero n enables
+    generations, which as a side effect disables automatic timeline creation.
+
+    This is kind of bootstrapping test: here membership conf & timeline is
+    created manually, later storcon will do that.
+    """
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    ps = env.pageservers[0]
+    ps_http_cli = ps.http_client()
+
+    http_clis = [sk.http_client() for sk in env.safekeepers]
+
+    config_lines = [
+        "neon.safekeeper_proto_version = 3",
+    ]
+    ep = env.endpoints.create("main", config_lines=config_lines)
+
+    # expected to fail because timeline is not created on safekeepers
+    with pytest.raises(Exception, match=r".*timed out.*"):
+        ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3], timeout="2s")
+    # figure out initial LSN.
+    ps_timeline_detail = ps_http_cli.timeline_detail(tenant_id, timeline_id)
+    init_lsn = ps_timeline_detail["last_record_lsn"]
+    log.info(f"initial LSN: {init_lsn}")
+    # sk timeline creation request expects minor version
+    pg_version = ps_timeline_detail["pg_version"] * 10000
+    # create inital mconf
+    sk_ids = [
+        SafekeeperId(env.safekeepers[0].id, "localhost", sk.port.pg_tenant_only)
+        for sk in env.safekeepers
+    ]
+    mconf = Configuration(generation=1, members=sk_ids, new_members=None)
+    create_r = TimelineCreateRequest(
+        tenant_id, timeline_id, mconf, pg_version, Lsn(init_lsn), commit_lsn=None
+    )
+    log.info(f"sending timeline create: {create_r.to_json()}")
+
+    for sk_http_cli in http_clis:
+        sk_http_cli.timeline_create(create_r)
+    # Once timeline created endpoint should start.
+    ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
+    ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
+
+
 # In this test we check for excessive START_REPLICATION and START_WAL_PUSH queries
 # when compute is active, but there are no writes to the timeline. In that case
 # pageserver should maintain a single connection to safekeeper and don't attempt

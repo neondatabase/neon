@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use regex::Regex;
 use remote_storage::RemotePath;
+use safekeeper_api::membership::SafekeeperGeneration;
 use serde::{Deserialize, Serialize};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
@@ -101,6 +102,14 @@ pub struct ComputeSpec {
     pub timeline_id: Option<TimelineId>,
     pub pageserver_connstring: Option<String>,
 
+    /// Safekeeper membership config generation. It is put in
+    /// neon.safekeepers GUC and serves two purposes:
+    /// 1) Non zero value forces walproposer to use membership configurations.
+    /// 2) If walproposer wants to update list of safekeepers to connect to
+    ///    taking them from some safekeeper mconf, it should check what value
+    ///    is newer by comparing the generation.
+    #[serde(default)]
+    pub safekeepers_generation: Option<SafekeeperGeneration>,
     #[serde(default)]
     pub safekeeper_connstrings: Vec<String>,
 
