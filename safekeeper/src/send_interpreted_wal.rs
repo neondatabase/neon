@@ -1001,17 +1001,22 @@ mod tests {
         const WAL_READER_BATCH_SIZE: usize = 8192;
 
         let start_lsn = Lsn::from_str("0/149FD18").unwrap();
-        let shard_0_start_lsn = Lsn::from_str("0/14AFE10").unwrap();
         let env = Env::new(true).unwrap();
+        let mut next_record_lsns = Vec::default();
         let tli = env
             .make_timeline(NodeId(1), TenantTimelineId::generate(), start_lsn)
             .await
             .unwrap();
 
         let resident_tli = tli.wal_residence_guard().await.unwrap();
-        let end_watch = Env::write_wal(tli, start_lsn, SIZE, MSG_COUNT, None)
-            .await
-            .unwrap();
+        let end_watch =
+            Env::write_wal(tli, start_lsn, SIZE, MSG_COUNT, Some(&mut next_record_lsns))
+                .await
+                .unwrap();
+
+        assert!(next_record_lsns.len() > 3);
+        let shard_0_start_lsn = next_record_lsns[3];
+
         let end_pos = end_watch.get();
 
         let streaming_wal_reader = StreamingWalReader::new(
@@ -1064,7 +1069,7 @@ mod tests {
         );
 
         let reader_state = reader.state();
-        let mut reader_fut = std::pin::pin!(reader.run(start_lsn, &None));
+        let mut reader_fut = std::pin::pin!(reader.run(shard_0_start_lsn, &None));
         loop {
             let poll = futures::poll!(reader_fut.as_mut());
             assert!(poll.is_pending());
