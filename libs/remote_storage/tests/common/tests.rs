@@ -1,19 +1,20 @@
+use std::collections::HashSet;
+use std::num::NonZeroU32;
+use std::ops::Bound;
+use std::sync::Arc;
+
 use anyhow::Context;
 use camino::Utf8Path;
 use futures::StreamExt;
 use remote_storage::{DownloadError, DownloadOpts, ListingMode, ListingObject, RemotePath};
-use std::ops::Bound;
-use std::sync::Arc;
-use std::{collections::HashSet, num::NonZeroU32};
 use test_context::test_context;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
-use crate::common::{download_to_vec, upload_stream, wrap_stream};
-
 use super::{
     MaybeEnabledStorage, MaybeEnabledStorageWithSimpleTestBlobs, MaybeEnabledStorageWithTestBlobs,
 };
+use crate::common::{download_to_vec, upload_stream, wrap_stream};
 
 /// Tests that S3 client can list all prefixes, even if the response come paginated and requires multiple S3 queries.
 /// Uses real S3 and requires [`ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME`] and related S3 cred env vars specified.
@@ -62,7 +63,8 @@ async fn pagination_should_work(ctx: &mut MaybeEnabledStorageWithTestBlobs) -> a
         .into_iter()
         .collect::<HashSet<_>>();
     assert_eq!(
-        root_remote_prefixes, HashSet::from([base_prefix.clone()]),
+        root_remote_prefixes,
+        HashSet::from([base_prefix.clone()]),
         "remote storage root prefixes list mismatches with the uploads. Returned prefixes: {root_remote_prefixes:?}"
     );
 
@@ -84,7 +86,8 @@ async fn pagination_should_work(ctx: &mut MaybeEnabledStorageWithTestBlobs) -> a
         .difference(&nested_remote_prefixes)
         .collect::<HashSet<_>>();
     assert_eq!(
-        remote_only_prefixes.len() + missing_uploaded_prefixes.len(), 0,
+        remote_only_prefixes.len() + missing_uploaded_prefixes.len(),
+        0,
         "remote storage nested prefixes list mismatches with the uploads. Remote only prefixes: {remote_only_prefixes:?}, missing uploaded prefixes: {missing_uploaded_prefixes:?}",
     );
 
@@ -119,7 +122,8 @@ async fn pagination_should_work(ctx: &mut MaybeEnabledStorageWithTestBlobs) -> a
         .difference(&nested_remote_prefixes_combined)
         .collect::<HashSet<_>>();
     assert_eq!(
-        remote_only_prefixes.len() + missing_uploaded_prefixes.len(), 0,
+        remote_only_prefixes.len() + missing_uploaded_prefixes.len(),
+        0,
         "remote storage nested prefixes list mismatches with the uploads. Remote only prefixes: {remote_only_prefixes:?}, missing uploaded prefixes: {missing_uploaded_prefixes:?}",
     );
 

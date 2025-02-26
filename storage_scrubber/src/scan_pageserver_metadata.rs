@@ -1,20 +1,21 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::checks::{
-    branch_cleanup_and_check_errors, list_timeline_blobs, BlobDataParseResult,
-    RemoteTimelineBlobData, TenantObjectListing, TimelineAnalysis,
-};
-use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
-use crate::{init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId};
 use futures_util::{StreamExt, TryStreamExt};
 use pageserver::tenant::remote_timeline_client::remote_layer_path;
 use pageserver_api::controller_api::MetadataHealthUpdateRequest;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::GenericRemoteStorage;
 use serde::Serialize;
-use tracing::{info_span, Instrument};
+use tracing::{Instrument, info_span};
 use utils::id::TenantId;
 use utils::shard::ShardCount;
+
+use crate::checks::{
+    BlobDataParseResult, RemoteTimelineBlobData, TenantObjectListing, TimelineAnalysis,
+    branch_cleanup_and_check_errors, list_timeline_blobs,
+};
+use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
+use crate::{BucketConfig, NodeKind, RootTarget, TenantShardTimelineId, init_remote};
 
 #[derive(Serialize, Default)]
 pub struct MetadataSummary {

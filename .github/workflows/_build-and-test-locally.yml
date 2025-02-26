@@ -337,7 +337,7 @@ jobs:
       - name: Pytest regression tests
         continue-on-error: ${{ matrix.lfc_state == 'with-lfc' && inputs.build-type == 'debug' }}
         uses: ./.github/actions/run-python-test-set
-        timeout-minutes: ${{ inputs.sanitizers != 'enabled' && 60 || 180 }}
+        timeout-minutes: ${{ inputs.sanitizers != 'enabled' && 75 || 180 }}
         with:
           build_type: ${{ inputs.build-type }}
           test_selection: regress

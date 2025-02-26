@@ -967,6 +967,7 @@ prefetch_lookupv(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blocknum, n
 			BITMAP_SET(mask, i);
 
 			hits += 1;
+			inc_getpage_wait(0);
 		}
 	}
 	pgBufferUsage.prefetch.hits += hits;

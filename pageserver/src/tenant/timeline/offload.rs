@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use pageserver_api::models::{TenantState, TimelineState};
 
-use super::delete::{delete_local_timeline_directory, DeletionGuard};
 use super::Timeline;
+use super::delete::{DeletionGuard, delete_local_timeline_directory};
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::remote_timeline_client::ShutdownIfArchivedError;
-use crate::tenant::timeline::delete::{make_timeline_delete_guard, TimelineDeleteGuardKind};
+use crate::tenant::timeline::delete::{TimelineDeleteGuardKind, make_timeline_delete_guard};
 use crate::tenant::{
     DeleteTimelineError, OffloadedTimeline, Tenant, TenantManifestError, TimelineOrOffloaded,
 };

@@ -1,13 +1,12 @@
-use crate::metrics::PageserverRequestLabelGroup;
 use safekeeper_api::models::{
     PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization, TimelineCreateRequest,
     TimelineStatus,
 };
 use safekeeper_client::mgmt_api::{Client, Result};
-use utils::{
-    id::{NodeId, TenantId, TimelineId},
-    logging::SecretString,
-};
+use utils::id::{NodeId, TenantId, TimelineId};
+use utils::logging::SecretString;
+
+use crate::metrics::PageserverRequestLabelGroup;
 
 /// Thin wrapper around [`safekeeper_client::mgmt_api::Client`]. It allows the storage
 /// controller to collect metrics in a non-intrusive manner.
