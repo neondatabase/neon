@@ -90,8 +90,8 @@ def setup_class(
     pg_version: PgVersion,
     neon_api: NeonAPI,
 ):
-    log.info("Creating a project")
     project = NeonProject(neon_api, pg_version)
+    log.info("Created a project with id %s, name %s", project.id, project.name)
     yield neon_api, project
     log.info("Removing the project")
     project.delete()
