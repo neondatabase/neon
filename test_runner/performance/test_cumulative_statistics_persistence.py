@@ -8,11 +8,10 @@ import psycopg2.extras
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_api import connection_parameters_to_env
+from fixtures.neon_fixtures import PgBin 
 from fixtures.pg_version import PgVersion
-from fixtures.neon_fixtures import PgBin  # Add this import
 
 if TYPE_CHECKING:
-
     from fixtures.benchmark_fixture import NeonBenchmarker
     from fixtures.neon_api import NeonAPI
     from fixtures.neon_fixtures import PgBin
