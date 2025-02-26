@@ -55,7 +55,7 @@ def insert_second_chunk_and_verify_autovacuum_is_now_running(
         (random() * 10)::int + 1 AS bid,
         (random() * 10000)::int AS abalance,
         'filler text' AS filler
-    FROM generate_series({6800001 + rows_to_insert -1}, {6800001 + rows_to_insert * 2 - 1}) AS aid;
+    FROM generate_series({6800001 + rows_to_insert}, {6800001 + rows_to_insert * 2 - 1}) AS aid;
     """)
     assert cur.rowcount == rows_to_insert
     for _ in range(5):
