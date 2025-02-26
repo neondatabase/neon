@@ -163,17 +163,22 @@ def test_cumulative_statistics_persistence(
                 cur, rows_to_insert, autovacuum_naptime
             )
 
-            # suspend the endpoint
-            log.info(f"Suspending endpoint {endpoint_id}")
-            neon_api.suspend_endpoint(project_id, endpoint_id)
-            neon_api.wait_for_operation_to_finish(project_id)
-            time.sleep(60)  # give some time in between suspend and resume
+        conn.close()
 
-            # resume the endpoint
-            log.info(f"Starting endpoint {endpoint_id}")
-            neon_api.start_endpoint(project_id, endpoint_id)
-            neon_api.wait_for_operation_to_finish(project_id)
+        # suspend the endpoint
+        log.info(f"Suspending endpoint {endpoint_id}")
+        neon_api.suspend_endpoint(project_id, endpoint_id)
+        neon_api.wait_for_operation_to_finish(project_id)
+        time.sleep(60)  # give some time in between suspend and resume
 
+        # resume the endpoint
+        log.info(f"Starting endpoint {endpoint_id}")
+        neon_api.start_endpoint(project_id, endpoint_id)
+        neon_api.wait_for_operation_to_finish(project_id)
+
+        conn = psycopg2.connect(connstr)
+        conn.autocommit = True
+        with conn.cursor() as cur:
             # insert additional rows that by itself are not enough to trigger auto-vacuum, but in combination
             # with the previous rows inserted before the suspension are
             log.info(
@@ -204,6 +209,8 @@ def test_cumulative_statistics_persistence(
             assert row[0] == 6800000 + rows_to_insert * 2
             assert row[1] == 1
             assert row[2] == 1
+
+        conn.close()
 
     except Exception as e:
         error_occurred = True
