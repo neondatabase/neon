@@ -873,7 +873,7 @@ impl ReadableLayer {
             }
             ReadableLayer::InMemoryLayer(layer) => {
                 layer
-                    .get_values_reconstruct_data(keyspace, lsn_range.end, reconstruct_state, ctx)
+                    .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, ctx)
                     .await
             }
         }
