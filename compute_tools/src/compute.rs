@@ -897,30 +897,13 @@ impl ComputeNode {
         let mut client = config.connect(NoTls)?;
         let pageserver_connect_micros = start_time.elapsed().as_micros() as u64;
 
+		let replica = if spec.spec.mode != ComputeMode::Primary { " --replica" } else { "" };
+		let lazy_slru_downloand = if spec.features.contains(&ComputeFeature::LazySlruDownload) { " --lazy-slru-download" } else { "" };
         let basebackup_cmd = match lsn {
-            Lsn(0) => {
-                if spec.spec.mode != ComputeMode::Primary {
-                    format!(
-                        "basebackup {} {} --gzip --replica",
-                        spec.tenant_id, spec.timeline_id
-                    )
-                } else {
-                    format!("basebackup {} {} --gzip", spec.tenant_id, spec.timeline_id)
-                }
-            }
-            _ => {
-                if spec.spec.mode != ComputeMode::Primary {
-                    format!(
-                        "basebackup {} {} {} --gzip --replica",
-                        spec.tenant_id, spec.timeline_id, lsn
-                    )
-                } else {
-                    format!(
-                        "basebackup {} {} {} --gzip",
-                        spec.tenant_id, spec.timeline_id, lsn
-                    )
-                }
-            }
+            Lsn(0) => format!("basebackup {} {} --gzip{}{}",
+                              spec.tenant_id, spec.timeline_id, replica, lazy_slru_dpownload)
+            _ => format!("basebackup {} {} {} --gzip{}{}",
+                        spec.tenant_id, spec.timeline_id, lsn, replica, lazy_slru_dpownload)
         };
 
         let copyreader = client.copy_out(basebackup_cmd.as_str())?;

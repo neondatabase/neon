@@ -2394,6 +2394,7 @@ impl PageServerHandler {
         full_backup: bool,
         gzip: bool,
         replica: bool,
+        lazy_slru_download: bool,
         ctx: &RequestContext,
     ) -> Result<(), QueryError>
     where
@@ -2461,6 +2462,7 @@ impl PageServerHandler {
                 prev_lsn,
                 full_backup,
                 replica,
+                lazy_slru_download,
                 &ctx,
             )
             .await
@@ -2484,6 +2486,7 @@ impl PageServerHandler {
                     prev_lsn,
                     full_backup,
                     replica,
+					lazy_slru_download,
                     &ctx,
                 )
                 .await
@@ -2501,6 +2504,7 @@ impl PageServerHandler {
                     prev_lsn,
                     full_backup,
                     replica,
+                    lazy_slru_download,
                     &ctx,
                 )
                 .await
@@ -2550,7 +2554,7 @@ impl PageServerHandler {
     }
 }
 
-/// `basebackup tenant timeline [lsn] [--gzip] [--replica]`
+/// `basebackup tenant timeline [lsn] [--gzip] [--replica]`[--lazy-sru-download]
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct BaseBackupCmd {
     tenant_id: TenantId,
@@ -2558,6 +2562,7 @@ struct BaseBackupCmd {
     lsn: Option<Lsn>,
     gzip: bool,
     replica: bool,
+    lazy_slru_download: bool,
 }
 
 /// `fullbackup tenant timeline [lsn] [prev_lsn]`
@@ -2690,6 +2695,7 @@ impl BaseBackupCmd {
 
         let mut gzip = false;
         let mut replica = false;
+        let mut lazy_slru_download = false;
 
         for &param in &parameters[flags_parse_from..] {
             match param {
@@ -2705,6 +2711,12 @@ impl BaseBackupCmd {
                     }
                     replica = true
                 }
+                "--lazy-slru-download" => {
+                    if lazy_slru_download {
+                        bail!("duplicate parameter for basebackup command: {param}")
+                    }
+                    lazy_slru_download = true
+                }
                 _ => bail!("invalid parameter for basebackup command: {param}"),
             }
         }
@@ -2714,6 +2726,7 @@ impl BaseBackupCmd {
             lsn,
             gzip,
             replica,
+			lazy_slru_download,
         })
     }
 }
@@ -2928,6 +2941,7 @@ where
                 lsn,
                 gzip,
                 replica,
+				lazy_slru_download,
             }) => {
                 tracing::Span::current()
                     .record("tenant_id", field::display(tenant_id))
@@ -2949,6 +2963,7 @@ where
                         false,
                         gzip,
                         replica,
+                        lazy_slru_download,
                         &ctx,
                     )
                     .await?;
@@ -3120,7 +3135,8 @@ mod tests {
                 timeline_id,
                 lsn: None,
                 gzip: false,
-                replica: false
+                replica: false,
+                lazy_slru_download: false
             })
         );
         let cmd =
@@ -3132,7 +3148,8 @@ mod tests {
                 timeline_id,
                 lsn: None,
                 gzip: true,
-                replica: false
+                replica: false,
+                lazy_slru_download: false
             })
         );
         let cmd =
@@ -3144,7 +3161,8 @@ mod tests {
                 timeline_id,
                 lsn: None,
                 gzip: false,
-                replica: false
+                replica: false,
+                lazy_slru_download: false
             })
         );
         let cmd = PageServiceCmd::parse(&format!("basebackup {tenant_id} {timeline_id} 0/16ABCDE"))
@@ -3156,7 +3174,8 @@ mod tests {
                 timeline_id,
                 lsn: Some(Lsn::from_str("0/16ABCDE").unwrap()),
                 gzip: false,
-                replica: false
+                replica: false,
+                lazy_slru_download: false
             })
         );
         let cmd = PageServiceCmd::parse(&format!(
@@ -3170,7 +3189,23 @@ mod tests {
                 timeline_id,
                 lsn: None,
                 gzip: true,
-                replica: true
+                replica: true,
+                lazy_slru_download: false
+            })
+        );
+        let cmd = PageServiceCmd::parse(&format!(
+            "basebackup {tenant_id} {timeline_id} --replica --gzip --lazy-slru-download"
+        ))
+        .unwrap();
+        assert_eq!(
+            cmd,
+            PageServiceCmd::BaseBackup(BaseBackupCmd {
+                tenant_id,
+                timeline_id,
+                lsn: None,
+                gzip: true,
+                replica: true,
+                lazy_slru_download: true
             })
         );
         let cmd = PageServiceCmd::parse(&format!(
@@ -3184,7 +3219,8 @@ mod tests {
                 timeline_id,
                 lsn: Some(Lsn::from_str("0/16ABCDE").unwrap()),
                 gzip: true,
-                replica: true
+                replica: true,
+				lazy_slru_download: false
             })
         );
         let cmd = PageServiceCmd::parse(&format!("fullbackup {tenant_id} {timeline_id}")).unwrap();
