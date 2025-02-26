@@ -249,6 +249,10 @@ class NeonAPI:
 
         return cast("dict[str, Any]", resp.json())
 
+    def delete_endpoint(self, project_id: str, endpoint_id: str) -> dict[str, Any]:
+        resp = self.__request("DELETE", f"/projects/{project_id}/endpoints/{endpoint_id}")
+        return cast("dict[str,Any]", resp.json())
+
     def get_connection_uri(
         self,
         project_id: str,

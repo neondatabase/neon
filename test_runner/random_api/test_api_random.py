@@ -15,8 +15,16 @@ from fixtures.pg_version import PgVersion
 
 
 class NeonEndpoint:
-    def __init__(self):
-        pass
+    def __init__(self, project, endpoint):
+        self.project = project
+        self.id = endpoint["id"]
+        self.branch = project.branches[endpoint["branch_id"]]
+        self.type = endpoint["type"]
+        self.branch.endpoints[self.id] = self
+        self.project.endpoints[self.id] = self
+
+    def delete(self):
+        self.project.delete_endpoint(self.id)
 
 
 class NeonBranch:
@@ -26,11 +34,20 @@ class NeonBranch:
         self.project = project
         self.neon_api = project.neon_api
         self.project_id = branch["project_id"]
+        self.parent = self.project.branches[branch["parent_id"]] if "parent_id" in branch else None
+        self.children = {}
+        self.endpoints = {}
+
+    def create_branch(self):
+        return self.project.create_branch(self.id)
 
     def create_ro_endpoint(self):
-        return self.neon_api.create_endpoint(self.project_id, self.id, "read_only", {})["endpoint"][
-            "id"
-        ]
+        return NeonEndpoint(
+            self.project,
+            self.neon_api.create_endpoint(self.project_id, self.id, "read_only", {})["endpoint"][
+                "id"
+            ],
+        )
 
 
 class NeonProject:
@@ -43,6 +60,12 @@ class NeonProject:
         self.name = proj["project"]["name"]
         self.connection_uri = proj["connection_uris"][0]["connection_uri"]
         self.pg_version = pg_version
+        self.main_branch = NeonBranch(self, proj["branch"])
+        self.branches = {self.main_branch.id: self.main_branch}
+        self.leaf_branches = {}
+        self.endpoints = {}
+        for endpoint in proj["endpoints"]:
+            NeonEndpoint(self, endpoint)
 
     def delete(self):
         self.neon_api.delete_project(self.id)
@@ -50,36 +73,36 @@ class NeonProject:
     def __get_branches_info(self) -> list[Any]:
         return self.neon_api.get_branches(self.id)["branches"]
 
-    def get_main_branch(self) -> NeonBranch:
-        for branch in self.__get_branches_info():
-            if "parent_id" not in branch:
-                return NeonBranch(self, branch)
-        raise RuntimeError(f"The main branch is not found for the project {self.id}")
-
-    def get_leaf_branches(self) -> list[NeonBranch]:
-        parents, branches, main = set(), set(), set()
-        branches_raw = self.__get_branches_info()
-        for branch in branches_raw:
-            branches.add(branch["id"])
-            if "parent_id" in branch:
-                parents.add(branch["parent_id"])
-            else:
-                main.add(branch["id"])
-        leafs = branches - parents - main
-        return [NeonBranch(self, branch) for branch in branches_raw if branch["id"] in leafs]
-
-    def get_branches(self) -> list[NeonBranch]:
-        return [NeonBranch(self, branch) for branch in self.__get_branches_info()]
-
     def create_branch(self, parent_id: str | None = None) -> NeonBranch:
-        return NeonBranch(self, self.neon_api.create_branch(self.id, parent_id=parent_id)["branch"])
+        new_branch = NeonBranch(
+            self, self.neon_api.create_branch(self.id, parent_id=parent_id)["branch"]
+        )
+        self.leaf_branches[new_branch.id] = new_branch
+        self.branches[new_branch.id] = new_branch
+        if parent_id and parent_id in self.leaf_branches:
+            self.leaf_branches.pop(parent_id)
+        if parent_id is None:
+            self.main_branch.children[new_branch.id] = new_branch
+        else:
+            self.branches[parent_id].children[new_branch.id] = new_branch
+        return new_branch
 
-    def get_ro_endpoints(self):
-        return [
-            _["id"]
-            for _ in self.neon_api.get_endpoints(self.id)["endpoints"]
-            if _["type"] == "read_only"
-        ]
+    def delete_branch(self, branch_id: str) -> None:
+        if branch_id == self.main_branch.id:
+            raise RuntimeError("Cannot delete the main branch")
+        if branch_id not in self.leaf_branches:
+            raise RuntimeError(f"The branch {branch_id}, probably, has ancestors")
+        if branch_id not in self.branches:
+            raise RuntimeError(f"The branch with id {branch_id} is not found")
+        self.neon_api.delete_branch(self.id, branch_id)
+        self.branches[branch_id].parent.children.pop(branch_id)
+        self.leaf_branches.pop(branch_id)
+        self.branches.pop(branch_id)
+
+    def delete_endpoint(self, endpoint_id: str) -> None:
+        self.endpoints[endpoint_id].branch.endpoints.pop(endpoint_id)
+        self.endpoints.pop(endpoint_id)
+        self.neon_api.delete_endpoint(self.id, endpoint_id)
 
     def wait(self):
         return self.neon_api.wait_for_operation_to_finish(self.id)
@@ -92,7 +115,7 @@ def setup_class(
 ):
     project = NeonProject(neon_api, pg_version)
     log.info("Created a project with id %s, name %s", project.id, project.name)
-    yield neon_api, project
+    yield project
     log.info("Removing the project")
     project.delete()
 
@@ -106,4 +129,11 @@ def test_api_random(
     """
     Run the random API tests
     """
+    project = setup_class
+    project.main_branch.create_branch().create_branch()
+    q = [project.main_branch]
+    while q:
+        br = q.pop()
+        log.info("branch id: %s", br.id)
+        q.extend(br.children.values())
     assert True
