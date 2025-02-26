@@ -31,6 +31,7 @@ use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 use utils::measured_stream::MeasuredReader;
 
+use crate::disk_quota::set_disk_quota;
 use crate::installed_extensions::get_installed_extensions;
 use crate::pg_helpers::*;
 use crate::spec::*;
@@ -44,9 +45,9 @@ use crate::spec_apply::PerDatabasePhase::{
     ChangeSchemaPerms, DeleteDBRoleReferences, DropLogicalSubscriptions, HandleAnonExtension,
 };
 use crate::spec_apply::{DB, MutableApplyContext, PerDatabasePhase, apply_operations};
+use crate::swap::resize_swap;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
 use crate::{config, extension_server, local_proxy};
-
 pub static SYNC_SAFEKEEPERS_PID: AtomicU32 = AtomicU32::new(0);
 pub static PG_PID: AtomicU32 = AtomicU32::new(0);
 
@@ -92,6 +93,10 @@ pub struct ComputeNode {
     // key: ext_archive_name, value: started download time, download_completed?
     pub ext_download_progress: RwLock<HashMap<String, (DateTime<Utc>, bool)>>,
     pub build_tag: String,
+    /// Initialized from cli.resize_swap_on_bind
+    pub resize_swap_on_bind: bool,
+    /// Initialized from cli.set_disk_quota_for_fs
+    pub set_disk_quota_for_fs: Option<String>,
 }
 
 // store some metrics about download size that might impact startup time
@@ -1429,12 +1434,59 @@ impl ComputeNode {
         Ok(())
     }
 
+    /// Configure some VM parameters like swap and disk quota
+    #[instrument(skip_all)]
+    pub fn configure_vm(&self, spec: &ComputeSpec) -> Result<()> {
+        // Resize swap to the desired size if the compute spec says so
+        if let (Some(size_bytes), true) = (spec.swap_size_bytes, self.resize_swap_on_bind) {
+            // To avoid 'swapoff' hitting postgres startup, we need to run resize-swap to completion
+            // *before* starting postgres.
+            //
+            // In theory, we could do this asynchronously if SkipSwapon was enabled for VMs, but this
+            // carries a risk of introducing hard-to-debug issues - e.g. if postgres sometimes gets
+            // OOM-killed during startup because swap wasn't available yet.
+            match resize_swap(size_bytes) {
+                Ok(()) => {
+                    let size_mib = size_bytes as f32 / (1 << 20) as f32; // just for more coherent display.
+                    info!(%size_bytes, %size_mib, "resized swap");
+                }
+                Err(err) => {
+                    let err = err.context("failed to resize swap");
+                    error!("{err:#}");
+
+                    return Err(err);
+                }
+            }
+        }
+
+        // Set disk quota if the compute spec says so
+        if let (Some(disk_quota_bytes), Some(disk_quota_fs_mountpoint)) =
+            (spec.disk_quota_bytes, self.set_disk_quota_for_fs.as_ref())
+        {
+            match set_disk_quota(disk_quota_bytes, disk_quota_fs_mountpoint) {
+                Ok(()) => {
+                    let size_mib = disk_quota_bytes as f32 / (1 << 20) as f32; // just for more coherent display.
+                    info!(%disk_quota_bytes, %size_mib, "set disk quota");
+                }
+                Err(err) => {
+                    let err = err.context("failed to set disk quota");
+                    error!("{err:#}");
+
+                    return Err(err);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     #[instrument(skip_all)]
     pub fn start_compute(
         &self,
     ) -> Result<(std::process::Child, tokio::task::JoinHandle<Result<()>>)> {
         let compute_state = self.state.lock().unwrap().clone();
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
+
         info!(
             "starting compute for project {}, operation {}, tenant {}, timeline {}",
             pspec.spec.cluster.cluster_id.as_deref().unwrap_or("None"),
@@ -1443,9 +1495,11 @@ impl ComputeNode {
             pspec.timeline_id,
         );
 
-        // tune pgbouncer
+        self.configure_vm(&pspec.spec)?;
+
+        // Configure pgbouncer
         if let Some(pgbouncer_settings) = &pspec.spec.pgbouncer_settings {
-            info!("tuning pgbouncer");
+            info!("configuring pgbouncer");
 
             // Spawn a background task to do the tuning,
             // so that we don't block the main thread that starts Postgres.
@@ -1471,14 +1525,11 @@ impl ComputeNode {
             });
         }
 
-        info!(
-            "start_compute spec.remote_extensions {:?}",
-            pspec.spec.remote_extensions
-        );
-
         // This part is sync, because we need to download
         // remote shared_preload_libraries before postgres start (if any)
         if let Some(remote_extensions) = &pspec.spec.remote_extensions {
+            info!(?remote_extensions, "processing remote extensions");
+
             // First, create control files for all availale extensions
             extension_server::create_control_files(remote_extensions, &self.pgbin);
 
@@ -1497,7 +1548,7 @@ impl ComputeNode {
             state.metrics.largest_ext_size = remote_ext_metrics.largest_ext_size;
             state.metrics.total_ext_download_size = remote_ext_metrics.total_ext_download_size;
             info!(
-                "Loading shared_preload_libraries took {:?}ms",
+                "loading shared_preload_libraries from remote extensions took {:?}ms",
                 library_load_time
             );
             info!("{:?}", remote_ext_metrics);
@@ -1556,6 +1607,7 @@ impl ComputeNode {
             });
         }
 
+        let metrics: ComputeMetrics;
         let startup_end_time = Utc::now();
         {
             let mut state = self.state.lock().unwrap();
@@ -1574,20 +1626,16 @@ impl ComputeNode {
                 .to_std()
                 .unwrap()
                 .as_millis() as u64;
+            metrics = state.metrics.clone();
         }
         self.set_status(ComputeStatus::Running);
 
+        // Log metrics so that we can search for slow operations in logs
         info!(
+            ?metrics,
             "finished configuration of compute for project {}",
             pspec.spec.cluster.cluster_id.as_deref().unwrap_or("None")
         );
-
-        // Log metrics so that we can search for slow operations in logs
-        let metrics = {
-            let state = self.state.lock().unwrap();
-            state.metrics.clone()
-        };
-        info!(?metrics, "compute start finished");
 
         Ok(pg_process)
     }
