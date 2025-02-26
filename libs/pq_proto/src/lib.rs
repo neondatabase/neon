@@ -206,8 +206,8 @@ use rand::distributions::{Distribution, Standard};
 impl Distribution<CancelKeyData> for Standard {
     fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> CancelKeyData {
         CancelKeyData {
-            backend_pid: rng.gen(),
-            cancel_key: rng.gen(),
+            backend_pid: rng.r#gen(),
+            cancel_key: rng.r#gen(),
         }
     }
 }

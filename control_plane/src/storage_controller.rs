@@ -96,7 +96,8 @@ pub struct AttachHookRequest {
 
 #[derive(Serialize, Deserialize)]
 pub struct AttachHookResponse {
-    pub gen: Option<u32>,
+    #[serde(rename="gen")]
+    pub generation: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -779,7 +780,7 @@ impl StorageController {
             )
             .await?;
 
-        Ok(response.gen)
+        Ok(response.generation)
     }
 
     #[instrument(skip(self))]

@@ -1856,7 +1856,7 @@ impl Service {
         }
 
         Ok(AttachHookResponse {
-            r#gen: attach_req
+            generation: attach_req
                 .node_id
                 .map(|_| tenant_shard.generation.expect("Test hook, not used on tenants that are mid-onboarding with a NULL generation").into().unwrap()),
         })
