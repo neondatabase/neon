@@ -31,7 +31,8 @@ use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
 
 use crate::metrics::{
-    REMOVED_WAL_SEGMENTS, WAL_STORAGE_OPERATION_SECONDS, WalStorageMetrics, time_io_closure,
+    time_io_closure, WalStorageMetrics, REMOVED_WAL_SEGMENTS, WAL_DISK_IO_ERRORS,
+    WAL_STORAGE_OPERATION_SECONDS,
 };
 use crate::state::TimelinePersistentState;
 use crate::wal_backup::{WalBackup, read_object, remote_timeline_path};
@@ -293,9 +294,12 @@ impl PhysicalStorage {
             // half initialized segment, first bake it under tmp filename and
             // then rename.
             let tmp_path = self.timeline_dir.join("waltmp");
-            let file = File::create(&tmp_path)
-                .await
-                .with_context(|| format!("Failed to open tmp wal file {:?}", &tmp_path))?;
+            let file: File = File::create(&tmp_path).await.with_context(|| {
+                /* BEGIN_HADRON */
+                WAL_DISK_IO_ERRORS.inc();
+                /* END_HADRON */
+                format!("Failed to open tmp wal file {:?}", &tmp_path)
+            })?;
 
             fail::fail_point!("sk-zero-segment", |_| {
                 info!("sk-zero-segment failpoint hit");
@@ -382,7 +386,11 @@ impl PhysicalStorage {
 
             let flushed = self
                 .write_in_segment(segno, xlogoff, &buf[..bytes_write])
-                .await?;
+                .await
+                /* BEGIN_HADRON */
+                .inspect_err(|_| WAL_DISK_IO_ERRORS.inc())?;
+            /* END_HADRON */
+
             self.write_lsn += bytes_write as u64;
             if flushed {
                 self.flush_lsn = self.write_lsn;
@@ -491,7 +499,11 @@ impl Storage for PhysicalStorage {
         }
 
         if let Some(unflushed_file) = self.file.take() {
-            self.fdatasync_file(&unflushed_file).await?;
+            self.fdatasync_file(&unflushed_file)
+                .await
+                /* BEGIN_HADRON */
+                .inspect_err(|_| WAL_DISK_IO_ERRORS.inc())?;
+            /* END_HADRON */
             self.file = Some(unflushed_file);
         } else {
             // We have unflushed data (write_lsn != flush_lsn), but no file. This

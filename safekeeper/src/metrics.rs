@@ -58,6 +58,15 @@ pub static FLUSH_WAL_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     )
     .expect("Failed to register safekeeper_flush_wal_seconds histogram")
 });
+/* BEGIN_HADRON */
+pub static WAL_DISK_IO_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_wal_disk_io_errors",
+        "Number of disk I/Os when creating and flushing WALs and control files"
+    )
+    .expect("Failed to register safekeeper_wal_disk_io_errors counter")
+});
+/* END_HADRON */
 pub static PERSIST_CONTROL_FILE_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "safekeeper_persist_control_file_seconds",
