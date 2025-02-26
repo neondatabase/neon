@@ -47,7 +47,7 @@ use crate::spec_apply::ApplySpecPhase::{
 };
 use crate::spec_apply::PerDatabasePhase;
 use crate::spec_apply::PerDatabasePhase::{
-    ChangeSchemaPerms, DeleteDBRoleReferences, DropLogicalSubscriptions, HandleAnonExtension,
+    ChangeSchemaPerms, DeleteDBRoleReferences, DropLogicalSubscriptions,
 };
 use crate::spec_apply::{apply_operations, MutableApplyContext, DB};
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
@@ -1124,7 +1124,6 @@ impl ComputeNode {
                     let mut phases = vec![
                         DeleteDBRoleReferences,
                         ChangeSchemaPerms,
-                        HandleAnonExtension,
                     ];
 
                     if spec.drop_subscriptions_before_start && !drop_subscriptions_done {
