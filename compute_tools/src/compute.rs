@@ -546,6 +546,7 @@ impl ComputeNode {
 
     // Fast path for sync_safekeepers. If they're already synced we get the lsn
     // in one roundtrip. If not, we should do a full sync_safekeepers.
+    #[instrument(skip_all)]
     pub fn check_safekeepers_synced(&self, compute_state: &ComputeState) -> Result<Option<Lsn>> {
         let start_time = Utc::now();
 

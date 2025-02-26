@@ -14,6 +14,9 @@
 //! len <  128: 0XXXXXXX
 //! len >= 128: 1CCCXXXX XXXXXXXX XXXXXXXX XXXXXXXX
 //!
+use std::cmp::min;
+use std::io::{Error, ErrorKind};
+
 use async_compression::Level;
 use bytes::{BufMut, BytesMut};
 use pageserver_api::models::ImageCompressionAlgorithm;
@@ -24,10 +27,8 @@ use tracing::warn;
 use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::tenant::block_io::BlockCursor;
-use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
 use crate::virtual_file::VirtualFile;
-use std::cmp::min;
-use std::io::{Error, ErrorKind};
+use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
 
 #[derive(Copy, Clone, Debug)]
 pub struct CompressionInfo {
@@ -414,11 +415,14 @@ impl BlobWriter<false> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::*;
-    use crate::{context::DownloadBehavior, task_mgr::TaskKind, tenant::block_io::BlockReaderRef};
     use camino::Utf8PathBuf;
     use camino_tempfile::Utf8TempDir;
     use rand::{Rng, SeedableRng};
+
+    use super::*;
+    use crate::context::DownloadBehavior;
+    use crate::task_mgr::TaskKind;
+    use crate::tenant::block_io::BlockReaderRef;
 
     async fn round_trip_test<const BUFFERED: bool>(blobs: &[Vec<u8>]) -> Result<(), Error> {
         round_trip_test_compressed::<BUFFERED>(blobs, false).await
@@ -486,7 +490,7 @@ pub(crate) mod tests {
 
     pub(crate) fn random_array(len: usize) -> Vec<u8> {
         let mut rng = rand::thread_rng();
-        (0..len).map(|_| rng.gen()).collect::<_>()
+        (0..len).map(|_| rng.r#gen()).collect::<_>()
     }
 
     #[tokio::test]
@@ -544,9 +548,9 @@ pub(crate) mod tests {
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
         let blobs = (0..1024)
             .map(|_| {
-                let mut sz: u16 = rng.gen();
+                let mut sz: u16 = rng.r#gen();
                 // Make 50% of the arrays small
-                if rng.gen() {
+                if rng.r#gen() {
                     sz &= 63;
                 }
                 random_array(sz.into())

@@ -1,16 +1,15 @@
 use core::fmt::Display;
-use pageserver_api::shard::TenantShardId;
 use std::ops::Range;
-use utils::{id::TimelineId, lsn::Lsn};
 
 use pageserver_api::key::Key;
-
-use super::{DeltaLayerName, ImageLayerName, LayerName};
-
+use pageserver_api::shard::TenantShardId;
 use serde::{Deserialize, Serialize};
-
 #[cfg(test)]
 use utils::id::TenantId;
+use utils::id::TimelineId;
+use utils::lsn::Lsn;
+
+use super::{DeltaLayerName, ImageLayerName, LayerName};
 
 /// A unique identifier of a persistent layer.
 ///

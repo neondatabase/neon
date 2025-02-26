@@ -2,38 +2,30 @@ pub mod detach_ancestor;
 pub mod partitioning;
 pub mod utilization;
 
-#[cfg(feature = "testing")]
-use camino::Utf8PathBuf;
-pub use utilization::PageserverUtilization;
-
 use core::ops::Range;
-use std::{
-    collections::HashMap,
-    fmt::Display,
-    io::{BufRead, Read},
-    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
-    str::FromStr,
-    time::{Duration, SystemTime},
-};
+use std::collections::HashMap;
+use std::fmt::Display;
+use std::io::{BufRead, Read};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+use std::str::FromStr;
+use std::time::{Duration, SystemTime};
 
 use byteorder::{BigEndian, ReadBytesExt};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+#[cfg(feature = "testing")]
+use camino::Utf8PathBuf;
 use postgres_ffi::BLCKSZ;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::serde_as;
-use utils::{
-    completion,
-    id::{NodeId, TenantId, TimelineId},
-    lsn::Lsn,
-    postgres_client::PostgresClientProtocol,
-    serde_system_time,
-};
+pub use utilization::PageserverUtilization;
+use utils::id::{NodeId, TenantId, TimelineId};
+use utils::lsn::Lsn;
+use utils::postgres_client::PostgresClientProtocol;
+use utils::{completion, serde_system_time};
 
-use crate::{
-    key::{CompactKey, Key},
-    reltag::RelTag,
-    shard::{ShardCount, ShardStripeSize, TenantShardId},
-};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use crate::key::{CompactKey, Key};
+use crate::reltag::RelTag;
+use crate::shard::{ShardCount, ShardStripeSize, TenantShardId};
 
 /// The state of a tenant in this pageserver.
 ///
@@ -332,7 +324,8 @@ pub struct ImportPgdataIdempotencyKey(pub String);
 
 impl ImportPgdataIdempotencyKey {
     pub fn random() -> Self {
-        use rand::{distributions::Alphanumeric, Rng};
+        use rand::Rng;
+        use rand::distributions::Alphanumeric;
         Self(
             rand::thread_rng()
                 .sample_iter(&Alphanumeric)
@@ -2288,8 +2281,9 @@ impl Default for PageTraceEvent {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use std::str::FromStr;
+
+    use serde_json::json;
 
     use super::*;
 

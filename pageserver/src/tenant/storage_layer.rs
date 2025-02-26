@@ -10,42 +10,39 @@ mod layer_desc;
 mod layer_name;
 pub mod merge_iterator;
 
-use crate::config::PageServerConf;
-use crate::context::{AccessStatsBehavior, RequestContext};
-use bytes::Bytes;
-use futures::stream::FuturesUnordered;
-use futures::StreamExt;
-use pageserver_api::key::Key;
-use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
-use pageserver_api::record::NeonWalRecord;
-use pageserver_api::value::Value;
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
 use std::collections::{BinaryHeap, HashMap};
 use std::future::Future;
 use std::ops::Range;
 use std::pin::Pin;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tracing::{trace, Instrument};
-use utils::sync::gate::GateGuard;
-
-use utils::lsn::Lsn;
 
 pub use batch_split_writer::{BatchLayerWriter, SplitDeltaLayerWriter, SplitImageLayerWriter};
+use bytes::Bytes;
 pub use delta_layer::{DeltaLayer, DeltaLayerWriter, ValueRef};
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 pub use image_layer::{ImageLayer, ImageLayerWriter};
 pub use inmemory_layer::InMemoryLayer;
+pub(crate) use layer::{EvictionError, Layer, ResidentLayer};
 pub use layer_desc::{PersistentLayerDesc, PersistentLayerKey};
 pub use layer_name::{DeltaLayerName, ImageLayerName, LayerName};
-
-pub(crate) use layer::{EvictionError, Layer, ResidentLayer};
+use pageserver_api::key::Key;
+use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
+use pageserver_api::record::NeonWalRecord;
+use pageserver_api::value::Value;
+use tracing::{Instrument, trace};
+use utils::lsn::Lsn;
+use utils::sync::gate::GateGuard;
 
 use self::inmemory_layer::InMemoryLayerFileId;
-
-use super::timeline::{GetVectoredError, ReadPath};
 use super::PageReconstructError;
+use super::timeline::{GetVectoredError, ReadPath};
+use crate::config::PageServerConf;
+use crate::context::{AccessStatsBehavior, RequestContext};
 
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where
@@ -510,6 +507,7 @@ impl IoConcurrency {
     #[cfg(test)]
     pub(crate) fn spawn_for_test() -> impl std::ops::DerefMut<Target = Self> {
         use std::ops::{Deref, DerefMut};
+
         use tracing::info;
         use utils::sync::gate::Gate;
 

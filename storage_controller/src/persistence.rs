@@ -2,48 +2,38 @@ pub(crate) mod split_state;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use self::split_state::SplitState;
-use diesel::deserialize::FromSql;
-use diesel::deserialize::FromSqlRow;
-use diesel::pg::Pg;
 use diesel::prelude::*;
 use diesel_async::async_connection_wrapper::AsyncConnectionWrapper;
 use diesel_async::pooled_connection::bb8::Pool;
-use diesel_async::pooled_connection::AsyncDieselConnectionManager;
-use diesel_async::pooled_connection::ManagerConfig;
-use diesel_async::AsyncPgConnection;
-use diesel_async::RunQueryDsl;
-use futures::future::BoxFuture;
+use diesel_async::pooled_connection::{AsyncDieselConnectionManager, ManagerConfig};
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_migrations::{EmbeddedMigrations, embed_migrations};
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use itertools::Itertools;
-use pageserver_api::controller_api::AvailabilityZone;
-use pageserver_api::controller_api::MetadataHealthRecord;
-use pageserver_api::controller_api::SafekeeperDescribeResponse;
-use pageserver_api::controller_api::ShardSchedulingPolicy;
-use pageserver_api::controller_api::SkSchedulingPolicy;
-use pageserver_api::controller_api::{NodeSchedulingPolicy, PlacementPolicy};
+use pageserver_api::controller_api::{
+    AvailabilityZone, MetadataHealthRecord, NodeSchedulingPolicy, PlacementPolicy,
+    SafekeeperDescribeResponse, ShardSchedulingPolicy, SkSchedulingPolicy,
+};
 use pageserver_api::models::TenantConfig;
-use pageserver_api::shard::ShardConfigError;
-use pageserver_api::shard::ShardIdentity;
-use pageserver_api::shard::ShardStripeSize;
-use pageserver_api::shard::{ShardCount, ShardNumber, TenantShardId};
-use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
+use pageserver_api::shard::{
+    ShardConfigError, ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId,
+};
 use rustls::client::WebPkiServerVerifier;
+use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::ring;
 use scoped_futures::ScopedBoxFuture;
 use serde::{Deserialize, Serialize};
 use utils::generation::Generation;
 use utils::id::{NodeId, TenantId};
 
+use self::split_state::SplitState;
 use crate::metrics::{
     DatabaseQueryErrorLabelGroup, DatabaseQueryLatencyLabelGroup, METRICS_REGISTRY,
 };
 use crate::node::Node;
-
-use diesel_migrations::{embed_migrations, EmbeddedMigrations};
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations");
 
 /// ## What do we store?
@@ -482,8 +472,7 @@ impl Persistence {
         &self,
         shards: Vec<TenantShardPersistence>,
     ) -> DatabaseResult<()> {
-        use crate::schema::metadata_health;
-        use crate::schema::tenant_shards;
+        use crate::schema::{metadata_health, tenant_shards};
 
         let now = chrono::Utc::now();
 
@@ -557,8 +546,7 @@ impl Persistence {
         &self,
         input_node_id: NodeId,
     ) -> DatabaseResult<HashMap<TenantShardId, Generation>> {
-        use crate::schema::nodes::dsl::scheduling_policy;
-        use crate::schema::nodes::dsl::*;
+        use crate::schema::nodes::dsl::{scheduling_policy, *};
         use crate::schema::tenant_shards::dsl::*;
         let updated = self
             .with_measured_conn(DatabaseOperation::ReAttach, move |conn| {
