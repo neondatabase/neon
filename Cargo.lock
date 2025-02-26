@@ -1316,6 +1316,8 @@ dependencies = [
  "flate2",
  "futures",
  "http 1.1.0",
+ "hyper 1.4.1",
+ "hyper-util",
  "metrics",
  "nix 0.27.1",
  "notify",
