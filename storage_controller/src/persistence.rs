@@ -32,7 +32,7 @@ use rustls::crypto::ring;
 use scoped_futures::ScopedBoxFuture;
 use serde::{Deserialize, Serialize};
 use utils::generation::Generation;
-use utils::id::{NodeId, TenantId};
+use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
 
 use self::split_state::SplitState;
@@ -121,6 +121,9 @@ pub(crate) enum DatabaseOperation {
     GetLeader,
     UpdateLeader,
     SetPreferredAzs,
+    InsertTimeline,
+    GetTimeline,
+    InsertTimelineReconcile,
 }
 
 #[must_use]
@@ -1280,6 +1283,127 @@ impl Persistence {
         })
         .await
     }
+
+    /// Persist timeline. Returns if the timeline was newly inserted. If it wasn't, we haven't done any writes.
+    pub(crate) async fn insert_timeline(&self, entry: TimelinePersistence) -> DatabaseResult<bool> {
+        use crate::schema::timelines;
+
+        let entry = &entry;
+        self.with_measured_conn(DatabaseOperation::InsertTimeline, move |conn| {
+            Box::pin(async move {
+                let inserted_updated = diesel::insert_into(timelines::table)
+                    .values(entry)
+                    .on_conflict((timelines::tenant_id, timelines::timeline_id))
+                    .do_nothing()
+                    .execute(conn)
+                    .await?;
+
+                match inserted_updated {
+                    0 => Ok(false),
+                    1 => Ok(true),
+                    _ => Err(DatabaseError::Logical(format!(
+                        "unexpected number of rows ({})",
+                        inserted_updated
+                    ))),
+                }
+            })
+        })
+        .await
+    }
+
+    /// Load timeline from db. Returns `None` if not present.
+    pub(crate) async fn get_timeline(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> DatabaseResult<Option<TimelinePersistence>> {
+        use crate::schema::timelines::dsl;
+
+        let tenant_id = &tenant_id;
+        let timeline_id = &timeline_id;
+        let timeline_from_db = self
+            .with_measured_conn(DatabaseOperation::GetTimeline, move |conn| {
+                Box::pin(async move {
+                    let mut from_db: Vec<TimelineFromDb> = dsl::timelines
+                        .filter(
+                            dsl::tenant_id
+                                .eq(&tenant_id.to_string())
+                                .and(dsl::timeline_id.eq(&timeline_id.to_string())),
+                        )
+                        .load(conn)
+                        .await?;
+                    if from_db.is_empty() {
+                        return Ok(None);
+                    }
+                    if from_db.len() != 1 {
+                        return Err(DatabaseError::Logical(format!(
+                            "unexpected number of rows ({})",
+                            from_db.len()
+                        )));
+                    }
+
+                    Ok(Some(from_db.pop().unwrap().into_persistence()))
+                })
+            })
+            .await?;
+
+        Ok(timeline_from_db)
+    }
+    /// Persist pending op. Returns if it was newly inserted. If it wasn't, we haven't done any writes.
+    pub(crate) async fn insert_pending_op(
+        &self,
+        entry: TimelinePendingOpPersistence,
+    ) -> DatabaseResult<bool> {
+        use crate::schema::safekeeper_timeline_pending_ops as skpo;
+
+        let entry = &entry;
+        self.with_measured_conn(DatabaseOperation::InsertTimeline, move |conn| {
+            Box::pin(async move {
+                let inserted_updated = diesel::insert_into(skpo::table)
+                    .values(entry)
+                    .on_conflict((skpo::tenant_id, skpo::timeline_id, skpo::sk_id))
+                    .do_nothing()
+                    .execute(conn)
+                    .await?;
+
+                match inserted_updated {
+                    0 => Ok(false),
+                    1 => Ok(true),
+                    _ => Err(DatabaseError::Logical(format!(
+                        "unexpected number of rows ({})",
+                        inserted_updated
+                    ))),
+                }
+            })
+        })
+        .await
+    }
+    /// Remove persisted pending op.
+    pub(crate) async fn remove_pending_op(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        sk_id: NodeId,
+        generation: u32,
+    ) -> DatabaseResult<()> {
+        use crate::schema::safekeeper_timeline_pending_ops::dsl;
+
+        let tenant_id = &tenant_id;
+        let timeline_id = &timeline_id;
+        self.with_measured_conn(DatabaseOperation::InsertTimeline, move |conn| {
+            Box::pin(async move {
+                diesel::delete(dsl::safekeeper_timeline_pending_ops)
+                    .filter(dsl::tenant_id.eq(tenant_id.to_string()))
+                    .filter(dsl::timeline_id.eq(timeline_id.to_string()))
+                    .filter(dsl::sk_id.eq(sk_id.0 as i64))
+                    .filter(dsl::generation.eq(generation as i32))
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .await
+    }
 }
 
 pub(crate) fn load_certs() -> anyhow::Result<Arc<rustls::RootCertStore>> {
@@ -1702,6 +1826,7 @@ impl ToSql<crate::schema::sql_types::PgLsn, Pg> for LsnWrapper {
             .map_err(Into::into)
     }
 }
+
 #[derive(Insertable, AsChangeset, Queryable, Selectable, Clone)]
 #[diesel(table_name = crate::schema::timelines)]
 pub(crate) struct TimelinePersistence {
@@ -1720,9 +1845,76 @@ pub(crate) struct TimelinePersistence {
 pub(crate) struct TimelineFromDb {
     pub(crate) tenant_id: String,
     pub(crate) timeline_id: String,
+    pub(crate) start_lsn: LsnWrapper,
     pub(crate) generation: i32,
     pub(crate) sk_set: Vec<Option<i64>>,
-    pub(crate) new_sk_set: Option<Vec<i64>>,
+    pub(crate) new_sk_set: Option<Vec<Option<i64>>>,
     pub(crate) cplane_notified_generation: i32,
     pub(crate) deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl TimelineFromDb {
+    fn into_persistence(self) -> TimelinePersistence {
+        // We should never encounter null entries in the sets, but we need to filter them out.
+        // There is no way to forbid this in the schema that diesel recognizes (to our knowledge).
+        let sk_set = self.sk_set.into_iter().flatten().collect::<Vec<_>>();
+        let new_sk_set = self
+            .new_sk_set
+            .map(|s| s.into_iter().flatten().collect::<Vec<_>>());
+        TimelinePersistence {
+            tenant_id: self.tenant_id,
+            timeline_id: self.timeline_id,
+            start_lsn: self.start_lsn,
+            generation: self.generation,
+            sk_set,
+            new_sk_set,
+            cplane_notified_generation: self.cplane_notified_generation,
+            deleted_at: self.deleted_at,
+        }
+    }
+}
+
+#[derive(Insertable, AsChangeset, Queryable, Selectable, Clone)]
+#[diesel(table_name = crate::schema::safekeeper_timeline_pending_ops)]
+pub(crate) struct TimelinePendingOpPersistence {
+    pub(crate) tenant_id: String,
+    pub(crate) timeline_id: String,
+    pub(crate) sk_id: i64,
+    pub(crate) generation: i32,
+    pub(crate) op_kind: SafekeeperTimelineOpKind,
+}
+
+#[derive(Serialize, Deserialize, FromSqlRow, AsExpression, Eq, PartialEq, Debug, Copy, Clone)]
+#[diesel(sql_type = diesel::sql_types::VarChar)]
+pub(crate) enum SafekeeperTimelineOpKind {
+    Pull,
+}
+
+impl FromSql<diesel::sql_types::VarChar, Pg> for SafekeeperTimelineOpKind {
+    fn from_sql(
+        bytes: <Pg as diesel::backend::Backend>::RawValue<'_>,
+    ) -> diesel::deserialize::Result<Self> {
+        let bytes = bytes.as_bytes();
+        match core::str::from_utf8(bytes) {
+            Ok(s) => match s {
+                "pull" => Ok(SafekeeperTimelineOpKind::Pull),
+                _ => Err(format!("can't parse: {s}").into()),
+            },
+            Err(e) => Err(format!("invalid UTF-8 for op_kind: {e}").into()),
+        }
+    }
+}
+
+impl ToSql<diesel::sql_types::VarChar, Pg> for SafekeeperTimelineOpKind {
+    fn to_sql<'b>(
+        &'b self,
+        out: &mut diesel::serialize::Output<'b, '_, Pg>,
+    ) -> diesel::serialize::Result {
+        let kind_str = match self {
+            SafekeeperTimelineOpKind::Pull => "pull",
+        };
+        out.write_all(kind_str.as_bytes())
+            .map(|_| IsNull::No)
+            .map_err(Into::into)
+    }
 }

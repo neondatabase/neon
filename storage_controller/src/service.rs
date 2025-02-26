@@ -1,5 +1,6 @@
 pub mod chaos_injector;
 mod context_iterator;
+pub(crate) mod safekeeper_reconciler;
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -18,8 +19,8 @@ use control_plane::storage_controller::{
     AttachHookRequest, AttachHookResponse, InspectRequest, InspectResponse,
 };
 use diesel::result::DatabaseErrorKind;
-use futures::StreamExt;
 use futures::stream::FuturesUnordered;
+use futures::{FutureExt, StreamExt};
 use http_utils::error::ApiError;
 use hyper::Uri;
 use itertools::Itertools;
@@ -34,11 +35,11 @@ use pageserver_api::controller_api::{
 };
 use pageserver_api::models::{
     self, LocationConfig, LocationConfigListResponse, LocationConfigMode, PageserverUtilization,
-    SecondaryProgress, ShardParameters, TenantConfig, TenantConfigPatchRequest,
-    TenantConfigRequest, TenantLocationConfigRequest, TenantLocationConfigResponse,
-    TenantShardLocation, TenantShardSplitRequest, TenantShardSplitResponse,
-    TenantTimeTravelRequest, TimelineArchivalConfigRequest, TimelineCreateRequest, TimelineInfo,
-    TopTenantShardsRequest,
+    SafekeeperInfo, SafekeepersInfo, SecondaryProgress, ShardParameters, TenantConfig,
+    TenantConfigPatchRequest, TenantConfigRequest, TenantLocationConfigRequest,
+    TenantLocationConfigResponse, TenantShardLocation, TenantShardSplitRequest,
+    TenantShardSplitResponse, TenantTimeTravelRequest, TimelineArchivalConfigRequest,
+    TimelineCreateRequest, TimelineCreateResponseStorcon, TimelineInfo, TopTenantShardsRequest,
 };
 use pageserver_api::shard::{
     ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId,
@@ -49,14 +50,18 @@ use pageserver_api::upcall_api::{
 };
 use pageserver_client::{BlockUnblock, mgmt_api};
 use reqwest::StatusCode;
+use safekeeper_api::membership::{MemberSet, SafekeeperGeneration, SafekeeperId};
 use safekeeper_api::models::SafekeeperUtilization;
+use safekeeper_reconciler::{SafekeeperReconcilers, ScheduleRequest};
 use tokio::sync::TryAcquireError;
 use tokio::sync::mpsc::error::TrySendError;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, instrument};
 use utils::completion::Barrier;
 use utils::generation::Generation;
 use utils::id::{NodeId, TenantId, TimelineId};
+use utils::logging::SecretString;
 use utils::sync::gate::Gate;
 use utils::{failpoint_support, pausable_failpoint};
 
@@ -78,7 +83,7 @@ use crate::persistence::split_state::SplitState;
 use crate::persistence::{
     AbortShardSplitStatus, ControllerPersistence, DatabaseError, DatabaseResult,
     MetadataHealthPersistence, Persistence, ShardGenerationState, TenantFilter,
-    TenantShardPersistence,
+    TenantShardPersistence, TimelinePendingOpPersistence, TimelinePersistence,
 };
 use crate::reconciler::{
     ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder, ReconcilerPriority,
@@ -200,6 +205,8 @@ struct ServiceState {
 
     safekeepers: Arc<HashMap<NodeId, Safekeeper>>,
 
+    safekeeper_reconcilers: SafekeeperReconcilers,
+
     scheduler: Scheduler,
 
     /// Ongoing background operation on the cluster if any is running.
@@ -279,6 +286,7 @@ impl ServiceState {
             tenants,
             nodes: Arc::new(nodes),
             safekeepers: Arc::new(safekeepers),
+            safekeeper_reconcilers: SafekeeperReconcilers::new(),
             scheduler,
             ongoing_operation: None,
             delayed_reconcile_rx,
@@ -3415,7 +3423,7 @@ impl Service {
         Ok(())
     }
 
-    pub(crate) async fn tenant_timeline_create(
+    pub(crate) async fn tenant_timeline_create_pageservers(
         &self,
         tenant_id: TenantId,
         mut create_req: TimelineCreateRequest,
@@ -3552,6 +3560,308 @@ impl Service {
             Ok(timeline_info)
         })
         .await?
+    }
+
+    /// Timeline creation on safekeepers
+    ///
+    /// Returns `Ok(left)` if the timeline has been created on a quorum of safekeepers,
+    /// where `left` contains the list of safekeepers that didn't have a successful response.
+    /// Assumes tenant lock is held while calling this function.
+    async fn tenant_timeline_create_safekeepers_quorum(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        pg_version: u32,
+        timeline_persistence: &TimelinePersistence,
+    ) -> Result<Vec<NodeId>, ApiError> {
+        // If quorum is reached, return if we are outside of a specified timeout
+        let jwt = self
+            .config
+            .safekeeper_jwt_token
+            .clone()
+            .map(SecretString::from);
+        let mut joinset = JoinSet::new();
+
+        let safekeepers = {
+            let locked = self.inner.read().unwrap();
+            locked.safekeepers.clone()
+        };
+
+        let mut members = Vec::new();
+        for sk_id in timeline_persistence.sk_set.iter() {
+            let sk_id = NodeId(*sk_id as u64);
+            let Some(safekeeper) = safekeepers.get(&sk_id) else {
+                return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                    "couldn't find entry for safekeeper with id {sk_id}"
+                )))?;
+            };
+            members.push(SafekeeperId {
+                id: sk_id,
+                host: safekeeper.skp.host.clone(),
+                pg_port: safekeeper.skp.port as u16,
+            });
+        }
+        let mut mconf = safekeeper_api::membership::Configuration::empty();
+        mconf.members = MemberSet::new(members).map_err(ApiError::InternalServerError)?;
+
+        let req = safekeeper_api::models::TimelineCreateRequest {
+            commit_lsn: None,
+            mconf,
+            pg_version,
+            start_lsn: timeline_persistence.start_lsn.0,
+            system_id: None,
+            tenant_id,
+            timeline_id,
+            wal_seg_size: None,
+        };
+        const SK_CREATE_TIMELINE_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
+        for sk in timeline_persistence.sk_set.iter() {
+            let sk_id = NodeId(*sk as u64);
+            let safekeepers = safekeepers.clone();
+            let jwt = jwt.clone();
+            let req = req.clone();
+            // Unwrap is fine as we already would have returned error above
+            joinset.spawn(async move {
+                let sk_p = safekeepers.get(&sk_id).unwrap();
+                sk_p.with_client_retries(
+                    |client| {
+                        let req = req.clone();
+                        async move { client.create_timeline(&req).await }
+                    },
+                    &jwt,
+                    3,
+                    3,
+                    SK_CREATE_TIMELINE_RECONCILE_TIMEOUT,
+                    &CancellationToken::new(),
+                )
+                .await
+                .map_err(|e| (sk_id, e))?;
+                Ok(())
+            });
+        }
+        // After we have built the joinset, we now wait for the tasks to complete,
+        // but with a specified timeout to make sure we return swiftly, either with
+        // a failure or success.
+        let reconcile_deadline = tokio::time::Instant::now() + SK_CREATE_TIMELINE_RECONCILE_TIMEOUT;
+
+        // Treat the first two tasks to finish differently, mostly when they timeout,
+        // because then we won't have a successful quorum.
+        // For the third task, we don't rely on it succeeding, and we need this to support
+        // continuing operations even if one safekeeper is down.
+        let timeout_or_quorum = tokio::time::timeout_at(reconcile_deadline, async {
+            (
+                joinset.join_next().await.unwrap(),
+                joinset.join_next().await.unwrap(),
+            )
+        })
+        .await;
+        let mut reconcile_results = Vec::new();
+        match timeout_or_quorum {
+            Ok((Ok(res_1), Ok(res_2))) => {
+                reconcile_results.push(res_1);
+                reconcile_results.push(res_2);
+            }
+            Ok((Err(_), Ok(_)) | (_, Err(_))) => {
+                return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                    "task was cancelled while reconciling timeline creation"
+                )));
+            }
+            Err(_) => {
+                return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                    "couldn't reconcile timeline creation on safekeepers within timeout"
+                )));
+            }
+        }
+        let timeout_or_last =
+            tokio::time::timeout_at(reconcile_deadline, joinset.join_next().map(Option::unwrap))
+                .await;
+        if let Ok(Ok(res)) = timeout_or_last {
+            reconcile_results.push(res);
+        } else {
+            // No error if cancelled or timed out: we already have feedback from a quorum of safekeepers
+            tracing::info!("timeout for third reconciliation");
+        }
+        // check now if quorum was reached in reconcile_results
+        let remaining = reconcile_results
+            .into_iter()
+            .filter_map(|res| res.err())
+            .collect::<Vec<_>>();
+        tracing::info!(
+            "Got {} non-successful results from initial creation request",
+            remaining.len()
+        );
+        if remaining.len() >= 2 {
+            // Failure
+            return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                "not enough successful reconciliations to reach quorum, please retry: {} errored",
+                remaining.len()
+            )));
+        }
+
+        let remaining = remaining.iter().map(|(id, _err)| *id).collect::<Vec<_>>();
+
+        Ok(remaining)
+    }
+
+    async fn tenant_timeline_create_safekeepers(
+        self: &Arc<Self>,
+        tenant_id: TenantId,
+        timeline_info: &TimelineInfo,
+        create_mode: models::TimelineCreateRequestMode,
+    ) -> Result<SafekeepersInfo, ApiError> {
+        let timeline_id = timeline_info.timeline_id;
+        let pg_version = timeline_info.pg_version;
+        let start_lsn = match create_mode {
+            models::TimelineCreateRequestMode::Bootstrap { .. } => timeline_info.last_record_lsn,
+            models::TimelineCreateRequestMode::Branch { .. } => timeline_info.last_record_lsn,
+            models::TimelineCreateRequestMode::ImportPgdata { .. } => {
+                return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                    "import pgdata doesn't specify the start lsn, aborting creation on safekeepers"
+                )))?;
+            }
+        };
+        // Choose initial set of safekeepers respecting affinity
+        let sks = self.safekeepers_for_new_timeline().await?;
+        let sks_persistence = sks.iter().map(|sk| sk.id.0 as i64).collect::<Vec<_>>();
+        // Add timeline to db
+        let mut timeline_persist = TimelinePersistence {
+            tenant_id: tenant_id.to_string(),
+            timeline_id: timeline_id.to_string(),
+            start_lsn: start_lsn.into(),
+            generation: 0,
+            sk_set: sks_persistence.clone(),
+            new_sk_set: None,
+            cplane_notified_generation: 0,
+            deleted_at: None,
+        };
+        let inserted = self
+            .persistence
+            .insert_timeline(timeline_persist.clone())
+            .await?;
+        if !inserted {
+            if let Some(existent_persist) = self
+                .persistence
+                .get_timeline(tenant_id, timeline_id)
+                .await?
+            {
+                // Replace with what we have in the db, to get stuff like the generation right.
+                // We do still repeat the http calls to the safekeepers. After all, we could have
+                // crashed right after the wrote to the DB.
+                timeline_persist = existent_persist;
+            } else {
+                return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                    "insertion said timeline already in db, but looking it up, it was gone"
+                )));
+            }
+        }
+        // Create the timeline on a quorum of safekeepers
+        let remaining = self
+            .tenant_timeline_create_safekeepers_quorum(
+                tenant_id,
+                timeline_id,
+                pg_version,
+                &timeline_persist,
+            )
+            .await?;
+
+        // For the remaining safekeepers, take care of their reconciliation asynchronously
+        for &remaining_id in remaining.iter() {
+            let pending_op = TimelinePendingOpPersistence {
+                tenant_id: tenant_id.to_string(),
+                timeline_id: timeline_id.to_string(),
+                generation: timeline_persist.generation,
+                op_kind: crate::persistence::SafekeeperTimelineOpKind::Pull,
+                sk_id: remaining_id.0 as i64,
+            };
+            self.persistence.insert_pending_op(pending_op).await?;
+        }
+        if !remaining.is_empty() {
+            let mut locked = self.inner.write().unwrap();
+            for remaining_id in remaining {
+                let Some(sk) = locked.safekeepers.get(&remaining_id) else {
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                        "Couldn't find safekeeper with id {remaining_id}"
+                    )));
+                };
+                let Ok(host_list) = sks
+                    .iter()
+                    .map(|sk| {
+                        Ok((
+                            sk.id,
+                            locked
+                                .safekeepers
+                                .get(&sk.id)
+                                .ok_or_else(|| {
+                                    ApiError::InternalServerError(anyhow::anyhow!(
+                                        "Couldn't find safekeeper with id {remaining_id} to pull from"
+                                    ))
+                                })?
+                                .base_url(),
+                        ))
+                    })
+                    .collect::<Result<_, ApiError>>()
+                else {
+                    continue;
+                };
+                let req = ScheduleRequest {
+                    safekeeper: Box::new(sk.clone()),
+                    host_list,
+                    tenant_id,
+                    timeline_id,
+                    generation: timeline_persist.generation as u32,
+                };
+                locked.safekeeper_reconcilers.schedule_request(self, req);
+            }
+        }
+
+        Ok(SafekeepersInfo {
+            generation: timeline_persist.generation as u32,
+            safekeepers: sks,
+            tenant_id,
+            timeline_id,
+        })
+    }
+
+    pub(crate) async fn tenant_timeline_create(
+        self: &Arc<Self>,
+        tenant_id: TenantId,
+        create_req: TimelineCreateRequest,
+    ) -> Result<TimelineCreateResponseStorcon, ApiError> {
+        let safekeepers = self.config.timelines_onto_safekeepers;
+        tracing::info!(
+            %safekeepers,
+            "Creating timeline {}/{}",
+            tenant_id,
+            create_req.new_timeline_id,
+        );
+
+        let _tenant_lock = trace_shared_lock(
+            &self.tenant_op_locks,
+            tenant_id,
+            TenantOperations::TimelineCreate,
+        )
+        .await;
+        failpoint_support::sleep_millis_async!("tenant-create-timeline-shared-lock");
+        let create_mode = create_req.mode.clone();
+
+        let timeline_info = self
+            .tenant_timeline_create_pageservers(tenant_id, create_req)
+            .await?;
+
+        let safekeepers = if safekeepers {
+            let res = self
+                .tenant_timeline_create_safekeepers(tenant_id, &timeline_info, create_mode)
+                .instrument(tracing::info_span!("timeline_create_safekeepers", %tenant_id, timeline_id=%timeline_info.timeline_id))
+                .await?;
+            Some(res)
+        } else {
+            None
+        };
+
+        Ok(TimelineCreateResponseStorcon {
+            timeline_info,
+            safekeepers,
+        })
     }
 
     pub(crate) async fn tenant_timeline_archival_config(
@@ -8145,6 +8455,13 @@ impl Service {
                 .get_mut(&node_id)
                 .ok_or(DatabaseError::Logical("Not found".to_string()))?;
             sk.set_scheduling_policy(scheduling_policy);
+
+            match scheduling_policy {
+                SkSchedulingPolicy::Active => (),
+                SkSchedulingPolicy::Decomissioned | SkSchedulingPolicy::Pause => {
+                    locked.safekeeper_reconcilers.cancel_safekeeper(node_id);
+                }
+            }
 
             locked.safekeepers = Arc::new(safekeepers);
         }
