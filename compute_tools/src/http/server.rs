@@ -1,23 +1,20 @@
-use std::{
-    fmt::Display,
-    net::{IpAddr, Ipv6Addr, SocketAddr},
-    sync::Arc,
-    time::Duration,
-};
+use std::fmt::Display;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
-use axum::{
-    extract::Request,
-    middleware::{self, Next},
-    response::{IntoResponse, Response},
-    routing::{get, post},
-    Router,
-};
+use axum::Router;
+use axum::extract::Request;
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
 use http::StatusCode;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
-use tower_http::{request_id::PropagateRequestIdLayer, trace::TraceLayer};
-use tracing::{debug, error, info, Span};
+use tower_http::request_id::PropagateRequestIdLayer;
+use tower_http::trace::TraceLayer;
+use tracing::{Span, debug, error, info};
 use uuid::Uuid;
 
 use super::routes::{

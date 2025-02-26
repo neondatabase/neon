@@ -1,14 +1,16 @@
 use std::sync::Arc;
 
-use axum::{body::Body, extract::State, response::Response};
-use http::{header::CONTENT_TYPE, StatusCode};
+use axum::body::Body;
+use axum::extract::State;
+use axum::response::Response;
+use http::StatusCode;
+use http::header::CONTENT_TYPE;
 use serde::Deserialize;
 
-use crate::{
-    catalog::{get_database_schema, SchemaDumpError},
-    compute::ComputeNode,
-    http::{extract::Query, JsonResponse},
-};
+use crate::catalog::{SchemaDumpError, get_database_schema};
+use crate::compute::ComputeNode;
+use crate::http::JsonResponse;
+use crate::http::extract::Query;
 
 #[derive(Debug, Clone, Deserialize)]
 pub(in crate::http) struct DatabaseSchemaParams {
