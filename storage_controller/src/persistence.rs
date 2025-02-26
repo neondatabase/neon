@@ -4,6 +4,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use diesel::deserialize::{FromSql, FromSqlRow};
+use diesel::pg::Pg;
 use diesel::prelude::*;
 use diesel_async::async_connection_wrapper::AsyncConnectionWrapper;
 use diesel_async::pooled_connection::bb8::Pool;
