@@ -1,42 +1,37 @@
 use std::collections::{HashMap, HashSet};
-use std::env;
-use std::fs;
 use std::iter::once;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::sync::atomic::AtomicU32;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
-use std::time::Duration;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use std::{env, fs};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use compute_api::spec::{Database, PgIdent, Role};
+use compute_api::privilege::Privilege;
+use compute_api::responses::{ComputeMetrics, ComputeStatus};
+use compute_api::spec::{
+    ComputeFeature, ComputeMode, ComputeSpec, Database, ExtVersion, PgIdent, Role,
+};
 use futures::StreamExt;
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
+use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use postgres;
 use postgres::NoTls;
 use postgres::error::SqlState;
+use remote_storage::{DownloadError, RemotePath};
+use tokio::spawn;
 use tracing::{debug, error, info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
-
-use compute_api::privilege::Privilege;
-use compute_api::responses::{ComputeMetrics, ComputeStatus};
-use compute_api::spec::{ComputeFeature, ComputeMode, ComputeSpec, ExtVersion};
 use utils::measured_stream::MeasuredReader;
 
-use nix::sys::signal::{Signal, kill};
-use remote_storage::{DownloadError, RemotePath};
-use tokio::spawn;
-
 use crate::installed_extensions::get_installed_extensions;
-use crate::local_proxy;
 use crate::pg_helpers::*;
 use crate::spec::*;
 use crate::spec_apply::ApplySpecPhase::{
@@ -45,13 +40,12 @@ use crate::spec_apply::ApplySpecPhase::{
     HandleNeonExtension, HandleOtherExtensions, RenameAndDeleteDatabases, RenameRoles,
     RunInEachDatabase,
 };
-use crate::spec_apply::PerDatabasePhase;
 use crate::spec_apply::PerDatabasePhase::{
     ChangeSchemaPerms, DeleteDBRoleReferences, DropLogicalSubscriptions, HandleAnonExtension,
 };
-use crate::spec_apply::{DB, MutableApplyContext, apply_operations};
+use crate::spec_apply::{DB, MutableApplyContext, PerDatabasePhase, apply_operations};
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
-use crate::{config, extension_server};
+use crate::{config, extension_server, local_proxy};
 
 pub static SYNC_SAFEKEEPERS_PID: AtomicU32 = AtomicU32::new(0);
 pub static PG_PID: AtomicU32 = AtomicU32::new(0);

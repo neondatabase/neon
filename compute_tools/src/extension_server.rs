@@ -71,15 +71,15 @@ More specifically, here is an example ext_index.json
     }
 }
 */
-use anyhow::Result;
-use anyhow::{Context, bail};
+use std::path::Path;
+use std::str;
+
+use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use compute_api::spec::RemoteExtSpec;
 use regex::Regex;
 use remote_storage::*;
 use reqwest::StatusCode;
-use std::path::Path;
-use std::str;
 use tar::Archive;
 use tracing::info;
 use tracing::log::warn;

@@ -1,19 +1,13 @@
 use std::sync::Arc;
 
-use axum::{
-    extract::State,
-    response::{IntoResponse, Response},
-};
+use axum::extract::State;
+use axum::response::{IntoResponse, Response};
 use http::StatusCode;
 use serde::Deserialize;
 
-use crate::{
-    compute::ComputeNode,
-    http::{
-        JsonResponse,
-        extract::{Path, Query},
-    },
-};
+use crate::compute::ComputeNode;
+use crate::http::JsonResponse;
+use crate::http::extract::{Path, Query};
 
 #[derive(Debug, Clone, Deserialize)]
 pub(in crate::http) struct ExtensionServerParams {

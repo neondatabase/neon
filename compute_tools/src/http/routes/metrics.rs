@@ -1,10 +1,12 @@
-use axum::{body::Body, response::Response};
+use axum::body::Body;
+use axum::response::Response;
 use http::StatusCode;
 use http::header::CONTENT_TYPE;
 use metrics::proto::MetricFamily;
 use metrics::{Encoder, TextEncoder};
 
-use crate::{http::JsonResponse, metrics::collect};
+use crate::http::JsonResponse;
+use crate::metrics::collect;
 
 /// Expose Prometheus metrics.
 pub(in crate::http) async fn get_metrics() -> Response {

@@ -41,33 +41,32 @@ use std::process::exit;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex, RwLock, mpsc};
-use std::{thread, time::Duration};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Parser;
-use compute_tools::disk_quota::set_disk_quota;
-use compute_tools::http::server::Server;
-use compute_tools::lsn_lease::launch_lsn_lease_bg_task_for_static;
-use signal_hook::consts::{SIGQUIT, SIGTERM};
-use signal_hook::{consts::SIGINT, iterator::Signals};
-use tracing::{error, info, warn};
-use url::Url;
-
 use compute_api::responses::{ComputeCtlConfig, ComputeStatus};
 use compute_api::spec::ComputeSpec;
-
 use compute_tools::compute::{
     ComputeNode, ComputeState, PG_PID, ParsedSpec, forward_termination_signal,
 };
 use compute_tools::configurator::launch_configurator;
+use compute_tools::disk_quota::set_disk_quota;
 use compute_tools::extension_server::get_pg_version_string;
+use compute_tools::http::server::Server;
 use compute_tools::logger::*;
+use compute_tools::lsn_lease::launch_lsn_lease_bg_task_for_static;
 use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
 use compute_tools::swap::resize_swap;
 use rlimit::{Resource, setrlimit};
+use signal_hook::consts::{SIGINT, SIGQUIT, SIGTERM};
+use signal_hook::iterator::Signals;
+use tracing::{error, info, warn};
+use url::Url;
 use utils::failpoint_support;
 
 // this is an arbitrary build tag. Fine as a default / for testing purposes

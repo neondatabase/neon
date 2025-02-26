@@ -1,18 +1,20 @@
+use std::path::Path;
+use std::process::Stdio;
+use std::result::Result;
+use std::sync::Arc;
+
+use compute_api::responses::CatalogObjects;
 use futures::Stream;
 use postgres::NoTls;
-use std::{path::Path, process::Stdio, result::Result, sync::Arc};
-use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    process::Command,
-    spawn,
-};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
+use tokio::spawn;
 use tokio_stream::{self as stream, StreamExt};
 use tokio_util::codec::{BytesCodec, FramedRead};
 use tracing::warn;
 
 use crate::compute::ComputeNode;
 use crate::pg_helpers::{get_existing_dbs_async, get_existing_roles_async, postgres_conf_for_db};
-use compute_api::responses::CatalogObjects;
 
 pub async fn get_dbs_and_roles(compute: &Arc<ComputeNode>) -> anyhow::Result<CatalogObjects> {
     let conf = compute.get_tokio_conn_conf(Some("compute_ctl:get_dbs_and_roles"));

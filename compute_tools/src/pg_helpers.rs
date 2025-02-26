@@ -10,6 +10,7 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
+use compute_api::spec::{Database, GenericOption, GenericOptions, PgIdent, Role};
 use futures::StreamExt;
 use ini::Ini;
 use notify::{RecursiveMode, Watcher};
@@ -20,8 +21,6 @@ use tokio::time::timeout;
 use tokio_postgres;
 use tokio_postgres::NoTls;
 use tracing::{debug, error, info, instrument};
-
-use compute_api::spec::{Database, GenericOption, GenericOptions, PgIdent, Role};
 
 const POSTGRES_WAIT_TIMEOUT: Duration = Duration::from_millis(60 * 1000); // milliseconds
 

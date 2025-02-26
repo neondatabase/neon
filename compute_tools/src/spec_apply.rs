@@ -1,18 +1,18 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Formatter};
 use std::future::Future;
-use std::iter::empty;
-use std::iter::once;
+use std::iter::{empty, once};
 use std::sync::Arc;
 
-use crate::compute::construct_superuser_query;
-use crate::pg_helpers::{DatabaseExt, Escaping, GenericOptionsSearch, RoleExt, escape_literal};
 use anyhow::Result;
 use compute_api::spec::{ComputeFeature, ComputeSpec, Database, PgIdent, Role};
 use futures::future::join_all;
 use tokio::sync::RwLock;
 use tokio_postgres::Client;
 use tracing::{Instrument, debug, info_span, warn};
+
+use crate::compute::construct_superuser_query;
+use crate::pg_helpers::{DatabaseExt, Escaping, GenericOptionsSearch, RoleExt, escape_literal};
 
 #[derive(Clone)]
 pub enum DB {

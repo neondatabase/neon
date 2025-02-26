@@ -1,18 +1,14 @@
 use std::sync::Arc;
 
-use axum::{
-    extract::State,
-    response::{IntoResponse, Response},
-};
+use axum::extract::State;
+use axum::response::{IntoResponse, Response};
 use compute_api::responses::ComputeStatus;
 use http::StatusCode;
 use tokio::task;
 use tracing::info;
 
-use crate::{
-    compute::{ComputeNode, forward_termination_signal},
-    http::JsonResponse,
-};
+use crate::compute::{ComputeNode, forward_termination_signal};
+use crate::http::JsonResponse;
 
 /// Terminate the compute.
 pub(in crate::http) async fn terminate(State(compute): State<Arc<ComputeNode>>) -> Response {
