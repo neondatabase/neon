@@ -101,6 +101,79 @@ class NeonAPI:
 
         return cast("dict[str, Any]", resp.json())
 
+    def create_branch(
+        self,
+        project_id: str,
+        branch_name: str | None = None,
+        parent_id: str | None = None,
+        add_endpoint=True,
+    ) -> dict[str, Any]:
+        data = {}
+        if add_endpoint:
+            data["endpoints"] = [{"type": "read_write"}]
+        if parent_id or branch_name:
+            data["branch"] = {}
+        if parent_id:
+            data["branch"]["parent_id"] = parent_id
+        if branch_name:
+            data["branch"]["name"] = branch_name
+        resp = self.__request(
+            "POST",
+            f"/projects/{project_id}/branches",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            json=data,
+        )
+        return cast("dict[str, Any]", resp.json())
+
+    def delete_branch(self, project_id: str, branch_id: str) -> dict[str, Any]:
+        resp = self.__request(
+            "DELETE",
+            f"/projects/{project_id}/{branch_id}",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+        return cast("dict[str, Any]", resp.json())
+
+    def restore_branch(
+        self,
+        project_id: str,
+        branch_id: str,
+        source_branch_id: str,
+        source_lsn: str | None,
+        source_timestamp: str | None,
+        preserve_under_name: str | None,
+    ):
+        data = {"source_branch_id": source_branch_id}
+        if source_lsn:
+            data["source_lsn"] = source_lsn
+        if source_timestamp:
+            data["source_timestamp"] = source_timestamp
+        if preserve_under_name:
+            data["preserve_under_name"] = preserve_under_name
+        resp = self.__request(
+            "POST",
+            f"/{project_id}/branches/{branch_id}",
+            headers={
+                "Accept": "application/json",
+            },
+            json=data,
+        )
+        return cast("dict[str, Any]", resp.json())
+
+    def reset_branch_to_parent(self, project_id: str, branch_id: str) -> dict[str, Any]:
+        resp = self.__request(
+            "POST",
+            f"/projects/{project_id}/{branch_id}",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+        return cast("dict[str, Any]", resp.json())
+
     def start_endpoint(
         self,
         project_id: str,
