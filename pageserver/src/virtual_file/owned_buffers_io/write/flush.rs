@@ -1,9 +1,9 @@
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
-use chrono::Duration;
 use once_cell::sync::Lazy;
 use tokio_util::sync::CancellationToken;
-use tracing::Instrument;
+use tracing::{Instrument, info, info_span, warn};
 use utils::sync::duplex;
 
 use super::{Buffer, CheapCloneForRead, OwnedAsyncWriter};
@@ -271,27 +271,37 @@ where
             // Without it, if we hit a bug where retrying is never successful,
             // then we can't shut down the timeline/tenant/pageserver cleanrly because
             // upp layers of the Pageserver write path are holding the gate open for EphemeralFile.
+            //
+            // TODO: use utils::backoff::retry once async closures are actually usable
+            //
             let mut slice_storage = Some(request.slice);
-            let offset = request.offset;
-            let op = async || {
-                let slice = slice_storage.take().expect(
-                    "likely previous invocation of this future didn't get polled to completion",
-                );
-                let (slice, res) = self.writer.write_all_at(slice, offset, &self.ctx).await;
-                let res = res.maybe_fatal_err("owned_buffers_io flush");
-                slice_storage = Some(slice);
-                res
-            };
-            static TODO_CANCEL: Lazy<CancellationToken> = Lazy::new(|| CancellationToken::new());
-            let res = utils::backoff::retry_forever(
-                op,
-                0, /* get warn! right from first error */
-                "owned_buffers_io flush",
-                &TODO_CANCEL,
-            )
-            .await
-            .expect("TODO_CANCEL is never cancelled");
-            let slice = slice_storage.take().expect("slice_storage is Some");
+            for attempt in 1.. {
+                let result = async {
+                    if attempt > 1 {
+                        info!("retrying flush");
+                    }
+                    let slice = slice_storage.take().expect(
+                        "likely previous invocation of this future didn't get polled to completion",
+                    );
+                    let (slice, res) = self.writer.write_all_at(slice, request.offset, &self.ctx).await;
+                    slice_storage = Some(slice);
+                    let res = res.maybe_fatal_err("owned_buffers_io flush");
+                    let Err(err) = res else {
+                        return ControlFlow::Break(());
+                    };
+                    warn!(%err, "error flushing buffered writer buffer to disk, retrying after backoff");
+                    static NO_CANCELLATION: Lazy<CancellationToken> = Lazy::new(CancellationToken::new);
+                    utils::backoff::exponential_backoff(attempt, 1.0, 10.0, &NO_CANCELLATION).await;
+                    ControlFlow::Continue(())
+                }
+                .instrument(info_span!("flush_attempt", %attempt))
+                .await;
+                match result {
+                    ControlFlow::Break(()) => break,
+                    ControlFlow::Continue(()) => continue,
+                }
+            }
+            let slice = slice_storage.expect("loop must have run at least once");
 
             #[cfg(test)]
             {
