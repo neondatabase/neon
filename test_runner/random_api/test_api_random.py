@@ -39,8 +39,8 @@ class NeonProject:
         proj = self.neon_api.create_project(
             pg_version, f"Automatic random API test {os.getenv('GITHUB_RUN_ID')}"
         )
-        self.id = proj["id"]
-        self.name = proj["name"]
+        self.id = proj["project"]["id"]
+        self.name = proj["[project"]["name"]
         self.connection_uri = proj["connection_uris"][0]["connection_uri"]
         self.pg_version = pg_version
 
