@@ -60,15 +60,6 @@ jobs:
           prefix: latest
           aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
-      - name: Create Neon Project
-        id: create-neon-project
-        uses: ./.github/actions/neon-project-create
-        with:
-          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-          postgres_version: ${{ env.DEFAULT_PG_VERSION }}
-          project_settings: >-
-            {"enable_logical_replication": true}
-
       - name: Run tests
         uses: ./.github/actions/run-python-test-set
         with:
@@ -80,14 +71,6 @@ jobs:
           aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
         env:
           NEON_API_KEY: ${{ secrets.NEON_STAGING_API_KEY }}
-          PROJECT_ID: ${{ steps.create-neon-project.outputs.project_id }}
-
-      - name: Delete Neon Project
-        if: always()
-        uses: ./.github/actions/neon-project-delete
-        with:
-          project_id: ${{ steps.create-neon-project.outputs.project_id }}
-          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
       - name: Create Allure report
         if: ${{ !cancelled() }}

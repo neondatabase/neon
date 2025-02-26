@@ -17,26 +17,31 @@ from fixtures.neon_api import NeonAPI
 class NeonEndpoint:
     def __init__(self):
         self.en
+
+
 class NeonBranch:
     def __init__(self, project, branch: dict[str, Any]):
         self.id = branch["id"]
         self.desc = branch
         self.project = project
+        self.neon_api = project.neon_api
         self.project_id = branch["project_id"]
 
     def create_ro_endpoint(self):
-        return self.project.neon_api.create_endpoint(self.project_id, self.id, "read_only", {})[
+        return self.neon_api.create_endpoint(self.project_id, self.id, "read_only", {})[
             "endpoint"
         ]["id"]
 
 
-class RandomNeonProject:
-    def __init__(self, project_id: str, neon_api: NeonAPI):
-        self.project_id = project_id
+class NeonProject:
+    def __init__(self, neon_api: NeonAPI, pg_version: PgVersion):
         self.neon_api = neon_api
+        proj = self.neon_api.create_project(pg_version)
+        self.id = proj["id"]
+        self.name = proj["name"]
 
     def __get_branches_info(self) -> list[Any]:
-        return self.neon_api.get_branches(self.project_id)["branches"]
+        return self.neon_api.get_branches(self.id)["branches"]
 
     def get_main_branch(self) -> NeonBranch:
         for branch in self.__get_branches_info():
@@ -72,31 +77,23 @@ class RandomNeonProject:
     def wait(self):
         return self.neon_api.wait_for_operation_to_finish(self.project_id)
 
+@pytest.fixture()
+def setup_class(
+        pg_version: PgVersion,
+        neon_api: NeonAPI,
+):
+    log.info("set up")
+    yield neon_api
+    log.info("tear down")
+
 
 @pytest.mark.timeout(7200)
 @pytest.mark.remote_cluster
 def test_api_random(
-    pg_version: PgVersion,
-    pg_distrib_dir: Path,
-    base_dir: Path,
+        setup_class,
     test_output_dir: Path,
-    neon_api: NeonAPI,
 ):
     """
     Run the random API tests
     """
-    project_id = os.getenv("PROJECT_ID")
-    log.info("Project ID: %s", project_id)
-    project = RandomNeonProject(project_id, neon_api)
-    br1 = project.create_branch()
-    log.info("created branch %s", br1)
-    project.wait()
-    br2 = project.create_branch(parent_id=br1)
-    log.info("created branch %s", br2)
-    project.wait()
-    log.info("leaf branches: %s", project.get_leaf_branches())
-    for branch in project.get_branches():
-        ep = project.create_ro_endpoint(branch)
-        log.info("RO endpoint created: %s", ep)
-    log.info("RO endpoints: %s", project.get_ro_endpoints())
     assert True
