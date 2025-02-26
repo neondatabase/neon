@@ -110,7 +110,23 @@ pub struct ComputeState {
     /// compute wasn't used since start.
     pub last_active: Option<DateTime<Utc>>,
     pub error: Option<String>,
+
+    /// Compute spec. This can be received from the CLI or - more likely -
+    /// passed by the control plane with a /configure HTTP request.
     pub pspec: Option<ParsedSpec>,
+
+    /// If the spec is passed by a /configure request, 'startup_span' is the
+    /// /configure request's tracing span. The main thread enters it when it
+    /// processes the compute startup, so that the compute startup is considered
+    /// to be part of the /configure request for tracing purposes.
+    ///
+    /// If the request handling thread/task called startup_compute() directly,
+    /// it would automatically be a child of the request handling span, and we
+    /// wouldn't need this. But because we use the main thread to perform the
+    /// startup, and the /configure task just waits for it to finish, we need to
+    /// set up the span relationship ourselves.
+    pub startup_span: Option<tracing::span::Span>,
+
     pub metrics: ComputeMetrics,
 }
 
@@ -122,6 +138,7 @@ impl ComputeState {
             last_active: None,
             error: None,
             pspec: None,
+            startup_span: None,
             metrics: ComputeMetrics::default(),
         }
     }

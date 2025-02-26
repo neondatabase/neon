@@ -193,6 +193,10 @@ toml_edit = "0.22"
 tonic = {version = "0.12.3", default-features = false, features = ["channel", "tls", "tls-roots"]}
 tower = { version = "0.5.2", default-features = false }
 tower-http = { version = "0.6.2", features = ["request-id", "trace"] }
+
+# This revision uses opentelemetry 0.27. There's no tag for it.
+tower-otel = { git = "https://github.com/mattiapenati/tower-otel", rev = "56a7321053bcb72443888257b622ba0d43a11fcd" }
+
 tower-service = "0.3.3"
 tracing = "0.1"
 tracing-error = "0.2"

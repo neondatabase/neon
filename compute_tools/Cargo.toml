@@ -46,7 +46,9 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 tokio-postgres.workspace = true
 tokio-util.workspace = true
 tokio-stream.workspace = true
+tower-otel.workspace = true
 tracing.workspace = true
+tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 tracing-utils.workspace = true
 thiserror.workspace = true

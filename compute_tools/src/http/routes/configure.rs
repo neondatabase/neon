@@ -45,13 +45,18 @@ pub(in crate::http) async fn configure(
             return JsonResponse::invalid_status(state.status);
         }
 
+        // Pass the tracing span to the main thread that performs the startup,
+        // so that the start_compute operation is considered a child of this
+        // configure request for tracing purposes.
+        state.startup_span = Some(tracing::Span::current());
+
         state.pspec = Some(pspec);
         state.set_status(ComputeStatus::ConfigurationPending, &compute.state_changed);
         drop(state);
     }
 
     // Spawn a blocking thread to wait for compute to become Running. This is
-    // needed to do not block the main pool of workers and be able to serve
+    // needed to not block the main pool of workers and to be able to serve
     // other requests while some particular request is waiting for compute to
     // finish configuration.
     let c = compute.clone();
