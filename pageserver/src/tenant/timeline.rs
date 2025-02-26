@@ -3906,37 +3906,22 @@ impl Timeline {
                 let guard = timeline.layers.read().await;
                 let layers = guard.layer_map()?;
 
-                let in_memory_layer = layers.search_in_memory_layer(cont_lsn);
+                for range in unmapped_keyspace.ranges.iter() {
+                    let results = layers.range_search(range.clone(), cont_lsn);
 
-                match in_memory_layer {
-                    Some(l) => {
-                        let lsn_range = l.get_lsn_range().start..cont_lsn;
-                        fringe.update(
-                            guard
-                                .upgrade(super::storage_layer::ReadableLayerWeak::InMemoryLayer(l)),
-                            unmapped_keyspace.clone(),
-                            lsn_range,
-                        );
-                    }
-                    None => {
-                        for range in unmapped_keyspace.ranges.iter() {
-                            let results = layers.range_search(range.clone(), cont_lsn);
-
-                            results
-                                .found
-                                .into_iter()
-                                .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
-                                    (
-                                        guard.upgrade(layer),
-                                        keyspace_accum.to_keyspace(),
-                                        lsn_floor..cont_lsn,
-                                    )
-                                })
-                                .for_each(|(layer, keyspace, lsn_range)| {
-                                    fringe.update(layer, keyspace, lsn_range)
-                                });
-                        }
-                    }
+                    results
+                        .found
+                        .into_iter()
+                        .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
+                            (
+                                guard.upgrade(layer),
+                                keyspace_accum.to_keyspace(),
+                                lsn_floor..cont_lsn,
+                            )
+                        })
+                        .for_each(|(layer, keyspace, lsn_range)| {
+                            fringe.update(layer, keyspace, lsn_range)
+                        });
                 }
 
                 // It's safe to drop the layer map lock after planning the next round of reads.

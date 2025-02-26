@@ -723,7 +723,7 @@ struct LayerToVisitId {
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
-pub(crate) enum ReadableLayerWeak {
+pub enum ReadableLayerWeak {
     PersistentLayer(Arc<PersistentLayerDesc>),
     InMemoryLayer(InMemoryLayerDesc),
 }
