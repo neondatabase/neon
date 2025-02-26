@@ -1,4 +1,3 @@
-use std::str::FromStr;
 use std::time::Duration;
 
 use pageserver_api::controller_api::{SafekeeperDescribeResponse, SkSchedulingPolicy};
@@ -26,7 +25,7 @@ pub struct Safekeeper {
 
 impl Safekeeper {
     pub(crate) fn from_persistence(skp: SafekeeperPersistence, cancel: CancellationToken) -> Self {
-        let scheduling_policy = SkSchedulingPolicy::from_str(&skp.scheduling_policy).unwrap();
+        let scheduling_policy = skp.scheduling_policy.0;
         Self {
             cancel,
             listen_http_addr: skp.host.clone(),
@@ -55,7 +54,7 @@ impl Safekeeper {
     }
     pub(crate) fn set_scheduling_policy(&mut self, scheduling_policy: SkSchedulingPolicy) {
         self.scheduling_policy = scheduling_policy;
-        self.skp.scheduling_policy = String::from(scheduling_policy);
+        self.skp.scheduling_policy = scheduling_policy.into();
     }
     /// Perform an operation (which is given a [`SafekeeperClient`]) with retries
     pub(crate) async fn with_client_retries<T, O, F>(

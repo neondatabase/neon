@@ -1,18 +1,18 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Formatter};
 use std::future::Future;
-use std::iter::empty;
-use std::iter::once;
+use std::iter::{empty, once};
 use std::sync::Arc;
 
-use crate::compute::construct_superuser_query;
-use crate::pg_helpers::{escape_literal, DatabaseExt, Escaping, GenericOptionsSearch, RoleExt};
 use anyhow::Result;
 use compute_api::spec::{ComputeFeature, ComputeSpec, Database, PgIdent, Role};
 use futures::future::join_all;
 use tokio::sync::RwLock;
 use tokio_postgres::Client;
-use tracing::{debug, info_span, warn, Instrument};
+use tracing::{Instrument, debug, info_span, warn};
+
+use crate::compute::construct_superuser_query;
+use crate::pg_helpers::{DatabaseExt, Escaping, GenericOptionsSearch, RoleExt, escape_literal};
 
 #[derive(Clone)]
 pub enum DB {
@@ -474,7 +474,10 @@ async fn get_operations<'a>(
                 let edb = match databases.get(&db.name) {
                     Some(edb) => edb,
                     None => {
-                        warn!("skipping RunInEachDatabase phase {:?}, database {} doesn't exist in PostgreSQL", subphase, db.name);
+                        warn!(
+                            "skipping RunInEachDatabase phase {:?}, database {} doesn't exist in PostgreSQL",
+                            subphase, db.name
+                        );
                         return Ok(Box::new(empty()));
                     }
                 };

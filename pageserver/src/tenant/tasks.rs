@@ -289,15 +289,14 @@ fn log_compaction_error(
 ) {
     use CompactionError::*;
 
-    use crate::pgdatadir_mapping::CollectKeySpaceError;
     use crate::tenant::PageReconstructError;
     use crate::tenant::upload_queue::NotInitialized;
 
     let level = match err {
+        e if e.is_cancel() => return,
         ShuttingDown => return,
         Offload(_) => Level::ERROR,
         AlreadyRunning(_) => Level::ERROR,
-        CollectKeySpaceError(CollectKeySpaceError::Cancelled) => Level::INFO,
         CollectKeySpaceError(_) => Level::ERROR,
         _ if task_cancelled => Level::INFO,
         Other(err) => {
