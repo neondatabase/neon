@@ -228,6 +228,13 @@ fn get_conn_info(
         }
     }
 
+    ctx.set_user_agent(
+        headers
+            .get(hyper::header::USER_AGENT)
+            .and_then(|h| h.to_str().ok())
+            .map(Into::into),
+    );
+
     let user_info = ComputeUserInfo {
         endpoint,
         user: username,
