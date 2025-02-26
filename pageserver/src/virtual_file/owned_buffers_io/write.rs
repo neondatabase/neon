@@ -31,7 +31,7 @@ pub trait OwnedAsyncWriter {
         buf: FullSlice<Buf>,
         offset: u64,
         ctx: &RequestContext,
-    ) -> impl std::future::Future<Output = std::io::Result<FullSlice<Buf>>> + Send;
+    ) -> impl std::future::Future<Output = (FullSlice<Buf>, std::io::Result<()>)> + Send;
 }
 
 /// A wrapper aorund an [`OwnedAsyncWriter`] that uses a [`Buffer`] to batch
@@ -66,6 +66,7 @@ where
         buf_new: impl Fn() -> B,
         gate_guard: utils::sync::gate::GateGuard,
         ctx: &RequestContext,
+        flush_task_span: tracing::Span,
     ) -> Self {
         Self {
             writer: writer.clone(),
@@ -75,6 +76,7 @@ where
                 buf_new(),
                 gate_guard,
                 ctx.attached_child(),
+                flush_task_span,
             ),
             bytes_submitted: 0,
         }
@@ -269,12 +271,12 @@ mod tests {
             buf: FullSlice<Buf>,
             offset: u64,
             _: &RequestContext,
-        ) -> std::io::Result<FullSlice<Buf>> {
+        ) -> (FullSlice<Buf>, std::io::Result<()>) {
             self.writes
                 .lock()
                 .unwrap()
                 .push((Vec::from(&buf[..]), offset));
-            Ok(buf)
+            (buf, Ok(()))
         }
     }
 
@@ -293,6 +295,7 @@ mod tests {
             || IoBufferMut::with_capacity(2),
             gate.enter()?,
             ctx,
+            tracing::Span::none(),
         );
 
         writer.write_buffered_borrowed(b"abc", ctx).await?;

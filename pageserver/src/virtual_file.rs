@@ -1344,9 +1344,8 @@ impl OwnedAsyncWriter for VirtualFile {
         buf: FullSlice<Buf>,
         offset: u64,
         ctx: &RequestContext,
-    ) -> std::io::Result<FullSlice<Buf>> {
-        let (buf, res) = VirtualFile::write_all_at(self, buf, offset, ctx).await;
-        res.map(|_| buf)
+    ) -> (FullSlice<Buf>, std::io::Result<()>) {
+        VirtualFile::write_all_at(self, buf, offset, ctx).await
     }
 }
 

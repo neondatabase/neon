@@ -43,6 +43,8 @@ pub fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_sec
     }
 }
 
+pub const INFINITE_RETRIES: u32 = u32::MAX;
+
 /// Retries passed operation until one of the following conditions are met:
 /// - encountered error is considered as permanent (non-retryable)
 /// - retries have been exhausted
@@ -55,6 +57,8 @@ pub fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_sec
 ///
 /// If attempts fail, they are being logged with `{:#}` which works for anyhow, but does not work
 /// for any other error type. Final failed attempt is logged with `{:?}`.
+///
+/// Pass [`INFINITE_RETRIES`] as `max_retries` to retry forever.
 ///
 /// Returns `None` if cancellation was noticed during backoff or the terminal result.
 pub async fn retry<T, O, F, E>(
@@ -96,7 +100,7 @@ where
             Err(err) if attempts < warn_threshold => {
                 tracing::info!("{description} failed, will retry (attempt {attempts}): {err:#}");
             }
-            Err(err) if attempts < max_retries => {
+            Err(err) if attempts < max_retries || max_retries == INFINITE_RETRIES => {
                 tracing::warn!("{description} failed, will retry (attempt {attempts}): {err:#}");
             }
             Err(err) => {
@@ -116,6 +120,38 @@ where
         )
         .await;
         attempts += 1;
+    }
+}
+
+/// Like [`retry`] but retries forever.
+///
+/// Returns `Some(T)` if operation succeeded, `None` if `cancel` was observed to have been cancelled before succeeded.
+pub async fn retry_forever<T, O, F, E>(
+    mut op: O,
+    warn_threshold: u32,
+    description: &str,
+    cancel: &CancellationToken,
+) -> Option<T>
+where
+    E: Display + Debug + 'static,
+    O: FnMut() -> F,
+    F: Future<Output = Result<T, E>>,
+{
+    match retry(
+        op,
+        |_| false,
+        warn_threshold,
+        INFINITE_RETRIES,
+        description,
+        cancel,
+    )
+    .await
+    {
+        Some(Ok(ok)) => Some(ok),
+        Some(Err(err)) => {
+            unreachable!("is_permanent closure always returns false and we passed INFINITE_RETRIES, so, only Ok() is possible");
+        }
+        None => None,
     }
 }
 

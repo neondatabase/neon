@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+use chrono::Duration;
+use once_cell::sync::Lazy;
+use tokio_util::sync::CancellationToken;
 use utils::sync::duplex;
 
 use super::{Buffer, CheapCloneForRead, OwnedAsyncWriter};
@@ -118,6 +121,7 @@ where
         buf: B,
         gate_guard: utils::sync::gate::GateGuard,
         ctx: RequestContext,
+        span: tracing::Span,
     ) -> Self
     where
         B: Buffer<IoBuf = Buf> + Send + 'static,
@@ -125,11 +129,14 @@ where
         // It is fine to buffer up to only 1 message. We only 1 message in-flight at a time.
         let (front, back) = duplex::mpsc::channel(1);
 
-        let join_handle = tokio::spawn(async move {
-            FlushBackgroundTask::new(back, file, gate_guard, ctx)
-                .run(buf.flush())
-                .await
-        });
+        let join_handle = tokio::spawn(
+            async move {
+                FlushBackgroundTask::new(back, file, gate_guard, ctx)
+                    .run(buf.flush())
+                    .await
+            }
+            .instrument(span),
+        );
 
         FlushHandle {
             inner: Some(FlushHandleInner {
@@ -236,6 +243,7 @@ where
     /// The passed in slice is immediately sent back to the flush handle through the duplex channel.
     async fn run(mut self, slice: FullSlice<Buf>) -> std::io::Result<Arc<W>> {
         // Sends the extra buffer back to the handle.
+        // TODO: can this ever await and or fail? I think not.
         self.channel.send(slice).await.map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::BrokenPipe, "flush handle closed early")
         })?;
@@ -251,10 +259,38 @@ where
             }
 
             // Write slice to disk at `offset`.
-            let slice = self
-                .writer
-                .write_all_at(request.slice, request.offset, &self.ctx)
-                .await?;
+            //
+            // Error handling happens according to the current policy of crashing
+            // on fatal IO errors and retrying in place otherwise (deeming all other errors retryable).
+            // (The upper layers of the Pageserver write path are not equipped to retry write errors
+            //  becasuse they often deallocate the buffers that were already written).
+            //
+            // TODO: cancellation sensitiity.
+            // Without it, if we hit a bug where retrying is never successful,
+            // then we can't shut down the timeline/tenant/pageserver cleanrly because
+            // upp layers of the Pageserver write path are holding the gate open for EphemeralFile.
+            let mut slice_storage = Some(request.slice);
+            let op = || async {
+                let slice = slice_storage.take().expect(
+                    "likely previous invocation of this future didn't get polled to completion",
+                );
+                let (slice, res) = self
+                    .writer
+                    .write_all_at(slice, request.offset, &self.ctx)
+                    .await;
+                slice_storage = Some(slice);
+                res
+            };
+            static TODO_CANCEL: Lazy<CancellationToken> = Lazy::new(|| CancellationToken::new());
+            let res = utils::backoff::retry_forever(
+                op,
+                0, /* get warn! right from first error */
+                "owned_buffers_io flush",
+                &TODO_CANCEL,
+            )
+            .await
+            .expect("TODO_CANCEL is never cancelled");
+            let slice = slice_storage.take().expect("slice_storage is Some");
 
             #[cfg(test)]
             {
