@@ -788,8 +788,9 @@ impl ComputeNode {
         Ok(())
     }
 
-    /// Start Postgres as a child process and manage DBs/roles.
-    /// After that this will hang waiting on the postmaster process to exit.
+    /// Start Postgres as a child process and wait for it to start accepting
+    /// connections.
+    ///
     /// Returns a handle to the child process and a handle to the logs thread.
     #[instrument(skip_all)]
     pub fn start_postgres(
