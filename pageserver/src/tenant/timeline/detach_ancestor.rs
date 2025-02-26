@@ -364,14 +364,25 @@ pub(super) async fn prepare(
 
     let mut tasks = tokio::task::JoinSet::new();
     let limiter = Arc::new(Semaphore::new(options.copy_concurrency.get()));
+    let cancel_eval = CancellationToken::new();
 
     for adopted in rest_of_historic {
         let limiter = limiter.clone();
         let timeline = detached.clone();
+        let cancel_eval = cancel_eval.clone();
 
         tasks.spawn(
             async move {
-                let _permit = limiter.acquire().await;
+                let _permit = tokio::select! {
+                    permit = limiter.acquire() => {
+                        permit
+                    }
+                    // Wait for the cancellation here instead of letting the entire task be cancelled.
+                    // Cancellations are racy in that they might leave layers on disk.
+                    _ = cancel_eval.cancelled() => {
+                        Err(Error::ShuttingDown)?
+                    }
+                };
                 let (owned, did_hardlink) = remote_copy(
                     &adopted,
                     &timeline,
@@ -402,6 +413,7 @@ pub(super) async fn prepare(
     }
 
     let mut should_fsync = false;
+    let mut first_err = None;
     while let Some(res) = tasks.join_next().await {
         match res {
             Ok(Ok((owned, did_hardlink))) => {
@@ -410,15 +422,22 @@ pub(super) async fn prepare(
                 }
                 new_layers.push(owned);
             }
+
+            // Don't stop the evaluation on errors, so that we get the full set of hardlinked layers to delete.
             Ok(Err(failed)) => {
-                delete_layers(detached, new_layers)?;
-                return Err(failed);
+                cancel_eval.cancel();
+                first_err.get_or_insert(failed);
             }
             Err(je) => {
-                delete_layers(detached, new_layers)?;
-                return Err(Error::Prepare(je.into()));
+                cancel_eval.cancel();
+                first_err.get_or_insert(Error::Prepare(je.into()));
             }
         }
+    }
+
+    if let Some(failed) = first_err {
+        delete_layers(detached, new_layers)?;
+        return Err(failed);
     }
 
     // fsync directory again if we hardlinked something
