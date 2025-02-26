@@ -286,7 +286,7 @@ inmem_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		 * investigate why we're accessing so many buffers.
 		 */
 		if (used_pages >= WARN_PAGES)
-			ereport(ERROR, (errmsg("inmem_write() called for %u/%u/%u.%u blk %u: used_pages %u",
+			ereport(WARNING, (errmsg("inmem_write() called for %u/%u/%u.%u blk %u: used_pages %u",
 								   RelFileInfoFmt(InfoFromSMgrRel(reln)),
 								   forknum,
 								   blocknum,
