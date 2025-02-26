@@ -131,8 +131,10 @@ def test_api_random(
     """
     project = setup_class
     br = project.main_branch.create_branch()
+    log.info("created a branch with id %s", br.id)
     project.wait()
-    br.create_branch()
+    br2 = br.create_branch()
+    log.info("created a branch with id %s, a child of %s", br2.id, br.id)
     project.wait()
     q = [project.main_branch]
     while q:
