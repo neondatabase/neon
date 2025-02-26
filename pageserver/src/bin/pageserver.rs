@@ -14,6 +14,7 @@ use camino::Utf8Path;
 use clap::{Arg, ArgAction, Command};
 use metrics::launch_timestamp::{LaunchTimestamp, set_launch_timestamp_metric};
 use metrics::set_build_info_metric;
+use nix::sys::socket::{setsockopt, sockopt};
 use pageserver::config::{PageServerConf, PageserverIdentity};
 use pageserver::controller_upcall_client::ControllerUpcallClient;
 use pageserver::deletion_queue::DeletionQueue;
@@ -346,6 +347,13 @@ fn start_pageserver(
 
     info!("Starting pageserver pg protocol handler on {pg_addr}");
     let pageserver_listener = tcp_listener::bind(pg_addr)?;
+
+    // Enable SO_KEEPALIVE on the socket, to detect dead connections faster.
+    // These are configured via net.ipv4.tcp_keepalive_* sysctls.
+    //
+    // TODO: also set this on the walreceiver socket, but tokio-postgres doesn't
+    // support enabling keepalives while using the default OS sysctls.
+    setsockopt(&pageserver_listener, sockopt::KeepAlive, &true)?;
 
     // Launch broker client
     // The storage_broker::connect call needs to happen inside a tokio runtime thread.
