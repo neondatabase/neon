@@ -164,11 +164,13 @@ def test_cumulative_statistics_persistence(
             )
 
             # suspend the endpoint
+            log.info(f"Suspending endpoint {endpoint_id}")
             neon_api.suspend_endpoint(project_id, endpoint_id)
             neon_api.wait_for_operation_to_finish(project_id)
             time.sleep(60)  # give some time in between suspend and resume
 
             # resume the endpoint
+            log.info(f"Starting endpoint {endpoint_id}")
             neon_api.start_endpoint(project_id, endpoint_id)
             neon_api.wait_for_operation_to_finish(project_id)
 
