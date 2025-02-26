@@ -1,19 +1,11 @@
-use tracing::instrument;
-use tracing::{error, info};
-
-use crate::metrics::WalRedoKillCause;
-use crate::metrics::WAL_REDO_PROCESS_COUNTERS;
-
 use std::io;
-use std::process::Command;
-
-use std::ops::DerefMut;
-
-use std::ops::Deref;
-
-use std::process::Child;
+use std::ops::{Deref, DerefMut};
+use std::process::{Child, Command};
 
 use pageserver_api::shard::TenantShardId;
+use tracing::{error, info, instrument};
+
+use crate::metrics::{WAL_REDO_PROCESS_COUNTERS, WalRedoKillCause};
 
 /// Wrapper type around `std::process::Child` which guarantees that the child
 /// will be killed and waited-for by this process before being dropped.

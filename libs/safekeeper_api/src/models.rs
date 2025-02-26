@@ -1,18 +1,17 @@
 //! Types used in safekeeper http API. Many of them are also reused internally.
 
+use std::net::SocketAddr;
+
 use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::TimestampTz;
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
 use tokio::time::Instant;
+use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
+use utils::lsn::Lsn;
+use utils::pageserver_feedback::PageserverFeedback;
 
-use utils::{
-    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
-    lsn::Lsn,
-    pageserver_feedback::PageserverFeedback,
-};
-
-use crate::{membership::Configuration, ServerInfo, Term};
+use crate::membership::Configuration;
+use crate::{ServerInfo, Term};
 
 #[derive(Debug, Serialize)]
 pub struct SafekeeperStatus {

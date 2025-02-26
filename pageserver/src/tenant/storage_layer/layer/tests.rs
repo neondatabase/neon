@@ -1,22 +1,16 @@
 use std::time::UNIX_EPOCH;
 
-use pageserver_api::key::{Key, CONTROLFILE_KEY};
+use pageserver_api::key::{CONTROLFILE_KEY, Key};
 use tokio::task::JoinSet;
-use utils::{
-    completion::{self, Completion},
-    id::TimelineId,
-};
+use utils::completion::{self, Completion};
+use utils::id::TimelineId;
 
 use super::failpoints::{Failpoint, FailpointKind};
 use super::*;
-use crate::{
-    context::DownloadBehavior,
-    tenant::{
-        harness::test_img,
-        storage_layer::{IoConcurrency, LayerVisibilityHint},
-    },
-};
-use crate::{task_mgr::TaskKind, tenant::harness::TenantHarness};
+use crate::context::DownloadBehavior;
+use crate::task_mgr::TaskKind;
+use crate::tenant::harness::{TenantHarness, test_img};
+use crate::tenant::storage_layer::{IoConcurrency, LayerVisibilityHint};
 
 /// Used in tests to advance a future to wanted await point, and not futher.
 const ADVANCE: std::time::Duration = std::time::Duration::from_secs(3600);
@@ -796,10 +790,12 @@ async fn evict_and_wait_does_not_wait_for_download() {
     let (arrival, _download_arrived) = utils::completion::channel();
     layer.enable_failpoint(Failpoint::WaitBeforeDownloading(Some(arrival), barrier));
 
-    let mut download = std::pin::pin!(layer
-        .0
-        .get_or_maybe_download(true, &ctx)
-        .instrument(download_span));
+    let mut download = std::pin::pin!(
+        layer
+            .0
+            .get_or_maybe_download(true, &ctx)
+            .instrument(download_span)
+    );
 
     assert!(
         !layer.is_likely_resident(),

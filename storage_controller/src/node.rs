@@ -1,22 +1,22 @@
-use std::{str::FromStr, time::Duration};
+use std::str::FromStr;
+use std::time::Duration;
 
 use anyhow::anyhow;
-use pageserver_api::{
-    controller_api::{
-        AvailabilityZone, NodeAvailability, NodeDescribeResponse, NodeRegisterRequest,
-        NodeSchedulingPolicy, TenantLocateResponseShard,
-    },
-    shard::TenantShardId,
+use pageserver_api::controller_api::{
+    AvailabilityZone, NodeAvailability, NodeDescribeResponse, NodeRegisterRequest,
+    NodeSchedulingPolicy, TenantLocateResponseShard,
 };
+use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use reqwest::StatusCode;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
-use utils::{backoff, id::NodeId};
+use utils::backoff;
+use utils::id::NodeId;
 
-use crate::{
-    pageserver_client::PageserverClient, persistence::NodePersistence, scheduler::MaySchedule,
-};
+use crate::pageserver_client::PageserverClient;
+use crate::persistence::NodePersistence;
+use crate::scheduler::MaySchedule;
 
 /// Represents the in-memory description of a Node.
 ///

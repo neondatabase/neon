@@ -1,14 +1,10 @@
-use std::{
-    io::{stdin, stdout, Read, Write},
-    time::Duration,
-};
+use std::io::{Read, Write, stdin, stdout};
+use std::time::Duration;
 
 use clap::Parser;
 use pageserver_api::models::{PagestreamRequest, PagestreamTestRequest};
-use utils::{
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
+use utils::id::{TenantId, TimelineId};
+use utils::lsn::Lsn;
 
 #[derive(clap::Parser)]
 struct Args {

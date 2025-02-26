@@ -1,16 +1,13 @@
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, RwLock},
-};
+use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock};
 
 use itertools::Itertools;
 use tokio_epoll_uring::{BoundedBuf, IoBufMut, Slice};
 
-use crate::{
-    assert_u64_eq_usize::{U64IsUsize, UsizeIsU64},
-    context::RequestContext,
-    virtual_file::{owned_buffers_io::io_buf_aligned::IoBufAlignedMut, IoBufferMut},
-};
+use crate::assert_u64_eq_usize::{U64IsUsize, UsizeIsU64};
+use crate::context::RequestContext;
+use crate::virtual_file::IoBufferMut;
+use crate::virtual_file::owned_buffers_io::io_buf_aligned::IoBufAlignedMut;
 
 /// The file interface we require. At runtime, this is a [`crate::tenant::ephemeral_file::EphemeralFile`].
 pub trait File: Send {
@@ -132,7 +129,9 @@ where
         let req_len = match cur {
             LogicalReadState::NotStarted(buf) => {
                 if buf.len() != 0 {
-                    panic!("The `LogicalRead`s that are passed in must be freshly created using `LogicalRead::new`");
+                    panic!(
+                        "The `LogicalRead`s that are passed in must be freshly created using `LogicalRead::new`"
+                    );
                 }
                 // buf.cap() == 0 is ok
 
@@ -141,7 +140,9 @@ where
                 *state = LogicalReadState::Ongoing(buf);
                 req_len
             }
-            x => panic!("must only call with fresh LogicalReads, got another state, leaving Undefined state behind state={x:?}"),
+            x => panic!(
+                "must only call with fresh LogicalReads, got another state, leaving Undefined state behind state={x:?}"
+            ),
         };
 
         // plan which chunks we need to read from
@@ -422,15 +423,15 @@ impl Buffer for Vec<u8> {
 #[cfg(test)]
 #[allow(clippy::assertions_on_constants)]
 mod tests {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
     use rand::Rng;
 
-    use crate::{
-        context::DownloadBehavior, task_mgr::TaskKind,
-        virtual_file::owned_buffers_io::slice::SliceMutExt,
-    };
-
     use super::*;
-    use std::{cell::RefCell, collections::VecDeque};
+    use crate::context::DownloadBehavior;
+    use crate::task_mgr::TaskKind;
+    use crate::virtual_file::owned_buffers_io::slice::SliceMutExt;
 
     struct InMemoryFile {
         content: Vec<u8>,

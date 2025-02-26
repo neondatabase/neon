@@ -63,9 +63,9 @@ pub fn check_valid_layermap(metadata: &[LayerName]) -> Option<String> {
                     && overlaps_with(&layer.key_range, &other_layer.key_range)
                 {
                     let err = format!(
-                            "layer violates the layer map LSN split assumption: layer {} intersects with layer {}",
-                            layer, other_layer
-                        );
+                        "layer violates the layer map LSN split assumption: layer {} intersects with layer {}",
+                        layer, other_layer
+                    );
                     return Some(err);
                 }
             }

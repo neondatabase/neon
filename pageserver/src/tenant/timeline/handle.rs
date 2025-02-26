@@ -202,18 +202,13 @@
 //! to the parent shard during a shard split. Eventually, the shard split task will
 //! shut down the parent => case (1).
 
-use std::collections::hash_map;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::Weak;
+use std::collections::{HashMap, hash_map};
+use std::sync::{Arc, Mutex, Weak};
 
 use pageserver_api::shard::ShardIdentity;
-use tracing::instrument;
-use tracing::trace;
+use tracing::{instrument, trace};
 use utils::id::TimelineId;
-use utils::shard::ShardIndex;
-use utils::shard::ShardNumber;
+use utils::shard::{ShardIndex, ShardNumber};
 
 use crate::tenant::mgr::ShardSelector;
 
@@ -636,12 +631,10 @@ impl<T: Types> HandleInner<T> {
 mod tests {
     use std::sync::Weak;
 
-    use pageserver_api::{
-        key::{rel_block_to_key, Key, DBDIR_KEY},
-        models::ShardParameters,
-        reltag::RelTag,
-        shard::ShardStripeSize,
-    };
+    use pageserver_api::key::{DBDIR_KEY, Key, rel_block_to_key};
+    use pageserver_api::models::ShardParameters;
+    use pageserver_api::reltag::RelTag;
+    use pageserver_api::shard::ShardStripeSize;
     use utils::shard::ShardCount;
 
     use super::*;

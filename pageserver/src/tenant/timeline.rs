@@ -14,55 +14,6 @@ pub mod span;
 pub mod uninit;
 mod walreceiver;
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
-use arc_swap::{ArcSwap, ArcSwapOption};
-use bytes::Bytes;
-use camino::Utf8Path;
-use chrono::{DateTime, Utc};
-use compaction::{CompactionOutcome, GcCompactionCombinedSettings};
-use enumset::EnumSet;
-use fail::fail_point;
-use futures::FutureExt;
-use futures::{stream::FuturesUnordered, StreamExt};
-use handle::ShardTimelineId;
-use layer_manager::Shutdown;
-use offload::OffloadError;
-use once_cell::sync::Lazy;
-use pageserver_api::models::PageTraceEvent;
-use pageserver_api::{
-    key::{
-        KEY_SIZE, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX, NON_INHERITED_RANGE,
-        SPARSE_RANGE,
-    },
-    keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning},
-    models::{
-        CompactKeyRange, CompactLsnRange, CompactionAlgorithm, CompactionAlgorithmSettings,
-        DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
-        InMemoryLayerInfo, LayerMapInfo, LsnLease, TimelineState,
-    },
-    reltag::BlockNumber,
-    shard::{ShardIdentity, ShardNumber, TenantShardId},
-};
-use rand::Rng;
-use remote_storage::DownloadError;
-use serde_with::serde_as;
-use storage_broker::BrokerClientChannel;
-use tokio::runtime::Handle;
-use tokio::sync::mpsc::Sender;
-use tokio::sync::{oneshot, watch, Notify};
-use tokio_util::sync::CancellationToken;
-use tracing::*;
-use utils::critical;
-use utils::rate_limit::RateLimit;
-use utils::{
-    fs_ext,
-    guard_arc_swap::GuardArcSwap,
-    pausable_failpoint,
-    postgres_client::PostgresClientProtocol,
-    sync::gate::{Gate, GateGuard},
-};
-use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
-
 use std::array;
 use std::cmp::{max, min};
 use std::collections::btree_map::Entry;
@@ -72,74 +23,58 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::l0_flush::{self, L0FlushGlobalState};
-use crate::tenant::storage_layer::ImageLayerName;
-use crate::{
-    aux_file::AuxFileSizeEstimator,
-    page_service::TenantManagerTypes,
-    tenant::{
-        config::AttachmentMode,
-        layer_map::{LayerMap, SearchResult},
-        metadata::TimelineMetadata,
-        storage_layer::{
-            inmemory_layer::IndexEntry, BatchLayerWriter, IoConcurrency, PersistentLayerDesc,
-            ValueReconstructSituation,
-        },
-    },
-    walingest::WalLagCooldown,
-    walredo,
-};
-use crate::{
-    context::{DownloadBehavior, RequestContext},
-    disk_usage_eviction_task::DiskUsageEvictionInfo,
-    pgdatadir_mapping::CollectKeySpaceError,
-};
-use crate::{
-    disk_usage_eviction_task::finite_f32,
-    tenant::storage_layer::{
-        AsLayerDesc, DeltaLayerWriter, EvictionError, ImageLayerWriter, InMemoryLayer, Layer,
-        LayerAccessStatsReset, LayerName, ResidentLayer, ValueReconstructState,
-        ValuesReconstructState,
-    },
-};
-use crate::{
-    disk_usage_eviction_task::EvictionCandidate, tenant::storage_layer::delta_layer::DeltaEntry,
-};
-use crate::{
-    metrics::ScanLatencyOngoingRecording, tenant::timeline::logical_size::CurrentLogicalSize,
-};
-use crate::{
-    pgdatadir_mapping::DirectoryKind,
-    virtual_file::{MaybeFatalIo, VirtualFile},
-};
-use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
-use crate::{pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS, tenant::storage_layer::PersistentLayerKey};
+use anyhow::{Context, Result, anyhow, bail, ensure};
+use arc_swap::{ArcSwap, ArcSwapOption};
+use bytes::Bytes;
+use camino::Utf8Path;
+use chrono::{DateTime, Utc};
+use compaction::{CompactionOutcome, GcCompactionCombinedSettings};
+use enumset::EnumSet;
+use fail::fail_point;
+use futures::stream::FuturesUnordered;
+use futures::{FutureExt, StreamExt};
+use handle::ShardTimelineId;
+use layer_manager::Shutdown;
+use offload::OffloadError;
+use once_cell::sync::Lazy;
 use pageserver_api::config::tenant_conf_defaults::DEFAULT_PITR_INTERVAL;
-
-use crate::config::PageServerConf;
-use crate::keyspace::{KeyPartitioning, KeySpace};
-use crate::metrics::{TimelineMetrics, DELTAS_PER_READ_GLOBAL, LAYERS_PER_READ_GLOBAL};
-use crate::pgdatadir_mapping::{CalculateLogicalSizeError, MetricsUpdate};
-use crate::tenant::config::TenantConfOpt;
-use pageserver_api::reltag::RelTag;
-use pageserver_api::shard::ShardIndex;
-
-use postgres_connection::PgConnectionConfig;
-use postgres_ffi::{to_pg_timestamp, v14::xlog_utils, WAL_SEGMENT_SIZE};
-use utils::{
-    completion,
-    generation::Generation,
-    id::TimelineId,
-    lsn::{AtomicLsn, Lsn, RecordLsn},
-    seqwait::SeqWait,
-    simple_rcu::{Rcu, RcuReadGuard},
+use pageserver_api::key::{
+    KEY_SIZE, Key, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX, NON_INHERITED_RANGE,
+    SPARSE_RANGE,
 };
-
-use crate::task_mgr;
-use crate::task_mgr::TaskKind;
-use crate::tenant::gc_result::GcResult;
-use crate::ZERO_PAGE;
-use pageserver_api::key::Key;
+use pageserver_api::keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning};
+use pageserver_api::models::{
+    CompactKeyRange, CompactLsnRange, CompactionAlgorithm, CompactionAlgorithmSettings,
+    DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
+    InMemoryLayerInfo, LayerMapInfo, LsnLease, PageTraceEvent, TimelineState,
+};
+use pageserver_api::reltag::{BlockNumber, RelTag};
+use pageserver_api::shard::{ShardIdentity, ShardIndex, ShardNumber, TenantShardId};
+#[cfg(test)]
+use pageserver_api::value::Value;
+use postgres_connection::PgConnectionConfig;
+use postgres_ffi::v14::xlog_utils;
+use postgres_ffi::{WAL_SEGMENT_SIZE, to_pg_timestamp};
+use rand::Rng;
+use remote_storage::DownloadError;
+use serde_with::serde_as;
+use storage_broker::BrokerClientChannel;
+use tokio::runtime::Handle;
+use tokio::sync::mpsc::Sender;
+use tokio::sync::{Notify, oneshot, watch};
+use tokio_util::sync::CancellationToken;
+use tracing::*;
+use utils::generation::Generation;
+use utils::guard_arc_swap::GuardArcSwap;
+use utils::id::TimelineId;
+use utils::lsn::{AtomicLsn, Lsn, RecordLsn};
+use utils::postgres_client::PostgresClientProtocol;
+use utils::rate_limit::RateLimit;
+use utils::seqwait::SeqWait;
+use utils::simple_rcu::{Rcu, RcuReadGuard};
+use utils::sync::gate::{Gate, GateGuard};
+use utils::{completion, critical, fs_ext, pausable_failpoint};
+use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 
 use self::delete::DeleteTimelineFlow;
 pub(super) use self::eviction_task::EvictionTaskTenantState;
@@ -147,24 +82,48 @@ use self::eviction_task::EvictionTaskTimelineState;
 use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
-
-use super::remote_timeline_client::index::GcCompactionState;
+use super::config::TenantConf;
+use super::remote_timeline_client::index::{GcCompactionState, IndexPart};
+use super::remote_timeline_client::{RemoteTimelineClient, WaitCompletionError};
+use super::secondary::heatmap::HeatMapLayer;
+use super::storage_layer::{LayerFringe, LayerVisibilityHint, ReadableLayer};
+use super::upload_queue::NotInitialized;
 use super::{
-    config::TenantConf, storage_layer::LayerVisibilityHint, upload_queue::NotInitialized,
-    MaybeOffloaded,
+    AttachedTenantConf, GcError, HeatMapTimeline, MaybeOffloaded,
+    debug_assert_current_span_has_tenant_and_timeline_id,
 };
-use super::{
-    debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf, HeatMapTimeline,
+use crate::aux_file::AuxFileSizeEstimator;
+use crate::config::PageServerConf;
+use crate::context::{DownloadBehavior, RequestContext};
+use crate::disk_usage_eviction_task::{DiskUsageEvictionInfo, EvictionCandidate, finite_f32};
+use crate::keyspace::{KeyPartitioning, KeySpace};
+use crate::l0_flush::{self, L0FlushGlobalState};
+use crate::metrics::{
+    DELTAS_PER_READ_GLOBAL, LAYERS_PER_READ_GLOBAL, ScanLatencyOngoingRecording, TimelineMetrics,
 };
-use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
-use super::{
-    remote_timeline_client::RemoteTimelineClient, remote_timeline_client::WaitCompletionError,
-    storage_layer::ReadableLayer,
+use crate::page_service::TenantManagerTypes;
+use crate::pgdatadir_mapping::{
+    CalculateLogicalSizeError, CollectKeySpaceError, DirectoryKind, LsnForTimestamp,
+    MAX_AUX_FILE_V2_DELTAS, MetricsUpdate,
 };
-use super::{secondary::heatmap::HeatMapLayer, GcError};
-
-#[cfg(test)]
-use pageserver_api::value::Value;
+use crate::task_mgr::TaskKind;
+use crate::tenant::config::{AttachmentMode, TenantConfOpt};
+use crate::tenant::gc_result::GcResult;
+use crate::tenant::layer_map::{LayerMap, SearchResult};
+use crate::tenant::metadata::TimelineMetadata;
+use crate::tenant::storage_layer::delta_layer::DeltaEntry;
+use crate::tenant::storage_layer::inmemory_layer::IndexEntry;
+use crate::tenant::storage_layer::{
+    AsLayerDesc, BatchLayerWriter, DeltaLayerWriter, EvictionError, ImageLayerName,
+    ImageLayerWriter, InMemoryLayer, IoConcurrency, Layer, LayerAccessStatsReset, LayerName,
+    PersistentLayerDesc, PersistentLayerKey, ResidentLayer, ValueReconstructSituation,
+    ValueReconstructState, ValuesReconstructState,
+};
+use crate::tenant::tasks::BackgroundLoopKind;
+use crate::tenant::timeline::logical_size::CurrentLogicalSize;
+use crate::virtual_file::{MaybeFatalIo, VirtualFile};
+use crate::walingest::WalLagCooldown;
+use crate::{ZERO_PAGE, task_mgr, walredo};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum FlushLoopState {
@@ -1474,13 +1433,22 @@ impl Timeline {
                 | TaskKind::WalReceiverConnectionHandler
                 | TaskKind::WalReceiverConnectionPoller => {
                     let is_myself = match who_is_waiting {
-                        WaitLsnWaiter::Timeline(waiter) => Weak::ptr_eq(&waiter.myself, &self.myself),
-                        WaitLsnWaiter::Tenant | WaitLsnWaiter::PageService | WaitLsnWaiter::HttpEndpoint => unreachable!("tenant or page_service context are not expected to have task kind {:?}", ctx.task_kind()),
+                        WaitLsnWaiter::Timeline(waiter) => {
+                            Weak::ptr_eq(&waiter.myself, &self.myself)
+                        }
+                        WaitLsnWaiter::Tenant
+                        | WaitLsnWaiter::PageService
+                        | WaitLsnWaiter::HttpEndpoint => unreachable!(
+                            "tenant or page_service context are not expected to have task kind {:?}",
+                            ctx.task_kind()
+                        ),
                     };
                     if is_myself {
                         if let Err(current) = self.last_record_lsn.would_wait_for(lsn) {
                             // walingest is the only one that can advance last_record_lsn; it should make sure to never reach here
-                            panic!("this timeline's walingest task is calling wait_lsn({lsn}) but we only have last_record_lsn={current}; would deadlock");
+                            panic!(
+                                "this timeline's walingest task is calling wait_lsn({lsn}) but we only have last_record_lsn={current}; would deadlock"
+                            );
                         }
                     } else {
                         // if another  timeline's  is waiting for us, there's no deadlock risk because
@@ -1509,12 +1477,12 @@ impl Timeline {
                         drop(_timer);
                         let walreceiver_status = self.walreceiver_status();
                         Err(WaitLsnError::Timeout(format!(
-                        "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}, WalReceiver status: {}",
-                        lsn,
-                        self.get_last_record_lsn(),
-                        self.get_disk_consistent_lsn(),
-                        walreceiver_status,
-                    )))
+                            "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}, WalReceiver status: {}",
+                            lsn,
+                            self.get_last_record_lsn(),
+                            self.get_disk_consistent_lsn(),
+                            walreceiver_status,
+                        )))
                     }
                 }
             }
@@ -1618,10 +1586,18 @@ impl Timeline {
                     if init || validate {
                         let latest_gc_cutoff_lsn = self.get_applied_gc_cutoff_lsn();
                         if lsn < *latest_gc_cutoff_lsn {
-                            bail!("tried to request an lsn lease for an lsn below the latest gc cutoff. requested at {} gc cutoff {}", lsn, *latest_gc_cutoff_lsn);
+                            bail!(
+                                "tried to request an lsn lease for an lsn below the latest gc cutoff. requested at {} gc cutoff {}",
+                                lsn,
+                                *latest_gc_cutoff_lsn
+                            );
                         }
                         if lsn < planned_cutoff {
-                            bail!("tried to request an lsn lease for an lsn below the planned gc cutoff. requested at {} planned gc cutoff {}", lsn, planned_cutoff);
+                            bail!(
+                                "tried to request an lsn lease for an lsn below the planned gc cutoff. requested at {} planned gc cutoff {}",
+                                lsn,
+                                planned_cutoff
+                            );
                         }
                     }
 
@@ -1745,7 +1721,9 @@ impl Timeline {
                 // This is not harmful, but it only happens in relatively rare cases where
                 // time-based checkpoints are not happening fast enough to keep the amount of
                 // ephemeral data within configured limits.  It's a sign of stress on the system.
-                tracing::info!("Early-rolling open layer at size {current_size} (limit {size_override}) due to dirty data pressure");
+                tracing::info!(
+                    "Early-rolling open layer at size {current_size} (limit {size_override}) due to dirty data pressure"
+                );
             }
         }
 
@@ -1871,7 +1849,9 @@ impl Timeline {
 
         // Last record Lsn could be zero in case the timeline was just created
         if !last_record_lsn.is_valid() {
-            warn!("Skipping compaction for potentially just initialized timeline, it has invalid last record lsn: {last_record_lsn}");
+            warn!(
+                "Skipping compaction for potentially just initialized timeline, it has invalid last record lsn: {last_record_lsn}"
+            );
             return Ok(CompactionOutcome::Skipped);
         }
 
@@ -2033,7 +2013,9 @@ impl Timeline {
                 // `self.remote_client.shutdown().await` above should have already flushed everything from the queue, but
                 // we also do a final check here to ensure that the queue is empty.
                 if !self.remote_client.no_pending_work() {
-                    warn!("still have pending work in remote upload queue, but continuing shutting down anyways");
+                    warn!(
+                        "still have pending work in remote upload queue, but continuing shutting down anyways"
+                    );
                 }
             }
         }
@@ -2042,7 +2024,9 @@ impl Timeline {
             // drain the upload queue
             self.remote_client.shutdown().await;
             if !self.remote_client.no_pending_work() {
-                warn!("still have pending work in remote upload queue, but continuing shutting down anyways");
+                warn!(
+                    "still have pending work in remote upload queue, but continuing shutting down anyways"
+                );
             }
         }
 
@@ -2947,8 +2931,9 @@ impl Timeline {
         disk_consistent_lsn: Lsn,
         index_part: IndexPart,
     ) -> anyhow::Result<()> {
-        use init::{Decision::*, Discovered, DismissedLayer};
         use LayerName::*;
+        use init::Decision::*;
+        use init::{Discovered, DismissedLayer};
 
         let mut guard = self.layers.write().await;
 
@@ -3163,11 +3148,15 @@ impl Timeline {
                             }
                             TimelineState::Loading => {
                                 // Import does not return an activated timeline.
-                                info!("discarding priority boost for logical size calculation because timeline is not yet active");
+                                info!(
+                                    "discarding priority boost for logical size calculation because timeline is not yet active"
+                                );
                             }
                             TimelineState::Active => {
                                 // activation should be setting the once cell
-                                warn!("unexpected: cancel_wait_for_background_loop_concurrency_limit_semaphore not set, priority-boosting of logical size calculation will not work");
+                                warn!(
+                                    "unexpected: cancel_wait_for_background_loop_concurrency_limit_semaphore not set, priority-boosting of logical size calculation will not work"
+                                );
                                 debug_assert!(false);
                             }
                         }
@@ -4307,10 +4296,14 @@ impl Timeline {
                 // This path is only taken for tenants with multiple shards: single sharded tenants should
                 // never encounter a gap in the wal.
                 let old_disk_consistent_lsn = self.disk_consistent_lsn.load();
-                tracing::debug!("Advancing disk_consistent_lsn across layer gap {old_disk_consistent_lsn}->{frozen_to_lsn}");
+                tracing::debug!(
+                    "Advancing disk_consistent_lsn across layer gap {old_disk_consistent_lsn}->{frozen_to_lsn}"
+                );
                 if self.set_disk_consistent_lsn(frozen_to_lsn) {
                     if let Err(e) = self.schedule_uploads(frozen_to_lsn, vec![]) {
-                        tracing::warn!("Failed to schedule metadata upload after updating disk_consistent_lsn: {e}");
+                        tracing::warn!(
+                            "Failed to schedule metadata upload after updating disk_consistent_lsn: {e}"
+                        );
                     }
                 }
             }
@@ -4535,7 +4528,10 @@ impl Timeline {
     /// This function must only be used from the layer flush task.
     fn set_disk_consistent_lsn(&self, new_value: Lsn) -> bool {
         let old_value = self.disk_consistent_lsn.fetch_max(new_value);
-        assert!(new_value >= old_value, "disk_consistent_lsn must be growing monotonously at runtime; current {old_value}, offered {new_value}");
+        assert!(
+            new_value >= old_value,
+            "disk_consistent_lsn must be growing monotonously at runtime; current {old_value}, offered {new_value}"
+        );
 
         self.metrics
             .disk_consistent_lsn_gauge
@@ -4830,7 +4826,9 @@ impl Timeline {
                                 // any metadata keys, keys, as that would lead to actual data
                                 // loss.
                                 if img_key.is_rel_fsm_block_key() || img_key.is_rel_vm_block_key() {
-                                    warn!("could not reconstruct FSM or VM key {img_key}, filling with zeros: {err:?}");
+                                    warn!(
+                                        "could not reconstruct FSM or VM key {img_key}, filling with zeros: {err:?}"
+                                    );
                                     ZERO_PAGE.clone()
                                 } else {
                                     return Err(CreateImageLayersError::from(err));
@@ -4909,7 +4907,8 @@ impl Timeline {
 
         let trigger_generation = delta_files_accessed as usize >= MAX_AUX_FILE_V2_DELTAS;
         info!(
-            "metadata key compaction: trigger_generation={trigger_generation}, delta_files_accessed={delta_files_accessed}, total_kb_retrieved={total_kb_retrieved}, total_keys_retrieved={total_keys_retrieved}, read_time={}s", elapsed.as_secs_f64()
+            "metadata key compaction: trigger_generation={trigger_generation}, delta_files_accessed={delta_files_accessed}, total_kb_retrieved={total_kb_retrieved}, total_keys_retrieved={total_keys_retrieved}, read_time={}s",
+            elapsed.as_secs_f64()
         );
 
         if !trigger_generation && mode == ImageLayerCreationMode::Try {
@@ -5231,7 +5230,8 @@ impl Timeline {
                         if should_yield {
                             tracing::info!(
                                 "preempt image layer generation at {lsn} when processing partition {}..{}: too many L0 layers",
-                                partition.start().unwrap(), partition.end().unwrap()
+                                partition.start().unwrap(),
+                                partition.end().unwrap()
                             );
                             last_partition_processed = Some(partition.clone());
                             all_generated = false;
@@ -5589,7 +5589,9 @@ impl Timeline {
                 // because we have not implemented L0 => L0 compaction.
                 duplicated_layers.insert(l.layer_desc().key());
             } else if LayerMap::is_l0(&l.layer_desc().key_range, l.layer_desc().is_delta) {
-                return Err(CompactionError::Other(anyhow::anyhow!("compaction generates a L0 layer file as output, which will cause infinite compaction.")));
+                return Err(CompactionError::Other(anyhow::anyhow!(
+                    "compaction generates a L0 layer file as output, which will cause infinite compaction."
+                )));
             } else {
                 insert_layers.push(l.clone());
             }
@@ -5713,8 +5715,10 @@ impl Timeline {
                 .await
             {
                 Ok((index_part, index_generation, _index_mtime)) => {
-                    tracing::info!("GC loaded shard zero metadata (gen {index_generation:?}): latest_gc_cutoff_lsn: {}",
-                        index_part.metadata.latest_gc_cutoff_lsn());
+                    tracing::info!(
+                        "GC loaded shard zero metadata (gen {index_generation:?}): latest_gc_cutoff_lsn: {}",
+                        index_part.metadata.latest_gc_cutoff_lsn()
+                    );
                     Ok(Some(index_part.metadata.latest_gc_cutoff_lsn()))
                 }
                 Err(DownloadError::NotFound) => {
@@ -6123,9 +6127,7 @@ impl Timeline {
             if let Some((img_lsn, img)) = &data.img {
                 trace!(
                     "found page image for key {} at {}, no WAL redo required, req LSN {}",
-                    key,
-                    img_lsn,
-                    request_lsn,
+                    key, img_lsn, request_lsn,
                 );
                 Ok(img.clone())
             } else {
@@ -6154,7 +6156,12 @@ impl Timeline {
                         request_lsn
                     );
                 } else {
-                    trace!("found {} WAL records that will init the page for {} at {}, performing WAL redo", data.records.len(), key, request_lsn);
+                    trace!(
+                        "found {} WAL records that will init the page for {} at {}, performing WAL redo",
+                        data.records.len(),
+                        key,
+                        request_lsn
+                    );
                 };
                 let res = self
                     .walredo_mgr
@@ -6705,7 +6712,9 @@ impl TimelineWriter<'_> {
 
         if let Some(wait_threshold) = wait_threshold {
             if l0_count >= wait_threshold {
-                debug!("layer roll waiting for flush due to compaction backpressure at {l0_count} L0 layers");
+                debug!(
+                    "layer roll waiting for flush due to compaction backpressure at {l0_count} L0 layers"
+                );
                 self.tl.wait_flush_completion(flush_id).await?;
             }
         }
@@ -6892,20 +6901,16 @@ mod tests {
     use pageserver_api::key::Key;
     use pageserver_api::value::Value;
     use tracing::Instrument;
-    use utils::{id::TimelineId, lsn::Lsn};
+    use utils::id::TimelineId;
+    use utils::lsn::Lsn;
 
-    use crate::{
-        context::RequestContextBuilder,
-        tenant::{
-            harness::{test_img, TenantHarness},
-            layer_map::LayerMap,
-            storage_layer::{Layer, LayerName, LayerVisibilityHint},
-            timeline::{DeltaLayerTestDesc, EvictionError},
-            PreviousHeatmap, Timeline,
-        },
-    };
-
+    use crate::context::RequestContextBuilder;
     use super::HeatMapTimeline;
+    use crate::tenant::harness::{TenantHarness, test_img};
+    use crate::tenant::layer_map::LayerMap;
+    use crate::tenant::storage_layer::{Layer, LayerName, LayerVisibilityHint};
+    use crate::tenant::timeline::{DeltaLayerTestDesc, EvictionError};
+    use crate::tenant::{PreviousHeatmap, Timeline};
 
     fn assert_heatmaps_have_same_layers(lhs: &HeatMapTimeline, rhs: &HeatMapTimeline) {
         assert_eq!(lhs.layers.len(), rhs.layers.len());
@@ -7038,7 +7043,7 @@ mod tests {
 
             eprintln!("Downloading {layer} and re-generating heatmap");
 
-            let ctx = &RequestContextBuilder::extend(&ctx)
+            let ctx = &RequestContextBuilder::extend(ctx)
                 .download_behavior(crate::context::DownloadBehavior::Download)
                 .build();
 

@@ -1,26 +1,20 @@
-use std::{
-    cell::{RefCell, RefMut, UnsafeCell},
-    ffi::CStr,
-    sync::Arc,
-};
+use std::cell::{RefCell, RefMut, UnsafeCell};
+use std::ffi::CStr;
+use std::sync::Arc;
 
 use bytes::Bytes;
-use desim::{
-    executor::{self, PollSome},
-    network::TCP,
-    node_os::NodeOs,
-    proto::{AnyMessage, NetEvent, NodeEvent},
-    world::NodeId,
-};
+use desim::executor::{self, PollSome};
+use desim::network::TCP;
+use desim::node_os::NodeOs;
+use desim::proto::{AnyMessage, NetEvent, NodeEvent};
+use desim::world::NodeId;
 use tracing::debug;
 use utils::lsn::Lsn;
-use walproposer::{
-    api_bindings::Level,
-    bindings::{
-        NeonWALReadResult, SafekeeperStateDesiredEvents, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE,
-    },
-    walproposer::{ApiImpl, Config},
+use walproposer::api_bindings::Level;
+use walproposer::bindings::{
+    NeonWALReadResult, SafekeeperStateDesiredEvents, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE,
 };
+use walproposer::walproposer::{ApiImpl, Config};
 
 use super::walproposer_disk::DiskWalProposer;
 
@@ -578,7 +572,9 @@ impl ApiImpl for SimulationApi {
         let disk_lsn = disk.lock().flush_rec_ptr().0;
         debug!("start_streaming at {} (disk_lsn={})", startpos, disk_lsn);
         if startpos < disk_lsn {
-            debug!("startpos < disk_lsn, it means we wrote some transaction even before streaming started");
+            debug!(
+                "startpos < disk_lsn, it means we wrote some transaction even before streaming started"
+            );
         }
         assert!(startpos <= disk_lsn);
         let mut broadcasted = Lsn(startpos);

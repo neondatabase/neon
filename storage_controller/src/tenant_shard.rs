@@ -1,50 +1,39 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-    time::Duration,
-};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
 
-use crate::{
-    metrics::{
-        self, ReconcileCompleteLabelGroup, ReconcileLongRunningLabelGroup, ReconcileOutcome,
-    },
-    persistence::TenantShardPersistence,
-    reconciler::{ReconcileUnits, ReconcilerConfig},
-    scheduler::{
-        AffinityScore, AttachedShardTag, NodeSchedulingScore, NodeSecondarySchedulingScore,
-        RefCountUpdate, ScheduleContext, SecondaryShardTag, ShardTag,
-    },
-    service::ReconcileResultRequest,
-};
 use futures::future::{self, Either};
 use itertools::Itertools;
 use pageserver_api::controller_api::{AvailabilityZone, PlacementPolicy, ShardSchedulingPolicy};
-use pageserver_api::{
-    models::{LocationConfig, LocationConfigMode, TenantConfig},
-    shard::{ShardIdentity, TenantShardId},
-};
+use pageserver_api::models::{LocationConfig, LocationConfigMode, TenantConfig};
+use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{instrument, Instrument};
-use utils::{
-    generation::Generation,
-    id::NodeId,
-    seqwait::{SeqWait, SeqWaitError},
-    shard::ShardCount,
-    sync::gate::GateGuard,
-};
+use tracing::{Instrument, instrument};
+use utils::generation::Generation;
+use utils::id::NodeId;
+use utils::seqwait::{SeqWait, SeqWaitError};
+use utils::shard::ShardCount;
+use utils::sync::gate::GateGuard;
 
-use crate::{
-    compute_hook::ComputeHook,
-    node::Node,
-    persistence::{split_state::SplitState, Persistence},
-    reconciler::{
-        attached_location_conf, secondary_location_conf, ReconcileError, Reconciler, TargetState,
-    },
-    scheduler::{ScheduleError, Scheduler},
-    service, Sequence,
+use crate::compute_hook::ComputeHook;
+use crate::metrics::{
+    self, ReconcileCompleteLabelGroup, ReconcileLongRunningLabelGroup, ReconcileOutcome,
 };
+use crate::node::Node;
+use crate::persistence::split_state::SplitState;
+use crate::persistence::{Persistence, TenantShardPersistence};
+use crate::reconciler::{
+    ReconcileError, ReconcileUnits, Reconciler, ReconcilerConfig, TargetState,
+    attached_location_conf, secondary_location_conf,
+};
+use crate::scheduler::{
+    AffinityScore, AttachedShardTag, NodeSchedulingScore, NodeSecondarySchedulingScore,
+    RefCountUpdate, ScheduleContext, ScheduleError, Scheduler, SecondaryShardTag, ShardTag,
+};
+use crate::service::ReconcileResultRequest;
+use crate::{Sequence, service};
 
 /// Serialization helper
 fn read_last_error<S, T>(v: &std::sync::Mutex<Option<T>>, serializer: S) -> Result<S::Ok, S::Error>
@@ -835,7 +824,9 @@ impl TenantShard {
                 let current_score = current_score.for_optimization();
 
                 if candidate_score < current_score {
-                    tracing::info!("Found a lower scoring location! {candidate} is better than {current} ({candidate_score:?} is better than {current_score:?})");
+                    tracing::info!(
+                        "Found a lower scoring location! {candidate} is better than {current} ({candidate_score:?} is better than {current_score:?})"
+                    );
                     Some(true)
                 } else {
                     // The candidate node is no better than our current location, so don't migrate
@@ -1005,7 +996,7 @@ impl TenantShard {
                 // most cases, even if some nodes are offline or have scheduling=pause set.
 
                 debug_assert!(self.intent.attached.is_some()); // We should not make it here unless attached -- this
-                                                               // logic presumes we are in a mode where we want secondaries to be in non-home AZ
+                // logic presumes we are in a mode where we want secondaries to be in non-home AZ
                 if let Some(retain_secondary) = self.intent.get_secondary().iter().find(|n| {
                     let in_home_az = scheduler.get_node_az(n) == self.intent.preferred_az_id;
                     let is_available = secondary_scores
@@ -1029,7 +1020,8 @@ impl TenantShard {
                 }
 
                 // Fall through: we didn't identify one to remove.  This ought to be rare.
-                tracing::warn!("Keeping extra secondaries: can't determine which of {:?} to remove (some nodes offline?)",
+                tracing::warn!(
+                    "Keeping extra secondaries: can't determine which of {:?} to remove (some nodes offline?)",
                     self.intent.get_secondary()
                 );
             } else {
@@ -1798,8 +1790,8 @@ impl TenantShard {
                 let conf = observed.conf.as_ref()?;
 
                 match (conf.generation, conf.mode) {
-                    (Some(gen), AttachedMulti | AttachedSingle | AttachedStale) => {
-                        Some((*node_id, gen))
+                    (Some(gen_), AttachedMulti | AttachedSingle | AttachedStale) => {
+                        Some((*node_id, gen_))
                     }
                     _ => None,
                 }
@@ -1807,7 +1799,7 @@ impl TenantShard {
             .sorted_by(|(_lhs_node_id, lhs_gen), (_rhs_node_id, rhs_gen)| {
                 lhs_gen.cmp(rhs_gen).reverse()
             })
-            .map(|(node_id, gen)| (node_id, Generation::new(gen)))
+            .map(|(node_id, gen_)| (node_id, Generation::new(gen_)))
             .collect()
     }
 
@@ -1839,7 +1831,10 @@ impl TenantShard {
                         (Some(crnt), Some(new)) if crnt_gen > new_gen => {
                             tracing::warn!(
                                 "Skipping observed state update {}: {:?} and using None due to stale generation ({} > {})",
-                                node_id, loc, crnt, new
+                                node_id,
+                                loc,
+                                crnt,
+                                new
                             );
 
                             self.observed
@@ -1896,18 +1891,17 @@ impl Drop for TenantShard {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::{cell::RefCell, rc::Rc};
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
-    use pageserver_api::{
-        controller_api::NodeAvailability,
-        shard::{ShardCount, ShardNumber},
-    };
-    use rand::{rngs::StdRng, SeedableRng};
+    use pageserver_api::controller_api::NodeAvailability;
+    use pageserver_api::shard::{ShardCount, ShardNumber};
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
     use utils::id::TenantId;
 
-    use crate::scheduler::test_utils::make_test_nodes;
-
     use super::*;
+    use crate::scheduler::test_utils::make_test_nodes;
 
     fn make_test_tenant_shard(policy: PlacementPolicy) -> TenantShard {
         let tenant_id = TenantId::generate();
@@ -2085,16 +2079,20 @@ pub(crate) mod tests {
 
         // In pause mode, schedule() shouldn't do anything
         tenant_shard.scheduling_policy = ShardSchedulingPolicy::Pause;
-        assert!(tenant_shard
-            .schedule(&mut scheduler, &mut ScheduleContext::default())
-            .is_ok());
+        assert!(
+            tenant_shard
+                .schedule(&mut scheduler, &mut ScheduleContext::default())
+                .is_ok()
+        );
         assert!(tenant_shard.intent.all_pageservers().is_empty());
 
         // In active mode, schedule() works
         tenant_shard.scheduling_policy = ShardSchedulingPolicy::Active;
-        assert!(tenant_shard
-            .schedule(&mut scheduler, &mut ScheduleContext::default())
-            .is_ok());
+        assert!(
+            tenant_shard
+                .schedule(&mut scheduler, &mut ScheduleContext::default())
+                .is_ok()
+        );
         assert!(!tenant_shard.intent.all_pageservers().is_empty());
 
         tenant_shard.intent.clear(&mut scheduler);
@@ -2621,9 +2619,11 @@ pub(crate) mod tests {
         );
         let mut schedule_context = ScheduleContext::default();
         for shard in &mut shards {
-            assert!(shard
-                .schedule(&mut scheduler, &mut schedule_context)
-                .is_ok());
+            assert!(
+                shard
+                    .schedule(&mut scheduler, &mut schedule_context)
+                    .is_ok()
+            );
         }
 
         // Initial: attached locations land in the tenant's home AZ.

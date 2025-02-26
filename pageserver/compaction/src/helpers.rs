@@ -221,12 +221,12 @@ where
             // performed implicitly when `top` is dropped).
             if let Some(mut top) = this.heap.peek_mut() {
                 match top.deref_mut() {
-                    LazyLoadLayer::Unloaded(ref mut l) => {
+                    LazyLoadLayer::Unloaded(l) => {
                         let fut = l.load_keys(this.ctx);
                         this.load_future.set(Some(Box::pin(fut)));
                         continue;
                     }
-                    LazyLoadLayer::Loaded(ref mut entries) => {
+                    LazyLoadLayer::Loaded(entries) => {
                         let result = entries.pop_front().unwrap();
                         if entries.is_empty() {
                             std::collections::binary_heap::PeekMut::pop(top);

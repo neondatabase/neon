@@ -1,9 +1,9 @@
-use std::{
-    ops::{Deref, Range, RangeBounds},
-    sync::Arc,
-};
+use std::ops::{Deref, Range, RangeBounds};
+use std::sync::Arc;
 
-use super::{alignment::Alignment, raw::RawAlignedBuffer, AlignedBufferMut, ConstAlign};
+use super::alignment::Alignment;
+use super::raw::RawAlignedBuffer;
+use super::{AlignedBufferMut, ConstAlign};
 
 /// An shared, immutable aligned buffer type.
 #[derive(Clone, Debug)]

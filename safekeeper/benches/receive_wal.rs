@@ -4,7 +4,7 @@ use std::io::Write as _;
 
 use bytes::BytesMut;
 use camino_tempfile::tempfile;
-use criterion::{criterion_group, criterion_main, BatchSize, Bencher, Criterion};
+use criterion::{BatchSize, Bencher, Criterion, criterion_group, criterion_main};
 use itertools::Itertools as _;
 use postgres_ffi::v17::wal_generator::{LogicalMessageGenerator, WalGenerator};
 use pprof::criterion::{Output, PProfProfiler};
@@ -27,7 +27,7 @@ const GB: usize = 1024 * MB;
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[allow(non_upper_case_globals)]
-#[export_name = "malloc_conf"]
+#[unsafe(export_name = "malloc_conf")]
 pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:21\0";
 
 // Register benchmarks with Criterion.
