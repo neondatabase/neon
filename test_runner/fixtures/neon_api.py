@@ -154,11 +154,14 @@ class NeonAPI:
             data["source_timestamp"] = source_timestamp
         if preserve_under_name:
             data["preserve_under_name"] = preserve_under_name
-        resp = self.__request("POST", f"/{project_id}/branches/{branch_id}",
-                              headers={
-                                  "Accept": "application/json",
-                              },
-                              json=data)
+        resp = self.__request(
+            "POST",
+            f"/{project_id}/branches/{branch_id}",
+            headers={
+                "Accept": "application/json",
+            },
+            json=data,
+        )
         return cast("dict[str, Any]", resp.json())
 
     def reset_branch_to_parent(self, project_id: str, branch_id: str) -> dict[str, Any]:
