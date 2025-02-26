@@ -1,3 +1,4 @@
+import math  # Add this import
 import time
 import traceback
 from pathlib import Path
@@ -33,7 +34,7 @@ def insert_first_chunk_and_verify_autovacuum_is_not_running(
         (random() * 10)::int + 1 AS bid,
         (random() * 10000)::int AS abalance,
         'filler text' AS filler
-    FROM generate_series(6800001, {6800001 + rows_to_insert}) AS aid;
+    FROM generate_series(6800001, {6800001 + rows_to_insert - 1}) AS aid;
     """)
     assert cur.rowcount == rows_to_insert
     for _ in range(5):
@@ -54,7 +55,7 @@ def insert_second_chunk_and_verify_autovacuum_is_now_running(
         (random() * 10)::int + 1 AS bid,
         (random() * 10000)::int AS abalance,
         'filler text' AS filler
-    FROM generate_series({6800001 + rows_to_insert}, {6800001 + rows_to_insert*2}) AS aid;
+    FROM generate_series({6800001 + rows_to_insert -1}, {6800001 + rows_to_insert * 2 - 1}) AS aid;
     """)
     assert cur.rowcount == rows_to_insert
     for _ in range(5):
@@ -144,9 +145,11 @@ def test_cumulative_statistics_persistence(
             # insert rows that by itself are not enough to trigger auto-vacuum
             # vacuum insert threshold = vacuum base insert threshold + vacuum insert scale factor * number of tuples
             # https://www.postgresql.org/docs/17/routine-vacuuming.html
-            rows_to_insert = (
-                autovacuum_vacuum_insert_threshold / 2
-                + row_count * autovacuum_vacuum_insert_scale_factor * 0.6
+            rows_to_insert = int(
+                math.ceil(
+                    autovacuum_vacuum_insert_threshold / 2
+                    + row_count * autovacuum_vacuum_insert_scale_factor * 0.6
+                )
             )
 
             log.info(
