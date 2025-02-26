@@ -169,7 +169,7 @@ def test_cumulative_statistics_persistence(
             time.sleep(60)  # give some time in between suspend and resume
 
             # resume the endpoint
-            neon_api.restart_endpoint(project_id, endpoint_id)
+            neon_api.start_endpoint(project_id, endpoint_id)
             neon_api.wait_for_operation_to_finish(project_id)
 
             # insert additional rows that by itself are not enough to trigger auto-vacuum, but in combination
