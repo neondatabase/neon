@@ -4713,6 +4713,7 @@ pagestore_smgr_processinterrupts(void)
 		if (!readpage_reentrant_guard && readahead_getpage_pull_timeout_ms > 0)
 			prefetch_pump_state(true);
 
+		timeout_signaled = false;
 		reconfigure_timeout_if_needed();
 	}
 
