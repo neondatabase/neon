@@ -8,6 +8,7 @@ use utils::sync::duplex;
 
 use super::{Buffer, CheapCloneForRead, OwnedAsyncWriter};
 use crate::context::RequestContext;
+use crate::virtual_file::MaybeFatalIo;
 use crate::virtual_file::owned_buffers_io::io_buf_aligned::IoBufAligned;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::FullSlice;
 
@@ -277,6 +278,7 @@ where
                     "likely previous invocation of this future didn't get polled to completion",
                 );
                 let (slice, res) = self.writer.write_all_at(slice, offset, &self.ctx).await;
+                let res = res.maybe_fatal_err("owned_buffers_io flush");
                 slice_storage = Some(slice);
                 res
             };
