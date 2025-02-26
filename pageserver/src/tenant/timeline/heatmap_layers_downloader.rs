@@ -3,9 +3,10 @@
 //! Provides utilities to spawn and abort a background task where the downloads happen.
 //! See /v1/tenant/:tenant_shard_id/timeline/:timeline_id/download_heatmap_layers.
 
+use std::sync::{Arc, Mutex};
+
 use futures::StreamExt;
 use http_utils::error::ApiError;
-use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use utils::sync::gate::Gate;
 

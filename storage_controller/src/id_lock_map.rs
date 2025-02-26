@@ -1,8 +1,7 @@
+use std::collections::HashMap;
 use std::fmt::Display;
-use std::time::Instant;
-use std::{collections::HashMap, sync::Arc};
-
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::service::RECONCILE_TIMEOUT;
 

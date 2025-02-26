@@ -2,23 +2,23 @@
 //!   WAL service listens for client connections and
 //!   receive WAL from wal_proposer and send it to WAL receivers
 //!
-use anyhow::{Context, Result};
-use postgres_backend::QueryError;
-use safekeeper_api::models::ConnectionId;
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::time::Duration;
+
+use anyhow::{Context, Result};
+use postgres_backend::{AuthType, PostgresBackend, QueryError};
+use safekeeper_api::models::ConnectionId;
 use tokio::net::TcpStream;
 use tokio_io_timeout::TimeoutReader;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::{auth::Scope, measured_stream::MeasuredStream};
+use utils::auth::Scope;
+use utils::measured_stream::MeasuredStream;
 
-use std::os::fd::AsRawFd;
-
+use crate::handler::SafekeeperPostgresHandler;
 use crate::metrics::TrafficMetrics;
-use crate::SafeKeeperConf;
-use crate::{handler::SafekeeperPostgresHandler, GlobalTimelines};
-use postgres_backend::{AuthType, PostgresBackend};
+use crate::{GlobalTimelines, SafeKeeperConf};
 
 /// Accept incoming TCP connections and spawn them into a background thread.
 ///

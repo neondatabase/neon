@@ -1,8 +1,6 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-    time::Duration,
-};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+use std::time::Duration;
 
 use pageserver_api::controller_api::ShardSchedulingPolicy;
 use rand::seq::SliceRandom;
@@ -176,12 +174,19 @@ impl ChaosInjector {
 
         let mut victims = Vec::with_capacity(batch_size);
         if out_of_home_az.len() >= batch_size {
-            tracing::info!("Injecting chaos: found {batch_size} shards to migrate back to home AZ (total {} out of home AZ)", out_of_home_az.len());
+            tracing::info!(
+                "Injecting chaos: found {batch_size} shards to migrate back to home AZ (total {} out of home AZ)",
+                out_of_home_az.len()
+            );
 
             out_of_home_az.shuffle(&mut thread_rng());
             victims.extend(out_of_home_az.into_iter().take(batch_size));
         } else {
-            tracing::info!("Injecting chaos: found {} shards to migrate back to home AZ, picking {} random shards to migrate", out_of_home_az.len(), std::cmp::min(batch_size - out_of_home_az.len(), in_home_az.len()));
+            tracing::info!(
+                "Injecting chaos: found {} shards to migrate back to home AZ, picking {} random shards to migrate",
+                out_of_home_az.len(),
+                std::cmp::min(batch_size - out_of_home_az.len(), in_home_az.len())
+            );
 
             victims.extend(out_of_home_az);
             in_home_az.shuffle(&mut thread_rng());

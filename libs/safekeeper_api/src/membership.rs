@@ -2,7 +2,8 @@
 //! rfcs/035-safekeeper-dynamic-membership-change.md
 //! for details.
 
-use std::{collections::HashSet, fmt::Display};
+use std::collections::HashSet;
+use std::fmt::Display;
 
 use anyhow;
 use anyhow::bail;
@@ -148,8 +149,9 @@ impl Display for Configuration {
 
 #[cfg(test)]
 mod tests {
-    use super::{MemberSet, SafekeeperId};
     use utils::id::NodeId;
+
+    use super::{MemberSet, SafekeeperId};
 
     #[test]
     fn test_member_set() {

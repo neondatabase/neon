@@ -1,7 +1,7 @@
-use crate::consumption_metrics::RawMetric;
+use std::collections::HashMap;
 
 use super::*;
-use std::collections::HashMap;
+use crate::consumption_metrics::RawMetric;
 
 #[test]
 fn startup_collected_timeline_metrics_before_advancing() {

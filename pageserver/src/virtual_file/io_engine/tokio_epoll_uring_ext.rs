@@ -5,18 +5,16 @@
 //! on older kernels, such as some (but not all) older kernels in the Linux 5.10 series.
 //! See <https://github.com/neondatabase/neon/issues/6373#issuecomment-1905814391> for more details.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-
-use tokio_util::sync::CancellationToken;
-use tracing::{error, info, info_span, warn, Instrument};
-use utils::backoff::{DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use tokio_epoll_uring::{System, SystemHandle};
-
-use crate::virtual_file::on_fatal_io_error;
+use tokio_util::sync::CancellationToken;
+use tracing::{Instrument, error, info, info_span, warn};
+use utils::backoff::{DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS};
 
 use crate::metrics::tokio_epoll_uring::{self as metrics, THREAD_LOCAL_METRICS_STORAGE};
+use crate::virtual_file::on_fatal_io_error;
 
 #[derive(Clone)]
 struct ThreadLocalState(Arc<ThreadLocalStateInner>);
@@ -194,7 +192,7 @@ impl std::ops::Deref for Handle {
 
     fn deref(&self) -> &Self::Target {
         self.0
-             .0
+            .0
             .cell
             .get()
             .expect("must be already initialized when using this")

@@ -1,25 +1,28 @@
-use std::{collections::HashSet, sync::Arc};
+use std::collections::HashSet;
+use std::sync::Arc;
 
-use super::{layer_manager::LayerManager, FlushLayerError, Timeline};
-use crate::{
-    context::{DownloadBehavior, RequestContext},
-    task_mgr::TaskKind,
-    tenant::{
-        remote_timeline_client::index::GcBlockingReason::DetachAncestor,
-        storage_layer::{
-            layer::local_layer_path, AsLayerDesc as _, DeltaLayerWriter, Layer, ResidentLayer,
-        },
-        Tenant,
-    },
-    virtual_file::{MaybeFatalIo, VirtualFile},
-};
 use anyhow::Context;
 use http_utils::error::ApiError;
-use pageserver_api::{models::detach_ancestor::AncestorDetached, shard::ShardIdentity};
+use pageserver_api::models::detach_ancestor::AncestorDetached;
+use pageserver_api::shard::ShardIdentity;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
-use utils::{completion, generation::Generation, id::TimelineId, lsn::Lsn, sync::gate::GateError};
+use utils::completion;
+use utils::generation::Generation;
+use utils::id::TimelineId;
+use utils::lsn::Lsn;
+use utils::sync::gate::GateError;
+
+use super::layer_manager::LayerManager;
+use super::{FlushLayerError, Timeline};
+use crate::context::{DownloadBehavior, RequestContext};
+use crate::task_mgr::TaskKind;
+use crate::tenant::Tenant;
+use crate::tenant::remote_timeline_client::index::GcBlockingReason::DetachAncestor;
+use crate::tenant::storage_layer::layer::local_layer_path;
+use crate::tenant::storage_layer::{AsLayerDesc as _, DeltaLayerWriter, Layer, ResidentLayer};
+use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
@@ -64,9 +67,10 @@ impl Error {
     where
         F: Fn(anyhow::Error) -> Error,
     {
+        use remote_storage::TimeoutOrCancel;
+
         use crate::tenant::remote_timeline_client::WaitCompletionError;
         use crate::tenant::upload_queue::NotInitialized;
-        use remote_storage::TimeoutOrCancel;
 
         if e.is::<NotInitialized>()
             || TimeoutOrCancel::caused_by_cancel(&e)
@@ -836,7 +840,7 @@ pub(super) async fn detach_and_reparent(
             // TODO: make sure there are no `?` before tenant_reset from after a questionmark from
             // here.
             panic!(
-            "bug: detach_and_reparent called on a timeline which has not been detached or which has no live ancestor"
+                "bug: detach_and_reparent called on a timeline which has not been detached or which has no live ancestor"
             );
         }
     };

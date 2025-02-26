@@ -1,5 +1,7 @@
 use std::time::SystemTime;
-use utils::{serde_percent::Percent, serde_system_time};
+
+use utils::serde_percent::Percent;
+use utils::serde_system_time;
 
 /// Pageserver current utilization and scoring for how good candidate the pageserver would be for
 /// the next tenant.
@@ -131,12 +133,12 @@ impl PageserverUtilization {
 
 /// Test helper
 pub mod test_utilization {
-    use super::PageserverUtilization;
     use std::time::SystemTime;
-    use utils::{
-        serde_percent::Percent,
-        serde_system_time::{self},
-    };
+
+    use utils::serde_percent::Percent;
+    use utils::serde_system_time::{self};
+
+    use super::PageserverUtilization;
 
     // Parameters of the imaginary node used for test utilization instances
     const TEST_DISK_SIZE: u64 = 1024 * 1024 * 1024 * 1024;

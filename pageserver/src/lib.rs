@@ -15,7 +15,8 @@ pub mod l0_flush;
 
 extern crate hyper0 as hyper;
 
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 pub use pageserver_api::keyspace;
 use tokio_util::sync::CancellationToken;
 mod assert_u64_eq_usize;
@@ -35,10 +36,8 @@ pub mod walredo;
 
 use camino::Utf8Path;
 use deletion_queue::DeletionQueue;
-use tenant::{
-    mgr::{BackgroundPurges, TenantManager},
-    secondary,
-};
+use tenant::mgr::{BackgroundPurges, TenantManager};
+use tenant::secondary;
 use tracing::{info, info_span};
 
 /// Current storage format version
@@ -350,8 +349,9 @@ async fn timed_after_cancellation<Fut: std::future::Future>(
 
 #[cfg(test)]
 mod timed_tests {
-    use super::timed;
     use std::time::Duration;
+
+    use super::timed;
 
     #[tokio::test]
     async fn timed_completes_when_inner_future_completes() {

@@ -722,14 +722,14 @@ jobs:
           - pg: v17
             debian: bookworm
     env:
-      VM_BUILDER_VERSION: v0.37.1
+      VM_BUILDER_VERSION: v0.42.2
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Downloading vm-builder
         run: |
-          curl -fL https://github.com/neondatabase/autoscaling/releases/download/$VM_BUILDER_VERSION/vm-builder -o vm-builder
+          curl -fL https://github.com/neondatabase/autoscaling/releases/download/$VM_BUILDER_VERSION/vm-builder-amd64 -o vm-builder
           chmod +x vm-builder
 
       - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
@@ -750,7 +750,8 @@ jobs:
             -size=2G \
             -spec=compute/vm-image-spec-${{ matrix.version.debian }}.yaml \
             -src=neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
-            -dst=neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}
+            -dst=neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
+            -target-arch=linux/amd64
 
       - name: Pushing vm-compute-node image
         run: |
