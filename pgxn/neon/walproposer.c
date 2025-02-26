@@ -1896,7 +1896,12 @@ PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf
 						pq_sendint64_le(buf, m->termHistory->entries[i].term);
 						pq_sendint64_le(buf, m->termHistory->entries[i].lsn);
 					}
-					pq_sendint64_le(buf, 0);	/* removed timeline_start_lsn */
+					/* 
+					 * Removed timeline_start_lsn. Still send it as a valid
+					 * value until safekeepers taking it from term history are
+					 * deployed.
+					 */
+					pq_sendint64_le(buf, m->termHistory->entries[0].lsn);
 					break;
 				}
 			case 'a':
