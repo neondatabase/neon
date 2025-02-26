@@ -408,11 +408,16 @@ fn start_postgres(
     // We got all we need, update the state.
     let mut state = compute.state.lock().unwrap();
 
-    // If we're being configured from a /configure HTTP request, consider this operation
-    // to be part of that request.
+    // Create a tracing span for the startup operation.
+    //
+    // We could otherwise just annotate the function with #[instrument], but if
+    // we're being configured from a /configure HTTP request, we want the
+    // startup to be considered part of the /configure request.
     let _this_entered = {
-        // Temporarily enter the parent span, so that the new span becomes its child.
+        // Temporarily enter the /configure request's span, so that the new span
+        // becomes its child.
         let _parent_entered = state.startup_span.take().map(|p| p.entered());
+
         tracing::info_span!("start_postgres")
     }
     .entered();
