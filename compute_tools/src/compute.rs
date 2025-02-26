@@ -577,24 +577,22 @@ impl ComputeNode {
         let mut pre_tasks = tokio::task::JoinSet::new();
 
         // If there are any remote extensions in shared_preload_libraries, start downloading them
-        self.download_preload_extensions(pspec, &mut pre_tasks);
+        if pspec.spec.remote_extensions.is_some() {
+            let (this, spec) = (self.clone(), pspec.spec.clone());
+            pre_tasks.spawn_blocking_child(move || this.download_preload_extensions(&spec));
+        }
 
-        // Prepre pgdata directory. This downloads the basebackup, among other things.
-        let this = self.clone();
-        let cs = compute_state.clone();
-        let sp = start_compute_span.clone();
-        pre_tasks.spawn_blocking(move || {
-            let _e = sp.enter();
-            this.prepare_pgdata(&cs)
-        });
+        // Prepare pgdata directory. This downloads the basebackup, among other things.
+        {
+            let (this, cs) = (self.clone(), compute_state.clone());
+            pre_tasks.spawn_blocking_child(move || this.prepare_pgdata(&cs));
+        }
 
         // Resize swap to the desired size if the compute spec says so
         if let (Some(size_bytes), true) =
             (pspec.spec.swap_size_bytes, self.params.resize_swap_on_bind)
         {
-            let sp = start_compute_span.clone();
-            pre_tasks.spawn_blocking(move || {
-                let _e = sp.enter();
+            pre_tasks.spawn_blocking_child(move || {
                 // To avoid 'swapoff' hitting postgres startup, we need to run resize-swap to completion
                 // *before* starting postgres.
                 //
@@ -615,9 +613,7 @@ impl ComputeNode {
             self.params.set_disk_quota_for_fs.as_ref(),
         ) {
             let disk_quota_fs_mountpoint = disk_quota_fs_mountpoint.clone();
-            let sp = start_compute_span.clone();
-            pre_tasks.spawn_blocking(move || {
-                let _e = sp.enter();
+            pre_tasks.spawn_blocking_child(move || {
                 set_disk_quota(disk_quota_bytes, &disk_quota_fs_mountpoint)
                     .context("failed to set disk quota")?;
                 let size_mib = disk_quota_bytes as f32 / (1 << 20) as f32; // just for more coherent display.
@@ -710,42 +706,37 @@ impl ComputeNode {
         Ok(())
     }
 
-    fn download_preload_extensions(
-        self: &Arc<Self>,
-        pspec: &ParsedSpec,
-        joinset: &mut tokio::task::JoinSet<anyhow::Result<()>>,
-    ) {
-        if let Some(remote_extensions) = &pspec.spec.remote_extensions {
-            let remote_extensions = remote_extensions.clone();
-            let this = self.clone();
-            let spec = pspec.spec.clone();
-            joinset.spawn_blocking(move || {
-                // First, create control files for all available extensions
-                extension_server::create_control_files(&remote_extensions, &this.params.pgbin);
+    fn download_preload_extensions(&self, spec: &ComputeSpec) -> Result<()> {
+        let remote_extensions = if let Some(remote_extensions) = &spec.remote_extensions {
+            remote_extensions
+        } else {
+            return Ok(());
+        };
 
-                let library_load_start_time = Utc::now();
-                let rt = tokio::runtime::Handle::current();
-                let remote_ext_metrics = rt.block_on(this.prepare_preload_libraries(&spec))?;
+        // First, create control files for all available extensions
+        extension_server::create_control_files(remote_extensions, &self.params.pgbin);
 
-                let library_load_time = Utc::now()
-                    .signed_duration_since(library_load_start_time)
-                    .to_std()
-                    .unwrap()
-                    .as_millis() as u64;
-                let mut state = this.state.lock().unwrap();
-                state.metrics.load_ext_ms = library_load_time;
-                state.metrics.num_ext_downloaded = remote_ext_metrics.num_ext_downloaded;
-                state.metrics.largest_ext_size = remote_ext_metrics.largest_ext_size;
-                state.metrics.total_ext_download_size = remote_ext_metrics.total_ext_download_size;
-                info!(
-                    "Loading shared_preload_libraries took {:?}ms",
-                    library_load_time
-                );
-                info!("{:?}", remote_ext_metrics);
+        let library_load_start_time = Utc::now();
+        let rt = tokio::runtime::Handle::current();
+        let remote_ext_metrics = rt.block_on(self.prepare_preload_libraries(spec))?;
 
-                Ok::<(), anyhow::Error>(())
-            });
-        }
+        let library_load_time = Utc::now()
+            .signed_duration_since(library_load_start_time)
+            .to_std()
+            .unwrap()
+            .as_millis() as u64;
+        let mut state = self.state.lock().unwrap();
+        state.metrics.load_ext_ms = library_load_time;
+        state.metrics.num_ext_downloaded = remote_ext_metrics.num_ext_downloaded;
+        state.metrics.largest_ext_size = remote_ext_metrics.largest_ext_size;
+        state.metrics.total_ext_download_size = remote_ext_metrics.total_ext_download_size;
+        info!(
+            "Loading shared_preload_libraries took {:?}ms",
+            library_load_time
+        );
+        info!("{:?}", remote_ext_metrics);
+
+        Ok(())
     }
 
     /// Start the vm-monitor if directed to. The vm-monitor only runs on linux
@@ -2062,5 +2053,28 @@ pub fn forward_termination_signal() {
         // ROs to get a list of running xacts faster instead of going through the CLOG.
         // See https://www.postgresql.org/docs/current/server-shutdown.html for the list of modes and signals.
         kill(pg_pid, Signal::SIGINT).ok();
+    }
+}
+
+// helper trait to call JoinSet::spawn_blocking(f), but propagates the current
+// tracing span to the thread.
+trait JoinSetExt<T> {
+    fn spawn_blocking_child<F>(&mut self, f: F) -> tokio::task::AbortHandle
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send;
+}
+
+impl<T: 'static> JoinSetExt<T> for tokio::task::JoinSet<T> {
+    fn spawn_blocking_child<F>(&mut self, f: F) -> tokio::task::AbortHandle
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send,
+    {
+        let sp = tracing::Span::current();
+        self.spawn_blocking(move || {
+            let _e = sp.enter();
+            f()
+        })
     }
 }
