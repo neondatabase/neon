@@ -3,6 +3,7 @@ use std::sync::Arc;
 use chrono::Duration;
 use once_cell::sync::Lazy;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use utils::sync::duplex;
 
 use super::{Buffer, CheapCloneForRead, OwnedAsyncWriter};
@@ -270,14 +271,12 @@ where
             // then we can't shut down the timeline/tenant/pageserver cleanrly because
             // upp layers of the Pageserver write path are holding the gate open for EphemeralFile.
             let mut slice_storage = Some(request.slice);
-            let op = || async {
+            let offset = request.offset;
+            let op = async || {
                 let slice = slice_storage.take().expect(
                     "likely previous invocation of this future didn't get polled to completion",
                 );
-                let (slice, res) = self
-                    .writer
-                    .write_all_at(slice, request.offset, &self.ctx)
-                    .await;
+                let (slice, res) = self.writer.write_all_at(slice, offset, &self.ctx).await;
                 slice_storage = Some(slice);
                 res
             };
