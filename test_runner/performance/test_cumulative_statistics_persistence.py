@@ -9,6 +9,7 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_api import connection_parameters_to_env
 from fixtures.pg_version import PgVersion
+from fixtures.neon_fixtures import PgBin  # Add this import
 
 if TYPE_CHECKING:
 
