@@ -10,7 +10,7 @@ use tokio::task;
 use tracing::info;
 
 use crate::{
-    compute::{forward_termination_signal, ComputeNode},
+    compute::{ComputeNode, forward_termination_signal},
     http::JsonResponse,
 };
 

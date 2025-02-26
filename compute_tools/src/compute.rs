@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::iter::once;
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
@@ -15,13 +15,13 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use compute_api::spec::{Database, PgIdent, Role};
+use futures::StreamExt;
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
-use futures::StreamExt;
 use nix::unistd::Pid;
 use postgres;
-use postgres::error::SqlState;
 use postgres::NoTls;
+use postgres::error::SqlState;
 use tracing::{debug, error, info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
@@ -31,7 +31,7 @@ use compute_api::responses::{ComputeMetrics, ComputeStatus};
 use compute_api::spec::{ComputeFeature, ComputeMode, ComputeSpec, ExtVersion};
 use utils::measured_stream::MeasuredReader;
 
-use nix::sys::signal::{kill, Signal};
+use nix::sys::signal::{Signal, kill};
 use remote_storage::{DownloadError, RemotePath};
 use tokio::spawn;
 
@@ -49,7 +49,7 @@ use crate::spec_apply::PerDatabasePhase;
 use crate::spec_apply::PerDatabasePhase::{
     ChangeSchemaPerms, DeleteDBRoleReferences, DropLogicalSubscriptions, HandleAnonExtension,
 };
-use crate::spec_apply::{apply_operations, MutableApplyContext, DB};
+use crate::spec_apply::{DB, MutableApplyContext, apply_operations};
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
 use crate::{config, extension_server};
 
@@ -1538,7 +1538,9 @@ impl ComputeNode {
                     &postgresql_conf_path,
                     "neon.disable_logical_replication_subscribers=false",
                 )? {
-                    info!("updated postgresql.conf to set neon.disable_logical_replication_subscribers=false");
+                    info!(
+                        "updated postgresql.conf to set neon.disable_logical_replication_subscribers=false"
+                    );
                 }
                 self.pg_reload_conf()?;
             }
@@ -1765,7 +1767,9 @@ LIMIT 100",
             info!("extension already downloaded, skipping re-download");
             return Ok(0);
         } else if start_time_delta < HANG_TIMEOUT && !first_try {
-            info!("download {ext_archive_name} already started by another process, hanging untill completion or timeout");
+            info!(
+                "download {ext_archive_name} already started by another process, hanging untill completion or timeout"
+            );
             let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
             loop {
                 info!("waiting for download");

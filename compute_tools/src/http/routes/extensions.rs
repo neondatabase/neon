@@ -9,7 +9,7 @@ use http::StatusCode;
 
 use crate::{
     compute::ComputeNode,
-    http::{extract::Json, JsonResponse},
+    http::{JsonResponse, extract::Json},
 };
 
 /// Install a extension.

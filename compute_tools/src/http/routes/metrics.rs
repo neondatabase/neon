@@ -1,6 +1,6 @@
 use axum::{body::Body, response::Response};
-use http::header::CONTENT_TYPE;
 use http::StatusCode;
+use http::header::CONTENT_TYPE;
 use metrics::proto::MetricFamily;
 use metrics::{Encoder, TextEncoder};
 

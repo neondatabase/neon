@@ -10,8 +10,8 @@ use serde::Deserialize;
 use crate::{
     compute::ComputeNode,
     http::{
-        extract::{Path, Query},
         JsonResponse,
+        extract::{Path, Query},
     },
 };
 

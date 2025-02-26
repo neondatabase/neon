@@ -17,7 +17,7 @@ pub struct FailpointConfig {
     pub actions: String,
 }
 
-use crate::http::{extract::Json, JsonResponse};
+use crate::http::{JsonResponse, extract::Json};
 
 /// Configure failpoints for testing purposes.
 pub(in crate::http) async fn configure_failpoints(

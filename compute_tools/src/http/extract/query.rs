@@ -1,8 +1,8 @@
 use std::ops::{Deref, DerefMut};
 
-use axum::extract::{rejection::QueryRejection, FromRequestParts};
+use axum::extract::{FromRequestParts, rejection::QueryRejection};
 use compute_api::responses::GenericAPIError;
-use http::{request::Parts, StatusCode};
+use http::{StatusCode, request::Parts};
 
 /// Custom `Query` extractor, so that we can format errors into
 /// `JsonResponse<GenericAPIError>`.

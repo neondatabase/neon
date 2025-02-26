@@ -1,5 +1,5 @@
-use anyhow::bail;
 use anyhow::Result;
+use anyhow::bail;
 use postgres::{NoTls, SimpleQueryMessage};
 use std::time::SystemTime;
 use std::{str::FromStr, sync::Arc, thread, time::Duration};

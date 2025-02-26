@@ -40,7 +40,7 @@ use std::path::Path;
 use std::process::exit;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
-use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock, mpsc};
 use std::{thread, time::Duration};
 
 use anyhow::{Context, Result};
@@ -58,7 +58,7 @@ use compute_api::responses::{ComputeCtlConfig, ComputeStatus};
 use compute_api::spec::ComputeSpec;
 
 use compute_tools::compute::{
-    forward_termination_signal, ComputeNode, ComputeState, ParsedSpec, PG_PID,
+    ComputeNode, ComputeState, PG_PID, ParsedSpec, forward_termination_signal,
 };
 use compute_tools::configurator::launch_configurator;
 use compute_tools::extension_server::get_pg_version_string;
@@ -67,7 +67,7 @@ use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
 use compute_tools::swap::resize_swap;
-use rlimit::{setrlimit, Resource};
+use rlimit::{Resource, setrlimit};
 use utils::failpoint_support;
 
 // this is an arbitrary build tag. Fine as a default / for testing purposes

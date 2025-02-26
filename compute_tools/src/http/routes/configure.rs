@@ -11,7 +11,7 @@ use tracing::info;
 
 use crate::{
     compute::{ComputeNode, ParsedSpec},
-    http::{extract::Json, JsonResponse},
+    http::{JsonResponse, extract::Json},
 };
 
 // Accept spec in JSON format and request compute configuration. If anything

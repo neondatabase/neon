@@ -9,7 +9,7 @@ use std::process::Child;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use futures::StreamExt;
 use ini::Ini;
 use notify::{RecursiveMode, Watcher};

@@ -7,17 +7,17 @@ use std::{
 
 use anyhow::Result;
 use axum::{
+    Router,
     extract::Request,
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Router,
 };
 use http::StatusCode;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::{request_id::PropagateRequestIdLayer, trace::TraceLayer};
-use tracing::{debug, error, info, Span};
+use tracing::{Span, debug, error, info};
 use uuid::Uuid;
 
 use super::routes::{

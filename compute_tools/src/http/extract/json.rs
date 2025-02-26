@@ -1,6 +1,6 @@
 use std::ops::{Deref, DerefMut};
 
-use axum::extract::{rejection::JsonRejection, FromRequest, Request};
+use axum::extract::{FromRequest, Request, rejection::JsonRejection};
 use compute_api::responses::GenericAPIError;
 use http::StatusCode;
 
