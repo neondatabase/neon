@@ -254,7 +254,7 @@ WalRedoMain(int argc, char *argv[])
 	 * which is super strange but that's not something we can solve
 	 * for here. ¯\_(-_-)_/¯
 	 */
-	SetConfigOption("log_min_messages", "FATAL", PGC_SUSET, PGC_S_OVERRIDE);
+	SetConfigOption("log_min_messages", "WARNING", PGC_SUSET, PGC_S_OVERRIDE);
 	SetConfigOption("client_min_messages", "ERROR", PGC_SUSET,
 					PGC_S_OVERRIDE);
 
