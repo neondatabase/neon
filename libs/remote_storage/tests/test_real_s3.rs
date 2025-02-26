@@ -1,13 +1,12 @@
+use std::collections::HashSet;
 use std::env;
 use std::fmt::{Debug, Display};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
-use std::{collections::HashSet, time::SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::common::{download_to_vec, upload_stream};
 use anyhow::Context;
 use camino::Utf8Path;
 use futures_util::StreamExt;
@@ -15,11 +14,12 @@ use remote_storage::{
     DownloadError, DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath,
     RemoteStorageConfig, RemoteStorageKind, S3Config,
 };
-use test_context::test_context;
-use test_context::AsyncTestContext;
+use test_context::{AsyncTestContext, test_context};
 use tokio::io::AsyncBufReadExt;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
+
+use crate::common::{download_to_vec, upload_stream};
 
 mod common;
 
@@ -128,8 +128,10 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
         let t0_hwt = t0 + half_wt;
         let t1_hwt = t1 - half_wt;
         if !(t0_hwt..=t1_hwt).contains(&last_modified) {
-            panic!("last_modified={last_modified:?} is not between t0_hwt={t0_hwt:?} and t1_hwt={t1_hwt:?}. \
-                This likely means a large lock discrepancy between S3 and the local clock.");
+            panic!(
+                "last_modified={last_modified:?} is not between t0_hwt={t0_hwt:?} and t1_hwt={t1_hwt:?}. \
+                This likely means a large lock discrepancy between S3 and the local clock."
+            );
         }
     }
 
@@ -383,7 +385,7 @@ async fn create_s3_client(
         .as_millis();
 
     // because nanos can be the same for two threads so can millis, add randomness
-    let random = rand::thread_rng().gen::<u32>();
+    let random = rand::thread_rng().r#gen::<u32>();
 
     let remote_storage_config = RemoteStorageConfig {
         storage: RemoteStorageKind::AwsS3(S3Config {

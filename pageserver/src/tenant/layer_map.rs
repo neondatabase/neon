@@ -46,24 +46,24 @@
 mod historic_layer_coverage;
 mod layer_coverage;
 
-use crate::context::RequestContext;
-use crate::keyspace::KeyPartitioning;
-use crate::tenant::storage_layer::InMemoryLayer;
-use anyhow::Result;
-use pageserver_api::key::Key;
-use pageserver_api::keyspace::{KeySpace, KeySpaceAccum};
-use range_set_blaze::{CheckSortedDisjoint, RangeSetBlaze};
 use std::collections::{HashMap, VecDeque};
 use std::iter::Peekable;
 use std::ops::Range;
 use std::sync::Arc;
+
+use anyhow::Result;
+use historic_layer_coverage::BufferedHistoricLayerCoverage;
+pub use historic_layer_coverage::LayerKey;
+use pageserver_api::key::Key;
+use pageserver_api::keyspace::{KeySpace, KeySpaceAccum};
+use range_set_blaze::{CheckSortedDisjoint, RangeSetBlaze};
 use tokio::sync::watch;
 use utils::lsn::Lsn;
 
-use historic_layer_coverage::BufferedHistoricLayerCoverage;
-pub use historic_layer_coverage::LayerKey;
-
 use super::storage_layer::{LayerVisibilityHint, PersistentLayerDesc};
+use crate::context::RequestContext;
+use crate::keyspace::KeyPartitioning;
+use crate::tenant::storage_layer::InMemoryLayer;
 
 ///
 /// LayerMap tracks what layers exist on a timeline.
@@ -1066,18 +1066,17 @@ impl LayerMap {
 
 #[cfg(test)]
 mod tests {
-    use crate::tenant::{storage_layer::LayerName, IndexPart};
-    use pageserver_api::{
-        key::DBDIR_KEY,
-        keyspace::{KeySpace, KeySpaceRandomAccum},
-    };
-    use std::{collections::HashMap, path::PathBuf};
-    use utils::{
-        id::{TenantId, TimelineId},
-        shard::TenantShardId,
-    };
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use pageserver_api::key::DBDIR_KEY;
+    use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
+    use utils::id::{TenantId, TimelineId};
+    use utils::shard::TenantShardId;
 
     use super::*;
+    use crate::tenant::IndexPart;
+    use crate::tenant::storage_layer::LayerName;
 
     #[derive(Clone)]
     struct LayerDesc {
@@ -1417,9 +1416,11 @@ mod tests {
         assert!(!shadow.ranges.is_empty());
 
         // At least some layers should be marked covered
-        assert!(layer_visibilities
-            .iter()
-            .any(|i| matches!(i.1, LayerVisibilityHint::Covered)));
+        assert!(
+            layer_visibilities
+                .iter()
+                .any(|i| matches!(i.1, LayerVisibilityHint::Covered))
+        );
 
         let layer_visibilities = layer_visibilities.into_iter().collect::<HashMap<_, _>>();
 

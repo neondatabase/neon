@@ -1,23 +1,18 @@
+use std::ops::Range;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
+use std::time::{Duration, SystemTime};
+
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::HistoricLayerInfo;
 use pageserver_api::shard::{ShardIdentity, ShardIndex, TenantShardId};
-use std::ops::Range;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Weak};
-use std::time::{Duration, SystemTime};
 use tracing::Instrument;
+use utils::generation::Generation;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
 use utils::sync::{gate, heavier_once_cell};
-
-use crate::config::PageServerConf;
-use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
-use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
-use crate::task_mgr::TaskKind;
-use crate::tenant::timeline::{CompactionError, GetVectoredError};
-use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
 
 use super::delta_layer::{self};
 use super::image_layer::{self};
@@ -25,8 +20,13 @@ use super::{
     AsLayerDesc, ImageLayerWriter, LayerAccessStats, LayerAccessStatsReset, LayerName,
     LayerVisibilityHint, PersistentLayerDesc, ValuesReconstructState,
 };
-
-use utils::generation::Generation;
+use crate::config::PageServerConf;
+use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
+use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
+use crate::task_mgr::TaskKind;
+use crate::tenant::Timeline;
+use crate::tenant::remote_timeline_client::LayerFileMetadata;
+use crate::tenant::timeline::{CompactionError, GetVectoredError};
 
 #[cfg(test)]
 mod tests;
@@ -1873,8 +1873,8 @@ impl ResidentLayer {
         self.owner.record_access(ctx);
 
         let res = match inner {
-            Delta(ref d) => delta_layer::DeltaLayerInner::load_keys(d, ctx).await,
-            Image(ref i) => image_layer::ImageLayerInner::load_keys(i, ctx).await,
+            Delta(d) => delta_layer::DeltaLayerInner::load_keys(d, ctx).await,
+            Image(i) => image_layer::ImageLayerInner::load_keys(i, ctx).await,
         };
         res.with_context(|| format!("Layer index is corrupted for {self}"))
     }
@@ -1920,7 +1920,7 @@ impl ResidentLayer {
         let owner = &self.owner.0;
 
         match self.downloaded.get(owner, ctx).await? {
-            Delta(ref d) => d
+            Delta(d) => d
                 .copy_prefix(writer, until, ctx)
                 .await
                 .with_context(|| format!("copy_delta_prefix until {until} of {self}")),
@@ -1943,7 +1943,7 @@ impl ResidentLayer {
     ) -> anyhow::Result<&delta_layer::DeltaLayerInner> {
         use LayerKind::*;
         match self.downloaded.get(&self.owner.0, ctx).await? {
-            Delta(ref d) => Ok(d),
+            Delta(d) => Ok(d),
             Image(_) => Err(anyhow::anyhow!("image layer")),
         }
     }
@@ -1955,7 +1955,7 @@ impl ResidentLayer {
     ) -> anyhow::Result<&image_layer::ImageLayerInner> {
         use LayerKind::*;
         match self.downloaded.get(&self.owner.0, ctx).await? {
-            Image(ref d) => Ok(d),
+            Image(d) => Ok(d),
             Delta(_) => Err(anyhow::anyhow!("delta layer")),
         }
     }

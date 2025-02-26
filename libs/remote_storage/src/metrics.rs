@@ -1,5 +1,5 @@
 use metrics::{
-    register_histogram_vec, register_int_counter, register_int_counter_vec, Histogram, IntCounter,
+    Histogram, IntCounter, register_histogram_vec, register_int_counter, register_int_counter_vec,
 };
 use once_cell::sync::Lazy;
 
@@ -16,8 +16,8 @@ pub(crate) enum RequestKind {
     Head = 6,
 }
 
-use scopeguard::ScopeGuard;
 use RequestKind::*;
+use scopeguard::ScopeGuard;
 
 impl RequestKind {
     const fn as_str(&self) -> &'static str {

@@ -3,23 +3,22 @@ use std::fmt::Display;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context};
-use futures::future::Either;
+use anyhow::{Context, anyhow};
 use futures::StreamExt;
+use futures::future::Either;
 use pageserver_api::shard::ShardIdentity;
 use postgres_backend::{CopyStreamHandlerEnd, PostgresBackend};
-use postgres_ffi::waldecoder::WalDecodeError;
-use postgres_ffi::{get_current_timestamp, waldecoder::WalStreamDecoder};
+use postgres_ffi::get_current_timestamp;
+use postgres_ffi::waldecoder::{WalDecodeError, WalStreamDecoder};
 use pq_proto::{BeMessage, InterpretedWalRecordsBody, WalSndKeepAlive};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::error::SendError;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
-use tracing::{error, info, info_span, Instrument};
+use tracing::{Instrument, error, info, info_span};
 use utils::critical;
 use utils::lsn::Lsn;
-use utils::postgres_client::Compression;
-use utils::postgres_client::InterpretedFormat;
+use utils::postgres_client::{Compression, InterpretedFormat};
 use wal_decoder::models::{InterpretedWalRecord, InterpretedWalRecords};
 use wal_decoder::wire_format::ToWireFormat;
 
@@ -691,22 +690,20 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
 }
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, str::FromStr, time::Duration};
+    use std::collections::HashMap;
+    use std::str::FromStr;
+    use std::time::Duration;
 
     use pageserver_api::shard::{ShardIdentity, ShardStripeSize};
     use postgres_ffi::MAX_SEND_SIZE;
     use tokio::sync::mpsc::error::TryRecvError;
-    use utils::{
-        id::{NodeId, TenantTimelineId},
-        lsn::Lsn,
-        shard::{ShardCount, ShardNumber},
-    };
+    use utils::id::{NodeId, TenantTimelineId};
+    use utils::lsn::Lsn;
+    use utils::shard::{ShardCount, ShardNumber};
 
-    use crate::{
-        send_interpreted_wal::{AttachShardNotification, Batch, InterpretedWalReader},
-        test_utils::Env,
-        wal_reader_stream::StreamingWalReader,
-    };
+    use crate::send_interpreted_wal::{AttachShardNotification, Batch, InterpretedWalReader};
+    use crate::test_utils::Env;
+    use crate::wal_reader_stream::StreamingWalReader;
 
     #[tokio::test]
     async fn test_interpreted_wal_reader_fanout() {
@@ -808,9 +805,11 @@ mod tests {
 
         // This test uses logical messages. Those only go to shard 0. Check that the
         // filtering worked and shard 1 did not get any.
-        assert!(shard_1_interpreted_records
-            .iter()
-            .all(|recs| recs.records.is_empty()));
+        assert!(
+            shard_1_interpreted_records
+                .iter()
+                .all(|recs| recs.records.is_empty())
+        );
 
         // Shard 0 should not receive anything more since the reader is
         // going through wal that it has already processed.
@@ -1002,17 +1001,22 @@ mod tests {
         const WAL_READER_BATCH_SIZE: usize = 8192;
 
         let start_lsn = Lsn::from_str("0/149FD18").unwrap();
-        let shard_0_start_lsn = Lsn::from_str("0/14AFE10").unwrap();
         let env = Env::new(true).unwrap();
+        let mut next_record_lsns = Vec::default();
         let tli = env
             .make_timeline(NodeId(1), TenantTimelineId::generate(), start_lsn)
             .await
             .unwrap();
 
         let resident_tli = tli.wal_residence_guard().await.unwrap();
-        let end_watch = Env::write_wal(tli, start_lsn, SIZE, MSG_COUNT, None)
-            .await
-            .unwrap();
+        let end_watch =
+            Env::write_wal(tli, start_lsn, SIZE, MSG_COUNT, Some(&mut next_record_lsns))
+                .await
+                .unwrap();
+
+        assert!(next_record_lsns.len() > 3);
+        let shard_0_start_lsn = next_record_lsns[3];
+
         let end_pos = end_watch.get();
 
         let streaming_wal_reader = StreamingWalReader::new(
@@ -1065,7 +1069,7 @@ mod tests {
         );
 
         let reader_state = reader.state();
-        let mut reader_fut = std::pin::pin!(reader.run(start_lsn, &None));
+        let mut reader_fut = std::pin::pin!(reader.run(shard_0_start_lsn, &None));
         loop {
             let poll = futures::poll!(reader_fut.as_mut());
             assert!(poll.is_pending());

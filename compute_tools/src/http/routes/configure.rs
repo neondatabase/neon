@@ -1,18 +1,16 @@
 use std::sync::Arc;
 
-use axum::{extract::State, response::Response};
-use compute_api::{
-    requests::ConfigurationRequest,
-    responses::{ComputeStatus, ComputeStatusResponse},
-};
+use axum::extract::State;
+use axum::response::Response;
+use compute_api::requests::ConfigurationRequest;
+use compute_api::responses::{ComputeStatus, ComputeStatusResponse};
 use http::StatusCode;
 use tokio::task;
 use tracing::info;
 
-use crate::{
-    compute::{ComputeNode, ParsedSpec},
-    http::{extract::Json, JsonResponse},
-};
+use crate::compute::{ComputeNode, ParsedSpec};
+use crate::http::JsonResponse;
+use crate::http::extract::Json;
 
 // Accept spec in JSON format and request compute configuration. If anything
 // goes wrong after we set the compute status to `ConfigurationPending` and

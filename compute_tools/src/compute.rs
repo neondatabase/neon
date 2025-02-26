@@ -1,42 +1,37 @@
 use std::collections::{HashMap, HashSet};
-use std::env;
-use std::fs;
 use std::iter::once;
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::sync::atomic::AtomicU32;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
-use std::time::Duration;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use std::{env, fs};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use compute_api::spec::{Database, PgIdent, Role};
+use compute_api::privilege::Privilege;
+use compute_api::responses::{ComputeMetrics, ComputeStatus};
+use compute_api::spec::{
+    ComputeFeature, ComputeMode, ComputeSpec, Database, ExtVersion, PgIdent, Role,
+};
+use futures::StreamExt;
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
-use futures::StreamExt;
+use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use postgres;
-use postgres::error::SqlState;
 use postgres::NoTls;
+use postgres::error::SqlState;
+use remote_storage::{DownloadError, RemotePath};
+use tokio::spawn;
 use tracing::{debug, error, info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
-
-use compute_api::privilege::Privilege;
-use compute_api::responses::{ComputeMetrics, ComputeStatus};
-use compute_api::spec::{ComputeFeature, ComputeMode, ComputeSpec, ExtVersion};
 use utils::measured_stream::MeasuredReader;
 
-use nix::sys::signal::{kill, Signal};
-use remote_storage::{DownloadError, RemotePath};
-use tokio::spawn;
-
 use crate::installed_extensions::get_installed_extensions;
-use crate::local_proxy;
 use crate::pg_helpers::*;
 use crate::spec::*;
 use crate::spec_apply::ApplySpecPhase::{
@@ -45,13 +40,12 @@ use crate::spec_apply::ApplySpecPhase::{
     HandleNeonExtension, HandleOtherExtensions, RenameAndDeleteDatabases, RenameRoles,
     RunInEachDatabase,
 };
-use crate::spec_apply::PerDatabasePhase;
 use crate::spec_apply::PerDatabasePhase::{
     ChangeSchemaPerms, DeleteDBRoleReferences, DropLogicalSubscriptions, HandleAnonExtension,
 };
-use crate::spec_apply::{apply_operations, MutableApplyContext, DB};
+use crate::spec_apply::{DB, MutableApplyContext, PerDatabasePhase, apply_operations};
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
-use crate::{config, extension_server};
+use crate::{config, extension_server, local_proxy};
 
 pub static SYNC_SAFEKEEPERS_PID: AtomicU32 = AtomicU32::new(0);
 pub static PG_PID: AtomicU32 = AtomicU32::new(0);
@@ -546,6 +540,7 @@ impl ComputeNode {
 
     // Fast path for sync_safekeepers. If they're already synced we get the lsn
     // in one roundtrip. If not, we should do a full sync_safekeepers.
+    #[instrument(skip_all)]
     pub fn check_safekeepers_synced(&self, compute_state: &ComputeState) -> Result<Option<Lsn>> {
         let start_time = Utc::now();
 
@@ -1317,7 +1312,7 @@ impl ComputeNode {
         // Merge-apply spec & changes to PostgreSQL state.
         self.apply_spec_sql(spec.clone(), conf.clone(), max_concurrent_connections)?;
 
-        if let Some(ref local_proxy) = &spec.clone().local_proxy_config {
+        if let Some(local_proxy) = &spec.clone().local_proxy_config {
             info!("configuring local_proxy");
             local_proxy::configure(local_proxy).context("apply_config local_proxy")?;
         }
@@ -1537,7 +1532,9 @@ impl ComputeNode {
                     &postgresql_conf_path,
                     "neon.disable_logical_replication_subscribers=false",
                 )? {
-                    info!("updated postgresql.conf to set neon.disable_logical_replication_subscribers=false");
+                    info!(
+                        "updated postgresql.conf to set neon.disable_logical_replication_subscribers=false"
+                    );
                 }
                 self.pg_reload_conf()?;
             }
@@ -1764,7 +1761,9 @@ LIMIT 100",
             info!("extension already downloaded, skipping re-download");
             return Ok(0);
         } else if start_time_delta < HANG_TIMEOUT && !first_try {
-            info!("download {ext_archive_name} already started by another process, hanging untill completion or timeout");
+            info!(
+                "download {ext_archive_name} already started by another process, hanging untill completion or timeout"
+            );
             let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
             loop {
                 info!("waiting for download");

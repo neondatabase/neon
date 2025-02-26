@@ -1,11 +1,13 @@
-use std::{collections::HashMap, time::SystemTime};
-
-use crate::tenant::{remote_timeline_client::index::LayerFileMetadata, storage_layer::LayerName};
+use std::collections::HashMap;
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr, TimestampSeconds};
+use serde_with::{DisplayFromStr, TimestampSeconds, serde_as};
+use utils::generation::Generation;
+use utils::id::TimelineId;
 
-use utils::{generation::Generation, id::TimelineId};
+use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
+use crate::tenant::storage_layer::LayerName;
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct HeatMapTenant {

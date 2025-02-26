@@ -398,6 +398,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     container:
       image: ${{ matrix.image }}
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
     # Increase timeout to 8h, default timeout is 6h

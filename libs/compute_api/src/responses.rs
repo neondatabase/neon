@@ -6,10 +6,8 @@ use chrono::{DateTime, Utc};
 use jsonwebtoken::jwk::JwkSet;
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::{
-    privilege::Privilege,
-    spec::{ComputeSpec, Database, ExtVersion, PgIdent, Role},
-};
+use crate::privilege::Privilege;
+use crate::spec::{ComputeSpec, Database, ExtVersion, PgIdent, Role};
 
 #[derive(Serialize, Debug, Deserialize)]
 pub struct GenericAPIError {

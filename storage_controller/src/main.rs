@@ -1,26 +1,26 @@
-use anyhow::{anyhow, Context};
-use clap::Parser;
-use hyper0::Uri;
-use metrics::launch_timestamp::LaunchTimestamp;
-use metrics::BuildInfo;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+
+use anyhow::{Context, anyhow};
+use clap::Parser;
+use hyper0::Uri;
+use metrics::BuildInfo;
+use metrics::launch_timestamp::LaunchTimestamp;
 use storage_controller::http::make_router;
 use storage_controller::metrics::preinitialize_metrics;
 use storage_controller::persistence::Persistence;
 use storage_controller::service::chaos_injector::ChaosInjector;
 use storage_controller::service::{
-    Config, Service, HEARTBEAT_INTERVAL_DEFAULT, LONG_RECONCILE_THRESHOLD_DEFAULT,
+    Config, HEARTBEAT_INTERVAL_DEFAULT, LONG_RECONCILE_THRESHOLD_DEFAULT,
     MAX_OFFLINE_INTERVAL_DEFAULT, MAX_WARMING_UP_INTERVAL_DEFAULT,
-    PRIORITY_RECONCILER_CONCURRENCY_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT,
+    PRIORITY_RECONCILER_CONCURRENCY_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT, Service,
 };
 use tokio::signal::unix::SignalKind;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use utils::auth::{JwtAuth, SwappableJwtAuth};
 use utils::logging::{self, LogFormat};
-
 use utils::sentry_init::init_sentry;
 use utils::{project_build_tag, project_git_version, tcp_listener};
 
@@ -34,7 +34,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 /// This adds roughly 3% overhead for allocations on average, which is acceptable considering
 /// performance-sensitive code will avoid allocations as far as possible anyway.
 #[allow(non_upper_case_globals)]
-#[export_name = "malloc_conf"]
+#[unsafe(export_name = "malloc_conf")]
 pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:21\0";
 
 #[derive(Parser)]
@@ -297,8 +297,8 @@ async fn async_main() -> anyhow::Result<()> {
             // Production systems should always have secrets configured: if public_key was not set
             // then we would implicitly disable auth.
             anyhow::bail!(
-                    "Insecure config!  One or more secrets is not set.  This is only permitted in `--dev` mode"
-                );
+                "Insecure config!  One or more secrets is not set.  This is only permitted in `--dev` mode"
+            );
         }
         StrictMode::Strict if args.compute_hook_url.is_none() => {
             // Production systems should always have a compute hook set, to prevent falling

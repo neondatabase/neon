@@ -2,125 +2,83 @@
 //! Management HTTP API
 //!
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
-use std::collections::HashMap;
+use std::collections::{BinaryHeap, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use enumset::EnumSet;
 use futures::future::join_all;
-use futures::StreamExt;
-use futures::TryFutureExt;
+use futures::{StreamExt, TryFutureExt};
 use http_utils::endpoint::{
-    profile_cpu_handler, profile_heap_handler, prometheus_metrics_handler, request_span,
+    self, attach_openapi_ui, auth_middleware, check_permission_with, profile_cpu_handler,
+    profile_heap_handler, prometheus_metrics_handler, request_span,
 };
+use http_utils::error::{ApiError, HttpErrorBody};
 use http_utils::failpoints::failpoints_handler;
-use http_utils::request::must_parse_query_param;
-use http_utils::request::{get_request_param, must_get_query_param, parse_query_param};
+use http_utils::json::{json_request, json_request_maybe, json_response};
+use http_utils::request::{
+    get_request_param, must_get_query_param, must_parse_query_param, parse_query_param,
+    parse_request_param,
+};
+use http_utils::{RequestExt, RouterBuilder};
 use humantime::format_rfc3339;
-use hyper::header;
-use hyper::StatusCode;
-use hyper::{Body, Request, Response, Uri};
+use hyper::{Body, Request, Response, StatusCode, Uri, header};
 use metrics::launch_timestamp::LaunchTimestamp;
 use pageserver_api::models::virtual_file::IoMode;
-use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
-use pageserver_api::models::IngestAuxFilesRequest;
-use pageserver_api::models::ListAuxFilesRequest;
-use pageserver_api::models::LocationConfig;
-use pageserver_api::models::LocationConfigListResponse;
-use pageserver_api::models::LocationConfigMode;
-use pageserver_api::models::LsnLease;
-use pageserver_api::models::LsnLeaseRequest;
-use pageserver_api::models::OffloadedTimelineInfo;
-use pageserver_api::models::PageTraceEvent;
-use pageserver_api::models::ShardParameters;
-use pageserver_api::models::TenantConfigPatchRequest;
-use pageserver_api::models::TenantDetails;
-use pageserver_api::models::TenantLocationConfigRequest;
-use pageserver_api::models::TenantLocationConfigResponse;
-use pageserver_api::models::TenantScanRemoteStorageResponse;
-use pageserver_api::models::TenantScanRemoteStorageShard;
-use pageserver_api::models::TenantShardLocation;
-use pageserver_api::models::TenantShardSplitRequest;
-use pageserver_api::models::TenantShardSplitResponse;
-use pageserver_api::models::TenantSorting;
-use pageserver_api::models::TenantState;
-use pageserver_api::models::TenantWaitLsnRequest;
-use pageserver_api::models::TimelineArchivalConfigRequest;
-use pageserver_api::models::TimelineCreateRequestMode;
-use pageserver_api::models::TimelineCreateRequestModeImportPgdata;
-use pageserver_api::models::TimelinesInfoAndOffloaded;
-use pageserver_api::models::TopTenantShardItem;
-use pageserver_api::models::TopTenantShardsRequest;
-use pageserver_api::models::TopTenantShardsResponse;
-use pageserver_api::shard::ShardCount;
-use pageserver_api::shard::TenantShardId;
-use remote_storage::DownloadError;
-use remote_storage::GenericRemoteStorage;
-use remote_storage::TimeTravelError;
+use pageserver_api::models::{
+    DownloadRemoteLayersTaskSpawnRequest, IngestAuxFilesRequest, ListAuxFilesRequest,
+    LocationConfig, LocationConfigListResponse, LocationConfigMode, LsnLease, LsnLeaseRequest,
+    OffloadedTimelineInfo, PageTraceEvent, ShardParameters, StatusResponse,
+    TenantConfigPatchRequest, TenantConfigRequest, TenantDetails, TenantInfo,
+    TenantLocationConfigRequest, TenantLocationConfigResponse, TenantScanRemoteStorageResponse,
+    TenantScanRemoteStorageShard, TenantShardLocation, TenantShardSplitRequest,
+    TenantShardSplitResponse, TenantSorting, TenantState, TenantWaitLsnRequest,
+    TimelineArchivalConfigRequest, TimelineCreateRequest, TimelineCreateRequestMode,
+    TimelineCreateRequestModeImportPgdata, TimelineGcRequest, TimelineInfo,
+    TimelinesInfoAndOffloaded, TopTenantShardItem, TopTenantShardsRequest, TopTenantShardsResponse,
+};
+use pageserver_api::shard::{ShardCount, TenantShardId};
+use remote_storage::{DownloadError, GenericRemoteStorage, TimeTravelError};
 use scopeguard::defer;
-use tenant_size_model::{svg::SvgBranchKind, SizeResult, StorageModel};
+use tenant_size_model::svg::SvgBranchKind;
+use tenant_size_model::{SizeResult, StorageModel};
 use tokio::time::Instant;
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::auth::SwappableJwtAuth;
+use utils::generation::Generation;
+use utils::id::{TenantId, TimelineId};
+use utils::lsn::Lsn;
 
 use crate::config::PageServerConf;
-use crate::context::RequestContextBuilder;
-use crate::context::{DownloadBehavior, RequestContext};
+use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::{LocationConf, TenantConfOpt};
-use crate::tenant::mgr::GetActiveTenantError;
 use crate::tenant::mgr::{
-    GetTenantError, TenantManager, TenantMapError, TenantMapInsertError, TenantSlotError,
-    TenantSlotUpsertError, TenantStateError,
+    GetActiveTenantError, GetTenantError, TenantManager, TenantMapError, TenantMapInsertError,
+    TenantSlot, TenantSlotError, TenantSlotUpsertError, TenantStateError, UpsertLocationError,
 };
-use crate::tenant::mgr::{TenantSlot, UpsertLocationError};
-use crate::tenant::remote_timeline_client;
-use crate::tenant::remote_timeline_client::download_index_part;
-use crate::tenant::remote_timeline_client::list_remote_tenant_shards;
-use crate::tenant::remote_timeline_client::list_remote_timelines;
+use crate::tenant::remote_timeline_client::{
+    download_index_part, list_remote_tenant_shards, list_remote_timelines,
+};
 use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
-use crate::tenant::storage_layer::IoConcurrency;
-use crate::tenant::storage_layer::LayerAccessStatsReset;
-use crate::tenant::storage_layer::LayerName;
-use crate::tenant::timeline::import_pgdata;
-use crate::tenant::timeline::offload::offload_timeline;
-use crate::tenant::timeline::offload::OffloadError;
-use crate::tenant::timeline::CompactFlags;
-use crate::tenant::timeline::CompactOptions;
-use crate::tenant::timeline::CompactRequest;
-use crate::tenant::timeline::CompactionError;
-use crate::tenant::timeline::Timeline;
-use crate::tenant::timeline::WaitLsnTimeout;
-use crate::tenant::timeline::WaitLsnWaiter;
-use crate::tenant::GetTimelineError;
-use crate::tenant::OffloadedTimeline;
-use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
-use crate::DEFAULT_PG_VERSION;
-use crate::{disk_usage_eviction_task, tenant};
-use http_utils::{
-    endpoint::{self, attach_openapi_ui, auth_middleware, check_permission_with},
-    error::{ApiError, HttpErrorBody},
-    json::{json_request, json_request_maybe, json_response},
-    request::parse_request_param,
-    RequestExt, RouterBuilder,
+use crate::tenant::storage_layer::{IoConcurrency, LayerAccessStatsReset, LayerName};
+use crate::tenant::timeline::offload::{OffloadError, offload_timeline};
+use crate::tenant::timeline::{
+    CompactFlags, CompactOptions, CompactRequest, CompactionError, Timeline, WaitLsnTimeout,
+    WaitLsnWaiter, import_pgdata,
 };
-use pageserver_api::models::{
-    StatusResponse, TenantConfigRequest, TenantInfo, TimelineCreateRequest, TimelineGcRequest,
-    TimelineInfo,
+use crate::tenant::{
+    GetTimelineError, LogicalSizeCalculationCause, OffloadedTimeline, PageReconstructError,
+    remote_timeline_client,
 };
-use utils::{
-    auth::SwappableJwtAuth,
-    generation::Generation,
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
+use crate::{DEFAULT_PG_VERSION, disk_usage_eviction_task, tenant};
 
 // For APIs that require an Active tenant, how long should we block waiting for that state?
 // This is not functionally necessary (clients will retry), but avoids generating a lot of
@@ -1128,12 +1086,12 @@ async fn tenant_list_handler(
             ApiError::ResourceUnavailable("Tenant map is initializing or shutting down".into())
         })?
         .iter()
-        .map(|(id, state, gen)| TenantInfo {
+        .map(|(id, state, gen_)| TenantInfo {
             id: *id,
             state: state.clone(),
             current_physical_size: None,
             attachment_status: state.attachment_status(),
-            generation: (*gen)
+            generation: (*gen_)
                 .into()
                 .expect("Tenants are always attached with a generation"),
             gc_blocking: None,
@@ -1670,9 +1628,8 @@ async fn block_or_unblock_gc(
     request: Request<Body>,
     block: bool,
 ) -> Result<Response<Body>, ApiError> {
-    use crate::tenant::{
-        remote_timeline_client::WaitCompletionError, upload_queue::NotInitialized,
-    };
+    use crate::tenant::remote_timeline_client::WaitCompletionError;
+    use crate::tenant::upload_queue::NotInitialized;
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
@@ -2058,7 +2015,9 @@ async fn tenant_time_travel_remote_storage_handler(
         )));
     }
 
-    tracing::info!("Issuing time travel request internally. timestamp={timestamp_raw}, done_if_after={done_if_after_raw}");
+    tracing::info!(
+        "Issuing time travel request internally. timestamp={timestamp_raw}, done_if_after={done_if_after_raw}"
+    );
 
     remote_timeline_client::upload::time_travel_recover_tenant(
         &state.remote_storage,
@@ -2459,8 +2418,9 @@ async fn timeline_detach_ancestor_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
-    use crate::tenant::timeline::detach_ancestor;
     use pageserver_api::models::detach_ancestor::AncestorDetached;
+
+    use crate::tenant::timeline::detach_ancestor;
 
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
@@ -2806,14 +2766,19 @@ async fn tenant_scan_remote_handler(
             .await
             {
                 Ok((index_part, index_generation, _index_mtime)) => {
-                    tracing::info!("Found timeline {tenant_shard_id}/{timeline_id} metadata (gen {index_generation:?}, {} layers, {} consistent LSN)",
-                        index_part.layer_metadata.len(), index_part.metadata.disk_consistent_lsn());
+                    tracing::info!(
+                        "Found timeline {tenant_shard_id}/{timeline_id} metadata (gen {index_generation:?}, {} layers, {} consistent LSN)",
+                        index_part.layer_metadata.len(),
+                        index_part.metadata.disk_consistent_lsn()
+                    );
                     generation = std::cmp::max(generation, index_generation);
                 }
                 Err(DownloadError::NotFound) => {
                     // This is normal for tenants that were created with multiple shards: they have an unsharded path
                     // containing the timeline's initdb tarball but no index.  Otherwise it is a bit strange.
-                    tracing::info!("Timeline path {tenant_shard_id}/{timeline_id} exists in remote storage but has no index, skipping");
+                    tracing::info!(
+                        "Timeline path {tenant_shard_id}/{timeline_id} exists in remote storage but has no index, skipping"
+                    );
                     continue;
                 }
                 Err(e) => {
@@ -3432,7 +3397,9 @@ async fn read_tar_eof(mut reader: (impl tokio::io::AsyncRead + Unpin)) -> anyhow
         anyhow::bail!("unexpected non-zero bytes after the tar archive");
     }
     if trailing_bytes % 512 != 0 {
-        anyhow::bail!("unexpected number of zeros ({trailing_bytes}), not divisible by tar block size (512 bytes), after the tar archive");
+        anyhow::bail!(
+            "unexpected number of zeros ({trailing_bytes}), not divisible by tar block size (512 bytes), after the tar archive"
+        );
     }
     Ok(())
 }

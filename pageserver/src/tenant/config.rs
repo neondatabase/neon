@@ -8,16 +8,17 @@
 //! We cannot use global or default config instead, because wrong settings
 //! may lead to a data loss.
 //!
+use std::num::NonZeroU64;
+use std::time::Duration;
+
 pub(crate) use pageserver_api::config::TenantConfigToml as TenantConf;
-use pageserver_api::models::CompactionAlgorithmSettings;
-use pageserver_api::models::EvictionPolicy;
-use pageserver_api::models::{self, TenantConfigPatch};
+use pageserver_api::models::{
+    self, CompactionAlgorithmSettings, EvictionPolicy, TenantConfigPatch,
+};
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
 use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::num::NonZeroU64;
-use std::time::Duration;
 use utils::generation::Generation;
 use utils::postgres_client::PostgresClientProtocol;
 
@@ -739,8 +740,9 @@ impl From<TenantConfOpt> for models::TenantConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use models::TenantConfig;
+
+    use super::*;
 
     #[test]
     fn de_serializing_pageserver_config_omits_empty_values() {

@@ -1,35 +1,31 @@
 //! Part of Safekeeper pretending to be Postgres, i.e. handling Postgres
 //! protocol commands.
 
-use anyhow::Context;
-use pageserver_api::models::ShardParameters;
-use pageserver_api::shard::{ShardIdentity, ShardStripeSize};
-use safekeeper_api::models::ConnectionId;
-use safekeeper_api::Term;
 use std::future::Future;
 use std::str::{self, FromStr};
 use std::sync::Arc;
+
+use anyhow::Context;
+use pageserver_api::models::ShardParameters;
+use pageserver_api::shard::{ShardIdentity, ShardStripeSize};
+use postgres_backend::{PostgresBackend, QueryError};
+use postgres_ffi::PG_TLI;
+use pq_proto::{BeMessage, FeStartupPacket, INT4_OID, RowDescriptor, TEXT_OID};
+use regex::Regex;
+use safekeeper_api::Term;
+use safekeeper_api::models::ConnectionId;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{debug, info, info_span, Instrument};
+use tracing::{Instrument, debug, info, info_span};
+use utils::auth::{Claims, JwtAuth, Scope};
+use utils::id::{TenantId, TenantTimelineId, TimelineId};
+use utils::lsn::Lsn;
 use utils::postgres_client::PostgresClientProtocol;
 use utils::shard::{ShardCount, ShardNumber};
 
 use crate::auth::check_permission;
-use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
-
-use crate::metrics::{TrafficMetrics, PG_QUERIES_GAUGE};
+use crate::metrics::{PG_QUERIES_GAUGE, TrafficMetrics};
 use crate::timeline::TimelineError;
 use crate::{GlobalTimelines, SafeKeeperConf};
-use postgres_backend::PostgresBackend;
-use postgres_backend::QueryError;
-use postgres_ffi::PG_TLI;
-use pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID};
-use regex::Regex;
-use utils::auth::{Claims, JwtAuth, Scope};
-use utils::{
-    id::{TenantId, TenantTimelineId, TimelineId},
-    lsn::Lsn,
-};
 
 /// Safekeeper handler of postgres commands
 pub struct SafekeeperPostgresHandler {
@@ -65,9 +61,6 @@ enum SafekeeperPostgresCommand {
     },
     IdentifySystem,
     TimelineStatus,
-    JSONCtrl {
-        cmd: AppendLogicalMessage,
-    },
 }
 
 fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
@@ -137,11 +130,6 @@ fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
         Ok(SafekeeperPostgresCommand::IdentifySystem)
     } else if cmd.starts_with("TIMELINE_STATUS") {
         Ok(SafekeeperPostgresCommand::TimelineStatus)
-    } else if cmd.starts_with("JSON_CTRL") {
-        let cmd = cmd.strip_prefix("JSON_CTRL").context("invalid prefix")?;
-        Ok(SafekeeperPostgresCommand::JSONCtrl {
-            cmd: serde_json::from_str(cmd)?,
-        })
     } else {
         anyhow::bail!("unsupported command {cmd}");
     }
@@ -153,7 +141,6 @@ fn cmd_to_string(cmd: &SafekeeperPostgresCommand) -> &str {
         SafekeeperPostgresCommand::StartReplication { .. } => "START_REPLICATION",
         SafekeeperPostgresCommand::TimelineStatus => "TIMELINE_STATUS",
         SafekeeperPostgresCommand::IdentifySystem => "IDENTIFY_SYSTEM",
-        SafekeeperPostgresCommand::JSONCtrl { .. } => "JSON_CTRL",
     }
 }
 
@@ -362,9 +349,6 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                 }
                 SafekeeperPostgresCommand::IdentifySystem => self.handle_identify_system(pgb).await,
                 SafekeeperPostgresCommand::TimelineStatus => self.handle_timeline_status(pgb).await,
-                SafekeeperPostgresCommand::JSONCtrl { ref cmd } => {
-                    handle_json_ctrl(self, pgb, cmd).await
-                }
             }
         })
     }
