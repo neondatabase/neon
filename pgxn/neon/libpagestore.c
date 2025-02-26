@@ -1326,6 +1326,16 @@ pg_init_libpagestore(void)
 							PGC_USERSET,
 							0,	/* no flags required */
 							NULL, (GucIntAssignHook) &readahead_buffer_resize, NULL);
+	DefineCustomIntVariable("neon.readahead_getpage_pull_timeout",
+							"readahead response pull timeout",
+							"Time between active tries to pull data from the "
+							"PageStream connection when we have pages which "
+							"were read ahead but not yet received.",
+							&readahead_getpage_pull_timeout_ms,
+							-1, -1, INT_MAX,
+							PGC_USERSET,
+							GUC_UNIT_MS,	/* no flags required */
+							NULL, NULL, NULL);
 	DefineCustomIntVariable("neon.protocol_version",
 							"Version of compute<->page server protocol",
 							NULL,
@@ -1339,7 +1349,7 @@ pg_init_libpagestore(void)
 
 	DefineCustomIntVariable("neon.pageserver_response_log_timeout",
 							"pageserver response log timeout",
-							"If the pageserver doesn't respond to a request within this timeout,"
+							"If the pageserver doesn't respond to a request within this timeout, "
 							"a message is printed to the log.",
 							&pageserver_response_log_timeout,
 							10000, 100, INT_MAX,
@@ -1349,7 +1359,7 @@ pg_init_libpagestore(void)
 
 	DefineCustomIntVariable("neon.pageserver_response_disconnect_timeout",
 							"pageserver response diconnect timeout",
-							"If the pageserver doesn't respond to a request within this timeout,"
+							"If the pageserver doesn't respond to a request within this timeout, "
 							"disconnect and reconnect.",
 							&pageserver_response_disconnect_timeout,
 							120000, 100, INT_MAX,

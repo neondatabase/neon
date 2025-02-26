@@ -67,9 +67,10 @@
 #include "storage/smgr.h"
 #include "utils/timeout.h"
 
+#include "bitmap.h"
+#include "neon.h"
 #include "neon_perf_counters.h"
 #include "pagestore_client.h"
-#include "bitmap.h"
 
 #if PG_VERSION_NUM >= 150000
 #include "access/xlogrecovery.h"
@@ -131,7 +132,7 @@ static uint32 local_request_counter;
  * Note: we'll trigger this every 100ms (= 0.1 seconds), which should be frequent
  * enough to fix overhead issues without too much issues with other overheads.
  */
-#define	PS_BACKGROUND_DELAY_MS 100
+int				readahead_getpage_pull_timeout_ms = -1;
 static int		PS_TIMEOUT_ID = 0;
 static bool		timeout_set = false;
 static bool		timeout_signaled = false;
@@ -264,7 +265,6 @@ typedef struct PrfHashEntry
 #define SH_DEFINE
 #define SH_DECLARE
 #include "lib/simplehash.h"
-#include "neon.h"
 
 /*
  * PrefetchState maintains the state of (prefetch) getPage@LSN requests.
@@ -4643,7 +4643,8 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 static void
 reconfigure_timeout_if_needed(void)
 {
-	bool	needs_set = MyPState->ring_receive != MyPState->ring_unused;
+	bool	needs_set = MyPState->ring_receive != MyPState->ring_unused &&
+						readahead_getpage_pull_timeout_ms > 0;
 
 	if (needs_set != timeout_set)
 	{
@@ -4660,13 +4661,13 @@ reconfigure_timeout_if_needed(void)
 		if (needs_set)
 		{
 #if PG_MAJORVERSION_NUM <= 14
-			enable_timeout_after(PS_TIMEOUT_ID, PS_BACKGROUND_DELAY_MS);
+			enable_timeout_after(PS_TIMEOUT_ID, readahead_getpage_pull_timeout_ms);
 #else
 			enable_timeout_every(
 				PS_TIMEOUT_ID,
 				TimestampTzPlusMilliseconds(GetCurrentTimestamp(),
-											PS_BACKGROUND_DELAY_MS),
-				PS_BACKGROUND_DELAY_MS
+											readahead_getpage_pull_timeout_ms),
+				readahead_getpage_pull_timeout_ms
 			);
 #endif
 			timeout_set = true;
@@ -4709,7 +4710,7 @@ pagestore_smgr_processinterrupts(void)
 {
 	if (timeout_signaled)
 	{
-		if (!readpage_reentrant_guard)
+		if (!readpage_reentrant_guard && readahead_getpage_pull_timeout_ms > 0)
 			prefetch_pump_state(true);
 
 		reconfigure_timeout_if_needed();

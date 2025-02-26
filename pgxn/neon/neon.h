@@ -22,6 +22,7 @@ extern char *neon_tenant;
 extern char *wal_acceptors_list;
 extern int	wal_acceptor_reconnect_timeout;
 extern int	wal_acceptor_connection_timeout;
+extern int	readahead_getpage_pull_timeout_ms;
 
 #if PG_MAJORVERSION_NUM >= 17
 extern uint32		WAIT_EVENT_NEON_LFC_MAINTENANCE;
