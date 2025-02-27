@@ -906,7 +906,8 @@ jobs:
 
   push-neon-image-prod:
     needs: [ meta, generate-image-maps, neon-image, test-images ]
-    if: ${{ contains(fromJSON('["storage-release", "proxy-release"]'), needs.meta.outputs.run-kind) }}
+    # Depends on jobs that can get skipped
+    if: ${{ !failure() && !cancelled() && contains(fromJSON('["storage-release", "proxy-release"]'), needs.meta.outputs.run-kind) }}
     uses: ./.github/workflows/_push-to-container-registry.yml
     permissions:
       id-token: write  # Required for aws/azure login
@@ -924,7 +925,8 @@ jobs:
 
   push-compute-image-prod:
     needs: [ meta, generate-image-maps, vm-compute-node-image, test-images ]
-    if: ${{ needs.meta.outputs.run-kind == 'compute-release' }}
+    # Depends on jobs that can get skipped
+    if: ${{ !failure() && !cancelled() && needs.meta.outputs.run-kind == 'compute-release' }}
     uses: ./.github/workflows/_push-to-container-registry.yml
     permissions:
       id-token: write  # Required for aws/azure login
