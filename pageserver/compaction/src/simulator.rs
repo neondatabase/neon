@@ -1,22 +1,17 @@
 mod draw;
 
-use draw::{LayerTraceEvent, LayerTraceFile, LayerTraceOp};
+use std::fmt::Write;
+use std::ops::Range;
+use std::sync::{Arc, Mutex};
 
+use draw::{LayerTraceEvent, LayerTraceFile, LayerTraceOp};
 use futures::StreamExt;
 use pageserver_api::shard::ShardIdentity;
 use rand::Rng;
 use tracing::info;
-
 use utils::lsn::Lsn;
 
-use std::fmt::Write;
-use std::ops::Range;
-use std::sync::Arc;
-use std::sync::Mutex;
-
-use crate::helpers::PAGE_SZ;
-use crate::helpers::{merge_delta_keys, overlaps_with};
-
+use crate::helpers::{PAGE_SZ, merge_delta_keys, overlaps_with};
 use crate::interface;
 use crate::interface::CompactionLayer;
 

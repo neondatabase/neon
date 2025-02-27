@@ -1,11 +1,10 @@
-use crate::error::ApiError;
-use crate::json::{json_request, json_response};
-
 use hyper::{Body, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
-
 use utils::failpoint_support::apply_failpoint;
+
+use crate::error::ApiError;
+use crate::json::{json_request, json_response};
 
 pub type ConfigureFailpointsRequest = Vec<FailpointConfig>;
 

@@ -21,15 +21,12 @@
 //!
 //! Another explaination can be found here: <https://brandur.org/rate-limiting>
 
-use std::{
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Mutex,
-    },
-    time::Duration,
-};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
-use tokio::{sync::Notify, time::Instant};
+use tokio::sync::Notify;
+use tokio::time::Instant;
 
 pub struct LeakyBucketConfig {
     /// This is the "time cost" of a single request unit.

@@ -1,8 +1,9 @@
 //! A wrapper around `ArcSwap` that ensures there is only one writer at a time and writes
 //! don't block reads.
 
-use arc_swap::ArcSwap;
 use std::sync::Arc;
+
+use arc_swap::ArcSwap;
 use tokio::sync::TryLockError;
 
 pub struct GuardArcSwap<T> {

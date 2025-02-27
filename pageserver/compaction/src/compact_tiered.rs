@@ -17,20 +17,19 @@
 //! distance of image layers in LSN dimension is roughly equal to the logical
 //! database size. For example, if the logical database size is 10 GB, we would
 //! generate new image layers every 10 GB of WAL.
-use futures::StreamExt;
-use pageserver_api::shard::ShardIdentity;
-use tracing::{debug, info};
-
 use std::collections::{HashSet, VecDeque};
 use std::ops::Range;
 
-use crate::helpers::{
-    accum_key_values, keyspace_total_size, merge_delta_keys_buffered, overlaps_with, PAGE_SZ,
-};
-use crate::interface::*;
+use futures::StreamExt;
+use pageserver_api::shard::ShardIdentity;
+use tracing::{debug, info};
 use utils::lsn::Lsn;
 
+use crate::helpers::{
+    PAGE_SZ, accum_key_values, keyspace_total_size, merge_delta_keys_buffered, overlaps_with,
+};
 use crate::identify_levels::identify_level;
+use crate::interface::*;
 
 /// Main entry point to compaction.
 ///
@@ -541,10 +540,11 @@ where
             }
         }
         // Open stream
-        let key_value_stream =
-            std::pin::pin!(merge_delta_keys_buffered::<E>(deltas.as_slice(), ctx)
+        let key_value_stream = std::pin::pin!(
+            merge_delta_keys_buffered::<E>(deltas.as_slice(), ctx)
                 .await?
-                .map(Result::<_, anyhow::Error>::Ok));
+                .map(Result::<_, anyhow::Error>::Ok)
+        );
         let mut new_jobs = Vec::new();
 
         // Slide a window through the keyspace

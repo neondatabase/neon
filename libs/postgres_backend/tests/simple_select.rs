@@ -1,10 +1,11 @@
+use std::io::Cursor;
+use std::sync::Arc;
+
 /// Test postgres_backend_async with tokio_postgres
 use once_cell::sync::Lazy;
 use postgres_backend::{AuthType, Handler, PostgresBackend, QueryError};
 use pq_proto::{BeMessage, RowDescriptor};
 use rustls::crypto::ring;
-use std::io::Cursor;
-use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_postgres::config::SslMode;

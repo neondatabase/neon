@@ -38,7 +38,8 @@ pub fn rename_noreplace<P1: ?Sized + NixPath, P2: ?Sized + NixPath>(
 
 #[cfg(test)]
 mod test {
-    use std::{fs, path::PathBuf};
+    use std::fs;
+    use std::path::PathBuf;
 
     use super::*;
 
