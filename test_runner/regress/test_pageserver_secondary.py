@@ -976,7 +976,7 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
     # Use a custom configuration that gives up earlier than usual.
     # We can't hydrate everything anyway because of the failpoints.
     config = StorageControllerMigrationConfig(
-        secondary_warmup_timeout="5s", secondary_download_request_timeout="2s"
+        secondary_warmup_timeout="5s", secondary_download_request_timeout="2s", graceful=False
     )
     env.storage_controller.tenant_shard_migrate(
         TenantShardId(tenant_id, shard_number=0, shard_count=0), ps_secondary.id, config
