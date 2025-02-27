@@ -599,13 +599,35 @@ impl Timeline {
         let n_blocks = self
             .get_slru_segment_size(kind, segno, Version::Lsn(lsn), ctx)
             .await?;
+
+        let keyspace = KeySpace::single(
+            slru_block_to_key(kind, segno, 0)..slru_block_to_key(kind, segno, n_blocks),
+        );
+
+        let partitions = keyspace.partition(
+            self.get_shard_identity(),
+            Timeline::MAX_GET_VECTORED_KEYS * BLCKSZ as u64,
+        );
+
+        let io_concurrency = IoConcurrency::spawn_from_conf(
+            self.conf,
+            self.gate
+                .enter()
+                .map_err(|_| PageReconstructError::Cancelled)?,
+        );
+
         let mut segment = BytesMut::with_capacity(n_blocks as usize * BLCKSZ as usize);
-        for blkno in 0..n_blocks {
-            let block = self
-                .get_slru_page_at_lsn(kind, segno, blkno, lsn, ctx)
+        for part in partitions.parts {
+            let blocks = self
+                .get_vectored(part, lsn, io_concurrency.clone(), ctx)
                 .await?;
-            segment.extend_from_slice(&block[..BLCKSZ as usize]);
+
+            for (_key, block) in blocks {
+                let block = block?;
+                segment.extend_from_slice(&block[..BLCKSZ as usize]);
+            }
         }
+
         Ok(segment.freeze())
     }
 
