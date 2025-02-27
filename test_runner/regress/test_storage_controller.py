@@ -766,7 +766,10 @@ def test_storage_controller_stuck_compute_hook(
         # status is cleared.
         handle_params["status"] = 423
         migrate_fut = executor.submit(
-            env.storage_controller.tenant_shard_migrate, shard_0_id, dest_ps_id
+            env.storage_controller.tenant_shard_migrate,
+            shard_0_id,
+            dest_ps_id,
+            config=StorageControllerMigrationConfig(graceful=False, force=True),
         )
 
         def logged_stuck():
@@ -794,7 +797,10 @@ def test_storage_controller_stuck_compute_hook(
         # Now, do a migration in the opposite direction
         handle_params["status"] = 423
         migrate_fut = executor.submit(
-            env.storage_controller.tenant_shard_migrate, shard_0_id, origin_pageserver.id
+            env.storage_controller.tenant_shard_migrate,
+            shard_0_id,
+            origin_pageserver.id,
+            config=StorageControllerMigrationConfig(graceful=False, force=True),
         )
 
         def logged_stuck_again():
@@ -1028,7 +1034,11 @@ def test_storage_controller_compute_hook_revert(
     with pytest.raises(StorageControllerApiException, match="Timeout waiting for shard"):
         # We expect the controller to give us an error because its reconciliation timed out
         # waiting for the compute hook.
-        env.storage_controller.tenant_shard_migrate(tenant_shard_id, pageserver_b.id)
+        env.storage_controller.tenant_shard_migrate(
+            tenant_shard_id,
+            pageserver_b.id,
+            config=StorageControllerMigrationConfig(graceful=False, force=True),
+        )
 
     # Although the migration API failed, the hook should still see pageserver B (it remembers what
     # was posted even when returning an error code)
@@ -1069,7 +1079,11 @@ def test_storage_controller_compute_hook_revert(
     # Migrate B -> A, with a working compute hook: the controller should notify the hook because the
     # last update it made that was acked (423) by the compute was for node B.
     handle_params["status"] = 200
-    env.storage_controller.tenant_shard_migrate(tenant_shard_id, pageserver_a.id)
+    env.storage_controller.tenant_shard_migrate(
+        tenant_shard_id,
+        pageserver_a.id,
+        config=StorageControllerMigrationConfig(graceful=False, force=True),
+    )
 
     wait_until(lambda: notified_ps(pageserver_a.id))
 
@@ -3935,9 +3949,6 @@ def test_storage_controller_graceful_migration(neon_env_builder: NeonEnvBuilder,
 
         # Turn off ordinary optimisations so that our migration will stay put once complete
         env.storage_controller.tenant_policy_update(env.initial_tenant, {"scheduling": "Essential"})
-
-        # Controller will log a warning when we force this
-        env.storage_controller.allowed_errors.append(".*worse-scoring node.*")
 
     # We expect this API call to succeed, and result in a new secondary location on the destination
     env.storage_controller.tenant_shard_migrate(
