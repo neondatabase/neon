@@ -4,6 +4,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use diesel::deserialize::{FromSql, FromSqlRow};
+use diesel::pg::Pg;
 use diesel::prelude::*;
 use diesel_async::async_connection_wrapper::AsyncConnectionWrapper;
 use diesel_async::pooled_connection::bb8::Pool;
@@ -1556,7 +1558,33 @@ pub(crate) struct SafekeeperPersistence {
     pub(crate) port: i32,
     pub(crate) http_port: i32,
     pub(crate) availability_zone_id: String,
-    pub(crate) scheduling_policy: String,
+    pub(crate) scheduling_policy: SkSchedulingPolicyFromSql,
+}
+
+/// Wrapper struct around [`SkSchedulingPolicy`] because both it and [`FromSql`] are from foreign crates,
+/// and we don't want to make [`safekeeper_api`] depend on [`diesel`].
+#[derive(Serialize, Deserialize, FromSqlRow, Eq, PartialEq, Debug, Copy, Clone)]
+pub(crate) struct SkSchedulingPolicyFromSql(pub(crate) SkSchedulingPolicy);
+
+impl From<SkSchedulingPolicy> for SkSchedulingPolicyFromSql {
+    fn from(value: SkSchedulingPolicy) -> Self {
+        SkSchedulingPolicyFromSql(value)
+    }
+}
+
+impl FromSql<diesel::sql_types::VarChar, Pg> for SkSchedulingPolicyFromSql {
+    fn from_sql(
+        bytes: <Pg as diesel::backend::Backend>::RawValue<'_>,
+    ) -> diesel::deserialize::Result<Self> {
+        let bytes = bytes.as_bytes();
+        match core::str::from_utf8(bytes) {
+            Ok(s) => match SkSchedulingPolicy::from_str(s) {
+                Ok(policy) => Ok(SkSchedulingPolicyFromSql(policy)),
+                Err(e) => Err(format!("can't parse: {e}").into()),
+            },
+            Err(e) => Err(format!("invalid UTF-8 for scheduling policy: {e}").into()),
+        }
+    }
 }
 
 impl SafekeeperPersistence {
@@ -1572,14 +1600,10 @@ impl SafekeeperPersistence {
             port: upsert.port,
             http_port: upsert.http_port,
             availability_zone_id: upsert.availability_zone_id,
-            scheduling_policy: String::from(scheduling_policy),
+            scheduling_policy: SkSchedulingPolicyFromSql(scheduling_policy),
         }
     }
     pub(crate) fn as_describe_response(&self) -> Result<SafekeeperDescribeResponse, DatabaseError> {
-        let scheduling_policy =
-            SkSchedulingPolicy::from_str(&self.scheduling_policy).map_err(|e| {
-                DatabaseError::Logical(format!("can't construct SkSchedulingPolicy: {e:?}"))
-            })?;
         Ok(SafekeeperDescribeResponse {
             id: NodeId(self.id as u64),
             region_id: self.region_id.clone(),
@@ -1588,7 +1612,7 @@ impl SafekeeperPersistence {
             port: self.port,
             http_port: self.http_port,
             availability_zone_id: self.availability_zone_id.clone(),
-            scheduling_policy,
+            scheduling_policy: self.scheduling_policy.0,
         })
     }
 }

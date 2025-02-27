@@ -7,14 +7,11 @@ use utils::lsn::Lsn;
 use utils::postgres_client::{Compression, InterpretedFormat};
 
 use crate::models::{
-    FlushUncommittedRecords, InterpretedWalRecord, InterpretedWalRecords, MetadataRecord,
+    FlushUncommittedRecords, InterpretedWalRecord, InterpretedWalRecords, MetadataRecord, proto,
 };
-
 use crate::serialized_batch::{
     ObservedValueMeta, SerializedValueBatch, SerializedValueMeta, ValueMeta,
 };
-
-use crate::models::proto;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToWireFormatError {
@@ -83,8 +80,8 @@ impl ToWireFormat for InterpretedWalRecords {
         format: InterpretedFormat,
         compression: Option<Compression>,
     ) -> Result<Bytes, ToWireFormatError> {
-        use async_compression::tokio::write::ZstdEncoder;
         use async_compression::Level;
+        use async_compression::tokio::write::ZstdEncoder;
 
         let encode_res: Result<Bytes, ToWireFormatError> = match format {
             InterpretedFormat::Bincode => {

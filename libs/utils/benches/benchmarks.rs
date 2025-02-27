@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use criterion::{criterion_group, criterion_main, Bencher, Criterion};
+use criterion::{Bencher, Criterion, criterion_group, criterion_main};
 use pprof::criterion::{Output, PProfProfiler};
 use utils::id;
 use utils::logging::log_slow;

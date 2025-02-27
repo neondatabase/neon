@@ -4,10 +4,9 @@ use std::io::prelude::*;
 use std::path::Path;
 
 use anyhow::Result;
-
-use crate::pg_helpers::escape_conf_value;
-use crate::pg_helpers::{GenericOptionExt, PgOptionsSerialize};
 use compute_api::spec::{ComputeMode, ComputeSpec, GenericOption};
+
+use crate::pg_helpers::{GenericOptionExt, PgOptionsSerialize, escape_conf_value};
 
 /// Check that `line` is inside a text file and put it there if it is not.
 /// Create file if it doesn't exist.

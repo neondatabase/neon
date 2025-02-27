@@ -58,9 +58,8 @@ where
 
 #[cfg(test)]
 mod test {
-    use crate::fs_ext::{is_directory_empty, list_dir};
-
     use super::ignore_absent_files;
+    use crate::fs_ext::{is_directory_empty, list_dir};
 
     #[test]
     fn is_empty_dir() {

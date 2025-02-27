@@ -8,7 +8,6 @@
 use std::time::Duration;
 
 use anyhow::Context;
-
 use camino::Utf8PathBuf;
 
 use crate::{background_process, local_env};

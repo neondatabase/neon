@@ -1,7 +1,7 @@
-use compute_api::responses::{InstalledExtension, InstalledExtensions};
 use std::collections::HashMap;
 
 use anyhow::Result;
+use compute_api::responses::{InstalledExtension, InstalledExtensions};
 use postgres::{Client, NoTls};
 
 use crate::metrics::INSTALLED_EXTENSIONS;

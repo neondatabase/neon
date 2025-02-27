@@ -37,27 +37,20 @@
 //! ```
 //!
 use std::collections::BTreeMap;
-use std::net::IpAddr;
-use std::net::Ipv4Addr;
-use std::net::SocketAddr;
-use std::net::TcpStream;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use compute_api::requests::ConfigurationRequest;
-use compute_api::responses::ComputeCtlConfig;
-use compute_api::spec::Database;
-use compute_api::spec::PgIdent;
-use compute_api::spec::RemoteExtSpec;
-use compute_api::spec::Role;
-use nix::sys::signal::kill;
-use nix::sys::signal::Signal;
+use compute_api::responses::{ComputeCtlConfig, ComputeStatus, ComputeStatusResponse};
+use compute_api::spec::{
+    Cluster, ComputeFeature, ComputeMode, ComputeSpec, Database, PgIdent, RemoteExtSpec, Role,
+};
+use nix::sys::signal::{Signal, kill};
 use pageserver_api::shard::ShardStripeSize;
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
@@ -68,9 +61,6 @@ use utils::id::{NodeId, TenantId, TimelineId};
 use crate::local_env::LocalEnv;
 use crate::postgresql_conf::PostgresConf;
 use crate::storage_controller::StorageController;
-
-use compute_api::responses::{ComputeStatus, ComputeStatusResponse};
-use compute_api::spec::{Cluster, ComputeFeature, ComputeMode, ComputeSpec};
 
 // contents of a endpoint.json file
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
@@ -237,7 +227,9 @@ impl ComputeControlPlane {
             });
 
             if let Some((key, _)) = duplicates.next() {
-                bail!("attempting to create a duplicate primary endpoint on tenant {tenant_id}, timeline {timeline_id}: endpoint {key:?} exists already. please don't do this, it is not supported.");
+                bail!(
+                    "attempting to create a duplicate primary endpoint on tenant {tenant_id}, timeline {timeline_id}: endpoint {key:?} exists already. please don't do this, it is not supported."
+                );
             }
         }
         Ok(())

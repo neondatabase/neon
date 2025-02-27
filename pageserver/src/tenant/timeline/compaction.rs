@@ -8,6 +8,13 @@ use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::ops::{Deref, Range};
 use std::sync::Arc;
 
+use super::layer_manager::LayerManager;
+use super::{
+    CompactFlags, CompactOptions, CompactionError, CreateImageLayersError, DurationRecorder,
+    GetVectoredError, ImageLayerCreationMode, LastImageLayerCreationStatus, RecordedDuration,
+    Timeline,
+};
+
 use anyhow::{Context, anyhow, bail};
 use bytes::Bytes;
 use enumset::EnumSet;
@@ -31,15 +38,8 @@ use utils::critical;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
 
-use super::layer_manager::LayerManager;
-use super::{
-    CompactFlags, CompactOptions, CompactionError, CreateImageLayersError, DurationRecorder,
-    GetVectoredError, ImageLayerCreationMode, LastImageLayerCreationStatus, PageReconstructError,
-    RecordedDuration, Timeline,
-};
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
-use crate::pgdatadir_mapping::CollectKeySpaceError;
 use crate::statvfs::Statvfs;
 use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::gc_block::GcBlock;
@@ -975,18 +975,12 @@ impl Timeline {
 
             // Suppress errors when cancelled.
             Err(_) if self.cancel.is_cancelled() => {}
-            Err(CompactionError::ShuttingDown) => {}
-            Err(CompactionError::CollectKeySpaceError(CollectKeySpaceError::Cancelled)) => {}
+            Err(err) if err.is_cancel() => {}
 
             // Alert on critical errors that indicate data corruption.
-            Err(
-                err @ CompactionError::CollectKeySpaceError(
-                    CollectKeySpaceError::Decode(_)
-                    | CollectKeySpaceError::PageRead(
-                        PageReconstructError::MissingKey(_) | PageReconstructError::WalRedo(_),
-                    ),
-                ),
-            ) => critical!("could not compact, repartitioning keyspace failed: {err:?}"),
+            Err(err) if err.is_critical() => {
+                critical!("could not compact, repartitioning keyspace failed: {err:?}");
+            }
 
             // Log other errors. No partitioning? This is normal, if the timeline was just created
             // as an empty timeline. Also in unit tests, when we use the timeline as a simple
@@ -1159,7 +1153,7 @@ impl Timeline {
             // - We do not run concurrently with other kinds of compaction, so the only layer map writes we race with are:
             //    - GC, which at worst witnesses us "undelete" a layer that they just deleted.
             //    - ingestion, which only inserts layers, therefore cannot collide with us.
-            let resident = layer.download_and_keep_resident().await?;
+            let resident = layer.download_and_keep_resident(ctx).await?;
 
             let keys_written = resident
                 .filter(&self.shard_identity, &mut image_layer_writer, ctx)
@@ -1387,14 +1381,14 @@ impl Timeline {
 
         let mut fully_compacted = true;
 
-        deltas_to_compact.push(first_level0_delta.download_and_keep_resident().await?);
+        deltas_to_compact.push(first_level0_delta.download_and_keep_resident(ctx).await?);
         for l in level0_deltas_iter {
             let lsn_range = &l.layer_desc().lsn_range;
 
             if lsn_range.start != prev_lsn_end {
                 break;
             }
-            deltas_to_compact.push(l.download_and_keep_resident().await?);
+            deltas_to_compact.push(l.download_and_keep_resident(ctx).await?);
             deltas_to_compact_bytes += l.metadata().file_size;
             prev_lsn_end = lsn_range.end;
 
@@ -2834,7 +2828,7 @@ impl Timeline {
                 total_downloaded_size += layer.layer_desc().file_size;
             }
             total_layer_size += layer.layer_desc().file_size;
-            let resident_layer = layer.download_and_keep_resident().await?;
+            let resident_layer = layer.download_and_keep_resident(ctx).await?;
             downloaded_layers.push(resident_layer);
         }
         info!(
@@ -3410,6 +3404,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
     async fn downcast_delta_layer(
         &self,
         layer: &OwnArc<PersistentLayerDesc>,
+        ctx: &RequestContext,
     ) -> anyhow::Result<Option<ResidentDeltaLayer>> {
         // this is a lot more complex than a simple downcast...
         if layer.is_delta() {
@@ -3417,7 +3412,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
                 let guard = self.timeline.layers.read().await;
                 guard.get_from_desc(layer)
             };
-            let result = l.download_and_keep_resident().await?;
+            let result = l.download_and_keep_resident(ctx).await?;
 
             Ok(Some(ResidentDeltaLayer(result)))
         } else {
