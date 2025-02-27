@@ -393,10 +393,6 @@ impl TimelineHandles {
             .await
             .map_err(|e| match e {
                 timeline::handle::GetError::TenantManager(e) => e,
-                timeline::handle::GetError::TimelineGateClosed => {
-                    trace!("timeline gate closed");
-                    GetActiveTimelineError::Timeline(GetTimelineError::ShuttingDown)
-                }
                 timeline::handle::GetError::PerTimelineStateShutDown => {
                     trace!("per-timeline state shut down");
                     GetActiveTimelineError::Timeline(GetTimelineError::ShuttingDown)
@@ -430,6 +426,8 @@ impl timeline::handle::Types for TenantManagerTypes {
 pub(crate) struct TenantManagerCacheItem {
     pub(crate) timeline: Arc<Timeline>,
     pub(crate) metrics: Arc<TimelineMetrics>,
+    #[allow(dead_code)] // we store it to keep the gate open
+    pub(crate) gate_guard: Arc<GateGuard>,
 }
 
 impl std::ops::Deref for TenantManagerCacheItem {
@@ -439,11 +437,7 @@ impl std::ops::Deref for TenantManagerCacheItem {
     }
 }
 
-impl timeline::handle::ArcTimeline<TenantManagerTypes> for TenantManagerCacheItem {
-    fn gate(&self) -> &utils::sync::gate::Gate {
-        &self.timeline.gate
-    }
-
+impl timeline::handle::Timeline<TenantManagerTypes> for TenantManagerCacheItem {
     fn shard_timeline_id(&self) -> timeline::handle::ShardTimelineId {
         Timeline::shard_timeline_id(&self.timeline)
     }
@@ -505,9 +499,26 @@ impl timeline::handle::TenantManager<TenantManagerTypes> for TenantManagerWrappe
         let timeline = tenant_shard
             .get_timeline(timeline_id, true)
             .map_err(GetActiveTimelineError::Timeline)?;
+        // this enter() is expensive in production code because
+        // it hits the global Arc<Timeline>::gate refcounts.
+        // That's why we do it only once per connection, on handle cache miss.
+        let gate_guard = match timeline.gate.enter() {
+            Ok(guard) => guard,
+            Err(_) => {
+                return Err(GetActiveTimelineError::Timeline(
+                    GetTimelineError::ShuttingDown,
+                ));
+            }
+        };
+        // the cache item itself needs to be cheaply clonable because handles are
+        // values (not refs). TODO: maybe we can avoid that?
+        let gate_guard = Arc::new(gate_guard);
+        // TODO: wrap in another Arc to make clones cheap
+        let metrics = Arc::clone(&timeline.metrics);
         Ok(TenantManagerCacheItem {
-            metrics: Arc::clone(&timeline.metrics),
             timeline,
+            metrics,
+            gate_guard,
         })
     }
 }
