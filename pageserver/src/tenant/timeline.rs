@@ -286,7 +286,7 @@ pub struct Timeline {
     // The LSN of gc-compaction that was last applied to this timeline.
     gc_compaction_state: ArcSwap<Option<GcCompactionState>>,
 
-    pub(crate) metrics: TimelineMetrics,
+    pub(crate) metrics: Arc<TimelineMetrics>,
 
     // `Timeline` doesn't write these metrics itself, but it manages the lifetime.  Code
     // in `crate::page_service` writes these metrics.
@@ -2658,14 +2658,14 @@ impl Timeline {
         }
 
         Arc::new_cyclic(|myself| {
-            let metrics = TimelineMetrics::new(
+            let metrics = Arc::new(TimelineMetrics::new(
                 &tenant_shard_id,
                 &timeline_id,
                 crate::metrics::EvictionsWithLowResidenceDurationBuilder::new(
                     "mtime",
                     evictions_low_residence_duration_metric_threshold,
                 ),
-            );
+            ));
             let aux_file_metrics = metrics.aux_file_size_gauge.clone();
 
             let mut result = Timeline {

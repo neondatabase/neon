@@ -95,7 +95,11 @@ use once_cell::sync::Lazy;
 use tracing::warn;
 use utils::{id::TimelineId, shard::TenantShardId};
 
-use crate::{metrics::StorageIoSizeMetrics, task_mgr::TaskKind, tenant::Timeline};
+use crate::{
+    metrics::{StorageIoSizeMetrics, TimelineMetrics},
+    task_mgr::TaskKind,
+    tenant::Timeline,
+};
 
 // The main structure of this module, see module-level comment.
 pub struct RequestContext {
@@ -107,7 +111,7 @@ pub struct RequestContext {
     scope: Scope,
 }
 
-// We wrap the `Arc<Timeline>`s inside another Arc to avoid child
+// We wrap the `Arc<StorageIoSizeMetrics>`s inside another Arc to avoid child
 // context creation contending for the ref counters of the Arc<Timeline>,
 // which are shared among all tasks that operate on the timeline, especially
 // concurrent page_service connections.
@@ -124,7 +128,7 @@ pub(crate) enum Scope {
     },
     Timeline {
         #[allow(clippy::redundant_allocation)]
-        arc_arc: Arc<Arc<Timeline>>,
+        arc_arc: Arc<Arc<TimelineMetrics>>,
     },
     #[cfg(test)]
     UnitTest {
@@ -143,16 +147,18 @@ impl Scope {
     }
     /// NB: this allocates, so, use only at relatively long-lived roots, e.g., at start
     /// of a compaction iteration.
-    pub(crate) fn new_timeline(timeline: &Arc<Timeline>) -> Self {
+    pub(crate) fn new_timeline(timeline: &Timeline) -> Self {
         Scope::Timeline {
-            arc_arc: Arc::new(Arc::clone(timeline)),
+            arc_arc: Arc::new(Arc::clone(&timeline.metrics)),
         }
     }
     pub(crate) fn new_page_service_pagestream(
-        handle: &crate::tenant::timeline::handle::Handle<crate::page_service::TenantManagerTypes>,
+        timeline_handle: &crate::tenant::timeline::handle::Handle<
+            crate::page_service::TenantManagerTypes,
+        >,
     ) -> Self {
         Scope::Timeline {
-            arc_arc: crate::tenant::timeline::handle::Handle::clone_timeline(handle),
+            arc_arc: Arc::new(Arc::clone(&timeline_handle.metrics)),
         }
     }
     pub(crate) fn new_secondary_timeline(
@@ -475,7 +481,7 @@ impl RequestContext {
                     io_size_metrics
                 }
             }
-            Scope::Timeline { arc_arc } => &arc_arc.metrics.storage_io_size,
+            Scope::Timeline { arc_arc } => &arc_arc.storage_io_size,
             Scope::SecondaryTimeline { io_size_metrics } => io_size_metrics,
             Scope::SecondaryTenant { io_size_metrics } => io_size_metrics,
             #[cfg(test)]
