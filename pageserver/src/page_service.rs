@@ -421,14 +421,10 @@ impl timeline::handle::Types for TenantManagerTypes {
     type Timeline = TenantManagerCacheItem;
 }
 
-#[derive(Clone)]
 pub(crate) struct TenantManagerCacheItem {
     pub(crate) timeline: Arc<Timeline>,
-    /// Wrapped in Arc to enable clonging so that
-    /// [`timeline::handle::Cache`] can hand out owned values.
-    /// See [`timeline::handle`] module comment for details.
     #[allow(dead_code)] // we store it to keep the gate open
-    pub(crate) gate_guard: Arc<GateGuard>,
+    pub(crate) gate_guard: GateGuard,
 }
 
 impl std::ops::Deref for TenantManagerCacheItem {
@@ -502,7 +498,7 @@ impl timeline::handle::TenantManager<TenantManagerTypes> for TenantManagerWrappe
             .map_err(GetActiveTimelineError::Timeline)?;
 
         let gate_guard = match timeline.gate.enter() {
-            Ok(guard) => Arc::new(guard),
+            Ok(guard) => guard,
             Err(_) => {
                 return Err(GetActiveTimelineError::Timeline(
                     GetTimelineError::ShuttingDown,
