@@ -49,6 +49,9 @@ class NeonBranch:
             self.neon_api.create_endpoint(self.project_id, self.id, "read_only", {})["endpoint"],
         )
 
+    def delete(self):
+        self.project.delete_branch(self.id)
+
 
 class NeonProject:
     def __init__(self, neon_api: NeonAPI, pg_version: PgVersion):
