@@ -262,7 +262,17 @@ fn maybe_cgexec(cmd: &str) -> Command {
     }
 }
 
-type PostgresHandle = (std::process::Child, tokio::task::JoinHandle<Result<()>>);
+struct PostgresHandle {
+    postgres: std::process::Child,
+    log_collector: tokio::task::JoinHandle<Result<()>>,
+}
+
+impl PostgresHandle {
+    /// Return PID of the postgres (postmaster) process
+    fn pid(&self) -> Pid {
+        Pid::from_raw(self.postgres.id() as i32)
+    }
+}
 
 struct StartVmMonitorResult {
     #[cfg(target_os = "linux")]
@@ -455,8 +465,7 @@ impl ComputeNode {
 
             // If the error happened after starting PostgreSQL, kill it
             if let Some(ref pg_process) = pg_process {
-                let pm_pid = Pid::from_raw(pg_process.0.id() as i32);
-                kill(pm_pid, Signal::SIGQUIT).ok();
+                kill(pg_process.pid(), Signal::SIGQUIT).ok();
             }
         } else {
             // Success!
@@ -467,7 +476,9 @@ impl ComputeNode {
         // If startup was successful, or it failed in the late stages,
         // PostgreSQL is now running. Wait until it exits.
         let exit_code = if let Some(pg_handle) = pg_process {
-            this.wait_postgres(pg_handle)
+            let exit_status = this.wait_postgres(pg_handle);
+            info!("Postgres exited with code {}, shutting down", exit_status);
+            exit_status.code()
         } else {
             None
         };
@@ -675,7 +686,7 @@ impl ComputeNode {
         // Start Postgres
         let start_time = Utc::now();
         let pg_process = self.start_postgres(pspec.storage_auth_token.clone())?;
-        let postmaster_pid = pg_process.0.id();
+        let postmaster_pid = pg_process.pid();
         *pg_handle = Some(pg_process);
 
         // If this is a primary endpoint, perform some post-startup configuration before
@@ -728,9 +739,9 @@ impl ComputeNode {
         Ok(())
     }
 
+    /// Start the vm-monitor if directed to. The vm-monitor only runs on linux
+    /// because it requires cgroups.
     fn start_vm_monitor(&self, disable_lfc_resizing: bool) -> StartVmMonitorResult {
-        // Start the vm-monitor if directed to. The vm-monitor only runs on linux
-        // because it requires cgroups.
         cfg_if::cfg_if! {
             if #[cfg(target_os = "linux")] {
                 use std::env;
@@ -1280,27 +1291,28 @@ impl ComputeNode {
 
         wait_for_postgres(&mut pg, pgdata_path)?;
 
-        Ok((pg, logs_handle))
+        Ok(PostgresHandle {
+            postgres: pg,
+            log_collector: logs_handle,
+        })
     }
 
-    fn wait_postgres(&self, pg_handle: PostgresHandle) -> Option<i32> {
-        // Wait for the child Postgres process forever. In this state Ctrl+C will
-        // propagate to Postgres and it will be shut down as well.
-        let (mut pg, logs_handle) = pg_handle;
-        info!(postmaster_pid = %pg.id(), "Waiting for Postgres to exit");
+    /// Wait for the child Postgres process forever. In this state Ctrl+C will
+    /// propagate to Postgres and it will be shut down as well.
+    fn wait_postgres(&self, mut pg_handle: PostgresHandle) -> std::process::ExitStatus {
+        info!(postmaster_pid = %pg_handle.postgres.id(), "Waiting for Postgres to exit");
 
-        let ecode = pg
+        let ecode = pg_handle.postgres
             .wait()
             .expect("failed to start waiting on Postgres process");
         PG_PID.store(0, Ordering::SeqCst);
 
         // Process has exited. Wait for the log collecting task to finish.
         let _ = tokio::runtime::Handle::current()
-            .block_on(logs_handle)
+            .block_on(pg_handle.log_collector)
             .map_err(|e| tracing::error!("log task panicked: {:?}", e));
 
-        info!("Postgres exited with code {}, shutting down", ecode);
-        ecode.code()
+        ecode
     }
 
     /// Do post configuration of the already started Postgres. This function spawns a background task to
