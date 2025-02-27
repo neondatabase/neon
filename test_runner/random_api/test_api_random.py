@@ -43,7 +43,7 @@ class NeonBranch:
         self.project = project
         self.neon_api = project.neon_api
         self.project_id = branch["branch"]["project_id"]
-        self.parent = self.project.branches[branch["branch"]["parent_id"]] if "parent_id" in branch else None
+        self.parent = self.project.branches[branch["branch"]["parent_id"]] if "parent_id" in branch["branch"] else None
         self.children = {}
         self.endpoints = {}
         self.connection_parameters = branch["connection_uris"][0]["connection_parameters"]
@@ -112,6 +112,7 @@ class NeonProject:
         return new_branch
 
     def delete_branch(self, branch_id: str) -> None:
+        parent = self.branches[branch_id].parent
         if branch_id == self.main_branch.id:
             raise RuntimeError("Cannot delete the main branch")
         if branch_id not in self.leaf_branches:
@@ -119,7 +120,9 @@ class NeonProject:
         if branch_id not in self.branches:
             raise RuntimeError(f"The branch with id {branch_id} is not found")
         self.neon_api.delete_branch(self.id, branch_id)
-        self.branches[branch_id].parent.children.pop(branch_id)
+        if len(parent.children) == 1:
+            self.leaf_branches[parent.id] = parent
+        parent.children.pop(branch_id)
         self.leaf_branches.pop(branch_id)
         self.branches.pop(branch_id)
         self.wait()
