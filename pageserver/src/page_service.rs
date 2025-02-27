@@ -392,10 +392,6 @@ impl TimelineHandles {
             .await
             .map_err(|e| match e {
                 timeline::handle::GetError::TenantManager(e) => e,
-                timeline::handle::GetError::TimelineGateClosed => {
-                    trace!("timeline gate closed");
-                    GetActiveTimelineError::Timeline(GetTimelineError::ShuttingDown)
-                }
                 timeline::handle::GetError::PerTimelineStateShutDown => {
                     trace!("per-timeline state shut down");
                     GetActiveTimelineError::Timeline(GetTimelineError::ShuttingDown)
@@ -428,6 +424,11 @@ impl timeline::handle::Types for TenantManagerTypes {
 #[derive(Clone)]
 pub(crate) struct TenantManagerCacheItem {
     pub(crate) timeline: Arc<Timeline>,
+    /// Wrapped in Arc to enable clonging so that
+    /// [`timeline::handle::Cache`] can hand out owned values.
+    /// See [`timeline::handle`] module comment for details.
+    #[allow(dead_code)] // we store it to keep the gate open
+    pub(crate) gate_guard: Arc<GateGuard>,
 }
 
 impl std::ops::Deref for TenantManagerCacheItem {
@@ -437,11 +438,7 @@ impl std::ops::Deref for TenantManagerCacheItem {
     }
 }
 
-impl timeline::handle::ArcTimeline<TenantManagerTypes> for TenantManagerCacheItem {
-    fn gate(&self) -> &utils::sync::gate::Gate {
-        &self.timeline.gate
-    }
-
+impl timeline::handle::Timeline<TenantManagerTypes> for TenantManagerCacheItem {
     fn shard_timeline_id(&self) -> timeline::handle::ShardTimelineId {
         Timeline::shard_timeline_id(&self.timeline)
     }
@@ -503,7 +500,20 @@ impl timeline::handle::TenantManager<TenantManagerTypes> for TenantManagerWrappe
         let timeline = tenant_shard
             .get_timeline(timeline_id, true)
             .map_err(GetActiveTimelineError::Timeline)?;
-        Ok(TenantManagerCacheItem { timeline })
+
+        let gate_guard = match timeline.gate.enter() {
+            Ok(guard) => Arc::new(guard),
+            Err(_) => {
+                return Err(GetActiveTimelineError::Timeline(
+                    GetTimelineError::ShuttingDown,
+                ));
+            }
+        };
+
+        Ok(TenantManagerCacheItem {
+            timeline,
+            gate_guard,
+        })
     }
 }
 
