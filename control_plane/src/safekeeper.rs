@@ -14,18 +14,15 @@ use std::{io, result};
 
 use anyhow::Context;
 use camino::Utf8PathBuf;
+use http_utils::error::HttpErrorBody;
 use postgres_connection::PgConnectionConfig;
 use reqwest::{IntoUrl, Method};
 use thiserror::Error;
-
-use http_utils::error::HttpErrorBody;
 use utils::auth::{Claims, Scope};
 use utils::id::NodeId;
 
-use crate::{
-    background_process,
-    local_env::{LocalEnv, SafekeeperConf},
-};
+use crate::background_process;
+use crate::local_env::{LocalEnv, SafekeeperConf};
 
 #[derive(Error, Debug)]
 pub enum SafekeeperHttpError {

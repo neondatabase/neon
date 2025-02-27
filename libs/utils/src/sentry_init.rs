@@ -1,7 +1,7 @@
-use sentry::ClientInitGuard;
 use std::borrow::Cow;
 use std::env;
 
+use sentry::ClientInitGuard;
 pub use sentry::release_name;
 
 #[must_use]

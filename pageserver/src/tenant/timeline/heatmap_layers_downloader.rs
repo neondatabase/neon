@@ -10,6 +10,8 @@ use http_utils::error::ApiError;
 use tokio_util::sync::CancellationToken;
 use utils::sync::gate::Gate;
 
+use crate::context::RequestContext;
+
 use super::Timeline;
 
 // This status is not strictly necessary now, but gives us a nice place
@@ -30,6 +32,7 @@ impl HeatmapLayersDownloader {
     fn new(
         timeline: Arc<Timeline>,
         concurrency: usize,
+        ctx: RequestContext,
     ) -> Result<HeatmapLayersDownloader, ApiError> {
         let tl_guard = timeline.gate.enter().map_err(|_| ApiError::Cancelled)?;
 
@@ -63,6 +66,7 @@ impl HeatmapLayersDownloader {
 
                 let stream = futures::stream::iter(heatmap.layers.into_iter().filter_map(
                     |layer| {
+                        let ctx = ctx.attached_child();
                         let tl = timeline.clone();
                         let dl_guard = match downloads_guard.enter() {
                             Ok(g) => g,
@@ -75,7 +79,7 @@ impl HeatmapLayersDownloader {
                         Some(async move {
                             let _dl_guard = dl_guard;
 
-                            let res = tl.download_layer(&layer.name).await;
+                            let res = tl.download_layer(&layer.name, &ctx).await;
                             if let Err(err) = res {
                                 if !err.is_cancelled() {
                                     tracing::warn!(layer=%layer.name,"Failed to download heatmap layer: {err}")
@@ -139,10 +143,11 @@ impl Timeline {
     pub(crate) async fn start_heatmap_layers_download(
         self: &Arc<Self>,
         concurrency: usize,
+        ctx: &RequestContext,
     ) -> Result<(), ApiError> {
         let mut locked = self.heatmap_layers_downloader.lock().unwrap();
         if locked.as_ref().map(|dl| dl.is_complete()).unwrap_or(true) {
-            let dl = HeatmapLayersDownloader::new(self.clone(), concurrency)?;
+            let dl = HeatmapLayersDownloader::new(self.clone(), concurrency, ctx.attached_child())?;
             *locked = Some(dl);
             Ok(())
         } else {

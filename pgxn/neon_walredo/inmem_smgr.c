@@ -32,8 +32,8 @@
 
 #include "inmem_smgr.h"
 
-/* Size of the in-memory smgr */
-#define MAX_PAGES 64
+/* Size of the in-memory smgr: XLR_MAX_BLOCK_ID is 32, but we can update up to 3 forks for each block */
+#define MAX_PAGES 100
 
 /* If more than WARN_PAGES are used, print a warning in the log */
 #define WARN_PAGES 32
@@ -285,12 +285,12 @@ inmem_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		 * WARN_PAGES, print a warning so that we get alerted and get to
 		 * investigate why we're accessing so many buffers.
 		 */
-		elog(used_pages >= WARN_PAGES ? WARNING : DEBUG1,
-			 "inmem_write() called for %u/%u/%u.%u blk %u: used_pages %u",
-			 RelFileInfoFmt(InfoFromSMgrRel(reln)),
-			 forknum,
-			 blocknum,
-			 used_pages);
+		if (used_pages >= WARN_PAGES)
+			ereport(WARNING, (errmsg("inmem_write() called for %u/%u/%u.%u blk %u: used_pages %u",
+								   RelFileInfoFmt(InfoFromSMgrRel(reln)),
+								   forknum,
+								   blocknum,
+								   used_pages), errbacktrace()));
 		if (used_pages == MAX_PAGES)
 			elog(ERROR, "Inmem storage overflow");
 

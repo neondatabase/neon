@@ -6,16 +6,15 @@
 //! there for potential pitfalls with lock files that are used
 //! to store PIDs (pidfiles).
 
-use std::{
-    fs,
-    io::{Read, Write},
-    ops::Deref,
-    os::unix::prelude::AsRawFd,
-};
+use std::fs;
+use std::io::{Read, Write};
+use std::ops::Deref;
+use std::os::unix::prelude::AsRawFd;
 
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
-use nix::{errno::Errno::EAGAIN, fcntl};
+use nix::errno::Errno::EAGAIN;
+use nix::fcntl;
 
 use crate::crashsafe;
 
