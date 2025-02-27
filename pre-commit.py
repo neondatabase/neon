@@ -30,7 +30,7 @@ def colorify(
 
 
 def rustfmt(fix_inplace: bool = False, no_color: bool = False) -> str:
-    cmd = "rustfmt --edition=2021"
+    cmd = "rustfmt --edition=2024"
     if not fix_inplace:
         cmd += " --check"
     if no_color:
