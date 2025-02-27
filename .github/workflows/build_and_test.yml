@@ -692,13 +692,15 @@ jobs:
                                              neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-x64 \
                                              neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
 
-  vm-compute-node-image:
+  vm-compute-node-image-arch:
     needs: [ check-permissions, meta, compute-node-image ]
     if: ${{ contains(fromJSON('["push-main", "pr", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
-    runs-on: [ self-hosted, large ]
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
     strategy:
       fail-fast: false
       matrix:
+        # TODO: in other places we use x64, but vm-builder has hardcoded list of supported architectures at the moment: amd64, arm64, probably should be extended by x64 as well
+        arch: [ amd64, arm64 ]
         version:
           # see the comment for `compute-node-image-arch` job
           - pg: v14
@@ -717,7 +719,7 @@ jobs:
 
       - name: Downloading vm-builder
         run: |
-          curl -fL https://github.com/neondatabase/autoscaling/releases/download/$VM_BUILDER_VERSION/vm-builder-amd64 -o vm-builder
+          curl -fL https://github.com/neondatabase/autoscaling/releases/download/$VM_BUILDER_VERSION/vm-builder-${{ matrix.arch }} -o vm-builder
           chmod +x vm-builder
 
       - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
@@ -738,12 +740,41 @@ jobs:
             -size=2G \
             -spec=compute/vm-image-spec-${{ matrix.version.debian }}.yaml \
             -src=neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }} \
-            -dst=neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }} \
-            -target-arch=linux/amd64
+            -dst=neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.arch }} \
+            -target-arch=linux/${{ matrix.arch }}
 
       - name: Pushing vm-compute-node image
         run: |
-          docker push neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}
+          docker push neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.arch }}
+
+  vm-compute-node-image:
+    needs: [ vm-compute-node-image-arch, meta ]
+    if: ${{ contains(fromJSON('["push-main", "pr", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    runs-on: [ self-hosted, large ]
+    strategy:
+      matrix:
+        version:
+          # see the comment for `compute-node-image-arch` job
+          - pg: v14
+            debian: bullseye
+          - pg: v15
+            debian: bullseye
+          - pg: v16
+            debian: bullseye
+          - pg: v17
+            debian: bookworm
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
+      - name: Create multi-arch compute-node image
+        run: |
+          docker buildx imagetools create -t neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }} \
+                                             neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-amd64 \
+                                             neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-arm64
+
 
   test-images:
     needs: [ check-permissions, meta, neon-image, compute-node-image ]
