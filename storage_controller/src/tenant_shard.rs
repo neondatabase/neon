@@ -861,7 +861,7 @@ impl TenantShard {
         }
     }
 
-    fn find_better_location<T: ShardTag>(
+    pub(crate) fn find_better_location<T: ShardTag>(
         &self,
         scheduler: &mut Scheduler,
         schedule_context: &ScheduleContext,
@@ -1088,7 +1088,8 @@ impl TenantShard {
             //
             // This should be a transient state, there should always be capacity eventually in our preferred AZ (even if nodes
             // there are too overloaded for scheduler to suggest them, more should be provisioned eventually).
-            if self.intent.preferred_az_id.is_some()
+            if self.preferred_node.is_none()
+                && self.intent.preferred_az_id.is_some()
                 && scheduler.get_node_az(&replacement) != self.intent.preferred_az_id
             {
                 tracing::debug!(
@@ -1209,6 +1210,10 @@ impl TenantShard {
         }
 
         self.preferred_node = node;
+    }
+
+    pub(crate) fn get_preferred_node(&self) -> Option<NodeId> {
+        self.preferred_node
     }
 
     /// Return true if the optimization was really applied: it will not be applied if the optimization's

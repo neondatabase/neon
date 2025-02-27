@@ -84,7 +84,9 @@ use crate::reconciler::{
     attached_location_conf,
 };
 use crate::safekeeper::Safekeeper;
-use crate::scheduler::{MaySchedule, ScheduleContext, ScheduleError, ScheduleMode, Scheduler};
+use crate::scheduler::{
+    AttachedShardTag, MaySchedule, ScheduleContext, ScheduleError, ScheduleMode, Scheduler,
+};
 use crate::tenant_shard::{
     IntentState, MigrateAttachment, ObservedState, ObservedStateDelta, ObservedStateLocation,
     ReconcileNeeded, ReconcileResult, ReconcileWaitError, ReconcilerStatus, ReconcilerWaiter,
@@ -5352,6 +5354,7 @@ impl Service {
                 )));
             };
 
+            // Migration to unavavailable node requires force flag
             if !node.is_available() {
                 if migrate_req.migration_config.force {
                     // Warn but proceed: the caller may intend to manually adjust the placement of
@@ -5359,9 +5362,9 @@ impl Service {
                     tracing::warn!("Forcibly migrating to unavailable node {node}");
                 } else {
                     tracing::warn!("Node {node} is unavailable, refusing migration");
-                    return Err(ApiError::BadRequest(anyhow::anyhow!(
-                        "Node {node} is unavailable"
-                    )));
+                    return Err(ApiError::PreconditionFailed(
+                        format!("Node {node} is unavailable").into_boxed_str(),
+                    ));
                 }
             }
 
@@ -5379,6 +5382,26 @@ impl Service {
                     anyhow::anyhow!("Tenant shard not found").into(),
                 ));
             };
+
+            // Migration to a node with unfavorable scheduling score requires a force flag, because it might just
+            // be migrated back by the optimiser.
+            if let Some(better_node) = shard.find_better_location::<AttachedShardTag>(
+                scheduler,
+                &schedule_context,
+                migrate_req.node_id,
+                &[],
+            ) {
+                if !migrate_req.migration_config.force {
+                    return Err(ApiError::PreconditionFailed(
+                        "Migration to a worse-scoring node".into(),
+                    ));
+                } else {
+                    tracing::info!(
+                        "Migrating to a worse-scoring node {} (optimiser would prefer {better_node})",
+                        migrate_req.node_id
+                    );
+                }
+            }
 
             if shard.intent.get_attached() == &Some(migrate_req.node_id) {
                 // No-op case: we will still proceed to wait for reconciliation in case it is
@@ -7024,6 +7047,10 @@ impl Service {
                 match shard.get_scheduling_policy() {
                     ShardSchedulingPolicy::Active => {
                         // Ok to do optimization
+                    }
+                    ShardSchedulingPolicy::Essential if shard.get_preferred_node().is_some() => {
+                        // Ok to do optimization: we are executing a graceful migration that
+                        // has set preferred_node
                     }
                     ShardSchedulingPolicy::Essential
                     | ShardSchedulingPolicy::Pause

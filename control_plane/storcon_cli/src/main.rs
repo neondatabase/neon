@@ -642,13 +642,23 @@ async fn main() -> anyhow::Result<()> {
                 migration_config,
             };
 
-            storcon_client
+            match storcon_client
                 .dispatch::<TenantShardMigrateRequest, TenantShardMigrateResponse>(
                     Method::PUT,
                     format!("control/v1/tenant/{tenant_shard_id}/migrate"),
                     Some(req),
                 )
-                .await?;
+                .await
+            {
+                Err(mgmt_api::Error::ApiError(StatusCode::PRECONDITION_FAILED, msg)) => {
+                    anyhow::bail!(
+                        "Migration to {node} rejected, may require `--force` ({}) ",
+                        msg
+                    );
+                }
+                Err(e) => return Err(e.into()),
+                Ok(_) => {}
+            }
 
             watch_tenant_shard(storcon_client, tenant_shard_id, Some(node)).await?;
         }

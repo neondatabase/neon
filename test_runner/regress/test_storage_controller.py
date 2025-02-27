@@ -3867,7 +3867,9 @@ def test_storage_controller_location_conf_equivalence(neon_env_builder: NeonEnvB
 
     assert reconciles_after_restart == 0
 
-def test_storage_controller_graceful_migration(neon_env_builder: NeonEnvBuilder):
+
+@pytest.mark.parametrize("wrong_az", [True, False])
+def test_storage_controller_graceful_migration(neon_env_builder: NeonEnvBuilder, wrong_az: bool):
     """
     Test that the graceful migration API goes through the process of
     creating a secondary & waiting for it to warm up before cutting over
@@ -3879,14 +3881,36 @@ def test_storage_controller_graceful_migration(neon_env_builder: NeonEnvBuilder)
 
     env = neon_env_builder.init_start()
 
+    # Enable secondary location (neon_local disables by default)
+    env.storage_controller.tenant_policy_update(env.initial_tenant, {"placement": {"Attached": 1}})
+    env.storage_controller.reconcile_until_idle()
+
     initial_desc = env.storage_controller.tenant_describe(env.initial_tenant)["shards"][0]
     initial_ps_id = initial_desc["node_attached"]
+    initial_secondary_id = initial_desc["node_secondary"][0]
     initial_ps_az = initial_desc["preferred_az_id"]
     initial_ps = [ps for ps in env.pageservers if ps.id == initial_ps_id][0]
 
-    dest_ps = [
-        ps for ps in env.pageservers if ps.id != initial_ps_id and ps.az_id == initial_ps_az
-    ][0]
+    if wrong_az:
+        dest_ps = [
+            ps
+            for ps in env.pageservers
+            if ps.id != initial_ps_id
+            and ps.az_id != initial_ps_az
+            and ps.id != initial_secondary_id
+        ][0]
+    else:
+        dest_ps = [
+            ps
+            for ps in env.pageservers
+            if ps.id != initial_ps_id
+            and ps.az_id == initial_ps_az
+            and ps.id != initial_secondary_id
+        ][0]
+
+    log.info(
+        f"Migrating to {dest_ps.id} in AZ {dest_ps.az_id} (from {initial_ps_id} in AZ {initial_ps_az})"
+    )
     dest_ps_id = dest_ps.id
 
     # Set a failpoint so that the migration will block at the point it has a secondary location
@@ -3897,11 +3921,26 @@ def test_storage_controller_graceful_migration(neon_env_builder: NeonEnvBuilder)
     # tenant will be in another AZ.
     assert dest_ps.http_client().tenant_list_locations()["tenant_shards"] == []
 
+    if wrong_az:
+        # If migrating to the wrong AZ, first check that omitting force flag results in rejection
+        with pytest.raises(StorageControllerApiException, match="worse-scoring node"):
+            env.storage_controller.tenant_shard_migrate(
+                TenantShardId(env.initial_tenant, 0, 0),
+                dest_ps_id,
+                config=StorageControllerMigrationConfig(graceful=True, force=False),
+            )
+
+        # Turn off ordinary optimisations so that our migration will stay put once complete
+        env.storage_controller.tenant_policy_update(env.initial_tenant, {"scheduling": "Essential"})
+
+        # Controller will log a warning when we force this
+        env.storage_controller.allowed_errors.append(".*worse-scoring node.*")
+
     # We expect this API call to succeed, and result in a new secondary location on the destination
     env.storage_controller.tenant_shard_migrate(
         TenantShardId(env.initial_tenant, 0, 0),
         dest_ps_id,
-        config=StorageControllerMigrationConfig(graceful=True),
+        config=StorageControllerMigrationConfig(graceful=True, force=wrong_az),
     )
 
     def secondary_at_dest():
@@ -3925,4 +3964,12 @@ def test_storage_controller_graceful_migration(neon_env_builder: NeonEnvBuilder)
     assert locs[0][1]["mode"] == "AttachedSingle"
 
     # Nothing left behind at the origin
-    assert initial_ps.http_client().tenant_list_locations()["tenant_shards"] == []
+    if wrong_az:
+        # We're in essential scheduling mode, so the end state should be attached in the migration
+        # destination and a secondary in the original location
+        assert (
+            initial_ps.http_client().tenant_list_locations()["tenant_shards"][0][1]["mode"]
+            == "Secondary"
+        )
+    else:
+        assert initial_ps.http_client().tenant_list_locations()["tenant_shards"] == []
