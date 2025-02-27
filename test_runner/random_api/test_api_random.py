@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import random
+import time
 from fixtures.log_helper import log
 from fixtures.neon_api import NeonAPI
 from fixtures.pg_version import PgVersion
@@ -37,8 +39,11 @@ class NeonBranch:
         self.parent = self.project.branches[branch["parent_id"]] if "parent_id" in branch else None
         self.children = {}
         self.endpoints = {}
+        for endpoint in branch["endpoints"]:
+            NeonEndpoint(self.project, endpoint)
+        self.connection_parameters = branch["connection_uris"][0]["connection_parameters"]
 
-    def create_branch(self):
+    def create_child_branch(self):
         return self.project.create_branch(self.id)
 
     def create_ro_endpoint(self):
@@ -66,6 +71,7 @@ class NeonProject:
         self.endpoints = {}
         for endpoint in proj["endpoints"]:
             NeonEndpoint(self, endpoint)
+        self.neon_api.wait_for_operation_to_finish(self.id)
 
     def delete(self):
         self.neon_api.delete_project(self.id)
@@ -85,6 +91,7 @@ class NeonProject:
             self.main_branch.children[new_branch.id] = new_branch
         else:
             self.branches[parent_id].children[new_branch.id] = new_branch
+        self.wait()
         return new_branch
 
     def delete_branch(self, branch_id: str) -> None:
@@ -98,11 +105,13 @@ class NeonProject:
         self.branches[branch_id].parent.children.pop(branch_id)
         self.leaf_branches.pop(branch_id)
         self.branches.pop(branch_id)
+        self.wait()
 
     def delete_endpoint(self, endpoint_id: str) -> None:
         self.endpoints[endpoint_id].branch.endpoints.pop(endpoint_id)
         self.endpoints.pop(endpoint_id)
         self.neon_api.delete_endpoint(self.id, endpoint_id)
+        self.wait()
 
     def wait(self):
         return self.neon_api.wait_for_operation_to_finish(self.id)
@@ -120,25 +129,51 @@ def setup_class(
     project.delete()
 
 
+def do_action(project, action):
+    if action == "new_branch":
+        parent = random.choice(list(project.branches.values()))
+        child = parent.create_child_branch()
+        log.info("Created branch %s, parent: %s", child.id, parent.id)
+    elif action == "delete_branch":
+        if project.leaf_branches:
+            target = random.choice(list(project.leaf_branches.values()))
+            log.info("Trying to delete branch %s", target.id)
+            target.delete()
+        else:
+            log.info("Leaf nodes not found, skipping")
+    elif action == "new_ro_endpoint":
+        ep = random.choice(list(project.branches.values())).create_ro_endpoint()
+        log.info("Created the RO endpoint with id %s branch: %s", ep.id, ep.branch.id)
+    elif action == "delete_ro_endpoint":
+        ro_endpoints = [_ for _ in project.endpoints.values() if _.type == "read_only"]
+        if ro_endpoints:
+            target = random.choice(ro_endpoints)
+            log.info("endpoint %s deleted", target.id)
+        else:
+            log.info("no read_only endpoints present, skipping")
+
+
+
 @pytest.mark.timeout(7200)
 @pytest.mark.remote_cluster
 def test_api_random(
     setup_class,
+    pg_distrib_dir: Path,
     test_output_dir: Path,
 ):
     """
     Run the random API tests
     """
+    if seed_env := os.getenv("RANDOM_SEED"):
+        seed = int(seed_env)
+    else:
+        seed = int(time.time())
+    log.info("Using random seed: %s", seed)
+    random.seed(seed)
     project = setup_class
-    project.wait()
-    br = project.main_branch.create_branch()
-    log.info("created a branch with id %s", br.id)
-    br2 = br.create_branch()
-    log.info("created a branch with id %s, a child of %s", br2.id, br.id)
-    project.wait()
-    q = [project.main_branch]
-    while q:
-        br = q.pop()
-        log.info("branch id: %s", br.id)
-        q.extend(br.children.values())
+    # Here we can assign weights by repeating actions
+    ACTIONS = ('new_branch', 'new_branch', 'new_branch', 'new_branch', 'new_ro_endpoint', 'new_ro_endpoint', 'new_ro_endpoint', "delete_ro_endpoint", "delete_ro_endpoint", "delete_branch", "delete branch")
+    ACTIONS_LIMIT = 250
+    for _ in range(ACTIONS_LIMIT):
+        do_action(project, random.choice(ACTIONS))
     assert True
