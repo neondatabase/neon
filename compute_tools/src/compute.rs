@@ -1507,7 +1507,8 @@ impl ComputeNode {
 
             // Spawn a background task to do the configuration,
             // so that we don't block the main thread that starts Postgres.
-            let local_proxy = local_proxy.clone();
+            let mut local_proxy = local_proxy.clone();
+            local_proxy.tls = self.compute_ctl_config.tls.clone();
             tokio::spawn(async move {
                 if let Err(err) = local_proxy::configure(&local_proxy) {
                     error!("error while configuring local_proxy: {err:?}");

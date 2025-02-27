@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
+use crate::responses::TlsConfig;
+
 /// String type alias representing Postgres identifier and
 /// intended to be used for DB / role names.
 pub type PgIdent = String;
@@ -357,6 +359,9 @@ pub struct LocalProxySpec {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jwks: Option<Vec<JwksSettings>>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
