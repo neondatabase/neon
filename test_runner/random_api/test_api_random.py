@@ -13,6 +13,7 @@ import random
 import time
 from fixtures.log_helper import log
 from fixtures.neon_api import NeonAPI
+from fixtures.neon_fixtures import PgBin
 from fixtures.pg_version import PgVersion
 
 
@@ -24,21 +25,28 @@ class NeonEndpoint:
         self.type = endpoint["type"]
         self.branch.endpoints[self.id] = self
         self.project.endpoints[self.id] = self
+        self.host = endpoint["host"]
 
     def delete(self):
         self.project.delete_endpoint(self.id)
 
+    def connect_env(self) -> dict[str, str]:
+        env = self.branch.connect_env
+        env["PGHOST"] = self.host
+        return env
+
 
 class NeonBranch:
     def __init__(self, project, branch: dict[str, Any]):
-        self.id = branch["id"]
+        self.id = branch["branch"]["id"]
         self.desc = branch
         self.project = project
         self.neon_api = project.neon_api
-        self.project_id = branch["project_id"]
-        self.parent = self.project.branches[branch["parent_id"]] if "parent_id" in branch else None
+        self.project_id = branch["branch"]["project_id"]
+        self.parent = self.project.branches[branch["branch"]["parent_id"]] if "parent_id" in branch else None
         self.children = {}
         self.endpoints = {}
+        self.connection_parameters = branch["connection_uris"][0]["connection_parameters"]
 
     def create_child_branch(self):
         return self.project.create_branch(self.id)
@@ -52,6 +60,12 @@ class NeonBranch:
     def delete(self):
         self.project.delete_branch(self.id)
 
+    def connect_env(self) -> dict[str, str]:
+        env = {"PGHOST": self.connection_parameters["host"], "PGUSER": self.connection_parameters["role"],
+               "PGDATABASE": self.connection_parameters["database"],
+               "PGPASSWORD": self.connection_parameters["password"]}
+        return env
+
 
 class NeonProject:
     def __init__(self, neon_api: NeonAPI, pg_version: PgVersion):
@@ -62,8 +76,10 @@ class NeonProject:
         self.id = proj["project"]["id"]
         self.name = proj["project"]["name"]
         self.connection_uri = proj["connection_uris"][0]["connection_uri"]
+        self.connection_parameters = proj["connection_uris"][0]["connection_parameters"]
         self.pg_version = pg_version
-        self.main_branch = NeonBranch(self, proj["branch"])
+        self.main_branch = NeonBranch(self, proj)
+        self.main_branch.connection_parameters = self.connection_parameters
         self.branches = {self.main_branch.id: self.main_branch}
         self.leaf_branches = {}
         self.endpoints = {}
@@ -118,11 +134,12 @@ class NeonProject:
 @pytest.fixture()
 def setup_class(
     pg_version: PgVersion,
+    pg_bin: PgBin,
     neon_api: NeonAPI,
 ):
     project = NeonProject(neon_api, pg_version)
     log.info("Created a project with id %s, name %s", project.id, project.name)
-    yield project
+    yield pg_bin, project
     log.info("Removing the project")
     project.delete()
 
@@ -138,7 +155,7 @@ def do_action(project, action):
             log.info("Trying to delete branch %s", target.id)
             target.delete()
         else:
-            log.info("Leaf nodes not found, skipping")
+            log.info("Leaf branches not found, skipping")
     elif action == "new_ro_endpoint":
         ep = random.choice(list(project.branches.values())).create_ro_endpoint()
         log.info("Created the RO endpoint with id %s branch: %s", ep.id, ep.branch.id)
@@ -168,10 +185,11 @@ def test_api_random(
         seed = int(time.time())
     log.info("Using random seed: %s", seed)
     random.seed(seed)
-    project = setup_class
+    pg_bin, project = setup_class
     # Here we can assign weights by repeating actions
     ACTIONS = ('new_branch', 'new_branch', 'new_branch', 'new_branch', 'new_ro_endpoint', 'new_ro_endpoint', 'new_ro_endpoint', "delete_ro_endpoint", "delete_ro_endpoint", "delete_branch", "delete branch")
     ACTIONS_LIMIT = 250
+    pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", "-s100"], env=project.main_branch.connect_env())
     for _ in range(ACTIONS_LIMIT):
         do_action(project, random.choice(ACTIONS))
     assert True
