@@ -104,23 +104,18 @@
 //! So, we want to avoid any permanent need for coordination between page_service tasks.
 //!
 //! The solution is to add indirection: we wrap the Types::Timeline object that is
-//! returned by Types::TenantManager into an Arc, but that Arc private to the `HandleInner`
+//! returned by Types::TenantManager into an Arc that is rivate to the `HandleInner`
 //! and hence to the single Cache / page_service connection.
 //! (Review the "Data Structures" section if that is unclear to you.)
+//!
 //!
 //! When upgrading a `WeakHandle`, we upgrade its weak to a strong ref (of the `Mutex<HandleInner>`),
 //! lock the mutex, take out a clone of the `Arc<Types::Timeline>`, and drop the Mutex.
 //! The Mutex is not contended because it is private to the connection.
-//! And again, the  `Arc<Types::Timeline>` clone is cheap because the refcounts are private to the connection.
+//! And again, the  `Arc<Types::Timeline>` clone is cheap because that wrapper
+//! Arc's refcounts are private to the connection.
 //!
 //! Downgrading drops these two Arcs, which again, manipulates refcounts that are private to the connection.
-//!
-//! Regarding the caching of `Timeline::gate::enter()`.
-//! The [`TenantManager::resolve`] method wraps the returned GateGuard into an `Arc` and includes
-//! it in the `Types::Timeline` object that it returns.
-//! Whenever `Cache::get` returns a `Handle`, it thereby clones `Arc<GateGuard>`, not the GateGuard itself.
-//! Thereby we avoid modifying the GateGuard-internal semaphore, which is shared state among all tasks
-//! operating on a particular Timeline object.
 //!
 //!
 //! # Shutdown
