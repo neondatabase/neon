@@ -136,9 +136,9 @@ impl WalRedoProcess {
                         Ok(0) => break Ok(()), // eof
                         Ok(num_bytes) => {
                             let output = String::from_utf8_lossy(&buf[..num_bytes]);
-							if !output.contains("LOG:") {
+                            if !output.contains("LOG:") {
                                error!(%output, "received output");
-							}
+                            }
                         }
                         Err(e) => {
                             break Err(e);
