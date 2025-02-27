@@ -5,6 +5,7 @@ package interpreted_wal;
 message InterpretedWalRecords {
   repeated InterpretedWalRecord records = 1;
   optional uint64 next_record_lsn = 2;
+  optional uint64 raw_wal_start_lsn = 3;
 }
 
 message InterpretedWalRecord {

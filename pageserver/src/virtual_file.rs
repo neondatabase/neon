@@ -11,11 +11,13 @@
 //! This is similar to PostgreSQL's virtual file descriptor facility in
 //! src/backend/storage/file/fd.c
 //!
-use crate::context::RequestContext;
-use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC};
+use std::fs::File;
+use std::io::{Error, ErrorKind, Seek, SeekFrom};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::OpenOptionsExt;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
-use crate::page_cache::{PageWriteGuard, PAGE_SZ};
-use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
 use owned_buffers_io::aligned_buffer::buffer::AlignedBuffer;
@@ -23,30 +25,29 @@ use owned_buffers_io::aligned_buffer::{AlignedBufferMut, AlignedSlice, ConstAlig
 use owned_buffers_io::io_buf_aligned::{IoBufAligned, IoBufAlignedMut};
 use owned_buffers_io::io_buf_ext::FullSlice;
 use pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
+pub use pageserver_api::models::virtual_file as api;
 use pageserver_api::shard::TenantShardId;
-use std::fs::File;
-use std::io::{Error, ErrorKind, Seek, SeekFrom};
-#[cfg(target_os = "linux")]
-use std::os::unix::fs::OpenOptionsExt;
-use tokio_epoll_uring::{BoundedBuf, IoBuf, IoBufMut, Slice};
-
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::time::Instant;
+use tokio_epoll_uring::{BoundedBuf, IoBuf, IoBufMut, Slice};
 
-pub use pageserver_api::models::virtual_file as api;
+use crate::context::RequestContext;
+use crate::metrics::{STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC, StorageIoOperation};
+use crate::page_cache::{PAGE_SZ, PageWriteGuard};
+use crate::tenant::TENANTS_SEGMENT_NAME;
 pub(crate) mod io_engine;
-pub use io_engine::feature_test as io_engine_feature_test;
-pub use io_engine::io_engine_for_bench;
-pub use io_engine::FeatureTestResult as IoEngineFeatureTestResult;
+pub use io_engine::{
+    FeatureTestResult as IoEngineFeatureTestResult, feature_test as io_engine_feature_test,
+    io_engine_for_bench,
+};
 mod metadata;
 mod open_options;
-use self::owned_buffers_io::write::OwnedAsyncWriter;
 pub(crate) use api::IoMode;
 pub(crate) use io_engine::IoEngineKind;
 pub(crate) use metadata::Metadata;
 pub(crate) use open_options::*;
+
+use self::owned_buffers_io::write::OwnedAsyncWriter;
 
 pub(crate) mod owned_buffers_io {
     //! Abstractions for IO with owned buffers.
@@ -1078,7 +1079,8 @@ where
 #[cfg(test)]
 mod test_read_exact_at_impl {
 
-    use std::{collections::VecDeque, sync::Arc};
+    use std::collections::VecDeque;
+    use std::sync::Arc;
 
     use tokio_epoll_uring::{BoundedBuf, BoundedBufMut};
 
@@ -1424,18 +1426,18 @@ static SYNC_MODE: AtomicU8 = AtomicU8::new(SyncMode::Sync as u8);
 
 #[cfg(test)]
 mod tests {
-    use crate::context::DownloadBehavior;
-    use crate::task_mgr::TaskKind;
-
-    use super::*;
-    use owned_buffers_io::io_buf_ext::IoBufExt;
-    use owned_buffers_io::slice::SliceMutExt;
-    use rand::seq::SliceRandom;
-    use rand::thread_rng;
-    use rand::Rng;
     use std::io::Write;
     use std::os::unix::fs::FileExt;
     use std::sync::Arc;
+
+    use owned_buffers_io::io_buf_ext::IoBufExt;
+    use owned_buffers_io::slice::SliceMutExt;
+    use rand::seq::SliceRandom;
+    use rand::{Rng, thread_rng};
+
+    use super::*;
+    use crate::context::DownloadBehavior;
+    use crate::task_mgr::TaskKind;
 
     enum MaybeVirtualFile {
         VirtualFile(VirtualFile),

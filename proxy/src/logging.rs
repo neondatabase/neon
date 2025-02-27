@@ -8,7 +8,7 @@ use opentelemetry::trace::TraceContextExt;
 use scopeguard::defer;
 use serde::ser::{SerializeMap, Serializer};
 use tracing::subscriber::Interest;
-use tracing::{callsite, span, Event, Metadata, Span, Subscriber};
+use tracing::{Event, Metadata, Span, Subscriber, callsite, span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 use tracing_subscriber::fmt::format::{Format, Full};

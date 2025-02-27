@@ -1,5 +1,5 @@
-use postgres_client::types::{Kind, Type};
 use postgres_client::Row;
+use postgres_client::types::{Kind, Type};
 use serde_json::{Map, Value};
 
 //

@@ -8,7 +8,7 @@ use chrono::{Datelike, Timelike};
 use futures::{Stream, StreamExt};
 use parquet::basic::Compression;
 use parquet::file::metadata::RowGroupMetaDataPtr;
-use parquet::file::properties::{WriterProperties, WriterPropertiesPtr, DEFAULT_PAGE_SIZE};
+use parquet::file::properties::{DEFAULT_PAGE_SIZE, WriterProperties, WriterPropertiesPtr};
 use parquet::file::writer::SerializedFileWriter;
 use parquet::record::RecordWriter;
 use pq_proto::StartupMessageParams;
@@ -17,10 +17,10 @@ use serde::ser::SerializeMap;
 use tokio::sync::mpsc;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, Span};
+use tracing::{Span, debug, info};
 use utils::backoff;
 
-use super::{RequestContextInner, LOG_CHAN};
+use super::{LOG_CHAN, RequestContextInner};
 use crate::config::remote_storage_from_toml;
 use crate::context::LOG_CHAN_DISCONNECT;
 use crate::ext::TaskExt;
@@ -82,6 +82,7 @@ pub(crate) struct RequestData {
     peer_addr: String,
     username: Option<String>,
     application_name: Option<String>,
+    user_agent: Option<String>,
     endpoint_id: Option<String>,
     database: Option<String>,
     project: Option<String>,
@@ -128,6 +129,7 @@ impl From<&RequestContextInner> for RequestData {
             timestamp: value.first_packet.naive_utc(),
             username: value.user.as_deref().map(String::from),
             application_name: value.application.as_deref().map(String::from),
+            user_agent: value.user_agent.as_deref().map(String::from),
             endpoint_id: value.endpoint_id.as_deref().map(String::from),
             database: value.dbname.as_deref().map(String::from),
             project: value.project.as_deref().map(String::from),
@@ -425,20 +427,20 @@ mod tests {
     use futures::{Stream, StreamExt};
     use itertools::Itertools;
     use parquet::basic::{Compression, ZstdLevel};
-    use parquet::file::properties::{WriterProperties, DEFAULT_PAGE_SIZE};
+    use parquet::file::properties::{DEFAULT_PAGE_SIZE, WriterProperties};
     use parquet::file::reader::FileReader;
     use parquet::file::serialized_reader::SerializedFileReader;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
     use remote_storage::{
-        GenericRemoteStorage, RemoteStorageConfig, RemoteStorageKind, S3Config,
         DEFAULT_MAX_KEYS_PER_LIST_RESPONSE, DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT,
+        GenericRemoteStorage, RemoteStorageConfig, RemoteStorageKind, S3Config,
     };
     use tokio::sync::mpsc;
     use tokio::time;
     use walkdir::WalkDir;
 
-    use super::{worker_inner, ParquetConfig, ParquetUploadArgs, RequestData};
+    use super::{ParquetConfig, ParquetUploadArgs, RequestData, worker_inner};
 
     #[derive(Parser)]
     struct ProxyCliArgs {
@@ -514,26 +516,27 @@ mod tests {
 
     fn generate_request_data(rng: &mut impl Rng) -> RequestData {
         RequestData {
-            session_id: uuid::Builder::from_random_bytes(rng.gen()).into_uuid(),
-            peer_addr: Ipv4Addr::from(rng.gen::<[u8; 4]>()).to_string(),
+            session_id: uuid::Builder::from_random_bytes(rng.r#gen()).into_uuid(),
+            peer_addr: Ipv4Addr::from(rng.r#gen::<[u8; 4]>()).to_string(),
             timestamp: chrono::DateTime::from_timestamp_millis(
                 rng.gen_range(1703862754..1803862754),
             )
             .unwrap()
             .naive_utc(),
             application_name: Some("test".to_owned()),
-            username: Some(hex::encode(rng.gen::<[u8; 4]>())),
-            endpoint_id: Some(hex::encode(rng.gen::<[u8; 16]>())),
-            database: Some(hex::encode(rng.gen::<[u8; 16]>())),
-            project: Some(hex::encode(rng.gen::<[u8; 16]>())),
-            branch: Some(hex::encode(rng.gen::<[u8; 16]>())),
+            user_agent: Some("test-user-agent".to_owned()),
+            username: Some(hex::encode(rng.r#gen::<[u8; 4]>())),
+            endpoint_id: Some(hex::encode(rng.r#gen::<[u8; 16]>())),
+            database: Some(hex::encode(rng.r#gen::<[u8; 16]>())),
+            project: Some(hex::encode(rng.r#gen::<[u8; 16]>())),
+            branch: Some(hex::encode(rng.r#gen::<[u8; 16]>())),
             pg_options: None,
             auth_method: None,
             jwt_issuer: None,
             protocol: ["tcp", "ws", "http"][rng.gen_range(0..3)],
             region: "us-east-1",
             error: None,
-            success: rng.gen(),
+            success: rng.r#gen(),
             cold_start_info: "no",
             duration_us: rng.gen_range(0..30_000_000),
             disconnect_timestamp: None,
@@ -610,15 +613,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1313105, 3, 6000),
-                (1313094, 3, 6000),
-                (1313153, 3, 6000),
-                (1313110, 3, 6000),
-                (1313246, 3, 6000),
-                (1313083, 3, 6000),
-                (1312877, 3, 6000),
-                (1313112, 3, 6000),
-                (438020, 1, 2000)
+                (1313953, 3, 6000),
+                (1313942, 3, 6000),
+                (1314001, 3, 6000),
+                (1313958, 3, 6000),
+                (1314094, 3, 6000),
+                (1313931, 3, 6000),
+                (1313725, 3, 6000),
+                (1313960, 3, 6000),
+                (438318, 1, 2000)
             ]
         );
 
@@ -650,11 +653,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1204324, 5, 10000),
-                (1204048, 5, 10000),
-                (1204349, 5, 10000),
-                (1204334, 5, 10000),
-                (1204588, 5, 10000)
+                (1205810, 5, 10000),
+                (1205534, 5, 10000),
+                (1205835, 5, 10000),
+                (1205820, 5, 10000),
+                (1206074, 5, 10000)
             ]
         );
 
@@ -679,15 +682,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1313105, 3, 6000),
-                (1313094, 3, 6000),
-                (1313153, 3, 6000),
-                (1313110, 3, 6000),
-                (1313246, 3, 6000),
-                (1313083, 3, 6000),
-                (1312877, 3, 6000),
-                (1313112, 3, 6000),
-                (438020, 1, 2000)
+                (1313953, 3, 6000),
+                (1313942, 3, 6000),
+                (1314001, 3, 6000),
+                (1313958, 3, 6000),
+                (1314094, 3, 6000),
+                (1313931, 3, 6000),
+                (1313725, 3, 6000),
+                (1313960, 3, 6000),
+                (438318, 1, 2000)
             ]
         );
 
@@ -724,7 +727,7 @@ mod tests {
         // files are smaller than the size threshold, but they took too long to fill so were flushed early
         assert_eq!(
             file_stats,
-            [(658014, 2, 3001), (657728, 2, 3000), (657524, 2, 2999)]
+            [(658584, 2, 3001), (658298, 2, 3000), (658094, 2, 2999)]
         );
 
         tmpdir.close().unwrap();

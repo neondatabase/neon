@@ -2,38 +2,30 @@ pub mod detach_ancestor;
 pub mod partitioning;
 pub mod utilization;
 
-#[cfg(feature = "testing")]
-use camino::Utf8PathBuf;
-pub use utilization::PageserverUtilization;
-
 use core::ops::Range;
-use std::{
-    collections::HashMap,
-    fmt::Display,
-    io::{BufRead, Read},
-    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
-    str::FromStr,
-    time::{Duration, SystemTime},
-};
+use std::collections::HashMap;
+use std::fmt::Display;
+use std::io::{BufRead, Read};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+use std::str::FromStr;
+use std::time::{Duration, SystemTime};
 
 use byteorder::{BigEndian, ReadBytesExt};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+#[cfg(feature = "testing")]
+use camino::Utf8PathBuf;
 use postgres_ffi::BLCKSZ;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::serde_as;
-use utils::{
-    completion,
-    id::{NodeId, TenantId, TimelineId},
-    lsn::Lsn,
-    postgres_client::PostgresClientProtocol,
-    serde_system_time,
-};
+pub use utilization::PageserverUtilization;
+use utils::id::{NodeId, TenantId, TimelineId};
+use utils::lsn::Lsn;
+use utils::postgres_client::PostgresClientProtocol;
+use utils::{completion, serde_system_time};
 
-use crate::{
-    key::{CompactKey, Key},
-    reltag::RelTag,
-    shard::{ShardCount, ShardStripeSize, TenantShardId},
-};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use crate::key::{CompactKey, Key};
+use crate::reltag::RelTag;
+use crate::shard::{ShardCount, ShardStripeSize, TenantShardId};
 
 /// The state of a tenant in this pageserver.
 ///
@@ -332,7 +324,8 @@ pub struct ImportPgdataIdempotencyKey(pub String);
 
 impl ImportPgdataIdempotencyKey {
     pub fn random() -> Self {
-        use rand::{distributions::Alphanumeric, Rng};
+        use rand::Rng;
+        use rand::distributions::Alphanumeric;
         Self(
             rand::thread_rng()
                 .sample_iter(&Alphanumeric)
@@ -526,9 +519,13 @@ pub struct TenantConfigPatch {
 #[derive(Serialize, Deserialize, Debug, Default, Clone, Eq, PartialEq)]
 pub struct TenantConfig {
     pub checkpoint_distance: Option<u64>,
-    pub checkpoint_timeout: Option<String>,
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub checkpoint_timeout: Option<Duration>,
     pub compaction_target_size: Option<u64>,
-    pub compaction_period: Option<String>,
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub compaction_period: Option<Duration>,
     pub compaction_threshold: Option<usize>,
     pub compaction_upper_limit: Option<usize>,
     // defer parsing compaction_algorithm, like eviction_policy
@@ -539,22 +536,38 @@ pub struct TenantConfig {
     pub l0_flush_stall_threshold: Option<usize>,
     pub l0_flush_wait_upload: Option<bool>,
     pub gc_horizon: Option<u64>,
-    pub gc_period: Option<String>,
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub gc_period: Option<Duration>,
     pub image_creation_threshold: Option<usize>,
-    pub pitr_interval: Option<String>,
-    pub walreceiver_connect_timeout: Option<String>,
-    pub lagging_wal_timeout: Option<String>,
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub pitr_interval: Option<Duration>,
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub walreceiver_connect_timeout: Option<Duration>,
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub lagging_wal_timeout: Option<Duration>,
     pub max_lsn_wal_lag: Option<NonZeroU64>,
     pub eviction_policy: Option<EvictionPolicy>,
     pub min_resident_size_override: Option<u64>,
-    pub evictions_low_residence_duration_metric_threshold: Option<String>,
-    pub heatmap_period: Option<String>,
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub evictions_low_residence_duration_metric_threshold: Option<Duration>,
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub heatmap_period: Option<Duration>,
     pub lazy_slru_download: Option<bool>,
     pub timeline_get_throttle: Option<ThrottleConfig>,
     pub image_layer_creation_check_threshold: Option<u8>,
     pub image_creation_preempt_threshold: Option<usize>,
-    pub lsn_lease_length: Option<String>,
-    pub lsn_lease_length_for_ts: Option<String>,
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub lsn_lease_length: Option<Duration>,
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub lsn_lease_length_for_ts: Option<Duration>,
     pub timeline_offloading: Option<bool>,
     pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
     pub rel_size_v2_enabled: Option<bool>,
@@ -564,7 +577,10 @@ pub struct TenantConfig {
 }
 
 impl TenantConfig {
-    pub fn apply_patch(self, patch: TenantConfigPatch) -> TenantConfig {
+    pub fn apply_patch(
+        self,
+        patch: TenantConfigPatch,
+    ) -> Result<TenantConfig, humantime::DurationError> {
         let Self {
             mut checkpoint_distance,
             mut checkpoint_timeout,
@@ -604,11 +620,17 @@ impl TenantConfig {
         } = self;
 
         patch.checkpoint_distance.apply(&mut checkpoint_distance);
-        patch.checkpoint_timeout.apply(&mut checkpoint_timeout);
+        patch
+            .checkpoint_timeout
+            .map(|v| humantime::parse_duration(&v))?
+            .apply(&mut checkpoint_timeout);
         patch
             .compaction_target_size
             .apply(&mut compaction_target_size);
-        patch.compaction_period.apply(&mut compaction_period);
+        patch
+            .compaction_period
+            .map(|v| humantime::parse_duration(&v))?
+            .apply(&mut compaction_period);
         patch.compaction_threshold.apply(&mut compaction_threshold);
         patch
             .compaction_upper_limit
@@ -626,15 +648,25 @@ impl TenantConfig {
             .apply(&mut l0_flush_stall_threshold);
         patch.l0_flush_wait_upload.apply(&mut l0_flush_wait_upload);
         patch.gc_horizon.apply(&mut gc_horizon);
-        patch.gc_period.apply(&mut gc_period);
+        patch
+            .gc_period
+            .map(|v| humantime::parse_duration(&v))?
+            .apply(&mut gc_period);
         patch
             .image_creation_threshold
             .apply(&mut image_creation_threshold);
-        patch.pitr_interval.apply(&mut pitr_interval);
+        patch
+            .pitr_interval
+            .map(|v| humantime::parse_duration(&v))?
+            .apply(&mut pitr_interval);
         patch
             .walreceiver_connect_timeout
+            .map(|v| humantime::parse_duration(&v))?
             .apply(&mut walreceiver_connect_timeout);
-        patch.lagging_wal_timeout.apply(&mut lagging_wal_timeout);
+        patch
+            .lagging_wal_timeout
+            .map(|v| humantime::parse_duration(&v))?
+            .apply(&mut lagging_wal_timeout);
         patch.max_lsn_wal_lag.apply(&mut max_lsn_wal_lag);
         patch.eviction_policy.apply(&mut eviction_policy);
         patch
@@ -642,8 +674,12 @@ impl TenantConfig {
             .apply(&mut min_resident_size_override);
         patch
             .evictions_low_residence_duration_metric_threshold
+            .map(|v| humantime::parse_duration(&v))?
             .apply(&mut evictions_low_residence_duration_metric_threshold);
-        patch.heatmap_period.apply(&mut heatmap_period);
+        patch
+            .heatmap_period
+            .map(|v| humantime::parse_duration(&v))?
+            .apply(&mut heatmap_period);
         patch.lazy_slru_download.apply(&mut lazy_slru_download);
         patch
             .timeline_get_throttle
@@ -654,9 +690,13 @@ impl TenantConfig {
         patch
             .image_creation_preempt_threshold
             .apply(&mut image_creation_preempt_threshold);
-        patch.lsn_lease_length.apply(&mut lsn_lease_length);
+        patch
+            .lsn_lease_length
+            .map(|v| humantime::parse_duration(&v))?
+            .apply(&mut lsn_lease_length);
         patch
             .lsn_lease_length_for_ts
+            .map(|v| humantime::parse_duration(&v))?
             .apply(&mut lsn_lease_length_for_ts);
         patch.timeline_offloading.apply(&mut timeline_offloading);
         patch
@@ -673,7 +713,7 @@ impl TenantConfig {
             .gc_compaction_ratio_percent
             .apply(&mut gc_compaction_ratio_percent);
 
-        Self {
+        Ok(Self {
             checkpoint_distance,
             checkpoint_timeout,
             compaction_target_size,
@@ -709,7 +749,7 @@ impl TenantConfig {
             gc_compaction_enabled,
             gc_compaction_initial_threshold_kb,
             gc_compaction_ratio_percent,
-        }
+        })
     }
 }
 
@@ -2241,8 +2281,9 @@ impl Default for PageTraceEvent {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use std::str::FromStr;
+
+    use serde_json::json;
 
     use super::*;
 
@@ -2503,7 +2544,7 @@ mod tests {
             ..base.clone()
         };
 
-        let patched = base.apply_patch(decoded.config);
+        let patched = base.apply_patch(decoded.config).unwrap();
 
         assert_eq!(patched, expected);
     }

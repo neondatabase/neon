@@ -8,23 +8,23 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
+use pageserver_api::config::tenant_conf_defaults::DEFAULT_COMPACTION_PERIOD;
 use rand::Rng;
 use scopeguard::defer;
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-
-use crate::context::{DownloadBehavior, RequestContext};
-use crate::metrics::{self, BackgroundLoopSemaphoreMetricsRecorder, TENANT_TASK_EVENTS};
-use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME, TOKIO_WORKER_THREADS};
-use crate::tenant::throttle::Stats;
-use crate::tenant::timeline::compaction::CompactionOutcome;
-use crate::tenant::timeline::CompactionError;
-use crate::tenant::{Tenant, TenantState};
-use pageserver_api::config::tenant_conf_defaults::DEFAULT_COMPACTION_PERIOD;
 use utils::backoff::exponential_backoff_duration;
 use utils::completion::Barrier;
 use utils::pausable_failpoint;
+
+use crate::context::{DownloadBehavior, RequestContext};
+use crate::metrics::{self, BackgroundLoopSemaphoreMetricsRecorder, TENANT_TASK_EVENTS};
+use crate::task_mgr::{self, BACKGROUND_RUNTIME, TOKIO_WORKER_THREADS, TaskKind};
+use crate::tenant::throttle::Stats;
+use crate::tenant::timeline::CompactionError;
+use crate::tenant::timeline::compaction::CompactionOutcome;
+use crate::tenant::{Tenant, TenantState};
 
 /// Semaphore limiting concurrent background tasks (across all tenants).
 ///
@@ -287,15 +287,16 @@ fn log_compaction_error(
     sleep_duration: Duration,
     task_cancelled: bool,
 ) {
-    use crate::pgdatadir_mapping::CollectKeySpaceError;
-    use crate::tenant::upload_queue::NotInitialized;
-    use crate::tenant::PageReconstructError;
     use CompactionError::*;
 
+    use crate::tenant::PageReconstructError;
+    use crate::tenant::upload_queue::NotInitialized;
+
     let level = match err {
+        e if e.is_cancel() => return,
         ShuttingDown => return,
         Offload(_) => Level::ERROR,
-        CollectKeySpaceError(CollectKeySpaceError::Cancelled) => Level::INFO,
+        AlreadyRunning(_) => Level::ERROR,
         CollectKeySpaceError(_) => Level::ERROR,
         _ if task_cancelled => Level::INFO,
         Other(err) => {

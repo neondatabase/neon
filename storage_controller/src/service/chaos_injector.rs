@@ -1,8 +1,6 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-    time::Duration,
-};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+use std::time::Duration;
 
 use pageserver_api::controller_api::ShardSchedulingPolicy;
 use rand::seq::SliceRandom;
@@ -16,29 +14,80 @@ use super::{Node, Scheduler, Service, TenantShard};
 pub struct ChaosInjector {
     service: Arc<Service>,
     interval: Duration,
+    chaos_exit_crontab: Option<cron::Schedule>,
+}
+
+fn cron_to_next_duration(cron: &cron::Schedule) -> anyhow::Result<tokio::time::Sleep> {
+    use chrono::Utc;
+    let next = cron.upcoming(Utc).next().unwrap();
+    let duration = (next - Utc::now()).to_std()?;
+    Ok(tokio::time::sleep(duration))
+}
+
+async fn maybe_sleep(sleep: Option<tokio::time::Sleep>) -> Option<()> {
+    if let Some(sleep) = sleep {
+        sleep.await;
+        Some(())
+    } else {
+        None
+    }
 }
 
 impl ChaosInjector {
-    pub fn new(service: Arc<Service>, interval: Duration) -> Self {
-        Self { service, interval }
+    pub fn new(
+        service: Arc<Service>,
+        interval: Duration,
+        chaos_exit_crontab: Option<cron::Schedule>,
+    ) -> Self {
+        Self {
+            service,
+            interval,
+            chaos_exit_crontab,
+        }
     }
 
     pub async fn run(&mut self, cancel: CancellationToken) {
         let mut interval = tokio::time::interval(self.interval);
-
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {}
-                _ = cancel.cancelled() => {
-                    tracing::info!("Shutting down");
-                    return;
+        let cron_interval = {
+            if let Some(ref chaos_exit_crontab) = self.chaos_exit_crontab {
+                match cron_to_next_duration(chaos_exit_crontab) {
+                    Ok(interval_exit) => Some(interval_exit),
+                    Err(e) => {
+                        tracing::error!("Error processing the cron schedule: {e}");
+                        None
+                    }
                 }
+            } else {
+                None
             }
-
-            self.inject_chaos().await;
-
-            tracing::info!("Chaos iteration...");
+        };
+        enum ChaosEvent {
+            ShuffleTenant,
+            ForceKill,
         }
+        let chaos_type = tokio::select! {
+            _ = interval.tick() => {
+                ChaosEvent::ShuffleTenant
+            }
+            Some(_) = maybe_sleep(cron_interval) => {
+                ChaosEvent::ForceKill
+            }
+            _ = cancel.cancelled() => {
+                tracing::info!("Shutting down");
+                return;
+            }
+        };
+
+        match chaos_type {
+            ChaosEvent::ShuffleTenant => {
+                self.inject_chaos().await;
+            }
+            ChaosEvent::ForceKill => {
+                self.force_kill().await;
+            }
+        }
+
+        tracing::info!("Chaos iteration...");
     }
 
     /// If a shard has a secondary and attached location, then re-assign the secondary to be
@@ -95,6 +144,11 @@ impl ChaosInjector {
         );
     }
 
+    async fn force_kill(&mut self) {
+        tracing::warn!("Injecting chaos: force kill");
+        std::process::exit(1);
+    }
+
     async fn inject_chaos(&mut self) {
         // Pick some shards to interfere with
         let batch_size = 128;
@@ -120,12 +174,19 @@ impl ChaosInjector {
 
         let mut victims = Vec::with_capacity(batch_size);
         if out_of_home_az.len() >= batch_size {
-            tracing::info!("Injecting chaos: found {batch_size} shards to migrate back to home AZ (total {} out of home AZ)", out_of_home_az.len());
+            tracing::info!(
+                "Injecting chaos: found {batch_size} shards to migrate back to home AZ (total {} out of home AZ)",
+                out_of_home_az.len()
+            );
 
             out_of_home_az.shuffle(&mut thread_rng());
             victims.extend(out_of_home_az.into_iter().take(batch_size));
         } else {
-            tracing::info!("Injecting chaos: found {} shards to migrate back to home AZ, picking {} random shards to migrate", out_of_home_az.len(), std::cmp::min(batch_size - out_of_home_az.len(), in_home_az.len()));
+            tracing::info!(
+                "Injecting chaos: found {} shards to migrate back to home AZ, picking {} random shards to migrate",
+                out_of_home_az.len(),
+                std::cmp::min(batch_size - out_of_home_az.len(), in_home_az.len())
+            );
 
             victims.extend(out_of_home_az);
             in_home_az.shuffle(&mut thread_rng());

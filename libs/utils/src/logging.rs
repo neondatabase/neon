@@ -1,9 +1,13 @@
+use std::future::Future;
 use std::str::FromStr;
+use std::time::Duration;
 
 use anyhow::Context;
 use metrics::{IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
 use strum_macros::{EnumString, VariantNames};
+use tokio::time::Instant;
+use tracing::info;
 
 /// Logs a critical error, similarly to `tracing::error!`. This will:
 ///
@@ -315,6 +319,43 @@ impl FromStr for SecretString {
 impl std::fmt::Debug for SecretString {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "[SECRET]")
+    }
+}
+
+/// Logs a periodic message if a future is slow to complete.
+///
+/// This is performance-sensitive as it's used on the GetPage read path.
+///
+/// TODO: consider upgrading this to a warning, but currently it fires too often.
+#[inline]
+pub async fn log_slow<O>(name: &str, threshold: Duration, f: impl Future<Output = O>) -> O {
+    // TODO: we unfortunately have to pin the future on the heap, since GetPage futures are huge and
+    // won't fit on the stack.
+    let mut f = Box::pin(f);
+
+    let started = Instant::now();
+    let mut attempt = 1;
+
+    loop {
+        // NB: use timeout_at() instead of timeout() to avoid an extra clock reading in the common
+        // case where the timeout doesn't fire.
+        let deadline = started + attempt * threshold;
+        if let Ok(output) = tokio::time::timeout_at(deadline, &mut f).await {
+            // NB: we check if we exceeded the threshold even if the timeout never fired, because
+            // scheduling or execution delays may cause the future to succeed even if it exceeds the
+            // timeout. This costs an extra unconditional clock reading, but seems worth it to avoid
+            // false negatives.
+            let elapsed = started.elapsed();
+            if elapsed >= threshold {
+                info!("slow {name} completed after {:.3}s", elapsed.as_secs_f64());
+            }
+            return output;
+        }
+
+        let elapsed = started.elapsed().as_secs_f64();
+        info!("slow {name} still running after {elapsed:.3}s",);
+
+        attempt += 1;
     }
 }
 

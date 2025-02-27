@@ -8,7 +8,7 @@ use pq_proto::StartupMessageParams;
 use smol_str::SmolStr;
 use tokio::sync::mpsc;
 use tracing::field::display;
-use tracing::{debug, error, info_span, Span};
+use tracing::{Span, debug, error, info_span};
 use try_lock::TryLock;
 use uuid::Uuid;
 
@@ -55,6 +55,7 @@ struct RequestContextInner {
     dbname: Option<DbName>,
     user: Option<RoleName>,
     application: Option<SmolStr>,
+    user_agent: Option<SmolStr>,
     error_kind: Option<ErrorKind>,
     pub(crate) auth_method: Option<AuthMethod>,
     jwt_issuer: Option<String>,
@@ -100,6 +101,7 @@ impl Clone for RequestContext {
             dbname: inner.dbname.clone(),
             user: inner.user.clone(),
             application: inner.application.clone(),
+            user_agent: inner.user_agent.clone(),
             error_kind: inner.error_kind,
             auth_method: inner.auth_method.clone(),
             jwt_issuer: inner.jwt_issuer.clone(),
@@ -149,6 +151,7 @@ impl RequestContext {
             dbname: None,
             user: None,
             application: None,
+            user_agent: None,
             error_kind: None,
             auth_method: None,
             jwt_issuer: None,
@@ -243,6 +246,13 @@ impl RequestContext {
             .try_lock()
             .expect("should not deadlock")
             .set_user(user);
+    }
+
+    pub(crate) fn set_user_agent(&self, user_agent: Option<SmolStr>) {
+        self.0
+            .try_lock()
+            .expect("should not deadlock")
+            .set_user_agent(user_agent);
     }
 
     pub(crate) fn set_auth_method(&self, auth_method: AuthMethod) {
@@ -382,6 +392,10 @@ impl RequestContextInner {
         if let Some(app) = app {
             self.application = Some(app);
         }
+    }
+
+    fn set_user_agent(&mut self, user_agent: Option<SmolStr>) {
+        self.user_agent = user_agent;
     }
 
     fn set_dbname(&mut self, dbname: DbName) {

@@ -1,7 +1,7 @@
 //! This module defines the WAL record format used within the pageserver.
 
 use bytes::Bytes;
-use postgres_ffi::walrecord::{describe_postgres_wal_record, MultiXactMember};
+use postgres_ffi::walrecord::{MultiXactMember, describe_postgres_wal_record};
 use postgres_ffi::{MultiXactId, MultiXactOffset, TimestampTz, TransactionId};
 use serde::{Deserialize, Serialize};
 use utils::bin_ser::DeserializeError;

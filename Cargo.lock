@@ -1342,7 +1342,9 @@ dependencies = [
  "tokio-util",
  "tower 0.5.2",
  "tower-http",
+ "tower-otel",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "tracing-utils",
  "url",
@@ -1544,6 +1546,17 @@ checksum = "6b50826342786a51a89e2da3a28f1c32b06e387201bc2d19791f622c673706b1"
 dependencies = [
  "cast",
  "itertools 0.10.5",
+]
+
+[[package]]
+name = "cron"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5877d3fbf742507b66bc2a1945106bd30dd8504019d596901ddd012a4dd01740"
+dependencies = [
+ "chrono",
+ "once_cell",
+ "winnow",
 ]
 
 [[package]]
@@ -1873,6 +1886,12 @@ checksum = "209c735641a413bc68c4923a9d6ad4bcb3ca306b794edaa7eb0b3228a99ffb25"
 dependencies = [
  "syn 2.0.90",
 ]
+
+[[package]]
+name = "difflib"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6184e33543162437515c2e2b48714794e37845ec9851711914eec9d308f6ebe8"
 
 [[package]]
 name = "digest"
@@ -3332,6 +3351,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "json-structural-diff"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e878e36a8a44c158505c2c818abdc1350413ad83dcb774a0459f6a7ef2b65cbf"
+dependencies = [
+ "difflib",
+ "regex",
+ "serde_json",
+]
+
+[[package]]
 name = "jsonwebtoken"
 version = "9.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4155,7 +4185,6 @@ dependencies = [
  "pageserver_client",
  "pageserver_compaction",
  "pin-project-lite",
- "postgres",
  "postgres-protocol",
  "postgres-types",
  "postgres_backend",
@@ -4242,7 +4271,6 @@ dependencies = [
  "futures",
  "http-utils",
  "pageserver_api",
- "postgres",
  "reqwest",
  "serde",
  "thiserror 1.0.69",
@@ -4458,18 +4486,18 @@ dependencies = [
 
 [[package]]
 name = "pin-project"
-version = "1.1.0"
+version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c95a7476719eab1e366eaf73d0260af3021184f18177925b07f54b30089ceead"
+checksum = "dfe2e71e1471fe07709406bf725f710b02927c9c54b2b5b2ec0e8087d97c327d"
 dependencies = [
  "pin-project-internal",
 ]
 
 [[package]]
 name = "pin-project-internal"
-version = "1.1.0"
+version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39407670928234ebc5e6e580247dd567ad73a3578460c5990f9503df207e8f07"
+checksum = "f6e859e6e5bd50440ab63c47e3ebabc90f26251f7c73c3d3e837b74a1cc3fa67"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4657,7 +4685,6 @@ dependencies = [
  "anyhow",
  "itertools 0.10.5",
  "once_cell",
- "postgres",
  "tokio-postgres",
  "url",
 ]
@@ -5799,7 +5826,6 @@ dependencies = [
  "once_cell",
  "pageserver_api",
  "parking_lot 0.12.1",
- "postgres",
  "postgres-protocol",
  "postgres_backend",
  "postgres_ffi",
@@ -6433,6 +6459,7 @@ dependencies = [
  "chrono",
  "clap",
  "control_plane",
+ "cron",
  "diesel",
  "diesel-async",
  "diesel_migrations",
@@ -6443,6 +6470,7 @@ dependencies = [
  "humantime",
  "hyper 0.14.30",
  "itertools 0.10.5",
+ "json-structural-diff",
  "lasso",
  "measured",
  "metrics",
@@ -7269,6 +7297,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "121c2a6cda46980bb0fcd1647ffaf6cd3fc79a013de288782836f6df9c48780e"
 
 [[package]]
+name = "tower-otel"
+version = "0.2.0"
+source = "git+https://github.com/mattiapenati/tower-otel?rev=56a7321053bcb72443888257b622ba0d43a11fcd#56a7321053bcb72443888257b622ba0d43a11fcd"
+dependencies = [
+ "http 1.1.0",
+ "opentelemetry",
+ "pin-project",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+ "tracing-opentelemetry",
+]
+
+[[package]]
 name = "tower-service"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7616,6 +7658,7 @@ dependencies = [
  "once_cell",
  "pin-project-lite",
  "postgres_connection",
+ "pprof",
  "pq_proto",
  "rand 0.8.5",
  "regex",
@@ -8123,9 +8166,9 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "winnow"
-version = "0.6.13"
+version = "0.6.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59b5e5f6c299a3c7890b876a2a587f3115162487e704907d9b6cd29473052ba1"
+checksum = "1e90edd2ac1aa278a5c4599b1d89cf03074b610800f866d4026dc199d7929a28"
 dependencies = [
  "memchr",
 ]

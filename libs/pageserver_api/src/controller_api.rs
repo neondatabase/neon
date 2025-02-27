@@ -9,11 +9,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use utils::id::{NodeId, TenantId};
 
-use crate::models::PageserverUtilization;
-use crate::{
-    models::{ShardParameters, TenantConfig},
-    shard::{ShardStripeSize, TenantShardId},
-};
+use crate::models::{PageserverUtilization, ShardParameters, TenantConfig};
+use crate::shard::{ShardStripeSize, TenantShardId};
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
@@ -57,6 +54,7 @@ pub struct NodeRegisterRequest {
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,
+    pub listen_https_port: Option<u16>,
 
     pub availability_zone_id: AvailabilityZone,
 }
@@ -105,6 +103,7 @@ pub struct TenantLocateResponseShard {
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,
+    pub listen_https_port: Option<u16>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -148,6 +147,7 @@ pub struct NodeDescribeResponse {
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,
+    pub listen_https_port: Option<u16>,
 
     pub listen_pg_addr: String,
     pub listen_pg_port: u16,
@@ -351,7 +351,7 @@ impl FromStr for SkSchedulingPolicy {
             _ => {
                 return Err(anyhow::anyhow!(
                     "Unknown scheduling policy '{s}', try active,pause,decomissioned"
-                ))
+                ));
             }
         })
     }
@@ -454,8 +454,9 @@ pub struct SafekeeperSchedulingPolicyRequest {
 
 #[cfg(test)]
 mod test {
-    use super::*;
     use serde_json;
+
+    use super::*;
 
     /// Check stability of PlacementPolicy's serialization
     #[test]

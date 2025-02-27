@@ -1,6 +1,8 @@
-use axum::{body::Body, response::Response};
+use axum::body::Body;
+use axum::response::Response;
 use compute_api::responses::{ComputeStatus, GenericAPIError};
-use http::{header::CONTENT_TYPE, StatusCode};
+use http::StatusCode;
+use http::header::CONTENT_TYPE;
 use serde::Serialize;
 use tracing::error;
 

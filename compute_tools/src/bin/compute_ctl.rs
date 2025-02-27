@@ -40,35 +40,33 @@ use std::path::Path;
 use std::process::exit;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
-use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
-use std::time::SystemTime;
-use std::{thread, time::Duration};
+use std::sync::{Arc, Condvar, Mutex, RwLock, mpsc};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Parser;
-use compute_tools::disk_quota::set_disk_quota;
-use compute_tools::http::server::Server;
-use compute_tools::lsn_lease::launch_lsn_lease_bg_task_for_static;
-use signal_hook::consts::{SIGQUIT, SIGTERM};
-use signal_hook::{consts::SIGINT, iterator::Signals};
-use tracing::{error, info, warn};
-use url::Url;
-
 use compute_api::responses::{ComputeCtlConfig, ComputeStatus};
 use compute_api::spec::ComputeSpec;
-
 use compute_tools::compute::{
-    forward_termination_signal, ComputeNode, ComputeState, ParsedSpec, PG_PID,
+    ComputeNode, ComputeState, PG_PID, ParsedSpec, forward_termination_signal,
 };
 use compute_tools::configurator::launch_configurator;
+use compute_tools::disk_quota::set_disk_quota;
 use compute_tools::extension_server::get_pg_version_string;
+use compute_tools::http::server::Server;
 use compute_tools::logger::*;
+use compute_tools::lsn_lease::launch_lsn_lease_bg_task_for_static;
 use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
 use compute_tools::swap::resize_swap;
-use rlimit::{setrlimit, Resource};
+use rlimit::{Resource, setrlimit};
+use signal_hook::consts::{SIGINT, SIGQUIT, SIGTERM};
+use signal_hook::iterator::Signals;
+use tracing::{error, info, warn};
+use url::Url;
 use utils::failpoint_support;
 
 // this is an arbitrary build tag. Fine as a default / for testing purposes
@@ -86,19 +84,6 @@ fn parse_remote_ext_config(arg: &str) -> Result<String> {
     }
 }
 
-/// Generate a compute ID if one is not supplied. This exists to keep forward
-/// compatibility tests working, but will be removed in a future iteration.
-fn generate_compute_id() -> String {
-    let now = SystemTime::now();
-
-    format!(
-        "compute-{}",
-        now.duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-    )
-}
-
 #[derive(Parser)]
 #[command(rename_all = "kebab-case")]
 struct Cli {
@@ -112,16 +97,13 @@ struct Cli {
     /// outside the compute will talk to the compute through this port. Keep
     /// the previous name for this argument around for a smoother release
     /// with the control plane.
-    ///
-    /// TODO: Remove the alias after the control plane release which teaches the
-    /// control plane about the renamed argument.
-    #[arg(long, alias = "http-port", default_value_t = 3080)]
+    #[arg(long, default_value_t = 3080)]
     pub external_http_port: u16,
 
-    /// The port to bind the internal listening HTTP server to. Clients like
+    /// The port to bind the internal listening HTTP server to. Clients include
     /// the neon extension (for installing remote extensions) and local_proxy.
-    #[arg(long)]
-    pub internal_http_port: Option<u16>,
+    #[arg(long, default_value_t = 3081)]
+    pub internal_http_port: u16,
 
     #[arg(short = 'D', long, value_name = "DATADIR")]
     pub pgdata: String,
@@ -156,7 +138,7 @@ struct Cli {
     #[arg(short = 'S', long, group = "spec-path")]
     pub spec_path: Option<OsString>,
 
-    #[arg(short = 'i', long, group = "compute-id", default_value = generate_compute_id())]
+    #[arg(short = 'i', long, group = "compute-id")]
     pub compute_id: String,
 
     #[arg(short = 'p', long, conflicts_with_all = ["spec", "spec-path"], value_name = "CONTROL_PLANE_API_BASE_URL")]
@@ -165,6 +147,8 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    let scenario = failpoint_support::init();
 
     // For historical reasons, the main thread that processes the spec and launches postgres
     // is synchronous, but we always have this tokio runtime available and we "enter" it so
@@ -176,8 +160,6 @@ fn main() -> Result<()> {
     let _rt_guard = runtime.enter();
 
     let build_tag = runtime.block_on(init())?;
-
-    let scenario = failpoint_support::init();
 
     // enable core dumping for all child processes
     setrlimit(Resource::CORE, rlimit::INFINITY, rlimit::INFINITY)?;
@@ -359,7 +341,7 @@ fn wait_spec(
         pgbin: cli.pgbin.clone(),
         pgversion: get_pg_version_string(&cli.pgbin),
         external_http_port: cli.external_http_port,
-        internal_http_port: cli.internal_http_port.unwrap_or(cli.external_http_port + 1),
+        internal_http_port: cli.internal_http_port,
         live_config_allowed,
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
@@ -383,7 +365,7 @@ fn wait_spec(
 
     // The internal HTTP server could be launched later, but there isn't much
     // sense in waiting.
-    Server::Internal(cli.internal_http_port.unwrap_or(cli.external_http_port + 1)).launch(&compute);
+    Server::Internal(cli.internal_http_port).launch(&compute);
 
     if !spec_set {
         // No spec provided, hang waiting for it.
@@ -424,6 +406,21 @@ fn start_postgres(
 ) -> Result<(Option<PostgresHandle>, StartPostgresResult)> {
     // We got all we need, update the state.
     let mut state = compute.state.lock().unwrap();
+
+    // Create a tracing span for the startup operation.
+    //
+    // We could otherwise just annotate the function with #[instrument], but if
+    // we're being configured from a /configure HTTP request, we want the
+    // startup to be considered part of the /configure request.
+    let _this_entered = {
+        // Temporarily enter the /configure request's span, so that the new span
+        // becomes its child.
+        let _parent_entered = state.startup_span.take().map(|p| p.entered());
+
+        tracing::info_span!("start_postgres")
+    }
+    .entered();
+
     state.set_status(ComputeStatus::Init, &compute.state_changed);
 
     info!(

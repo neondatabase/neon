@@ -4,56 +4,50 @@
 //! allowing multiple api users to independently work with the same S3 bucket, if
 //! their bucket prefixes are both specified and different.
 
-use std::{
-    borrow::Cow,
-    collections::HashMap,
-    num::NonZeroU32,
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-    time::{Duration, SystemTime},
-};
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::num::NonZeroU32;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::{Duration, SystemTime};
 
-use anyhow::{anyhow, Context as _};
-use aws_config::{
-    default_provider::credentials::DefaultCredentialsChain,
-    retry::{RetryConfigBuilder, RetryMode},
-    BehaviorVersion,
-};
-use aws_sdk_s3::{
-    config::{AsyncSleep, IdentityCache, Region, SharedAsyncSleep},
-    error::SdkError,
-    operation::{get_object::GetObjectError, head_object::HeadObjectError},
-    types::{Delete, DeleteMarkerEntry, ObjectIdentifier, ObjectVersion, StorageClass},
-    Client,
-};
+use anyhow::{Context as _, anyhow};
+use aws_config::BehaviorVersion;
+use aws_config::default_provider::credentials::DefaultCredentialsChain;
+use aws_config::retry::{RetryConfigBuilder, RetryMode};
+use aws_sdk_s3::Client;
+use aws_sdk_s3::config::{AsyncSleep, IdentityCache, Region, SharedAsyncSleep};
+use aws_sdk_s3::error::SdkError;
+use aws_sdk_s3::operation::get_object::GetObjectError;
+use aws_sdk_s3::operation::head_object::HeadObjectError;
+use aws_sdk_s3::types::{Delete, DeleteMarkerEntry, ObjectIdentifier, ObjectVersion, StorageClass};
 use aws_smithy_async::rt::sleep::TokioSleep;
-use http_body_util::StreamBody;
-use http_types::StatusCode;
-
-use aws_smithy_types::{body::SdkBody, DateTime};
-use aws_smithy_types::{byte_stream::ByteStream, date_time::ConversionError};
+use aws_smithy_types::DateTime;
+use aws_smithy_types::body::SdkBody;
+use aws_smithy_types::byte_stream::ByteStream;
+use aws_smithy_types::date_time::ConversionError;
 use bytes::Bytes;
 use futures::stream::Stream;
 use futures_util::StreamExt;
+use http_body_util::StreamBody;
+use http_types::StatusCode;
 use hyper::body::Frame;
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
 use utils::backoff;
 
 use super::StorageMetadata;
-use crate::{
-    config::S3Config,
-    error::Cancelled,
-    metrics::{start_counting_cancelled_wait, start_measuring_requests},
-    support::PermitCarrying,
-    ConcurrencyLimiter, Download, DownloadError, DownloadOpts, Listing, ListingMode, ListingObject,
-    RemotePath, RemoteStorage, TimeTravelError, TimeoutOrCancel, MAX_KEYS_PER_DELETE_S3,
-    REMOTE_STORAGE_PREFIX_SEPARATOR,
-};
-
-use crate::metrics::AttemptOutcome;
+use crate::config::S3Config;
+use crate::error::Cancelled;
 pub(super) use crate::metrics::RequestKind;
+use crate::metrics::{AttemptOutcome, start_counting_cancelled_wait, start_measuring_requests};
+use crate::support::PermitCarrying;
+use crate::{
+    ConcurrencyLimiter, Download, DownloadError, DownloadOpts, Listing, ListingMode, ListingObject,
+    MAX_KEYS_PER_DELETE_S3, REMOTE_STORAGE_PREFIX_SEPARATOR, RemotePath, RemoteStorage,
+    TimeTravelError, TimeoutOrCancel,
+};
 
 /// AWS S3 storage.
 pub struct S3Bucket {
@@ -958,8 +952,10 @@ impl RemoteStorage for S3Bucket {
                 version_id, key, ..
             } = &vd;
             if version_id == "null" {
-                return Err(TimeTravelError::Other(anyhow!("Received ListVersions response for key={key} with version_id='null', \
-                    indicating either disabled versioning, or legacy objects with null version id values")));
+                return Err(TimeTravelError::Other(anyhow!(
+                    "Received ListVersions response for key={key} with version_id='null', \
+                    indicating either disabled versioning, or legacy objects with null version id values"
+                )));
             }
             tracing::trace!(
                 "Parsing version key={key} version_id={version_id} kind={:?}",
@@ -1126,8 +1122,9 @@ impl VerOrDelete {
 
 #[cfg(test)]
 mod tests {
-    use camino::Utf8Path;
     use std::num::NonZeroUsize;
+
+    use camino::Utf8Path;
 
     use crate::{RemotePath, S3Bucket, S3Config};
 

@@ -9,45 +9,42 @@
 //! then a (re)connection happens, if necessary.
 //! Only WAL streaming task expects to be finished, other loops (storage broker, connection management) never exit unless cancelled explicitly via the dedicated channel.
 
-use std::{collections::HashMap, num::NonZeroU64, ops::ControlFlow, sync::Arc, time::Duration};
+use std::collections::HashMap;
+use std::num::NonZeroU64;
+use std::ops::ControlFlow;
+use std::sync::Arc;
+use std::time::Duration;
 
-use super::{TaskStateUpdate, WalReceiverConf};
+use anyhow::Context;
+use chrono::{NaiveDateTime, Utc};
+use pageserver_api::models::TimelineState;
+use postgres_connection::PgConnectionConfig;
+use storage_broker::proto::{
+    FilterTenantTimelineId, MessageType, SafekeeperDiscoveryRequest, SafekeeperDiscoveryResponse,
+    SubscribeByFilterRequest, TenantTimelineId as ProtoTenantTimelineId, TypeSubscription,
+    TypedMessage,
+};
+use storage_broker::{BrokerClientChannel, Code, Streaming};
+use tokio_util::sync::CancellationToken;
+use tracing::*;
+use utils::backoff::{
+    DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS, exponential_backoff,
+};
+use utils::id::{NodeId, TenantTimelineId};
+use utils::lsn::Lsn;
+use utils::postgres_client::{
+    ConnectionConfigArgs, PostgresClientProtocol, wal_stream_connection_config,
+};
+
+use super::walreceiver_connection::{WalConnectionStatus, WalReceiverError};
+use super::{TaskEvent, TaskHandle, TaskStateUpdate, WalReceiverConf};
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::{
     WALRECEIVER_ACTIVE_MANAGERS, WALRECEIVER_BROKER_UPDATES, WALRECEIVER_CANDIDATES_ADDED,
     WALRECEIVER_CANDIDATES_REMOVED, WALRECEIVER_SWITCHES,
 };
 use crate::task_mgr::TaskKind;
-use crate::tenant::{debug_assert_current_span_has_tenant_and_timeline_id, Timeline};
-use anyhow::Context;
-use chrono::{NaiveDateTime, Utc};
-use pageserver_api::models::TimelineState;
-
-use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
-use storage_broker::proto::{
-    FilterTenantTimelineId, MessageType, SafekeeperDiscoveryRequest, SafekeeperDiscoveryResponse,
-    SubscribeByFilterRequest, TypeSubscription, TypedMessage,
-};
-use storage_broker::{BrokerClientChannel, Code, Streaming};
-use tokio_util::sync::CancellationToken;
-use tracing::*;
-
-use postgres_connection::PgConnectionConfig;
-use utils::backoff::{
-    exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
-};
-use utils::postgres_client::{
-    wal_stream_connection_config, ConnectionConfigArgs, PostgresClientProtocol,
-};
-use utils::{
-    id::{NodeId, TenantTimelineId},
-    lsn::Lsn,
-};
-
-use super::{
-    walreceiver_connection::WalConnectionStatus, walreceiver_connection::WalReceiverError,
-    TaskEvent, TaskHandle,
-};
+use crate::tenant::{Timeline, debug_assert_current_span_has_tenant_and_timeline_id};
 
 pub(crate) struct Cancelled;
 
@@ -349,7 +346,9 @@ async fn subscribe_for_timeline_updates(
             Err(e) => {
                 // Safekeeper nodes can stop pushing timeline updates to the broker, when no new writes happen and
                 // entire WAL is streamed. Keep this noticeable with logging, but do not warn/error.
-                info!("Attempt #{attempt}, failed to subscribe for timeline {id} updates in broker: {e:#}");
+                info!(
+                    "Attempt #{attempt}, failed to subscribe for timeline {id} updates in broker: {e:#}"
+                );
                 continue;
             }
         }
@@ -512,11 +511,11 @@ impl ConnectionManagerState {
     fn spawn<Fut>(
         &self,
         task: impl FnOnce(
-                tokio::sync::watch::Sender<TaskStateUpdate<WalConnectionStatus>>,
-                CancellationToken,
-            ) -> Fut
-            + Send
-            + 'static,
+            tokio::sync::watch::Sender<TaskStateUpdate<WalConnectionStatus>>,
+            CancellationToken,
+        ) -> Fut
+        + Send
+        + 'static,
     ) -> TaskHandle<WalConnectionStatus>
     where
         Fut: std::future::Future<Output = anyhow::Result<()>> + Send,
@@ -537,6 +536,7 @@ impl ConnectionManagerState {
         let connect_timeout = self.conf.wal_connect_timeout;
         let ingest_batch_size = self.conf.ingest_batch_size;
         let protocol = self.conf.protocol;
+        let validate_wal_contiguity = self.conf.validate_wal_contiguity;
         let timeline = Arc::clone(&self.timeline);
         let ctx = ctx.detached_child(
             TaskKind::WalReceiverConnectionHandler,
@@ -558,6 +558,7 @@ impl ConnectionManagerState {
                     ctx,
                     node_id,
                     ingest_batch_size,
+                    validate_wal_contiguity,
                 )
                 .await;
 
@@ -878,8 +879,7 @@ impl ConnectionManagerState {
                     discovered_new_wal = if candidate_commit_lsn > current_commit_lsn {
                         trace!(
                             "New candidate has commit_lsn {}, higher than current_commit_lsn {}",
-                            candidate_commit_lsn,
-                            current_commit_lsn
+                            candidate_commit_lsn, current_commit_lsn
                         );
                         Some(NewCommittedWAL {
                             lsn: candidate_commit_lsn,
@@ -1046,7 +1046,9 @@ impl ConnectionManagerState {
 
         if !node_ids_to_remove.is_empty() {
             for node_id in node_ids_to_remove {
-                info!("Safekeeper node {node_id} did not send events for over {lagging_wal_timeout:?}, not retrying the connections");
+                info!(
+                    "Safekeeper node {node_id} did not send events for over {lagging_wal_timeout:?}, not retrying the connections"
+                );
                 self.wal_connection_retries.remove(&node_id);
                 WALRECEIVER_CANDIDATES_REMOVED.inc();
             }
@@ -1117,10 +1119,11 @@ impl ReconnectReason {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::tenant::harness::{TenantHarness, TIMELINE_ID};
     use pageserver_api::config::defaults::DEFAULT_WAL_RECEIVER_PROTOCOL;
     use url::Host;
+
+    use super::*;
+    use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
 
     fn dummy_broker_sk_timeline(
         commit_lsn: u64,
@@ -1563,6 +1566,7 @@ mod tests {
                 auth_token: None,
                 availability_zone: None,
                 ingest_batch_size: 1,
+                validate_wal_contiguity: false,
             },
             wal_connection: None,
             wal_stream_candidates: HashMap::new(),

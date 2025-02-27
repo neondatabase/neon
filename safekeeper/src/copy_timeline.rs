@@ -1,24 +1,22 @@
-use anyhow::{bail, Result};
+use std::sync::Arc;
+
+use anyhow::{Result, bail};
 use camino::Utf8PathBuf;
 use postgres_ffi::{MAX_SEND_SIZE, WAL_SEGMENT_SIZE};
 use safekeeper_api::membership::Configuration;
-use std::sync::Arc;
-use tokio::{
-    fs::OpenOptions,
-    io::{AsyncSeekExt, AsyncWriteExt},
-};
+use tokio::fs::OpenOptions;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tracing::{info, warn};
-use utils::{id::TenantTimelineId, lsn::Lsn};
+use utils::id::TenantTimelineId;
+use utils::lsn::Lsn;
 
-use crate::{
-    control_file::FileStorage,
-    state::TimelinePersistentState,
-    timeline::{TimelineError, WalResidentTimeline},
-    timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline},
-    wal_backup::copy_s3_segments,
-    wal_storage::{wal_file_paths, WalReader},
-    GlobalTimelines,
-};
+use crate::GlobalTimelines;
+use crate::control_file::FileStorage;
+use crate::state::TimelinePersistentState;
+use crate::timeline::{TimelineError, WalResidentTimeline};
+use crate::timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline};
+use crate::wal_backup::copy_s3_segments;
+use crate::wal_storage::{WalReader, wal_file_paths};
 
 // we don't want to have more than 10 segments on disk after copy, because they take space
 const MAX_BACKUP_LAG: u64 = 10 * WAL_SEGMENT_SIZE as u64;

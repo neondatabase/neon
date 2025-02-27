@@ -27,8 +27,7 @@ use utils::vec_map::VecMap;
 
 use crate::context::RequestContext;
 use crate::tenant::blob_io::{BYTE_UNCOMPRESSED, BYTE_ZSTD, LEN_COMPRESSION_BIT_MASK};
-use crate::virtual_file::IoBufferMut;
-use crate::virtual_file::{self, VirtualFile};
+use crate::virtual_file::{self, IoBufferMut, VirtualFile};
 
 /// Metadata bundled with the start and end offset of a blob.
 #[derive(Copy, Clone, Debug)]
@@ -139,7 +138,10 @@ impl VectoredBlob {
             bits => {
                 let error = std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("Failed to decompress blob for {}@{}, {}..{}: invalid compression byte {bits:x}", self.meta.key, self.meta.lsn, self.start, self.end),
+                    format!(
+                        "Failed to decompress blob for {}@{}, {}..{}: invalid compression byte {bits:x}",
+                        self.meta.key, self.meta.lsn, self.start, self.end
+                    ),
                 );
                 Err(error)
             }
@@ -677,12 +679,11 @@ impl StreamingVectoredReadPlanner {
 mod tests {
     use anyhow::Error;
 
+    use super::super::blob_io::tests::{random_array, write_maybe_compressed};
+    use super::*;
     use crate::context::DownloadBehavior;
     use crate::page_cache::PAGE_SZ;
     use crate::task_mgr::TaskKind;
-
-    use super::super::blob_io::tests::{random_array, write_maybe_compressed};
-    use super::*;
 
     fn validate_read(read: &VectoredRead, offset_range: &[(Key, Lsn, u64, BlobFlag)]) {
         const ALIGN: u64 = virtual_file::get_io_buffer_alignment() as u64;
