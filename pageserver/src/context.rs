@@ -107,14 +107,12 @@ pub struct RequestContext {
     scope: Scope,
 }
 
-// we wrap the inner struct in an Arc so that we can clone it cheaply
-// for context propagation; Cloning the `Arc<Timeline>`s inside the
-// ScopeInner is not cheap because the ref count atomics are shared among all
-// tasks operating on that timeline (e..g, multiple page_service connections).
+// We wrap the `Arc<Timeline>`s inside another Arc to avoid child
+// context creation contending for the ref counters of the Arc<Timeline>,
+// which are shared among all tasks that operate on the timeline, especially
+// concurrent page_service connections.
 #[derive(Clone)]
-pub(crate) struct Scope(Arc<ScopeInner>);
-
-pub(crate) enum ScopeInner {
+pub(crate) enum Scope {
     Global {
         io_size_metrics: &'static crate::metrics::StorageIoSizeMetrics,
     },
@@ -125,11 +123,8 @@ pub(crate) enum ScopeInner {
         io_size_metrics: crate::metrics::StorageIoSizeMetrics,
     },
     Timeline {
-        timeline: Arc<Timeline>,
-    },
-    TimelineHandle {
         #[allow(clippy::redundant_allocation)]
-        arc_arc_timeline: Arc<Arc<Timeline>>,
+        arc_arc: Arc<Arc<Timeline>>,
     },
     #[cfg(test)]
     UnitTest {
@@ -142,20 +137,23 @@ static GLOBAL_IO_SIZE_METRICS: Lazy<crate::metrics::StorageIoSizeMetrics> =
 
 impl Scope {
     pub(crate) fn new_global() -> Self {
-        Scope(Arc::new(ScopeInner::Global {
+        Scope::Global {
             io_size_metrics: &GLOBAL_IO_SIZE_METRICS,
-        }))
+        }
     }
+    /// NB: this allocates, so, use only at relatively long-lived roots, e.g., at start
+    /// of a compaction iteration.
     pub(crate) fn new_timeline(timeline: &Arc<Timeline>) -> Self {
-        Scope(Arc::new(ScopeInner::Timeline {
-            timeline: Arc::clone(timeline),
-        }))
+        Scope::Timeline {
+            arc_arc: Arc::new(Arc::clone(timeline)),
+        }
     }
-    pub(crate) fn new_timeline_handle(
+    pub(crate) fn new_page_service_pagestream(
         handle: &crate::tenant::timeline::handle::Handle<crate::page_service::TenantManagerTypes>,
     ) -> Self {
-        let arc_arc_timeline = crate::tenant::timeline::handle::Handle::clone_timeline(handle);
-        Scope(Arc::new(ScopeInner::TimelineHandle { arc_arc_timeline }))
+        Scope::Timeline {
+            arc_arc: crate::tenant::timeline::handle::Handle::clone_timeline(handle),
+        }
     }
     pub(crate) fn new_secondary_timeline(
         tenant_shard_id: &TenantShardId,
@@ -169,7 +167,7 @@ impl Scope {
 
         let io_size_metrics =
             crate::metrics::StorageIoSizeMetrics::new(&tenant_id, &shard_id, &timeline_id);
-        Scope(Arc::new(ScopeInner::SecondaryTimeline { io_size_metrics }))
+        Scope::SecondaryTimeline { io_size_metrics }
     }
     pub(crate) fn new_secondary_tenant(_tenant_shard_id: &TenantShardId) -> Self {
         // Before propagating metrics via RequestContext, the labels were inferred from file path.
@@ -181,15 +179,15 @@ impl Scope {
         // we will need to think about the metric lifecycle, i.e., remove them during secondary tenant shutdown,
         // like we do for attached timelines. (We don't have attached-tenant-scoped usage of VirtualFile
         // at this point, so, we were able to completely side-step tenant-scoped stuff there).
-        Scope(Arc::new(ScopeInner::SecondaryTenant {
+        Scope::SecondaryTenant {
             io_size_metrics: &GLOBAL_IO_SIZE_METRICS,
-        }))
+        }
     }
     #[cfg(test)]
     pub(crate) fn new_unit_test() -> Self {
-        Scope(Arc::new(ScopeInner::UnitTest {
+        Scope::UnitTest {
             io_size_metrics: &GLOBAL_IO_SIZE_METRICS,
-        }))
+        }
     }
 }
 
@@ -404,7 +402,7 @@ impl RequestContext {
         >,
     ) -> Self {
         RequestContextBuilder::extend(self)
-            .scope(Scope::new_timeline_handle(timeline_handle))
+            .scope(Scope::new_page_service_pagestream(timeline_handle))
             .build()
     }
 
@@ -452,8 +450,8 @@ impl RequestContext {
     }
 
     pub(crate) fn io_size_metrics(&self) -> &StorageIoSizeMetrics {
-        match &*self.scope.0 {
-            ScopeInner::Global { io_size_metrics } => {
+        match &self.scope {
+            Scope::Global { io_size_metrics } => {
                 let is_unit_test = cfg!(test);
                 let is_regress_test_build = cfg!(feature = "testing");
                 if is_unit_test || is_regress_test_build {
@@ -477,14 +475,11 @@ impl RequestContext {
                     io_size_metrics
                 }
             }
-            ScopeInner::Timeline { timeline } => &timeline.metrics.storage_io_size,
-            ScopeInner::TimelineHandle { arc_arc_timeline } => {
-                &arc_arc_timeline.metrics.storage_io_size
-            }
-            ScopeInner::SecondaryTimeline { io_size_metrics } => io_size_metrics,
-            ScopeInner::SecondaryTenant { io_size_metrics } => io_size_metrics,
+            Scope::Timeline { arc_arc } => &arc_arc.metrics.storage_io_size,
+            Scope::SecondaryTimeline { io_size_metrics } => io_size_metrics,
+            Scope::SecondaryTenant { io_size_metrics } => io_size_metrics,
             #[cfg(test)]
-            ScopeInner::UnitTest { io_size_metrics } => io_size_metrics,
+            Scope::UnitTest { io_size_metrics } => io_size_metrics,
         }
     }
 }
