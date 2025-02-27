@@ -213,30 +213,33 @@ impl GcCompactionQueue {
     }
 
     /// Trigger an auto compaction.
-    pub async fn trigger_auto_compaction(&self, timeline: &Arc<Timeline>) {
+    pub async fn trigger_auto_compaction(
+        &self,
+        timeline: &Arc<Timeline>,
+    ) -> Result<(), CompactionError> {
         let GcCompactionCombinedSettings {
             gc_compaction_enabled,
             gc_compaction_initial_threshold_kb,
             gc_compaction_ratio_percent,
         } = timeline.get_gc_compaction_settings();
         if !gc_compaction_enabled {
-            return;
+            return Ok(());
         }
         if self.remaining_jobs_num() > 0 {
             // Only schedule auto compaction when the queue is empty
-            return;
+            return Ok(());
         }
         if timeline.ancestor_timeline().is_some() {
             // Do not trigger auto compaction for child timelines. We haven't tested
             // it enough in staging yet.
-            return;
+            return Ok(());
         }
 
         let Ok(permit) = CONCURRENT_GC_COMPACTION_TASKS.clone().try_acquire_owned() else {
             // Only allow one compaction run at a time. TODO: As we do `try_acquire_owned`, we cannot ensure
             // the fairness of the lock across timelines. We should listen for both `acquire` and `l0_compaction_trigger`
             // to ensure the fairness while avoid starving other tasks.
-            return;
+            return Ok(());
         };
 
         let gc_compaction_state = timeline.get_gc_compaction_state();
@@ -246,7 +249,7 @@ impl GcCompactionQueue {
 
         let layers = {
             let guard = timeline.layers.read().await;
-            let layer_map = guard.layer_map().unwrap();
+            let layer_map = guard.layer_map()?;
             layer_map.iter_historic_layers().collect_vec()
         };
         let mut l2_size: u64 = 0;
@@ -323,6 +326,7 @@ impl GcCompactionQueue {
                 l1_size, l2_size, l2_lsn, gc_cutoff
             );
         }
+        Ok(())
     }
 
     /// Notify the caller the job has finished and unblock GC.
@@ -444,7 +448,7 @@ impl GcCompactionQueue {
                 None
             }
         }) else {
-            self.trigger_auto_compaction(timeline).await;
+            self.trigger_auto_compaction(timeline).await?;
             // Always yield after triggering auto-compaction. Gc-compaction is a low-priority task and we
             // have not implemented preemption mechanism yet. We always want to yield it to more important
             // tasks if there is one.
