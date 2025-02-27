@@ -131,7 +131,7 @@ class NeonAPI:
     def delete_branch(self, project_id: str, branch_id: str) -> dict[str, Any]:
         resp = self.__request(
             "DELETE",
-            f"/projects/{project_id}/{branch_id}",
+            f"/projects/{project_id}/branches/{branch_id}",
             headers={
                 "Accept": "application/json",
             },
