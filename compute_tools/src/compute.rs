@@ -388,7 +388,8 @@ impl ComputeNode {
         })
     }
 
-    /// Top-level control flow of compute_ctl
+    /// Top-level control flow of compute_ctl. Returns a process exit code we should
+    /// exit with.
     pub fn run(self) -> Result<Option<i32>> {
         let this = Arc::new(self);
 
@@ -425,22 +426,24 @@ impl ComputeNode {
         let mut vm_monitor = None;
         let mut pg_process: Option<PostgresHandle> = None;
 
-        let start_compute_result = this.start_compute(&mut pg_process);
-        if let Err(err) = start_compute_result {
-            // Something went wrong with the startup. Log it and expose the error to
-            // HTTP status requests.
-            error!("could not start the compute node: {:#}", err);
-            this.set_failed_status(err);
-            delay_exit = true;
-
-            // If the error happened after starting PostgreSQL, kill it
-            if let Some(ref pg_process) = pg_process {
-                kill(pg_process.pid(), Signal::SIGQUIT).ok();
+        match this.start_compute(&mut pg_process) {
+            Ok(()) => {
+                // Success! Launch remaining services (just vm-monitor currently)
+                vm_monitor =
+                    Some(this.start_vm_monitor(pspec.spec.disable_lfc_resizing.unwrap_or(false)));
             }
-        } else {
-            // Success!
-            vm_monitor =
-                Some(this.start_vm_monitor(pspec.spec.disable_lfc_resizing.unwrap_or(false)));
+            Err(err) => {
+                // Something went wrong with the startup. Log it and expose the error to
+                // HTTP status requests.
+                error!("could not start the compute node: {:#}", err);
+                this.set_failed_status(err);
+                delay_exit = true;
+
+                // If the error happened after starting PostgreSQL, kill it
+                if let Some(ref pg_process) = pg_process {
+                    kill(pg_process.pid(), Signal::SIGQUIT).ok();
+                }
+            }
         }
 
         // If startup was successful, or it failed in the late stages,
