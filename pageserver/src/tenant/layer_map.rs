@@ -463,6 +463,12 @@ impl LayerMap {
         Self::select_layer(latest_delta, latest_image, in_memory_layer, end_lsn)
     }
 
+    /// Select a layer from three potential candidates (in-memory, delta and image layer).
+    /// The candidates represent the first layer of each type which intersect a key range.
+    ///
+    /// Layer types have an in implicit priority (image > delta > in-memory). For instance,
+    /// if we have the option of reading an LSN range from both an image and a delta, we
+    /// should read from the image.
     fn select_layer(
         delta_layer: Option<Arc<PersistentLayerDesc>>,
         image_layer: Option<Arc<PersistentLayerDesc>>,
@@ -498,6 +504,8 @@ impl LayerMap {
                         lsn_floor: img_lsn,
                     })
                 } else {
+                    // If the delta overlaps with the image in the LSN dimension, do a partial
+                    // up to the image layer.
                     let lsn_floor =
                         std::cmp::max(delta.get_lsn_range().start, image.get_lsn_range().start + 1);
                     Some(SearchResult {
@@ -514,7 +522,8 @@ impl LayerMap {
                 })
             }
             (None, Some(image), Some(inmem)) => {
-                // TODO: de-duplicate with (Some(delta), Some(image), None)
+                // If the in-memory layer overlaps with the image in the LSN dimension, do a partial
+                // up to the image layer.
                 let img_lsn = image.get_lsn_range().start;
                 let image_is_newer = image.get_lsn_range().end >= inmem.get_lsn_range().end;
                 let image_exact_match = img_lsn + 1 == end_lsn;
@@ -533,7 +542,8 @@ impl LayerMap {
                 }
             }
             (Some(delta), None, Some(inmem)) => {
-                // TODO: de-duplicate with (Some(delta), Some(image), None)
+                // Overlaps between delta and in-memory layers are not a valid
+                // state, but we handle them here for completeness.
                 let delta_end = delta.get_lsn_range().end;
                 let delta_is_newer = delta_end >= inmem.get_lsn_range().end;
                 let delta_exact_match = delta_end == end_lsn;
@@ -543,6 +553,8 @@ impl LayerMap {
                         layer: ReadableLayerWeak::PersistentLayer(delta),
                     })
                 } else {
+                    // If the in-memory layer overlaps with the delta in the LSN dimension, do a partial
+                    // up to the delta layer.
                     let lsn_floor =
                         std::cmp::max(inmem.get_lsn_range().start, delta.get_lsn_range().end);
                     Some(SearchResult {
@@ -552,6 +564,8 @@ impl LayerMap {
                 }
             }
             (Some(delta), Some(image), Some(inmem)) => {
+                // Determine the preferred persistent layer without taking the in-memory layer
+                // into consideration.
                 let persistent_res =
                     Self::select_layer(Some(delta.clone()), Some(image.clone()), None, end_lsn)
                         .unwrap();
@@ -560,6 +574,7 @@ impl LayerMap {
                     ReadableLayerWeak::InMemoryLayer(_) => unreachable!(),
                 };
 
+                // Now handle the in-memory layer overlaps.
                 let inmem_res = if persistent_l.is_delta() {
                     Self::select_layer(Some(persistent_l), None, Some(inmem.clone()), end_lsn)
                         .unwrap()
@@ -570,6 +585,7 @@ impl LayerMap {
 
                 Some(SearchResult {
                     layer: inmem_res.layer,
+                    // Use the more restrictive LSN floor
                     lsn_floor: std::cmp::max(persistent_res.lsn_floor, inmem_res.lsn_floor),
                 })
             }

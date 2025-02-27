@@ -485,6 +485,25 @@ impl OpenLayerManager {
         mapping.remove(layer);
         layer.delete_on_drop();
     }
+
+    #[cfg(test)]
+    pub(crate) fn force_insert_in_memory_layer(&mut self, layer: Arc<InMemoryLayer>) {
+        use pageserver_api::models::InMemoryLayerInfo;
+
+        match layer.info() {
+            InMemoryLayerInfo::Open { .. } => {
+                assert!(self.layer_map.open_layer.is_none());
+                self.layer_map.open_layer = Some(layer);
+            }
+            InMemoryLayerInfo::Frozen { lsn_start, .. } => {
+                if let Some(last) = self.layer_map.frozen_layers.back() {
+                    assert!(last.get_lsn_range().end <= lsn_start);
+                }
+
+                self.layer_map.frozen_layers.push_back(layer);
+            }
+        }
+    }
 }
 
 pub(crate) struct LayerFileManager<T>(HashMap<PersistentLayerKey, T>);
