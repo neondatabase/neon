@@ -1,7 +1,7 @@
 [package]
 name = "compute_tools"
 version = "0.1.0"
-edition.workspace = true
+edition = "2024"
 license.workspace = true
 
 [features]
@@ -14,6 +14,7 @@ base64.workspace = true
 aws-config.workspace = true
 aws-sdk-s3.workspace = true
 aws-sdk-kms.workspace = true
+aws-smithy-types.workspace = true
 anyhow.workspace = true
 axum = { workspace = true, features = [] }
 camino.workspace = true
@@ -45,6 +46,7 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 tokio-postgres.workspace = true
 tokio-util.workspace = true
 tokio-stream.workspace = true
+tower-otel.workspace = true
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
@@ -52,7 +54,7 @@ tracing-utils.workspace = true
 thiserror.workspace = true
 url.workspace = true
 uuid.workspace = true
-prometheus.workspace = true
+walkdir.workspace = true
 
 postgres_initdb.workspace = true
 compute_api.workspace = true

@@ -53,9 +53,10 @@ mod tests {
 
     #[test]
     fn basics() {
-        use super::RateLimit;
         use std::sync::atomic::Ordering::Relaxed;
         use std::time::Duration;
+
+        use super::RateLimit;
 
         let called = AtomicUsize::new(0);
         let mut f = RateLimit::new(Duration::from_millis(100));

@@ -1,15 +1,14 @@
-use anyhow::bail;
-use flate2::write::{GzDecoder, GzEncoder};
-use flate2::Compression;
-use itertools::Itertools as _;
-use once_cell::sync::Lazy;
-use pprof::protos::{Function, Line, Location, Message as _, Profile};
-use regex::Regex;
-
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::io::Write as _;
+
+use anyhow::bail;
+use flate2::Compression;
+use flate2::write::{GzDecoder, GzEncoder};
+use itertools::Itertools as _;
+use pprof::protos::{Function, Line, Location, Message as _, Profile};
+use regex::Regex;
 
 /// Decodes a gzip-compressed Protobuf-encoded pprof profile.
 pub fn decode(bytes: &[u8]) -> anyhow::Result<Profile> {
@@ -58,38 +57,30 @@ pub fn symbolize(mut profile: Profile) -> anyhow::Result<Profile> {
 
         // Resolve the line and function for each location.
         backtrace::resolve(loc.address as *mut c_void, |symbol| {
-            let Some(symname) = symbol.name() else {
+            let Some(symbol_name) = symbol.name() else {
                 return;
             };
-            let mut name = symname.to_string();
 
-            // Strip the Rust monomorphization suffix from the symbol name.
-            static SUFFIX_REGEX: Lazy<Regex> =
-                Lazy::new(|| Regex::new("::h[0-9a-f]{16}$").expect("invalid regex"));
-            if let Some(m) = SUFFIX_REGEX.find(&name) {
-                name.truncate(m.start());
-            }
-
-            let function_id = match functions.get(&name) {
-                Some(function) => function.id,
-                None => {
-                    let id = functions.len() as u64 + 1;
-                    let system_name = String::from_utf8_lossy(symname.as_bytes());
+            let function_name = format!("{symbol_name:#}");
+            let functions_len = functions.len();
+            let function_id = functions
+                .entry(function_name)
+                .or_insert_with_key(|function_name| {
+                    let function_id = functions_len as u64 + 1;
+                    let system_name = String::from_utf8_lossy(symbol_name.as_bytes());
                     let filename = symbol
                         .filename()
                         .map(|path| path.to_string_lossy())
                         .unwrap_or(Cow::Borrowed(""));
-                    let function = Function {
-                        id,
-                        name: string_id(&name),
+                    Function {
+                        id: function_id,
+                        name: string_id(function_name),
                         system_name: string_id(&system_name),
                         filename: string_id(&filename),
                         ..Default::default()
-                    };
-                    functions.insert(name, function);
-                    id
-                }
-            };
+                    }
+                })
+                .id;
             loc.line.push(Line {
                 function_id,
                 line: symbol.lineno().unwrap_or(0) as i64,

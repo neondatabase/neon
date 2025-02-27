@@ -2,20 +2,51 @@
 //! rfcs/035-safekeeper-dynamic-membership-change.md
 //! for details.
 
-use std::{collections::HashSet, fmt::Display};
+use std::collections::HashSet;
+use std::fmt::Display;
 
 use anyhow;
 use anyhow::bail;
 use serde::{Deserialize, Serialize};
 use utils::id::NodeId;
 
-/// Number uniquely identifying safekeeper configuration.
-/// Note: it is a part of sk control file.
-pub type Generation = u32;
 /// 1 is the first valid generation, 0 is used as
 /// a placeholder before we fully migrate to generations.
-pub const INVALID_GENERATION: Generation = 0;
-pub const INITIAL_GENERATION: Generation = 1;
+pub const INVALID_GENERATION: SafekeeperGeneration = SafekeeperGeneration::new(0);
+pub const INITIAL_GENERATION: SafekeeperGeneration = SafekeeperGeneration::new(1);
+
+/// Number uniquely identifying safekeeper configuration.
+/// Note: it is a part of sk control file.
+///
+/// Like tenant generations, but for safekeepers.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SafekeeperGeneration(u32);
+
+impl SafekeeperGeneration {
+    pub const fn new(v: u32) -> Self {
+        Self(v)
+    }
+
+    #[track_caller]
+    pub fn previous(&self) -> Option<Self> {
+        Some(Self(self.0.checked_sub(1)?))
+    }
+
+    #[track_caller]
+    pub fn next(&self) -> Self {
+        Self(self.0 + 1)
+    }
+
+    pub fn into_inner(self) -> u32 {
+        self.0
+    }
+}
+
+impl Display for SafekeeperGeneration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 /// Membership is defined by ids so e.g. walproposer uses them to figure out
 /// quorums, but we also carry host and port to give wp idea where to connect.
@@ -38,14 +69,12 @@ impl Display for SafekeeperId {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(transparent)]
 pub struct MemberSet {
-    pub members: Vec<SafekeeperId>,
+    pub m: Vec<SafekeeperId>,
 }
 
 impl MemberSet {
     pub fn empty() -> Self {
-        MemberSet {
-            members: Vec::new(),
-        }
+        MemberSet { m: Vec::new() }
     }
 
     pub fn new(members: Vec<SafekeeperId>) -> anyhow::Result<Self> {
@@ -53,21 +82,21 @@ impl MemberSet {
         if hs.len() != members.len() {
             bail!("duplicate safekeeper id in the set {:?}", members);
         }
-        Ok(MemberSet { members })
+        Ok(MemberSet { m: members })
     }
 
-    pub fn contains(&self, sk: &SafekeeperId) -> bool {
-        self.members.iter().any(|m| m.id == sk.id)
+    pub fn contains(&self, sk: NodeId) -> bool {
+        self.m.iter().any(|m| m.id == sk)
     }
 
     pub fn add(&mut self, sk: SafekeeperId) -> anyhow::Result<()> {
-        if self.contains(&sk) {
+        if self.contains(sk.id) {
             bail!(format!(
                 "sk {} is already member of the set {}",
                 sk.id, self
             ));
         }
-        self.members.push(sk);
+        self.m.push(sk);
         Ok(())
     }
 }
@@ -75,11 +104,7 @@ impl MemberSet {
 impl Display for MemberSet {
     /// Display as a comma separated list of members.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let sks_str = self
-            .members
-            .iter()
-            .map(|m| m.to_string())
-            .collect::<Vec<_>>();
+        let sks_str = self.m.iter().map(|sk| sk.to_string()).collect::<Vec<_>>();
         write!(f, "({})", sks_str.join(", "))
     }
 }
@@ -89,7 +114,7 @@ impl Display for MemberSet {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Configuration {
     /// Unique id.
-    pub generation: Generation,
+    pub generation: SafekeeperGeneration,
     /// Current members of the configuration.
     pub members: MemberSet,
     /// Some means it is a joint conf.
@@ -104,6 +129,11 @@ impl Configuration {
             members: MemberSet::empty(),
             new_members: None,
         }
+    }
+
+    /// Is `sk_id` member of the configuration?
+    pub fn contains(&self, sk_id: NodeId) -> bool {
+        self.members.contains(sk_id) || self.new_members.as_ref().is_some_and(|m| m.contains(sk_id))
     }
 }
 
@@ -124,8 +154,9 @@ impl Display for Configuration {
 
 #[cfg(test)]
 mod tests {
-    use super::{MemberSet, SafekeeperId};
     use utils::id::NodeId;
+
+    use super::{MemberSet, SafekeeperId};
 
     #[test]
     fn test_member_set() {

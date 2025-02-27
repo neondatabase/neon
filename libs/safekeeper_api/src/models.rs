@@ -1,18 +1,17 @@
 //! Types used in safekeeper http API. Many of them are also reused internally.
 
+use std::net::SocketAddr;
+
 use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::TimestampTz;
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
 use tokio::time::Instant;
+use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
+use utils::lsn::Lsn;
+use utils::pageserver_feedback::PageserverFeedback;
 
-use utils::{
-    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
-    lsn::Lsn,
-    pageserver_feedback::PageserverFeedback,
-};
-
-use crate::{membership::Configuration, ServerInfo, Term};
+use crate::membership::Configuration;
+use crate::{ServerInfo, Term};
 
 #[derive(Debug, Serialize)]
 pub struct SafekeeperStatus {
@@ -281,4 +280,19 @@ pub struct TimelineTermBumpResponse {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SafekeeperUtilization {
     pub timeline_count: u64,
+}
+
+/// pull_timeline request body.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct PullTimelineRequest {
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
+    pub http_hosts: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PullTimelineResponse {
+    // Donor safekeeper host
+    pub safekeeper_host: String,
+    // TODO: add more fields?
 }

@@ -38,6 +38,9 @@ jobs:
     runs-on: us-east-2
     container:
       image: neondatabase/build-tools:pinned-bookworm
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
     steps:

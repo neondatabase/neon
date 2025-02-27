@@ -6,20 +6,15 @@
 //! number of full-sized DeleteObjects requests, rather than a larger number of
 //! smaller requests.
 
-use remote_storage::GenericRemoteStorage;
-use remote_storage::RemotePath;
-use remote_storage::TimeoutOrCancel;
 use std::time::Duration;
+
+use remote_storage::{GenericRemoteStorage, RemotePath, TimeoutOrCancel};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
-use tracing::warn;
-use utils::backoff;
-use utils::pausable_failpoint;
+use tracing::{info, warn};
+use utils::{backoff, pausable_failpoint};
 
+use super::{DeletionQueueError, FlushOp};
 use crate::metrics;
-
-use super::DeletionQueueError;
-use super::FlushOp;
 
 const AUTOFLUSH_INTERVAL: Duration = Duration::from_secs(10);
 

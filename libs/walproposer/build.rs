@@ -1,9 +1,11 @@
 //! Links with walproposer, pgcommon, pgport and runs bindgen on walproposer.h
 //! to generate Rust bindings for it.
 
-use std::{env, path::PathBuf, process::Command};
+use std::env;
+use std::path::PathBuf;
+use std::process::Command;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 
 const WALPROPOSER_PG_VERSION: &str = "v17";
 

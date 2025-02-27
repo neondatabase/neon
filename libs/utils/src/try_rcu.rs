@@ -44,9 +44,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use arc_swap::ArcSwap;
     use std::sync::Arc;
+
+    use arc_swap::ArcSwap;
+
+    use super::*;
 
     #[test]
     fn test_try_rcu_success() {

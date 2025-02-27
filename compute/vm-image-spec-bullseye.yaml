@@ -44,10 +44,17 @@ shutdownHook: |
 files:
   - filename: compute_ctl-sudoers
     content: |
+      # Reverse hostname lookup doesn't currently work, and isn't needed anyway when all
+      # the rules use ALL as the hostname. Avoid the pointless lookups and the "unable to
+      # resolve host" log messages that they generate.
+      Defaults !fqdn
+      
       # Allow postgres user (which is what compute_ctl runs as) to run /neonvm/bin/resize-swap
       # and /neonvm/bin/set-disk-quota as root without requiring entering a password (NOPASSWD),
       # regardless of hostname (ALL)
-      postgres ALL=(root) NOPASSWD: /neonvm/bin/resize-swap, /neonvm/bin/set-disk-quota
+      #
+      # Also allow it to shut down the VM. The fast_import job does that when it's finished.
+      postgres ALL=(root) NOPASSWD: /neonvm/bin/resize-swap, /neonvm/bin/set-disk-quota, /neonvm/bin/poweroff
   - filename: cgconfig.conf
     content: |
       # Configuration for cgroups in VM compute nodes

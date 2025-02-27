@@ -337,7 +337,7 @@ jobs:
       - name: Pytest regression tests
         continue-on-error: ${{ matrix.lfc_state == 'with-lfc' && inputs.build-type == 'debug' }}
         uses: ./.github/actions/run-python-test-set
-        timeout-minutes: ${{ inputs.sanitizers != 'enabled' && 60 || 180 }}
+        timeout-minutes: ${{ inputs.sanitizers != 'enabled' && 75 || 180 }}
         with:
           build_type: ${{ inputs.build-type }}
           test_selection: regress
@@ -348,6 +348,10 @@ jobs:
           rerun_failed: true
           pg_version: ${{ matrix.pg_version }}
           aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+          # `--session-timeout` is equal to (timeout-minutes - 10 minutes) * 60 seconds.
+          # Attempt to stop tests gracefully to generate test reports
+          # until they are forcibly stopped by the stricter `timeout-minutes` limit.
+          extra_params: --session-timeout=${{ inputs.sanitizers != 'enabled' && 3000 || 10200 }}
         env:
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty

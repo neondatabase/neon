@@ -1,21 +1,22 @@
-use std::{str::FromStr, time::Duration};
+use std::str::FromStr;
+use std::time::Duration;
 
-use pageserver_api::{
-    controller_api::{
-        AvailabilityZone, NodeAvailability, NodeDescribeResponse, NodeRegisterRequest,
-        NodeSchedulingPolicy, TenantLocateResponseShard,
-    },
-    shard::TenantShardId,
+use anyhow::anyhow;
+use pageserver_api::controller_api::{
+    AvailabilityZone, NodeAvailability, NodeDescribeResponse, NodeRegisterRequest,
+    NodeSchedulingPolicy, TenantLocateResponseShard,
 };
+use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use reqwest::StatusCode;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
-use utils::{backoff, id::NodeId};
+use utils::backoff;
+use utils::id::NodeId;
 
-use crate::{
-    pageserver_client::PageserverClient, persistence::NodePersistence, scheduler::MaySchedule,
-};
+use crate::pageserver_client::PageserverClient;
+use crate::persistence::NodePersistence;
+use crate::scheduler::MaySchedule;
 
 /// Represents the in-memory description of a Node.
 ///
@@ -32,12 +33,16 @@ pub(crate) struct Node {
 
     listen_http_addr: String,
     listen_http_port: u16,
+    listen_https_port: Option<u16>,
 
     listen_pg_addr: String,
     listen_pg_port: u16,
 
     availability_zone_id: AvailabilityZone,
 
+    // Flag from storcon's config to use https for pageserver admin API.
+    // Invariant: if |true|, listen_https_port should contain a value.
+    use_https: bool,
     // This cancellation token means "stop any RPCs in flight to this node, and don't start
     // any more". It is not related to process shutdown.
     #[serde(skip)]
@@ -56,7 +61,16 @@ pub(crate) enum AvailabilityTransition {
 
 impl Node {
     pub(crate) fn base_url(&self) -> String {
-        format!("http://{}:{}", self.listen_http_addr, self.listen_http_port)
+        if self.use_https {
+            format!(
+                "https://{}:{}",
+                self.listen_http_addr,
+                self.listen_https_port
+                    .expect("https port should be specified if use_https is on")
+            )
+        } else {
+            format!("http://{}:{}", self.listen_http_addr, self.listen_http_port)
+        }
     }
 
     pub(crate) fn get_id(&self) -> NodeId {
@@ -82,9 +96,18 @@ impl Node {
         self.id == register_req.node_id
             && self.listen_http_addr == register_req.listen_http_addr
             && self.listen_http_port == register_req.listen_http_port
+            // Note: listen_https_port may change. See [`Self::need_update`] for mode details.
+            // && self.listen_https_port == register_req.listen_https_port
             && self.listen_pg_addr == register_req.listen_pg_addr
             && self.listen_pg_port == register_req.listen_pg_port
             && self.availability_zone_id == register_req.availability_zone_id
+    }
+
+    // Do we need to update an existing record in DB on this registration request?
+    pub(crate) fn need_update(&self, register_req: &NodeRegisterRequest) -> bool {
+        // listen_https_port is checked here because it may change during migration to https.
+        // After migration, this check may be moved to registration_match.
+        self.listen_https_port != register_req.listen_https_port
     }
 
     /// For a shard located on this node, populate a response object
@@ -95,6 +118,7 @@ impl Node {
             node_id: self.id,
             listen_http_addr: self.listen_http_addr.clone(),
             listen_http_port: self.listen_http_port,
+            listen_https_port: self.listen_https_port,
             listen_pg_addr: self.listen_pg_addr.clone(),
             listen_pg_port: self.listen_pg_port,
         }
@@ -175,25 +199,34 @@ impl Node {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         id: NodeId,
         listen_http_addr: String,
         listen_http_port: u16,
+        listen_https_port: Option<u16>,
         listen_pg_addr: String,
         listen_pg_port: u16,
         availability_zone_id: AvailabilityZone,
-    ) -> Self {
-        Self {
+        use_https: bool,
+    ) -> anyhow::Result<Self> {
+        if use_https && listen_https_port.is_none() {
+            return Err(anyhow!("https is enabled, but node has no https port"));
+        }
+
+        Ok(Self {
             id,
             listen_http_addr,
             listen_http_port,
+            listen_https_port,
             listen_pg_addr,
             listen_pg_port,
             scheduling: NodeSchedulingPolicy::Active,
             availability: NodeAvailability::Offline,
             availability_zone_id,
+            use_https,
             cancel: CancellationToken::new(),
-        }
+        })
     }
 
     pub(crate) fn to_persistent(&self) -> NodePersistence {
@@ -202,14 +235,19 @@ impl Node {
             scheduling_policy: self.scheduling.into(),
             listen_http_addr: self.listen_http_addr.clone(),
             listen_http_port: self.listen_http_port as i32,
+            listen_https_port: self.listen_https_port.map(|x| x as i32),
             listen_pg_addr: self.listen_pg_addr.clone(),
             listen_pg_port: self.listen_pg_port as i32,
             availability_zone_id: self.availability_zone_id.0.clone(),
         }
     }
 
-    pub(crate) fn from_persistent(np: NodePersistence) -> Self {
-        Self {
+    pub(crate) fn from_persistent(np: NodePersistence, use_https: bool) -> anyhow::Result<Self> {
+        if use_https && np.listen_https_port.is_none() {
+            return Err(anyhow!("https is enabled, but node has no https port"));
+        }
+
+        Ok(Self {
             id: NodeId(np.node_id as u64),
             // At startup we consider a node offline until proven otherwise.
             availability: NodeAvailability::Offline,
@@ -217,11 +255,13 @@ impl Node {
                 .expect("Bad scheduling policy in DB"),
             listen_http_addr: np.listen_http_addr,
             listen_http_port: np.listen_http_port as u16,
+            listen_https_port: np.listen_https_port.map(|x| x as u16),
             listen_pg_addr: np.listen_pg_addr,
             listen_pg_port: np.listen_pg_port as u16,
             availability_zone_id: AvailabilityZone(np.availability_zone_id),
+            use_https,
             cancel: CancellationToken::new(),
-        }
+        })
     }
 
     /// Wrapper for issuing requests to pageserver management API: takes care of generic
@@ -285,8 +325,9 @@ impl Node {
             warn_threshold,
             max_retries,
             &format!(
-                "Call to node {} ({}:{}) management API",
-                self.id, self.listen_http_addr, self.listen_http_port
+                "Call to node {} ({}) management API",
+                self.id,
+                self.base_url(),
             ),
             cancel,
         )
@@ -302,6 +343,7 @@ impl Node {
             availability_zone_id: self.availability_zone_id.0.clone(),
             listen_http_addr: self.listen_http_addr.clone(),
             listen_http_port: self.listen_http_port,
+            listen_https_port: self.listen_https_port,
             listen_pg_addr: self.listen_pg_addr.clone(),
             listen_pg_port: self.listen_pg_port,
         }

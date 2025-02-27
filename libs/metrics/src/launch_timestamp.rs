@@ -1,9 +1,10 @@
 //! A timestamp captured at process startup to identify restarts of the process, e.g., in logs and metrics.
 
+use std::fmt::Display;
+
 use chrono::Utc;
 
 use super::register_uint_gauge;
-use std::fmt::Display;
 
 pub struct LaunchTimestamp(chrono::DateTime<Utc>);
 

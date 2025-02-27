@@ -5,12 +5,11 @@
 //! and connect it to the storage nodes.
 use std::collections::HashMap;
 
+use regex::Regex;
+use remote_storage::RemotePath;
 use serde::{Deserialize, Serialize};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
-
-use regex::Regex;
-use remote_storage::RemotePath;
 
 /// String type alias representing Postgres identifier and
 /// intended to be used for DB / role names.
@@ -252,7 +251,7 @@ pub enum ComputeMode {
     Replica,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Cluster {
     pub cluster_id: Option<String>,
     pub name: Option<String>,
@@ -283,7 +282,7 @@ pub struct DeltaOp {
 
 /// Rust representation of Postgres role info with only those fields
 /// that matter for us.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Role {
     pub name: PgIdent,
     pub encrypted_password: Option<String>,
@@ -292,7 +291,7 @@ pub struct Role {
 
 /// Rust representation of Postgres database info with only those fields
 /// that matter for us.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Database {
     pub name: PgIdent,
     pub owner: PgIdent,
@@ -308,7 +307,7 @@ pub struct Database {
 /// Common type representing both SQL statement params with or without value,
 /// like `LOGIN` or `OWNER username` in the `CREATE/ALTER ROLE`, and config
 /// options like `wal_level = logical`.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct GenericOption {
     pub name: String,
     pub value: Option<String>,
@@ -339,8 +338,9 @@ pub struct JwksSettings {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs::File;
+
+    use super::*;
 
     #[test]
     fn allow_installing_remote_extensions() {

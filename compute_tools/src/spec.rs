@@ -1,18 +1,20 @@
-use anyhow::{anyhow, bail, Result};
-use reqwest::StatusCode;
 use std::fs::File;
 use std::path::Path;
+
+use anyhow::{Result, anyhow, bail};
+use compute_api::responses::{
+    ComputeCtlConfig, ControlPlaneComputeStatus, ControlPlaneSpecResponse,
+};
+use compute_api::spec::ComputeSpec;
+use reqwest::StatusCode;
 use tokio_postgres::Client;
 use tracing::{error, info, instrument, warn};
 
 use crate::config;
-use crate::metrics::{CPlaneRequestRPC, CPLANE_REQUESTS_TOTAL, UNKNOWN_HTTP_STATUS};
+use crate::metrics::{CPLANE_REQUESTS_TOTAL, CPlaneRequestRPC, UNKNOWN_HTTP_STATUS};
 use crate::migration::MigrationRunner;
 use crate::params::PG_HBA_ALL_MD5;
 use crate::pg_helpers::*;
-
-use compute_api::responses::{ControlPlaneComputeStatus, ControlPlaneSpecResponse};
-use compute_api::spec::ComputeSpec;
 
 // Do control plane request and return response if any. In case of error it
 // returns a bool flag indicating whether it makes sense to retry the request
@@ -73,14 +75,13 @@ fn do_control_plane_request(
 pub fn get_spec_from_control_plane(
     base_uri: &str,
     compute_id: &str,
-) -> Result<Option<ComputeSpec>> {
+) -> Result<(Option<ComputeSpec>, ComputeCtlConfig)> {
     let cp_uri = format!("{base_uri}/compute/api/v2/computes/{compute_id}/spec");
     let jwt: String = match std::env::var("NEON_CONTROL_PLANE_TOKEN") {
         Ok(v) => v,
         Err(_) => "".to_string(),
     };
     let mut attempt = 1;
-    let mut spec: Result<Option<ComputeSpec>> = Ok(None);
 
     info!("getting spec from control plane: {}", cp_uri);
 
@@ -90,7 +91,7 @@ pub fn get_spec_from_control_plane(
     // - no spec for compute yet (Empty state) -> return Ok(None)
     // - got spec -> return Ok(Some(spec))
     while attempt < 4 {
-        spec = match do_control_plane_request(&cp_uri, &jwt) {
+        let result = match do_control_plane_request(&cp_uri, &jwt) {
             Ok(spec_resp) => {
                 CPLANE_REQUESTS_TOTAL
                     .with_label_values(&[
@@ -99,10 +100,10 @@ pub fn get_spec_from_control_plane(
                     ])
                     .inc();
                 match spec_resp.status {
-                    ControlPlaneComputeStatus::Empty => Ok(None),
+                    ControlPlaneComputeStatus::Empty => Ok((None, spec_resp.compute_ctl_config)),
                     ControlPlaneComputeStatus::Attached => {
                         if let Some(spec) = spec_resp.spec {
-                            Ok(Some(spec))
+                            Ok((Some(spec), spec_resp.compute_ctl_config))
                         } else {
                             bail!("compute is attached, but spec is empty")
                         }
@@ -121,10 +122,10 @@ pub fn get_spec_from_control_plane(
             }
         };
 
-        if let Err(e) = &spec {
+        if let Err(e) = &result {
             error!("attempt {} to get spec failed with: {}", attempt, e);
         } else {
-            return spec;
+            return result;
         }
 
         attempt += 1;
@@ -132,13 +133,14 @@ pub fn get_spec_from_control_plane(
     }
 
     // All attempts failed, return error.
-    spec
+    Err(anyhow::anyhow!(
+        "Exhausted all attempts to retrieve the spec from the control plane"
+    ))
 }
 
 /// Check `pg_hba.conf` and update if needed to allow external connections.
 pub fn update_pg_hba(pgdata_path: &Path) -> Result<()> {
     // XXX: consider making it a part of spec.json
-    info!("checking pg_hba.conf");
     let pghba_path = pgdata_path.join("pg_hba.conf");
 
     if config::line_in_file(&pghba_path, PG_HBA_ALL_MD5)? {
@@ -153,12 +155,11 @@ pub fn update_pg_hba(pgdata_path: &Path) -> Result<()> {
 /// Create a standby.signal file
 pub fn add_standby_signal(pgdata_path: &Path) -> Result<()> {
     // XXX: consider making it a part of spec.json
-    info!("adding standby.signal");
     let signalfile = pgdata_path.join("standby.signal");
 
     if !signalfile.exists() {
-        info!("created standby.signal");
         File::create(signalfile)?;
+        info!("created standby.signal");
     } else {
         info!("reused pre-existing standby.signal");
     }
@@ -167,7 +168,6 @@ pub fn add_standby_signal(pgdata_path: &Path) -> Result<()> {
 
 #[instrument(skip_all)]
 pub async fn handle_neon_extension_upgrade(client: &mut Client) -> Result<()> {
-    info!("handle neon extension upgrade");
     let query = "ALTER EXTENSION neon UPDATE";
     info!("update neon extension version with query: {}", query);
     client.simple_query(query).await?;

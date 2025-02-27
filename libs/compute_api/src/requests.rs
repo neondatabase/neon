@@ -1,18 +1,19 @@
 //! Structs representing the JSON formats used in the compute_ctl's HTTP API.
-use crate::{
-    privilege::Privilege,
-    spec::{ComputeSpec, ExtVersion, PgIdent},
-};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+use crate::privilege::Privilege;
+use crate::responses::ComputeCtlConfig;
+use crate::spec::{ComputeSpec, ExtVersion, PgIdent};
 
 /// Request of the /configure API
 ///
 /// We now pass only `spec` in the configuration request, but later we can
 /// extend it and something like `restart: bool` or something else. So put
 /// `spec` into a struct initially to be more flexible in the future.
-#[derive(Deserialize, Debug)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ConfigurationRequest {
     pub spec: ComputeSpec,
+    pub compute_ctl_config: ComputeCtlConfig,
 }
 
 #[derive(Deserialize, Debug)]

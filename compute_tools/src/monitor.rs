@@ -1,13 +1,14 @@
 use std::sync::Arc;
-use std::{thread, time::Duration};
+use std::thread;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use compute_api::responses::ComputeStatus;
+use compute_api::spec::ComputeFeature;
 use postgres::{Client, NoTls};
 use tracing::{debug, error, info, warn};
 
 use crate::compute::ComputeNode;
-use compute_api::responses::ComputeStatus;
-use compute_api::spec::ComputeFeature;
 
 const MONITOR_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 

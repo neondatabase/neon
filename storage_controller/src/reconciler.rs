@@ -1,17 +1,16 @@
-use crate::pageserver_client::PageserverClient;
-use crate::persistence::Persistence;
-use crate::{compute_hook, service};
-use pageserver_api::controller_api::{AvailabilityZone, PlacementPolicy};
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use json_structural_diff::JsonDiff;
+use pageserver_api::controller_api::{AvailabilityZone, MigrationConfig, PlacementPolicy};
 use pageserver_api::models::{
     LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig, TenantWaitLsnRequest,
 };
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use pageserver_client::mgmt_api;
 use reqwest::StatusCode;
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use utils::backoff::exponential_backoff;
 use utils::generation::Generation;
@@ -22,9 +21,12 @@ use utils::sync::gate::GateGuard;
 
 use crate::compute_hook::{ComputeHook, NotifyError};
 use crate::node::Node;
+use crate::pageserver_client::PageserverClient;
+use crate::persistence::Persistence;
 use crate::tenant_shard::{IntentState, ObservedState, ObservedStateDelta, ObservedStateLocation};
+use crate::{compute_hook, service};
 
-const DEFAULT_HEATMAP_PERIOD: &str = "60s";
+const DEFAULT_HEATMAP_PERIOD: Duration = Duration::from_secs(60);
 
 /// Object with the lifetime of the background reconcile task that is created
 /// for tenants which have a difference between their intent and observed states.
@@ -91,9 +93,10 @@ pub(crate) struct ReconcilerConfigBuilder {
 }
 
 impl ReconcilerConfigBuilder {
-    pub(crate) fn new() -> Self {
+    /// Priority is special: you must pick one thoughtfully, do not just use 'normal' as the default
+    pub(crate) fn new(priority: ReconcilerPriority) -> Self {
         Self {
-            config: ReconcilerConfig::default(),
+            config: ReconcilerConfig::new(priority),
         }
     }
 
@@ -129,8 +132,18 @@ impl ReconcilerConfigBuilder {
     }
 }
 
-#[derive(Default, Debug, Copy, Clone)]
+// Higher priorities are used for user-facing tasks, so that a long backlog of housekeeping work (e.g. reconciling on startup, rescheduling
+// things on node changes) does not starve user-facing tasks.
+#[derive(Debug, Copy, Clone)]
+pub(crate) enum ReconcilerPriority {
+    Normal,
+    High,
+}
+
+#[derive(Debug, Copy, Clone)]
 pub(crate) struct ReconcilerConfig {
+    pub(crate) priority: ReconcilerPriority,
+
     // During live migration give up on warming-up the secondary
     // after this timeout.
     secondary_warmup_timeout: Option<Duration>,
@@ -145,6 +158,18 @@ pub(crate) struct ReconcilerConfig {
 }
 
 impl ReconcilerConfig {
+    /// Configs are always constructed with an explicit priority, to force callers to think about whether
+    /// the operation they're scheduling is high-priority or not. Normal priority is not a safe default, because
+    /// scheduling something user-facing at normal priority can result in it getting starved out by background work.
+    pub(crate) fn new(priority: ReconcilerPriority) -> Self {
+        Self {
+            priority,
+            secondary_warmup_timeout: None,
+            secondary_download_request_timeout: None,
+            tenant_creation_hint: false,
+        }
+    }
+
     pub(crate) fn get_secondary_warmup_timeout(&self) -> Duration {
         const SECONDARY_WARMUP_TIMEOUT_DEFAULT: Duration = Duration::from_secs(300);
         self.secondary_warmup_timeout
@@ -159,6 +184,24 @@ impl ReconcilerConfig {
 
     pub(crate) fn tenant_creation_hint(&self) -> bool {
         self.tenant_creation_hint
+    }
+}
+
+impl From<&MigrationConfig> for ReconcilerConfig {
+    fn from(value: &MigrationConfig) -> Self {
+        // Run reconciler at high priority because MigrationConfig comes from human requests that should
+        // be presumed urgent.
+        let mut builder = ReconcilerConfigBuilder::new(ReconcilerPriority::High);
+
+        if let Some(timeout) = value.secondary_warmup_timeout {
+            builder = builder.secondary_warmup_timeout(timeout)
+        }
+
+        if let Some(timeout) = value.secondary_download_request_timeout {
+            builder = builder.secondary_download_request_timeout(timeout)
+        }
+
+        builder.build()
     }
 }
 
@@ -255,7 +298,7 @@ impl Reconciler {
                         .location_config(tenant_shard_id, config.clone(), flush_ms, lazy)
                         .await
                 },
-                &self.service_config.jwt_token,
+                &self.service_config.pageserver_jwt_token,
                 1,
                 3,
                 timeout,
@@ -376,7 +419,7 @@ impl Reconciler {
         let client = PageserverClient::new(
             node.get_id(),
             node.base_url(),
-            self.service_config.jwt_token.as_deref(),
+            self.service_config.pageserver_jwt_token.as_deref(),
         );
 
         client
@@ -399,7 +442,7 @@ impl Reconciler {
         let client = PageserverClient::new(
             node.get_id(),
             node.base_url(),
-            self.service_config.jwt_token.as_deref(),
+            self.service_config.pageserver_jwt_token.as_deref(),
         );
 
         let timelines = client.timeline_list(&tenant_shard_id).await?;
@@ -437,7 +480,7 @@ impl Reconciler {
                             )
                             .await
                     },
-                    &self.service_config.jwt_token,
+                    &self.service_config.pageserver_jwt_token,
                     1,
                     3,
                     request_download_timeout * 2,
@@ -469,7 +512,8 @@ impl Reconciler {
             } else if status == StatusCode::ACCEPTED {
                 let total_runtime = started_at.elapsed();
                 if total_runtime > total_download_timeout {
-                    tracing::warn!("Timed out after {}ms downloading layers to {node}.  Progress so far: {}/{} layers, {}/{} bytes",
+                    tracing::warn!(
+                        "Timed out after {}ms downloading layers to {node}.  Progress so far: {}/{} layers, {}/{} bytes",
                         total_runtime.as_millis(),
                         progress.layers_downloaded,
                         progress.layers_total,
@@ -730,7 +774,7 @@ impl Reconciler {
             let observed_conf = match attached_node
                 .with_client_retries(
                     |client| async move { client.get_location_config(tenant_shard_id).await },
-                    &self.service_config.jwt_token,
+                    &self.service_config.pageserver_jwt_token,
                     1,
                     1,
                     Duration::from_secs(5),
@@ -839,7 +883,27 @@ impl Reconciler {
                         self.generation = Some(generation);
                         wanted_conf.generation = generation.into();
                     }
-                    tracing::info!(node_id=%node.get_id(), "Observed configuration requires update.");
+
+                    let diff = match observed {
+                        Some(ObservedStateLocation {
+                            conf: Some(observed),
+                        }) => {
+                            let diff = JsonDiff::diff(
+                                &serde_json::to_value(observed.clone()).unwrap(),
+                                &serde_json::to_value(wanted_conf.clone()).unwrap(),
+                                false,
+                            );
+
+                            if let Some(json_diff) = diff.diff {
+                                serde_json::to_string(&json_diff).unwrap_or("diff err".to_string())
+                            } else {
+                                "unknown".to_string()
+                            }
+                        }
+                        _ => "full".to_string(),
+                    };
+
+                    tracing::info!(node_id=%node.get_id(), "Observed configuration requires update: {diff}");
 
                     // Because `node` comes from a ref to &self, clone it before calling into a &mut self
                     // function: this could be avoided by refactoring the state mutated by location_config into
@@ -1058,7 +1122,7 @@ impl Reconciler {
             match origin
                 .with_client_retries(
                     |client| async move { client.get_location_config(tenant_shard_id).await },
-                    &self.service_config.jwt_token,
+                    &self.service_config.pageserver_jwt_token,
                     1,
                     3,
                     Duration::from_secs(5),
@@ -1139,7 +1203,7 @@ fn ha_aware_config(config: &TenantConfig, has_secondaries: bool) -> TenantConfig
     let mut config = config.clone();
     if has_secondaries {
         if config.heatmap_period.is_none() {
-            config.heatmap_period = Some(DEFAULT_HEATMAP_PERIOD.to_string());
+            config.heatmap_period = Some(DEFAULT_HEATMAP_PERIOD);
         }
     } else {
         config.heatmap_period = None;

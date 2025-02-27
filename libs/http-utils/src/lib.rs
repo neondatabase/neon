@@ -9,4 +9,4 @@ extern crate hyper0 as hyper;
 
 /// Current fast way to apply simple http routing in various Neon binaries.
 /// Re-exported for sake of uniform approach, that could be later replaced with better alternatives, if needed.
-pub use routerify::{ext::RequestExt, RouterBuilder, RouterService};
+pub use routerify::{RouterBuilder, RouterService, ext::RequestExt};

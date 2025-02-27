@@ -1,34 +1,27 @@
-use futures::StreamExt;
-use std::{
-    collections::{HashMap, HashSet},
-    str::FromStr,
-    time::Duration,
-};
+use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use pageserver_api::{
-    controller_api::{
-        AvailabilityZone, NodeAvailabilityWrapper, NodeDescribeResponse, NodeShardResponse,
-        SafekeeperDescribeResponse, SafekeeperSchedulingPolicyRequest, ShardSchedulingPolicy,
-        ShardsPreferredAzsRequest, ShardsPreferredAzsResponse, SkSchedulingPolicy,
-        TenantCreateRequest, TenantDescribeResponse, TenantPolicyRequest,
-    },
-    models::{
-        EvictionPolicy, EvictionPolicyLayerAccessThreshold, LocationConfigSecondary,
-        ShardParameters, TenantConfig, TenantConfigPatchRequest, TenantConfigRequest,
-        TenantShardSplitRequest, TenantShardSplitResponse,
-    },
-    shard::{ShardStripeSize, TenantShardId},
+use futures::StreamExt;
+use pageserver_api::controller_api::{
+    AvailabilityZone, NodeAvailabilityWrapper, NodeConfigureRequest, NodeDescribeResponse,
+    NodeRegisterRequest, NodeSchedulingPolicy, NodeShardResponse, PlacementPolicy,
+    SafekeeperDescribeResponse, SafekeeperSchedulingPolicyRequest, ShardSchedulingPolicy,
+    ShardsPreferredAzsRequest, ShardsPreferredAzsResponse, SkSchedulingPolicy, TenantCreateRequest,
+    TenantDescribeResponse, TenantPolicyRequest, TenantShardMigrateRequest,
+    TenantShardMigrateResponse,
 };
+use pageserver_api::models::{
+    EvictionPolicy, EvictionPolicyLayerAccessThreshold, LocationConfigSecondary, ShardParameters,
+    TenantConfig, TenantConfigPatchRequest, TenantConfigRequest, TenantShardSplitRequest,
+    TenantShardSplitResponse,
+};
+use pageserver_api::shard::{ShardStripeSize, TenantShardId};
 use pageserver_client::mgmt_api::{self};
 use reqwest::{Method, StatusCode, Url};
-use utils::id::{NodeId, TenantId};
-
-use pageserver_api::controller_api::{
-    NodeConfigureRequest, NodeRegisterRequest, NodeSchedulingPolicy, PlacementPolicy,
-    TenantShardMigrateRequest, TenantShardMigrateResponse,
-};
 use storage_controller_client::control_api::Client;
+use utils::id::{NodeId, TenantId, TimelineId};
 
 #[derive(Subcommand, Debug)]
 enum Command {
@@ -47,6 +40,9 @@ enum Command {
         listen_http_addr: String,
         #[arg(long)]
         listen_http_port: u16,
+        #[arg(long)]
+        listen_https_port: Option<u16>,
+
         #[arg(long)]
         availability_zone_id: String,
     },
@@ -239,6 +235,19 @@ enum Command {
         #[arg(long)]
         scheduling_policy: SkSchedulingPolicyArg,
     },
+    /// Downloads any missing heatmap layers for all shard for a given timeline
+    DownloadHeatmapLayers {
+        /// Tenant ID or tenant shard ID. When an unsharded tenant ID is specified,
+        /// the operation is performed on all shards. When a sharded tenant ID is
+        /// specified, the operation is only performed on the specified shard.
+        #[arg(long)]
+        tenant_shard_id: TenantShardId,
+        #[arg(long)]
+        timeline_id: TimelineId,
+        /// Optional: Maximum download concurrency (default is 16)
+        #[arg(long)]
+        concurrency: Option<usize>,
+    },
 }
 
 #[derive(Parser)]
@@ -381,6 +390,7 @@ async fn main() -> anyhow::Result<()> {
             listen_pg_port,
             listen_http_addr,
             listen_http_port,
+            listen_https_port,
             availability_zone_id,
         } => {
             storcon_client
@@ -393,6 +403,7 @@ async fn main() -> anyhow::Result<()> {
                         listen_pg_port,
                         listen_http_addr,
                         listen_http_port,
+                        listen_https_port,
                         availability_zone_id: AvailabilityZone(availability_zone_id),
                     }),
                 )
@@ -609,7 +620,10 @@ async fn main() -> anyhow::Result<()> {
             tenant_shard_id,
             node,
         } => {
-            let req = TenantShardMigrateRequest { node_id: node };
+            let req = TenantShardMigrateRequest {
+                node_id: node,
+                migration_config: None,
+            };
 
             storcon_client
                 .dispatch::<TenantShardMigrateRequest, TenantShardMigrateResponse>(
@@ -623,7 +637,10 @@ async fn main() -> anyhow::Result<()> {
             tenant_shard_id,
             node,
         } => {
-            let req = TenantShardMigrateRequest { node_id: node };
+            let req = TenantShardMigrateRequest {
+                node_id: node,
+                migration_config: None,
+            };
 
             storcon_client
                 .dispatch::<TenantShardMigrateRequest, TenantShardMigrateResponse>(
@@ -897,7 +914,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::TenantDrop { tenant_id, unclean } => {
             if !unclean {
-                anyhow::bail!("This command is not a tenant deletion, and uncleanly drops all controller state for the tenant.  If you know what you're doing, add `--unclean` to proceed.")
+                anyhow::bail!(
+                    "This command is not a tenant deletion, and uncleanly drops all controller state for the tenant.  If you know what you're doing, add `--unclean` to proceed."
+                )
             }
             storcon_client
                 .dispatch::<(), ()>(
@@ -909,7 +928,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::NodeDrop { node_id, unclean } => {
             if !unclean {
-                anyhow::bail!("This command is not a clean node decommission, and uncleanly drops all controller state for the node, without checking if any tenants still refer to it.  If you know what you're doing, add `--unclean` to proceed.")
+                anyhow::bail!(
+                    "This command is not a clean node decommission, and uncleanly drops all controller state for the node, without checking if any tenants still refer to it.  If you know what you're doing, add `--unclean` to proceed."
+                )
             }
             storcon_client
                 .dispatch::<(), ()>(Method::POST, format!("debug/v1/node/{node_id}/drop"), None)
@@ -935,7 +956,7 @@ async fn main() -> anyhow::Result<()> {
                                 threshold: threshold.into(),
                             },
                         )),
-                        heatmap_period: Some("300s".to_string()),
+                        heatmap_period: Some(Duration::from_secs(300)),
                         ..Default::default()
                     },
                 })
@@ -1082,7 +1103,10 @@ async fn main() -> anyhow::Result<()> {
                             .dispatch::<TenantShardMigrateRequest, TenantShardMigrateResponse>(
                                 Method::PUT,
                                 format!("control/v1/tenant/{}/migrate", mv.tenant_shard_id),
-                                Some(TenantShardMigrateRequest { node_id: mv.to }),
+                                Some(TenantShardMigrateRequest {
+                                    node_id: mv.to,
+                                    migration_config: None,
+                                }),
                             )
                             .await
                             .map_err(|e| (mv.tenant_shard_id, mv.from, mv.to, e))
@@ -1237,6 +1261,24 @@ async fn main() -> anyhow::Result<()> {
                 "Scheduling policy of {node_id} set to {}",
                 String::from(scheduling_policy)
             );
+        }
+        Command::DownloadHeatmapLayers {
+            tenant_shard_id,
+            timeline_id,
+            concurrency,
+        } => {
+            let mut path = format!(
+                "/v1/tenant/{}/timeline/{}/download_heatmap_layers",
+                tenant_shard_id, timeline_id,
+            );
+
+            if let Some(c) = concurrency {
+                path = format!("{path}?concurrency={c}");
+            }
+
+            storcon_client
+                .dispatch::<(), ()>(Method::POST, path, None)
+                .await?;
         }
     }
 

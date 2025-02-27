@@ -1,10 +1,13 @@
-use anyhow::{bail, Result};
-use byteorder::{ByteOrder, BE};
+use std::fmt;
+use std::ops::Range;
+
+use anyhow::{Result, bail};
+use byteorder::{BE, ByteOrder};
+use bytes::Bytes;
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
-use postgres_ffi::Oid;
-use postgres_ffi::RepOriginId;
+use postgres_ffi::{Oid, RepOriginId};
 use serde::{Deserialize, Serialize};
-use std::{fmt, ops::Range};
+use utils::const_assert;
 
 use crate::reltag::{BlockNumber, RelTag, SlruKind};
 
@@ -48,6 +51,64 @@ pub const AUX_KEY_PREFIX: u8 = 0x62;
 
 /// The key prefix of ReplOrigin keys.
 pub const REPL_ORIGIN_KEY_PREFIX: u8 = 0x63;
+
+/// The key prefix of db directory keys.
+pub const DB_DIR_KEY_PREFIX: u8 = 0x64;
+
+/// The key prefix of rel directory keys.
+pub const REL_DIR_KEY_PREFIX: u8 = 0x65;
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub enum RelDirExists {
+    Exists,
+    Removed,
+}
+
+#[derive(Debug)]
+pub struct DecodeError;
+
+impl fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid marker")
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
+impl RelDirExists {
+    /// The value of the rel directory keys that indicates the existence of a relation.
+    const REL_EXISTS_MARKER: Bytes = Bytes::from_static(b"r");
+
+    pub fn encode(&self) -> Bytes {
+        match self {
+            Self::Exists => Self::REL_EXISTS_MARKER.clone(),
+            Self::Removed => SPARSE_TOMBSTONE_MARKER.clone(),
+        }
+    }
+
+    pub fn decode_option(data: Option<impl AsRef<[u8]>>) -> Result<Self, DecodeError> {
+        match data {
+            Some(marker) if marker.as_ref() == Self::REL_EXISTS_MARKER => Ok(Self::Exists),
+            // Any other marker is invalid
+            Some(_) => Err(DecodeError),
+            None => Ok(Self::Removed),
+        }
+    }
+
+    pub fn decode(data: impl AsRef<[u8]>) -> Result<Self, DecodeError> {
+        let data = data.as_ref();
+        if data == Self::REL_EXISTS_MARKER {
+            Ok(Self::Exists)
+        } else if data == SPARSE_TOMBSTONE_MARKER {
+            Ok(Self::Removed)
+        } else {
+            Err(DecodeError)
+        }
+    }
+}
+
+/// A tombstone in the sparse keyspace, which is an empty buffer.
+pub const SPARSE_TOMBSTONE_MARKER: Bytes = Bytes::from_static(b"");
 
 /// Check if the key falls in the range of metadata keys.
 pub const fn is_metadata_key_slice(key: &[u8]) -> bool {
@@ -102,6 +163,24 @@ impl Key {
             field6: 0,
         }..Key {
             field1: AUX_KEY_PREFIX + 1,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
+        }
+    }
+
+    pub fn rel_dir_sparse_key_range() -> Range<Self> {
+        Key {
+            field1: REL_DIR_KEY_PREFIX,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
+        }..Key {
+            field1: REL_DIR_KEY_PREFIX + 1,
             field2: 0,
             field3: 0,
             field4: 0,
@@ -441,6 +520,36 @@ pub fn rel_dir_to_key(spcnode: Oid, dbnode: Oid) -> Key {
 }
 
 #[inline(always)]
+pub fn rel_tag_sparse_key(spcnode: Oid, dbnode: Oid, relnode: Oid, forknum: u8) -> Key {
+    Key {
+        field1: REL_DIR_KEY_PREFIX,
+        field2: spcnode,
+        field3: dbnode,
+        field4: relnode,
+        field5: forknum,
+        field6: 1,
+    }
+}
+
+pub fn rel_tag_sparse_key_range(spcnode: Oid, dbnode: Oid) -> Range<Key> {
+    Key {
+        field1: REL_DIR_KEY_PREFIX,
+        field2: spcnode,
+        field3: dbnode,
+        field4: 0,
+        field5: 0,
+        field6: 0,
+    }..Key {
+        field1: REL_DIR_KEY_PREFIX,
+        field2: spcnode,
+        field3: dbnode,
+        field4: u32::MAX,
+        field5: u8::MAX,
+        field6: u32::MAX,
+    } // it's fine to exclude the last key b/c we only use field6 == 1
+}
+
+#[inline(always)]
 pub fn rel_block_to_key(rel: RelTag, blknum: BlockNumber) -> Key {
     Key {
         field1: 0x00,
@@ -734,9 +843,9 @@ impl Key {
         self.field1 == RELATION_SIZE_PREFIX
     }
 
-    pub fn sparse_non_inherited_keyspace() -> Range<Key> {
+    pub const fn sparse_non_inherited_keyspace() -> Range<Key> {
         // The two keys are adjacent; if we will have non-adjancent keys in the future, we should return a keyspace
-        debug_assert_eq!(AUX_KEY_PREFIX + 1, REPL_ORIGIN_KEY_PREFIX);
+        const_assert!(AUX_KEY_PREFIX + 1 == REPL_ORIGIN_KEY_PREFIX);
         Key {
             field1: AUX_KEY_PREFIX,
             field2: 0,
@@ -846,25 +955,22 @@ impl std::str::FromStr for Key {
 mod tests {
     use std::str::FromStr;
 
-    use crate::key::is_metadata_key_slice;
-    use crate::key::Key;
-
-    use rand::Rng;
-    use rand::SeedableRng;
+    use rand::{Rng, SeedableRng};
 
     use super::AUX_KEY_PREFIX;
+    use crate::key::{Key, is_metadata_key_slice};
 
     #[test]
     fn display_fromstr_bijection() {
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
 
         let key = Key {
-            field1: rng.gen(),
-            field2: rng.gen(),
-            field3: rng.gen(),
-            field4: rng.gen(),
-            field5: rng.gen(),
-            field6: rng.gen(),
+            field1: rng.r#gen(),
+            field2: rng.r#gen(),
+            field3: rng.r#gen(),
+            field4: rng.r#gen(),
+            field5: rng.r#gen(),
+            field6: rng.r#gen(),
         };
 
         assert_eq!(key, Key::from_str(&format!("{key}")).unwrap());

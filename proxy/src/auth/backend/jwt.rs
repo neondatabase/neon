@@ -6,9 +6,9 @@ use std::time::{Duration, SystemTime};
 use arc_swap::ArcSwapOption;
 use clashmap::ClashMap;
 use jose_jwk::crypto::KeyInfo;
-use reqwest::{redirect, Client};
-use reqwest_retry::policies::ExponentialBackoff;
+use reqwest::{Client, redirect};
 use reqwest_retry::RetryTransientMiddleware;
+use reqwest_retry::policies::ExponentialBackoff;
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
@@ -220,11 +220,11 @@ async fn fetch_jwks(
 }
 
 impl JwkCacheEntryLock {
-    async fn acquire_permit<'a>(self: &'a Arc<Self>) -> JwkRenewalPermit<'a> {
+    async fn acquire_permit(self: &Arc<Self>) -> JwkRenewalPermit<'_> {
         JwkRenewalPermit::acquire_permit(self).await
     }
 
-    fn try_acquire_permit<'a>(self: &'a Arc<Self>) -> Option<JwkRenewalPermit<'a>> {
+    fn try_acquire_permit(self: &Arc<Self>) -> Option<JwkRenewalPermit<'_>> {
         JwkRenewalPermit::try_acquire_permit(self)
     }
 
@@ -393,7 +393,7 @@ impl JwkCacheEntryLock {
                 verify_rsa_signature(header_payload.as_bytes(), &sig, key, &header.algorithm)?;
             }
             key => return Err(JwtError::UnsupportedKeyType(key.into())),
-        };
+        }
 
         tracing::debug!(?payload, "JWT signature valid with claims");
 
@@ -498,8 +498,8 @@ fn verify_rsa_signature(
     alg: &jose_jwa::Algorithm,
 ) -> Result<(), JwtError> {
     use jose_jwa::{Algorithm, Signing};
-    use rsa::pkcs1v15::{Signature, VerifyingKey};
     use rsa::RsaPublicKey;
+    use rsa::pkcs1v15::{Signature, VerifyingKey};
 
     let key = RsaPublicKey::try_from(key).map_err(JwtError::InvalidRsaKey)?;
 
@@ -510,7 +510,7 @@ fn verify_rsa_signature(
             key.verify(data, &sig)?;
         }
         _ => return Err(JwtError::InvalidRsaSigningAlgorithm),
-    };
+    }
 
     Ok(())
 }

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
+use std::os::fd::RawFd;
 use std::pin::Pin;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
@@ -9,11 +10,11 @@ use std::time::{Duration, Instant};
 use enum_map::{Enum as _, EnumMap};
 use futures::Future;
 use metrics::{
+    Counter, CounterVec, Gauge, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPair,
+    IntCounterPairVec, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
     register_int_counter, register_int_counter_pair_vec, register_int_counter_vec,
     register_int_gauge, register_int_gauge_vec, register_uint_gauge, register_uint_gauge_vec,
-    Counter, CounterVec, Gauge, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPair,
-    IntCounterPairVec, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
 use pageserver_api::config::{
@@ -23,9 +24,8 @@ use pageserver_api::config::{
 use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
 use pin_project_lite::pin_project;
-use postgres_backend::{is_expected_io_error, QueryError};
+use postgres_backend::{QueryError, is_expected_io_error};
 use pq_proto::framed::ConnectionError;
-
 use strum::{EnumCount, IntoEnumIterator as _, VariantNames};
 use strum_macros::{IntoStaticStr, VariantNames};
 use utils::id::TimelineId;
@@ -34,12 +34,12 @@ use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext};
 use crate::pgdatadir_mapping::DatadirModificationStats;
 use crate::task_mgr::TaskKind;
+use crate::tenant::Timeline;
 use crate::tenant::layer_map::LayerMap;
 use crate::tenant::mgr::TenantSlot;
 use crate::tenant::storage_layer::{InMemoryLayer, PersistentLayerDesc};
 use crate::tenant::tasks::BackgroundLoopKind;
 use crate::tenant::throttle::ThrottleResult;
-use crate::tenant::Timeline;
 
 /// Prometheus histogram buckets (in seconds) for operations in the critical
 /// path. In other words, operations that directly affect that latency of user
@@ -129,7 +129,7 @@ pub(crate) static LAYERS_PER_READ: Lazy<HistogramVec> = Lazy::new(|| {
         "Layers visited to serve a single read (read amplification). In a batch, all visited layers count towards every read.",
         &["tenant_id", "shard_id", "timeline_id"],
         // Low resolution to reduce cardinality.
-        vec![1.0, 5.0, 10.0, 25.0, 50.0, 100.0],
+        vec![4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0],
     )
     .expect("failed to define a metric")
 });
@@ -362,7 +362,7 @@ pub(crate) static PAGE_CACHE_SIZE: Lazy<PageCacheSizeMetrics> =
 pub(crate) mod page_cache_eviction_metrics {
     use std::num::NonZeroUsize;
 
-    use metrics::{register_int_counter_vec, IntCounter, IntCounterVec};
+    use metrics::{IntCounter, IntCounterVec, register_int_counter_vec};
     use once_cell::sync::Lazy;
 
     #[derive(Clone, Copy)]
@@ -721,7 +721,7 @@ pub(crate) static RELSIZE_CACHE_MISSES_OLD: Lazy<IntCounter> = Lazy::new(|| {
 });
 
 pub(crate) mod initial_logical_size {
-    use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
+    use metrics::{IntCounter, IntCounterVec, register_int_counter, register_int_counter_vec};
     use once_cell::sync::Lazy;
 
     pub(crate) struct StartCalculation(IntCounterVec);
@@ -1104,12 +1104,17 @@ impl EvictionsWithLowResidenceDuration {
                 // - future "drop panick => abort"
                 //
                 // so just nag: (the error has the labels)
-                tracing::warn!("failed to remove EvictionsWithLowResidenceDuration, it was already removed? {e:#?}");
+                tracing::warn!(
+                    "failed to remove EvictionsWithLowResidenceDuration, it was already removed? {e:#?}"
+                );
             }
             Ok(()) => {
                 // to help identify cases where we double-remove the same values, let's log all
                 // deletions?
-                tracing::info!("removed EvictionsWithLowResidenceDuration with {tenant_id}, {timeline_id}, {}, {threshold}", self.data_source);
+                tracing::info!(
+                    "removed EvictionsWithLowResidenceDuration with {tenant_id}, {timeline_id}, {}, {threshold}",
+                    self.data_source
+                );
             }
         }
     }
@@ -1439,27 +1444,66 @@ impl Drop for SmgrOpTimer {
 }
 
 impl SmgrOpFlushInProgress {
-    pub(crate) async fn measure<Fut, O>(self, mut started_at: Instant, mut fut: Fut) -> O
+    /// The caller must guarantee that `socket_fd`` outlives this function.
+    pub(crate) async fn measure<Fut, O>(
+        self,
+        started_at: Instant,
+        mut fut: Fut,
+        socket_fd: RawFd,
+    ) -> O
     where
         Fut: std::future::Future<Output = O>,
     {
         let mut fut = std::pin::pin!(fut);
 
-        // Whenever observe_guard gets called, or dropped,
-        // it adds the time elapsed since its last call to metrics.
-        // Last call is tracked in `now`.
+        let mut logged = false;
+        let mut last_counter_increment_at = started_at;
         let mut observe_guard = scopeguard::guard(
-            || {
+            |is_timeout| {
                 let now = Instant::now();
-                let elapsed = now - started_at;
-                self.global_micros
-                    .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
-                self.per_timeline_micros
-                    .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
-                started_at = now;
+
+                // Increment counter
+                {
+                    let elapsed_since_last_observe = now - last_counter_increment_at;
+                    self.global_micros
+                        .inc_by(u64::try_from(elapsed_since_last_observe.as_micros()).unwrap());
+                    self.per_timeline_micros
+                        .inc_by(u64::try_from(elapsed_since_last_observe.as_micros()).unwrap());
+                    last_counter_increment_at = now;
+                }
+
+                // Log something on every timeout, and on completion but only if we hit a timeout.
+                if is_timeout || logged {
+                    logged = true;
+                    let elapsed_total = now - started_at;
+                    let msg = if is_timeout {
+                        "slow flush ongoing"
+                    } else {
+                        "slow flush completed or cancelled"
+                    };
+
+                    let (inq, outq) = {
+                        // SAFETY: caller guarantees that `socket_fd` outlives this function.
+                        #[cfg(target_os = "linux")]
+                        unsafe {
+                            (
+                                utils::linux_socket_ioctl::inq(socket_fd).unwrap_or(-2),
+                                utils::linux_socket_ioctl::outq(socket_fd).unwrap_or(-2),
+                            )
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            _ = socket_fd; // appease unused lint on macOS
+                            (-1, -1)
+                        }
+                    };
+
+                    let elapsed_total_secs = format!("{:.6}", elapsed_total.as_secs_f64());
+                    tracing::info!(elapsed_total_secs, inq, outq, msg);
+                }
             },
             |mut observe| {
-                observe();
+                observe(false);
             },
         );
 
@@ -1467,7 +1511,7 @@ impl SmgrOpFlushInProgress {
             match tokio::time::timeout(Duration::from_secs(10), &mut fut).await {
                 Ok(v) => return v,
                 Err(_timeout) => {
-                    (*observe_guard)();
+                    (*observe_guard)(true);
                 }
             }
         }
@@ -3534,12 +3578,10 @@ impl<F: Future<Output = Result<O, E>>, O, E> Future for MeasuredRemoteOp<F> {
 }
 
 pub mod tokio_epoll_uring {
-    use std::{
-        collections::HashMap,
-        sync::{Arc, Mutex},
-    };
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
-    use metrics::{register_histogram, register_int_counter, Histogram, LocalHistogram, UIntGauge};
+    use metrics::{Histogram, LocalHistogram, UIntGauge, register_histogram, register_int_counter};
     use once_cell::sync::Lazy;
 
     /// Shared storage for tokio-epoll-uring thread local metrics.
@@ -3548,7 +3590,9 @@ pub mod tokio_epoll_uring {
             let slots_submission_queue_depth = register_histogram!(
                 "pageserver_tokio_epoll_uring_slots_submission_queue_depth",
                 "The slots waiters queue depth of each tokio_epoll_uring system",
-                vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
+                vec![
+                    1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0
+                ],
             )
             .expect("failed to define a metric");
             ThreadLocalMetricsStorage {
@@ -3725,7 +3769,7 @@ pub mod tokio_epoll_uring {
 }
 
 pub(crate) mod tenant_throttling {
-    use metrics::{register_int_counter_vec, IntCounter};
+    use metrics::{IntCounter, register_int_counter_vec};
     use once_cell::sync::Lazy;
     use utils::shard::TenantShardId;
 

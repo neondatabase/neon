@@ -11,16 +11,15 @@ pub(crate) mod errors;
 
 use std::sync::Arc;
 
+use crate::auth::IpPattern;
 use crate::auth::backend::jwt::AuthRule;
 use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
-use crate::auth::IpPattern;
 use crate::cache::project_info::ProjectInfoCacheImpl;
 use crate::cache::{Cached, TimedLru};
 use crate::config::ComputeConfig;
 use crate::context::RequestContext;
 use crate::control_plane::messages::{ControlPlaneErrorMessage, MetricsAuxInfo};
-use crate::intern::AccountIdInt;
-use crate::intern::ProjectIdInt;
+use crate::intern::{AccountIdInt, ProjectIdInt};
 use crate::types::{EndpointCacheKey, EndpointId};
 use crate::{compute, scram};
 

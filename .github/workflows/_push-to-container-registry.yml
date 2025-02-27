@@ -2,7 +2,7 @@ name: Push images to Container Registry
 on:
   workflow_call:
     inputs:
-      # Example: {"docker.io/neondatabase/neon:13196061314":["369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:13196061314","neoneastus2.azurecr.io/neondatabase/neon:13196061314"]}
+      # Example: {"docker.io/neondatabase/neon:13196061314":["${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/neon:13196061314","neoneastus2.azurecr.io/neondatabase/neon:13196061314"]}
       image-map:
         description: JSON map of images, mapping from a source image to an array of target images that should be pushed.
         required: true
@@ -11,8 +11,12 @@ on:
         description: AWS region to log in to. Required when pushing to ECR.
         required: false
         type: string
-      aws-account-ids:
-        description: Comma separated AWS account IDs to log in to for pushing to ECR. Required when pushing to ECR.
+      aws-account-id:
+        description: AWS account ID to log in to for pushing to ECR. Required when pushing to ECR.
+        required: false
+        type: string
+      aws-role-to-assume:
+        description: AWS role to assume to for pushing to ECR. Required when pushing to ECR.
         required: false
         type: string
       azure-client-id:
@@ -31,16 +35,6 @@ on:
         description: ACR registry name. Required when pushing to ACR.
         required: false
         type: string
-    secrets:
-      docker-hub-username:
-        description: Docker Hub username. Required when pushing to Docker Hub.
-        required: false
-      docker-hub-password:
-        description: Docker Hub password. Required when pushing to Docker Hub.
-        required: false
-      aws-role-to-assume:
-        description: AWS role to assume. Required when pushing to ECR.
-        required: false
 
 permissions: {}
 
@@ -53,10 +47,11 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       id-token: write  # Required for aws/azure login
+      packages: write  # required for pushing to GHCR
     steps:
       - uses: actions/checkout@v4
         with:
-          sparse-checkout: scripts/push_with_image_map.py
+          sparse-checkout: .github/scripts/push_with_image_map.py
           sparse-checkout-cone-mode: false
 
       - name: Print image-map
@@ -67,14 +62,14 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: "${{ inputs.aws-region }}"
-          role-to-assume: "${{ secrets.aws-role-to-assume }}"
+          role-to-assume: "arn:aws:iam::${{ inputs.aws-account-id }}:role/${{ inputs.aws-role-to-assume }}"
           role-duration-seconds: 3600
 
       - name: Login to ECR
         if: contains(inputs.image-map, 'amazonaws.com/')
         uses: aws-actions/amazon-ecr-login@v2
         with:
-          registries: "${{ inputs.aws-account-ids }}"
+          registries: "${{ inputs.aws-account-id }}"
 
       - name: Configure Azure credentials
         if: contains(inputs.image-map, 'azurecr.io/')
@@ -89,13 +84,21 @@ jobs:
         run: |
           az acr login --name=${{ inputs.acr-registry-name }}
 
+      - name: Login to GHCR
+        if: contains(inputs.image-map, 'ghcr.io/')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.docker-hub-username }}
-          password: ${{ secrets.docker-hub-password }}
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
       - name: Copy docker images to target registries
-        run: python scripts/push_with_image_map.py
+        run: python3 .github/scripts/push_with_image_map.py
         env:
           IMAGE_MAP: ${{ inputs.image-map }}

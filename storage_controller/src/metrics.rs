@@ -7,17 +7,18 @@
 //!
 //! The rest of the code defines label group types and deals with converting outer types to labels.
 //!
+use std::sync::Mutex;
+
 use bytes::Bytes;
-use measured::{label::LabelValue, metric::histogram, FixedCardinalityLabel, MetricGroup};
+use measured::label::LabelValue;
+use measured::metric::histogram;
+use measured::{FixedCardinalityLabel, MetricGroup};
 use metrics::NeonMetrics;
 use once_cell::sync::Lazy;
-use std::sync::Mutex;
 use strum::IntoEnumIterator;
 
-use crate::{
-    persistence::{DatabaseError, DatabaseOperation},
-    service::LeadershipStatus,
-};
+use crate::persistence::{DatabaseError, DatabaseOperation};
+use crate::service::LeadershipStatus;
 
 pub(crate) static METRICS_REGISTRY: Lazy<StorageControllerMetrics> =
     Lazy::new(StorageControllerMetrics::default);
@@ -80,11 +81,23 @@ pub(crate) struct StorageControllerMetricGroup {
     pub(crate) storage_controller_pageserver_request_error:
         measured::CounterVec<PageserverRequestLabelGroupSet>,
 
+    /// Count of HTTP requests to the safekeeper that resulted in an error,
+    /// broken down by the safekeeper node id, request name and method
+    pub(crate) storage_controller_safekeeper_request_error:
+        measured::CounterVec<PageserverRequestLabelGroupSet>,
+
     /// Latency of HTTP requests to the pageserver, broken down by pageserver
     /// node id, request name and method. This include both successful and unsuccessful
     /// requests.
     #[metric(metadata = histogram::Thresholds::exponential_buckets(0.1, 2.0))]
     pub(crate) storage_controller_pageserver_request_latency:
+        measured::HistogramVec<PageserverRequestLabelGroupSet, 5>,
+
+    /// Latency of HTTP requests to the safekeeper, broken down by safekeeper
+    /// node id, request name and method. This include both successful and unsuccessful
+    /// requests.
+    #[metric(metadata = histogram::Thresholds::exponential_buckets(0.1, 2.0))]
+    pub(crate) storage_controller_safekeeper_request_latency:
         measured::HistogramVec<PageserverRequestLabelGroupSet, 5>,
 
     /// Count of pass-through HTTP requests to the pageserver that resulted in an error,

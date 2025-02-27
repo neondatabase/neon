@@ -1,7 +1,7 @@
 [package]
 name = "pageserver"
 version = "0.1.0"
-edition.workspace = true
+edition = "2024"
 license.workspace = true
 
 [features]
@@ -40,7 +40,6 @@ num_cpus.workspace = true
 num-traits.workspace = true
 once_cell.workspace = true
 pin-project-lite.workspace = true
-postgres.workspace = true
 postgres_backend.workspace = true
 postgres-protocol.workspace = true
 postgres-types.workspace = true

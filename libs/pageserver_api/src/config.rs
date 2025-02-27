@@ -9,19 +9,18 @@ pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN
 pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 9898;
 pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
 
+use std::collections::HashMap;
+use std::num::{NonZeroU64, NonZeroUsize};
+use std::str::FromStr;
+use std::time::Duration;
+
 use postgres_backend::AuthType;
 use remote_storage::RemoteStorageConfig;
 use serde_with::serde_as;
-use std::{
-    collections::HashMap,
-    num::{NonZeroU64, NonZeroUsize},
-    str::FromStr,
-    time::Duration,
-};
-use utils::{logging::LogFormat, postgres_client::PostgresClientProtocol};
+use utils::logging::LogFormat;
+use utils::postgres_client::PostgresClientProtocol;
 
-use crate::models::ImageCompressionAlgorithm;
-use crate::models::LsnLease;
+use crate::models::{ImageCompressionAlgorithm, LsnLease};
 
 // Certain metadata (e.g. externally-addressable name, AZ) is delivered
 // as a separate structure.  This information is not neeed by the pageserver
@@ -122,6 +121,8 @@ pub struct ConfigToml {
     pub page_service_pipelining: PageServicePipeliningConfig,
     pub get_vectored_concurrent_io: GetVectoredConcurrentIo,
     pub enable_read_path_debugging: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validate_wal_contiguity: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -351,7 +352,7 @@ pub struct TenantConfigToml {
 
     /// Enable rel_size_v2 for this tenant. Once enabled, the tenant will persist this information into
     /// `index_part.json`, and it cannot be reversed.
-    pub rel_size_v2_enabled: Option<bool>,
+    pub rel_size_v2_enabled: bool,
 
     // gc-compaction related configs
     /// Enable automatic gc-compaction trigger on this tenant.
@@ -365,9 +366,9 @@ pub struct TenantConfigToml {
 }
 
 pub mod defaults {
-    use crate::models::ImageCompressionAlgorithm;
-
     pub use storage_broker::DEFAULT_ENDPOINT as BROKER_DEFAULT_ENDPOINT;
+
+    use crate::models::ImageCompressionAlgorithm;
 
     pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "300 s";
     pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
@@ -521,6 +522,7 @@ impl Default for ConfigToml {
             } else {
                 None
             },
+            validate_wal_contiguity: None,
         }
     }
 }
@@ -544,10 +546,11 @@ pub mod tenant_conf_defaults {
     pub const DEFAULT_COMPACTION_PERIOD: &str = "20 s";
     pub const DEFAULT_COMPACTION_THRESHOLD: usize = 10;
 
-    // This value needs to be tuned to avoid OOM. We have 3/4 of the total CPU threads to do background works, that's 16*3/4=9 on
-    // most of our pageservers. Compaction ~50 layers requires about 2GB memory (could be reduced later by optimizing L0 hole
-    // calculation to avoid loading all keys into the memory). So with this config, we can get a maximum peak compaction usage of 18GB.
-    pub const DEFAULT_COMPACTION_UPPER_LIMIT: usize = 50;
+    // This value needs to be tuned to avoid OOM. We have 3/4*CPUs threads for L0 compaction, that's
+    // 3/4*16=9 on most of our pageservers. Compacting 20 layers requires about 1 GB memory (could
+    // be reduced later by optimizing L0 hole calculation to avoid loading all keys into memory). So
+    // with this config, we can get a maximum peak compaction usage of 9 GB.
+    pub const DEFAULT_COMPACTION_UPPER_LIMIT: usize = 20;
     pub const DEFAULT_COMPACTION_L0_FIRST: bool = false;
     pub const DEFAULT_COMPACTION_L0_SEMAPHORE: bool = true;
 
@@ -580,7 +583,7 @@ pub mod tenant_conf_defaults {
     // image layers should be created.
     pub const DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD: u8 = 2;
     pub const DEFAULT_GC_COMPACTION_ENABLED: bool = false;
-    pub const DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB: u64 = 10240000;
+    pub const DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB: u64 = 5 * 1024 * 1024; // 5GB
     pub const DEFAULT_GC_COMPACTION_RATIO_PERCENT: u64 = 100;
 }
 
@@ -633,7 +636,7 @@ impl Default for TenantConfigToml {
             lsn_lease_length_for_ts: LsnLease::DEFAULT_LENGTH_FOR_TS,
             timeline_offloading: true,
             wal_receiver_protocol_override: None,
-            rel_size_v2_enabled: None,
+            rel_size_v2_enabled: false,
             gc_compaction_enabled: DEFAULT_GC_COMPACTION_ENABLED,
             gc_compaction_initial_threshold_kb: DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB,
             gc_compaction_ratio_percent: DEFAULT_GC_COMPACTION_RATIO_PERCENT,

@@ -19,8 +19,9 @@
 
 use anyhow::ensure;
 use serde::{Deserialize, Serialize};
-use utils::bin_ser::SerializeError;
-use utils::{bin_ser::BeSer, id::TimelineId, lsn::Lsn};
+use utils::bin_ser::{BeSer, SerializeError};
+use utils::id::TimelineId;
+use utils::lsn::Lsn;
 
 /// Use special format number to enable backward compatibility.
 const METADATA_FORMAT_VERSION: u16 = 4;
@@ -130,7 +131,10 @@ struct TimelineMetadataBodyV2 {
     prev_record_lsn: Option<Lsn>,
     ancestor_timeline: Option<TimelineId>,
     ancestor_lsn: Lsn,
+
+    // The LSN at which GC was last executed.  Synonym of [`Timeline::applied_gc_cutoff_lsn`].
     latest_gc_cutoff_lsn: Lsn,
+
     initdb_lsn: Lsn,
     pg_version: u32,
 }
@@ -342,8 +346,9 @@ impl TimelineMetadata {
 }
 
 pub(crate) mod modern_serde {
-    use super::{TimelineMetadata, TimelineMetadataBodyV2, TimelineMetadataHeader};
     use serde::{Deserialize, Serialize};
+
+    use super::{TimelineMetadata, TimelineMetadataBodyV2, TimelineMetadataHeader};
 
     pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<TimelineMetadata, D::Error>
     where

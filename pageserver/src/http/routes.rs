@@ -2,124 +2,83 @@
 //! Management HTTP API
 //!
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
-use std::collections::HashMap;
+use std::collections::{BinaryHeap, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use enumset::EnumSet;
 use futures::future::join_all;
-use futures::StreamExt;
-use futures::TryFutureExt;
+use futures::{StreamExt, TryFutureExt};
 use http_utils::endpoint::{
-    profile_cpu_handler, profile_heap_handler, prometheus_metrics_handler, request_span,
+    self, attach_openapi_ui, auth_middleware, check_permission_with, profile_cpu_handler,
+    profile_heap_handler, prometheus_metrics_handler, request_span,
 };
+use http_utils::error::{ApiError, HttpErrorBody};
 use http_utils::failpoints::failpoints_handler;
-use http_utils::request::must_parse_query_param;
-use http_utils::request::{get_request_param, must_get_query_param, parse_query_param};
+use http_utils::json::{json_request, json_request_maybe, json_response};
+use http_utils::request::{
+    get_request_param, must_get_query_param, must_parse_query_param, parse_query_param,
+    parse_request_param,
+};
+use http_utils::{RequestExt, RouterBuilder};
 use humantime::format_rfc3339;
-use hyper::header;
-use hyper::StatusCode;
-use hyper::{Body, Request, Response, Uri};
+use hyper::{Body, Request, Response, StatusCode, Uri, header};
 use metrics::launch_timestamp::LaunchTimestamp;
 use pageserver_api::models::virtual_file::IoMode;
-use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
-use pageserver_api::models::IngestAuxFilesRequest;
-use pageserver_api::models::ListAuxFilesRequest;
-use pageserver_api::models::LocationConfig;
-use pageserver_api::models::LocationConfigListResponse;
-use pageserver_api::models::LocationConfigMode;
-use pageserver_api::models::LsnLease;
-use pageserver_api::models::LsnLeaseRequest;
-use pageserver_api::models::OffloadedTimelineInfo;
-use pageserver_api::models::PageTraceEvent;
-use pageserver_api::models::ShardParameters;
-use pageserver_api::models::TenantConfigPatchRequest;
-use pageserver_api::models::TenantDetails;
-use pageserver_api::models::TenantLocationConfigRequest;
-use pageserver_api::models::TenantLocationConfigResponse;
-use pageserver_api::models::TenantScanRemoteStorageResponse;
-use pageserver_api::models::TenantScanRemoteStorageShard;
-use pageserver_api::models::TenantShardLocation;
-use pageserver_api::models::TenantShardSplitRequest;
-use pageserver_api::models::TenantShardSplitResponse;
-use pageserver_api::models::TenantSorting;
-use pageserver_api::models::TenantState;
-use pageserver_api::models::TenantWaitLsnRequest;
-use pageserver_api::models::TimelineArchivalConfigRequest;
-use pageserver_api::models::TimelineCreateRequestMode;
-use pageserver_api::models::TimelineCreateRequestModeImportPgdata;
-use pageserver_api::models::TimelinesInfoAndOffloaded;
-use pageserver_api::models::TopTenantShardItem;
-use pageserver_api::models::TopTenantShardsRequest;
-use pageserver_api::models::TopTenantShardsResponse;
-use pageserver_api::shard::ShardCount;
-use pageserver_api::shard::TenantShardId;
-use remote_storage::DownloadError;
-use remote_storage::GenericRemoteStorage;
-use remote_storage::TimeTravelError;
+use pageserver_api::models::{
+    DownloadRemoteLayersTaskSpawnRequest, IngestAuxFilesRequest, ListAuxFilesRequest,
+    LocationConfig, LocationConfigListResponse, LocationConfigMode, LsnLease, LsnLeaseRequest,
+    OffloadedTimelineInfo, PageTraceEvent, ShardParameters, StatusResponse,
+    TenantConfigPatchRequest, TenantConfigRequest, TenantDetails, TenantInfo,
+    TenantLocationConfigRequest, TenantLocationConfigResponse, TenantScanRemoteStorageResponse,
+    TenantScanRemoteStorageShard, TenantShardLocation, TenantShardSplitRequest,
+    TenantShardSplitResponse, TenantSorting, TenantState, TenantWaitLsnRequest,
+    TimelineArchivalConfigRequest, TimelineCreateRequest, TimelineCreateRequestMode,
+    TimelineCreateRequestModeImportPgdata, TimelineGcRequest, TimelineInfo,
+    TimelinesInfoAndOffloaded, TopTenantShardItem, TopTenantShardsRequest, TopTenantShardsResponse,
+};
+use pageserver_api::shard::{ShardCount, TenantShardId};
+use remote_storage::{DownloadError, GenericRemoteStorage, TimeTravelError};
 use scopeguard::defer;
-use tenant_size_model::{svg::SvgBranchKind, SizeResult, StorageModel};
+use tenant_size_model::svg::SvgBranchKind;
+use tenant_size_model::{SizeResult, StorageModel};
 use tokio::time::Instant;
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::auth::SwappableJwtAuth;
+use utils::generation::Generation;
+use utils::id::{TenantId, TimelineId};
+use utils::lsn::Lsn;
 
 use crate::config::PageServerConf;
-use crate::context::{DownloadBehavior, RequestContext};
+use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::{LocationConf, TenantConfOpt};
-use crate::tenant::mgr::GetActiveTenantError;
 use crate::tenant::mgr::{
-    GetTenantError, TenantManager, TenantMapError, TenantMapInsertError, TenantSlotError,
-    TenantSlotUpsertError, TenantStateError,
+    GetActiveTenantError, GetTenantError, TenantManager, TenantMapError, TenantMapInsertError,
+    TenantSlot, TenantSlotError, TenantSlotUpsertError, TenantStateError, UpsertLocationError,
 };
-use crate::tenant::mgr::{TenantSlot, UpsertLocationError};
-use crate::tenant::remote_timeline_client;
-use crate::tenant::remote_timeline_client::download_index_part;
-use crate::tenant::remote_timeline_client::list_remote_tenant_shards;
-use crate::tenant::remote_timeline_client::list_remote_timelines;
+use crate::tenant::remote_timeline_client::{
+    download_index_part, list_remote_tenant_shards, list_remote_timelines,
+};
 use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
-use crate::tenant::storage_layer::IoConcurrency;
-use crate::tenant::storage_layer::LayerAccessStatsReset;
-use crate::tenant::storage_layer::LayerName;
-use crate::tenant::timeline::import_pgdata;
-use crate::tenant::timeline::offload::offload_timeline;
-use crate::tenant::timeline::offload::OffloadError;
-use crate::tenant::timeline::CompactFlags;
-use crate::tenant::timeline::CompactOptions;
-use crate::tenant::timeline::CompactRequest;
-use crate::tenant::timeline::CompactionError;
-use crate::tenant::timeline::Timeline;
-use crate::tenant::timeline::WaitLsnTimeout;
-use crate::tenant::timeline::WaitLsnWaiter;
-use crate::tenant::GetTimelineError;
-use crate::tenant::OffloadedTimeline;
-use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
-use crate::DEFAULT_PG_VERSION;
-use crate::{disk_usage_eviction_task, tenant};
-use http_utils::{
-    endpoint::{self, attach_openapi_ui, auth_middleware, check_permission_with},
-    error::{ApiError, HttpErrorBody},
-    json::{json_request, json_request_maybe, json_response},
-    request::parse_request_param,
-    RequestExt, RouterBuilder,
+use crate::tenant::storage_layer::{IoConcurrency, LayerAccessStatsReset, LayerName};
+use crate::tenant::timeline::offload::{OffloadError, offload_timeline};
+use crate::tenant::timeline::{
+    CompactFlags, CompactOptions, CompactRequest, CompactionError, Timeline, WaitLsnTimeout,
+    WaitLsnWaiter, import_pgdata,
 };
-use pageserver_api::models::{
-    StatusResponse, TenantConfigRequest, TenantInfo, TimelineCreateRequest, TimelineGcRequest,
-    TimelineInfo,
+use crate::tenant::{
+    GetTimelineError, LogicalSizeCalculationCause, OffloadedTimeline, PageReconstructError,
+    remote_timeline_client,
 };
-use utils::{
-    auth::SwappableJwtAuth,
-    generation::Generation,
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
+use crate::{DEFAULT_PG_VERSION, disk_usage_eviction_task, tenant};
 
 // For APIs that require an Active tenant, how long should we block waiting for that state?
 // This is not functionally necessary (clients will retry), but avoids generating a lot of
@@ -482,6 +441,11 @@ async fn build_timeline_info_common(
 
     let (pitr_history_size, within_ancestor_pitr) = timeline.get_pitr_history_stats();
 
+    let min_readable_lsn = std::cmp::max(
+        timeline.get_gc_cutoff_lsn(),
+        *timeline.get_applied_gc_cutoff_lsn(),
+    );
+
     let info = TimelineInfo {
         tenant_id: timeline.tenant_shard_id,
         timeline_id: timeline.timeline_id,
@@ -493,7 +457,12 @@ async fn build_timeline_info_common(
         initdb_lsn,
         last_record_lsn,
         prev_record_lsn: Some(timeline.get_prev_record_lsn()),
-        latest_gc_cutoff_lsn: *timeline.get_latest_gc_cutoff_lsn(),
+        // Externally, expose the lowest LSN that can be used to create a branch as the "GC cutoff", although internally
+        // we distinguish between the "planned" GC cutoff (PITR point) and the "latest" GC cutoff (where we
+        // actually trimmed data to), which can pass each other when PITR is changed.
+        latest_gc_cutoff_lsn: min_readable_lsn,
+        min_readable_lsn,
+        applied_gc_cutoff_lsn: *timeline.get_applied_gc_cutoff_lsn(),
         current_logical_size: current_logical_size.size_dont_care_about_accuracy(),
         current_logical_size_is_accurate: match current_logical_size.accuracy() {
             tenant::timeline::logical_size::Accuracy::Approximate => false,
@@ -958,11 +927,10 @@ async fn get_lsn_by_timestamp_handler(
 
     let with_lease = parse_query_param(&request, "with_lease")?.unwrap_or(false);
 
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
     let result = timeline
         .find_lsn_for_timestamp(timestamp_pg, &cancel, &ctx)
         .await?;
@@ -1031,10 +999,10 @@ async fn get_timestamp_of_lsn_handler(
         .with_context(|| format!("Invalid LSN: {lsn_str:?}"))
         .map_err(ApiError::BadRequest)?;
 
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
     let result = timeline.get_timestamp_for_lsn(lsn, &ctx).await?;
 
     match result {
@@ -1117,12 +1085,12 @@ async fn tenant_list_handler(
             ApiError::ResourceUnavailable("Tenant map is initializing or shutting down".into())
         })?
         .iter()
-        .map(|(id, state, gen)| TenantInfo {
+        .map(|(id, state, gen_)| TenantInfo {
             id: *id,
             state: state.clone(),
             current_physical_size: None,
             attachment_status: state.attachment_status(),
-            generation: (*gen)
+            generation: (*gen_)
                 .into()
                 .expect("Tenants are always attached with a generation"),
             gc_blocking: None,
@@ -1399,7 +1367,7 @@ async fn timeline_layer_scan_disposable_keys(
     };
 
     let resident_layer = layer
-        .download_and_keep_resident()
+        .download_and_keep_resident(&ctx)
         .await
         .map_err(|err| match err {
             tenant::storage_layer::layer::DownloadError::TimelineShutdown
@@ -1453,6 +1421,62 @@ async fn timeline_layer_scan_disposable_keys(
     )
 }
 
+async fn timeline_download_heatmap_layers_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    // Only used in the case where remote storage is not configured.
+    const DEFAULT_MAX_CONCURRENCY: usize = 100;
+    // A conservative default.
+    const DEFAULT_CONCURRENCY: usize = 16;
+
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+
+    let desired_concurrency =
+        parse_query_param(&request, "concurrency")?.unwrap_or(DEFAULT_CONCURRENCY);
+
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let state = get_state(&request);
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+
+    let max_concurrency = get_config(&request)
+        .remote_storage_config
+        .as_ref()
+        .map(|c| c.concurrency_limit())
+        .unwrap_or(DEFAULT_MAX_CONCURRENCY);
+    let concurrency = std::cmp::min(max_concurrency, desired_concurrency);
+
+    timeline
+        .start_heatmap_layers_download(concurrency, &ctx)
+        .await?;
+
+    json_response(StatusCode::ACCEPTED, ())
+}
+
+async fn timeline_shutdown_download_heatmap_layers_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let state = get_state(&request);
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+
+    timeline.stop_and_drain_heatmap_layers_download().await;
+
+    json_response(StatusCode::OK, ())
+}
+
 async fn layer_download_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
@@ -1468,8 +1492,9 @@ async fn layer_download_handler(
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
     let downloaded = timeline
-        .download_layer(&layer_name)
+        .download_layer(&layer_name, &ctx)
         .await
         .map_err(|e| match e {
             tenant::storage_layer::layer::DownloadError::TimelineShutdown
@@ -1606,9 +1631,8 @@ async fn block_or_unblock_gc(
     request: Request<Body>,
     block: bool,
 ) -> Result<Response<Body>, ApiError> {
-    use crate::tenant::{
-        remote_timeline_client::WaitCompletionError, upload_queue::NotInitialized,
-    };
+    use crate::tenant::remote_timeline_client::WaitCompletionError;
+    use crate::tenant::upload_queue::NotInitialized;
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
@@ -1994,7 +2018,9 @@ async fn tenant_time_travel_remote_storage_handler(
         )));
     }
 
-    tracing::info!("Issuing time travel request internally. timestamp={timestamp_raw}, done_if_after={done_if_after_raw}");
+    tracing::info!(
+        "Issuing time travel request internally. timestamp={timestamp_raw}, done_if_after={done_if_after_raw}"
+    );
 
     remote_timeline_client::upload::time_travel_recover_tenant(
         &state.remote_storage,
@@ -2331,7 +2357,9 @@ async fn timeline_checkpoint_handler(
                     match e {
                         CompactionError::ShuttingDown => ApiError::ShuttingDown,
                         CompactionError::Offload(e) => ApiError::InternalServerError(anyhow::anyhow!(e)),
-                        CompactionError::Other(e) => ApiError::InternalServerError(e)
+                        CompactionError::CollectKeySpaceError(e) => ApiError::InternalServerError(anyhow::anyhow!(e)),
+                        CompactionError::Other(e) => ApiError::InternalServerError(e),
+                        CompactionError::AlreadyRunning(_) => ApiError::InternalServerError(anyhow::anyhow!(e)),
                     }
                 )?;
         }
@@ -2364,7 +2392,8 @@ async fn timeline_download_remote_layers_handler_post(
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
-    match timeline.spawn_download_all_remote_layers(body).await {
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+    match timeline.spawn_download_all_remote_layers(body, &ctx).await {
         Ok(st) => json_response(StatusCode::ACCEPTED, st),
         Err(st) => json_response(StatusCode::CONFLICT, st),
     }
@@ -2393,8 +2422,9 @@ async fn timeline_detach_ancestor_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
-    use crate::tenant::timeline::detach_ancestor;
     use pageserver_api::models::detach_ancestor::AncestorDetached;
+
+    use crate::tenant::timeline::detach_ancestor;
 
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
@@ -2508,14 +2538,30 @@ async fn deletion_queue_flush(
     }
 }
 
-/// Try if `GetPage@Lsn` is successful, useful for manual debugging.
 async fn getpage_at_lsn_handler(
+    request: Request<Body>,
+    cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    getpage_at_lsn_handler_inner(false, request, cancel).await
+}
+
+async fn touchpage_at_lsn_handler(
+    request: Request<Body>,
+    cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    getpage_at_lsn_handler_inner(true, request, cancel).await
+}
+
+/// Try if `GetPage@Lsn` is successful, useful for manual debugging.
+async fn getpage_at_lsn_handler_inner(
+    touch: bool,
     request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
-    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    // Require pageserver admin permission for this API instead of only tenant-level token.
+    check_permission(&request, None)?;
     let state = get_state(&request);
 
     struct Key(pageserver_api::key::Key);
@@ -2530,22 +2576,29 @@ async fn getpage_at_lsn_handler(
 
     let key: Key = parse_query_param(&request, "key")?
         .ok_or_else(|| ApiError::BadRequest(anyhow!("missing 'key' query parameter")))?;
-    let lsn: Lsn = parse_query_param(&request, "lsn")?
-        .ok_or_else(|| ApiError::BadRequest(anyhow!("missing 'lsn' query parameter")))?;
+    let lsn: Option<Lsn> = parse_query_param(&request, "lsn")?;
 
     async {
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+        // Enable read path debugging
+        let ctx = RequestContextBuilder::extend(&ctx).read_path_debug(true).build();
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
 
+        // Use last_record_lsn if no lsn is provided
+        let lsn = lsn.unwrap_or_else(|| timeline.get_last_record_lsn());
         let page = timeline.get(key.0, lsn, &ctx).await?;
 
-        Result::<_, ApiError>::Ok(
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "application/octet-stream")
-                .body(hyper::Body::from(page))
-                .unwrap(),
-        )
+        if touch {
+            json_response(StatusCode::OK, ())
+        } else {
+            Result::<_, ApiError>::Ok(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                    .body(hyper::Body::from(page))
+                    .unwrap(),
+            )
+        }
     }
     .instrument(info_span!("timeline_get", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
     .await
@@ -2717,14 +2770,19 @@ async fn tenant_scan_remote_handler(
             .await
             {
                 Ok((index_part, index_generation, _index_mtime)) => {
-                    tracing::info!("Found timeline {tenant_shard_id}/{timeline_id} metadata (gen {index_generation:?}, {} layers, {} consistent LSN)",
-                        index_part.layer_metadata.len(), index_part.metadata.disk_consistent_lsn());
+                    tracing::info!(
+                        "Found timeline {tenant_shard_id}/{timeline_id} metadata (gen {index_generation:?}, {} layers, {} consistent LSN)",
+                        index_part.layer_metadata.len(),
+                        index_part.metadata.disk_consistent_lsn()
+                    );
                     generation = std::cmp::max(generation, index_generation);
                 }
                 Err(DownloadError::NotFound) => {
                     // This is normal for tenants that were created with multiple shards: they have an unsharded path
                     // containing the timeline's initdb tarball but no index.  Otherwise it is a bit strange.
-                    tracing::info!("Timeline path {tenant_shard_id}/{timeline_id} exists in remote storage but has no index, skipping");
+                    tracing::info!(
+                        "Timeline path {tenant_shard_id}/{timeline_id} exists in remote storage but has no index, skipping"
+                    );
                     continue;
                 }
                 Err(e) => {
@@ -3343,7 +3401,9 @@ async fn read_tar_eof(mut reader: (impl tokio::io::AsyncRead + Unpin)) -> anyhow
         anyhow::bail!("unexpected non-zero bytes after the tar archive");
     }
     if trailing_bytes % 512 != 0 {
-        anyhow::bail!("unexpected number of zeros ({trailing_bytes}), not divisible by tar block size (512 bytes), after the tar archive");
+        anyhow::bail!(
+            "unexpected number of zeros ({trailing_bytes}), not divisible by tar block size (512 bytes), after the tar archive"
+        );
     }
     Ok(())
 }
@@ -3616,6 +3676,14 @@ pub fn make_router(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/layer",
             |r| api_handler(r, layer_map_info_handler),
         )
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/download_heatmap_layers",
+            |r| api_handler(r, timeline_download_heatmap_layers_handler),
+        )
+        .delete(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/download_heatmap_layers",
+            |r| api_handler(r, timeline_shutdown_download_heatmap_layers_handler),
+        )
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/layer/:layer_file_name",
             |r| api_handler(r, layer_download_handler),
@@ -3671,6 +3739,10 @@ pub fn make_router(
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/getpage",
             |r| testing_api_handler("getpage@lsn", r, getpage_at_lsn_handler),
+        )
+        .get(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/touchpage",
+            |r| api_handler(r, touchpage_at_lsn_handler),
         )
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/keyspace",

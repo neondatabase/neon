@@ -1,0 +1,103 @@
+name: Generate run metadata
+on:
+  workflow_call:
+    inputs:
+      github-event-name:
+        type: string
+        required: true
+    outputs:
+      build-tag:
+        description: "Tag for the current workflow run"
+        value: ${{ jobs.tags.outputs.build-tag }}
+      previous-storage-release:
+        description: "Tag of the last storage release"
+        value: ${{ jobs.tags.outputs.storage }}
+      previous-proxy-release:
+        description: "Tag of the last proxy release"
+        value: ${{ jobs.tags.outputs.proxy }}
+      previous-compute-release:
+        description: "Tag of the last compute release"
+        value: ${{ jobs.tags.outputs.compute }}
+      run-kind:
+        description: "The kind of run we're currently in. Will be one of `pr`, `push-main`, `storage-rc`, `storage-release`, `proxy-rc`, `proxy-release`, `compute-rc`, `compute-release` or `merge_queue`"
+        value: ${{ jobs.tags.outputs.run-kind }}
+
+permissions: {}
+
+jobs:
+  tags:
+    runs-on: ubuntu-22.04
+    outputs:
+      build-tag: ${{ steps.build-tag.outputs.tag }}
+      compute: ${{ steps.previous-releases.outputs.compute }}
+      proxy: ${{ steps.previous-releases.outputs.proxy }}
+      storage: ${{ steps.previous-releases.outputs.storage }}
+      run-kind: ${{ steps.run-kind.outputs.run-kind }}
+    permissions:
+      contents: read
+    steps:
+      # Need `fetch-depth: 0` to count the number of commits in the branch
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get run kind
+        id: run-kind
+        env:
+          RUN_KIND: >-
+            ${{
+              false
+              || (inputs.github-event-name == 'push'         && github.ref_name == 'main')            && 'push-main'
+              || (inputs.github-event-name == 'push'         && github.ref_name == 'release')         && 'storage-release'
+              || (inputs.github-event-name == 'push'         && github.ref_name == 'release-compute') && 'compute-release'
+              || (inputs.github-event-name == 'push'         && github.ref_name == 'release-proxy')   && 'proxy-release'
+              || (inputs.github-event-name == 'pull_request' && github.base_ref == 'release')         && 'storage-rc-pr'
+              || (inputs.github-event-name == 'pull_request' && github.base_ref == 'release-compute') && 'compute-rc-pr'
+              || (inputs.github-event-name == 'pull_request' && github.base_ref == 'release-proxy')   && 'proxy-rc-pr'
+              || (inputs.github-event-name == 'pull_request')                                         && 'pr'
+              || 'unknown'
+            }}
+        run: |
+          echo "run-kind=$RUN_KIND" | tee -a $GITHUB_OUTPUT
+
+      - name: Get build tag
+        id: build-tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CURRENT_BRANCH: ${{ github.head_ref || github.ref_name }}
+          CURRENT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          RUN_KIND: ${{ steps.run-kind.outputs.run-kind }}
+        run: |
+          case $RUN_KIND in
+          push-main)
+            echo "tag=$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
+            ;;
+          storage-release)
+            echo "tag=release-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
+            ;;
+          proxy-release)
+            echo "tag=release-proxy-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
+            ;;
+          compute-release)
+            echo "tag=release-compute-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
+            ;;
+          pr|storage-rc-pr|compute-rc-pr|proxy-rc-pr)
+            BUILD_AND_TEST_RUN_ID=$(gh run list -b $CURRENT_BRANCH -c $CURRENT_SHA -w 'Build and Test' -L 1 --json databaseId --jq '.[].databaseId')
+            echo "tag=$BUILD_AND_TEST_RUN_ID" | tee -a $GITHUB_OUTPUT
+            ;;
+          *)
+            echo "Unexpected RUN_KIND ('${RUN_KIND}'), failing to assign build-tag!"
+            exit 1
+          esac
+
+      - name: Get the previous release-tags
+        id: previous-releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --paginate \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${GITHUB_REPOSITORY}/releases" \
+          | jq -f .github/scripts/previous-releases.jq -r \
+          | tee -a "${GITHUB_OUTPUT}"

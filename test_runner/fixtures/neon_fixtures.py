@@ -3,6 +3,7 @@ from __future__ import annotations
 import abc
 import asyncio
 import concurrent.futures
+import dataclasses
 import filecmp
 import json
 import os
@@ -26,6 +27,7 @@ from urllib.parse import quote, urlparse
 
 import asyncpg
 import backoff
+import boto3
 import httpx
 import psycopg2
 import psycopg2.sql
@@ -36,6 +38,8 @@ from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.fixtures import FixtureRequest
 from jwcrypto import jwk
+from mypy_boto3_kms import KMSClient
+from mypy_boto3_s3 import S3Client
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
@@ -92,7 +96,7 @@ from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
     COMPONENT_BINARIES,
     USE_LFC,
-    allure_add_grafana_links,
+    allure_add_grafana_link,
     assert_no_errors,
     get_dir_size,
     print_gc_result,
@@ -196,6 +200,30 @@ def mock_s3_server(port_distributor: PortDistributor) -> Iterator[MockS3Server]:
     mock_s3_server = MockS3Server(port_distributor.get_port())
     yield mock_s3_server
     mock_s3_server.kill()
+
+
+@pytest.fixture(scope="session")
+def mock_kms(mock_s3_server: MockS3Server) -> Iterator[KMSClient]:
+    yield boto3.client(
+        "kms",
+        endpoint_url=mock_s3_server.endpoint(),
+        region_name=mock_s3_server.region(),
+        aws_access_key_id=mock_s3_server.access_key(),
+        aws_secret_access_key=mock_s3_server.secret_key(),
+        aws_session_token=mock_s3_server.session_token(),
+    )
+
+
+@pytest.fixture(scope="session")
+def mock_s3_client(mock_s3_server: MockS3Server) -> Iterator[S3Client]:
+    yield boto3.client(
+        "s3",
+        endpoint_url=mock_s3_server.endpoint(),
+        region_name=mock_s3_server.region(),
+        aws_access_key_id=mock_s3_server.access_key(),
+        aws_secret_access_key=mock_s3_server.secret_key(),
+        aws_session_token=mock_s3_server.session_token(),
+    )
 
 
 class PgProtocol:
@@ -463,6 +491,7 @@ class NeonEnvBuilder:
         self.test_may_use_compatibility_snapshot_binaries = False
         self.version_combination = combination
         self.mixdir = self.test_output_dir / "mixdir_neon"
+
         if self.version_combination is not None:
             assert (
                 self.compatibility_neon_binpath is not None
@@ -674,6 +703,11 @@ class NeonEnvBuilder:
 
     def _mix_versions(self):
         assert self.version_combination is not None, "version combination must be set"
+
+        # Always use a newer version of `neon_local`
+        (self.mixdir / "neon_local").hardlink_to(self.neon_binpath / "neon_local")
+        self.neon_local_binpath = self.mixdir
+
         for component, paths in COMPONENT_BINARIES.items():
             directory = (
                 self.neon_binpath
@@ -682,10 +716,11 @@ class NeonEnvBuilder:
             )
             for filename in paths:
                 destination = self.mixdir / filename
-                destination.symlink_to(directory / filename)
+                destination.hardlink_to(directory / filename)
+        self.neon_binpath = self.mixdir
+
         if self.version_combination["compute"] == "old":
             self.pg_distrib_dir = self.compatibility_pg_distrib_dir
-        self.neon_binpath = self.mixdir
 
     def overlay_mount(self, ident: str, srcdir: Path, dstdir: Path):
         """
@@ -1132,15 +1167,15 @@ class NeonEnv:
                 "max_batch_size": 32,
             }
 
-            # Concurrent IO (https://github.com/neondatabase/neon/issues/9378):
-            # enable concurrent IO by default in tests and benchmarks.
-            # Compat tests are exempt because old versions fail to parse the new config.
-            get_vectored_concurrent_io = self.pageserver_get_vectored_concurrent_io
             if config.test_may_use_compatibility_snapshot_binaries:
                 log.info(
-                    "Forcing use of binary-built-in default to avoid forward-compatibility related test failures"
+                    "Skipping WAL contiguity validation to avoid forward-compatibility related test failures"
                 )
-                get_vectored_concurrent_io = None
+            else:
+                # Look for gaps in WAL received from safekeepeers
+                ps_cfg["validate_wal_contiguity"] = True
+
+            get_vectored_concurrent_io = self.pageserver_get_vectored_concurrent_io
             if get_vectored_concurrent_io is not None:
                 ps_cfg["get_vectored_concurrent_io"] = {
                     "mode": self.pageserver_get_vectored_concurrent_io,
@@ -1595,6 +1630,7 @@ def neon_env_builder(
 class PageserverPort:
     pg: int
     http: int
+    https: int | None = None
 
 
 class LogUtils:
@@ -1673,6 +1709,12 @@ class StorageControllerLeadershipStatus(StrEnum):
     LEADER = "leader"
     STEPPED_DOWN = "stepped_down"
     CANDIDATE = "candidate"
+
+
+@dataclass
+class StorageControllerMigrationConfig:
+    secondary_warmup_timeout: str | None
+    secondary_download_request_timeout: str | None
 
 
 class NeonStorageController(MetricsGetter, LogUtils):
@@ -1845,6 +1887,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
             "node_id": int(node.id),
             "listen_http_addr": "localhost",
             "listen_http_port": node.service_port.http,
+            "listen_https_port": node.service_port.https,
             "listen_pg_addr": "localhost",
             "listen_pg_port": node.service_port.pg,
             "availability_zone_id": node.az_id,
@@ -2068,11 +2111,20 @@ class NeonStorageController(MetricsGetter, LogUtils):
         shards: list[TenantShardId] = body["new_shards"]
         return shards
 
-    def tenant_shard_migrate(self, tenant_shard_id: TenantShardId, dest_ps_id: int):
+    def tenant_shard_migrate(
+        self,
+        tenant_shard_id: TenantShardId,
+        dest_ps_id: int,
+        config: StorageControllerMigrationConfig | None = None,
+    ):
+        payload = {"tenant_shard_id": str(tenant_shard_id), "node_id": dest_ps_id}
+        if config is not None:
+            payload["migration_config"] = dataclasses.asdict(config)
+
         self.request(
             "PUT",
             f"{self.api}/control/v1/tenant/{tenant_shard_id}/migrate",
-            json={"tenant_shard_id": str(tenant_shard_id), "node_id": dest_ps_id},
+            json=payload,
             headers=self.headers(TokenScope.ADMIN),
         )
         log.info(f"Migrated tenant {tenant_shard_id} to pageserver {dest_ps_id}")
@@ -2416,6 +2468,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
         response.raise_for_status()
         return [TenantShardId.parse(tid) for tid in response.json()["updated"]]
+
+    def download_heatmap_layers(self, tenant_shard_id: TenantShardId, timeline_id: TimelineId):
+        response = self.request(
+            "POST",
+            f"{self.api}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/download_heatmap_layers",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        response.raise_for_status()
 
     def __enter__(self) -> Self:
         return self
@@ -3197,7 +3257,7 @@ def remote_pg(
     end_ms = int(datetime.utcnow().timestamp() * 1000)
     if is_neon:
         # Add 10s margin to the start and end times
-        allure_add_grafana_links(
+        allure_add_grafana_link(
             host,
             timeline_id,
             start_ms - 10_000,
@@ -4463,33 +4523,6 @@ class Safekeeper(LogUtils):
         for na in not_allowed:
             assert not self.log_contains(na)
 
-    def append_logical_message(
-        self, tenant_id: TenantId, timeline_id: TimelineId, request: dict[str, Any]
-    ) -> dict[str, Any]:
-        """
-        Send JSON_CTRL query to append LogicalMessage to WAL and modify
-        safekeeper state. It will construct LogicalMessage from provided
-        prefix and message, and then will write it to WAL.
-        """
-
-        # "replication=0" hacks psycopg not to send additional queries
-        # on startup, see https://github.com/psycopg/psycopg2/pull/482
-        token = self.env.auth_keys.generate_tenant_token(tenant_id)
-        connstr = f"host=localhost port={self.port.pg} password={token} replication=0 options='-c timeline_id={timeline_id} tenant_id={tenant_id}'"
-
-        with closing(psycopg2.connect(connstr)) as conn:
-            # server doesn't support transactions
-            conn.autocommit = True
-            with conn.cursor() as cur:
-                request_json = json.dumps(request)
-                log.info(f"JSON_CTRL request on port {self.port.pg}: {request_json}")
-                cur.execute("JSON_CTRL " + request_json)
-                all = cur.fetchall()
-                log.info(f"JSON_CTRL response: {all[0][0]}")
-                res = json.loads(all[0][0])
-                assert isinstance(res, dict)
-                return res
-
     def http_client(
         self, auth_token: str | None = None, gen_sk_wide_token: bool = True
     ) -> SafekeeperHttpClient:
@@ -4972,8 +5005,13 @@ def check_restored_datadir_content(
 
     restored_files = list_files_to_compare(restored_dir_path)
 
+    # pg_notify files are always ignored
+    pgdata_files = [f for f in pgdata_files if not f.startswith("pg_notify")]
+    restored_files = [f for f in restored_files if not f.startswith("pg_notify")]
+
+    # pg_xact and pg_multixact files are optional in basebackup: depending on our configuration they
+    # may be omitted and loaded on demand.
     if pgdata_files != restored_files:
-        # filter pg_xact and multixact files which are downloaded on demand
         pgdata_files = [
             f
             for f in pgdata_files

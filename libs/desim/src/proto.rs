@@ -3,7 +3,8 @@ use std::fmt::Debug;
 use bytes::Bytes;
 use utils::lsn::Lsn;
 
-use crate::{network::TCP, world::NodeId};
+use crate::network::TCP;
+use crate::world::NodeId;
 
 /// Internal node events.
 #[derive(Debug)]
