@@ -155,7 +155,7 @@ def do_action(project, action):
     elif action == "delete_branch":
         if project.leaf_branches:
             target = random.choice(list(project.leaf_branches.values()))
-            log.info("Trying to delete branch %s", target.id)
+            log.info("Trying to delete branch %s", target)
             target.delete()
         else:
             log.info("Leaf branches not found, skipping")
