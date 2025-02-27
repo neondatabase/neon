@@ -271,7 +271,9 @@ criterion_main!(
 );
 
 /*
-Results on an im4gn.2xlarge instance 2025-02-27
+RUST_BACKTRACE=full cargo bench --bench bench_metrics --  --discard-baseline --noplot
+
+Results on an im4gn.2xlarge instance
 
 label_values__naive_usage/ntimelines/1 time:   [178.71 ns 178.74 ns 178.76 ns]
 label_values__naive_usage/ntimelines/4 time:   [532.94 ns 539.59 ns 546.31 ns]
@@ -288,4 +290,22 @@ propagation_of_cached_label_value__naive/nthreads/8 time:   [211.50 ns 214.44 ns
 propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/1 time:   [14.135 ns 14.147 ns 14.160 ns]
 propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/4 time:   [14.243 ns 14.255 ns 14.268 ns]
 propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/8 time:   [14.470 ns 14.682 ns 14.895 ns]
+
+Results on an M4 MAX MacBook Pro   Total Number of Cores:	14 (10 performance and 4 efficiency)
+
+label_values__naive_usage/ntimelines/1      time:   [52.711 ns 53.026 ns 53.381 ns]
+label_values__naive_usage/ntimelines/4      time:   [323.99 ns 330.40 ns 337.53 ns]
+label_values__naive_usage/ntimelines/8      time:   [1.1615 µs 1.1998 µs 1.2399 µs]
+label_values__cache_label_values_lookup/ntimelines/1      time:   [1.6635 ns 1.6715 ns 1.6809 ns]
+label_values__cache_label_values_lookup/ntimelines/4      time:   [1.7786 ns 1.7876 ns 1.8028 ns]
+label_values__cache_label_values_lookup/ntimelines/8      time:   [1.8195 ns 1.8371 ns 1.8665 ns]
+single_metric_multicore_scalability/nthreads/1      time:   [1.7764 ns 1.7909 ns 1.8079 ns]
+single_metric_multicore_scalability/nthreads/4      time:   [33.875 ns 34.868 ns 35.923 ns]
+single_metric_multicore_scalability/nthreads/8      time:   [226.85 ns 235.30 ns 244.18 ns]
+propagation_of_cached_label_value__naive/nthreads/1     time:   [3.4337 ns 3.4491 ns 3.4660 ns]
+propagation_of_cached_label_value__naive/nthreads/4     time:   [69.486 ns 71.937 ns 74.472 ns]
+propagation_of_cached_label_value__naive/nthreads/8     time:   [434.87 ns 456.47 ns 477.84 ns]
+propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/1     time:   [3.3767 ns 3.3974 ns 3.4220 ns]
+propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/4     time:   [3.6105 ns 4.2355 ns 5.1463 ns]
+propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/8     time:   [4.0889 ns 4.9714 ns 6.0779 ns]
 */
