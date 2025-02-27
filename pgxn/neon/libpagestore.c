@@ -1332,9 +1332,9 @@ pg_init_libpagestore(void)
 							"PageStream connection when we have pages which "
 							"were read ahead but not yet received.",
 							&readahead_getpage_pull_timeout_ms,
-							-1, -1, INT_MAX,
+							0, 0, 5 * 60 * 1000,
 							PGC_USERSET,
-							GUC_UNIT_MS,	/* no flags required */
+							GUC_UNIT_MS,
 							NULL, NULL, NULL);
 	DefineCustomIntVariable("neon.protocol_version",
 							"Version of compute<->page server protocol",

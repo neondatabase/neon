@@ -128,11 +128,8 @@ static uint32 local_request_counter;
 /*
  * Various settings related to prompt (fast) handling of PageStream responses
  * at any CHECK_FOR_INTERRUPTS point.
- *
- * Note: we'll trigger this every 100ms (= 0.1 seconds), which should be frequent
- * enough to fix overhead issues without too much issues with other overheads.
  */
-int				readahead_getpage_pull_timeout_ms = -1;
+int				readahead_getpage_pull_timeout_ms = 0;
 static int		PS_TIMEOUT_ID = 0;
 static bool		timeout_set = false;
 static bool		timeout_signaled = false;
