@@ -97,7 +97,7 @@ docker compose exec neon-test-extensions psql -c "CREATE DATABASE contrib_regres
 tenant_id=$(docker compose exec neon-test-extensions psql -Aqt -c "SHOW neon.tenant_id")
 EXT_TIMELINE["main"]=$(docker compose exec neon-test-extensions psql -Aqt -c "SHOW neon.timeline_id")
 create_timeline "${EXT_TIMELINE["main"]}" init
-restart_compute "${OLDTAG}" "${EXT_TIMELINE["init"]}"
+restart_compute "${OLD_COMPUTE_TAG}" "${EXT_TIMELINE["init"]}"
 create_extensions "${EXTNAMES}"
 if [ "${FORCE_ALL_UPGRADE_TESTS:-false}" = true ]; then
   exts="${EXTNAMES}"
@@ -112,9 +112,9 @@ else
     echo Testing ${ext}...
     create_timeline "${EXT_TIMELINE["main"]}" ${ext}
     EXTDIR=$(echo ${EXTENSIONS} | jq -r '.[] | select(.extname=="'${ext}'") | .extdir')
-    restart_compute "${OLDTAG}" "${EXT_TIMELINE[${ext}]}"
+    restart_compute "${OLD_COMPUTE_TAG}" "${EXT_TIMELINE[${ext}]}"
     docker compose exec neon-test-extensions psql -d contrib_regression -c "CREATE EXTENSION ${ext} CASCADE"
-    restart_compute "${NEWTAG}" "${EXT_TIMELINE[${ext}]}"
+    restart_compute "${NEW_COMPUTE_TAG}" "${EXT_TIMELINE[${ext}]}"
     docker compose exec neon-test-extensions psql -d contrib_regression -c "\dx ${ext}"
     if ! docker compose exec neon-test-extensions sh -c /ext-src/${EXTDIR}/test-upgrade.sh; then
       docker  compose exec neon-test-extensions  cat /ext-src/${EXTDIR}/regression.diffs
