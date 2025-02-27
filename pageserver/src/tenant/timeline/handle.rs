@@ -261,21 +261,22 @@ pub(crate) struct ShardTimelineId {
 
 /// See module-level comment.
 pub(crate) struct Handle<T: Types> {
-    timeline: Arc<T::Timeline>,
-    #[allow(dead_code)] // the field exists to keep the gate open
-    gate_guard: Arc<utils::sync::gate::GateGuard>,
     inner: Arc<Mutex<HandleInner<T>>>,
+    keep_open: KeepingTimelineGateOpen<T>,
 }
 pub(crate) struct WeakHandle<T: Types> {
     inner: Weak<Mutex<HandleInner<T>>>,
 }
+
 enum HandleInner<T: Types> {
-    KeepingTimelineGateOpen {
-        #[allow(dead_code)]
-        gate_guard: Arc<utils::sync::gate::GateGuard>,
-        timeline: Arc<T::Timeline>,
-    },
+    KeepingTimelineGateOpen(KeepingTimelineGateOpen<T>),
     ShutDown,
+}
+
+struct KeepingTimelineGateOpen<T: Types> {
+    timeline: Arc<T::Timeline>,
+    #[allow(dead_code)]
+    gate_guard: Arc<utils::sync::gate::GateGuard>,
 }
 
 /// Embedded in each [`Types::Timeline`] as the anchor for the only long-lived strong ref to `HandleInner`.
@@ -434,21 +435,23 @@ impl<T: Types> Cache<T> {
                 }
 
                 trace!("creating new HandleInner");
-                let handle_inner_arc = Arc::new(Mutex::new(HandleInner::KeepingTimelineGateOpen {
-                    gate_guard: Arc::new(
-                        // this enter() is expensive in production code because
-                        // it hits the global Arc<Timeline>::gate refcounts
-                        match timeline.gate().enter() {
-                            Ok(guard) => guard,
-                            Err(_) => {
-                                return Err(GetError::TimelineGateClosed);
-                            }
-                        },
-                    ),
-                    // this clone is expensive in production code because
-                    // it hits the global Arc<Timeline>::clone refcounts
-                    timeline: Arc::new(timeline.clone()),
-                }));
+                let handle_inner_arc = Arc::new(Mutex::new(HandleInner::KeepingTimelineGateOpen(
+                    KeepingTimelineGateOpen {
+                        gate_guard: Arc::new(
+                            // this enter() is expensive in production code because
+                            // it hits the global Arc<Timeline>::gate refcounts
+                            match timeline.gate().enter() {
+                                Ok(guard) => guard,
+                                Err(_) => {
+                                    return Err(GetError::TimelineGateClosed);
+                                }
+                            },
+                        ),
+                        // this clone is expensive in production code because
+                        // it hits the global Arc<Timeline>::clone refcounts
+                        timeline: Arc::new(timeline.clone()),
+                    },
+                )));
                 let handle_weak = WeakHandle {
                     inner: Arc::downgrade(&handle_inner_arc),
                 };
@@ -503,18 +506,10 @@ impl<T: Types> WeakHandle<T> {
         };
         let lock_guard = inner.lock().expect("poisoned");
         match &*lock_guard {
-            HandleInner::KeepingTimelineGateOpen {
-                timeline,
-                gate_guard,
-            } => {
-                let gate_guard = Arc::clone(gate_guard);
-                let timeline = Arc::clone(timeline);
+            HandleInner::KeepingTimelineGateOpen(keep_open) => {
+                let keep_open = KeepingTimelineGateOpen::clone(keep_open);
                 drop(lock_guard);
-                Ok(Handle {
-                    timeline,
-                    gate_guard,
-                    inner,
-                })
+                Ok(Handle { keep_open, inner })
             }
             HandleInner::ShutDown => Err(HandleUpgradeError::ShutDown),
         }
@@ -525,10 +520,19 @@ impl<T: Types> WeakHandle<T> {
     }
 }
 
+impl<T: Types> Clone for KeepingTimelineGateOpen<T> {
+    fn clone(&self) -> Self {
+        Self {
+            timeline: Arc::clone(&self.timeline),
+            gate_guard: Arc::clone(&self.gate_guard),
+        }
+    }
+}
+
 impl<T: Types> std::ops::Deref for Handle<T> {
     type Target = T::Timeline;
     fn deref(&self) -> &Self::Target {
-        &self.timeline
+        &self.keep_open.timeline
     }
 }
 
@@ -541,7 +545,7 @@ impl<T: Types> Handle<T> {
     /// Get a clone of our long-lived strong ref to the `Arc<Timeline>`.
     /// Does not keep the gate open.
     pub(crate) fn clone_timeline(&self) -> Arc<T::Timeline> {
-        Arc::clone(&self.timeline)
+        Arc::clone(&self.keep_open.timeline)
     }
 }
 
@@ -616,7 +620,9 @@ impl<T: Types> Drop for Cache<T> {
 impl<T: Types> HandleInner<T> {
     fn shutdown(&mut self) -> Option<Arc<T::Timeline>> {
         match std::mem::replace(self, HandleInner::ShutDown) {
-            HandleInner::KeepingTimelineGateOpen { timeline, .. } => Some(timeline),
+            HandleInner::KeepingTimelineGateOpen(KeepingTimelineGateOpen { timeline, .. }) => {
+                Some(timeline)
+            }
             HandleInner::ShutDown => {
                 // Duplicate shutdowns are possible because both Cache::drop and PerTimelineState::shutdown
                 // may do it concurrently, but locking rules disallow holding per-timeline-state lock and
@@ -1043,7 +1049,6 @@ mod tests {
         let key = DBDIR_KEY;
 
         // Simulate 10 connections that's opened, used, and closed
-        let mut used_handles = vec![];
         for _ in 0..10 {
             let mut cache = Cache::<TestTypes>::default();
             let handle = {
@@ -1055,7 +1060,6 @@ mod tests {
                 handle
             };
             handle.getpage();
-            used_handles.push(Arc::downgrade(&handle.timeline));
         }
 
         // No handles exist, thus gates are closed and don't require shutdown.
