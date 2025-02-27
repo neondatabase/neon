@@ -54,12 +54,11 @@ pub struct ComputeNode {
     pub resize_swap_on_bind: bool,
     pub set_disk_quota_for_fs: Option<String>,
 
+    // VM monitor parameters
     #[cfg(target_os = "linux")]
     pub filecache_connstr: String,
-
     #[cfg(target_os = "linux")]
     pub cgroup: String,
-
     #[cfg(target_os = "linux")]
     pub vm_monitor_addr: String,
 
@@ -1302,7 +1301,8 @@ impl ComputeNode {
     fn wait_postgres(&self, mut pg_handle: PostgresHandle) -> std::process::ExitStatus {
         info!(postmaster_pid = %pg_handle.postgres.id(), "Waiting for Postgres to exit");
 
-        let ecode = pg_handle.postgres
+        let ecode = pg_handle
+            .postgres
             .wait()
             .expect("failed to start waiting on Postgres process");
         PG_PID.store(0, Ordering::SeqCst);
