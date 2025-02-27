@@ -766,26 +766,6 @@ impl ComputeNode {
         }
     }
 
-    fn wait_postgres(&self, pg_handle: PostgresHandle) -> Option<i32> {
-        // Wait for the child Postgres process forever. In this state Ctrl+C will
-        // propagate to Postgres and it will be shut down as well.
-        let (mut pg, logs_handle) = pg_handle;
-        info!(postmaster_pid = %pg.id(), "Waiting for Postgres to exit");
-
-        let ecode = pg
-            .wait()
-            .expect("failed to start waiting on Postgres process");
-        PG_PID.store(0, Ordering::SeqCst);
-
-        // Process has exited. Wait for the log collecting task to finish.
-        let _ = tokio::runtime::Handle::current()
-            .block_on(logs_handle)
-            .map_err(|e| tracing::error!("log task panicked: {:?}", e));
-
-        info!("Postgres exited with code {}, shutting down", ecode);
-        ecode.code()
-    }
-
     fn cleanup_after_postgres_exit(&self) -> Result<bool> {
         // Maybe sync safekeepers again, to speed up next startup
         let compute_state = self.state.lock().unwrap().clone();
@@ -1301,6 +1281,26 @@ impl ComputeNode {
         wait_for_postgres(&mut pg, pgdata_path)?;
 
         Ok((pg, logs_handle))
+    }
+
+    fn wait_postgres(&self, pg_handle: PostgresHandle) -> Option<i32> {
+        // Wait for the child Postgres process forever. In this state Ctrl+C will
+        // propagate to Postgres and it will be shut down as well.
+        let (mut pg, logs_handle) = pg_handle;
+        info!(postmaster_pid = %pg.id(), "Waiting for Postgres to exit");
+
+        let ecode = pg
+            .wait()
+            .expect("failed to start waiting on Postgres process");
+        PG_PID.store(0, Ordering::SeqCst);
+
+        // Process has exited. Wait for the log collecting task to finish.
+        let _ = tokio::runtime::Handle::current()
+            .block_on(logs_handle)
+            .map_err(|e| tracing::error!("log task panicked: {:?}", e));
+
+        info!("Postgres exited with code {}, shutting down", ecode);
+        ecode.code()
     }
 
     /// Do post configuration of the already started Postgres. This function spawns a background task to
