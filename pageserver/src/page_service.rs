@@ -2726,7 +2726,7 @@ impl BaseBackupCmd {
             lsn,
             gzip,
             replica,
-			lazy_slru_download,
+            lazy_slru_download,
         })
     }
 }
@@ -2941,7 +2941,7 @@ where
                 lsn,
                 gzip,
                 replica,
-				lazy_slru_download,
+                lazy_slru_download,
             }) => {
                 tracing::Span::current()
                     .record("tenant_id", field::display(tenant_id))
@@ -2999,6 +2999,7 @@ where
                     lsn,
                     prev_lsn,
                     true,
+                    false,
                     false,
                     false,
                     &ctx,
@@ -3220,7 +3221,7 @@ mod tests {
                 lsn: Some(Lsn::from_str("0/16ABCDE").unwrap()),
                 gzip: true,
                 replica: true,
-				lazy_slru_download: false
+                lazy_slru_download: false
             })
         );
         let cmd = PageServiceCmd::parse(&format!("fullbackup {tenant_id} {timeline_id}")).unwrap();

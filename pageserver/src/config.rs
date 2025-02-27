@@ -224,6 +224,10 @@ pub struct PageServerConf {
     /// Does not force TLS: the client negotiates TLS usage during the handshake.
     /// Uses key and certificate from ssl_key_file/ssl_cert_file.
     pub enable_tls_page_service_api: bool,
+    ///
+    /// Size of SLRU object in blocks which triggers on-demand download rarther than including it in basebackup
+    ///
+    pub lazy_slru_download_threshold: usize,
 }
 
 /// Token for authentication to safekeepers
@@ -397,6 +401,7 @@ impl PageServerConf {
             generate_unarchival_heatmap,
             tracing,
             enable_tls_page_service_api,
+            lazy_slru_download_threshold,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -501,6 +506,7 @@ impl PageServerConf {
                 }
                 None => Vec::new(),
             },
+            lazy_slru_download_threshold,
         };
 
         // ------------------------------------------------------------

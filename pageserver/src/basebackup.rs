@@ -80,7 +80,7 @@ pub async fn send_basebackup_tarball<'a, W>(
     prev_lsn: Option<Lsn>,
     full_backup: bool,
     replica: bool,
-    lazy_slru_download: bool,
+    lazy_slru_download_enabled: bool,
     ctx: &'a RequestContext,
 ) -> Result<(), BasebackupError>
 where
@@ -132,8 +132,8 @@ where
     };
 
     info!(
-        "taking basebackup lsn={}, prev_lsn={} (full_backup={}, replica={}, lazy_slru_download={})",
-        backup_lsn, prev_lsn, full_backup, replica, lazy_slru_download
+        "taking basebackup lsn={}, prev_lsn={} (full_backup={}, replica={}, lazy_slru_download_enabled={})",
+        backup_lsn, prev_lsn, full_backup, replica, lazy_slru_download_enabled
     );
 
     let basebackup = Basebackup {
@@ -143,7 +143,7 @@ where
         prev_record_lsn: prev_lsn,
         full_backup,
         replica,
-		lazy_slru_dpownload,
+        lazy_slru_download_enabled,
         ctx,
         io_concurrency: IoConcurrency::spawn_from_conf(
             timeline.conf,
@@ -172,7 +172,7 @@ where
     prev_record_lsn: Lsn,
     full_backup: bool,
     replica: bool,
-	lazy_slru_download: bool,
+    lazy_slru_download_enabled: bool,
     ctx: &'a RequestContext,
     io_concurrency: IoConcurrency,
 }
@@ -311,7 +311,9 @@ where
                 self.timeline.pg_version,
             )?;
 
-        let lazy_slru_download = (self.self.lazy_slru_download || timeline.get_lazy_slru_download()) && !self.full_backup;
+        let lazy_slru_download = self.lazy_slru_download_enabled
+            && self.timeline.get_lazy_slru_download()
+            && !self.full_backup;
 
         let pgversion = self.timeline.pg_version;
         let subdirs = dispatch_pgversion!(pgversion, &pgv::bindings::PGDATA_SUBDIRS[..]);
@@ -361,6 +363,10 @@ where
                     .timeline
                     .get_vectored(query, self.io_concurrency.clone(), self.ctx)
                     .await?;
+
+                if blocks.len() > self.timeline.conf.lazy_slru_download_threshold {
+                    self.timeline.set_lazy_slru_download(true);
+                }
 
                 for (key, block) in blocks {
                     let block = block?;

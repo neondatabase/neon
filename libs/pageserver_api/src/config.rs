@@ -181,6 +181,7 @@ pub struct ConfigToml {
     pub generate_unarchival_heatmap: Option<bool>,
     pub tracing: Option<Tracing>,
     pub enable_tls_page_service_api: bool,
+    pub lazy_slru_download_threshold: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -537,6 +538,7 @@ pub mod defaults {
 
     pub const DEFAULT_SSL_KEY_FILE: &str = "server.key";
     pub const DEFAULT_SSL_CERT_FILE: &str = "server.crt";
+    pub const DEFAULT_LAZY_SLRU_DOWNLOAD_THRESHOLD: usize = 128;
 }
 
 impl Default for ConfigToml {
@@ -655,6 +657,7 @@ impl Default for ConfigToml {
             generate_unarchival_heatmap: None,
             tracing: None,
             enable_tls_page_service_api: false,
+            lazy_slru_download_threshold: DEFAULT_LAZY_SLRU_DOWNLOAD_THRESHOLD,
         }
     }
 }
