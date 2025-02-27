@@ -95,7 +95,7 @@ class NeonProject:
 
     def create_branch(self, parent_id: str | None = None) -> NeonBranch:
         new_branch = NeonBranch(
-            self, self.neon_api.create_branch(self.id, parent_id=parent_id)["branch"]
+            self, self.neon_api.create_branch(self.id, parent_id=parent_id)
         )
         self.leaf_branches[new_branch.id] = new_branch
         self.branches[new_branch.id] = new_branch
