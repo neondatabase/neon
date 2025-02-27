@@ -64,17 +64,17 @@ impl ChaosInjector {
         let mut interval = tokio::time::interval(self.interval);
         #[derive(Debug)]
         enum ChaosEvent {
-            ShuffleTenant,
-            ForceKill,
+            MigrationsToSecondary,
+            ForceKillController,
         }
         loop {
             let cron_interval = self.get_cron_interval_sleep_future();
             let chaos_type = tokio::select! {
                 _ = interval.tick() => {
-                    ChaosEvent::ShuffleTenant
+                    ChaosEvent::MigrationsToSecondary
                 }
                 Some(_) = maybe_sleep(cron_interval) => {
-                    ChaosEvent::ForceKill
+                    ChaosEvent::ForceKillController
                 }
                 _ = cancel.cancelled() => {
                     tracing::info!("Shutting down");
@@ -83,10 +83,10 @@ impl ChaosInjector {
             };
             tracing::info!("Chaos iteration: {chaos_type:?}...");
             match chaos_type {
-                ChaosEvent::ShuffleTenant => {
+                ChaosEvent::MigrationsToSecondary => {
                     self.inject_chaos().await;
                 }
-                ChaosEvent::ForceKill => {
+                ChaosEvent::ForceKillController => {
                     self.force_kill().await;
                 }
             }
@@ -115,6 +115,14 @@ impl ChaosInjector {
                 "Skipping shard {tenant_shard_id}: scheduling policy is {:?}",
                 shard.get_scheduling_policy()
             );
+            return;
+        }
+
+        if shard.get_preferred_node().is_some() {
+            // This shard is doing a graceful migration, don't interrupt that.  If we did, then
+            // our chaos injection of such graceful migrations would be invalidated by our chaos
+            // injections of non-graceful migrations.
+            tracing::info!("Skipping shard {tenant_shard_id}: has a preferred node set");
             return;
         }
 
@@ -152,7 +160,10 @@ impl ChaosInjector {
         std::process::exit(1);
     }
 
-    async fn inject_chaos(&mut self) {
+    /// Migrations of attached locations to their secondary location.  This exercises reconciliation in general,
+    /// live migration in particular, and the pageserver code for cleanly shutting down and starting up tenants
+    /// during such migrations.
+    async fn inject_secondary_migrations(&mut self) {
         // Pick some shards to interfere with
         let batch_size = 128;
         let mut inner = self.service.inner.write().unwrap();
