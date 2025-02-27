@@ -308,4 +308,23 @@ propagation_of_cached_label_value__naive/nthreads/8     time:   [434.87 ns 456.4
 propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/1     time:   [3.3767 ns 3.3974 ns 3.4220 ns]
 propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/4     time:   [3.6105 ns 4.2355 ns 5.1463 ns]
 propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/8     time:   [4.0889 ns 4.9714 ns 6.0779 ns]
+
+Results on a Hetzner AX102 AMD Ryzen 9 7950X3D 16-Core Processor
+
+label_values__naive_usage/ntimelines/1      time:   [64.510 ns 64.559 ns 64.610 ns]
+label_values__naive_usage/ntimelines/4      time:   [309.71 ns 326.09 ns 342.32 ns]
+label_values__naive_usage/ntimelines/8      time:   [776.92 ns 819.35 ns 856.93 ns]
+label_values__cache_label_values_lookup/ntimelines/1      time:   [1.2855 ns 1.2943 ns 1.3021 ns]
+label_values__cache_label_values_lookup/ntimelines/4      time:   [1.3865 ns 1.4139 ns 1.4441 ns]
+label_values__cache_label_values_lookup/ntimelines/8      time:   [1.5311 ns 1.5669 ns 1.6046 ns]
+single_metric_multicore_scalability/nthreads/1      time:   [1.1927 ns 1.1981 ns 1.2049 ns]
+single_metric_multicore_scalability/nthreads/4      time:   [24.346 ns 25.439 ns 26.634 ns]
+single_metric_multicore_scalability/nthreads/8      time:   [58.666 ns 60.137 ns 61.486 ns]
+propagation_of_cached_label_value__naive/nthreads/1     time:   [2.7067 ns 2.7238 ns 2.7402 ns]
+propagation_of_cached_label_value__naive/nthreads/4     time:   [62.723 ns 66.214 ns 69.787 ns]
+propagation_of_cached_label_value__naive/nthreads/8     time:   [164.24 ns 170.10 ns 175.68 ns]
+propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/1     time:   [2.2915 ns 2.2960 ns 2.3012 ns]
+propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/4     time:   [2.5726 ns 2.6158 ns 2.6624 ns]
+propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/8     time:   [2.7068 ns 2.8243 ns 2.9824 ns]
+
 */
