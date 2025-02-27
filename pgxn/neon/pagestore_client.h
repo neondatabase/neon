@@ -209,7 +209,11 @@ typedef struct
 	NeonResponse *(*receive) (shardno_t shard_no);
 	/*
 	 * Try get the next response from the TCP buffers, if any.
-	 * Returns NULL when the data is not yet available. 
+	 * Returns NULL when the data is not yet available.
+	 *
+	 * This will raise errors only for malformed responses (we can't put them
+	 * back into connection). All other error conditions are soft errors and
+	 * return NULL as "no response available".
 	 */
 	NeonResponse *(*try_receive) (shardno_t shard_no);
 	/*
