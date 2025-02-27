@@ -291,6 +291,42 @@ propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/1 ti
 propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/4 time:   [14.243 ns 14.255 ns 14.268 ns]
 propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/8 time:   [14.470 ns 14.682 ns 14.895 ns]
 
+Results on an i3en.3xlarge instance
+
+label_values__naive_usage/ntimelines/1      time:   [117.32 ns 117.53 ns 117.74 ns]
+label_values__naive_usage/ntimelines/4      time:   [736.58 ns 741.12 ns 745.61 ns]
+label_values__naive_usage/ntimelines/8      time:   [1.4513 µs 1.4596 µs 1.4665 µs]
+label_values__cache_label_values_lookup/ntimelines/1      time:   [8.0964 ns 8.0979 ns 8.0995 ns]
+label_values__cache_label_values_lookup/ntimelines/4      time:   [8.1620 ns 8.2912 ns 8.4491 ns]
+label_values__cache_label_values_lookup/ntimelines/8      time:   [14.148 ns 14.237 ns 14.324 ns]
+single_metric_multicore_scalability/nthreads/1      time:   [8.0993 ns 8.1013 ns 8.1046 ns]
+single_metric_multicore_scalability/nthreads/4      time:   [80.039 ns 80.672 ns 81.297 ns]
+single_metric_multicore_scalability/nthreads/8      time:   [153.58 ns 154.23 ns 154.90 ns]
+propagation_of_cached_label_value__naive/nthreads/1     time:   [13.924 ns 13.926 ns 13.928 ns]
+propagation_of_cached_label_value__naive/nthreads/4     time:   [143.66 ns 145.27 ns 146.59 ns]
+propagation_of_cached_label_value__naive/nthreads/8     time:   [296.51 ns 297.90 ns 299.30 ns]
+propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/1     time:   [14.013 ns 14.149 ns 14.308 ns]
+propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/4     time:   [14.311 ns 14.625 ns 14.984 ns]
+propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/8     time:   [25.981 ns 26.227 ns 26.476 ns]
+
+Results on an Standard L16s v3 (16 vcpus, 128 GiB memory)  Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+
+label_values__naive_usage/ntimelines/1      time:   [101.63 ns 101.84 ns 102.06 ns]
+label_values__naive_usage/ntimelines/4      time:   [417.55 ns 424.73 ns 432.63 ns]
+label_values__naive_usage/ntimelines/8      time:   [874.91 ns 889.51 ns 904.25 ns]
+label_values__cache_label_values_lookup/ntimelines/1      time:   [5.7724 ns 5.7760 ns 5.7804 ns]
+label_values__cache_label_values_lookup/ntimelines/4      time:   [7.8878 ns 7.9401 ns 8.0034 ns]
+label_values__cache_label_values_lookup/ntimelines/8      time:   [7.2621 ns 7.6354 ns 8.0337 ns]
+single_metric_multicore_scalability/nthreads/1      time:   [5.7710 ns 5.7744 ns 5.7785 ns]
+single_metric_multicore_scalability/nthreads/4      time:   [66.629 ns 66.994 ns 67.336 ns]
+single_metric_multicore_scalability/nthreads/8      time:   [130.85 ns 131.98 ns 132.91 ns]
+propagation_of_cached_label_value__naive/nthreads/1     time:   [11.540 ns 11.546 ns 11.553 ns]
+propagation_of_cached_label_value__naive/nthreads/4     time:   [131.22 ns 131.90 ns 132.56 ns]
+propagation_of_cached_label_value__naive/nthreads/8     time:   [260.99 ns 262.75 ns 264.26 ns]
+propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/1     time:   [11.544 ns 11.550 ns 11.557 ns]
+propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/4     time:   [11.568 ns 11.642 ns 11.763 ns]
+propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/8     time:   [13.416 ns 14.121 ns 14.886 ns
+
 Results on an M4 MAX MacBook Pro   Total Number of Cores:	14 (10 performance and 4 efficiency)
 
 label_values__naive_usage/ntimelines/1      time:   [52.711 ns 53.026 ns 53.381 ns]
