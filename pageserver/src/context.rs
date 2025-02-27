@@ -108,8 +108,9 @@ pub struct RequestContext {
 }
 
 // we wrap the inner struct in an Arc so that we can clone it cheaply
-// for context propagation; the inner's `Arc<Timeline>`` are not cheap
-// to clone because the ref count atomics are shared among tasks
+// for context propagation; Cloning the `Arc<Timeline>`s inside the
+// ScopeInner is not cheap because the ref count atomics are shared among all
+// tasks operating on that timeline (e..g, multiple page_service connections).
 #[derive(Clone)]
 pub(crate) struct Scope(Arc<ScopeInner>);
 
