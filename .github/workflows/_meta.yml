@@ -19,7 +19,7 @@ on:
         description: "Tag of the last compute release"
         value: ${{ jobs.tags.outputs.compute }}
       run-kind:
-        description: "The kind of run we're currently in. Will be one of `pr-main`, `push-main`, `storage-rc`, `storage-release`, `proxy-rc`, `proxy-release`, `compute-rc`, `compute-release` or `merge_queue`"
+        description: "The kind of run we're currently in. Will be one of `pr`, `push-main`, `storage-rc`, `storage-release`, `proxy-rc`, `proxy-release`, `compute-rc`, `compute-release` or `merge_queue`"
         value: ${{ jobs.tags.outputs.run-kind }}
 
 permissions: {}
@@ -51,10 +51,10 @@ jobs:
               || (inputs.github-event-name == 'push'         && github.ref_name == 'release')         && 'storage-release'
               || (inputs.github-event-name == 'push'         && github.ref_name == 'release-compute') && 'compute-release'
               || (inputs.github-event-name == 'push'         && github.ref_name == 'release-proxy')   && 'proxy-release'
-              || (inputs.github-event-name == 'pull_request' && github.base_ref == 'main')            && 'pr-main'
               || (inputs.github-event-name == 'pull_request' && github.base_ref == 'release')         && 'storage-rc-pr'
               || (inputs.github-event-name == 'pull_request' && github.base_ref == 'release-compute') && 'compute-rc-pr'
               || (inputs.github-event-name == 'pull_request' && github.base_ref == 'release-proxy')   && 'proxy-rc-pr'
+              || (inputs.github-event-name == 'pull_request')                                         && 'pr'
               || 'unknown'
             }}
         run: |
@@ -81,7 +81,7 @@ jobs:
           compute-release)
             echo "tag=release-compute-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
             ;;
-          pr-main|storage-rc-pr|compute-rc-pr|proxy-rc-pr)
+          pr|storage-rc-pr|compute-rc-pr|proxy-rc-pr)
             BUILD_AND_TEST_RUN_ID=$(gh run list -b $CURRENT_BRANCH -c $CURRENT_SHA -w 'Build and Test' -L 1 --json databaseId --jq '.[].databaseId')
             echo "tag=$BUILD_AND_TEST_RUN_ID" | tee -a $GITHUB_OUTPUT
             ;;
