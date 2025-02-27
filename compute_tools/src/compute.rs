@@ -429,7 +429,7 @@ impl ComputeNode {
         if let Err(err) = start_compute_result {
             // Something went wrong with the startup. Log it and expose the error to
             // HTTP status requests.
-            error!(?err);
+            error!("could not start the compute node: {:#}", err);
             this.set_failed_status(err);
             delay_exit = true;
 
