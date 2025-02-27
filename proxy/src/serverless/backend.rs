@@ -7,11 +7,15 @@ use async_trait::async_trait;
 use ed25519_dalek::SigningKey;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use jose_jwk::jose_b64;
+use postgres_client::config::SslMode;
 use rand::rngs::OsRng;
+use rustls::pki_types::{DnsName, ServerName};
 use tokio::net::{TcpStream, lookup_host};
+use tokio_rustls::TlsConnector;
 use tracing::field::display;
 use tracing::{debug, info};
 
+use super::AsyncRW;
 use super::conn_pool::poll_client;
 use super::conn_pool_lib::{Client, ConnInfo, EndpointConnPool, GlobalConnPool};
 use super::http_conn_pool::{self, HttpConnPool, Send, poll_http2_client};
@@ -608,8 +612,14 @@ impl ConnectMechanism for HyperMechanism {
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
 
+        let tls = if node_info.config.get_ssl_mode() == SslMode::Disable {
+            None
+        } else {
+            Some(&config.tls)
+        };
+
         let port = node_info.config.get_port();
-        let res = connect_http2(host_addr, &host, port, config.timeout).await;
+        let res = connect_http2(host_addr, &host, port, config.timeout, tls).await;
         drop(pause);
         let (client, connection) = permit.release_result(res)?;
 
@@ -637,6 +647,7 @@ async fn connect_http2(
     host: &str,
     port: u16,
     timeout: Duration,
+    tls: Option<&Arc<rustls::ClientConfig>>,
 ) -> Result<(http_conn_pool::Send, http_conn_pool::Connect), LocalProxyConnError> {
     let addrs = match host_addr {
         Some(addr) => vec![SocketAddr::new(addr, port)],
@@ -673,6 +684,20 @@ async fn connect_http2(
                 )));
             }
         }
+    };
+
+    let stream = if let Some(tls) = tls {
+        let host = DnsName::try_from(host)
+            .map_err(io::Error::other)
+            .map_err(LocalProxyConnError::Io)?
+            .to_owned();
+        let stream = TlsConnector::from(tls.clone())
+            .connect(ServerName::DnsName(host), stream)
+            .await
+            .map_err(LocalProxyConnError::Io)?;
+        Box::pin(stream) as AsyncRW
+    } else {
+        Box::pin(stream) as AsyncRW
     };
 
     let (client, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
