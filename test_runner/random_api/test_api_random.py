@@ -39,8 +39,6 @@ class NeonBranch:
         self.parent = self.project.branches[branch["parent_id"]] if "parent_id" in branch else None
         self.children = {}
         self.endpoints = {}
-        log.info("%s", branch)
-        self.connection_parameters = branch["connection_uris"][0]["connection_parameters"]
 
     def create_child_branch(self):
         return self.project.create_branch(self.id)
