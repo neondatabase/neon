@@ -1224,7 +1224,7 @@ impl PageServerHandler {
             ($shard:ident) => {{
                 let weak_handle = &$shard;
                 let handle = weak_handle.upgrade()?;
-                let ctx = ctx.with_scope_timeline_handle(&handle);
+                let ctx = ctx.with_scope_page_service_pagestream(&handle);
                 (handle, ctx)
             }};
         }

@@ -395,7 +395,7 @@ impl RequestContext {
             .build()
     }
 
-    pub(crate) fn with_scope_timeline_handle(
+    pub(crate) fn with_scope_page_service_pagestream(
         &self,
         timeline_handle: &crate::tenant::timeline::handle::Handle<
             crate::page_service::TenantManagerTypes,
