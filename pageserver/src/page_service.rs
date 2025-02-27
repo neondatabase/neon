@@ -422,14 +422,13 @@ impl timeline::handle::Types for TenantManagerTypes {
     type Timeline = TenantManagerCacheItem;
 }
 
-#[derive(Clone)]
 pub(crate) struct TenantManagerCacheItem {
     pub(crate) timeline: Arc<Timeline>,
     // allow() for cheap propagation through RequestContext inside a task
     #[allow(clippy::redundant_allocation)]
     pub(crate) metrics: Arc<Arc<TimelineMetrics>>,
     #[allow(dead_code)] // we store it to keep the gate open
-    pub(crate) gate_guard: Arc<GateGuard>,
+    pub(crate) gate_guard: GateGuard,
 }
 
 impl std::ops::Deref for TenantManagerCacheItem {
@@ -501,9 +500,7 @@ impl timeline::handle::TenantManager<TenantManagerTypes> for TenantManagerWrappe
         let timeline = tenant_shard
             .get_timeline(timeline_id, true)
             .map_err(GetActiveTimelineError::Timeline)?;
-        // this enter() is expensive in production code because
-        // it hits the global Arc<Timeline>::gate refcounts.
-        // That's why we do it only once per connection, on handle cache miss.
+
         let gate_guard = match timeline.gate.enter() {
             Ok(guard) => guard,
             Err(_) => {
@@ -512,10 +509,9 @@ impl timeline::handle::TenantManager<TenantManagerTypes> for TenantManagerWrappe
                 ));
             }
         };
-        // the cache item itself needs to be cheaply clonable because handles are
-        // values (not refs). TODO: maybe we can avoid that?
-        let gate_guard = Arc::new(gate_guard);
+
         let metrics = Arc::new(Arc::clone(&timeline.metrics));
+
         Ok(TenantManagerCacheItem {
             timeline,
             metrics,
