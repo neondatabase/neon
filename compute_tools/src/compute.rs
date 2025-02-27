@@ -30,7 +30,6 @@ use utils::measured_stream::MeasuredReader;
 
 use crate::configurator::launch_configurator;
 use crate::disk_quota::set_disk_quota;
-use crate::extension_server::get_pg_version_string;
 use crate::installed_extensions::get_installed_extensions;
 use crate::logger::startup_context_from_env;
 use crate::lsn_lease::launch_lsn_lease_bg_task_for_static;
@@ -44,8 +43,9 @@ use crate::{config, extension_server, local_proxy};
 pub static SYNC_SAFEKEEPERS_PID: AtomicU32 = AtomicU32::new(0);
 pub static PG_PID: AtomicU32 = AtomicU32::new(0);
 
-/// Compute node info shared across several `compute_ctl` threads.
-pub struct ComputeNode {
+/// Static configuration params that don't change after startup. These mostly
+/// come from the CLI args, or are derived from them.
+pub struct ComputeNodeParams {
     /// The ID of the compute
     pub compute_id: String,
     // Url type maintains proper escaping
@@ -62,13 +62,19 @@ pub struct ComputeNode {
     #[cfg(target_os = "linux")]
     pub vm_monitor_addr: String,
 
-    // We connect to Postgres from many different places, so build configs once
-    // and reuse them where needed.
-    pub conn_conf: postgres::config::Config,
-    pub tokio_conn_conf: tokio_postgres::config::Config,
     pub pgdata: String,
     pub pgbin: String,
     pub pgversion: String,
+    pub build_tag: String,
+
+    /// The port that the compute's external HTTP server listens on
+    pub external_http_port: u16,
+    /// The port that the compute's internal HTTP server listens on
+    pub internal_http_port: u16,
+
+    /// the address of extension storage proxy gateway
+    pub ext_remote_storage: Option<String>,
+
     /// We should only allow live re- / configuration of the compute node if
     /// it uses 'pull model', i.e. it can go to control-plane and fetch
     /// the latest configuration. Otherwise, there could be a case:
@@ -82,10 +88,17 @@ pub struct ComputeNode {
     /// - we push spec and it does configuration
     /// - but then it is restarted without any spec again
     pub live_config_allowed: bool,
-    /// The port that the compute's external HTTP server listens on
-    pub external_http_port: u16,
-    /// The port that the compute's internal HTTP server listens on
-    pub internal_http_port: u16,
+}
+
+/// Compute node info shared across several `compute_ctl` threads.
+pub struct ComputeNode {
+    pub params: ComputeNodeParams,
+
+    // We connect to Postgres from many different places, so build configs once
+    // and reuse them where needed. These are derived from 'params.connstr'
+    pub conn_conf: postgres::config::Config,
+    pub tokio_conn_conf: tokio_postgres::config::Config,
+
     /// Volatile part of the `ComputeNode`, which should be used under `Mutex`.
     /// To allow HTTP API server to serving status requests, while configuration
     /// is in progress, lock should be held only for short periods of time to do
@@ -93,11 +106,9 @@ pub struct ComputeNode {
     pub state: Mutex<ComputeState>,
     /// `Condvar` to allow notifying waiters about state changes.
     pub state_changed: Condvar,
-    /// the address of extension storage proxy gateway
-    pub ext_remote_storage: Option<String>,
+
     // key: ext_archive_name, value: started download time, download_completed?
     pub ext_download_progress: RwLock<HashMap<String, (DateTime<Utc>, bool)>>,
-    pub build_tag: String,
 }
 
 // store some metrics about download size that might impact startup time
@@ -354,35 +365,12 @@ pub(crate) fn construct_superuser_query(spec: &ComputeSpec) -> String {
 }
 
 impl ComputeNode {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        compute_id: &str,
-        connstr: url::Url,
-        pgdata: String,
-        pgbin: String,
-        external_http_port: u16,
-        internal_http_port: u16,
-        live_config_allowed: bool,
-        ext_remote_storage: Option<String>,
-        resize_swap_on_bind: bool,
-        set_disk_quota_for_fs: Option<String>,
-
-        #[cfg(target_os = "linux")] filecache_connstr: String,
-
-        #[cfg(target_os = "linux")] cgroup: String,
-
-        #[cfg(target_os = "linux")] vm_monitor_addr: String,
-
-        build_tag: String,
-
-        cli_spec: Option<ComputeSpec>,
-    ) -> Result<Self> {
-        let conn_conf = postgres::config::Config::from_str(connstr.as_str())
+    pub fn new(params: ComputeNodeParams, cli_spec: Option<ComputeSpec>) -> Result<Self> {
+        let connstr = params.connstr.as_str();
+        let conn_conf = postgres::config::Config::from_str(connstr)
             .context("cannot build postgres config from connstr")?;
-        let tokio_conn_conf = tokio_postgres::config::Config::from_str(connstr.as_str())
+        let tokio_conn_conf = tokio_postgres::config::Config::from_str(connstr)
             .context("cannot build tokio postgres config from connstr")?;
-
-        let pgversion = get_pg_version_string(&pgbin);
 
         let mut new_state = ComputeState::new();
         if let Some(cli_spec) = cli_spec {
@@ -391,29 +379,12 @@ impl ComputeNode {
         }
 
         Ok(ComputeNode {
-            compute_id: compute_id.to_string(),
-            connstr,
+            params,
             conn_conf,
             tokio_conn_conf,
-            pgdata,
-            pgbin,
-            pgversion,
-            external_http_port,
-            internal_http_port,
-            live_config_allowed,
             state: Mutex::new(new_state),
             state_changed: Condvar::new(),
-            ext_remote_storage,
             ext_download_progress: RwLock::new(HashMap::new()),
-            build_tag,
-            resize_swap_on_bind,
-            set_disk_quota_for_fs,
-            #[cfg(target_os = "linux")]
-            filecache_connstr,
-            #[cfg(target_os = "linux")]
-            cgroup,
-            #[cfg(target_os = "linux")]
-            vm_monitor_addr,
         })
     }
 
@@ -433,11 +404,11 @@ impl ComputeNode {
 
         // Launch the external HTTP server first, so that we can serve control plane
         // requests while configuration is still in progress.
-        crate::http::server::Server::External(this.external_http_port).launch(&this);
+        crate::http::server::Server::External(this.params.external_http_port).launch(&this);
 
         // The internal HTTP server could be launched later, but there isn't much
         // sense in waiting.
-        crate::http::server::Server::Internal(this.internal_http_port).launch(&this);
+        crate::http::server::Server::Internal(this.params.internal_http_port).launch(&this);
 
         // If we got a spec from the CLI already, use that. Otherwise wait for the
         // control plane to pass it to us with a /configure HTTP request
@@ -598,7 +569,9 @@ impl ComputeNode {
         let _configurator_handle = launch_configurator(self);
 
         // Resize swap to the desired size if the compute spec says so
-        if let (Some(size_bytes), true) = (pspec.spec.swap_size_bytes, self.resize_swap_on_bind) {
+        if let (Some(size_bytes), true) =
+            (pspec.spec.swap_size_bytes, self.params.resize_swap_on_bind)
+        {
             // To avoid 'swapoff' hitting postgres startup, we need to run resize-swap to completion
             // *before* starting postgres.
             //
@@ -613,7 +586,7 @@ impl ComputeNode {
         // Set disk quota if the compute spec says so
         if let (Some(disk_quota_bytes), Some(disk_quota_fs_mountpoint)) = (
             pspec.spec.disk_quota_bytes,
-            self.set_disk_quota_for_fs.as_ref(),
+            self.params.set_disk_quota_for_fs.as_ref(),
         ) {
             set_disk_quota(disk_quota_bytes, disk_quota_fs_mountpoint)
                 .context("failed to set disk quota")?;
@@ -656,7 +629,7 @@ impl ComputeNode {
         // remote shared_preload_libraries before postgres start (if any)
         if let Some(remote_extensions) = &pspec.spec.remote_extensions {
             // First, create control files for all availale extensions
-            extension_server::create_control_files(remote_extensions, &self.pgbin);
+            extension_server::create_control_files(remote_extensions, &self.params.pgbin);
 
             let library_load_start_time = Utc::now();
             let rt = tokio::runtime::Handle::current();
@@ -753,15 +726,15 @@ impl ComputeNode {
                 let pgconnstr = if disable_lfc_resizing {
                     None
                 } else {
-                    Some(self.filecache_connstr.clone())
+                    Some(self.params.filecache_connstr.clone())
                 };
 
                 let vm_monitor = if env::var_os("AUTOSCALING").is_some() {
                     let vm_monitor = tokio::spawn(vm_monitor::start(
                         Box::leak(Box::new(vm_monitor::Args {
-                            cgroup: Some(self.cgroup.clone()),
+                            cgroup: Some(self.params.cgroup.clone()),
                             pgconnstr,
-                            addr: self.vm_monitor_addr.clone(),
+                            addr: self.params.vm_monitor_addr.clone(),
                         })),
                         token.clone(),
                     ));
@@ -842,9 +815,10 @@ impl ComputeNode {
     fn create_pgdata(&self) -> Result<()> {
         // Ignore removal error, likely it is a 'No such file or directory (os error 2)'.
         // If it is something different then create_dir() will error out anyway.
-        let _ok = fs::remove_dir_all(&self.pgdata);
-        fs::create_dir(&self.pgdata)?;
-        fs::set_permissions(&self.pgdata, fs::Permissions::from_mode(0o700))?;
+        let pgdata = &self.params.pgdata;
+        let _ok = fs::remove_dir_all(pgdata);
+        fs::create_dir(pgdata)?;
+        fs::set_permissions(pgdata, fs::Permissions::from_mode(0o700))?;
 
         Ok(())
     }
@@ -909,7 +883,7 @@ impl ComputeNode {
         // sends an Error after finishing the tarball, we will not notice it.
         let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(&mut bufreader));
         ar.set_ignore_zeros(true);
-        ar.unpack(&self.pgdata)?;
+        ar.unpack(&self.params.pgdata)?;
 
         // Report metrics
         let mut state = self.state.lock().unwrap();
@@ -1054,9 +1028,9 @@ impl ComputeNode {
     pub fn sync_safekeepers(&self, storage_auth_token: Option<String>) -> Result<Lsn> {
         let start_time = Utc::now();
 
-        let mut sync_handle = maybe_cgexec(&self.pgbin)
+        let mut sync_handle = maybe_cgexec(&self.params.pgbin)
             .args(["--sync-safekeepers"])
-            .env("PGDATA", &self.pgdata) // we cannot use -D in this mode
+            .env("PGDATA", &self.params.pgdata) // we cannot use -D in this mode
             .envs(if let Some(storage_auth_token) = &storage_auth_token {
                 vec![("NEON_AUTH_TOKEN", storage_auth_token)]
             } else {
@@ -1113,14 +1087,14 @@ impl ComputeNode {
     pub fn prepare_pgdata(&self, compute_state: &ComputeState) -> Result<()> {
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
         let spec = &pspec.spec;
-        let pgdata_path = Path::new(&self.pgdata);
+        let pgdata_path = Path::new(&self.params.pgdata);
 
         // Remove/create an empty pgdata directory and put configuration there.
         self.create_pgdata()?;
         config::write_postgres_conf(
             &pgdata_path.join("postgresql.conf"),
             &pspec.spec,
-            self.internal_http_port,
+            self.params.internal_http_port,
         )?;
 
         // Syncing safekeepers is only safe with primary nodes: if a primary
@@ -1220,12 +1194,15 @@ impl ComputeNode {
         info!("prewarming");
 
         // Create pgdata
-        let pgdata = &format!("{}.warmup", self.pgdata);
+        let pgdata = &format!("{}.warmup", self.params.pgdata);
         create_pgdata(pgdata)?;
 
         // Run initdb to completion
         info!("running initdb");
-        let initdb_bin = Path::new(&self.pgbin).parent().unwrap().join("initdb");
+        let initdb_bin = Path::new(&self.params.pgbin)
+            .parent()
+            .unwrap()
+            .join("initdb");
         Command::new(initdb_bin)
             .args(["--pgdata", pgdata])
             .output()
@@ -1241,7 +1218,7 @@ impl ComputeNode {
 
         // Start postgres
         info!("starting postgres");
-        let mut pg = maybe_cgexec(&self.pgbin)
+        let mut pg = maybe_cgexec(&self.params.pgbin)
             .args(["-D", pgdata])
             .spawn()
             .expect("cannot start postgres process");
@@ -1269,11 +1246,11 @@ impl ComputeNode {
     /// Returns a handle to the child process and a handle to the logs thread.
     #[instrument(skip_all)]
     pub fn start_postgres(&self, storage_auth_token: Option<String>) -> Result<PostgresHandle> {
-        let pgdata_path = Path::new(&self.pgdata);
+        let pgdata_path = Path::new(&self.params.pgdata);
 
         // Run postgres as a child process.
-        let mut pg = maybe_cgexec(&self.pgbin)
-            .args(["-D", &self.pgdata])
+        let mut pg = maybe_cgexec(&self.params.pgbin)
+            .args(["-D", &self.params.pgdata])
             .envs(if let Some(storage_auth_token) = &storage_auth_token {
                 vec![("NEON_AUTH_TOKEN", storage_auth_token)]
             } else {
@@ -1479,9 +1456,12 @@ impl ComputeNode {
     // `pg_ctl` for start / stop.
     #[instrument(skip_all)]
     fn pg_reload_conf(&self) -> Result<()> {
-        let pgctl_bin = Path::new(&self.pgbin).parent().unwrap().join("pg_ctl");
+        let pgctl_bin = Path::new(&self.params.pgbin)
+            .parent()
+            .unwrap()
+            .join("pg_ctl");
         Command::new(pgctl_bin)
-            .args(["reload", "-D", &self.pgdata])
+            .args(["reload", "-D", &self.params.pgdata])
             .output()
             .expect("cannot run pg_ctl process");
         Ok(())
@@ -1521,9 +1501,9 @@ impl ComputeNode {
         }
 
         // Write new config
-        let pgdata_path = Path::new(&self.pgdata);
+        let pgdata_path = Path::new(&self.params.pgdata);
         let postgresql_conf_path = pgdata_path.join("postgresql.conf");
-        config::write_postgres_conf(&postgresql_conf_path, &spec, self.internal_http_port)?;
+        config::write_postgres_conf(&postgresql_conf_path, &spec, self.params.internal_http_port)?;
 
         if !spec.skip_pg_catalog_updates {
             let max_concurrent_connections = spec.reconfigure_concurrency;
@@ -1534,7 +1514,8 @@ impl ComputeNode {
                 self.pg_reload_conf()?;
 
                 if spec.mode == ComputeMode::Primary {
-                    let mut conf = tokio_postgres::Config::from_str(self.connstr.as_str()).unwrap();
+                    let mut conf =
+                        tokio_postgres::Config::from_str(self.params.connstr.as_str()).unwrap();
                     conf.application_name("apply_config");
                     let conf = Arc::new(conf);
 
@@ -1565,7 +1546,7 @@ impl ComputeNode {
 
         assert!(pspec.spec.mode == ComputeMode::Primary);
         if !pspec.spec.skip_pg_catalog_updates {
-            let pgdata_path = Path::new(&self.pgdata);
+            let pgdata_path = Path::new(&self.params.pgdata);
             // temporarily reset max_cluster_size in config
             // to avoid the possibility of hitting the limit, while we are applying config:
             // creating new extensions, roles, etc...
@@ -1634,7 +1615,7 @@ impl ComputeNode {
     pub fn check_for_core_dumps(&self) -> Result<()> {
         let core_dump_dir = match std::env::consts::OS {
             "macos" => Path::new("/cores/"),
-            _ => Path::new(&self.pgdata),
+            _ => Path::new(&self.params.pgdata),
         };
 
         // Collect core dump paths if any
@@ -1664,7 +1645,7 @@ impl ComputeNode {
 
             // Try first with gdb
             let backtrace = Command::new("gdb")
-                .args(["--batch", "-q", "-ex", "bt", &self.pgbin])
+                .args(["--batch", "-q", "-ex", "bt", &self.params.pgbin])
                 .arg(&core_path)
                 .output();
 
@@ -1741,7 +1722,8 @@ LIMIT 100",
         ext_path: RemotePath,
     ) -> Result<u64, DownloadError> {
         let ext_remote_storage =
-            self.ext_remote_storage
+            self.params
+                .ext_remote_storage
                 .as_ref()
                 .ok_or(DownloadError::BadInput(anyhow::anyhow!(
                     "Remote extensions storage is not configured",
@@ -1804,7 +1786,7 @@ LIMIT 100",
             &real_ext_name,
             &ext_path,
             ext_remote_storage,
-            &self.pgbin,
+            &self.params.pgbin,
         )
         .await
         .map_err(DownloadError::Other);
@@ -1912,7 +1894,7 @@ LIMIT 100",
         &self,
         spec: &ComputeSpec,
     ) -> Result<RemoteExtensionMetrics> {
-        if self.ext_remote_storage.is_none() {
+        if self.params.ext_remote_storage.is_none() {
             return Ok(RemoteExtensionMetrics {
                 num_ext_downloaded: 0,
                 largest_ext_size: 0,
@@ -1963,8 +1945,12 @@ LIMIT 100",
 
         let mut download_tasks = Vec::new();
         for library in &libs_vec {
-            let (ext_name, ext_path) =
-                remote_extensions.get_ext(library, true, &self.build_tag, &self.pgversion)?;
+            let (ext_name, ext_path) = remote_extensions.get_ext(
+                library,
+                true,
+                &self.params.build_tag,
+                &self.params.pgversion,
+            )?;
             download_tasks.push(self.download_extension(ext_name, ext_path));
         }
         let results = join_all(download_tasks).await;

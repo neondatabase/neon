@@ -45,7 +45,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use compute_api::responses::ComputeCtlConfig;
 use compute_api::spec::ComputeSpec;
-use compute_tools::compute::{ComputeNode, forward_termination_signal};
+use compute_tools::compute::{ComputeNode, ComputeNodeParams, forward_termination_signal};
+use compute_tools::extension_server::get_pg_version_string;
 use compute_tools::logger::*;
 use compute_tools::params::*;
 use compute_tools::spec::*;
@@ -156,23 +157,27 @@ fn main() -> Result<()> {
     let cli_spec = try_spec_from_cli(&cli)?;
 
     let compute_node = ComputeNode::new(
-        &cli.compute_id,
-        connstr,
-        cli.pgdata.clone(),
-        cli.pgbin.clone(),
-        cli.external_http_port,
-        cli.internal_http_port,
-        cli_spec.live_config_allowed,
-        cli.remote_ext_config.clone(),
-        cli.resize_swap_on_bind,
-        cli.set_disk_quota_for_fs,
-        #[cfg(target_os = "linux")]
-        cli.filecache_connstr,
-        #[cfg(target_os = "linux")]
-        cli.cgroup,
-        #[cfg(target_os = "linux")]
-        cli.vm_monitor_addr,
-        build_tag,
+        ComputeNodeParams {
+            compute_id: cli.compute_id,
+            connstr,
+            pgdata: cli.pgdata.clone(),
+            pgbin: cli.pgbin.clone(),
+            pgversion: get_pg_version_string(&cli.pgbin),
+            external_http_port: cli.external_http_port,
+            internal_http_port: cli.internal_http_port,
+            ext_remote_storage: cli.remote_ext_config.clone(),
+            resize_swap_on_bind: cli.resize_swap_on_bind,
+            set_disk_quota_for_fs: cli.set_disk_quota_for_fs,
+            #[cfg(target_os = "linux")]
+            filecache_connstr: cli.filecache_connstr,
+            #[cfg(target_os = "linux")]
+            cgroup: cli.cgroup,
+            #[cfg(target_os = "linux")]
+            vm_monitor_addr: cli.vm_monitor_addr,
+            build_tag,
+
+            live_config_allowed: cli_spec.live_config_allowed,
+        },
         cli_spec.spec,
     )?;
 
