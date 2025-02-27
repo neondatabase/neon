@@ -112,7 +112,7 @@ enum Command {
         tenant_shard_id: TenantShardId,
         #[arg(long)]
         node: NodeId,
-        #[arg(long, default_value_t = true)]
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         graceful: bool,
         #[arg(long, default_value_t = false)]
         force: bool,
@@ -1335,7 +1335,7 @@ async fn watch_tenant_shard(
         let desc = storcon_client
             .dispatch::<(), TenantDescribeResponse>(
                 Method::GET,
-                format!("control/v1/tenant/{}", tenant_shard_id),
+                format!("control/v1/tenant/{}", tenant_shard_id.tenant_id),
                 None,
             )
             .await?;

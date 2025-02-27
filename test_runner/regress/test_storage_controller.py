@@ -1950,6 +1950,9 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
                     env.storage_controller.tenant_describe(tenant_id)["shards"][0]["node_attached"]
                 )
             ),
+            # A simple migration where we will ignore scheduling (force=true) and do it immediately (graceful=false)
+            "--graceful=false",
+            "--force",
         ]
     )
 
