@@ -5260,9 +5260,12 @@ impl Service {
         Ok((response, waiters))
     }
 
-    /// Graceful migration: update the preferred node and let optimisation handle the migration
+    /// A graceful migration: update the preferred node and let optimisation handle the migration
     /// in the background (may take a long time as it will fully warm up a location before cutting over)
-    fn tenant_shard_migrate_graceful(
+    ///
+    /// Our external API calls this a 'prewarm=true' migration, but internally it isn't a special prewarm step: it's
+    /// just a migration that uses the same graceful procedure as our background scheduling optimisations would use.
+    fn tenant_shard_migrate_with_prewarm(
         &self,
         migrate_req: &TenantShardMigrateRequest,
         shard: &mut TenantShard,
@@ -5356,7 +5359,7 @@ impl Service {
 
             // Migration to unavavailable node requires force flag
             if !node.is_available() {
-                if migrate_req.migration_config.force {
+                if migrate_req.migration_config.override_scheduler {
                     // Warn but proceed: the caller may intend to manually adjust the placement of
                     // a shard even if the node is down, e.g. if intervening during an incident.
                     tracing::warn!("Forcibly migrating to unavailable node {node}");
@@ -5391,7 +5394,7 @@ impl Service {
                 migrate_req.node_id,
                 &[],
             ) {
-                if !migrate_req.migration_config.force {
+                if !migrate_req.migration_config.override_scheduler {
                     return Err(ApiError::PreconditionFailed(
                         "Migration to a worse-scoring node".into(),
                     ));
@@ -5412,8 +5415,8 @@ impl Service {
                     nodes,
                     (&migrate_req.migration_config).into(),
                 ))
-            } else if migrate_req.migration_config.graceful {
-                MigrationOutcome::Optimization(self.tenant_shard_migrate_graceful(
+            } else if migrate_req.migration_config.prewarm {
+                MigrationOutcome::Optimization(self.tenant_shard_migrate_with_prewarm(
                     &migrate_req,
                     shard,
                     scheduler,

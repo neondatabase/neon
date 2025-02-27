@@ -769,7 +769,7 @@ def test_storage_controller_stuck_compute_hook(
             env.storage_controller.tenant_shard_migrate,
             shard_0_id,
             dest_ps_id,
-            config=StorageControllerMigrationConfig(graceful=False, force=True),
+            config=StorageControllerMigrationConfig(prewarm=False, override_scheduler=True),
         )
 
         def logged_stuck():
@@ -800,7 +800,7 @@ def test_storage_controller_stuck_compute_hook(
             env.storage_controller.tenant_shard_migrate,
             shard_0_id,
             origin_pageserver.id,
-            config=StorageControllerMigrationConfig(graceful=False, force=True),
+            config=StorageControllerMigrationConfig(prewarm=False, override_scheduler=True),
         )
 
         def logged_stuck_again():
@@ -1037,7 +1037,7 @@ def test_storage_controller_compute_hook_revert(
         env.storage_controller.tenant_shard_migrate(
             tenant_shard_id,
             pageserver_b.id,
-            config=StorageControllerMigrationConfig(graceful=False, force=True),
+            config=StorageControllerMigrationConfig(prewarm=False, override_scheduler=True),
         )
 
     # Although the migration API failed, the hook should still see pageserver B (it remembers what
@@ -1082,7 +1082,7 @@ def test_storage_controller_compute_hook_revert(
     env.storage_controller.tenant_shard_migrate(
         tenant_shard_id,
         pageserver_a.id,
-        config=StorageControllerMigrationConfig(graceful=False, force=True),
+        config=StorageControllerMigrationConfig(prewarm=False, override_scheduler=True),
     )
 
     wait_until(lambda: notified_ps(pageserver_a.id))
@@ -1964,9 +1964,9 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
                     env.storage_controller.tenant_describe(tenant_id)["shards"][0]["node_attached"]
                 )
             ),
-            # A simple migration where we will ignore scheduling (force=true) and do it immediately (graceful=false)
-            "--graceful=false",
-            "--force",
+            # A simple migration where we will ignore scheduling (force=true) and do it immediately (prewarm=false)
+            "--prewarm=false",
+            "--override-scheduler=true",
         ]
     )
 
@@ -3889,7 +3889,8 @@ def test_storage_controller_location_conf_equivalence(neon_env_builder: NeonEnvB
 def test_storage_controller_graceful_migration(neon_env_builder: NeonEnvBuilder, wrong_az: bool):
     """
     Test that the graceful migration API goes through the process of
-    creating a secondary & waiting for it to warm up before cutting over
+    creating a secondary & waiting for it to warm up before cutting over, when
+    we use the prewarm=True flag to the API.
     """
 
     # 2 pageservers in 2 AZs, so that each AZ has a pageserver we can migrate to
@@ -3944,7 +3945,7 @@ def test_storage_controller_graceful_migration(neon_env_builder: NeonEnvBuilder,
             env.storage_controller.tenant_shard_migrate(
                 TenantShardId(env.initial_tenant, 0, 0),
                 dest_ps_id,
-                config=StorageControllerMigrationConfig(graceful=True, force=False),
+                config=StorageControllerMigrationConfig(prewarm=True, override_scheduler=False),
             )
 
         # Turn off ordinary optimisations so that our migration will stay put once complete
@@ -3954,7 +3955,7 @@ def test_storage_controller_graceful_migration(neon_env_builder: NeonEnvBuilder,
     env.storage_controller.tenant_shard_migrate(
         TenantShardId(env.initial_tenant, 0, 0),
         dest_ps_id,
-        config=StorageControllerMigrationConfig(graceful=True, force=wrong_az),
+        config=StorageControllerMigrationConfig(prewarm=True, override_scheduler=wrong_az),
     )
 
     def secondary_at_dest():

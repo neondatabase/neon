@@ -193,8 +193,8 @@ pub struct MigrationConfig {
     /// tenant's scheduling policy to Essential or Pause to avoid the optimiser reverting your migration.
     ///
     /// Default: false
-    #[serde(default = "default_migration_force")]
-    pub force: bool,
+    #[serde(default = "default_migration_override_scheduler")]
+    pub override_scheduler: bool,
 
     /// If true, the migration will be done gracefully by creating a secondary location first and
     /// waiting for it to warm up before cutting over.  If false, if there is no existing secondary
@@ -205,26 +205,26 @@ pub struct MigrationConfig {
     /// When doing a graceful migration, the migration API returns as soon as it is started.
     ///
     /// Default: true
-    #[serde(default = "default_migration_graceful")]
-    pub graceful: bool,
+    #[serde(default = "default_migration_prewarm")]
+    pub prewarm: bool,
 
-    /// For force migrations which will immediately enter a cutover to the new node: how long to wait
+    /// For non-prewarm migrations which will immediately enter a cutover to the new node: how long to wait
     /// overall for secondary warmup before cutting over
     #[serde(default)]
     #[serde(with = "humantime_serde")]
     pub secondary_warmup_timeout: Option<Duration>,
-    /// For force migrations which will immediately enter a cutover to the new node: how long to wait
+    /// For non-prewarm migrations which will immediately enter a cutover to the new node: how long to wait
     /// within each secondary download poll call to pageserver.
     #[serde(default)]
     #[serde(with = "humantime_serde")]
     pub secondary_download_request_timeout: Option<Duration>,
 }
 
-fn default_migration_graceful() -> bool {
+fn default_migration_prewarm() -> bool {
     true
 }
 
-fn default_migration_force() -> bool {
+fn default_migration_override_scheduler() -> bool {
     false
 }
 

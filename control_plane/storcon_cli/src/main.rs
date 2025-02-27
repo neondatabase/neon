@@ -113,9 +113,9 @@ enum Command {
         #[arg(long)]
         node: NodeId,
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-        graceful: bool,
-        #[arg(long, default_value_t = false)]
-        force: bool,
+        prewarm: bool,
+        #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+        override_scheduler: bool,
     },
     /// Watch the location of a tenant shard evolve, e.g. while expecting it to migrate
     TenantShardWatch {
@@ -628,12 +628,12 @@ async fn main() -> anyhow::Result<()> {
         Command::TenantShardMigrate {
             tenant_shard_id,
             node,
-            graceful,
-            force,
+            prewarm,
+            override_scheduler,
         } => {
             let migration_config = MigrationConfig {
-                graceful,
-                force,
+                prewarm,
+                override_scheduler,
                 ..Default::default()
             };
 

@@ -1713,10 +1713,10 @@ class StorageControllerLeadershipStatus(StrEnum):
 
 @dataclass
 class StorageControllerMigrationConfig:
-    # Unlike the API itself, tests default to graceful=False because it's a simpler API and doesn't
+    # Unlike the API itself, tests default to prewarm=False because it's a simpler API and doesn't
     # require the test to go poll for the migration actually completing.
-    graceful: bool = False
-    force: bool = False
+    prewarm: bool = False
+    override_scheduler: bool = False
     secondary_warmup_timeout: str | None = None
     secondary_download_request_timeout: str | None = None
 
@@ -2133,9 +2133,9 @@ class NeonStorageController(MetricsGetter, LogUtils):
             json=payload,
             headers=self.headers(TokenScope.ADMIN),
         )
-        if config.graceful:
+        if config.prewarm:
             log.info(
-                f"Started graceful migration of tenant {tenant_shard_id} to pageserver {dest_ps_id}"
+                f"Started prewarm migration of tenant {tenant_shard_id} to pageserver {dest_ps_id}"
             )
         else:
             log.info(f"Migrated tenant {tenant_shard_id} to pageserver {dest_ps_id}")
