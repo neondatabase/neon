@@ -46,9 +46,7 @@ class NeonBranch:
     def create_ro_endpoint(self):
         return NeonEndpoint(
             self.project,
-            self.neon_api.create_endpoint(self.project_id, self.id, "read_only", {})["endpoint"][
-                "id"
-            ],
+            self.neon_api.create_endpoint(self.project_id, self.id, "read_only", {})["endpoint"],
         )
 
 
