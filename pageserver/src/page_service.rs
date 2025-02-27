@@ -425,7 +425,9 @@ impl timeline::handle::Types for TenantManagerTypes {
 #[derive(Clone)]
 pub(crate) struct TenantManagerCacheItem {
     pub(crate) timeline: Arc<Timeline>,
-    pub(crate) metrics: Arc<TimelineMetrics>,
+    // allow() for cheap propagation through RequestContext inside a task
+    #[allow(clippy::redundant_allocation)]
+    pub(crate) metrics: Arc<Arc<TimelineMetrics>>,
     #[allow(dead_code)] // we store it to keep the gate open
     pub(crate) gate_guard: Arc<GateGuard>,
 }
@@ -513,8 +515,7 @@ impl timeline::handle::TenantManager<TenantManagerTypes> for TenantManagerWrappe
         // the cache item itself needs to be cheaply clonable because handles are
         // values (not refs). TODO: maybe we can avoid that?
         let gate_guard = Arc::new(gate_guard);
-        // TODO: wrap in another Arc to make clones cheap
-        let metrics = Arc::clone(&timeline.metrics);
+        let metrics = Arc::new(Arc::clone(&timeline.metrics));
         Ok(TenantManagerCacheItem {
             timeline,
             metrics,

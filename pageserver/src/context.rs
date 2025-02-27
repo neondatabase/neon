@@ -158,7 +158,7 @@ impl Scope {
         >,
     ) -> Self {
         Scope::Timeline {
-            arc_arc: Arc::new(Arc::clone(&timeline_handle.metrics)),
+            arc_arc: Arc::clone(&timeline_handle.metrics),
         }
     }
     pub(crate) fn new_secondary_timeline(
