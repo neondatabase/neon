@@ -4212,10 +4212,6 @@ impl Timeline {
 
                 // Stall flushes to backpressure if compaction can't keep up. This is propagated up
                 // to WAL ingestion by having ephemeral layer rolls wait for flushes.
-                //
-                // NB: the compaction loop only checks `compaction_threshold` every 20 seconds, so
-                // we can end up stalling before compaction even starts. Consider making it more
-                // responsive (e.g. via `watch_level0_deltas`).
                 if let Some(stall_threshold) = self.get_l0_flush_stall_threshold() {
                     if l0_count >= stall_threshold {
                         warn!(
