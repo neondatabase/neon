@@ -58,6 +58,17 @@ typedef struct
 
 #define messageTag(m) (((const NeonMessage *)(m))->tag)
 
+<<<<<<< HEAD
+=======
+#define NEON_TAG "[NEON_SMGR] "
+#define neon_log(tag, fmt, ...) ereport(tag,                                  \
+										(errmsg(NEON_TAG fmt, ##__VA_ARGS__), \
+										 errhidestmt(true), errhidecontext(true), errposition(0), internalerrposition(0)))
+#define neon_shard_log(shard_no, tag, fmt, ...) ereport(tag,	\
+														(errmsg(NEON_TAG "[shard %d] " fmt, shard_no, ##__VA_ARGS__), \
+														 errhidestmt(true), errhidecontext(true), errposition(0), internalerrposition(0)))
+
+>>>>>>> 7dbb65404 (Use standard prefetch mechanism for geting prewarm results fropm page server)
 /* SLRUs downloadable from page server */
 typedef enum {
 	SLRU_CLOG,
@@ -281,4 +292,6 @@ extern void set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumb
 extern void update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size);
 extern void forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum);
 
+
 #endif							/* PAGESTORE_CLIENT_H */
+k
