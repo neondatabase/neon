@@ -5807,7 +5807,8 @@ pub(crate) mod harness {
         }
 
         pub(crate) async fn load(&self) -> (Arc<Tenant>, RequestContext) {
-            let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+            let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error)
+                .with_scope_unit_test();
             (
                 self.do_try_load(&ctx)
                     .await

@@ -1334,7 +1334,7 @@ impl DeltaLayerInner {
             block_reader,
         );
 
-        tree_reader.dump().await?;
+        tree_reader.dump(ctx).await?;
 
         let keys = self.index_entries(ctx).await?;
 

@@ -8,7 +8,6 @@ use utils::id::TimelineId;
 use super::failpoints::{Failpoint, FailpointKind};
 use super::*;
 use crate::context::DownloadBehavior;
-use crate::task_mgr::TaskKind;
 use crate::tenant::harness::{TenantHarness, test_img};
 use crate::tenant::storage_layer::{IoConcurrency, LayerVisibilityHint};
 
@@ -27,10 +26,8 @@ async fn smoke_test() {
     let h = TenantHarness::create("smoke_test").await.unwrap();
     let span = h.span();
     let download_span = span.in_scope(|| tracing::info_span!("downloading", timeline_id = 1));
-    let (tenant, _) = h.load().await;
+    let (tenant, ctx) = h.load().await;
     let io_concurrency = IoConcurrency::spawn_for_test();
-
-    let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Download);
 
     let image_layers = vec![(
         Lsn(0x40),

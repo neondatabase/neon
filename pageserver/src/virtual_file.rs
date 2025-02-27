@@ -1548,7 +1548,8 @@ mod tests {
     where
         A: Adapter,
     {
-        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let ctx =
+            RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
         let testdir = crate::config::PageServerConf::test_repo_dir(testname);
         std::fs::create_dir_all(&testdir)?;
 
@@ -1675,7 +1676,8 @@ mod tests {
         const THREADS: usize = 100;
         const SAMPLE: [u8; SIZE] = [0xADu8; SIZE];
 
-        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let ctx =
+            RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
         let testdir = crate::config::PageServerConf::test_repo_dir("vfile_concurrency");
         std::fs::create_dir_all(&testdir)?;
 
@@ -1734,7 +1736,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_atomic_overwrite_basic() {
-        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let ctx =
+            RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
         let testdir = crate::config::PageServerConf::test_repo_dir("test_atomic_overwrite_basic");
         std::fs::create_dir_all(&testdir).unwrap();
 
@@ -1762,7 +1765,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_atomic_overwrite_preexisting_tmp() {
-        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let ctx =
+            RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
         let testdir =
             crate::config::PageServerConf::test_repo_dir("test_atomic_overwrite_preexisting_tmp");
         std::fs::create_dir_all(&testdir).unwrap();

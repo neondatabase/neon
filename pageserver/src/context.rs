@@ -130,6 +130,10 @@ pub(crate) enum ScopeInner {
         #[allow(clippy::redundant_allocation)]
         arc_arc_timeline: Arc<Arc<Timeline>>,
     },
+    #[cfg(test)]
+    UnitTest {
+        io_size_metrics: &'static crate::metrics::StorageIoSizeMetrics,
+    },
 }
 
 static GLOBAL_IO_SIZE_METRICS: Lazy<crate::metrics::StorageIoSizeMetrics> =
@@ -177,6 +181,12 @@ impl Scope {
         // like we do for attached timelines. (We don't have attached-tenant-scoped usage of VirtualFile
         // at this point, so, we were able to completely side-step tenant-scoped stuff there).
         Scope(Arc::new(ScopeInner::SecondaryTenant {
+            io_size_metrics: &GLOBAL_IO_SIZE_METRICS,
+        }))
+    }
+    #[cfg(test)]
+    pub(crate) fn new_unit_test() -> Self {
+        Scope(Arc::new(ScopeInner::UnitTest {
             io_size_metrics: &GLOBAL_IO_SIZE_METRICS,
         }))
     }
@@ -413,6 +423,13 @@ impl RequestContext {
             .build()
     }
 
+    #[cfg(test)]
+    pub fn with_scope_unit_test(&self) -> Self {
+        RequestContextBuilder::new(TaskKind::UnitTest)
+            .scope(Scope::new_unit_test())
+            .build()
+    }
+
     pub fn task_kind(&self) -> TaskKind {
         self.task_kind
     }
@@ -438,10 +455,7 @@ impl RequestContext {
             ScopeInner::Global { io_size_metrics } => {
                 let is_unit_test = cfg!(test);
                 let is_regress_test_build = cfg!(feature = "testing");
-                if is_unit_test {
-                    // TODO: We haven't converted all the unit tests to set timeline scope yet.
-                    io_size_metrics
-                } else if is_regress_test_build {
+                if is_unit_test || is_regress_test_build {
                     panic!("all VirtualFile instances are timeline-scoped");
                 } else {
                     use once_cell::sync::Lazy;
@@ -468,6 +482,8 @@ impl RequestContext {
             }
             ScopeInner::SecondaryTimeline { io_size_metrics } => io_size_metrics,
             ScopeInner::SecondaryTenant { io_size_metrics } => io_size_metrics,
+            #[cfg(test)]
+            ScopeInner::UnitTest { io_size_metrics } => io_size_metrics,
         }
     }
 }
