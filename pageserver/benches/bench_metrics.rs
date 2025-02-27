@@ -269,3 +269,23 @@ criterion_main!(
     single_metric_multicore_scalability,
     propagation_of_cached_label_value
 );
+
+/*
+Results on an im4gn.2xlarge instance 2025-02-27
+
+label_values__naive_usage/ntimelines/1 time:   [178.71 ns 178.74 ns 178.76 ns]
+label_values__naive_usage/ntimelines/4 time:   [532.94 ns 539.59 ns 546.31 ns]
+label_values__naive_usage/ntimelines/8 time:   [1.1082 µs 1.1109 µs 1.1135 µs]
+label_values__cache_label_values_lookup/ntimelines/1 time:   [6.4116 ns 6.4119 ns 6.4123 ns]
+label_values__cache_label_values_lookup/ntimelines/4 time:   [6.3482 ns 6.3819 ns 6.4079 ns]
+label_values__cache_label_values_lookup/ntimelines/8 time:   [6.4213 ns 6.5279 ns 6.6293 ns]
+single_metric_multicore_scalability/nthreads/1 time:   [6.0102 ns 6.0104 ns 6.0106 ns]
+single_metric_multicore_scalability/nthreads/4 time:   [38.127 ns 38.275 ns 38.416 ns]
+single_metric_multicore_scalability/nthreads/8 time:   [73.698 ns 74.882 ns 75.864 ns]
+propagation_of_cached_label_value__naive/nthreads/1 time:   [14.424 ns 14.425 ns 14.426 ns]
+propagation_of_cached_label_value__naive/nthreads/4 time:   [100.71 ns 102.53 ns 104.35 ns]
+propagation_of_cached_label_value__naive/nthreads/8 time:   [211.50 ns 214.44 ns 216.87 ns]
+propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/1 time:   [14.135 ns 14.147 ns 14.160 ns]
+propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/4 time:   [14.243 ns 14.255 ns 14.268 ns]
+propagation_of_cached_label_value__long_lived_reference_per_thread/nthreads/8 time:   [14.470 ns 14.682 ns 14.895 ns]
+*/
