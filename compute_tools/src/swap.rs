@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use tracing::{instrument, warn};
 
 pub const RESIZE_SWAP_BIN: &str = "/neonvm/bin/resize-swap";

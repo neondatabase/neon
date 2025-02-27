@@ -51,7 +51,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          sparse-checkout: scripts/push_with_image_map.py
+          sparse-checkout: .github/scripts/push_with_image_map.py
           sparse-checkout-cone-mode: false
 
       - name: Print image-map
@@ -99,6 +99,6 @@ jobs:
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
       - name: Copy docker images to target registries
-        run: python scripts/push_with_image_map.py
+        run: python3 .github/scripts/push_with_image_map.py
         env:
           IMAGE_MAP: ${{ inputs.image-map }}

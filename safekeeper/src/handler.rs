@@ -23,7 +23,6 @@ use utils::postgres_client::PostgresClientProtocol;
 use utils::shard::{ShardCount, ShardNumber};
 
 use crate::auth::check_permission;
-use crate::json_ctrl::{AppendLogicalMessage, handle_json_ctrl};
 use crate::metrics::{PG_QUERIES_GAUGE, TrafficMetrics};
 use crate::timeline::TimelineError;
 use crate::{GlobalTimelines, SafeKeeperConf};
@@ -62,9 +61,6 @@ enum SafekeeperPostgresCommand {
     },
     IdentifySystem,
     TimelineStatus,
-    JSONCtrl {
-        cmd: AppendLogicalMessage,
-    },
 }
 
 fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
@@ -134,11 +130,6 @@ fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
         Ok(SafekeeperPostgresCommand::IdentifySystem)
     } else if cmd.starts_with("TIMELINE_STATUS") {
         Ok(SafekeeperPostgresCommand::TimelineStatus)
-    } else if cmd.starts_with("JSON_CTRL") {
-        let cmd = cmd.strip_prefix("JSON_CTRL").context("invalid prefix")?;
-        Ok(SafekeeperPostgresCommand::JSONCtrl {
-            cmd: serde_json::from_str(cmd)?,
-        })
     } else {
         anyhow::bail!("unsupported command {cmd}");
     }
@@ -150,7 +141,6 @@ fn cmd_to_string(cmd: &SafekeeperPostgresCommand) -> &str {
         SafekeeperPostgresCommand::StartReplication { .. } => "START_REPLICATION",
         SafekeeperPostgresCommand::TimelineStatus => "TIMELINE_STATUS",
         SafekeeperPostgresCommand::IdentifySystem => "IDENTIFY_SYSTEM",
-        SafekeeperPostgresCommand::JSONCtrl { .. } => "JSON_CTRL",
     }
 }
 
@@ -359,9 +349,6 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                 }
                 SafekeeperPostgresCommand::IdentifySystem => self.handle_identify_system(pgb).await,
                 SafekeeperPostgresCommand::TimelineStatus => self.handle_timeline_status(pgb).await,
-                SafekeeperPostgresCommand::JSONCtrl { ref cmd } => {
-                    handle_json_ctrl(self, pgb, cmd).await
-                }
             }
         })
     }

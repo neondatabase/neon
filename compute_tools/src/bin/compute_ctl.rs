@@ -40,34 +40,33 @@ use std::path::Path;
 use std::process::exit;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
-use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
-use std::{thread, time::Duration};
+use std::sync::{Arc, Condvar, Mutex, RwLock, mpsc};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Parser;
-use compute_tools::disk_quota::set_disk_quota;
-use compute_tools::http::server::Server;
-use compute_tools::lsn_lease::launch_lsn_lease_bg_task_for_static;
-use signal_hook::consts::{SIGQUIT, SIGTERM};
-use signal_hook::{consts::SIGINT, iterator::Signals};
-use tracing::{error, info, warn};
-use url::Url;
-
 use compute_api::responses::{ComputeCtlConfig, ComputeStatus};
 use compute_api::spec::ComputeSpec;
-
 use compute_tools::compute::{
-    forward_termination_signal, ComputeNode, ComputeState, ParsedSpec, PG_PID,
+    ComputeNode, ComputeState, PG_PID, ParsedSpec, forward_termination_signal,
 };
 use compute_tools::configurator::launch_configurator;
+use compute_tools::disk_quota::set_disk_quota;
 use compute_tools::extension_server::get_pg_version_string;
+use compute_tools::http::server::Server;
 use compute_tools::logger::*;
+use compute_tools::lsn_lease::launch_lsn_lease_bg_task_for_static;
 use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
 use compute_tools::swap::resize_swap;
-use rlimit::{setrlimit, Resource};
+use rlimit::{Resource, setrlimit};
+use signal_hook::consts::{SIGINT, SIGQUIT, SIGTERM};
+use signal_hook::iterator::Signals;
+use tracing::{error, info, warn};
+use url::Url;
 use utils::failpoint_support;
 
 // this is an arbitrary build tag. Fine as a default / for testing purposes
@@ -149,6 +148,8 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    let scenario = failpoint_support::init();
+
     // For historical reasons, the main thread that processes the spec and launches postgres
     // is synchronous, but we always have this tokio runtime available and we "enter" it so
     // that you can use tokio::spawn() and tokio::runtime::Handle::current().block_on(...)
@@ -159,8 +160,6 @@ fn main() -> Result<()> {
     let _rt_guard = runtime.enter();
 
     let build_tag = runtime.block_on(init())?;
-
-    let scenario = failpoint_support::init();
 
     // enable core dumping for all child processes
     setrlimit(Resource::CORE, rlimit::INFINITY, rlimit::INFINITY)?;
@@ -407,6 +406,21 @@ fn start_postgres(
 ) -> Result<(Option<PostgresHandle>, StartPostgresResult)> {
     // We got all we need, update the state.
     let mut state = compute.state.lock().unwrap();
+
+    // Create a tracing span for the startup operation.
+    //
+    // We could otherwise just annotate the function with #[instrument], but if
+    // we're being configured from a /configure HTTP request, we want the
+    // startup to be considered part of the /configure request.
+    let _this_entered = {
+        // Temporarily enter the /configure request's span, so that the new span
+        // becomes its child.
+        let _parent_entered = state.startup_span.take().map(|p| p.entered());
+
+        tracing::info_span!("start_postgres")
+    }
+    .entered();
+
     state.set_status(ComputeStatus::Init, &compute.state_changed);
 
     info!(

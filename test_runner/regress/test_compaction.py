@@ -319,8 +319,12 @@ def test_pageserver_gc_compaction_idempotent(
             },
         )
         wait_until(compaction_finished, timeout=60)
+        workload.validate(env.pageserver.id)
+        # Ensure all data are uploaded so that the duplicated layer gets into index_part.json
+        ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_flushed=True)
     if compaction_mode == "after_restart":
         env.pageserver.restart(True)
+        workload.validate(env.pageserver.id)
         ps_http.timeline_gc(
             tenant_id, timeline_id, None
         )  # Force refresh gc info to have gc_cutoff generated
@@ -335,6 +339,7 @@ def test_pageserver_gc_compaction_idempotent(
                     "sub_compaction_max_job_size_mb": 16,
                 },
             )
+            workload.validate(env.pageserver.id)
             wait_until(compaction_finished, timeout=60)
 
     # ensure gc_compaction is scheduled and it's actually running (instead of skipping due to no layers picked)

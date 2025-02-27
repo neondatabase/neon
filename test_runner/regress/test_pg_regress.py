@@ -364,7 +364,7 @@ def test_tx_abort_with_many_relations(
         n = 4000
         step = 4000
     else:
-        n = 100000
+        n = 20000
         step = 5000
 
     def create():

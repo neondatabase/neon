@@ -1,16 +1,14 @@
 use std::sync::Arc;
 
-use axum::{extract::State, response::Response};
-use compute_api::{
-    requests::ExtensionInstallRequest,
-    responses::{ComputeStatus, ExtensionInstallResponse},
-};
+use axum::extract::State;
+use axum::response::Response;
+use compute_api::requests::ExtensionInstallRequest;
+use compute_api::responses::{ComputeStatus, ExtensionInstallResponse};
 use http::StatusCode;
 
-use crate::{
-    compute::ComputeNode,
-    http::{extract::Json, JsonResponse},
-};
+use crate::compute::ComputeNode;
+use crate::http::JsonResponse;
+use crate::http::extract::Json;
 
 /// Install a extension.
 pub(in crate::http) async fn install_extension(

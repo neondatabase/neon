@@ -10,8 +10,8 @@ use tracing::{Instrument, error, info, info_span, instrument};
 use utils::id::TimelineId;
 use utils::{crashsafe, fs_ext, pausable_failpoint};
 
-use crate::context::RequestContext;
 use crate::config::PageServerConf;
+use crate::context::RequestContext;
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::remote_timeline_client::{

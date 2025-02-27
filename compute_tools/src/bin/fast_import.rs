@@ -25,13 +25,13 @@
 //! docker push localhost:3030/localregistry/compute-node-v14:latest
 //! ```
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use aws_config::BehaviorVersion;
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::{Parser, Subcommand};
-use compute_tools::extension_server::{get_pg_version, PostgresMajorVersion};
+use compute_tools::extension_server::{PostgresMajorVersion, get_pg_version};
 use nix::unistd::Pid;
-use tracing::{error, info, info_span, warn, Instrument};
+use tracing::{Instrument, error, info, info_span, warn};
 use utils::fs_ext::is_directory_empty;
 
 #[path = "fast_import/aws_s3_sync.rs"]
@@ -558,7 +558,9 @@ async fn cmd_dumprestore(
                     decode_connstring(kms_client.as_ref().unwrap(), &key_id, dest_ciphertext)
                         .await?
                 } else {
-                    bail!("destination connection string must be provided in spec for dump_restore command");
+                    bail!(
+                        "destination connection string must be provided in spec for dump_restore command"
+                    );
                 };
 
                 (source, dest)
