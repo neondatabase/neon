@@ -104,6 +104,10 @@ static char *hexdump_page(char *page);
 
 const int	SmgrTrace = DEBUG5;
 
+#define NEON_PANIC_CONNECTION_STATE(shard_no, elvl, message, ...) \
+       neon_shard_log(shard_no, elvl, "Broken connection state: " message, \
+                                  ##__VA_ARGS__)
+
 page_server_api *page_server;
 
 /* unlogged relation build states */
@@ -812,6 +816,27 @@ prefetch_read(PrefetchRequest *slot)
 	}
 }
 
+
+/*
+ * Wait completion of previosly registered prefetch request.
+ * Prefetch result shoudl be placed in LFC by prefetch_wait_for.
+ */
+bool
+prefetch_receive(BufferTag tag)
+{
+	PrfHashEntry *entry;
+	PrefetchRequest hashkey;
+
+	hashkey.buftag = tag;
+	entry = prfh_lookup(MyPState->prf_hash, &hashkey);
+	if (entry != NULL && prefetch_wait_for(entry->slot->my_ring_index))
+	{
+		prefetch_set_unused(entry->slot->my_ring_index);
+		return true;
+	}
+	return false;
+}
+
 /*
  * Disconnect hook - drop prefetches when the connection drops
  *
@@ -1082,7 +1107,7 @@ prefetch_lookup(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkn, neon_r
  * NOTE: this function may indirectly update MyPState->pfs_hash; which
  * invalidates any active pointers into the hash table.
  */
-static uint64
+uint64
 prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frlsns,
 						  BlockNumber nblocks, const bits8 *mask,
 						  bool is_prefetch)
