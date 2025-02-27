@@ -48,6 +48,9 @@ class NeonBranch:
         self.endpoints = {}
         self.connection_parameters = branch["connection_uris"][0]["connection_parameters"]
 
+    def __str__(self):
+        return f"Branch {self.id}, parent: {self.parent}"
+
     def create_child_branch(self):
         return self.project.create_branch(self.id)
 
