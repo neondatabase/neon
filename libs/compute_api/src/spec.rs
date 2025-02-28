@@ -183,7 +183,7 @@ pub enum ComputeFeature {
     /// track short-lived connections as user activity.
     ActivityMonitorExperimental,
 
-    /// Download larger SLU files on demand
+    /// Download all SLRU files on demand
     LazySlruDownload,
 
     /// This is a special feature flag that is used to represent unknown feature flags.
