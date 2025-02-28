@@ -15,12 +15,15 @@ use crate::virtual_file::owned_buffers_io::io_buf_ext::FullSlice;
 /// A handle to the flush task.
 pub struct FlushHandle<Buf, W> {
     inner: Option<FlushHandleInner<Buf, W>>,
+    /// Immutable buffer for serving tail reads.
+    /// `None` if no flush request has been submitted.
+    pub(super) maybe_flushed: Option<FullSlice<Buf>>,
 }
 
 pub struct FlushHandleInner<Buf, W> {
     /// A bi-directional channel that sends (buffer, offset) for writes,
     /// and receives recyled buffer.
-    pub channel: duplex::mpsc::Duplex<FlushRequest<Buf>, FullSlice<Buf>>,
+    channel: duplex::mpsc::Duplex<FlushRequest<Buf>, FullSlice<Buf>>,
     /// Join handle for the background flush task.
     join_handle: tokio::task::JoinHandle<Arc<W>>,
 }
@@ -36,7 +39,7 @@ struct FlushRequest<Buf> {
 
 /// Constructs a request and a control object for a new flush operation.
 #[cfg(not(test))]
-pub fn new_flush_op<Buf>(slice: FullSlice<Buf>, offset: u64) -> (FlushRequest<Buf>, FlushControl) {
+fn new_flush_op<Buf>(slice: FullSlice<Buf>, offset: u64) -> (FlushRequest<Buf>, FlushControl) {
     let request = FlushRequest { slice, offset };
     let control = FlushControl::untracked();
 
@@ -45,7 +48,7 @@ pub fn new_flush_op<Buf>(slice: FullSlice<Buf>, offset: u64) -> (FlushRequest<Bu
 
 /// Constructs a request and a control object for a new flush operation.
 #[cfg(test)]
-pub fn new_flush_op<Buf>(slice: FullSlice<Buf>, offset: u64) -> (FlushRequest<Buf>, FlushControl) {
+fn new_flush_op<Buf>(slice: FullSlice<Buf>, offset: u64) -> (FlushRequest<Buf>, FlushControl) {
     let (ready_to_flush_tx, ready_to_flush_rx) = tokio::sync::oneshot::channel();
     let (done_flush_tx, done_flush_rx) = tokio::sync::oneshot::channel();
     let control = FlushControl::not_started(ready_to_flush_tx, done_flush_rx);
@@ -142,7 +145,42 @@ where
                 channel: front,
                 join_handle,
             }),
+            maybe_flushed: None,
         }
+    }
+
+    /// Submits a buffer to be flushed in the background task.
+    /// Returns a buffer that completed flushing for re-use, length reset to 0, capacity unchanged.
+    /// If `save_buf_for_read` is true, then we save the buffer in `Self::maybe_flushed`, otherwise
+    /// clear `maybe_flushed`.
+    pub async fn flush<B>(&mut self, buf: B, offset: u64) -> std::io::Result<(B, FlushControl)>
+    where
+        B: Buffer<IoBuf = Buf> + Send + 'static,
+    {
+        let slice = buf.flush();
+
+        // Saves a buffer for read while flushing. This also removes reference to the old buffer.
+        self.maybe_flushed = Some(slice.cheap_clone());
+
+        let (request, flush_control) = new_flush_op(slice, offset);
+
+        // Submits the buffer to the background task.
+        let submit = self.inner_mut().channel.send(request).await;
+        if submit.is_err() {
+            return self.handle_error().await;
+        }
+
+        // Wait for an available buffer from the background flush task.
+        // This is the BACKPRESSURE mechanism: if the flush task can't keep up,
+        // then the write path will eventually wait for it here.
+        let Some(recycled) = self.inner_mut().channel.recv().await else {
+            return self.handle_error().await;
+        };
+
+        // The only other place that could hold a reference to the recycled buffer
+        // is in `Self::maybe_flushed`, but we have already replace it with the new buffer.
+        let recycled = Buffer::reuse_after_flush(recycled.into_raw_slice().into_inner());
+        Ok((recycled, flush_control))
     }
 
     async fn handle_error<T>(&mut self) -> std::io::Result<T> {
@@ -164,7 +202,7 @@ where
 
     /// Gets a mutable reference to the inner handle. Panics if [`Self::inner`] is `None`.
     /// This only happens if the handle is used after an error.
-    pub fn inner_mut(&mut self) -> &mut FlushHandleInner<Buf, W> {
+    fn inner_mut(&mut self) -> &mut FlushHandleInner<Buf, W> {
         self.inner
             .as_mut()
             .expect("must not use after we returned an error")
@@ -175,7 +213,7 @@ where
 pub struct FlushBackgroundTask<Buf, W> {
     /// A bi-directional channel that receives (buffer, offset) for writes,
     /// and send back recycled buffer.
-    pub channel: duplex::mpsc::Duplex<FullSlice<Buf>, FlushRequest<Buf>>,
+    channel: duplex::mpsc::Duplex<FullSlice<Buf>, FlushRequest<Buf>>,
     /// A writter for persisting data to disk.
     writer: Arc<W>,
     ctx: RequestContext,
