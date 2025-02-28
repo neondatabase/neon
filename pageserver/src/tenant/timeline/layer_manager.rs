@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::{Context, bail, ensure};
 use itertools::Itertools;
 use pageserver_api::shard::TenantShardId;
+use tokio_util::sync::CancellationToken;
 use tracing::trace;
 use utils::id::TimelineId;
 use utils::lsn::{AtomicLsn, Lsn};
@@ -178,6 +179,7 @@ impl OpenLayerManager {
 
     /// Open a new writable layer to append data if there is no open layer, otherwise return the
     /// current open layer, called within `get_layer_for_write`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn get_layer_for_write(
         &mut self,
         lsn: Lsn,
@@ -185,6 +187,7 @@ impl OpenLayerManager {
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
         gate: &utils::sync::gate::Gate,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<InMemoryLayer>> {
         ensure!(lsn.is_aligned());
@@ -212,9 +215,16 @@ impl OpenLayerManager {
                 timeline_id, start_lsn, lsn
             );
 
-            let new_layer =
-                InMemoryLayer::create(conf, timeline_id, tenant_shard_id, start_lsn, gate, ctx)
-                    .await?;
+            let new_layer = InMemoryLayer::create(
+                conf,
+                timeline_id,
+                tenant_shard_id,
+                start_lsn,
+                gate,
+                cancel,
+                ctx,
+            )
+            .await?;
             let layer = Arc::new(new_layer);
 
             self.layer_map.open_layer = Some(layer.clone());
