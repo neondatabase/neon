@@ -210,6 +210,7 @@ pub struct PageServerConf {
     /// Interpreted protocol feature: if enabled, validate that the logical WAL received from
     /// safekeepers does not have gaps.
     pub validate_wal_contiguity: bool,
+<<<<<<< HEAD
 
     /// When set, the previously written to disk heatmap is loaded on tenant attach and used
     /// to avoid clobbering the heatmap from new, cold, attached locations.
@@ -228,6 +229,8 @@ pub struct PageServerConf {
     /// Size of SLRU object in blocks which triggers on-demand download rarther than including it in basebackup
     ///
     pub lazy_slru_download_threshold: usize,
+=======
+>>>>>>> 1ef4316b4 (Use lazy SLRU download for all timelines is feature flag is set)
 }
 
 /// Token for authentication to safekeepers
@@ -397,11 +400,14 @@ impl PageServerConf {
             get_vectored_concurrent_io,
             enable_read_path_debugging,
             validate_wal_contiguity,
+<<<<<<< HEAD
             load_previous_heatmap,
             generate_unarchival_heatmap,
             tracing,
             enable_tls_page_service_api,
             lazy_slru_download_threshold,
+=======
+>>>>>>> 1ef4316b4 (Use lazy SLRU download for all timelines is feature flag is set)
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -506,7 +512,6 @@ impl PageServerConf {
                 }
                 None => Vec::new(),
             },
-            lazy_slru_download_threshold,
         };
 
         // ------------------------------------------------------------

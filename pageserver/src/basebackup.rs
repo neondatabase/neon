@@ -311,8 +311,8 @@ where
                 self.timeline.pg_version,
             )?;
 
-        let lazy_slru_download = self.lazy_slru_download_enabled
-            && self.timeline.get_lazy_slru_download()
+        let lazy_slru_download = (self.lazy_slru_download_enabled
+            || self.timeline.get_lazy_slru_download())
             && !self.full_backup;
 
         let pgversion = self.timeline.pg_version;
@@ -356,7 +356,7 @@ where
                 );
 
             let mut slru_builder = SlruSegmentsBuilder::new(&mut self.ar);
-            let mut total_slru_blocks = 0usize;
+
             for part in slru_partitions.parts {
                 let query = VersionedKeySpaceQuery::uniform(part, self.lsn);
                 let blocks = self
@@ -364,17 +364,12 @@ where
                     .get_vectored(query, self.io_concurrency.clone(), self.ctx)
                     .await?;
 
-                total_slru_blocks += blocks.len();
-
                 for (key, block) in blocks {
                     let block = block?;
                     slru_builder.add_block(&key, block).await?;
                 }
             }
             slru_builder.finish().await?;
-            self.timeline.set_lazy_slru_download(
-                total_slru_blocks > self.timeline.conf.lazy_slru_download_threshold,
-            );
         }
 
         let mut min_restart_lsn: Lsn = Lsn::MAX;
