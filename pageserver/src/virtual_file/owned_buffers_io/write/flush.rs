@@ -25,7 +25,7 @@ pub struct FlushHandleInner<Buf, W> {
     /// and receives recyled buffer.
     channel: duplex::mpsc::Duplex<FlushRequest<Buf>, FullSlice<Buf>>,
     /// Join handle for the background flush task.
-    join_handle: tokio::task::JoinHandle<std::io::Result<Arc<W>>>,
+    join_handle: tokio::task::JoinHandle<Arc<W>>,
 }
 
 struct FlushRequest<Buf> {
@@ -130,14 +130,14 @@ where
     {
         // It is fine to buffer up to only 1 message. We only 1 message in-flight at a time.
         let (front, back) = duplex::mpsc::channel(1);
+        // Sends the extra buffer back to the handle.
+        back.try_send(buf.flush())
+            .expect("we just created it and it has buffer capacity");
 
         let join_handle = tokio::spawn(
-            async move {
-                FlushBackgroundTask::new(back, file, gate_guard, ctx)
-                    .run(buf.flush())
-                    .await
-            }
-            .instrument(span),
+            FlushBackgroundTask::new(back, file, gate_guard, ctx)
+                .run()
+                .instrument(span),
         );
 
         FlushHandle {
@@ -191,13 +191,13 @@ where
     }
 
     /// Cleans up the channel, join the flush task.
-    pub async fn shutdown(&mut self) -> std::io::Result<Arc<W>> {
+    pub async fn shutdown(&mut self) -> Arc<W> {
         let handle = self
             .inner
             .take()
             .expect("must not use after we returned an error");
         drop(handle.channel.tx);
-        handle.join_handle.await.unwrap()
+        Ok(handle.join_handle.await.unwrap())
     }
 
     /// Gets a mutable reference to the inner handle. Panics if [`Self::inner`] is `None`.
@@ -243,13 +243,7 @@ where
 
     /// Runs the background flush task.
     /// The passed in slice is immediately sent back to the flush handle through the duplex channel.
-    async fn run(mut self, slice: FullSlice<Buf>) -> std::io::Result<Arc<W>> {
-        // Sends the extra buffer back to the handle.
-        // TODO: can this ever await and or fail? I think not.
-        self.channel.send(slice).await.map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "flush handle closed early")
-        })?;
-
+    async fn run(mut self) -> Arc<W> {
         //  Exit condition: channel is closed and there is no remaining buffer to be flushed
         while let Some(request) = self.channel.recv().await {
             #[cfg(test)]
@@ -318,7 +312,7 @@ where
             }
         }
 
-        Ok(self.writer)
+        self.writer
     }
 }
 
