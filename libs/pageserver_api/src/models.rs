@@ -1135,6 +1135,14 @@ pub struct TenantDetails {
     pub timelines: Vec<TimelineId>,
 }
 
+/// Tenant debug information. This is unstable, and intended for human consumption.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TenantDebug {
+    /// The last compaction loop result. None if it hasn't run an iteration yet.
+    pub compaction_loop_result: Option<Result<String, String>>,
+    pub compaction_loop_timestamp: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Copy, Debug)]
 pub enum TimelineArchivalState {
     Archived,

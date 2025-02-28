@@ -23,7 +23,7 @@ use std::time::{Duration, Instant, SystemTime};
 use std::{fmt, fs};
 
 use anyhow::{Context, bail};
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use camino::{Utf8Path, Utf8PathBuf};
 use chrono::NaiveDateTime;
 use enumset::EnumSet;
@@ -314,6 +314,11 @@ pub struct Tenant {
 
     /// Scheduled gc-compaction tasks.
     scheduled_compaction_tasks: std::sync::Mutex<HashMap<TimelineId, Arc<GcCompactionQueue>>>,
+
+    /// The result of the last compaction loop iteration, for debugging. None if
+    /// the compaction loop hasn't run an iteration yet.
+    pub(crate) compaction_loop_result:
+        ArcSwapOption<(SystemTime, Result<CompactionOutcome, String>)>,
 
     /// If the tenant is in Activating state, notify this to encourage it
     /// to proceed to Active as soon as possible, rather than waiting for lazy
@@ -4264,6 +4269,7 @@ impl Tenant {
                 // use an extremely long backoff.
                 Some(Duration::from_secs(3600 * 24)),
             )),
+            compaction_loop_result: ArcSwapOption::default(),
             l0_compaction_trigger: Arc::new(Notify::new()),
             scheduled_compaction_tasks: Mutex::new(Default::default()),
             activate_now_sem: tokio::sync::Semaphore::new(0),

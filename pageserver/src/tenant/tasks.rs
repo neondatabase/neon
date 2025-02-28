@@ -5,7 +5,7 @@ use std::future::Future;
 use std::ops::{ControlFlow, RangeInclusive};
 use std::pin::pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use once_cell::sync::Lazy;
 use pageserver_api::config::tenant_conf_defaults::DEFAULT_COMPACTION_PERIOD;
@@ -251,6 +251,11 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
         let IterationResult { output, elapsed } = iteration
             .run(tenant.compaction_iteration(&cancel, &ctx))
             .await;
+
+        tenant.compaction_loop_result.store(Some(Arc::new((
+            SystemTime::now(),
+            output.as_ref().map_err(|err| format!("{err:?}")).copied(),
+        ))));
 
         match output {
             Ok(outcome) => {

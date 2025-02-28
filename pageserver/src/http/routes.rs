@@ -31,7 +31,7 @@ use pageserver_api::models::{
     DownloadRemoteLayersTaskSpawnRequest, IngestAuxFilesRequest, ListAuxFilesRequest,
     LocationConfig, LocationConfigListResponse, LocationConfigMode, LsnLease, LsnLeaseRequest,
     OffloadedTimelineInfo, PageTraceEvent, ShardParameters, StatusResponse,
-    TenantConfigPatchRequest, TenantConfigRequest, TenantDetails, TenantInfo,
+    TenantConfigPatchRequest, TenantConfigRequest, TenantDebug, TenantDetails, TenantInfo,
     TenantLocationConfigRequest, TenantLocationConfigResponse, TenantScanRemoteStorageResponse,
     TenantScanRemoteStorageShard, TenantShardLocation, TenantShardSplitRequest,
     TenantShardSplitResponse, TenantSorting, TenantState, TenantWaitLsnRequest,
@@ -1157,6 +1157,43 @@ async fn tenant_status(
     .await?;
 
     json_response(StatusCode::OK, tenant_info)
+}
+
+async fn tenant_debug_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    check_permission(&request, None)?;
+    let state = get_state(&request);
+
+    let tenant_debug = async {
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id)?;
+
+        // This is advisory: we prefer to let the tenant activate on-demand when this function is
+        // called, but it is still valid to return 200 and describe the current state of the tenant
+        // if it doesn't make it into an active state.
+        tenant
+            .wait_to_become_active(ACTIVE_TENANT_TIMEOUT)
+            .await
+            .ok();
+
+        let compaction_result = tenant.compaction_loop_result.load_full();
+        Ok::<_, ApiError>(TenantDebug {
+            compaction_loop_timestamp: compaction_result.as_deref().map(|&(ts, _)| ts.into()),
+            compaction_loop_result: compaction_result
+                .as_deref()
+                .map(|(_, r)| r.clone().map(|o| o.to_string())),
+        })
+    }
+    .instrument(info_span!("tenant_debug_handler",
+                    tenant_id = %tenant_shard_id.tenant_id,
+                    shard_id = %tenant_shard_id.shard_slug()))
+    .await?;
+
+    json_response(StatusCode::OK, tenant_debug)
 }
 
 async fn tenant_delete_handler(
@@ -3568,6 +3605,9 @@ pub fn make_router(
         })
         .delete("/v1/tenant/:tenant_shard_id", |r| {
             api_handler(r, tenant_delete_handler)
+        })
+        .get("/v1/tenant/:tenant_shard_id/debug", |r| {
+            api_handler(r, tenant_debug_handler)
         })
         .get("/v1/tenant/:tenant_shard_id/synthetic_size", |r| {
             api_handler(r, tenant_size_handler)

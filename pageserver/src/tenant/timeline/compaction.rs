@@ -795,7 +795,7 @@ impl CompactionStatistics {
     }
 }
 
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, strum_macros::Display)]
 pub enum CompactionOutcome {
     #[default]
     /// No layers need to be compacted after this round. Compaction doesn't need
