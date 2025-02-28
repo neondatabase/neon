@@ -3,14 +3,19 @@ from __future__ import annotations
 import threading
 import time
 from contextlib import closing
+from enum import StrEnum
 
 import pytest
-from fixtures.common_types import TimelineId
+import requests
+from fixtures.common_types import Lsn, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
     NeonEnvBuilder,
 )
+from fixtures.remote_storage import S3Storage, s3_storage
+from fixtures.safekeeper_utils import is_segment_offloaded
+from fixtures.utils import wait_until
 
 
 @pytest.mark.parametrize("auth_enabled", [False, True])
@@ -219,3 +224,104 @@ def test_safekeeper_delete_timeline_under_load(neon_env_builder: NeonEnvBuilder)
         log.info("Joining threads...")
         t_a.join()
         t_b.join()
+
+
+class RemoteDeleteFailpoint(StrEnum):
+    PAUSE = "sk-delete-timeline-remote-pause"
+    FAIL = "sk-delete-timeline-remote"
+
+
+@pytest.mark.parametrize("failpoint", [RemoteDeleteFailpoint.PAUSE, RemoteDeleteFailpoint.FAIL])
+def test_safekeeper_delete_remote_errors(
+    neon_env_builder: NeonEnvBuilder, failpoint: RemoteDeleteFailpoint
+):
+    """
+    Test that errors and delays during remote deletion are handled correctly.
+    """
+
+    # Configure safekeepers with ultra-fast eviction policy
+    neon_env_builder.safekeeper_extra_opts = [
+        "--enable-offload",
+        "--delete-offloaded-wal",
+        "--control-file-save-interval",
+        "1s",
+    ]
+    neon_env_builder.enable_safekeeper_remote_storage(s3_storage())
+    env = neon_env_builder.init_start()
+
+    # FIXME: pageserver is intermittently emitting this
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*unsupported command START_WAL_PUSH in START_WAL_PUSH.*",
+        ]
+    )
+
+    timeline_id_a = env.create_branch("deleteme_a")
+    endpoint_a = env.endpoints.create("deleteme_a")
+    endpoint_a.start()
+    with closing(endpoint_a.connect()) as conn:
+        with conn.cursor() as cur:
+            # roughly fills one segment
+            cur.execute("create table t(key int, value text)")
+            cur.execute("insert into t select generate_series(1,250000), 'payload'")
+    endpoint_a.stop()
+
+    # Ensure something is uploaded to remote storage
+    wait_until(
+        lambda: is_segment_offloaded(
+            env.safekeepers[0], env.initial_tenant, timeline_id_a, Lsn("0/2000000")
+        )
+    )
+
+    def list_timeline_remote():
+        assert isinstance(env.safekeepers_remote_storage, S3Storage)
+        prefix = f"{env.safekeepers_remote_storage.safekeeper_timeline_path(env.initial_tenant, timeline_id_a)}/"
+
+        listing = env.safekeepers_remote_storage.client.list_objects_v2(
+            Bucket=env.safekeepers_remote_storage.bucket_name,
+            Prefix=prefix,
+        )
+        return listing.get("Contents", [])
+
+    assert list_timeline_remote() != []
+
+    sk_http = env.safekeepers[0].http_client()
+    env.pageserver.http_client().timeline_delete(env.initial_tenant, timeline_id_a)
+
+    # Set up failpoint
+    if failpoint == RemoteDeleteFailpoint.PAUSE:
+        sk_http.configure_failpoints((failpoint, "pause"))
+    elif failpoint == RemoteDeleteFailpoint.FAIL:
+        sk_http.configure_failpoints((failpoint, "return"))
+    else:
+        raise NotImplementedError(f"Unknown failpoint: {failpoint}")
+
+    # Delete the timeline - this should hit the configured failpoint
+    if failpoint == RemoteDeleteFailpoint.PAUSE:
+        # Expect time out
+        with pytest.raises(requests.exceptions.ReadTimeout, match="timed out"):
+            sk_http.timeline_delete(env.initial_tenant, timeline_id_a, timeout=5)
+
+        # Assert deletion didn't happy yet
+        assert list_timeline_remote() != []
+
+        # Unblock the background task that should still be running
+        sk_http.configure_failpoints((failpoint, "off"))
+
+        # Expect that after unblocking, remote deletion proceeds
+        wait_until(lambda: list_timeline_remote() == [])
+
+    elif failpoint == RemoteDeleteFailpoint.FAIL:
+        # Expect immediate failure
+        with pytest.raises(sk_http.HTTPError, match="Internal Server Error"):
+            sk_http.timeline_delete(env.initial_tenant, timeline_id_a)
+
+        sk_http.configure_failpoints((failpoint, "off"))
+    else:
+        raise NotImplementedError(f"Unknown failpoint: {failpoint}")
+
+    # Retry should succeed
+    sk_http.timeline_delete(env.initial_tenant, timeline_id_a)
+
+    # Remote storage should be empty
+    assert list_timeline_remote() == []
