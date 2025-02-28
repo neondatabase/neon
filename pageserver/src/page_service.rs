@@ -392,10 +392,6 @@ impl TimelineHandles {
             .await
             .map_err(|e| match e {
                 timeline::handle::GetError::TenantManager(e) => e,
-                timeline::handle::GetError::TimelineGateClosed => {
-                    trace!("timeline gate closed");
-                    GetActiveTimelineError::Timeline(GetTimelineError::ShuttingDown)
-                }
                 timeline::handle::GetError::PerTimelineStateShutDown => {
                     trace!("per-timeline state shut down");
                     GetActiveTimelineError::Timeline(GetTimelineError::ShuttingDown)
@@ -422,24 +418,33 @@ pub(crate) struct TenantManagerTypes;
 impl timeline::handle::Types for TenantManagerTypes {
     type TenantManagerError = GetActiveTimelineError;
     type TenantManager = TenantManagerWrapper;
-    type Timeline = Arc<Timeline>;
+    type Timeline = TenantManagerCacheItem;
 }
 
-impl timeline::handle::ArcTimeline<TenantManagerTypes> for Arc<Timeline> {
-    fn gate(&self) -> &utils::sync::gate::Gate {
-        &self.gate
-    }
+pub(crate) struct TenantManagerCacheItem {
+    pub(crate) timeline: Arc<Timeline>,
+    #[allow(dead_code)] // we store it to keep the gate open
+    pub(crate) gate_guard: GateGuard,
+}
 
+impl std::ops::Deref for TenantManagerCacheItem {
+    type Target = Arc<Timeline>;
+    fn deref(&self) -> &Self::Target {
+        &self.timeline
+    }
+}
+
+impl timeline::handle::Timeline<TenantManagerTypes> for TenantManagerCacheItem {
     fn shard_timeline_id(&self) -> timeline::handle::ShardTimelineId {
-        Timeline::shard_timeline_id(self)
+        Timeline::shard_timeline_id(&self.timeline)
     }
 
     fn per_timeline_state(&self) -> &timeline::handle::PerTimelineState<TenantManagerTypes> {
-        &self.handles
+        &self.timeline.handles
     }
 
     fn get_shard_identity(&self) -> &pageserver_api::shard::ShardIdentity {
-        Timeline::get_shard_identity(self)
+        Timeline::get_shard_identity(&self.timeline)
     }
 }
 
@@ -448,7 +453,7 @@ impl timeline::handle::TenantManager<TenantManagerTypes> for TenantManagerWrappe
         &self,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
-    ) -> Result<Arc<Timeline>, GetActiveTimelineError> {
+    ) -> Result<TenantManagerCacheItem, GetActiveTimelineError> {
         let tenant_id = self.tenant_id.get().expect("we set this in get()");
         let timeout = ACTIVE_TENANT_TIMEOUT;
         let wait_start = Instant::now();
@@ -491,7 +496,20 @@ impl timeline::handle::TenantManager<TenantManagerTypes> for TenantManagerWrappe
         let timeline = tenant_shard
             .get_timeline(timeline_id, true)
             .map_err(GetActiveTimelineError::Timeline)?;
-        Ok(timeline)
+
+        let gate_guard = match timeline.gate.enter() {
+            Ok(guard) => guard,
+            Err(_) => {
+                return Err(GetActiveTimelineError::Timeline(
+                    GetTimelineError::ShuttingDown,
+                ));
+            }
+        };
+
+        Ok(TenantManagerCacheItem {
+            timeline,
+            gate_guard,
+        })
     }
 }
 

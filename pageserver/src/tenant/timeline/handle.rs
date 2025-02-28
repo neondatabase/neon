@@ -1,5 +1,4 @@
-//! An efficient way to keep the timeline gate open without preventing
-//! timeline shutdown for longer than a single call to a timeline method.
+//! A cache for [`crate::tenant::mgr`]+`Tenant::get_timeline`+`Timeline::gate.enter()`.
 //!
 //! # Motivation
 //!
@@ -19,27 +18,32 @@
 //! we hold the Timeline gate open while we're invoking the method on the
 //! Timeline object.
 //!
-//! However, we want to avoid the overhead of entering the gate for every
-//! method invocation.
-//!
-//! Further, for shard routing, we want to avoid calling the tenant manager to
-//! resolve the shard for every request. Instead, we want to cache the
-//! routing result so we can bypass the tenant manager for all subsequent requests
-//! that get routed to that shard.
+//! We want to avoid the overhead of doing, for each incoming request,
+//! - tenant manager lookup (global rwlock + btreemap lookup for shard routing)
+//! - cloning the `Arc<Timeline>` out of the tenant manager so we can
+//!   release the mgr rwlock before doing any request processing work
+//! - re-entering the Timeline gate for each Timeline method invocation.
 //!
 //! Regardless of how we accomplish the above, it should not
 //! prevent the Timeline from shutting down promptly.
+//!
 //!
 //! # Design
 //!
 //! ## Data Structures
 //!
-//! There are three user-facing data structures:
+//! There are two concepts expressed as associated types in the `Types` trait:
+//! - `TenantManager`: the thing that performs the expensive work. It produces
+//!   a `Timeline` object, which is the other associated type.
+//! - `Timeline`: the item that we cache for fast (TenantTimelineId,ShardSelector) lookup.
+//!
+//! There are three user-facing data structures exposed by this module:
 //! - `PerTimelineState`: a struct embedded into each Timeline struct. Lifetime == Timeline lifetime.
 //! - `Cache`: a struct private to each connection handler; Lifetime == connection lifetime.
-//! - `Handle`: a smart pointer that holds the Timeline gate open and derefs to `&Timeline`.
+//! - `Handle`: a smart pointer that derefs to the Types::Timeline.
 //! - `WeakHandle`: downgrade of a `Handle` that does not keep the gate open, but allows
-//!   trying to ugprade back to a `Handle`, guaranteeing it's the same `Timeline` *object*.
+//!   trying to ugprade back to a `Handle`. If successful, a re-upgraded Handle will always
+//!   point to the same cached `Types::Timeline`. Upgrades never invoke the `TenantManager`.
 //!
 //! Internally, there is 0 or 1 `HandleInner` per `(Cache,Timeline)`.
 //! Since Cache:Connection is 1:1, there is 0 or 1 `HandleInner` per `(Connection,Timeline)`.
@@ -64,11 +68,14 @@
 //!
 //! To dispatch a request, the page service connection calls `Cache::get`.
 //!
-//! A cache miss means we consult the tenant manager for shard routing,
-//! resulting in an `Arc<Timeline>`. We enter its gate _once_ and store it in the the
-//! `Arc<Mutex<HandleInner>>>`. A weak ref is stored in the `Cache`
+//! A cache miss means we call Types::TenantManager::resolve for shard routing,
+//! cloning the `Arc<Timeline>` out of it, and entering the gate. The result of
+//! resolve() is the object we want to cache, and return `Handle`s to for subseqent `Cache::get` calls.
+//!
+//! We wrap the object returned from resolve() in an `Arc` and store that inside the
+//! `Arc<Mutex<HandleInner>>>`. A weak ref to the HandleInner is stored in the `Cache`
 //! and a strong ref in the `PerTimelineState`.
-//! A strong ref is returned wrapped in a `Handle`.
+//! Another strong ref is returned wrapped in a `Handle`.
 //!
 //! For subsequent requests, `Cache::get` will perform a "fast path" shard routing
 //! and find the weak ref in the cache.
@@ -78,51 +85,51 @@
 //! While a request is batching, the `Handle` is downgraded to a `WeakHandle`.
 //! When the batch is ready to be executed, the `WeakHandle` is upgraded back to a `Handle`
 //! and the request handler dispatches the request to the right `<Handle as Deref<Target = Timeline>>::$request_method`.
-//! It then drops the `Handle`, which drops the `Arc<HandleInner>`.
+//! It then drops the `Handle`, and thus the `Arc<Mutex<HandleInner>>` inside it.
 //!
 //! # Performance
 //!
 //! Remember from the introductory section:
 //!
-//! > However, we want to avoid the overhead of entering the gate for every
-//! > method invocation.
+//! > We want to avoid the overhead of doing, for each incoming request,
+//! > - tenant manager lookup (global rwlock + btreemap lookup for shard routing)
+//! > - cloning the `Arc<Timeline>` out of the tenant manager so we can
+//! >   release the mgr rwlock before doing any request processing work
+//! > - re-entering the Timeline gate for each Timeline method invocation.
 //!
-//! Why do we want to avoid that?
-//! Because the gate is a shared location in memory and entering it involves
-//! bumping refcounts, which leads to cache contention if done frequently
-//! from multiple cores in parallel.
+//! All of these boil down to some state that is either globally shared among all shards
+//! or state shared among all tasks that serve a particular timeline.
+//! It is either protected by RwLock or manipulated via atomics.
+//! Even atomics are costly when shared across multiple cores.
+//! So, we want to avoid any permanent need for coordination between page_service tasks.
 //!
-//! So, we only acquire the `GateGuard` once on `Cache` miss, and wrap it in an `Arc`.
-//! That `Arc` is private to the `HandleInner` and hence to the connection.
+//! The solution is to add indirection: we wrap the Types::Timeline object that is
+//! returned by Types::TenantManager into an Arc that is rivate to the `HandleInner`
+//! and hence to the single Cache / page_service connection.
 //! (Review the "Data Structures" section if that is unclear to you.)
 //!
-//! A `WeakHandle` is a weak ref to the `HandleInner`.
-//! When upgrading a `WeakHandle`, we upgrade to a strong ref to the `HandleInner` and
-//! further acquire an additional strong ref to the `Arc<GateGuard>` inside it.
-//! Again, this manipulation of ref counts is is cheap because `Arc` is private to the connection.
 //!
-//! When downgrading a `Handle` to a `WeakHandle`, we drop the `Arc<GateGuard>`.
-//! Again, this is cheap because the `Arc` is private to the connection.
+//! When upgrading a `WeakHandle`, we upgrade its weak to a strong ref (of the `Mutex<HandleInner>`),
+//! lock the mutex, take out a clone of the `Arc<Types::Timeline>`, and drop the Mutex.
+//! The Mutex is not contended because it is private to the connection.
+//! And again, the  `Arc<Types::Timeline>` clone is cheap because that wrapper
+//! Arc's refcounts are private to the connection.
 //!
-//! In addition to the GateGuard, we need to provide `Deref<Target=Timeline>` impl.
-//! For this, both `Handle` need infallible access to an `Arc<Timeline>`.
-//! We could clone the `Arc<Timeline>` when upgrading a `WeakHandle`, but that would cause contention
-//! on the shared memory location that trakcs the refcount of the `Arc<Timeline>`.
-//! Instead, we wrap the `Arc<Timeline>` into another `Arc`.
-//! so that we can clone it cheaply when upgrading a `WeakHandle`.
+//! Downgrading drops these two Arcs, which again, manipulates refcounts that are private to the connection.
+//!
 //!
 //! # Shutdown
 //!
 //! The attentive reader may have noticed the following reference cycle around the `Arc<Timeline>`:
 //!
 //! ```text
-//! Timeline --owns--> PerTimelineState --strong--> HandleInner --strong--> Timeline
+//! Timeline --owns--> PerTimelineState --strong--> HandleInner --strong--> Types::Timeline --strong--> Timeline
 //! ```
 //!
 //! Further, there is this cycle:
 //!
 //! ```text
-//! Timeline --owns--> PerTimelineState --strong--> HandleInner --strong--> GateGuard --keepalive--> Timeline
+//! Timeline --owns--> PerTimelineState --strong--> HandleInner --strong--> Types::Timeline --strong--> GateGuard --keepalive--> Timeline
 //! ```
 //!
 //! The former cycle is a memory leak if not broken.
@@ -135,9 +142,12 @@
 //! - Timeline shutdown (=> `PerTimelineState::shutdown`)
 //! - Connection shutdown (=> dropping the `Cache`).
 //!
-//! Both transition the `HandleInner` from [`HandleInner::KeepingTimelineGateOpen`] to
-//! [`HandleInner::ShutDown`], which drops the only long-lived strong ref to the
-//! `Arc<GateGuard>`.
+//! Both transition the `HandleInner` from [`HandleInner::Open`] to
+//! [`HandleInner::ShutDown`], which drops the only long-lived
+//! `Arc<Types::Timeline>`. Once the last short-lived Arc<Types::Timeline>
+//! is dropped, the `Types::Timeline` gets dropped and thereby
+//! the `GateGuard` and the `Arc<Timeline>` that it stores,
+//! thereby breaking both cycles.
 //!
 //! `PerTimelineState::shutdown` drops all the `HandleInners` it contains,
 //! thereby breaking the cycle.
@@ -216,7 +226,7 @@ use crate::tenant::mgr::ShardSelector;
 pub(crate) trait Types: Sized + std::fmt::Debug {
     type TenantManagerError: Sized + std::fmt::Debug;
     type TenantManager: TenantManager<Self> + Sized;
-    type Timeline: ArcTimeline<Self> + Sized;
+    type Timeline: Timeline<Self> + Sized;
 }
 
 /// Uniquely identifies a [`Cache`] instance over the lifetime of the process.
@@ -261,20 +271,15 @@ pub(crate) struct ShardTimelineId {
 
 /// See module-level comment.
 pub(crate) struct Handle<T: Types> {
-    timeline: Arc<T::Timeline>,
-    #[allow(dead_code)] // the field exists to keep the gate open
-    gate_guard: Arc<utils::sync::gate::GateGuard>,
     inner: Arc<Mutex<HandleInner<T>>>,
+    open: Arc<T::Timeline>,
 }
 pub(crate) struct WeakHandle<T: Types> {
     inner: Weak<Mutex<HandleInner<T>>>,
 }
+
 enum HandleInner<T: Types> {
-    KeepingTimelineGateOpen {
-        #[allow(dead_code)]
-        gate_guard: Arc<utils::sync::gate::GateGuard>,
-        timeline: Arc<T::Timeline>,
-    },
+    Open(Arc<T::Timeline>),
     ShutDown,
 }
 
@@ -307,8 +312,7 @@ pub(crate) trait TenantManager<T: Types> {
 }
 
 /// Abstract view of an [`Arc<Timeline>`], for testability.
-pub(crate) trait ArcTimeline<T: Types>: Clone {
-    fn gate(&self) -> &utils::sync::gate::Gate;
+pub(crate) trait Timeline<T: Types> {
     fn shard_timeline_id(&self) -> ShardTimelineId;
     fn get_shard_identity(&self) -> &ShardIdentity;
     fn per_timeline_state(&self) -> &PerTimelineState<T>;
@@ -318,7 +322,6 @@ pub(crate) trait ArcTimeline<T: Types>: Clone {
 #[derive(Debug)]
 pub(crate) enum GetError<T: Types> {
     TenantManager(T::TenantManagerError),
-    TimelineGateClosed,
     PerTimelineStateShutDown,
 }
 
@@ -434,21 +437,9 @@ impl<T: Types> Cache<T> {
                 }
 
                 trace!("creating new HandleInner");
-                let handle_inner_arc = Arc::new(Mutex::new(HandleInner::KeepingTimelineGateOpen {
-                    gate_guard: Arc::new(
-                        // this enter() is expensive in production code because
-                        // it hits the global Arc<Timeline>::gate refcounts
-                        match timeline.gate().enter() {
-                            Ok(guard) => guard,
-                            Err(_) => {
-                                return Err(GetError::TimelineGateClosed);
-                            }
-                        },
-                    ),
-                    // this clone is expensive in production code because
-                    // it hits the global Arc<Timeline>::clone refcounts
-                    timeline: Arc::new(timeline.clone()),
-                }));
+                let timeline = Arc::new(timeline);
+                let handle_inner_arc =
+                    Arc::new(Mutex::new(HandleInner::Open(Arc::clone(&timeline))));
                 let handle_weak = WeakHandle {
                     inner: Arc::downgrade(&handle_inner_arc),
                 };
@@ -503,18 +494,10 @@ impl<T: Types> WeakHandle<T> {
         };
         let lock_guard = inner.lock().expect("poisoned");
         match &*lock_guard {
-            HandleInner::KeepingTimelineGateOpen {
-                timeline,
-                gate_guard,
-            } => {
-                let gate_guard = Arc::clone(gate_guard);
-                let timeline = Arc::clone(timeline);
+            HandleInner::Open(open) => {
+                let open = Arc::clone(open);
                 drop(lock_guard);
-                Ok(Handle {
-                    timeline,
-                    gate_guard,
-                    inner,
-                })
+                Ok(Handle { open, inner })
             }
             HandleInner::ShutDown => Err(HandleUpgradeError::ShutDown),
         }
@@ -528,7 +511,7 @@ impl<T: Types> WeakHandle<T> {
 impl<T: Types> std::ops::Deref for Handle<T> {
     type Target = T::Timeline;
     fn deref(&self) -> &Self::Target {
-        &self.timeline
+        &self.open
     }
 }
 
@@ -545,7 +528,7 @@ impl<T: Types> PerTimelineState<T> {
     /// to the [`Types::Timeline`] that embeds this per-timeline state.
     /// Even if [`TenantManager::resolve`] would still resolve to it.
     ///
-    /// Already-alive [`Handle`]s for will remain open, usable, and keeping the [`ArcTimeline`] alive.
+    /// Already-alive [`Handle`]s for will remain open, usable, and keeping the [`Types::Timeline`] alive.
     /// That's ok because they're short-lived. See module-level comment for details.
     #[instrument(level = "trace", skip_all)]
     pub(super) fn shutdown(&self) {
@@ -611,7 +594,7 @@ impl<T: Types> Drop for Cache<T> {
 impl<T: Types> HandleInner<T> {
     fn shutdown(&mut self) -> Option<Arc<T::Timeline>> {
         match std::mem::replace(self, HandleInner::ShutDown) {
-            HandleInner::KeepingTimelineGateOpen { timeline, .. } => Some(timeline),
+            HandleInner::Open(timeline) => Some(timeline),
             HandleInner::ShutDown => {
                 // Duplicate shutdowns are possible because both Cache::drop and PerTimelineState::shutdown
                 // may do it concurrently, but locking rules disallow holding per-timeline-state lock and
@@ -631,6 +614,7 @@ mod tests {
     use pageserver_api::reltag::RelTag;
     use pageserver_api::shard::ShardStripeSize;
     use utils::shard::ShardCount;
+    use utils::sync::gate::GateGuard;
 
     use super::*;
 
@@ -641,7 +625,7 @@ mod tests {
     impl Types for TestTypes {
         type TenantManagerError = anyhow::Error;
         type TenantManager = StubManager;
-        type Timeline = Arc<StubTimeline>;
+        type Timeline = Entered;
     }
 
     struct StubManager {
@@ -656,17 +640,19 @@ mod tests {
         myself: Weak<StubTimeline>,
     }
 
+    struct Entered {
+        timeline: Arc<StubTimeline>,
+        #[allow(dead_code)] // it's stored here to keep the gate open
+        gate_guard: Arc<GateGuard>,
+    }
+
     impl StubTimeline {
         fn getpage(&self) {
             // do nothing
         }
     }
 
-    impl ArcTimeline<TestTypes> for Arc<StubTimeline> {
-        fn gate(&self) -> &utils::sync::gate::Gate {
-            &self.gate
-        }
-
+    impl Timeline<TestTypes> for Entered {
         fn shard_timeline_id(&self) -> ShardTimelineId {
             ShardTimelineId {
                 shard_index: self.shard.shard_index(),
@@ -688,26 +674,47 @@ mod tests {
             &self,
             timeline_id: TimelineId,
             shard_selector: ShardSelector,
-        ) -> anyhow::Result<Arc<StubTimeline>> {
+        ) -> anyhow::Result<Entered> {
             for timeline in &self.shards {
                 if timeline.id == timeline_id {
+                    let enter_gate = || {
+                        let gate_guard = timeline.gate.enter()?;
+                        let gate_guard = Arc::new(gate_guard);
+                        anyhow::Ok(gate_guard)
+                    };
                     match &shard_selector {
                         ShardSelector::Zero if timeline.shard.is_shard_zero() => {
-                            return Ok(Arc::clone(timeline));
+                            return Ok(Entered {
+                                timeline: Arc::clone(timeline),
+                                gate_guard: enter_gate()?,
+                            });
                         }
                         ShardSelector::Zero => continue,
                         ShardSelector::Page(key) if timeline.shard.is_key_local(key) => {
-                            return Ok(Arc::clone(timeline));
+                            return Ok(Entered {
+                                timeline: Arc::clone(timeline),
+                                gate_guard: enter_gate()?,
+                            });
                         }
                         ShardSelector::Page(_) => continue,
                         ShardSelector::Known(idx) if idx == &timeline.shard.shard_index() => {
-                            return Ok(Arc::clone(timeline));
+                            return Ok(Entered {
+                                timeline: Arc::clone(timeline),
+                                gate_guard: enter_gate()?,
+                            });
                         }
                         ShardSelector::Known(_) => continue,
                     }
                 }
             }
             anyhow::bail!("not found")
+        }
+    }
+
+    impl std::ops::Deref for Entered {
+        type Target = StubTimeline;
+        fn deref(&self) -> &Self::Target {
+            &self.timeline
         }
     }
 
@@ -1038,7 +1045,6 @@ mod tests {
         let key = DBDIR_KEY;
 
         // Simulate 10 connections that's opened, used, and closed
-        let mut used_handles = vec![];
         for _ in 0..10 {
             let mut cache = Cache::<TestTypes>::default();
             let handle = {
@@ -1050,7 +1056,6 @@ mod tests {
                 handle
             };
             handle.getpage();
-            used_handles.push(Arc::downgrade(&handle.timeline));
         }
 
         // No handles exist, thus gates are closed and don't require shutdown.
