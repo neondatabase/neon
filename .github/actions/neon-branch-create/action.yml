@@ -84,7 +84,13 @@ runs:
           --header "Authorization: Bearer ${API_KEY}"
           )
 
-        role_name=$(echo $roles | jq --raw-output '.roles[] | select(.protected == false) | .name')
+        role_name=$(echo "$roles" | jq --raw-output '
+          (.roles | map(select(.protected == false))) as $roles |
+          if any($roles[]; .name == "neondb_owner")
+          then "neondb_owner"
+          else $roles[0].name
+          end
+        ')
         echo "role_name=${role_name}" >> $GITHUB_OUTPUT
       env:
         API_HOST: ${{ inputs.api_host }}
