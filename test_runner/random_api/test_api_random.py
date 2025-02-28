@@ -161,7 +161,7 @@ class NeonProject:
             raise RuntimeError(f"Benchmark was already started for {target}")
         target_endpoint = target.startswith("ep")
         read_only = target_endpoint and self.endpoints[target].type == "read_only"
-        cmd = ["pgbench", f"-c{clients}", "10800", "-Mprepared"]
+        cmd = ["pgbench", f"-c{clients}", "-T10800", "-Mprepared"]
         if read_only:
             cmd.append("-S")
         if target_endpoint:
