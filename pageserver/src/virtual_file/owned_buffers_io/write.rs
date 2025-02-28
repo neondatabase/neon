@@ -197,13 +197,12 @@ where
         let slice = buf.flush();
         // NB: this assignment also drops thereference to the old buffer, allowing us to re-own & make it mutable below.
         self.maybe_flushed = Some(slice.cheap_clone());
+        let offset = self.bytes_submitted;
         self.bytes_submitted += u64::try_from(buf_len).unwrap();
 
         // If we return/panic here or later, we'll leave mutable = None, breaking further
         // writers, but the read path should still work.
-
-        let (recycled, flush_control) =
-            self.flush_handle.flush(slice, self.bytes_submitted).await?;
+        let (recycled, flush_control) = self.flush_handle.flush(slice, offset).await?;
 
         // The only other place that could hold a reference to the recycled buffer
         // is in `Self::maybe_flushed`, but we have already replace it with the new buffer.

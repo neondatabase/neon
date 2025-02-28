@@ -488,10 +488,8 @@ mod tests {
         file.write_raw(&content, &ctx).await.unwrap();
 
         // assert the state is as this test expects it to be
-        assert_eq!(
-            &file.load_to_io_buf(&ctx).await.unwrap(),
-            &content[0..cap * 2 + cap / 2]
-        );
+        let load_io_buf_res = file.load_to_io_buf(&ctx).await.unwrap();
+        assert_eq!(&load_io_buf_res[..], &content[0..cap * 2 + cap / 2]);
         let md = file.buffered_writer.as_inner().path().metadata().unwrap();
         assert_eq!(
             md.len(),
