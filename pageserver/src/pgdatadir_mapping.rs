@@ -1052,6 +1052,8 @@ impl Timeline {
     ) -> Result<u64, CalculateLogicalSizeError> {
         debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
+        fail::fail_point!("skip-logical-size-calculation", |_| { Ok(0) });
+
         // Fetch list of database dirs and iterate them
         let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
         let dbdir = DbDirectory::des(&buf)?;

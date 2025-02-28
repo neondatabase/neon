@@ -3774,6 +3774,7 @@ impl Service {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         concurrency: Option<usize>,
+        recurse: bool,
     ) -> Result<(), ApiError> {
         let _tenant_lock = trace_shared_lock(
             &self.tenant_op_locks,
@@ -3811,7 +3812,12 @@ impl Service {
             targets,
             |tenant_shard_id, client| async move {
                 client
-                    .timeline_download_heatmap_layers(tenant_shard_id, timeline_id, concurrency)
+                    .timeline_download_heatmap_layers(
+                        tenant_shard_id,
+                        timeline_id,
+                        concurrency,
+                        recurse,
+                    )
                     .await
             },
             1,

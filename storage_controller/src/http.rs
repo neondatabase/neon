@@ -524,9 +524,10 @@ async fn handle_tenant_timeline_download_heatmap_layers(
 
     let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
     let concurrency: Option<usize> = parse_query_param(&req, "concurrency")?;
+    let recurse = parse_query_param(&req, "recurse")?.unwrap_or(false);
 
     service
-        .tenant_timeline_download_heatmap_layers(tenant_shard_id, timeline_id, concurrency)
+        .tenant_timeline_download_heatmap_layers(tenant_shard_id, timeline_id, concurrency, recurse)
         .await?;
 
     json_response(StatusCode::OK, ())

@@ -2469,12 +2469,21 @@ class NeonStorageController(MetricsGetter, LogUtils):
         response.raise_for_status()
         return [TenantShardId.parse(tid) for tid in response.json()["updated"]]
 
-    def download_heatmap_layers(self, tenant_shard_id: TenantShardId, timeline_id: TimelineId):
+    def download_heatmap_layers(
+        self, tenant_shard_id: TenantShardId, timeline_id: TimelineId, recurse: bool | None = None
+    ):
+        url = (
+            f"{self.api}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/download_heatmap_layers"
+        )
+        if recurse is not None:
+            url = url + f"?recurse={str(recurse).lower()}"
+
         response = self.request(
             "POST",
-            f"{self.api}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/download_heatmap_layers",
+            url,
             headers=self.headers(TokenScope.ADMIN),
         )
+
         response.raise_for_status()
 
     def __enter__(self) -> Self:

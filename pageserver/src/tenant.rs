@@ -1153,12 +1153,15 @@ impl Tenant {
             let mut tline_ending_at = Some((&timeline, timeline.get_last_record_lsn()));
             while let Some((tline, end_lsn)) = tline_ending_at {
                 let unarchival_heatmap = tline.generate_unarchival_heatmap(end_lsn).await;
-                if !tline.is_previous_heatmap_active() {
+                // Another unearchived timeline might have generated a heatmap for this ancestor.
+                // If the current branch point greater than the previous one use the the heatmap
+                // we just generated - it should include more layers.
+                if !tline.should_keep_previous_heatmap(end_lsn) {
                     tline
                         .previous_heatmap
                         .store(Some(Arc::new(unarchival_heatmap)));
                 } else {
-                    tracing::info!("Previous heatmap still active. Dropping unarchival heatmap.")
+                    tracing::info!("Previous heatmap preferred. Dropping unarchival heatmap.")
                 }
 
                 match tline.ancestor_timeline() {
@@ -1939,6 +1942,7 @@ impl Tenant {
                 hs.0.remove(&timeline_id).map(|h| PreviousHeatmap::Active {
                     heatmap: h,
                     read_at: hs.1,
+                    end_lsn: None,
                 })
             });
             part_downloads.spawn(
