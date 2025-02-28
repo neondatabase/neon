@@ -283,6 +283,7 @@ impl<W> Basebackup<'_, W>
 where
     W: AsyncWrite + Send + Sync + Unpin,
 {
+    #[allow(clippy::too_many_arguments)]
     async fn send_tarball(mut self) -> Result<(), BasebackupError> {
         // TODO include checksum
 
