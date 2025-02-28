@@ -17,7 +17,8 @@ use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::error::ErrorKind;
 use crate::intern::{BranchIdInt, ProjectIdInt};
 use crate::metrics::{
-    ConnectOutcome, InvalidEndpointsGroup, LatencyTimer, Metrics, Protocol, Waiting,
+    ConnectOutcome, InvalidEndpointsGroup, LatencyAccumulated, LatencyTimer, Metrics, Protocol,
+    Waiting,
 };
 use crate::protocol2::{ConnectionInfo, ConnectionInfoExtra};
 use crate::types::{DbName, EndpointId, RoleName};
@@ -344,6 +345,14 @@ impl RequestContext {
             start: tokio::time::Instant::now(),
             waiting_for,
         }
+    }
+
+    pub(crate) fn get_proxy_latency(&self) -> LatencyAccumulated {
+        self.0
+            .try_lock()
+            .expect("should not deadlock")
+            .latency_timer
+            .accumulated()
     }
 
     pub(crate) fn success(&self) {
