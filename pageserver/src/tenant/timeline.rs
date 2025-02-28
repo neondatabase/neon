@@ -442,6 +442,8 @@ pub(crate) enum PreviousHeatmap {
     Active {
         heatmap: HeatMapTimeline,
         read_at: std::time::Instant,
+        // End LSN covered by the heatmap if known
+        end_lsn: Option<Lsn>,
     },
     Obsolete,
 }
@@ -3570,12 +3572,16 @@ impl Timeline {
         Ok(layer)
     }
 
-    pub(super) fn is_previous_heatmap_active(&self) -> bool {
-        self.previous_heatmap
-            .load()
-            .as_ref()
-            .map(|prev| matches!(**prev, PreviousHeatmap::Active { .. }))
-            .unwrap_or(false)
+    pub(super) fn should_keep_previous_heatmap(&self, new_heatmap_end_lsn: Lsn) -> bool {
+        let crnt = self.previous_heatmap.load();
+        match crnt.as_deref() {
+            Some(PreviousHeatmap::Active { end_lsn, .. }) => match end_lsn {
+                Some(crnt_end_lsn) => *crnt_end_lsn > new_heatmap_end_lsn,
+                None => true,
+            },
+            Some(PreviousHeatmap::Obsolete) => false,
+            None => false,
+        }
     }
 
     /// The timeline heatmap is a hint to secondary locations from the primary location,
@@ -3603,26 +3609,26 @@ impl Timeline {
         // heatamp.
         let previous_heatmap = self.previous_heatmap.load();
         let visible_non_resident = match previous_heatmap.as_deref() {
-            Some(PreviousHeatmap::Active { heatmap, read_at }) => {
-                Some(heatmap.layers.iter().filter_map(|hl| {
-                    let desc: PersistentLayerDesc = hl.name.clone().into();
-                    let layer = guard.try_get_from_key(&desc.key())?;
+            Some(PreviousHeatmap::Active {
+                heatmap, read_at, ..
+            }) => Some(heatmap.layers.iter().filter_map(|hl| {
+                let desc: PersistentLayerDesc = hl.name.clone().into();
+                let layer = guard.try_get_from_key(&desc.key())?;
 
-                    if layer.visibility() == LayerVisibilityHint::Covered {
-                        return None;
-                    }
+                if layer.visibility() == LayerVisibilityHint::Covered {
+                    return None;
+                }
 
-                    if layer.is_likely_resident() {
-                        return None;
-                    }
+                if layer.is_likely_resident() {
+                    return None;
+                }
 
-                    if layer.last_evicted_at().happened_after(*read_at) {
-                        return None;
-                    }
+                if layer.last_evicted_at().happened_after(*read_at) {
+                    return None;
+                }
 
-                    Some((desc, hl.metadata.clone(), hl.access_time))
-                }))
-            }
+                Some((desc, hl.metadata.clone(), hl.access_time))
+            })),
             Some(PreviousHeatmap::Obsolete) => None,
             None => None,
         };
@@ -3709,6 +3715,7 @@ impl Timeline {
         PreviousHeatmap::Active {
             heatmap,
             read_at: Instant::now(),
+            end_lsn: Some(end_lsn),
         }
     }
 
@@ -7046,6 +7053,7 @@ mod tests {
             .store(Some(Arc::new(PreviousHeatmap::Active {
                 heatmap: heatmap.clone(),
                 read_at: std::time::Instant::now(),
+                end_lsn: None,
             })));
 
         // Generate a new heatmap and assert that it contains the same layers as the old one.
@@ -7148,6 +7156,7 @@ mod tests {
             .store(Some(Arc::new(PreviousHeatmap::Active {
                 heatmap: heatmap.clone(),
                 read_at: std::time::Instant::now(),
+                end_lsn: None,
             })));
 
         // Evict all the layers in the previous heatmap

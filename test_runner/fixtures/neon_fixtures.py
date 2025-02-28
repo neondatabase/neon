@@ -1128,6 +1128,13 @@ class NeonEnv:
         if self.storage_controller_config is not None:
             cfg["storage_controller"] = self.storage_controller_config
 
+        # Disable new storcon flag in compat tests
+        if config.test_may_use_compatibility_snapshot_binaries:
+            if "storage_controller" in cfg:
+                cfg["storage_controller"]["load_safekeepers"] = False
+            else:
+                cfg["storage_controller"] = {"load_safekeepers": False}
+
         # Create config for pageserver
         http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
         pg_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
@@ -2480,12 +2487,21 @@ class NeonStorageController(MetricsGetter, LogUtils):
         response.raise_for_status()
         return [TenantShardId.parse(tid) for tid in response.json()["updated"]]
 
-    def download_heatmap_layers(self, tenant_shard_id: TenantShardId, timeline_id: TimelineId):
+    def download_heatmap_layers(
+        self, tenant_shard_id: TenantShardId, timeline_id: TimelineId, recurse: bool | None = None
+    ):
+        url = (
+            f"{self.api}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/download_heatmap_layers"
+        )
+        if recurse is not None:
+            url = url + f"?recurse={str(recurse).lower()}"
+
         response = self.request(
             "POST",
-            f"{self.api}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/download_heatmap_layers",
+            url,
             headers=self.headers(TokenScope.ADMIN),
         )
+
         response.raise_for_status()
 
     def __enter__(self) -> Self:
@@ -3603,6 +3619,7 @@ class NeonProxy(PgProtocol):
                             "project_id": "test_project_id",
                             "endpoint_id": "test_endpoint_id",
                             "branch_id": "test_branch_id",
+                            "compute_id": "test_compute_id",
                         },
                     }
                 },
@@ -3828,6 +3845,7 @@ def static_auth_broker(
         {
             "address": local_proxy_addr,
             "aux": {
+                "compute_id": "compute-foo-bar-1234-5678",
                 "endpoint_id": "ep-foo-bar-1234",
                 "branch_id": "br-foo-bar",
                 "project_id": "foo-bar",

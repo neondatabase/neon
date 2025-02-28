@@ -524,9 +524,10 @@ async fn handle_tenant_timeline_download_heatmap_layers(
 
     let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
     let concurrency: Option<usize> = parse_query_param(&req, "concurrency")?;
+    let recurse = parse_query_param(&req, "recurse")?.unwrap_or(false);
 
     service
-        .tenant_timeline_download_heatmap_layers(tenant_shard_id, timeline_id, concurrency)
+        .tenant_timeline_download_heatmap_layers(tenant_shard_id, timeline_id, concurrency, recurse)
         .await?;
 
     json_response(StatusCode::OK, ())
@@ -547,7 +548,7 @@ async fn handle_tenant_timeline_passthrough(
     service: Arc<Service>,
     req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
-    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let tenant_or_shard_id: TenantShardId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
 
     let req = match maybe_forward(req).await {
@@ -562,15 +563,28 @@ async fn handle_tenant_timeline_passthrough(
         return Err(ApiError::BadRequest(anyhow::anyhow!("Missing path")));
     };
 
-    tracing::info!("Proxying request for tenant {} ({})", tenant_id, path);
+    tracing::info!(
+        "Proxying request for tenant {} ({})",
+        tenant_or_shard_id.tenant_id,
+        path
+    );
 
     // Find the node that holds shard zero
-    let (node, tenant_shard_id) = service.tenant_shard0_node(tenant_id).await?;
+    let (node, tenant_shard_id) = if tenant_or_shard_id.is_unsharded() {
+        service
+            .tenant_shard0_node(tenant_or_shard_id.tenant_id)
+            .await?
+    } else {
+        (
+            service.tenant_shard_node(tenant_or_shard_id).await?,
+            tenant_or_shard_id,
+        )
+    };
 
     // Callers will always pass an unsharded tenant ID.  Before proxying, we must
     // rewrite this to a shard-aware shard zero ID.
     let path = format!("{}", path);
-    let tenant_str = tenant_id.to_string();
+    let tenant_str = tenant_or_shard_id.tenant_id.to_string();
     let tenant_shard_str = format!("{}", tenant_shard_id);
     let path = path.replace(&tenant_str, &tenant_shard_str);
 
@@ -610,7 +624,7 @@ async fn handle_tenant_timeline_passthrough(
     // Transform 404 into 503 if we raced with a migration
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         // Look up node again: if we migrated it will be different
-        let (new_node, _tenant_shard_id) = service.tenant_shard0_node(tenant_id).await?;
+        let new_node = service.tenant_shard_node(tenant_shard_id).await?;
         if new_node.get_id() != node.get_id() {
             // Rather than retry here, send the client a 503 to prompt a retry: this matches
             // the pageserver's use of 503, and all clients calling this API should retry on 503.

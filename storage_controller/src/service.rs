@@ -391,6 +391,8 @@ pub struct Config {
     pub long_reconcile_threshold: Duration,
 
     pub use_https_pageserver_api: bool,
+
+    pub load_safekeepers: bool,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -1407,15 +1409,20 @@ impl Service {
             .set(nodes.len() as i64);
 
         tracing::info!("Loading safekeepers from database...");
-        let safekeepers = persistence
-            .list_safekeepers()
-            .await?
-            .into_iter()
-            .map(|skp| Safekeeper::from_persistence(skp, CancellationToken::new()))
-            .collect::<Vec<_>>();
+        let safekeepers = if config.load_safekeepers {
+            persistence
+                .list_safekeepers()
+                .await?
+                .into_iter()
+                .map(|skp| Safekeeper::from_persistence(skp, CancellationToken::new()))
+                .collect::<Vec<_>>()
+        } else {
+            tracing::info!("Skipping safekeeper loading");
+            Default::default()
+        };
+
         let safekeepers: HashMap<NodeId, Safekeeper> =
             safekeepers.into_iter().map(|n| (n.get_id(), n)).collect();
-        tracing::info!("Loaded {} safekeepers from database.", safekeepers.len());
 
         tracing::info!("Loading shards from database...");
         let mut tenant_shard_persistence = persistence.load_active_tenant_shards().await?;
@@ -3776,6 +3783,7 @@ impl Service {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         concurrency: Option<usize>,
+        recurse: bool,
     ) -> Result<(), ApiError> {
         let _tenant_lock = trace_shared_lock(
             &self.tenant_op_locks,
@@ -3813,7 +3821,12 @@ impl Service {
             targets,
             |tenant_shard_id, client| async move {
                 client
-                    .timeline_download_heatmap_layers(tenant_shard_id, timeline_id, concurrency)
+                    .timeline_download_heatmap_layers(
+                        tenant_shard_id,
+                        timeline_id,
+                        concurrency,
+                        recurse,
+                    )
                     .await
             },
             1,
@@ -4160,22 +4173,43 @@ impl Service {
         }).await?
     }
 
-    /// When you need to send an HTTP request to the pageserver that holds shard0 of a tenant, this
-    /// function looks up and returns node. If the tenant isn't found, returns Err(ApiError::NotFound)
+    /// When you know the TenantId but not a specific shard, and would like to get the node holding shard 0.
     pub(crate) async fn tenant_shard0_node(
         &self,
         tenant_id: TenantId,
     ) -> Result<(Node, TenantShardId), ApiError> {
-        // Look up in-memory state and maybe use the node from there.
-        {
+        let tenant_shard_id = {
             let locked = self.inner.read().unwrap();
-            let Some((tenant_shard_id, shard)) = locked
+            let Some((tenant_shard_id, _shard)) = locked
                 .tenants
                 .range(TenantShardId::tenant_range(tenant_id))
                 .next()
             else {
                 return Err(ApiError::NotFound(
                     anyhow::anyhow!("Tenant {tenant_id} not found").into(),
+                ));
+            };
+
+            *tenant_shard_id
+        };
+
+        self.tenant_shard_node(tenant_shard_id)
+            .await
+            .map(|node| (node, tenant_shard_id))
+    }
+
+    /// When you need to send an HTTP request to the pageserver that holds a shard of a tenant, this
+    /// function looks up and returns node. If the shard isn't found, returns Err(ApiError::NotFound)
+    pub(crate) async fn tenant_shard_node(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<Node, ApiError> {
+        // Look up in-memory state and maybe use the node from there.
+        {
+            let locked = self.inner.read().unwrap();
+            let Some(shard) = locked.tenants.get(&tenant_shard_id) else {
+                return Err(ApiError::NotFound(
+                    anyhow::anyhow!("Tenant shard {tenant_shard_id} not found").into(),
                 ));
             };
 
@@ -4199,7 +4233,7 @@ impl Service {
                         "Shard refers to nonexistent node"
                     )));
                 };
-                return Ok((node.clone(), *tenant_shard_id));
+                return Ok(node.clone());
             }
         };
 
@@ -4207,29 +4241,34 @@ impl Service {
         // generation state: this will reflect the progress of any ongoing migration.
         // Note that it is not guaranteed to _stay_ here, our caller must still handle
         // the case where they call through to the pageserver and get a 404.
-        let db_result = self.persistence.tenant_generations(tenant_id).await?;
+        let db_result = self
+            .persistence
+            .tenant_generations(tenant_shard_id.tenant_id)
+            .await?;
         let Some(ShardGenerationState {
-            tenant_shard_id,
+            tenant_shard_id: _,
             generation: _,
             generation_pageserver: Some(node_id),
-        }) = db_result.first()
+        }) = db_result
+            .into_iter()
+            .find(|s| s.tenant_shard_id == tenant_shard_id)
         else {
             // This can happen if we raced with a tenant deletion or a shard split.  On a retry
             // the caller will either succeed (shard split case), get a proper 404 (deletion case),
             // or a conflict response (case where tenant was detached in background)
             return Err(ApiError::ResourceUnavailable(
-                "Shard {} not found in database, or is not attached".into(),
+                format!("Shard {tenant_shard_id} not found in database, or is not attached").into(),
             ));
         };
         let locked = self.inner.read().unwrap();
-        let Some(node) = locked.nodes.get(node_id) else {
+        let Some(node) = locked.nodes.get(&node_id) else {
             // This should never happen
             return Err(ApiError::InternalServerError(anyhow::anyhow!(
                 "Shard refers to nonexistent node"
             )));
         };
 
-        Ok((node.clone(), *tenant_shard_id))
+        Ok(node.clone())
     }
 
     pub(crate) fn tenant_locate(
@@ -8172,7 +8211,8 @@ impl Service {
     ) -> Result<(), DatabaseError> {
         let node_id = NodeId(record.id as u64);
         self.persistence.safekeeper_upsert(record.clone()).await?;
-        {
+
+        if self.config.load_safekeepers {
             let mut locked = self.inner.write().unwrap();
             let mut safekeepers = (*locked.safekeepers).clone();
             match safekeepers.entry(node_id) {
@@ -8204,7 +8244,7 @@ impl Service {
             .await?;
         let node_id = NodeId(id as u64);
         // After the change has been persisted successfully, update the in-memory state
-        {
+        if self.config.load_safekeepers {
             let mut locked = self.inner.write().unwrap();
             let mut safekeepers = (*locked.safekeepers).clone();
             let sk = safekeepers
