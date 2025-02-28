@@ -14,9 +14,6 @@ use crate::virtual_file::owned_buffers_io::io_buf_ext::FullSlice;
 /// A handle to the flush task.
 pub struct FlushHandle<Buf, W> {
     inner: Option<FlushHandleInner<Buf, W>>,
-    /// Immutable buffer for serving tail reads.
-    /// `None` if no flush request has been submitted.
-    pub(super) maybe_flushed: Option<FullSlice<Buf>>,
 }
 
 pub struct FlushHandleInner<Buf, W> {
@@ -145,7 +142,6 @@ where
                 channel: front,
                 join_handle,
             }),
-            maybe_flushed: None,
         }
     }
 
@@ -153,15 +149,11 @@ where
     /// Returns a buffer that completed flushing for re-use, length reset to 0, capacity unchanged.
     /// If `save_buf_for_read` is true, then we save the buffer in `Self::maybe_flushed`, otherwise
     /// clear `maybe_flushed`.
-    pub async fn flush<B>(&mut self, buf: B, offset: u64) -> std::io::Result<(B, FlushControl)>
-    where
-        B: Buffer<IoBuf = Buf> + Send + 'static,
-    {
-        let slice = buf.flush();
-
-        // Saves a buffer for read while flushing. This also removes reference to the old buffer.
-        self.maybe_flushed = Some(slice.cheap_clone());
-
+    pub async fn flush(
+        &mut self,
+        slice: FullSlice<Buf>,
+        offset: u64,
+    ) -> std::io::Result<(B, FlushControl)> {
         let (request, flush_control) = new_flush_op(slice, offset);
 
         // Submits the buffer to the background task.
@@ -177,10 +169,7 @@ where
             return self.handle_error().await;
         };
 
-        // The only other place that could hold a reference to the recycled buffer
-        // is in `Self::maybe_flushed`, but we have already replace it with the new buffer.
-        let recycled = Buffer::reuse_after_flush(recycled.into_raw_slice().into_inner());
-        Ok((recycled, flush_control))
+                Ok((recycled, flush_control))
     }
 
     async fn handle_error<T>(&mut self) -> std::io::Result<T> {

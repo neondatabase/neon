@@ -41,6 +41,9 @@ pub trait OwnedAsyncWriter {
 // since we would avoid copying majority of the data into the internal buffer.
 pub struct BufferedWriter<B: Buffer, W> {
     writer: Arc<W>,
+    /// Immutable buffer for serving tail reads.
+    /// `None` if no flush request has been submitted.
+    pub(super) maybe_flushed: Option<FullSlice<Buf>>,
     /// invariant: always remains Some(buf) except
     /// - while IO is ongoing => goes back to Some() once the IO completed successfully
     /// - after an IO error => stays `None` forever
@@ -94,9 +97,17 @@ where
         self.bytes_submitted
     }
 
-    /// Panics if used after any of the write paths returned an error
-    pub fn inspect_mutable(&self) -> &B {
-        self.mutable()
+    pub fn inspect_mutable_pending(&self) -> &[u8] {
+        match mutable
+            .as_ref()
+            .expect("must not use after we returned an error")
+        {
+            Some(mutable) => {
+                let mutable = &mutable[0..mutable.pending()];
+                mutable
+            }
+            None => &[],
+        }
     }
 
     /// Gets a reference to the maybe flushed read-only buffer.
@@ -125,11 +136,7 @@ where
 
     /// Gets a reference to the mutable in-memory buffer.
     #[inline(always)]
-    fn mutable(&self) -> &B {
-        self.mutable
-            .as_ref()
-            .expect("must not use after we returned an error")
-    }
+    fn mutable(&self) -> &B {}
 
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub async fn write_buffered_borrowed(
@@ -170,6 +177,15 @@ where
         Ok((chunk_len, control))
     }
 
+    /// If this function errors, the read path can still serve reads correctly
+    /// up to where it could read before calling this function.
+    ///
+    /// The write path should not be retrying because there's no way to get that
+    /// correct with the current append-style APIs.
+    /// The only correct solution is to discard the entire [`BufferedWriter`],
+    /// which upper layers of pageserver write path currently do not support.
+    /// It is in fact quite hard to reason about what exactly happens in today's code.
+    /// Best case we accumulate junk in the EphemeralFile, worst case is data corruption.
     #[must_use = "caller must explcitly check the flush control"]
     async fn flush(&mut self, _ctx: &RequestContext) -> std::io::Result<Option<FlushControl>> {
         let buf = self.mutable.take().expect("must not use after an error");
@@ -178,9 +194,25 @@ where
             self.mutable = Some(buf);
             return Ok(None);
         }
-        let (recycled, flush_control) = self.flush_handle.flush(buf, self.bytes_submitted).await?;
+        // Prepare the buffer for read while flushing.
+        let slice = buf.flush();
+        // NB: this assignment also drops thereference to the old buffer, allowing us to re-own & make it mutable below.
+        self.maybe_flushed = Some(slice.cheap_clone());
         self.bytes_submitted += u64::try_from(buf_len).unwrap();
+
+        // If we return/panic here or later, we'll leave mutable = None, breaking further
+        // writers, but the read path should still work.
+
+        let (recycled, flush_control) =
+            self.flush_handle.flush(slice, self.bytes_submitted).await?;
+
+        // The only other place that could hold a reference to the recycled buffer
+        // is in `Self::maybe_flushed`, but we have already replace it with the new buffer.
+        let recycled = Buffer::reuse_after_flush(recycled.into_raw_slice().into_inner());
+
+        // We got back some recycled buffer, can open up for more writes again.
         self.mutable = Some(recycled);
+
         Ok(Some(flush_control))
     }
 }

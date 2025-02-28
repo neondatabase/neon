@@ -187,8 +187,7 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
     ) -> std::io::Result<(tokio_epoll_uring::Slice<B>, usize)> {
         let submitted_offset = self.buffered_writer.bytes_submitted();
 
-        let mutable = self.buffered_writer.inspect_mutable();
-        let mutable = &mutable[0..mutable.pending()];
+        let mutable = self.buffered_writer.inspect_mutable_pending();
 
         let maybe_flushed = self.buffered_writer.inspect_maybe_flushed();
 
@@ -406,7 +405,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mutable = file.buffered_writer.inspect_mutable();
+        let mutable = file.buffered_writer.inspect_mutable_pending();
         let cap = mutable.capacity();
         let align = mutable.align();
 
@@ -449,7 +448,7 @@ mod tests {
         let maybe_flushed_buffer_contents = file.buffered_writer.inspect_maybe_flushed().unwrap();
         assert_eq!(&maybe_flushed_buffer_contents[..], &content[cap..cap * 2]);
 
-        let mutable_buffer_contents = file.buffered_writer.inspect_mutable();
+        let mutable_buffer_contents = file.buffered_writer.inspect_mutable_pending();
         assert_eq!(mutable_buffer_contents, &content[cap * 2..write_nbytes]);
     }
 
@@ -464,7 +463,7 @@ mod tests {
             .unwrap();
 
         // mutable buffer and maybe_flushed buffer each has `cap` bytes.
-        let cap = file.buffered_writer.inspect_mutable().capacity();
+        let cap = file.buffered_writer.inspect_mutable_pending().capacity();
 
         let content: Vec<u8> = rand::thread_rng()
             .sample_iter(rand::distributions::Standard)
@@ -489,7 +488,7 @@ mod tests {
             &content[cap..cap * 2]
         );
         assert_eq!(
-            &file.buffered_writer.inspect_mutable()[0..cap / 2],
+            &file.buffered_writer.inspect_mutable_pending()[0..cap / 2],
             &content[cap * 2..cap * 2 + cap / 2]
         );
     }
@@ -511,7 +510,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mutable = file.buffered_writer.inspect_mutable();
+        let mutable = file.buffered_writer.inspect_mutable_pending();
         let cap = mutable.capacity();
         let align = mutable.align();
         let content: Vec<u8> = rand::thread_rng()
