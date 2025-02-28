@@ -1,6 +1,7 @@
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
+use once_cell::sync::Lazy;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info, info_span, warn};
 use utils::sync::duplex;
@@ -121,7 +122,6 @@ where
         file: Arc<W>,
         buf: B,
         gate_guard: utils::sync::gate::GateGuard,
-        cancel: CancellationToken,
         ctx: RequestContext,
         span: tracing::Span,
     ) -> Self
@@ -133,7 +133,7 @@ where
 
         let join_handle = tokio::spawn(
             async move {
-                FlushBackgroundTask::new(back, file, gate_guard, cancel, ctx)
+                FlushBackgroundTask::new(back, file, gate_guard, ctx)
                     .run(buf.flush())
                     .await
             }
@@ -217,7 +217,6 @@ pub struct FlushBackgroundTask<Buf, W> {
     /// A writter for persisting data to disk.
     writer: Arc<W>,
     ctx: RequestContext,
-    cancel: CancellationToken,
     /// Prevent timeline from shuting down until the flush background task finishes flushing all remaining buffers to disk.
     _gate_guard: utils::sync::gate::GateGuard,
 }
@@ -232,14 +231,12 @@ where
         channel: duplex::mpsc::Duplex<FullSlice<Buf>, FlushRequest<Buf>>,
         file: Arc<W>,
         gate_guard: utils::sync::gate::GateGuard,
-        cancel: CancellationToken,
         ctx: RequestContext,
     ) -> Self {
         FlushBackgroundTask {
             channel,
             writer: file,
             _gate_guard: gate_guard,
-            cancel,
             ctx,
         }
     }
@@ -279,12 +276,6 @@ where
             //
             let mut slice_storage = Some(request.slice);
             for attempt in 1.. {
-                if self.cancel.is_cancelled() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "BufferedWriter cancellation token is cancelled",
-                    ));
-                }
                 let result = async {
                     if attempt > 1 {
                         info!("retrying flush");
@@ -292,11 +283,6 @@ where
                     let slice = slice_storage.take().expect(
                         "likely previous invocation of this future didn't get polled to completion",
                     );
-                    // Don't cancel this write by doing tokio::select with self.cancel.cancelled().
-                    // The underlying tokio-epoll-uring slot / kernel operation is still ongoing and occupies resources.
-                    // If we retry indefinitely, we'll deplete those resources.
-                    // Future: teach tokio-epoll-uring io_uring operation cancellation, but still,
-                    // wait for cancelled ops to complete and discard their error.
                     let (slice, res) = self.writer.write_all_at(slice, request.offset, &self.ctx).await;
                     slice_storage = Some(slice);
                     let res = res.maybe_fatal_err("owned_buffers_io flush");
@@ -304,7 +290,8 @@ where
                         return ControlFlow::Break(());
                     };
                     warn!(%err, "error flushing buffered writer buffer to disk, retrying after backoff");
-                    utils::backoff::exponential_backoff(attempt, 1.0, 10.0, &self.cancel).await;
+                    static NO_CANCELLATION: Lazy<CancellationToken> = Lazy::new(CancellationToken::new);
+                    utils::backoff::exponential_backoff(attempt, 1.0, 10.0, &NO_CANCELLATION).await;
                     ControlFlow::Continue(())
                 }
                 .instrument(info_span!("flush_attempt", %attempt))

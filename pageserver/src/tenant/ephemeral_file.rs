@@ -9,7 +9,6 @@ use camino::Utf8PathBuf;
 use num_traits::Num;
 use pageserver_api::shard::TenantShardId;
 use tokio_epoll_uring::{BoundedBuf, Slice};
-use tokio_util::sync::CancellationToken;
 use tracing::{error, info_span};
 use utils::id::TimelineId;
 
@@ -41,7 +40,6 @@ impl EphemeralFile {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         gate: &utils::sync::gate::Gate,
-        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<EphemeralFile> {
         static NEXT_FILENAME: AtomicU64 = AtomicU64::new(1);
@@ -77,7 +75,6 @@ impl EphemeralFile {
                 file,
                 || IoBufferMut::with_capacity(TAIL_SZ),
                 gate.enter()?,
-                cancel.child_token(),
                 ctx,
                 info_span!(parent: None, "ephemeral_file_buffered_writer", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), timeline_id=%timeline_id, path = %filename),
             ),
@@ -368,9 +365,8 @@ mod tests {
             harness("ephemeral_file_holds_gate_open").unwrap();
 
         let gate = utils::sync::gate::Gate::default();
-        let cancel = CancellationToken::new();
 
-        let file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &cancel, &ctx)
+        let file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &ctx)
             .await
             .unwrap();
 
@@ -400,9 +396,8 @@ mod tests {
         let (conf, tenant_id, timeline_id, ctx) = harness("test_ephemeral_file_basics").unwrap();
 
         let gate = utils::sync::gate::Gate::default();
-        let cancel = CancellationToken::new();
 
-        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &cancel, &ctx)
+        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &ctx)
             .await
             .unwrap();
 
@@ -458,8 +453,8 @@ mod tests {
         let (conf, tenant_id, timeline_id, ctx) = harness("test_flushes_do_happen").unwrap();
 
         let gate = utils::sync::gate::Gate::default();
-        let cancel = CancellationToken::new();
-        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &cancel, &ctx)
+
+        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &ctx)
             .await
             .unwrap();
 
@@ -505,9 +500,8 @@ mod tests {
             harness("test_read_split_across_file_and_buffer").unwrap();
 
         let gate = utils::sync::gate::Gate::default();
-        let cancel = CancellationToken::new();
 
-        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &cancel, &ctx)
+        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &ctx)
             .await
             .unwrap();
 

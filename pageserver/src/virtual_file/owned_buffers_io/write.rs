@@ -4,7 +4,6 @@ use std::sync::Arc;
 pub(crate) use flush::FlushControl;
 use flush::FlushHandle;
 use tokio_epoll_uring::IoBuf;
-use tokio_util::sync::CancellationToken;
 
 use super::io_buf_aligned::IoBufAligned;
 use super::io_buf_ext::{FullSlice, IoBufExt};
@@ -66,7 +65,6 @@ where
         writer: Arc<W>,
         buf_new: impl Fn() -> B,
         gate_guard: utils::sync::gate::GateGuard,
-        cancel: CancellationToken,
         ctx: &RequestContext,
         flush_task_span: tracing::Span,
     ) -> Self {
@@ -77,7 +75,6 @@ where
                 writer,
                 buf_new(),
                 gate_guard,
-                cancel,
                 ctx.attached_child(),
                 flush_task_span,
             ),
@@ -293,12 +290,10 @@ mod tests {
         let ctx = &ctx;
         let recorder = Arc::new(RecorderWriter::default());
         let gate = utils::sync::gate::Gate::default();
-        let cancel = CancellationToken::new();
         let mut writer = BufferedWriter::<_, RecorderWriter>::new(
             recorder,
             || IoBufferMut::with_capacity(2),
             gate.enter()?,
-            cancel,
             ctx,
             tracing::Span::none(),
         );

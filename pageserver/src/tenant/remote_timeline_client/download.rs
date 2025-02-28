@@ -18,7 +18,7 @@ use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{info_span, warn};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
 use utils::{backoff, pausable_failpoint};
@@ -206,7 +206,6 @@ async fn download_object(
         #[cfg(target_os = "linux")]
         crate::virtual_file::io_engine::IoEngine::TokioEpollUring => {
             use std::sync::Arc;
-            use tracing::info_span;
 
             use crate::virtual_file::{IoBufferMut, owned_buffers_io};
             async {
@@ -229,7 +228,6 @@ async fn download_object(
                     destination_file,
                     || IoBufferMut::with_capacity(super::BUFFER_SIZE),
                     gate.enter().map_err(|_| DownloadError::Cancelled)?,
-                    cancel.child_token(),
                     ctx,
                     info_span!(parent: None, "download_object_buffered_writer", %dst_path),
                 );

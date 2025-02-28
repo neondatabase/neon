@@ -13,7 +13,6 @@ use pageserver::{page_cache, virtual_file};
 use pageserver_api::key::Key;
 use pageserver_api::shard::TenantShardId;
 use pageserver_api::value::Value;
-use tokio_util::sync::CancellationToken;
 use utils::bin_ser::BeSer;
 use utils::id::{TenantId, TimelineId};
 use wal_decoder::serialized_batch::SerializedValueBatch;
@@ -61,18 +60,8 @@ async fn ingest(
     let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
 
     let gate = utils::sync::gate::Gate::default();
-    let cancel = CancellationToken::new();
 
-    let layer = InMemoryLayer::create(
-        conf,
-        timeline_id,
-        tenant_shard_id,
-        lsn,
-        &gate,
-        &cancel,
-        &ctx,
-    )
-    .await?;
+    let layer = InMemoryLayer::create(conf, timeline_id, tenant_shard_id, lsn, &gate, &ctx).await?;
 
     let data = Value::Image(Bytes::from(vec![0u8; put_size]));
     let data_ser_size = data.serialized_size().unwrap() as usize;
