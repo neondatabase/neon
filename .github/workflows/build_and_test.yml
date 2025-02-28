@@ -748,7 +748,7 @@ jobs:
   vm-compute-node-image:
     needs: [ vm-compute-node-image-arch, meta ]
     if: ${{ contains(fromJSON('["push-main", "pr", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
-    runs-on: [ self-hosted, large ]
+    runs-on: ubuntu-22.04
     strategy:
       matrix:
         version:
