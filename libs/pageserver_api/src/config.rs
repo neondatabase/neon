@@ -181,7 +181,6 @@ pub struct ConfigToml {
     pub generate_unarchival_heatmap: Option<bool>,
     pub tracing: Option<Tracing>,
     pub enable_tls_page_service_api: bool,
-    pub lazy_slru_download_threshold: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -657,7 +656,6 @@ impl Default for ConfigToml {
             generate_unarchival_heatmap: None,
             tracing: None,
             enable_tls_page_service_api: false,
-            lazy_slru_download_threshold: DEFAULT_LAZY_SLRU_DOWNLOAD_THRESHOLD,
         }
     }
 }
