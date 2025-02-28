@@ -164,7 +164,10 @@ class NeonProject:
         cmd = ["pgbench", f"-c{clients}", "10800", "-Mprepared"]
         if read_only:
             cmd.append("-S")
-        log.info("connect_env: %s", self.branches[target].connect_env())
+        if target_endpoint:
+            log.info("connect_env: %s", self.endpoints[target].connect_env())
+        else:
+            log.info("connect_env: %s", self.branches[target].connect_env())
         pgbench = self.pg_bin.run_nonblocking(cmd, env=self.endpoints[target].connect_env if target_endpoint else self.branches[target].connect_env())
         self.benchmarks[target] = pgbench
         if target_endpoint:
