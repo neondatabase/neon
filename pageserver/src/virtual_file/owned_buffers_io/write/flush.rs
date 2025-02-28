@@ -1,6 +1,8 @@
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
+use once_cell::sync::Lazy;
+use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info, info_span, warn};
 use utils::sync::duplex;
 
@@ -275,9 +277,6 @@ where
             let mut slice_storage = Some(request.slice);
             for attempt in 1.. {
                 if self.channel.is_closed() {
-                    info!(
-                        "flush handle shutting down or dropped during flush attempt number {attempt}"
-                    );
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         format!(
@@ -292,11 +291,6 @@ where
                     let slice = slice_storage.take().expect(
                         "likely previous invocation of this future didn't get polled to completion",
                     );
-                    // Don't cancel this write by doing tokio::select with self.cancel.cancelled().
-                    // The underlying tokio-epoll-uring slot / kernel operation is still ongoing and occupies resources.
-                    // If we retry indefinitely, we'll deplete those resources.
-                    // Future: teach tokio-epoll-uring io_uring operation cancellation, but still,
-                    // wait for cancelled ops to complete and discard their error.
                     let (slice, res) = self.writer.write_all_at(slice, request.offset, &self.ctx).await;
                     slice_storage = Some(slice);
                     let res = res.maybe_fatal_err("owned_buffers_io flush");
