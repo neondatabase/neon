@@ -138,6 +138,10 @@ struct Cli {
     // Flag to use https for requests to pageserver API.
     #[arg(long, default_value = "false")]
     use_https_pageserver_api: bool,
+
+    /// Whether to load safekeeprs from the database and heartbeat them
+    #[arg(long, default_value = "false")]
+    load_safekeepers: bool,
 }
 
 enum StrictMode {
@@ -350,6 +354,7 @@ async fn async_main() -> anyhow::Result<()> {
         start_as_candidate: args.start_as_candidate,
         http_service_port: args.listen.port() as i32,
         use_https_pageserver_api: args.use_https_pageserver_api,
+        load_safekeepers: args.load_safekeepers,
     };
 
     // Validate that we can connect to the database
