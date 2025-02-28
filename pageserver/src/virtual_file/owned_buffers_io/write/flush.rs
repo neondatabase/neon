@@ -149,11 +149,20 @@ where
         }
     }
 
-    /// Submits a buffer to be flushed in the background task.
-    /// Returns a buffer that completed flushing for re-use, length reset to 0, capacity unchanged.
-    /// If `save_buf_for_read` is true, then we save the buffer in `Self::maybe_flushed`, otherwise
-    /// clear `maybe_flushed`.
-    pub async fn flush<B>(&mut self, buf: B, offset: u64) -> std::io::Result<(B, FlushControl)>
+    /// Starts flushing the buffer and fills `out_new_mutable` with a recycled buffer, i.e., a
+    /// buffer that finished flushing.
+    ///
+    /// Recycling means that the length was reset to 0 but capacity remains unchanged.
+    ///
+    /// The flushing buffer is inspectible in `Self::maybe_flushed` for reads while flush is ongoing.
+    ///
+    ///
+    pub async fn flush<B>(
+        &mut self,
+        buf: B,
+        offset: u64,
+        out_new_mutable: &mut Option<B>,
+    ) -> std::io::Result<(FlushControl)>
     where
         B: Buffer<IoBuf = Buf> + Send + 'static,
     {
@@ -161,6 +170,22 @@ where
 
         // Saves a buffer for read while flushing. This also removes reference to the old buffer.
         self.maybe_flushed = Some(slice.cheap_clone());
+
+        // Wait for an available buffer from the background flush task.
+        // This is the BACKPRESSURE mechanism: if the flush task can't keep up,
+        // then the write path will eventually wait for it here.
+        match self.inner_mut().channel.recv().await {
+            Some(recycled) => {
+                // The only other place that could hold a reference to the recycled buffer
+                // is in `Self::maybe_flushed`, but we have already replace it with the new buffer.
+                let recycled = Buffer::reuse_after_flush(recycled.into_raw_slice().into_inner());
+                *out_new_mutable = *recycled;
+            }
+            None => {
+                // The flush task has exited, so we should too.
+                return self.handle_error().await;
+            }
+        };
 
         let (request, flush_control) = new_flush_op(slice, offset);
 
@@ -170,16 +195,6 @@ where
             return self.handle_error().await;
         }
 
-        // Wait for an available buffer from the background flush task.
-        // This is the BACKPRESSURE mechanism: if the flush task can't keep up,
-        // then the write path will eventually wait for it here.
-        let Some(recycled) = self.inner_mut().channel.recv().await else {
-            return self.handle_error().await;
-        };
-
-        // The only other place that could hold a reference to the recycled buffer
-        // is in `Self::maybe_flushed`, but we have already replace it with the new buffer.
-        let recycled = Buffer::reuse_after_flush(recycled.into_raw_slice().into_inner());
         Ok((recycled, flush_control))
     }
 
