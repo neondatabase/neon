@@ -8061,7 +8061,8 @@ impl Service {
     ) -> Result<(), DatabaseError> {
         let node_id = NodeId(record.id as u64);
         self.persistence.safekeeper_upsert(record.clone()).await?;
-        {
+
+        if self.config.load_safekeepers {
             let mut locked = self.inner.write().unwrap();
             let mut safekeepers = (*locked.safekeepers).clone();
             match safekeepers.entry(node_id) {
@@ -8093,7 +8094,7 @@ impl Service {
             .await?;
         let node_id = NodeId(id as u64);
         // After the change has been persisted successfully, update the in-memory state
-        {
+        if self.config.load_safekeepers {
             let mut locked = self.inner.write().unwrap();
             let mut safekeepers = (*locked.safekeepers).clone();
             let sk = safekeepers
