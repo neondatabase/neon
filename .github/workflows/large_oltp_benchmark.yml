@@ -46,7 +46,7 @@ jobs:
       PG_VERSION: 16 # pre-determined by pre-determined project
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
+      SAVE_PERF_REPORT: ${{ github.ref_name == 'main' }}
       PLATFORM: ${{ matrix.target }}
 
     runs-on: [ self-hosted, us-east-2, x64 ]

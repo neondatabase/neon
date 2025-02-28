@@ -5,7 +5,7 @@ import timeit
 from pathlib import Path
 
 import pytest
-from fixtures.benchmark_fixture import MetricReport, PgBenchRunResult
+from fixtures.benchmark_fixture import PgBenchRunResult
 from fixtures.compare_fixtures import PgCompare
 
 from performance.test_perf_pgbench import get_durations_matrix, utc_now_timestamp
