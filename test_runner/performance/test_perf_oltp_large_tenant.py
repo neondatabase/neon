@@ -27,8 +27,6 @@ def get_custom_scripts(
 
 
 def run_test_pgbench(env: PgCompare, custom_scripts: str, duration: int):
-    env.zenbenchmark.record("custom scripts", 0.0, custom_scripts, MetricReport.TEST_PARAM)
-    
     password = env.pg.default_options.get("password", None)
     options = env.pg.default_options.get("options", "")
     # drop password from the connection string by passing password=None and set password separately

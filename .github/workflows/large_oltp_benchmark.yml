@@ -40,7 +40,7 @@ jobs:
       statuses: write
       id-token: write # aws-actions/configure-aws-credentials
     env:
-      TEST_PG_BENCH_DURATIONS_MATRIX: "3m" # todo when it is working update to 1 h or more
+      TEST_PG_BENCH_DURATIONS_MATRIX: "1h" # todo update to > 1 h 
       TEST_PGBENCH_CUSTOM_SCRIPTS: ${{ matrix.custom_scripts }}
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       PG_VERSION: 16 # pre-determined by pre-determined project
