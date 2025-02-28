@@ -40,6 +40,9 @@ pub trait OwnedAsyncWriter {
 // since we would avoid copying majority of the data into the internal buffer.
 pub struct BufferedWriter<B: Buffer, W> {
     writer: Arc<W>,
+    /// Immutable buffer for serving tail reads.
+    /// `None` if no flush request has been submitted.
+    pub(super) maybe_flushed: Option<FullSlice<Buf>>,
     /// invariant: always remains Some(buf) except
     /// - while IO is ongoing => goes back to Some() once the IO completed successfully
     /// - after an IO error => stays `None` forever
@@ -107,7 +110,7 @@ where
         mut self,
         ctx: &RequestContext,
     ) -> std::io::Result<(u64, Arc<W>)> {
-        self.flush(ctx).await?;
+        self.flush(ctx).await;
 
         let Self {
             mutable: buf,
@@ -161,24 +164,42 @@ where
                 if let Some(control) = control.take() {
                     control.release().await;
                 }
-                control = self.flush(ctx).await?;
+                control = self.flush(ctx).await;
             }
         }
         Ok((chunk_len, control))
     }
 
     #[must_use = "caller must explcitly check the flush control"]
-    async fn flush(&mut self, _ctx: &RequestContext) -> std::io::Result<Option<FlushControl>> {
-        let buf = self.mutable.take().expect("must not use after an error");
-        let buf_len = buf.pending();
-        if buf_len == 0 {
-            self.mutable = Some(buf);
-            return Ok(None);
-        }
-        let (recycled, flush_control) = self.flush_handle.flush(buf, self.bytes_submitted).await?;
-        self.bytes_submitted += u64::try_from(buf_len).unwrap();
-        self.mutable = Some(recycled);
-        Ok(Some(flush_control))
+    async fn flush(&mut self, _ctx: &RequestContext) -> FlushControl {
+        // There is always a recycled buffer available because the channel is initialized
+        // to the desired queue depth with "pre-recycled" buffers.
+        let recycled = match self.flush_handle.inner_mut().channel.recv().await {
+            Some(recycled) => Buffer::reuse_after_flush(recycled.into_raw_slice().into_inner()),
+            None => {
+                todo!()
+            }
+        };
+
+        let Some(slice_to_flush) = self.mutable.replace(recycled) else {
+            panic!("mutable is always Some") // TODO: remove Option and replace this with std::mem::swap, will be much clearer
+        };
+        // Make the slice available for reads while it is flushing.
+        let offset = self.bytes_submitted;
+        let len = slice_to_flush.pending();
+        self.bytes_submitted += u64::try_from(len).unwrap();
+        let slice_to_flush = slice_to_flush.flush();
+        self.maybe_flushed = Some(slice_to_flush.cheap_clone());
+        // Wait for the flush to be issued.
+        // 
+        let (request, flush_control) = flush::new_flush_op(slice_to_flush, offset);
+        self.flush_handle
+            .inner_mut()
+            .channel
+            .send(request)
+            .await
+            .expect("flush task must have panicked or exited, this is unexpected");
+        flush_control
     }
 }
 
