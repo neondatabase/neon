@@ -12,3 +12,4 @@ XLogRecPtr neon_set_lwlsn_block_v_hook set_lwlsn_block_v_hook(const XLogRecPtr *
 XLogRecPtr neon_set_lwlsn_block_hook set_lwlsn_block_hook(XLogRecPtr lsn, RelFileLocator rlocator, ForkNumber forknum, BlockNumber blkno);
 XLogRecPtr neon_set_lwlsn_relation_hook set_lwlsn_relation_hook(XLogRecPtr lsn, RelFileLocator rlocator, ForkNumber forknum);
 XLogRecPtr neon_set_lwlsn_db_hook(XLogRecPtr lsn);
+int GetLastWrittenLSNCacheSize(void);

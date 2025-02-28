@@ -26,7 +26,7 @@ typedef struct LastWrittenLsnCacheEntry
 	dlist_node	lru_node;
 } LastWrittenLsnCacheEntry;
 
-LwLSN
+int lastWrittenLsnCacheSize;
 /*
  * Maximal last written LSN for pages not present in lastWrittenLsnCache
  */
@@ -52,7 +52,7 @@ static HTAB *lastWrittenLsnCache;
 static void
 lwlc_register_gucs(void)
 {
-	DefineCustomIntVariable("neon.lwlsn_cache_size",
+	DefineCustomIntVariable("neon.last_written_lsn_cache_size",
 							"Size of last written LSN cache used by Neon",
 							NULL,
 							&lsn_cache_size,
@@ -69,16 +69,18 @@ static XLogRecPtr SetLastWrittenLSNForBlockRangeInternal(XLogRecPtr lsn,
 														 BlockNumber n_blocks);
 
 /* All the necessary hooks are defined here */
-
+ // TODO: Need to see how to define this
 void lwlc_pre_recovery_start_hook(const ControlFileData* controlFile);
 
-get_lwlsn_hook_type get_lwlsn_hook = NULL;
-get_lwlsn_v_hook_type get_lwlsn_v_hook = NULL;
-set_lwlsn_block_range_hook_type set_lwlsn_block_range_hook = NULL;
-set_lwlsn_block_v_hook_type set_lwlsn_block_v_hook = NULL;
-set_lwlsn_block_hook_type set_lwlsn_block_hook = NULL;
-set_lwlsn_relation_hook_type set_lwlsn_relation_hook = NULL;
-set_lwlsn_db_hook_type set_lwlsn_db_hook = NULL;
+// Note: these are the previous hooks
+get_lwlsn_hook_type prev_get_lwlsn_hook = NULL;
+get_lwlsn_v_hook_type prev_get_lwlsn_v_hook = NULL;
+set_lwlsn_block_range_hook_type prev_set_lwlsn_block_range_hook = NULL;
+set_lwlsn_block_v_hook_type prev_set_lwlsn_block_v_hook = NULL;
+set_lwlsn_block_hook_type prev_set_lwlsn_block_hook = NULL;
+set_lwlsn_relation_hook_type prev_set_lwlsn_relation_hook = NULL;
+set_lwlsn_db_hook_type prev_set_lwlsn_db_hook = NULL;
+get_lwlsn_cache_size_type prev_get_lwlsn_cache_size = NULL;
 
 static shmem_startup_hook prev_shmem_startup_hook;
 static shmem_request_hook prev_shmem_request_hook;
@@ -93,13 +95,14 @@ pg_init_lwlc(void)
 
 	INSTALL_HOOK(shmem_startup_hook, shmeminit);
 
-	INSTALL_HOOK(get_lwlsn_hook, neon_get_lwlsn_hook);
-	INSTALL_HOOK(get_lwlsn_v_hook, neon_get_lwlsn_v_hook);
-	INSTALL_HOOK(set_lwlsn_block_range_hook, neon_set_lwlsn_block_range_hook);
-	INSTALL_HOOK(set_lwlsn_block_v_hook, neon_set_lwlsn_block_v_hook);
-	INSTALL_HOOK(set_lwlsn_block_hook, neon_set_lwlsn_block_hook);
-	INSTALL_HOOK(set_lwlsn_relation_hook, neon_set_lwlsn_relation_hook);
-	INSTALL_HOOK(set_lwlsn_db_hook, neon_set_lwlsn_db_hook);
+	INSTALL_HOOK(get_lwlsn_hook, GetLastWrittenLSN);
+	INSTALL_HOOK(get_lwlsn_v_hook, GetLastWrittenLSNv);
+	INSTALL_HOOK(set_lwlsn_block_range_hook, SetLastWrittenLSNForBlockRange);
+	INSTALL_HOOK(set_lwlsn_block_v_hook, SetLastWrittenLSNForBlockv);
+	INSTALL_HOOK(set_lwlsn_block_hook, SetLastWrittenLSNForBlock);
+	INSTALL_HOOK(set_lwlsn_relation_hook, SetLastWrittenLSNForRelation);
+	INSTALL_HOOK(set_lwlsn_db_hook, SetLastWrittenLSNForDatabase);
+	INSTALL_HOOK(get_lwlsn_cache_size, GetLastWrittenLSNCacheSize);
 
 #if PG_VERSION_NUM >= 150000
 	INSTALL_HOOK(shmem_request_hook, shmemrequest);
@@ -116,9 +119,9 @@ void shmemrequest(void) {
 }
 
 void shmeminit(void) {
-	// TODO: Why do we need this check? Do we still do it?
-//if (lastWrittenLsnCacheSize > 0)
-//	{
+
+if (lastWrittenLsnCacheSize > 0)
+	{
 	if (prev_shmem_startup_hook) {
 		prev_shmem_startup_hook();
 	}
@@ -131,9 +134,13 @@ void shmeminit(void) {
 										&info,
 										HASH_ELEM | HASH_BLOBS);
 
-//	}
+	}
 	dlist_init(&lastWrittenLsnLRU);
     maxLastWrittenLsn = GetRedoRecPtr();
+}
+
+int GetLastWrittenLSNCacheSize (void) {
+	return lastWrittenLsnCacheSize;
 }
 
 /*
