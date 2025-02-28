@@ -126,3 +126,22 @@ jobs:
         project_id: ${{ vars.BENCHMARK_LARGE_OLTP_PROJECTID }}
         branch_id: ${{ steps.create-neon-branch-oltp-target.outputs.branch_id }}
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+
+    - name: Create Allure report
+      id: create-allure-report
+      if: ${{ !cancelled() }}
+      uses: ./.github/actions/allure-report-generate
+      with:
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+  
+    - name: Post to a Slack channel
+      if: ${{ github.event.schedule && failure() }}
+      uses: slackapi/slack-github-action@v1
+      with:
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
+        slack-message: |
+          Periodic large oltp perf testing: ${{ job.status }}
+          <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+          <${{ steps.create-allure-report.outputs.report-url }}|Allure report>
+      env:
+        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
