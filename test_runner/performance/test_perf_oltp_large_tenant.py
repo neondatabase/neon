@@ -1,20 +1,19 @@
 from __future__ import annotations
 
-import calendar
-import enum
 import os
 import timeit
-from datetime import datetime
 from pathlib import Path
 
 import pytest
-from fixtures.benchmark_fixture import MetricReport, PgBenchInitResult, PgBenchRunResult
+from fixtures.benchmark_fixture import MetricReport, PgBenchRunResult
 from fixtures.compare_fixtures import PgCompare
-from fixtures.utils import get_scale_for_db
-from test_runner.performance.test_perf_pgbench import get_durations_matrix, get_scales_matrix, run_test_pgbench, utc_now_timestamp
+
+from performance.test_perf_pgbench import get_durations_matrix, utc_now_timestamp
 
 
-def get_custom_scripts(default: str = "insert_webhooks.sql@2 select_any_webhook_with_skew.sql@4 select_recent_webhook.sql@4" ) -> list[str]:
+def get_custom_scripts(
+    default: str = "insert_webhooks.sql@2 select_any_webhook_with_skew.sql@4 select_recent_webhook.sql@4",
+) -> list[str]:
     # We parametrize each run with the custom scripts to run and their weights.
     # The custom scripts and their weights are passed through TEST_PGBENCH_CUSTOM_SCRIPTS env variable.
     # Delimit the custom scripts for one run by spaces and for different runs by commas, for example:
@@ -26,6 +25,7 @@ def get_custom_scripts(default: str = "insert_webhooks.sql@2 select_any_webhook_
         rv.append(s)
     return rv
 
+
 def run_test_pgbench(env: PgCompare, custom_scripts: str, duration: int):
     env.zenbenchmark.record("custom scripts", 0.0, custom_scripts, MetricReport.TEST_PARAM)
 
@@ -36,13 +36,13 @@ def run_test_pgbench(env: PgCompare, custom_scripts: str, duration: int):
 
     script_args = [
         "pgbench",
-        "-N", # no explicit vacuum before the test - we want to rely on auto-vacuum
+        "-N",  # no explicit vacuum before the test - we want to rely on auto-vacuum
         "-M",
-        "prepared", 
+        "prepared",
         "--client=500",
         "--jobs=100",
         f"-T{duration}",
-        "-P60", # progress every minute
+        "-P60",  # progress every minute
         "--progress-timestamp",
     ]
     for script in custom_scripts.split():
@@ -50,17 +50,18 @@ def run_test_pgbench(env: PgCompare, custom_scripts: str, duration: int):
     script_args.append(connstr)
 
     run_pgbench(
-            env,
-            "custom-scripts",
-            script_args,
-            password=password,
-        )
+        env,
+        "custom-scripts",
+        script_args,
+        password=password,
+    )
+
 
 def run_pgbench(env: PgCompare, prefix: str, cmdline, password: None):
     environ: dict[str, str] = {}
     if password is not None:
         environ["PGPASSWORD"] = password
-    
+
     run_start_timestamp = utc_now_timestamp()
     t0 = timeit.default_timer()
     out = env.pg_bin.run_capture(cmdline, env=environ)
@@ -77,6 +78,7 @@ def run_pgbench(env: PgCompare, prefix: str, cmdline, password: None):
         run_end_timestamp=run_end_timestamp,
     )
     env.zenbenchmark.record_pg_bench_result(prefix, res)
+
 
 @pytest.mark.parametrize("custom_scripts", get_custom_scripts())
 @pytest.mark.parametrize("duration", get_durations_matrix())
