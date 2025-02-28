@@ -187,9 +187,16 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
     ) -> std::io::Result<(tokio_epoll_uring::Slice<B>, usize)> {
         let submitted_offset = self.buffered_writer.bytes_submitted();
 
-        let mutable = self.buffered_writer.inspect_mutable_pending();
-
         let maybe_flushed = self.buffered_writer.inspect_maybe_flushed();
+
+        let mutable = match self.buffered_writer.inspect_mutable() {
+            Some(mutable) => &mutable[0..mutable.pending()],
+            None => {
+                // Timeline::cancel and hence buffered writer flush was cancelled.
+                // Remain read-available while timeline is shutting down.
+                &[]
+            }
+        };
 
         let dst_cap = dst.bytes_total().into_u64();
         let end = {
@@ -448,7 +455,7 @@ mod tests {
         let maybe_flushed_buffer_contents = file.buffered_writer.inspect_maybe_flushed().unwrap();
         assert_eq!(&maybe_flushed_buffer_contents[..], &content[cap..cap * 2]);
 
-        let mutable_buffer_contents = file.buffered_writer.inspect_mutable_pending();
+        let mutable_buffer_contents = file.buffered_writer.mutable();
         assert_eq!(mutable_buffer_contents, &content[cap * 2..write_nbytes]);
     }
 
@@ -488,7 +495,7 @@ mod tests {
             &content[cap..cap * 2]
         );
         assert_eq!(
-            &file.buffered_writer.inspect_mutable_pending()[0..cap / 2],
+            &file.buffered_writer.mutable()[0..cap / 2],
             &content[cap * 2..cap * 2 + cap / 2]
         );
     }

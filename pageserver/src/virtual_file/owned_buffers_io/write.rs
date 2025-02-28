@@ -98,13 +98,9 @@ where
         self.bytes_submitted
     }
 
-    pub fn inspect_mutable_pending(&self) -> &[u8] {
-        match self.mutable.as_ref() {
-            Some(mutable) => {
-                &mutable[0..mutable.pending()]
-            }
-            None => &[],
-        }
+    /// Panics if used after any of the write paths returned an error
+    pub fn inspect_mutable(&self) -> Option<&B> {
+        self.mutable.as_ref()
     }
 
     /// Gets a reference to the maybe flushed read-only buffer.
