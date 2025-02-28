@@ -20,7 +20,7 @@ use crate::page_cache;
 use crate::tenant::storage_layer::inmemory_layer::vectored_dio_read::File;
 use crate::virtual_file::owned_buffers_io::io_buf_aligned::IoBufAlignedMut;
 use crate::virtual_file::owned_buffers_io::slice::SliceMutExt;
-use crate::virtual_file::owned_buffers_io::write::Buffer;
+use crate::virtual_file::owned_buffers_io::write::{Buffer, FlushTaskError};
 use crate::virtual_file::{self, IoBufferMut, VirtualFile, owned_buffers_io};
 
 pub struct EphemeralFile {
@@ -104,6 +104,14 @@ impl Drop for EphemeralFile {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum EphemeralFileWriteError {
+    #[error("{0}")]
+    TooLong(String),
+    #[error("cancelled")]
+    Cancelled,
+}
+
 impl EphemeralFile {
     pub(crate) fn len(&self) -> u64 {
         self.bytes_written
@@ -136,7 +144,7 @@ impl EphemeralFile {
         &mut self,
         srcbuf: &[u8],
         ctx: &RequestContext,
-    ) -> std::io::Result<u64> {
+    ) -> Result<u64, EphemeralFileWriteError> {
         let (pos, control) = self.write_raw_controlled(srcbuf, ctx).await?;
         if let Some(control) = control {
             control.release().await;
@@ -148,24 +156,24 @@ impl EphemeralFile {
         &mut self,
         srcbuf: &[u8],
         ctx: &RequestContext,
-    ) -> std::io::Result<(u64, Option<owned_buffers_io::write::FlushControl>)> {
+    ) -> Result<(u64, Option<owned_buffers_io::write::FlushControl>), EphemeralFileWriteError> {
         let pos = self.bytes_written;
 
         let new_bytes_written = pos.checked_add(srcbuf.len().into_u64()).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!(
-                    "write would grow EphemeralFile beyond u64::MAX: len={pos} writen={srcbuf_len}",
-                    srcbuf_len = srcbuf.len(),
-                ),
-            )
+            EphemeralFileWriteError::TooLong(format!(
+                "write would grow EphemeralFile beyond u64::MAX: len={pos} writen={srcbuf_len}",
+                srcbuf_len = srcbuf.len(),
+            ))
         })?;
 
         // Write the payload
         let (nwritten, control) = self
             .buffered_writer
             .write_buffered_borrowed_controlled(srcbuf, ctx)
-            .await?;
+            .await
+            .map_err(|e| match e {
+                FlushTaskError::Cancelled => EphemeralFileWriteError::Cancelled,
+            })?;
         assert_eq!(
             nwritten,
             srcbuf.len(),
@@ -187,8 +195,6 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
     ) -> std::io::Result<(tokio_epoll_uring::Slice<B>, usize)> {
         let submitted_offset = self.buffered_writer.bytes_submitted();
 
-        let maybe_flushed = self.buffered_writer.inspect_maybe_flushed();
-
         let mutable = match self.buffered_writer.inspect_mutable() {
             Some(mutable) => &mutable[0..mutable.pending()],
             None => {
@@ -197,6 +203,8 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
                 &[]
             }
         };
+
+        let maybe_flushed = self.buffered_writer.inspect_maybe_flushed();
 
         let dst_cap = dst.bytes_total().into_u64();
         let end = {

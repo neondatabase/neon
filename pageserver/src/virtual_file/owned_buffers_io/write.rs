@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 pub(crate) use flush::FlushControl;
 use flush::FlushHandle;
+pub(crate) use flush::FlushTaskError;
 use tokio_epoll_uring::IoBuf;
 use tokio_util::sync::CancellationToken;
 
@@ -113,7 +114,7 @@ where
     pub async fn flush_and_into_inner(
         mut self,
         ctx: &RequestContext,
-    ) -> std::io::Result<(u64, Arc<W>)> {
+    ) -> Result<(u64, Arc<W>), FlushTaskError> {
         self.flush(ctx).await?;
 
         let Self {
@@ -138,7 +139,7 @@ where
         &mut self,
         chunk: &[u8],
         ctx: &RequestContext,
-    ) -> std::io::Result<usize> {
+    ) -> Result<usize, FlushTaskError> {
         let (len, control) = self.write_buffered_borrowed_controlled(chunk, ctx).await?;
         if let Some(control) = control {
             control.release().await;
@@ -151,7 +152,7 @@ where
         &mut self,
         mut chunk: &[u8],
         ctx: &RequestContext,
-    ) -> std::io::Result<(usize, Option<FlushControl>)> {
+    ) -> Result<(usize, Option<FlushControl>), FlushTaskError> {
         let chunk_len = chunk.len();
         let mut control: Option<FlushControl> = None;
         while !chunk.is_empty() {
@@ -182,7 +183,10 @@ where
     /// It is in fact quite hard to reason about what exactly happens in today's code.
     /// Best case we accumulate junk in the EphemeralFile, worst case is data corruption.
     #[must_use = "caller must explcitly check the flush control"]
-    async fn flush(&mut self, _ctx: &RequestContext) -> std::io::Result<Option<FlushControl>> {
+    async fn flush(
+        &mut self,
+        _ctx: &RequestContext,
+    ) -> Result<Option<FlushControl>, FlushTaskError> {
         let buf = self.mutable.take().expect("must not use after an error");
         let buf_len = buf.pending();
         if buf_len == 0 {

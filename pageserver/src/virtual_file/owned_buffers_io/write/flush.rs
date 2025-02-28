@@ -21,7 +21,7 @@ pub struct FlushHandleInner<Buf, W> {
     /// and receives recyled buffer.
     channel: duplex::mpsc::Duplex<FlushRequest<Buf>, FullSlice<Buf>>,
     /// Join handle for the background flush task.
-    join_handle: tokio::task::JoinHandle<std::io::Result<Arc<W>>>,
+    join_handle: tokio::task::JoinHandle<Result<Arc<W>, FlushTaskError>>,
 }
 
 struct FlushRequest<Buf> {
@@ -113,7 +113,12 @@ where
 {
     /// Spawns a new background flush task and obtains a handle.
     ///
-    /// Note: The background task so we do not need to explicitly maintain a queue of buffers.
+    /// Handle and background task are connected through a duplex channel.
+    /// Dirty buffers are sent to the background task for flushing.
+    /// Clean buffers are sent back to the handle for reuse.
+    ///
+    /// The queue depth is 1, and the passed-in `buf` seeds the queue depth.
+    /// I.e., the passed-in buf is immediately available to the handle as a recycled buffer.
     pub fn spawn_new<B>(
         file: Arc<W>,
         buf: B,
@@ -125,16 +130,14 @@ where
     where
         B: Buffer<IoBuf = Buf> + Send + 'static,
     {
-        // It is fine to buffer up to only 1 message. We only 1 message in-flight at a time.
         let (front, back) = duplex::mpsc::channel(1);
+        back.try_send(buf.flush())
+            .expect("we just created it with capacity 1");
 
         let join_handle = tokio::spawn(
-            async move {
-                FlushBackgroundTask::new(back, file, gate_guard, cancel, ctx)
-                    .run(buf.flush())
-                    .await
-            }
-            .instrument(span),
+            FlushBackgroundTask::new(back, file, gate_guard, cancel, ctx)
+                .run()
+                .instrument(span),
         );
 
         FlushHandle {
@@ -153,7 +156,7 @@ where
         &mut self,
         slice: FullSlice<Buf>,
         offset: u64,
-    ) -> std::io::Result<(FullSlice<Buf>, FlushControl)> {
+    ) -> Result<(FullSlice<Buf>, FlushControl), FlushTaskError> {
         let (request, flush_control) = new_flush_op(slice, offset);
 
         // Submits the buffer to the background task.
@@ -169,10 +172,10 @@ where
             return self.handle_error().await;
         };
 
-                Ok((recycled, flush_control))
+        Ok((recycled, flush_control))
     }
 
-    async fn handle_error<T>(&mut self) -> std::io::Result<T> {
+    async fn handle_error<T>(&mut self) -> Result<T, FlushTaskError> {
         Err(self
             .shutdown()
             .await
@@ -180,7 +183,7 @@ where
     }
 
     /// Cleans up the channel, join the flush task.
-    pub async fn shutdown(&mut self) -> std::io::Result<Arc<W>> {
+    pub async fn shutdown(&mut self) -> Result<Arc<W>, FlushTaskError> {
         let handle = self
             .inner
             .take()
@@ -211,6 +214,12 @@ pub struct FlushBackgroundTask<Buf, W> {
     _gate_guard: utils::sync::gate::GateGuard,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum FlushTaskError {
+    #[error("flush task cancelled")]
+    Cancelled,
+}
+
 impl<Buf, W> FlushBackgroundTask<Buf, W>
 where
     Buf: IoBufAligned + Send + Sync,
@@ -234,14 +243,7 @@ where
     }
 
     /// Runs the background flush task.
-    /// The passed in slice is immediately sent back to the flush handle through the duplex channel.
-    async fn run(mut self, slice: FullSlice<Buf>) -> std::io::Result<Arc<W>> {
-        // Sends the extra buffer back to the handle.
-        // TODO: can this ever await and or fail? I think not.
-        self.channel.send(slice).await.map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "flush handle closed early")
-        })?;
-
+    async fn run(mut self) -> Result<Arc<W>, FlushTaskError> {
         //  Exit condition: channel is closed and there is no remaining buffer to be flushed
         while let Some(request) = self.channel.recv().await {
             #[cfg(test)]
@@ -259,20 +261,12 @@ where
             // (The upper layers of the Pageserver write path are not equipped to retry write errors
             //  becasuse they often deallocate the buffers that were already written).
             //
-            // TODO: cancellation sensitiity.
-            // Without it, if we hit a bug where retrying is never successful,
-            // then we can't shut down the timeline/tenant/pageserver cleanly because
-            // layers of the Pageserver write path are holding the gate open for EphemeralFile.
-            //
             // TODO: use utils::backoff::retry once async closures are actually usable
             //
             let mut slice_storage = Some(request.slice);
             for attempt in 1.. {
                 if self.cancel.is_cancelled() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "BufferedWriter cancellation token is cancelled",
-                    ));
+                    return Err(FlushTaskError::Cancelled);
                 }
                 let result = async {
                     if attempt > 1 {
