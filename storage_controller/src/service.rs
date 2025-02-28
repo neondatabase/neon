@@ -389,6 +389,8 @@ pub struct Config {
     pub long_reconcile_threshold: Duration,
 
     pub use_https_pageserver_api: bool,
+
+    pub load_safekeepers: bool,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -1405,15 +1407,20 @@ impl Service {
             .set(nodes.len() as i64);
 
         tracing::info!("Loading safekeepers from database...");
-        let safekeepers = persistence
-            .list_safekeepers()
-            .await?
-            .into_iter()
-            .map(|skp| Safekeeper::from_persistence(skp, CancellationToken::new()))
-            .collect::<Vec<_>>();
+        let safekeepers = if config.load_safekeepers {
+            persistence
+                .list_safekeepers()
+                .await?
+                .into_iter()
+                .map(|skp| Safekeeper::from_persistence(skp, CancellationToken::new()))
+                .collect::<Vec<_>>()
+        } else {
+            tracing::info!("Skipping safekeeper loading");
+            Default::default()
+        };
+
         let safekeepers: HashMap<NodeId, Safekeeper> =
             safekeepers.into_iter().map(|n| (n.get_id(), n)).collect();
-        tracing::info!("Loaded {} safekeepers from database.", safekeepers.len());
 
         tracing::info!("Loading shards from database...");
         let mut tenant_shard_persistence = persistence.load_active_tenant_shards().await?;
