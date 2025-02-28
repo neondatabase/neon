@@ -679,6 +679,21 @@ impl ComputeNode {
         let config_time = Utc::now();
         if pspec.spec.mode == ComputeMode::Primary {
             self.configure_as_primary(&compute_state)?;
+
+            let conf = self.get_conn_conf(None);
+            tokio::task::spawn_blocking(|| {
+                let res = get_installed_extensions(conf);
+                match res {
+                    Ok(extensions) => {
+                        info!(
+                            "[NEON_EXT_STAT] {}",
+                            serde_json::to_string(&extensions)
+                                .expect("failed to serialize extensions list")
+                        );
+                    }
+                    Err(err) => error!("could not get installed extensions: {err:?}"),
+                }
+            });
         }
 
         // All done!
@@ -1602,21 +1617,6 @@ impl ComputeNode {
             self.pg_reload_conf()?;
         }
         self.post_apply_config()?;
-
-        let conf = self.get_conn_conf(None);
-        tokio::task::spawn_blocking(|| {
-            let res = get_installed_extensions(conf);
-            match res {
-                Ok(extensions) => {
-                    info!(
-                        "[NEON_EXT_STAT] {}",
-                        serde_json::to_string(&extensions)
-                            .expect("failed to serialize extensions list")
-                    );
-                }
-                Err(err) => error!("could not get installed extensions: {err:?}"),
-            }
-        });
 
         Ok(())
     }
