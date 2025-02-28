@@ -182,6 +182,13 @@ pub struct TenantDescribeResponseShard {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TenantShardMigrateRequest {
     pub node_id: NodeId,
+
+    /// Optionally, callers may specify the node they are migrating _from_, and the server will
+    /// reject the request if the shard is no longer attached there: this enables writing safer
+    /// clients that don't risk fighting with some other movement of the shard.
+    #[serde(default)]
+    pub origin_node_id: Option<NodeId>,
+
     #[serde(default)]
     pub migration_config: MigrationConfig,
 }

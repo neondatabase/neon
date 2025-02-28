@@ -5406,6 +5406,19 @@ impl Service {
                 }
             }
 
+            if let Some(origin_node_id) = migrate_req.origin_node_id {
+                if shard.intent.get_attached() != &Some(origin_node_id) {
+                    return Err(ApiError::PreconditionFailed(
+                        format!(
+                            "Migration expected to originate from {} but shard is on {:?}",
+                            origin_node_id,
+                            shard.intent.get_attached()
+                        )
+                        .into(),
+                    ));
+                }
+            }
+
             if shard.intent.get_attached() == &Some(migrate_req.node_id) {
                 // No-op case: we will still proceed to wait for reconciliation in case it is
                 // incomplete from an earlier update to the intent.

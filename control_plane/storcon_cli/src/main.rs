@@ -639,6 +639,7 @@ async fn main() -> anyhow::Result<()> {
 
             let req = TenantShardMigrateRequest {
                 node_id: node,
+                origin_node_id: None,
                 migration_config,
             };
 
@@ -671,6 +672,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let req = TenantShardMigrateRequest {
                 node_id: node,
+                origin_node_id: None,
                 migration_config: MigrationConfig::default(),
             };
 
@@ -1137,6 +1139,7 @@ async fn main() -> anyhow::Result<()> {
                                 format!("control/v1/tenant/{}/migrate", mv.tenant_shard_id),
                                 Some(TenantShardMigrateRequest {
                                     node_id: mv.to,
+                                    origin_node_id: Some(mv.from),
                                     migration_config: MigrationConfig::default(),
                                 }),
                             )
