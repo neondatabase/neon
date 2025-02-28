@@ -2554,7 +2554,7 @@ impl PageServerHandler {
     }
 }
 
-/// `basebackup tenant timeline [lsn] [--gzip] [--replica]`[--lazy-sru-download]
+/// `basebackup tenant timeline [lsn] [--gzip] [--replica] [--lazy-slru-download]`
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct BaseBackupCmd {
     tenant_id: TenantId,
