@@ -5,7 +5,7 @@ use crate::timeline_manager::StateSnapshot;
 /// Get oldest LSN we still need to keep.
 ///
 /// We hold WAL till it is consumed by
-/// 1) pageserver (remote_consistent_lsn)
+/// 1) pageserver (min_remote_consistent_lsn)
 /// 2) s3 offloading.
 /// 3) Additionally we must store WAL since last local commit_lsn because
 ///    that's where we start looking for last WAL record on start.
@@ -17,7 +17,7 @@ use crate::timeline_manager::StateSnapshot;
 pub(crate) fn calc_horizon_lsn(state: &StateSnapshot, extra_horizon_lsn: Option<Lsn>) -> Lsn {
     use std::cmp::min;
 
-    let mut horizon_lsn = state.cfile_remote_consistent_lsn;
+    let mut horizon_lsn = state.min_remote_consistent_lsn;
     // we don't want to remove WAL that is not yet offloaded to s3
     horizon_lsn = min(horizon_lsn, state.cfile_backup_lsn);
     // Min by local commit_lsn to be able to begin reading WAL from somewhere on

@@ -61,10 +61,9 @@ pub struct TimelinePersistentState {
     /// walproposer proto called 'truncate_lsn'. Updates are currently drived
     /// only by walproposer.
     pub peer_horizon_lsn: Lsn,
-    /// LSN of the oldest known checkpoint made by pageserver and successfully
-    /// pushed to s3. We don't remove WAL beyond it. Persisted only for
-    /// informational purposes, we receive it from pageserver (or broker).
-    pub remote_consistent_lsn: Lsn,
+    /// Obsolete; nowadays we track remote_consistent_lsn by generation number
+    /// in a separate cache with relaxed persistency requirements.
+    remote_consistent_lsn: Lsn,
     /// Holds names of partial segments uploaded to remote storage. Used to
     /// clean up old objects without leaving garbage in remote storage.
     pub partial_backup: wal_backup_partial::State,

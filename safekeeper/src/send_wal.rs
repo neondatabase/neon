@@ -251,17 +251,6 @@ impl WalSenders {
         shared.update_reply_feedback();
     }
 
-    /// Get remote_consistent_lsn reported by the pageserver. Returns None if
-    /// client is not pageserver.
-    pub fn get_ws_remote_consistent_lsn(self: &Arc<WalSenders>, id: WalSenderId) -> Option<Lsn> {
-        let shared = self.mutex.lock();
-        let slot = shared.get_slot(id);
-        match slot.get_feedback() {
-            ReplicationFeedback::Pageserver(feedback) => Some(feedback.remote_consistent_lsn),
-            _ => None,
-        }
-    }
-
     /// Unregister walsender.
     fn unregister(self: &Arc<WalSenders>, id: WalSenderId) {
         let mut shared = self.mutex.lock();
@@ -890,28 +879,6 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
                 return Ok(());
             }
 
-            // Timed out waiting for WAL, check for termination and send KA.
-            // Check for termination only if we are streaming up to commit_lsn
-            // (to pageserver).
-            if let EndWatch::Commit(_) = self.end_watch {
-                if let Some(remote_consistent_lsn) = self
-                    .ws_guard
-                    .walsenders
-                    .get_ws_remote_consistent_lsn(self.ws_guard.id)
-                {
-                    if self.tli.should_walsender_stop(remote_consistent_lsn).await {
-                        // Terminate if there is nothing more to send.
-                        // Note that "ending streaming" part of the string is used by
-                        // pageserver to identify WalReceiverError::SuccessfulCompletion,
-                        // do not change this string without updating pageserver.
-                        return Err(CopyStreamHandlerEnd::ServerInitiated(format!(
-                        "ending streaming to {:?} at {}, receiver is caughtup and there is no computes",
-                        self.appname, self.start_pos,
-                    )));
-                    }
-                }
-            }
-
             let msg = BeMessage::KeepAlive(WalSndKeepAlive {
                 wal_end: self.end_pos.0,
                 timestamp: get_current_timestamp(),
@@ -1020,7 +987,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
                     .walsenders
                     .record_ps_feedback(self.ws_guard.id, &ps_feedback);
                 self.tli
-                    .update_remote_consistent_lsn(ps_feedback.remote_consistent_lsn, ps_feedback.generation)
+                    .process_remote_consistent_lsn_update(
+                        ps_feedback.generation,
+                        ps_feedback.remote_consistent_lsn,
+                    )
                     .await;
                 // in principle new remote_consistent_lsn could allow to
                 // deactivate the timeline, but we check that regularly through

@@ -47,6 +47,7 @@ pub(crate) struct StateSnapshot {
     // inmem values
     pub(crate) commit_lsn: Lsn,
     pub(crate) backup_lsn: Lsn,
+    pub(crate) min_remote_consistent_lsn: Lsn,
 
     // persistent control file values
     pub(crate) cfile_commit_lsn: Lsn,
@@ -58,7 +59,7 @@ pub(crate) struct StateSnapshot {
 
     // misc
     pub(crate) cfile_last_persist_at: std::time::Instant,
-    pub(crate) inmem_flush_pending: bool,
+    pub(crate) cfile_inmem_flush_pending: bool,
     pub(crate) wal_removal_on_hold: bool,
     pub(crate) peers: Vec<PeerInfo>,
 }
@@ -70,21 +71,23 @@ impl StateSnapshot {
         Self {
             commit_lsn: state.inmem.commit_lsn,
             backup_lsn: state.inmem.backup_lsn,
+            min_remote_consistent_lsn: todo!(""),
             cfile_commit_lsn: state.commit_lsn,
             cfile_backup_lsn: state.backup_lsn,
             flush_lsn: read_guard.sk.flush_lsn(),
             last_log_term: read_guard.sk.last_log_term(),
             cfile_last_persist_at: state.pers.last_persist_at(),
-            inmem_flush_pending: Self::has_unflushed_inmem_state(state),
+            cfile_inmem_flush_pending: Self::has_unflushed_cfile_inmem_state(state),
             wal_removal_on_hold: read_guard.wal_removal_on_hold,
             peers: read_guard.get_peers(heartbeat_timeout),
         }
     }
 
-    fn has_unflushed_inmem_state(state: &TimelineState<FileStorage>) -> bool {
+    fn has_unflushed_cfile_inmem_state(state: &TimelineState<FileStorage>) -> bool {
         state.inmem.commit_lsn > state.commit_lsn
             || state.inmem.backup_lsn > state.backup_lsn
             || state.inmem.peer_horizon_lsn > state.peer_horizon_lsn
+        // NB: remote_consistent_lsn storage is stored separately from control file
     }
 }
 
@@ -498,15 +501,14 @@ impl Manager {
     ) {
         let is_active = is_wal_backup_required
             || num_computes > 0
-            // TODO: replace with new facility
-            || state.remote_consistent_lsn < state.commit_lsn;
+            || state.min_remote_consistent_lsn < state.commit_lsn;
 
         // update the broker timeline set
         if self.tli_broker_active.set(is_active) {
             // write log if state has changed
             info!(
-                "timeline active={} now, remote_consistent_lsn={}, commit_lsn={}",
-                is_active, state.remote_consistent_lsn, state.commit_lsn,
+                "timeline active={} now, min_remote_consistent_lsn={}, commit_lsn={}",
+                is_active, state.min_remote_consistent_lsn, state.commit_lsn,
             );
 
             MANAGER_ACTIVE_CHANGES.inc();
@@ -524,7 +526,7 @@ impl Manager {
         state: &StateSnapshot,
         next_event: &mut Option<Instant>,
     ) {
-        if !state.inmem_flush_pending {
+        if !state.cfile_inmem_flush_pending {
             return;
         }
 

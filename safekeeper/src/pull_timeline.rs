@@ -309,10 +309,7 @@ impl WalResidentTimeline {
         // lock and setting `wal_removal_on_hold` later, it guarantees that WAL
         // won't be removed until we're done.
         // TODO: do we still need this snapshot code path?
-        let from_lsn = min(
-            shared_state.sk.state().remote_consistent_lsn,
-            shared_state.sk.state().backup_lsn,
-        );
+        let from_lsn = shared_state.sk.state().backup_lsn;
         if from_lsn == Lsn::INVALID {
             // this is possible if snapshot is called before handling first
             // elected message

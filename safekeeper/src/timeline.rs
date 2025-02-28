@@ -215,7 +215,7 @@ impl StateSK {
             StateSK::Empty => unreachable!(),
         }
 
-        // update everything else, including remote_consistent_lsn and backup_lsn
+        // update everything else, including backup_lsn
         let mut sync_control_file = false;
         let state = self.state_mut();
         let wal_seg_size = state.server.wal_seg_size as u64;
@@ -873,6 +873,16 @@ impl Timeline {
     pub async fn backup_partial_reset(self: &Arc<Self>) -> Result<Vec<String>> {
         self.manager_ctl.backup_partial_reset().await
     }
+
+    pub async fn process_remote_consistent_lsn_update(
+        &self,
+        generation: Generation,
+        candidate: Lsn,
+    ) {
+        // TODO: still update controlfile state for backwards compate
+
+        todo!("implement & use the remote_persistent_lsn cache")
+    }
 }
 
 /// This is a guard that allows to read/write disk timeline state.
@@ -897,23 +907,6 @@ impl Deref for WalResidentTimeline {
 }
 
 impl WalResidentTimeline {
-    /// Returns true if walsender should stop sending WAL to pageserver. We
-    /// terminate it if remote_consistent_lsn reached commit_lsn and there is no
-    /// computes. While there might be nothing to stream already, we learn about
-    /// remote_consistent_lsn update through replication feedback, and we want
-    /// to stop pushing to the broker if pageserver is fully caughtup.
-    pub async fn should_walsender_stop(&self, reported_remote_consistent_lsn: Lsn) -> bool {
-        if self.is_cancelled() {
-            return true;
-        }
-        let shared_state = self.read_shared_state().await;
-        if self.walreceivers.get_num() == 0 {
-            return shared_state.sk.state().inmem.commit_lsn == Lsn(0) || // no data at all yet
-            reported_remote_consistent_lsn >= shared_state.sk.state().inmem.commit_lsn;
-        }
-        false
-    }
-
     /// Ensure that current term is t, erroring otherwise, and lock the state.
     pub async fn acquire_term(&self, t: Term) -> Result<ReadGuardSharedState> {
         let ss = self.read_shared_state().await;
@@ -964,11 +957,6 @@ impl WalResidentTimeline {
 
     pub fn get_timeline_dir(&self) -> Utf8PathBuf {
         self.timeline_dir.clone()
-    }
-
-    /// Update in memory remote consistent lsn.
-    pub async fn update_remote_consistent_lsn(&self, candidate: Lsn, generation: Generation) {
-        todo!()
     }
 }
 
