@@ -33,7 +33,7 @@ class NeonEndpoint:
         self.project.delete_endpoint(self.id)
 
     def connect_env(self) -> dict[str, str]:
-        env = self.branch.connect_env
+        env = self.branch.connect_env()
         env["PGHOST"] = self.host
         return env
 
