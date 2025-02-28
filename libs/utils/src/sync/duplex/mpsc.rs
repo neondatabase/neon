@@ -3,7 +3,7 @@ use tokio::sync::mpsc;
 /// A bi-directional channel.
 pub struct Duplex<S, R> {
     tx: mpsc::Sender<S>,
-    rx: RecvOnly<R>,
+    rx: mpsc::Receiver<R>,
 }
 
 /// Creates a bi-directional channel.
@@ -15,16 +15,7 @@ pub fn channel<A: Send, B: Send>(buffer: usize) -> (Duplex<A, B>, Duplex<B, A>) 
     let (tx_a, rx_a) = mpsc::channel::<A>(buffer);
     let (tx_b, rx_b) = mpsc::channel::<B>(buffer);
 
-    (
-        Duplex {
-            tx: tx_a,
-            rx: RecvOnly { rx: rx_b },
-        },
-        Duplex {
-            tx: tx_b,
-            rx: RecvOnly { rx: rx_a },
-        },
-    )
+    (Duplex { tx: tx_a, rx: rx_b }, Duplex { tx: tx_b, rx: rx_a })
 }
 
 impl<S: Send, R: Send> Duplex<S, R> {
@@ -43,95 +34,49 @@ impl<S: Send, R: Send> Duplex<S, R> {
         self.rx.recv().await
     }
 
-    pub fn shutdown_write_half(self) -> RecvOnly<R> {
+    pub fn close(self) {
         let Self { tx: _, rx } = { self };
-        rx
+        drop(rx); // this makes the other Duplex's tx resolve on tx.closed()
     }
 
     /// Future
-    pub async fn wait_for_peer_gone(&self) {
+    pub async fn closed(&self) {
         self.tx.closed().await
     }
 
-    pub fn is_peer_gone(&self) -> bool {
+    pub fn is_closed(&self) -> bool {
         self.tx.is_closed()
-    }
-}
-
-pub struct RecvOnly<R> {
-    rx: mpsc::Receiver<R>,
-}
-
-impl<R: Send> RecvOnly<R> {
-    pub async fn recv(&mut self) -> Option<R> {
-        self.rx.recv().await
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::time::Duration;
 
-    #[tokio::test]
-    async fn test_orderly_shutdown_buffered_writer_use_case() {
+    const FOREVER: Duration = Duration::from_secs(100 * 365 * 24 * 60 * 60);
+
+    #[tokio::test(start_paused = true)]
+    async fn test_await_close() {
         let (a, mut b) = super::channel::<i32, i32>(1);
 
-        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut recv_fut = Box::pin(b.recv());
 
-        let flush_task = tokio::spawn({
-            let written = Arc::clone(&written);
-            async move {
-                loop {
-                    match b.recv().await {
-                        Some(slice) => {
-                            dbg!(slice);
-                            // retry flush until sucess, with exponential back-off
-                            for attempt in 1.. {
-                                println!("attempt {}", attempt);
-                                if b.is_peer_gone() {
-                                    anyhow::bail!("peer is gone");
-                                }
-                                if slice % 2 == 0 {
-                                    // simulate success
-                                    written.lock().unwrap().push(slice.clone());
-                                    break;
-                                } else {
-                                    println!("simulated IO error");
-                                    crate::backoff::exponential_backoff2(
-                                        attempt,
-                                        0.1,
-                                        0.5,
-                                        b.wait_for_peer_gone(),
-                                    )
-                                    .await;
-                                }
-                            }
-                            // return the slice for reuse; if there is no interest, still process remaining flushes
-                            let _ = b.send(slice).await;
-                        }
-                        None => {
-                            println!("peer hung up");
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-        });
+        tokio::select! {
+            _ = &mut recv_fut => unreachable!("nothing was sent"),
+            _ = tokio::time::sleep(FOREVER) => (),
+        }
 
-        a.send(2).await.unwrap();
-        a.send(4).await.unwrap();
+        a.close();
 
-        // orderly shutdown looks like this
-        let mut a = a.shutdown_write_half();
-        let recv = a.recv().await.unwrap();
-        assert_eq!(recv, 2);
-        let recv = a.recv().await.unwrap();
-        assert_eq!(recv, 4);
-        flush_task
-            .await
-            .expect("flush task to not panic")
-            .expect("flush task to exit with Ok()");
+        tokio::select! {
+            res = &mut recv_fut => {
+                assert!(res.is_none());
+            },
+            _ = tokio::time::sleep(FOREVER) => (),
+        }
 
-        assert_eq!(written.lock().unwrap().as_slice(), &[2, 4]);
+        drop(recv_fut);
+
+        assert!(b.is_closed());
     }
 }
