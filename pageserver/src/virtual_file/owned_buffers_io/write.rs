@@ -175,10 +175,7 @@ where
             self.mutable = Some(buf);
             return Ok(None);
         }
-        let (recycled, flush_control) = self
-            .flush_handle
-            .flush(buf, self.bytes_submitted, &mut self.mutable)
-            .await?;
+        let (recycled, flush_control) = self.flush_handle.flush(buf, self.bytes_submitted).await?;
         self.bytes_submitted += u64::try_from(buf_len).unwrap();
         self.mutable = Some(recycled);
         Ok(Some(flush_control))
