@@ -269,8 +269,8 @@ where
             //
             // TODO: cancellation sensitiity.
             // Without it, if we hit a bug where retrying is never successful,
-            // then we can't shut down the timeline/tenant/pageserver cleanrly because
-            // upp layers of the Pageserver write path are holding the gate open for EphemeralFile.
+            // then we can't shut down the timeline/tenant/pageserver cleanly because
+            // layers of the Pageserver write path are holding the gate open for EphemeralFile.
             //
             // TODO: use utils::backoff::retry once async closures are actually usable
             //
