@@ -55,7 +55,7 @@ lwlc_register_gucs(void)
 	DefineCustomIntVariable("neon.last_written_lsn_cache_size",
 							"Size of last written LSN cache used by Neon",
 							NULL,
-							&lsn_cache_size,
+							&lastWrittenLsnCacheSize,
 							(128*1024), -1, INT_MAX,
 							PGC_POSTMASTER,
 							0, /* plain units */
@@ -95,14 +95,14 @@ pg_init_lwlc(void)
 
 	INSTALL_HOOK(shmem_startup_hook, shmeminit);
 
-	INSTALL_HOOK(get_lwlsn_hook, GetLastWrittenLSN);
-	INSTALL_HOOK(get_lwlsn_v_hook, GetLastWrittenLSNv);
-	INSTALL_HOOK(set_lwlsn_block_range_hook, SetLastWrittenLSNForBlockRange);
-	INSTALL_HOOK(set_lwlsn_block_v_hook, SetLastWrittenLSNForBlockv);
-	INSTALL_HOOK(set_lwlsn_block_hook, SetLastWrittenLSNForBlock);
-	INSTALL_HOOK(set_lwlsn_relation_hook, SetLastWrittenLSNForRelation);
-	INSTALL_HOOK(set_lwlsn_db_hook, SetLastWrittenLSNForDatabase);
-	INSTALL_HOOK(get_lwlsn_cache_size, GetLastWrittenLSNCacheSize);
+	INSTALL_HOOK(get_lwlsn_hook, neon_get_lwlsn);
+	INSTALL_HOOK(get_lwlsn_v_hook, neon_get_lwlsn_v);
+	INSTALL_HOOK(set_lwlsn_block_range_hook, neon_set_lwlsn_block_range);
+	INSTALL_HOOK(set_lwlsn_block_v_hook, neon_set_lwlsn_block_v);
+	INSTALL_HOOK(set_lwlsn_block_hook, neon_set_lwlsn_block);
+	INSTALL_HOOK(set_lwlsn_relation_hook, neon_set_lwlsn_relation);
+	INSTALL_HOOK(set_lwlsn_db_hook, neon_set_lwlsn_db);
+	INSTALL_HOOK(get_lwlsn_cache_size, neon_get_lwlsn_cache_size);
 
 #if PG_VERSION_NUM >= 150000
 	INSTALL_HOOK(shmem_request_hook, shmemrequest);
@@ -113,9 +113,17 @@ pg_init_lwlc(void)
 	INSTALL_HOOK(xlog_pre_recovery_start_hook, lwlc_pre_recovery_start_hook);
 }
 
-// TODO: Finish this function
 void shmemrequest(void) {
+	Size requested_size = sizeof(dlist_head);
 
+	#if PG_VERSION_NUM >= 150000
+		if (prev_shmem_request_hook)
+			prev_shmem_request_hook();
+	#endif
+	
+		requested_size += hash_estimate_size(lastWrittenLsnCacheSize, sizeof(dlist_head));
+	
+		RequestAddinShmemSpace(requested_size);
 }
 
 void shmeminit(void) {
@@ -139,20 +147,20 @@ if (lastWrittenLsnCacheSize > 0)
     maxLastWrittenLsn = GetRedoRecPtr();
 }
 
-int GetLastWrittenLSNCacheSize (void) {
+int neon_get_lwlsn_cache_size (void) {
 	return lastWrittenLsnCacheSize;
 }
 
 /*
- * GetLastWrittenLSN -- Returns maximal LSN of written page.
+ * neon_get_lwlsn -- Returns maximal LSN of written page.
  * It returns an upper bound for the last written LSN of a given page,
  * either from a cached last written LSN or a global maximum last written LSN.
  * If rnode is InvalidOid then we calculate maximum among all cached LSN and maxLastWrittenLsn.
  * If cache is large enough, iterating through all hash items may be rather expensive.
- * But GetLastWrittenLSN(InvalidOid) is used only by neon_dbsize which is not performance critical.
+ * But neon_get_lwlsn(InvalidOid) is used only by neon_dbsize which is not performance critical.
  */
 XLogRecPtr
-GetLastWrittenLSN(RelFileLocator rlocator, ForkNumber forknum, BlockNumber blkno)
+neon_get_lwlsn(RelFileLocator rlocator, ForkNumber forknum, BlockNumber blkno)
 {
 	XLogRecPtr lsn;
 	LastWrittenLsnCacheEntry* entry;
@@ -218,7 +226,7 @@ GetLastWrittenLSN(RelFileLocator rlocator, ForkNumber forknum, BlockNumber blkno
  * But GetLastWrittenLSN(InvalidOid) is used only by neon_dbsize which is not performance critical.
  */
 void
-GetLastWrittenLSNv(RelFileLocator relfilenode, ForkNumber forknum,
+neon_get_lwlsn_v(RelFileLocator relfilenode, ForkNumber forknum,
 				   BlockNumber blkno, int nblocks, XLogRecPtr *lsns)
 {
 	LastWrittenLsnCacheEntry* entry;
@@ -371,7 +379,7 @@ SetLastWrittenLSNForBlockRangeInternal(XLogRecPtr lsn,
  * SetLastWrittenLsn with dummy rlocator is used by createdb and dbase_redo functions.
  */
 XLogRecPtr
-SetLastWrittenLSNForBlockRange(XLogRecPtr lsn, RelFileLocator rlocator, ForkNumber forknum, BlockNumber from, BlockNumber n_blocks)
+neon_set_lwlsn_block_range(XLogRecPtr lsn, RelFileLocator rlocator, ForkNumber forknum, BlockNumber from, BlockNumber n_blocks)
 {
 	if (lsn == InvalidXLogRecPtr || n_blocks == 0 || lastWrittenLsnCacheSize == 0)
 		return lsn;
@@ -384,7 +392,7 @@ SetLastWrittenLSNForBlockRange(XLogRecPtr lsn, RelFileLocator rlocator, ForkNumb
 }
 
 /*
- * SetLastWrittenLSNForBlockv -- Set maximal LSN of pages to their respective
+ * neon_set_lwlsn_block_v -- Set maximal LSN of pages to their respective
  * LSNs.
  *
  * We maintain cache of last written LSNs with limited size and LRU replacement
@@ -393,7 +401,7 @@ SetLastWrittenLSNForBlockRange(XLogRecPtr lsn, RelFileLocator rlocator, ForkNumb
  * efficient work of prefetch in case massive update operations (like vacuum or remove).
  */
 XLogRecPtr
-SetLastWrittenLSNForBlockv(const XLogRecPtr *lsns, RelFileLocator relfilenode,
+neon_set_lwlsn_block_v(const XLogRecPtr *lsns, RelFileLocator relfilenode,
 						   ForkNumber forknum, BlockNumber blockno,
 						   int nblocks)
 {
@@ -456,26 +464,26 @@ SetLastWrittenLSNForBlockv(const XLogRecPtr *lsns, RelFileLocator relfilenode,
  * SetLastWrittenLSNForBlock -- Set maximal LSN for block
  */
 XLogRecPtr
-SetLastWrittenLSNForBlock(XLogRecPtr lsn, RelFileLocator rlocator, ForkNumber forknum, BlockNumber blkno)
+neon_set_lwlsn_block(XLogRecPtr lsn, RelFileLocator rlocator, ForkNumber forknum, BlockNumber blkno)
 {
-	return SetLastWrittenLSNForBlockRange(lsn, rlocator, forknum, blkno, 1);
+	return neon_set_lwlsn_block_range(lsn, rlocator, forknum, blkno, 1);
 }
 
 /*
- * SetLastWrittenLSNForRelation -- Set maximal LSN for relation metadata
+ * neon_set_lwlsn_relation -- Set maximal LSN for relation metadata
  */
 XLogRecPtr
-SetLastWrittenLSNForRelation(XLogRecPtr lsn, RelFileLocator rlocator, ForkNumber forknum)
+neon_set_lwlsn_relation(XLogRecPtr lsn, RelFileLocator rlocator, ForkNumber forknum)
 {
-	return SetLastWrittenLSNForBlock(lsn, rlocator, forknum, REL_METADATA_PSEUDO_BLOCKNO);
+	return neon_set_lwlsn_block(lsn, rlocator, forknum, REL_METADATA_PSEUDO_BLOCKNO);
 }
 
 /*
- * SetLastWrittenLSNForDatabase -- Set maximal LSN for the whole database
+ * neon_set_lwlsn_db -- Set maximal LSN for the whole database
  */
 XLogRecPtr
-SetLastWrittenLSNForDatabase(XLogRecPtr lsn)
+neon_set_lwlsn_db(XLogRecPtr lsn)
 {
 	RelFileLocator dummyNode = {InvalidOid, InvalidOid, InvalidOid};
-	return SetLastWrittenLSNForBlock(lsn, dummyNode, MAIN_FORKNUM, 0);
+	return neon_set_lwlsn_block(lsn, dummyNode, MAIN_FORKNUM, 0);
 }
