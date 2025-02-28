@@ -40,6 +40,7 @@ use crate::span::{
 use crate::tenant::Generation;
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::LayerName;
+use crate::virtual_file::owned_buffers_io::write::FlushTaskError;
 use crate::virtual_file::{MaybeFatalIo, VirtualFile, on_fatal_io_error};
 
 ///
@@ -242,11 +243,21 @@ async fn download_object(
                     {
                         let chunk = match res {
                             Ok(chunk) => chunk,
-                            Err(e) => return Err(e),
+                            Err(e) => return Err(DownloadError::from(e)),
                         };
-                        buffered.write_buffered_borrowed(&chunk, ctx).await?;
+                        buffered
+                            .write_buffered_borrowed(&chunk, ctx)
+                            .await
+                            .map_err(|e| match e {
+                                FlushTaskError::Cancelled => DownloadError::Cancelled,
+                            })?;
                     }
-                    let inner = buffered.flush_and_into_inner(ctx).await?;
+                    let inner = buffered
+                        .flush_and_into_inner(ctx)
+                        .await
+                        .map_err(|e| match e {
+                            FlushTaskError::Cancelled => DownloadError::Cancelled,
+                        })?;
                     Ok(inner)
                 }
                 .await?;
