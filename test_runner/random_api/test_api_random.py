@@ -19,23 +19,20 @@ from fixtures.pg_version import PgVersion
 
 
 class NeonEndpoint:
-    def __init__(self, project, endpoint):
-        self.project = project
-        self.id = endpoint["id"]
-        self.branch = project.branches[endpoint["branch_id"]]
-        self.type = endpoint["type"]
+    def __init__(self, project: NeonProject, endpoint: dict[str, Any]):
+        self.project: NeonProject = project
+        self.id: str = endpoint["id"]
+        self.branch: NeonBranch = project.branches[endpoint["branch_id"]]
+        self.type: str = endpoint["type"]
         self.branch.endpoints[self.id] = self
         self.project.endpoints[self.id] = self
-        self.host = endpoint["host"]
-        self.benchmark = None
+        self.host: str = endpoint["host"]
+        self.benchmark: subprocess.Popen | None = None
+        self.connect_env: dict[str, str] = self.branch.connect_env
+        self.connect_env['PGHOST'] = self.host
 
     def delete(self):
         self.project.delete_endpoint(self.id)
-
-    def connect_env(self) -> dict[str, str]:
-        env = self.branch.connect_env()
-        env["PGHOST"] = self.host
-        return env
 
     def start_benchmark(self, clients=10):
         return self.project.start_benchmark(self.id, clients=clients)
@@ -54,11 +51,21 @@ class NeonBranch:
         self.project = project
         self.neon_api = project.neon_api
         self.project_id = branch["branch"]["project_id"]
-        self.parent = self.project.branches[branch["branch"]["parent_id"]] if "parent_id" in branch["branch"] else None
+        self.parent = (
+            self.project.branches[branch["branch"]["parent_id"]]
+            if "parent_id" in branch["branch"]
+            else None
+        )
         self.children = {}
         self.endpoints = {}
         self.connection_parameters = branch["connection_uris"][0]["connection_parameters"]
         self.benchmark = None
+        self.connect_env = {
+            "PGHOST": self.connection_parameters["host"],
+            "PGUSER": self.connection_parameters["role"],
+            "PGDATABASE": self.connection_parameters["database"],
+            "PGPASSWORD": self.connection_parameters["password"],
+        }
 
     def __str__(self):
         return f"Branch {self.id}, parent: {self.parent}"
@@ -74,12 +81,6 @@ class NeonBranch:
 
     def delete(self):
         self.project.delete_branch(self.id)
-
-    def connect_env(self) -> dict[str, str]:
-        env = {"PGHOST": self.connection_parameters["host"], "PGUSER": self.connection_parameters["role"],
-               "PGDATABASE": self.connection_parameters["database"],
-               "PGPASSWORD": self.connection_parameters["password"]}
-        return env
 
     def start_benchmark(self, clients=10):
         return self.project.start_benchmark(self.id, clients=clients)
@@ -101,7 +102,9 @@ class NeonProject:
         self.id: str = proj["project"]["id"]
         self.name: str = proj["project"]["name"]
         self.connection_uri: str = proj["connection_uris"][0]["connection_uri"]
-        self.connection_parameters: dict[str, str] = proj["connection_uris"][0]["connection_parameters"]
+        self.connection_parameters: dict[str, str] = proj["connection_uris"][0][
+            "connection_parameters"
+        ]
         self.pg_version: PgVersion = pg_version
         self.main_branch: NeonBranch = NeonBranch(self, proj)
         self.main_branch.connection_parameters = self.connection_parameters
@@ -120,9 +123,7 @@ class NeonProject:
         return self.neon_api.get_branches(self.id)["branches"]
 
     def create_branch(self, parent_id: str | None = None) -> NeonBranch:
-        new_branch = NeonBranch(
-            self, self.neon_api.create_branch(self.id, parent_id=parent_id)
-        )
+        new_branch = NeonBranch(self, self.neon_api.create_branch(self.id, parent_id=parent_id))
         self.leaf_branches[new_branch.id] = new_branch
         self.branches[new_branch.id] = new_branch
         if parent_id and parent_id in self.leaf_branches:
@@ -156,7 +157,7 @@ class NeonProject:
         self.neon_api.delete_endpoint(self.id, endpoint_id)
         self.wait()
 
-    def start_benchmark(self, target: str, clients: int=10) -> subprocess.Popen:
+    def start_benchmark(self, target: str, clients: int = 10) -> subprocess.Popen:
         if target in self.benchmarks:
             raise RuntimeError(f"Benchmark was already started for {target}")
         target_endpoint = target.startswith("ep")
@@ -164,7 +165,12 @@ class NeonProject:
         cmd = ["pgbench", f"-c{clients}", "-T10800", "-Mprepared"]
         if read_only:
             cmd.append("-S")
-        pgbench = self.pg_bin.run_nonblocking(cmd, env=self.endpoints[target].connect_env if target_endpoint else self.branches[target].connect_env())
+        pgbench = self.pg_bin.run_nonblocking(
+            cmd,
+            env=self.endpoints[target].connect_env
+            if target_endpoint
+            else self.branches[target].connect_env,
+        )
         self.benchmarks[target] = pgbench
         if target_endpoint:
             self.endpoints[target].benchmark = pgbench
@@ -236,7 +242,6 @@ def do_action(project, action):
             log.info("no read_only endpoints present, skipping")
 
 
-
 @pytest.mark.timeout(7200)
 @pytest.mark.remote_cluster
 def test_api_random(
@@ -255,9 +260,23 @@ def test_api_random(
     random.seed(seed)
     pg_bin, project = setup_class
     # Here we can assign weights by repeating actions
-    ACTIONS = ('new_branch', 'new_branch', 'new_branch', 'new_branch', 'new_ro_endpoint', 'new_ro_endpoint', 'new_ro_endpoint', "delete_ro_endpoint", "delete_ro_endpoint", "delete_branch", "delete branch")
+    ACTIONS = (
+        "new_branch",
+        "new_branch",
+        "new_branch",
+        "new_branch",
+        "new_ro_endpoint",
+        "new_ro_endpoint",
+        "new_ro_endpoint",
+        "delete_ro_endpoint",
+        "delete_ro_endpoint",
+        "delete_branch",
+        "delete branch",
+    )
     ACTIONS_LIMIT = 250
-    pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", "-s100"], env=project.main_branch.connect_env())
+    pg_bin.run_capture(
+        ["pgbench", "-i", "-I", "dtGvp", "-s100"], env=project.main_branch.connect_env
+    )
     for _ in range(ACTIONS_LIMIT):
         do_action(project, random.choice(ACTIONS))
     assert True
