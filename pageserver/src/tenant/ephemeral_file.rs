@@ -351,7 +351,8 @@ mod tests {
         let timeline_id = TimelineId::from_str("22000000000000000000000000000000").unwrap();
         fs::create_dir_all(conf.timeline_path(&tenant_shard_id, &timeline_id))?;
 
-        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let ctx =
+            RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
 
         Ok((conf, tenant_shard_id, timeline_id, ctx))
     }

@@ -8,7 +8,6 @@ use utils::id::TimelineId;
 use super::failpoints::{Failpoint, FailpointKind};
 use super::*;
 use crate::context::DownloadBehavior;
-use crate::task_mgr::TaskKind;
 use crate::tenant::harness::{TenantHarness, test_img};
 use crate::tenant::storage_layer::{IoConcurrency, LayerVisibilityHint};
 
@@ -27,10 +26,8 @@ async fn smoke_test() {
     let h = TenantHarness::create("smoke_test").await.unwrap();
     let span = h.span();
     let download_span = span.in_scope(|| tracing::info_span!("downloading", timeline_id = 1));
-    let (tenant, _) = h.load().await;
+    let (tenant, ctx) = h.load().await;
     let io_concurrency = IoConcurrency::spawn_for_test();
-
-    let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Download);
 
     let image_layers = vec![(
         Lsn(0x40),
@@ -55,6 +52,7 @@ async fn smoke_test() {
         )
         .await
         .unwrap();
+    let ctx = &ctx.with_scope_timeline(&timeline);
 
     // Grab one of the timeline's layers to exercise in the test, and the other layer that is just
     // there to avoid the timeline being illegally empty
@@ -93,7 +91,7 @@ async fn smoke_test() {
                 controlfile_keyspace.clone(),
                 Lsn(0x10)..Lsn(0x11),
                 &mut data,
-                &ctx,
+                ctx,
             )
             .await
             .unwrap();
@@ -128,7 +126,7 @@ async fn smoke_test() {
                 controlfile_keyspace.clone(),
                 Lsn(0x10)..Lsn(0x11),
                 &mut data,
-                &ctx,
+                ctx,
             )
             .instrument(download_span.clone())
             .await
@@ -178,7 +176,7 @@ async fn smoke_test() {
 
     // plain downloading is rarely needed
     layer
-        .download_and_keep_resident(&ctx)
+        .download_and_keep_resident(ctx)
         .instrument(download_span)
         .await
         .unwrap();
@@ -340,6 +338,7 @@ fn read_wins_pending_eviction() {
             .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
             .await
             .unwrap();
+        let ctx = ctx.with_scope_timeline(&timeline);
 
         let layer = {
             let mut layers = {
@@ -472,6 +471,7 @@ fn multiple_pending_evictions_scenario(name: &'static str, in_order: bool) {
             .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
             .await
             .unwrap();
+        let ctx = ctx.with_scope_timeline(&timeline);
 
         let layer = {
             let mut layers = {
@@ -641,12 +641,12 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
         .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
         .await
         .unwrap();
+    let ctx = ctx.with_scope_timeline(&timeline);
 
     // This test does downloads
     let ctx = RequestContextBuilder::extend(&ctx)
         .download_behavior(DownloadBehavior::Download)
         .build();
-
     let layer = {
         let mut layers = {
             let layers = timeline.layers.read().await;
@@ -726,6 +726,7 @@ async fn evict_and_wait_does_not_wait_for_download() {
         .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
         .await
         .unwrap();
+    let ctx = ctx.with_scope_timeline(&timeline);
 
     // This test does downloads
     let ctx = RequestContextBuilder::extend(&ctx)

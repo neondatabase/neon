@@ -77,6 +77,8 @@ use self::timeline::{
     EvictionTaskTenantState, GcCutoffs, TimelineDeleteProgress, TimelineResources, WaitLsnError,
 };
 use crate::config::PageServerConf;
+use crate::context;
+use crate::context::RequestContextBuilder;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::{DeletionQueueClient, DeletionQueueError};
 use crate::l0_flush::L0FlushGlobalState;
@@ -1114,7 +1116,7 @@ impl Tenant {
             }
         };
 
-        let timeline = self.create_timeline_struct(
+        let (timeline, timeline_ctx) = self.create_timeline_struct(
             timeline_id,
             &metadata,
             previous_heatmap,
@@ -1123,6 +1125,7 @@ impl Tenant {
             CreateTimelineCause::Load,
             idempotency.clone(),
             index_part.gc_compaction.clone(),
+            ctx,
         )?;
         let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
         anyhow::ensure!(
@@ -1256,7 +1259,7 @@ impl Tenant {
                         match activate {
                             ActivateTimelineArgs::Yes { broker_client } => {
                                 info!("activating timeline after reload from pgdata import task");
-                                timeline.activate(self.clone(), broker_client, None, ctx);
+                                timeline.activate(self.clone(), broker_client, None, &timeline_ctx);
                             }
                             ActivateTimelineArgs::No => (),
                         }
@@ -1760,6 +1763,7 @@ impl Tenant {
                         import_pgdata,
                         ActivateTimelineArgs::No,
                         guard,
+                        ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Warn),
                     ));
                 }
             }
@@ -1777,6 +1781,7 @@ impl Tenant {
                 timeline_id,
                 &index_part.metadata,
                 remote_timeline_client,
+                ctx,
             )
             .instrument(tracing::info_span!("timeline_delete", %timeline_id))
             .await
@@ -2214,7 +2219,7 @@ impl Tenant {
                 self.clone(),
                 broker_client.clone(),
                 background_jobs_can_start,
-                &ctx,
+                &ctx.with_scope_timeline(&timeline),
             );
         }
 
@@ -2411,8 +2416,8 @@ impl Tenant {
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
         pg_version: u32,
-        _ctx: &RequestContext,
-    ) -> anyhow::Result<UninitializedTimeline> {
+        ctx: &RequestContext,
+    ) -> anyhow::Result<(UninitializedTimeline, RequestContext)> {
         anyhow::ensure!(
             self.is_active(),
             "Cannot create empty timelines on inactive tenant"
@@ -2446,6 +2451,7 @@ impl Tenant {
             create_guard,
             initdb_lsn,
             None,
+            ctx,
         )
         .await
     }
@@ -2463,7 +2469,7 @@ impl Tenant {
         pg_version: u32,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
-        let uninit_tl = self
+        let (uninit_tl, ctx) = self
             .create_empty_timeline(new_timeline_id, initdb_lsn, pg_version, ctx)
             .await?;
         let tline = uninit_tl.raw_timeline().expect("we just created it");
@@ -2475,7 +2481,7 @@ impl Tenant {
             .init_empty_test_timeline()
             .context("init_empty_test_timeline")?;
         modification
-            .commit(ctx)
+            .commit(&ctx)
             .await
             .context("commit init_empty_test_timeline modification")?;
 
@@ -2687,7 +2693,12 @@ impl Tenant {
         // doing stuff before the IndexPart is durable in S3, which is done by the previous section.
         let activated_timeline = match result {
             CreateTimelineResult::Created(timeline) => {
-                timeline.activate(self.clone(), broker_client, None, ctx);
+                timeline.activate(
+                    self.clone(),
+                    broker_client,
+                    None,
+                    &ctx.with_scope_timeline(&timeline),
+                );
                 timeline
             }
             CreateTimelineResult::Idempotent(timeline) => {
@@ -2749,10 +2760,9 @@ impl Tenant {
             }
         };
 
-        let mut uninit_timeline = {
+        let (mut uninit_timeline, timeline_ctx) = {
             let this = &self;
             let initdb_lsn = Lsn(0);
-            let _ctx = ctx;
             async move {
                 let new_metadata = TimelineMetadata::new(
                     // Initialize disk_consistent LSN to 0, The caller must import some data to
@@ -2771,6 +2781,7 @@ impl Tenant {
                     timeline_create_guard,
                     initdb_lsn,
                     None,
+                    ctx,
                 )
                 .await
             }
@@ -2800,6 +2811,7 @@ impl Tenant {
             index_part,
             activate,
             timeline_create_guard,
+            timeline_ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Warn),
         ));
 
         // NB: the timeline doesn't exist in self.timelines at this point
@@ -2813,6 +2825,7 @@ impl Tenant {
         index_part: import_pgdata::index_part_format::Root,
         activate: ActivateTimelineArgs,
         timeline_create_guard: TimelineCreateGuard,
+        ctx: RequestContext,
     ) {
         debug_assert_current_span_has_tenant_and_timeline_id();
         info!("starting");
@@ -2824,6 +2837,7 @@ impl Tenant {
                 index_part,
                 activate,
                 timeline_create_guard,
+                ctx,
             )
             .await;
         if let Err(err) = &res {
@@ -2839,9 +2853,8 @@ impl Tenant {
         index_part: import_pgdata::index_part_format::Root,
         activate: ActivateTimelineArgs,
         timeline_create_guard: TimelineCreateGuard,
+        ctx: RequestContext,
     ) -> Result<(), anyhow::Error> {
-        let ctx = RequestContext::new(TaskKind::ImportPgdata, DownloadBehavior::Warn);
-
         info!("importing pgdata");
         import_pgdata::doit(&timeline, index_part, &ctx, self.cancel.clone())
             .await
@@ -3050,6 +3063,7 @@ impl Tenant {
 
             let mut has_pending_l0 = false;
             for timeline in compact_l0 {
+                let ctx = &ctx.with_scope_timeline(&timeline);
                 let outcome = timeline
                     .compact(cancel, CompactFlags::OnlyL0Compaction.into(), ctx)
                     .instrument(info_span!("compact_timeline", timeline_id = %timeline.timeline_id))
@@ -3083,6 +3097,7 @@ impl Tenant {
             if !timeline.is_active() {
                 continue;
             }
+            let ctx = &ctx.with_scope_timeline(&timeline);
 
             let mut outcome = timeline
                 .compact(cancel, EnumSet::default(), ctx)
@@ -3308,7 +3323,7 @@ impl Tenant {
                     self.clone(),
                     broker_client.clone(),
                     background_jobs_can_start,
-                    ctx,
+                    &ctx.with_scope_timeline(timeline),
                 );
                 activated_timelines += 1;
             }
@@ -4122,7 +4137,8 @@ impl Tenant {
         cause: CreateTimelineCause,
         create_idempotency: CreateTimelineIdempotency,
         gc_compaction_state: Option<GcCompactionState>,
-    ) -> anyhow::Result<Arc<Timeline>> {
+        ctx: &RequestContext,
+    ) -> anyhow::Result<(Arc<Timeline>, RequestContext)> {
         let state = match cause {
             CreateTimelineCause::Load => {
                 let ancestor_id = new_metadata.ancestor_timeline();
@@ -4157,7 +4173,11 @@ impl Tenant {
             self.cancel.child_token(),
         );
 
-        Ok(timeline)
+        let timeline_ctx = RequestContextBuilder::extend(ctx)
+            .scope(context::Scope::new_timeline(&timeline))
+            .build();
+
+        Ok((timeline, timeline_ctx))
     }
 
     /// [`Tenant::shutdown`] must be called before dropping the returned [`Tenant`] object
@@ -4573,6 +4593,7 @@ impl Tenant {
         // Ensures all timelines use the same start time when computing the time cutoff.
         let now_ts_for_pitr_calc = SystemTime::now();
         for timeline in timelines.iter() {
+            let ctx = &ctx.with_scope_timeline(timeline);
             let cutoff = timeline
                 .get_last_record_lsn()
                 .checked_sub(horizon)
@@ -4746,7 +4767,7 @@ impl Tenant {
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
-        _ctx: &RequestContext,
+        ctx: &RequestContext,
     ) -> Result<CreateTimelineResult, CreateTimelineError> {
         let src_id = src_timeline.timeline_id;
 
@@ -4849,13 +4870,14 @@ impl Tenant {
             src_timeline.pg_version,
         );
 
-        let uninitialized_timeline = self
+        let (uninitialized_timeline, _timeline_ctx) = self
             .prepare_new_timeline(
                 dst_id,
                 &metadata,
                 timeline_create_guard,
                 start_lsn + 1,
                 Some(Arc::clone(src_timeline)),
+                ctx,
             )
             .await?;
 
@@ -5122,13 +5144,14 @@ impl Tenant {
             pgdata_lsn,
             pg_version,
         );
-        let mut raw_timeline = self
+        let (mut raw_timeline, timeline_ctx) = self
             .prepare_new_timeline(
                 timeline_id,
                 &new_metadata,
                 timeline_create_guard,
                 pgdata_lsn,
                 None,
+                ctx,
             )
             .await?;
 
@@ -5139,7 +5162,7 @@ impl Tenant {
                     &unfinished_timeline,
                     &pgdata_path,
                     pgdata_lsn,
-                    ctx,
+                    &timeline_ctx,
                 )
                 .await
                 .with_context(|| {
@@ -5207,7 +5230,8 @@ impl Tenant {
         create_guard: TimelineCreateGuard,
         start_lsn: Lsn,
         ancestor: Option<Arc<Timeline>>,
-    ) -> anyhow::Result<UninitializedTimeline<'a>> {
+        ctx: &RequestContext,
+    ) -> anyhow::Result<(UninitializedTimeline<'a>, RequestContext)> {
         let tenant_shard_id = self.tenant_shard_id;
 
         let resources = self.build_timeline_resources(new_timeline_id);
@@ -5215,7 +5239,7 @@ impl Tenant {
             .remote_client
             .init_upload_queue_for_empty_remote(new_metadata)?;
 
-        let timeline_struct = self
+        let (timeline_struct, timeline_ctx) = self
             .create_timeline_struct(
                 new_timeline_id,
                 new_metadata,
@@ -5225,6 +5249,7 @@ impl Tenant {
                 CreateTimelineCause::Load,
                 create_guard.idempotency.clone(),
                 None,
+                ctx,
             )
             .context("Failed to create timeline data structure")?;
 
@@ -5245,10 +5270,13 @@ impl Tenant {
             "Successfully created initial files for timeline {tenant_shard_id}/{new_timeline_id}"
         );
 
-        Ok(UninitializedTimeline::new(
-            self,
-            new_timeline_id,
-            Some((timeline_struct, create_guard)),
+        Ok((
+            UninitializedTimeline::new(
+                self,
+                new_timeline_id,
+                Some((timeline_struct, create_guard)),
+            ),
+            timeline_ctx,
         ))
     }
 
@@ -5783,7 +5811,8 @@ pub(crate) mod harness {
         }
 
         pub(crate) async fn load(&self) -> (Arc<Tenant>, RequestContext) {
-            let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+            let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error)
+                .with_scope_unit_test();
             (
                 self.do_try_load(&ctx)
                     .await
@@ -6804,7 +6833,7 @@ mod tests {
 
         let (tenant, ctx) = harness.load().await;
         let io_concurrency = IoConcurrency::spawn_for_test();
-        let tline = tenant
+        let (tline, ctx) = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
             .await?;
         let tline = tline.raw_timeline().unwrap();
@@ -7426,7 +7455,7 @@ mod tests {
             .await;
 
         let initdb_lsn = Lsn(0x20);
-        let utline = tenant
+        let (utline, ctx) = tenant
             .create_empty_timeline(TIMELINE_ID, initdb_lsn, DEFAULT_PG_VERSION, &ctx)
             .await?;
         let tline = utline.raw_timeline().unwrap();
@@ -7493,7 +7522,7 @@ mod tests {
         let harness = TenantHarness::create(name).await?;
         {
             let (tenant, ctx) = harness.load().await;
-            let tline = tenant
+            let (tline, _ctx) = tenant
                 .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
                 .await?;
             // Leave the timeline ID in [`Tenant::timelines_creating`] to exclude attempting to create it again
