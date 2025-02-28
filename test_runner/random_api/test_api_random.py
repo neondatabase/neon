@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 import random
+import subprocess
 import time
 from fixtures.log_helper import log
 from fixtures.neon_api import NeonAPI
@@ -26,6 +27,7 @@ class NeonEndpoint:
         self.branch.endpoints[self.id] = self
         self.project.endpoints[self.id] = self
         self.host = endpoint["host"]
+        self.benchmark = None
 
     def delete(self):
         self.project.delete_endpoint(self.id)
@@ -34,6 +36,15 @@ class NeonEndpoint:
         env = self.branch.connect_env
         env["PGHOST"] = self.host
         return env
+
+    def start_benchmark(self, clients=10):
+        return self.project.start_benchmark(self.id, clients=clients)
+
+    def check_benchmark(self):
+        self.project.check_benchmark(self.id)
+
+    def terminate_benchmark(self):
+        self.project.terminate_benchmark(self.id)
 
 
 class NeonBranch:
@@ -47,6 +58,7 @@ class NeonBranch:
         self.children = {}
         self.endpoints = {}
         self.connection_parameters = branch["connection_uris"][0]["connection_parameters"]
+        self.benchmark = None
 
     def __str__(self):
         return f"Branch {self.id}, parent: {self.parent}"
@@ -69,26 +81,37 @@ class NeonBranch:
                "PGPASSWORD": self.connection_parameters["password"]}
         return env
 
+    def start_benchmark(self, clients=10):
+        return self.project.start_benchmark(self.id, clients=clients)
+
+    def check_benchmark(self):
+        self.project.check_benchmark(self.id)
+
+    def terminate_benchmark(self):
+        self.project.terminate_benchmark(self.id)
+
 
 class NeonProject:
-    def __init__(self, neon_api: NeonAPI, pg_version: PgVersion):
+    def __init__(self, neon_api: NeonAPI, pg_bin: PgBin, pg_version: PgVersion):
         self.neon_api = neon_api
+        self.pg_bin = pg_bin
         proj = self.neon_api.create_project(
             pg_version, f"Automatic random API test {os.getenv('GITHUB_RUN_ID')}"
         )
-        self.id = proj["project"]["id"]
-        self.name = proj["project"]["name"]
-        self.connection_uri = proj["connection_uris"][0]["connection_uri"]
-        self.connection_parameters = proj["connection_uris"][0]["connection_parameters"]
-        self.pg_version = pg_version
-        self.main_branch = NeonBranch(self, proj)
+        self.id: str = proj["project"]["id"]
+        self.name: str = proj["project"]["name"]
+        self.connection_uri: str = proj["connection_uris"][0]["connection_uri"]
+        self.connection_parameters: dict[str, str] = proj["connection_uris"][0]["connection_parameters"]
+        self.pg_version: PgVersion = pg_version
+        self.main_branch: NeonBranch = NeonBranch(self, proj)
         self.main_branch.connection_parameters = self.connection_parameters
-        self.branches = {self.main_branch.id: self.main_branch}
-        self.leaf_branches = {}
-        self.endpoints = {}
+        self.branches: dict[str, NeonBranch] = {self.main_branch.id: self.main_branch}
+        self.leaf_branches: dict[str, NeonBranch] = {}
+        self.endpoints: dict[str, NeonEndpoint] = {}
         for endpoint in proj["endpoints"]:
             NeonEndpoint(self, endpoint)
         self.neon_api.wait_for_operation_to_finish(self.id)
+        self.benchmarks: dict[str, subprocess.Popen] = {}
 
     def delete(self):
         self.neon_api.delete_project(self.id)
@@ -133,6 +156,41 @@ class NeonProject:
         self.neon_api.delete_endpoint(self.id, endpoint_id)
         self.wait()
 
+    def start_benchmark(self, target: str, clients: int=10) -> subprocess.Popen:
+        if target in self.benchmarks:
+            raise RuntimeError(f"Benchmark was already started for {target}")
+        target_endpoint = target.startswith("ep")
+        read_only = target_endpoint and self.endpoints[target].type == "read_only"
+        cmd = ["pgbench", f"-c{clients}", "10800", "-Mprepared"]
+        if read_only:
+            cmd.append("-S")
+        pgbench = self.pg_bin.run_nonblocking(cmd, env=self.endpoints[target].connect_env if target_endpoint else self.branches[target].connect_env())
+        self.benchmarks[target] = pgbench
+        if target_endpoint:
+            self.endpoints[target].benchmark = pgbench
+        else:
+            self.branches[target].benchmark = pgbench
+        return pgbench
+
+    def check_all_benchmarks(self) -> None:
+        for target in self.benchmarks.keys():
+            self.check_benchmark(target)
+
+    def check_benchmark(self, target):
+        rc = self.benchmarks[target].poll()
+        if rc is not None:
+            raise RuntimeError(f"The benchmark for {target} ended with code {rc}")
+
+    def terminate_benchmark(self, target):
+        target_endpoint = target.startswith("ep")
+        self.check_benchmark(target)
+        self.benchmarks[target].terminate()
+        self.benchmarks.pop(target)
+        if target_endpoint:
+            self.endpoints[target].benchmark = None
+        else:
+            self.branches[target].benchmark = None
+
     def wait(self):
         return self.neon_api.wait_for_operation_to_finish(self.id)
 
@@ -143,7 +201,7 @@ def setup_class(
     pg_bin: PgBin,
     neon_api: NeonAPI,
 ):
-    project = NeonProject(neon_api, pg_version)
+    project = NeonProject(neon_api, pg_bin, pg_version)
     log.info("Created a project with id %s, name %s", project.id, project.name)
     yield pg_bin, project
     log.info("Removing the project")
@@ -155,20 +213,24 @@ def do_action(project, action):
         parent = random.choice(list(project.branches.values()))
         child = parent.create_child_branch()
         log.info("Created branch %s, parent: %s", child.id, parent.id)
+        child.start_benchmark()
     elif action == "delete_branch":
         if project.leaf_branches:
             target = random.choice(list(project.leaf_branches.values()))
             log.info("Trying to delete branch %s", target)
+            target.terminate_benchmark()
             target.delete()
         else:
             log.info("Leaf branches not found, skipping")
     elif action == "new_ro_endpoint":
         ep = random.choice(list(project.branches.values())).create_ro_endpoint()
         log.info("Created the RO endpoint with id %s branch: %s", ep.id, ep.branch.id)
+        ep.start_benchmark()
     elif action == "delete_ro_endpoint":
         ro_endpoints = [_ for _ in project.endpoints.values() if _.type == "read_only"]
         if ro_endpoints:
             target = random.choice(ro_endpoints)
+            target.terminate_benchmark()
             log.info("endpoint %s deleted", target.id)
         else:
             log.info("no read_only endpoints present, skipping")
