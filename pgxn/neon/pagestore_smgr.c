@@ -819,7 +819,7 @@ prefetch_read(PrefetchRequest *slot)
 
 /*
  * Wait completion of previosly registered prefetch request.
- * Prefetch result shoudl be placed in LFC by prefetch_wait_for.
+ * Prefetch result should be placed in LFC by prefetch_wait_for.
  */
 bool
 prefetch_receive(BufferTag tag)
