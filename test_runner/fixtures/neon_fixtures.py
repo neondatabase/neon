@@ -1127,9 +1127,13 @@ class NeonEnv:
 
         if self.storage_controller_config is not None:
             cfg["storage_controller"] = self.storage_controller_config
-        elif config.test_may_use_compatibility_snapshot_binaries:
-            # Disable new storcon flag in compat tests
-            cfg["storage_controller"] = {"load_safekeepers": None}
+
+        # Disable new storcon flag in compat tests
+        if config.test_may_use_compatibility_snapshot_binaries:
+            if "storage_controller" in cfg:
+                cfg["load_safekeepers"] = None
+            else:
+                cfg["storage_controller"] = {"load_safekeepers": None}
 
         # Create config for pageserver
         http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
