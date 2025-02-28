@@ -907,7 +907,7 @@ impl ComputeNode {
         if lsn != Lsn::INVALID {
             cmd.push(&lsn_str);
         }
-        cmd.push("--zip");
+        cmd.push("--gzip");
         if spec.spec.mode != ComputeMode::Primary {
             cmd.push("--replica");
         }
