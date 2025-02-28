@@ -173,12 +173,15 @@ where
         Ok((chunk_len, control))
     }
 
-    /// If this function errors, the read path can still serve reads correctly
-    /// up to where it could read before calling this function.
+    /// This function can only error if the flush task got cancelled.
+    /// In that case, we leave [`Self::mutable`] intentionally as `None`.
     ///
-    /// The write path should not be retrying because there's no way to get that
-    /// correct with the current append-style APIs.
-    /// The only correct solution is to discard the entire [`BufferedWriter`],
+    /// The read path continues to function correctly; it can read up to the
+    /// point where it could read before, i.e., including what was in [`Self::mutable`]
+    /// before the call to this function, because that's now stored in [`Self::maybe_flushed`].
+    ///
+    /// The write path becomes unavailable and will panic if used.
+    /// The only correct solution to retry writes is to discard the entire [`BufferedWriter`],
     /// which upper layers of pageserver write path currently do not support.
     /// It is in fact quite hard to reason about what exactly happens in today's code.
     /// Best case we accumulate junk in the EphemeralFile, worst case is data corruption.
