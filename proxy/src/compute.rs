@@ -287,8 +287,9 @@ impl ConnCfg {
         // TODO: lots of useful info but maybe we can move it elsewhere (eg traces?)
         info!(
             cold_start_info = ctx.cold_start_info().as_str(),
-            "connected to compute node at {host} ({socket_addr}) sslmode={:?}",
-            self.0.get_ssl_mode()
+            "connected to compute node at {host} ({socket_addr}) sslmode={:?}, latency={}",
+            self.0.get_ssl_mode(),
+            ctx.get_proxy_latency(),
         );
 
         // NB: CancelToken is supposed to hold socket_addr, but we use connect_raw.
