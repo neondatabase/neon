@@ -184,6 +184,16 @@ impl InterpretedWalReaderState {
                         to: *current_position,
                     }
                 } else {
+                    // Edge case: The new shard is at the same current position as
+                    // the reader. Note that the current position is WAL record aligned,
+                    // so the reader might have done some partial reads and updated the
+                    // batch start. If that's the case, adjust the batch start to match
+                    // starting position of the new shard. It can lead to some shards
+                    // seeing overlaps, but in that case the actual record LSNs are checked
+                    // which should be fine based on the filtering logic.
+                    if let Some(start) = current_batch_wal_start {
+                        *start = std::cmp::min(*start, new_shard_start_pos);
+                    }
                     CurrentPositionUpdate::NotReset(*current_position)
                 }
             }
