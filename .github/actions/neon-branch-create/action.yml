@@ -119,7 +119,7 @@ runs:
 
           password=$(echo $reset_password | jq --raw-output '.role.password')
           if [ "${password}" == "null" ]; then
-            sleep 1
+            sleep i # increasing backoff
             continue
           fi
 
