@@ -607,6 +607,7 @@ lfc_prewarm(FileCacheStateEntry* fs, size_t n_entries)
 {
 	size_t snd_idx = 0, rcv_idx = 0;
 	size_t n_sent = 0, n_received = 0;
+	size_t prewarm_batch = Min(lfc_prewarm_batch, readahead_buffer_size);
 	bool save_lfc_store_prefetch_result;
 
 	if (!lfc_ensure_opened())
@@ -667,7 +668,7 @@ lfc_prewarm(FileCacheStateEntry* fs, size_t n_entries)
 			}
 			snd_idx += 1;
 		}
-		if (n_sent >= n_received + lfc_prewarm_batch || chunk_no == n_entries)
+		if (n_sent >= n_received + prewarm_batch || chunk_no == n_entries)
 		{
 			do
 			{
