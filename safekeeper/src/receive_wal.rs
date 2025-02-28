@@ -2,35 +2,21 @@
 //! Gets messages from the network, passes them down to consensus module and
 //! sends replies back.
 
-use crate::handler::SafekeeperPostgresHandler;
-use crate::metrics::{
-    WAL_RECEIVERS, WAL_RECEIVER_QUEUE_DEPTH, WAL_RECEIVER_QUEUE_DEPTH_TOTAL,
-    WAL_RECEIVER_QUEUE_SIZE_TOTAL,
-};
-use crate::safekeeper::AcceptorProposerMessage;
-use crate::safekeeper::ProposerAcceptorMessage;
-use crate::timeline::WalResidentTimeline;
-use crate::GlobalTimelines;
-use anyhow::{anyhow, Context};
-use bytes::BytesMut;
-use parking_lot::MappedMutexGuard;
-use parking_lot::Mutex;
-use parking_lot::MutexGuard;
-use postgres_backend::CopyStreamHandlerEnd;
-use postgres_backend::PostgresBackend;
-use postgres_backend::PostgresBackendReader;
-use postgres_backend::QueryError;
-use pq_proto::BeMessage;
-use safekeeper_api::membership::Configuration;
-use safekeeper_api::models::{ConnectionId, WalReceiverState, WalReceiverStatus};
-use safekeeper_api::ServerInfo;
 use std::future;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::io::AsyncRead;
-use tokio::io::AsyncWrite;
+
+use anyhow::{Context, anyhow};
+use bytes::BytesMut;
+use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
+use postgres_backend::{CopyStreamHandlerEnd, PostgresBackend, PostgresBackendReader, QueryError};
+use pq_proto::BeMessage;
+use safekeeper_api::ServerInfo;
+use safekeeper_api::membership::Configuration;
+use safekeeper_api::models::{ConnectionId, WalReceiverState, WalReceiverStatus};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::error::SendTimeoutError;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::task;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, MissedTickBehavior};
@@ -38,6 +24,15 @@ use tracing::*;
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
 use utils::pageserver_feedback::PageserverFeedback;
+
+use crate::GlobalTimelines;
+use crate::handler::SafekeeperPostgresHandler;
+use crate::metrics::{
+    WAL_RECEIVER_QUEUE_DEPTH, WAL_RECEIVER_QUEUE_DEPTH_TOTAL, WAL_RECEIVER_QUEUE_SIZE_TOTAL,
+    WAL_RECEIVERS,
+};
+use crate::safekeeper::{AcceptorProposerMessage, ProposerAcceptorMessage};
+use crate::timeline::WalResidentTimeline;
 
 const DEFAULT_FEEDBACK_CAPACITY: usize = 8;
 
@@ -281,7 +276,7 @@ impl SafekeeperPostgresHandler {
             tokio::select! {
                 // todo: add read|write .context to these errors
                 r = network_reader.run(msg_tx, msg_rx, reply_tx, timeline, next_msg) => r,
-                r = network_write(pgb, reply_rx, pageserver_feedback_rx) => r,
+                r = network_write(pgb, reply_rx, pageserver_feedback_rx, proto_version) => r,
                 _ = timeline_cancel.cancelled() => {
                     return Err(CopyStreamHandlerEnd::Cancelled);
                 }
@@ -342,8 +337,8 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'_, IO> {
         let tli = match next_msg {
             ProposerAcceptorMessage::Greeting(ref greeting) => {
                 info!(
-                    "start handshake with walproposer {} sysid {} timeline {}",
-                    self.peer_addr, greeting.system_id, greeting.tli,
+                    "start handshake with walproposer {} sysid {}",
+                    self.peer_addr, greeting.system_id,
                 );
                 let server_info = ServerInfo {
                     pg_version: greeting.pg_version,
@@ -371,7 +366,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'_, IO> {
             _ => {
                 return Err(CopyStreamHandlerEnd::Other(anyhow::anyhow!(
                     "unexpected message {next_msg:?} instead of greeting"
-                )))
+                )));
             }
         };
         Ok((tli, next_msg))
@@ -459,6 +454,7 @@ async fn network_write<IO: AsyncRead + AsyncWrite + Unpin>(
     pgb_writer: &mut PostgresBackend<IO>,
     mut reply_rx: Receiver<AcceptorProposerMessage>,
     mut pageserver_feedback_rx: tokio::sync::broadcast::Receiver<PageserverFeedback>,
+    proto_version: u32,
 ) -> Result<(), CopyStreamHandlerEnd> {
     let mut buf = BytesMut::with_capacity(128);
 
@@ -496,7 +492,7 @@ async fn network_write<IO: AsyncRead + AsyncWrite + Unpin>(
         };
 
         buf.clear();
-        msg.serialize(&mut buf)?;
+        msg.serialize(&mut buf, proto_version)?;
         pgb_writer.write_message(&BeMessage::CopyData(&buf)).await?;
     }
 }

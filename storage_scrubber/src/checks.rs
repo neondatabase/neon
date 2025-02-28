@@ -1,12 +1,19 @@
 use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
 
+use futures_util::StreamExt;
 use itertools::Itertools;
+use pageserver::tenant::IndexPart;
 use pageserver::tenant::checks::check_valid_layermap;
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver::tenant::remote_timeline_client::manifest::TenantManifest;
+use pageserver::tenant::remote_timeline_client::{
+    parse_remote_index_path, parse_remote_tenant_manifest_path, remote_layer_path,
+};
+use pageserver::tenant::storage_layer::LayerName;
 use pageserver_api::shard::ShardIndex;
+use remote_storage::{GenericRemoteStorage, ListingObject, RemotePath};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use utils::generation::Generation;
@@ -15,14 +22,7 @@ use utils::shard::TenantShardId;
 
 use crate::cloud_admin_api::BranchData;
 use crate::metadata_stream::stream_listing;
-use crate::{download_object_with_retries, RootTarget, TenantShardTimelineId};
-use futures_util::StreamExt;
-use pageserver::tenant::remote_timeline_client::{
-    parse_remote_index_path, parse_remote_tenant_manifest_path, remote_layer_path,
-};
-use pageserver::tenant::storage_layer::LayerName;
-use pageserver::tenant::IndexPart;
-use remote_storage::{GenericRemoteStorage, ListingObject, RemotePath};
+use crate::{RootTarget, TenantShardTimelineId, download_object_with_retries};
 
 pub(crate) struct TimelineAnalysis {
     /// Anomalies detected
@@ -329,11 +329,11 @@ pub(crate) enum BlobDataParseResult {
 pub(crate) fn parse_layer_object_name(name: &str) -> Result<(LayerName, Generation), String> {
     match name.rsplit_once('-') {
         // FIXME: this is gross, just use a regex?
-        Some((layer_filename, gen)) if gen.len() == 8 => {
+        Some((layer_filename, gen_)) if gen_.len() == 8 => {
             let layer = layer_filename.parse::<LayerName>()?;
-            let gen =
-                Generation::parse_suffix(gen).ok_or("Malformed generation suffix".to_string())?;
-            Ok((layer, gen))
+            let gen_ =
+                Generation::parse_suffix(gen_).ok_or("Malformed generation suffix".to_string())?;
+            Ok((layer, gen_))
         }
         _ => Ok((name.parse::<LayerName>()?, Generation::none())),
     }
@@ -423,9 +423,9 @@ async fn list_timeline_blobs_impl(
                 tracing::info!("initdb archive preserved {key}");
             }
             Some(maybe_layer_name) => match parse_layer_object_name(maybe_layer_name) {
-                Ok((new_layer, gen)) => {
-                    tracing::debug!("Parsed layer key: {new_layer} {gen:?}");
-                    s3_layers.insert((new_layer, gen));
+                Ok((new_layer, gen_)) => {
+                    tracing::debug!("Parsed layer key: {new_layer} {gen_:?}");
+                    s3_layers.insert((new_layer, gen_));
                 }
                 Err(e) => {
                     tracing::info!("Error parsing {maybe_layer_name} as layer name: {e}");
@@ -465,7 +465,7 @@ async fn list_timeline_blobs_impl(
         .max_by_key(|i| i.1)
         .map(|(k, g)| (k.clone(), g))
     {
-        Some((key, gen)) => (Some::<ListingObject>(key.to_owned()), gen),
+        Some((key, gen_)) => (Some::<ListingObject>(key.to_owned()), gen_),
         None => {
             // Legacy/missing case: one or zero index parts, which did not have a generation
             (index_part_keys.pop(), Generation::none())
@@ -521,7 +521,7 @@ async fn list_timeline_blobs_impl(
                     },
                     unused_index_keys: index_part_keys,
                     unknown_keys,
-                }))
+                }));
             }
             Err(index_parse_error) => errors.push(format!(
                 "index_part.json body parsing error: {index_parse_error}"
@@ -631,7 +631,7 @@ pub(crate) async fn list_tenant_manifests(
         .map(|(g, obj)| (*g, obj.clone()))
         .unwrap();
 
-    manifests.retain(|(gen, _obj)| gen != &latest_generation);
+    manifests.retain(|(gen_, _obj)| gen_ != &latest_generation);
 
     let manifest_bytes =
         match download_object_with_retries(remote_client, &latest_listing_object.key).await {

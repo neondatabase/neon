@@ -1,20 +1,20 @@
-use anyhow::{anyhow, bail, Result};
-use reqwest::StatusCode;
 use std::fs::File;
 use std::path::Path;
-use tokio_postgres::Client;
-use tracing::{error, info, instrument, warn};
 
-use crate::config;
-use crate::metrics::{CPlaneRequestRPC, CPLANE_REQUESTS_TOTAL, UNKNOWN_HTTP_STATUS};
-use crate::migration::MigrationRunner;
-use crate::params::PG_HBA_ALL_MD5;
-use crate::pg_helpers::*;
-
+use anyhow::{Result, anyhow, bail};
 use compute_api::responses::{
     ComputeCtlConfig, ControlPlaneComputeStatus, ControlPlaneSpecResponse,
 };
 use compute_api::spec::ComputeSpec;
+use reqwest::StatusCode;
+use tokio_postgres::Client;
+use tracing::{error, info, instrument, warn};
+
+use crate::config;
+use crate::metrics::{CPLANE_REQUESTS_TOTAL, CPlaneRequestRPC, UNKNOWN_HTTP_STATUS};
+use crate::migration::MigrationRunner;
+use crate::params::PG_HBA_ALL_MD5;
+use crate::pg_helpers::*;
 
 // Do control plane request and return response if any. In case of error it
 // returns a bool flag indicating whether it makes sense to retry the request
@@ -141,7 +141,6 @@ pub fn get_spec_from_control_plane(
 /// Check `pg_hba.conf` and update if needed to allow external connections.
 pub fn update_pg_hba(pgdata_path: &Path) -> Result<()> {
     // XXX: consider making it a part of spec.json
-    info!("checking pg_hba.conf");
     let pghba_path = pgdata_path.join("pg_hba.conf");
 
     if config::line_in_file(&pghba_path, PG_HBA_ALL_MD5)? {
@@ -156,12 +155,11 @@ pub fn update_pg_hba(pgdata_path: &Path) -> Result<()> {
 /// Create a standby.signal file
 pub fn add_standby_signal(pgdata_path: &Path) -> Result<()> {
     // XXX: consider making it a part of spec.json
-    info!("adding standby.signal");
     let signalfile = pgdata_path.join("standby.signal");
 
     if !signalfile.exists() {
-        info!("created standby.signal");
         File::create(signalfile)?;
+        info!("created standby.signal");
     } else {
         info!("reused pre-existing standby.signal");
     }
@@ -170,7 +168,6 @@ pub fn add_standby_signal(pgdata_path: &Path) -> Result<()> {
 
 #[instrument(skip_all)]
 pub async fn handle_neon_extension_upgrade(client: &mut Client) -> Result<()> {
-    info!("handle neon extension upgrade");
     let query = "ALTER EXTENSION neon UPDATE";
     info!("update neon extension version with query: {}", query);
     client.simple_query(query).await?;

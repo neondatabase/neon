@@ -4,7 +4,7 @@ use std::io::Write as _;
 
 use bytes::BytesMut;
 use camino_tempfile::tempfile;
-use criterion::{criterion_group, criterion_main, BatchSize, Bencher, Criterion};
+use criterion::{BatchSize, Bencher, Criterion, criterion_group, criterion_main};
 use itertools::Itertools as _;
 use postgres_ffi::v17::wal_generator::{LogicalMessageGenerator, WalGenerator};
 use pprof::criterion::{Output, PProfProfiler};
@@ -13,6 +13,7 @@ use safekeeper::safekeeper::{
     AcceptorProposerMessage, AppendRequest, AppendRequestHeader, ProposerAcceptorMessage,
 };
 use safekeeper::test_utils::Env;
+use safekeeper_api::membership::SafekeeperGeneration as Generation;
 use tokio::io::AsyncWriteExt as _;
 use utils::id::{NodeId, TenantTimelineId};
 use utils::lsn::Lsn;
@@ -26,7 +27,7 @@ const GB: usize = 1024 * MB;
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[allow(non_upper_case_globals)]
-#[export_name = "malloc_conf"]
+#[unsafe(export_name = "malloc_conf")]
 pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:21\0";
 
 // Register benchmarks with Criterion.
@@ -88,13 +89,12 @@ fn bench_process_msg(c: &mut Criterion) {
                 let (lsn, record) = walgen.next().expect("endless WAL");
                 ProposerAcceptorMessage::AppendRequest(AppendRequest {
                     h: AppendRequestHeader {
+                        generation: Generation::new(0),
                         term: 1,
-                        term_start_lsn: Lsn(0),
                         begin_lsn: lsn,
                         end_lsn: lsn + record.len() as u64,
                         commit_lsn: if commit { lsn } else { Lsn(0) }, // commit previous record
                         truncate_lsn: Lsn(0),
-                        proposer_uuid: [0; 16],
                     },
                     wal_data: record,
                 })
@@ -160,13 +160,12 @@ fn bench_wal_acceptor(c: &mut Criterion) {
                     .take(n)
                     .map(|(lsn, record)| AppendRequest {
                         h: AppendRequestHeader {
+                            generation: Generation::new(0),
                             term: 1,
-                            term_start_lsn: Lsn(0),
                             begin_lsn: lsn,
                             end_lsn: lsn + record.len() as u64,
                             commit_lsn: Lsn(0),
                             truncate_lsn: Lsn(0),
-                            proposer_uuid: [0; 16],
                         },
                         wal_data: record,
                     })
@@ -262,13 +261,12 @@ fn bench_wal_acceptor_throughput(c: &mut Criterion) {
             runtime.block_on(async {
                 let reqgen = walgen.take(count).map(|(lsn, record)| AppendRequest {
                     h: AppendRequestHeader {
+                        generation: Generation::new(0),
                         term: 1,
-                        term_start_lsn: Lsn(0),
                         begin_lsn: lsn,
                         end_lsn: lsn + record.len() as u64,
                         commit_lsn: if commit { lsn } else { Lsn(0) }, // commit previous record
                         truncate_lsn: Lsn(0),
-                        proposer_uuid: [0; 16],
                     },
                     wal_data: record,
                 });

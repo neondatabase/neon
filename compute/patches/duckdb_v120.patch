@@ -1,0 +1,67 @@
+diff --git a/libduckdb_pg_duckdb.map b/libduckdb_pg_duckdb.map
+new file mode 100644
+index 0000000000..0872978b48
+--- /dev/null
++++ b/libduckdb_pg_duckdb.map
+@@ -0,0 +1,6 @@
++DUCKDB_1.2.0 {
++    global:
++        *duckdb*;
++    local:
++        *;
++};
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 58adef3fc0..2c522f91be 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -59,7 +59,7 @@ endfunction()
+ 
+ if(AMALGAMATION_BUILD)
+ 
+-  add_library(duckdb SHARED "${PROJECT_SOURCE_DIR}/src/amalgamation/duckdb.cpp")
++  add_library(duckdb_pg_duckdb SHARED "${PROJECT_SOURCE_DIR}/src/amalgamation/duckdb.cpp")
+   target_link_libraries(duckdb ${DUCKDB_SYSTEM_LIBS})
+   link_threads(duckdb)
+   link_extension_libraries(duckdb)
+@@ -109,7 +109,7 @@ else()
+       duckdb_yyjson
+       duckdb_zstd)
+ 
+-  add_library(duckdb SHARED ${ALL_OBJECT_FILES})
++  add_library(duckdb_pg_duckdb SHARED ${ALL_OBJECT_FILES})
+ 
+   if(WIN32 AND NOT MINGW)
+     ensure_variable_is_number(DUCKDB_MAJOR_VERSION RC_MAJOR_VERSION)
+@@ -131,9 +131,11 @@ else()
+     target_sources(duckdb PRIVATE version.rc)
+   endif()
+ 
+-  target_link_libraries(duckdb ${DUCKDB_LINK_LIBS})
+-  link_threads(duckdb)
+-  link_extension_libraries(duckdb)
++  target_link_libraries(duckdb_pg_duckdb ${DUCKDB_LINK_LIBS})
++  link_threads(duckdb_pg_duckdb)
++  link_extension_libraries(duckdb_pg_duckdb)
++  target_link_options(duckdb_pg_duckdb PRIVATE
++    -Wl,--version-script=${CMAKE_SOURCE_DIR}/libduckdb_pg_duckdb.map)
+ 
+   add_library(duckdb_static STATIC ${ALL_OBJECT_FILES})
+   target_link_libraries(duckdb_static ${DUCKDB_LINK_LIBS})
+@@ -141,7 +143,7 @@ else()
+   link_extension_libraries(duckdb_static)
+ 
+   target_include_directories(
+-    duckdb PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
++    duckdb_pg_duckdb PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+                   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+ 
+   target_include_directories(
+@@ -161,7 +163,7 @@ else()
+ endif()
+ 
+ install(
+-  TARGETS duckdb duckdb_static
++  TARGETS duckdb_pg_duckdb duckdb_static
+   EXPORT "${DUCKDB_EXPORT_SET}"
+   LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
+   ARCHIVE DESTINATION "${INSTALL_LIB_DIR}"

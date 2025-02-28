@@ -71,15 +71,15 @@ More specifically, here is an example ext_index.json
     }
 }
 */
-use anyhow::Result;
-use anyhow::{bail, Context};
+use std::path::Path;
+use std::str;
+
+use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use compute_api::spec::RemoteExtSpec;
 use regex::Regex;
 use remote_storage::*;
 use reqwest::StatusCode;
-use std::path::Path;
-use std::str;
 use tar::Archive;
 use tracing::info;
 use tracing::log::warn;
@@ -244,7 +244,10 @@ pub fn create_control_files(remote_extensions: &RemoteExtSpec, pgbin: &str) {
                 info!("writing file {:?}{:?}", control_path, control_content);
                 std::fs::write(control_path, control_content).unwrap();
             } else {
-                warn!("control file {:?} exists both locally and remotely. ignoring the remote version.", control_path);
+                warn!(
+                    "control file {:?} exists both locally and remotely. ignoring the remote version.",
+                    control_path
+                );
             }
         }
     }

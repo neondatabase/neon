@@ -1,10 +1,9 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use tokio::task::JoinSet;
+use tracing::{info, warn};
 use walkdir::WalkDir;
 
 use super::s3_uri::S3Uri;
-
-use tracing::{info, warn};
 
 const MAX_PARALLEL_UPLOADS: usize = 10;
 

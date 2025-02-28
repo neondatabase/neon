@@ -543,11 +543,7 @@ impl Drop for LatencyTimer {
 
 impl From<bool> for Bool {
     fn from(value: bool) -> Self {
-        if value {
-            Bool::True
-        } else {
-            Bool::False
-        }
+        if value { Bool::True } else { Bool::False }
     }
 }
 

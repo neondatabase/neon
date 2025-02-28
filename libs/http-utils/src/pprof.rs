@@ -1,14 +1,14 @@
-use anyhow::bail;
-use flate2::write::{GzDecoder, GzEncoder};
-use flate2::Compression;
-use itertools::Itertools as _;
-use pprof::protos::{Function, Line, Location, Message as _, Profile};
-use regex::Regex;
-
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::io::Write as _;
+
+use anyhow::bail;
+use flate2::Compression;
+use flate2::write::{GzDecoder, GzEncoder};
+use itertools::Itertools as _;
+use pprof::protos::{Function, Line, Location, Message as _, Profile};
+use regex::Regex;
 
 /// Decodes a gzip-compressed Protobuf-encoded pprof profile.
 pub fn decode(bytes: &[u8]) -> anyhow::Result<Profile> {

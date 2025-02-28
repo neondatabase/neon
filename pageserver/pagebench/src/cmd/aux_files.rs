@@ -1,11 +1,11 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
+
 use pageserver_api::models::{TenantConfig, TenantConfigRequest};
 use pageserver_api::shard::TenantShardId;
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
-
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Instant;
 
 /// Ingest aux files into the pageserver.
 #[derive(clap::Parser)]

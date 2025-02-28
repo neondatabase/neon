@@ -1,7 +1,9 @@
 //! Enum-dispatch to the `OpenOptions` type of the respective [`super::IoEngineKind`];
 
+use std::os::fd::OwnedFd;
+use std::path::Path;
+
 use super::io_engine::IoEngine;
-use std::{os::fd::OwnedFd, path::Path};
 
 #[derive(Debug, Clone)]
 pub enum OpenOptions {

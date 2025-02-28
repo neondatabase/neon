@@ -7,7 +7,6 @@
 //! ```
 //!
 use std::collections::HashMap;
-
 use std::io;
 use std::io::Write;
 use std::num::NonZeroU64;
@@ -15,22 +14,19 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use camino::Utf8PathBuf;
 use pageserver_api::models::{self, TenantInfo, TimelineInfo};
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use postgres_backend::AuthType;
-use postgres_connection::{parse_host_port, PgConnectionConfig};
+use postgres_connection::{PgConnectionConfig, parse_host_port};
 use utils::auth::{Claims, Scope};
-use utils::id::NodeId;
-use utils::{
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
+use utils::id::{NodeId, TenantId, TimelineId};
+use utils::lsn::Lsn;
 
-use crate::local_env::{NeonLocalInitPageserverConf, PageServerConf};
-use crate::{background_process, local_env::LocalEnv};
+use crate::background_process;
+use crate::local_env::{LocalEnv, NeonLocalInitPageserverConf, PageServerConf};
 
 /// Directory within .neon which will be used by default for LocalFs remote storage.
 pub const PAGESERVER_REMOTE_STORAGE_DIR: &str = "local_fs_remote_storage/pageserver";
@@ -81,7 +77,11 @@ impl PageServerNode {
         &self,
         conf: NeonLocalInitPageserverConf,
     ) -> anyhow::Result<toml_edit::DocumentMut> {
-        assert_eq!(&PageServerConf::from(&conf), &self.conf, "during neon_local init, we derive the runtime state of ps conf (self.conf) from the --config flag fully");
+        assert_eq!(
+            &PageServerConf::from(&conf),
+            &self.conf,
+            "during neon_local init, we derive the runtime state of ps conf (self.conf) from the --config flag fully"
+        );
 
         // TODO(christian): instead of what we do here, create a pageserver_api::config::ConfigToml (PR #7656)
 

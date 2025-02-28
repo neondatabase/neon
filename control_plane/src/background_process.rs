@@ -25,7 +25,7 @@ use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, FdFlag};
-use nix::sys::signal::{kill, Signal};
+use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use utils::pid_file::{self, PidFileRead};
 

@@ -4,7 +4,7 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use bindgen::callbacks::{DeriveInfo, ParseCallbacks};
 
 #[derive(Debug)]

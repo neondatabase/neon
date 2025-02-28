@@ -1,16 +1,15 @@
-use futures::Future;
-use rand::Rng;
-use std::{
-    collections::HashMap,
-    marker::PhantomData,
-    pin::Pin,
-    time::{Duration, Instant},
-};
+use std::collections::HashMap;
+use std::marker::PhantomData;
+use std::pin::Pin;
+use std::time::{Duration, Instant};
 
+use futures::Future;
 use pageserver_api::shard::TenantShardId;
+use rand::Rng;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use utils::{completion::Barrier, yielding_loop::yielding_loop};
+use utils::completion::Barrier;
+use utils::yielding_loop::yielding_loop;
 
 use super::{CommandRequest, CommandResponse, SecondaryTenantError};
 

@@ -3,28 +3,22 @@
 //! Now it also provides init method which acts like a stub for proper installation
 //! script which will use local paths.
 
-use anyhow::{bail, Context};
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+use std::{env, fs};
 
+use anyhow::{Context, bail};
 use clap::ValueEnum;
 use postgres_backend::AuthType;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::env;
-use std::fs;
-use std::net::IpAddr;
-use std::net::Ipv4Addr;
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Duration;
-use utils::{
-    auth::{encode_from_key_file, Claims},
-    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
-};
+use utils::auth::{Claims, encode_from_key_file};
+use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 
-use crate::pageserver::PageServerNode;
-use crate::pageserver::PAGESERVER_REMOTE_STORAGE_DIR;
+use crate::pageserver::{PAGESERVER_REMOTE_STORAGE_DIR, PageServerNode};
 use crate::safekeeper::SafekeeperNode;
 
 pub const DEFAULT_PG_VERSION: u32 = 16;
@@ -465,7 +459,9 @@ impl LocalEnv {
             if old_timeline_id == &timeline_id {
                 Ok(())
             } else {
-                bail!("branch '{branch_name}' is already mapped to timeline {old_timeline_id}, cannot map to another timeline {timeline_id}");
+                bail!(
+                    "branch '{branch_name}' is already mapped to timeline {old_timeline_id}, cannot map to another timeline {timeline_id}"
+                );
             }
         } else {
             existing_values.push((tenant_id, timeline_id));

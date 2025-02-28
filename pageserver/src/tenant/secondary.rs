@@ -3,40 +3,31 @@ pub mod heatmap;
 mod heatmap_uploader;
 mod scheduler;
 
-use std::{sync::Arc, time::SystemTime};
+use std::sync::Arc;
+use std::time::SystemTime;
 
-use crate::{
-    context::RequestContext,
-    disk_usage_eviction_task::DiskUsageEvictionInfo,
-    metrics::SECONDARY_HEATMAP_TOTAL_SIZE,
-    task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
-};
-
-use self::{
-    downloader::{downloader_task, SecondaryDetail},
-    heatmap_uploader::heatmap_uploader_task,
-};
-
-use super::{
-    config::{SecondaryLocationConfig, TenantConfOpt},
-    mgr::TenantManager,
-    span::debug_assert_current_span_has_tenant_id,
-    storage_layer::LayerName,
-    GetTenantError,
-};
-
-use crate::metrics::SECONDARY_RESIDENT_PHYSICAL_SIZE;
 use metrics::UIntGauge;
-use pageserver_api::{
-    models,
-    shard::{ShardIdentity, TenantShardId},
-};
+use pageserver_api::models;
+use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use remote_storage::GenericRemoteStorage;
-
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
-use utils::{completion::Barrier, id::TimelineId, sync::gate::Gate};
+use utils::completion::Barrier;
+use utils::id::TimelineId;
+use utils::sync::gate::Gate;
+
+use self::downloader::{SecondaryDetail, downloader_task};
+use self::heatmap_uploader::heatmap_uploader_task;
+use super::GetTenantError;
+use super::config::{SecondaryLocationConfig, TenantConfOpt};
+use super::mgr::TenantManager;
+use super::span::debug_assert_current_span_has_tenant_id;
+use super::storage_layer::LayerName;
+use crate::context::RequestContext;
+use crate::disk_usage_eviction_task::DiskUsageEvictionInfo;
+use crate::metrics::{SECONDARY_HEATMAP_TOTAL_SIZE, SECONDARY_RESIDENT_PHYSICAL_SIZE};
+use crate::task_mgr::{self, BACKGROUND_RUNTIME, TaskKind};
 
 enum DownloadCommand {
     Download(TenantShardId),

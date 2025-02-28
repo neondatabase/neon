@@ -5,7 +5,16 @@
 //! easier to work with locally. The python tests in `test_runner`
 //! rely on `neon_local` to set up the environment for each test.
 //!
-use anyhow::{anyhow, bail, Context, Result};
+use std::borrow::Cow;
+use std::collections::{BTreeSet, HashMap};
+use std::fs::File;
+use std::os::fd::AsRawFd;
+use std::path::PathBuf;
+use std::process::exit;
+use std::str::FromStr;
+use std::time::Duration;
+
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use compute_api::spec::ComputeMode;
 use control_plane::endpoint::ComputeControlPlane;
@@ -19,7 +28,7 @@ use control_plane::storage_controller::{
     NeonStorageControllerStartArgs, NeonStorageControllerStopArgs, StorageController,
 };
 use control_plane::{broker, local_env};
-use nix::fcntl::{flock, FlockArg};
+use nix::fcntl::{FlockArg, flock};
 use pageserver_api::config::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
@@ -35,23 +44,13 @@ use safekeeper_api::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_SAFEKEEPER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
 };
-use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap};
-use std::fs::File;
-use std::os::fd::AsRawFd;
-use std::path::PathBuf;
-use std::process::exit;
-use std::str::FromStr;
-use std::time::Duration;
 use storage_broker::DEFAULT_LISTEN_ADDR as DEFAULT_BROKER_ADDR;
 use tokio::task::JoinSet;
 use url::Host;
-use utils::{
-    auth::{Claims, Scope},
-    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
-    lsn::Lsn,
-    project_git_version,
-};
+use utils::auth::{Claims, Scope};
+use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
+use utils::lsn::Lsn;
+use utils::project_git_version;
 
 // Default id of a safekeeper node, if not specified on the command line.
 const DEFAULT_SAFEKEEPER_ID: NodeId = NodeId(1);
@@ -887,20 +886,6 @@ fn print_timeline(
     Ok(())
 }
 
-/// Returns a map of timeline IDs to timeline_id@lsn strings.
-/// Connects to the pageserver to query this information.
-async fn get_timeline_infos(
-    env: &local_env::LocalEnv,
-    tenant_shard_id: &TenantShardId,
-) -> Result<HashMap<TimelineId, TimelineInfo>> {
-    Ok(get_default_pageserver(env)
-        .timeline_list(tenant_shard_id)
-        .await?
-        .into_iter()
-        .map(|timeline_info| (timeline_info.timeline_id, timeline_info))
-        .collect())
-}
-
 /// Helper function to get tenant id from an optional --tenant_id option or from the config file
 fn get_tenant_id(
     tenant_id_arg: Option<TenantId>,
@@ -935,7 +920,9 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
     let init_conf: NeonLocalInitConf = if let Some(config_path) = &args.config {
         // User (likely the Python test suite) provided a description of the environment.
         if args.num_pageservers.is_some() {
-            bail!("Cannot specify both --num-pageservers and --config, use key `pageservers` in the --config file instead");
+            bail!(
+                "Cannot specify both --num-pageservers and --config, use key `pageservers` in the --config file instead"
+            );
         }
         // load and parse the file
         let contents = std::fs::read_to_string(config_path).with_context(|| {
@@ -1251,12 +1238,6 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             // TODO(sharding): this command shouldn't have to specify a shard ID: we should ask the storage controller
             // where shard 0 is attached, and query there.
             let tenant_shard_id = get_tenant_shard_id(args.tenant_shard_id, env)?;
-            let timeline_infos = get_timeline_infos(env, &tenant_shard_id)
-                .await
-                .unwrap_or_else(|e| {
-                    eprintln!("Failed to load timeline info: {}", e);
-                    HashMap::new()
-                });
 
             let timeline_name_mappings = env.timeline_name_mappings();
 
@@ -1285,12 +1266,9 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                         lsn.to_string()
                     }
                     _ => {
-                        // -> primary endpoint or hot replica
-                        // Use the LSN at the end of the timeline.
-                        timeline_infos
-                            .get(&endpoint.timeline_id)
-                            .map(|bi| bi.last_record_lsn.to_string())
-                            .unwrap_or_else(|| "?".to_string())
+                        // As the LSN here refers to the one that the compute is started with,
+                        // we display nothing as it is a primary/hot standby compute.
+                        "---".to_string()
                     }
                 };
 
@@ -1338,10 +1316,14 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
 
             match (mode, args.hot_standby) {
                 (ComputeMode::Static(_), true) => {
-                    bail!("Cannot start a node in hot standby mode when it is already configured as a static replica")
+                    bail!(
+                        "Cannot start a node in hot standby mode when it is already configured as a static replica"
+                    )
                 }
                 (ComputeMode::Primary, true) => {
-                    bail!("Cannot start a node as a hot standby replica, it is already configured as primary node")
+                    bail!(
+                        "Cannot start a node as a hot standby replica, it is already configured as primary node"
+                    )
                 }
                 _ => {}
             }

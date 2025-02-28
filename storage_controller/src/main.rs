@@ -1,26 +1,26 @@
-use anyhow::{anyhow, Context};
-use clap::Parser;
-use hyper0::Uri;
-use metrics::launch_timestamp::LaunchTimestamp;
-use metrics::BuildInfo;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+
+use anyhow::{Context, anyhow};
+use clap::Parser;
+use hyper0::Uri;
+use metrics::BuildInfo;
+use metrics::launch_timestamp::LaunchTimestamp;
 use storage_controller::http::make_router;
 use storage_controller::metrics::preinitialize_metrics;
 use storage_controller::persistence::Persistence;
 use storage_controller::service::chaos_injector::ChaosInjector;
 use storage_controller::service::{
-    Config, Service, HEARTBEAT_INTERVAL_DEFAULT, LONG_RECONCILE_THRESHOLD_DEFAULT,
+    Config, HEARTBEAT_INTERVAL_DEFAULT, LONG_RECONCILE_THRESHOLD_DEFAULT,
     MAX_OFFLINE_INTERVAL_DEFAULT, MAX_WARMING_UP_INTERVAL_DEFAULT,
-    PRIORITY_RECONCILER_CONCURRENCY_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT,
+    PRIORITY_RECONCILER_CONCURRENCY_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT, Service,
 };
 use tokio::signal::unix::SignalKind;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use utils::auth::{JwtAuth, SwappableJwtAuth};
 use utils::logging::{self, LogFormat};
-
 use utils::sentry_init::init_sentry;
 use utils::{project_build_tag, project_git_version, tcp_listener};
 
@@ -34,7 +34,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 /// This adds roughly 3% overhead for allocations on average, which is acceptable considering
 /// performance-sensitive code will avoid allocations as far as possible anyway.
 #[allow(non_upper_case_globals)]
-#[export_name = "malloc_conf"]
+#[unsafe(export_name = "malloc_conf")]
 pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:21\0";
 
 #[derive(Parser)]
@@ -52,6 +52,10 @@ struct Cli {
     /// Token for authenticating this service with the pageservers it controls
     #[arg(long)]
     jwt_token: Option<String>,
+
+    /// Token for authenticating this service with the safekeepers it controls
+    #[arg(long)]
+    safekeeper_jwt_token: Option<String>,
 
     /// Token for authenticating this service with the control plane, when calling
     /// the compute notification endpoint
@@ -111,9 +115,13 @@ struct Cli {
     #[arg(long)]
     neon_local_repo_dir: Option<PathBuf>,
 
-    /// Chaos testing
+    /// Chaos testing: exercise tenant migrations
     #[arg(long)]
     chaos_interval: Option<humantime::Duration>,
+
+    /// Chaos testing: exercise an immediate exit
+    #[arg(long)]
+    chaos_exit_crontab: Option<cron::Schedule>,
 
     // Maximum acceptable lag for the secondary location while draining
     // a pageserver
@@ -153,7 +161,8 @@ impl Default for StrictMode {
 struct Secrets {
     database_url: String,
     public_key: Option<JwtAuth>,
-    jwt_token: Option<String>,
+    pageserver_jwt_token: Option<String>,
+    safekeeper_jwt_token: Option<String>,
     control_plane_jwt_token: Option<String>,
     peer_jwt_token: Option<String>,
 }
@@ -161,6 +170,7 @@ struct Secrets {
 impl Secrets {
     const DATABASE_URL_ENV: &'static str = "DATABASE_URL";
     const PAGESERVER_JWT_TOKEN_ENV: &'static str = "PAGESERVER_JWT_TOKEN";
+    const SAFEKEEPER_JWT_TOKEN_ENV: &'static str = "SAFEKEEPER_JWT_TOKEN";
     const CONTROL_PLANE_JWT_TOKEN_ENV: &'static str = "CONTROL_PLANE_JWT_TOKEN";
     const PEER_JWT_TOKEN_ENV: &'static str = "PEER_JWT_TOKEN";
     const PUBLIC_KEY_ENV: &'static str = "PUBLIC_KEY";
@@ -184,7 +194,14 @@ impl Secrets {
         let this = Self {
             database_url,
             public_key,
-            jwt_token: Self::load_secret(&args.jwt_token, Self::PAGESERVER_JWT_TOKEN_ENV),
+            pageserver_jwt_token: Self::load_secret(
+                &args.jwt_token,
+                Self::PAGESERVER_JWT_TOKEN_ENV,
+            ),
+            safekeeper_jwt_token: Self::load_secret(
+                &args.safekeeper_jwt_token,
+                Self::SAFEKEEPER_JWT_TOKEN_ENV,
+            ),
             control_plane_jwt_token: Self::load_secret(
                 &args.control_plane_jwt_token,
                 Self::CONTROL_PLANE_JWT_TOKEN_ENV,
@@ -264,18 +281,24 @@ async fn async_main() -> anyhow::Result<()> {
 
     let secrets = Secrets::load(&args).await?;
 
+    // TODO: once we've rolled out the safekeeper JWT token everywhere, put it into the validation code below
+    tracing::info!(
+        "safekeeper_jwt_token set: {:?}",
+        secrets.safekeeper_jwt_token.is_some()
+    );
+
     // Validate required secrets and arguments are provided in strict mode
     match strict_mode {
         StrictMode::Strict
             if (secrets.public_key.is_none()
-                || secrets.jwt_token.is_none()
+                || secrets.pageserver_jwt_token.is_none()
                 || secrets.control_plane_jwt_token.is_none()) =>
         {
             // Production systems should always have secrets configured: if public_key was not set
             // then we would implicitly disable auth.
             anyhow::bail!(
-                    "Insecure config!  One or more secrets is not set.  This is only permitted in `--dev` mode"
-                );
+                "Insecure config!  One or more secrets is not set.  This is only permitted in `--dev` mode"
+            );
         }
         StrictMode::Strict if args.compute_hook_url.is_none() => {
             // Production systems should always have a compute hook set, to prevent falling
@@ -293,7 +316,8 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     let config = Config {
-        jwt_token: secrets.jwt_token,
+        pageserver_jwt_token: secrets.pageserver_jwt_token,
+        safekeeper_jwt_token: secrets.safekeeper_jwt_token,
         control_plane_jwt_token: secrets.control_plane_jwt_token,
         peer_jwt_token: secrets.peer_jwt_token,
         compute_hook_url: args.compute_hook_url,
@@ -362,10 +386,12 @@ async fn async_main() -> anyhow::Result<()> {
         let service = service.clone();
         let cancel = CancellationToken::new();
         let cancel_bg = cancel.clone();
+        let chaos_exit_crontab = args.chaos_exit_crontab;
         (
             tokio::task::spawn(
                 async move {
-                    let mut chaos_injector = ChaosInjector::new(service, interval.into());
+                    let mut chaos_injector =
+                        ChaosInjector::new(service, interval.into(), chaos_exit_crontab);
                     chaos_injector.run(cancel_bg).await
                 }
                 .instrument(tracing::info_span!("chaos_injector")),

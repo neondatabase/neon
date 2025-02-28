@@ -1,24 +1,22 @@
-use futures::{stream::FuturesUnordered, StreamExt};
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::future::Future;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
+use pageserver_api::controller_api::{NodeAvailability, SkSchedulingPolicy};
+use pageserver_api::models::PageserverUtilization;
 use safekeeper_api::models::SafekeeperUtilization;
 use safekeeper_client::mgmt_api;
-use std::{
-    collections::HashMap,
-    fmt::Debug,
-    future::Future,
-    sync::Arc,
-    time::{Duration, Instant},
-};
-use tokio_util::sync::CancellationToken;
-
-use pageserver_api::{
-    controller_api::{NodeAvailability, SkSchedulingPolicy},
-    models::PageserverUtilization,
-};
-
 use thiserror::Error;
-use utils::{id::NodeId, logging::SecretString};
+use tokio_util::sync::CancellationToken;
+use utils::id::NodeId;
+use utils::logging::SecretString;
 
-use crate::{node::Node, safekeeper::Safekeeper};
+use crate::node::Node;
+use crate::safekeeper::Safekeeper;
 
 struct HeartbeaterTask<Server, State> {
     receiver: tokio::sync::mpsc::UnboundedReceiver<HeartbeatRequest<Server, State>>,
@@ -223,21 +221,21 @@ impl HeartBeat<Node, PageserverState> for HeartbeaterTask<Node, PageserverState>
                     Some((*node_id, status))
                 }
             });
+        }
 
-            loop {
-                let maybe_status = tokio::select! {
-                    next = heartbeat_futs.next() => {
-                        match next {
-                            Some(result) => result,
-                            None => { break; }
-                        }
-                    },
-                    _ = self.cancel.cancelled() => { return Err(HeartbeaterError::Cancel); }
-                };
+        loop {
+            let maybe_status = tokio::select! {
+                next = heartbeat_futs.next() => {
+                    match next {
+                        Some(result) => result,
+                        None => { break; }
+                    }
+                },
+                _ = self.cancel.cancelled() => { return Err(HeartbeaterError::Cancel); }
+            };
 
-                if let Some((node_id, status)) = maybe_status {
-                    new_state.insert(node_id, status);
-                }
+            if let Some((node_id, status)) = maybe_status {
+                new_state.insert(node_id, status);
             }
         }
 
@@ -363,21 +361,21 @@ impl HeartBeat<Safekeeper, SafekeeperState> for HeartbeaterTask<Safekeeper, Safe
                     Some((*node_id, status))
                 }
             });
+        }
 
-            loop {
-                let maybe_status = tokio::select! {
-                    next = heartbeat_futs.next() => {
-                        match next {
-                            Some(result) => result,
-                            None => { break; }
-                        }
-                    },
-                    _ = self.cancel.cancelled() => { return Err(HeartbeaterError::Cancel); }
-                };
+        loop {
+            let maybe_status = tokio::select! {
+                next = heartbeat_futs.next() => {
+                    match next {
+                        Some(result) => result,
+                        None => { break; }
+                    }
+                },
+                _ = self.cancel.cancelled() => { return Err(HeartbeaterError::Cancel); }
+            };
 
-                if let Some((node_id, status)) = maybe_status {
-                    new_state.insert(node_id, status);
-                }
+            if let Some((node_id, status)) = maybe_status {
+                new_state.insert(node_id, status);
             }
         }
 

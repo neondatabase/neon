@@ -1,17 +1,15 @@
-use std::{collections::HashMap, error::Error as _};
+use std::collections::HashMap;
+use std::error::Error as _;
 
 use bytes::Bytes;
-use reqwest::{IntoUrl, Method, StatusCode};
-
 use detach_ancestor::AncestorDetached;
 use http_utils::error::HttpErrorBody;
-use pageserver_api::{models::*, shard::TenantShardId};
-use utils::{
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
-
+use pageserver_api::models::*;
+use pageserver_api::shard::TenantShardId;
 pub use reqwest::Body as ReqwestBody;
+use reqwest::{IntoUrl, Method, StatusCode};
+use utils::id::{TenantId, TimelineId};
+use utils::lsn::Lsn;
 
 use crate::BlockUnblock;
 

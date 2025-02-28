@@ -73,10 +73,9 @@ impl Statvfs {
 
 pub mod mock {
     use camino::Utf8Path;
+    pub use pageserver_api::config::statvfs::mock::Behavior;
     use regex::Regex;
     use tracing::log::info;
-
-    pub use pageserver_api::config::statvfs::mock::Behavior;
 
     pub fn get(tenants_dir: &Utf8Path, behavior: &Behavior) -> nix::Result<Statvfs> {
         info!("running mocked statvfs");
@@ -85,7 +84,7 @@ pub mod mock {
             Behavior::Success {
                 blocksize,
                 total_blocks,
-                ref name_filter,
+                name_filter,
             } => {
                 let used_bytes = walk_dir_disk_usage(tenants_dir, name_filter.as_deref()).unwrap();
 
@@ -134,7 +133,7 @@ pub mod mock {
                 }
                 Err(e) => {
                     return Err(anyhow::Error::new(e)
-                        .context(format!("get metadata of {:?}", entry.path())))
+                        .context(format!("get metadata of {:?}", entry.path())));
                 }
             };
             total += m.len();

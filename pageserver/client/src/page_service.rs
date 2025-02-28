@@ -1,23 +1,16 @@
 use std::sync::{Arc, Mutex};
 
-use futures::{
-    stream::{SplitSink, SplitStream},
-    SinkExt, StreamExt,
+use futures::stream::{SplitSink, SplitStream};
+use futures::{SinkExt, StreamExt};
+use pageserver_api::models::{
+    PagestreamBeMessage, PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetPageResponse,
 };
-use pageserver_api::{
-    models::{
-        PagestreamBeMessage, PagestreamFeMessage, PagestreamGetPageRequest,
-        PagestreamGetPageResponse,
-    },
-    reltag::RelTag,
-};
+use pageserver_api::reltag::RelTag;
 use tokio::task::JoinHandle;
 use tokio_postgres::CopyOutStream;
 use tokio_util::sync::CancellationToken;
-use utils::{
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
+use utils::id::{TenantId, TimelineId};
+use utils::lsn::Lsn;
 
 pub struct Client {
     client: tokio_postgres::Client,
@@ -34,7 +27,8 @@ pub struct BasebackupRequest {
 
 impl Client {
     pub async fn new(connstring: String) -> anyhow::Result<Self> {
-        let (client, connection) = tokio_postgres::connect(&connstring, postgres::NoTls).await?;
+        let (client, connection) =
+            tokio_postgres::connect(&connstring, tokio_postgres::NoTls).await?;
 
         let conn_task_cancel = CancellationToken::new();
         let conn_task = tokio::spawn({
