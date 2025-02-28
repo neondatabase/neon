@@ -23,7 +23,7 @@ use postgres::NoTls;
 use postgres::error::SqlState;
 use remote_storage::{DownloadError, RemotePath};
 use tokio::spawn;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{Instrument, debug, error, info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 use utils::measured_stream::MeasuredReader;
@@ -579,7 +579,11 @@ impl ComputeNode {
         // If there are any remote extensions in shared_preload_libraries, start downloading them
         if pspec.spec.remote_extensions.is_some() {
             let (this, spec) = (self.clone(), pspec.spec.clone());
-            pre_tasks.spawn_blocking_child(move || this.download_preload_extensions(&spec));
+            pre_tasks.spawn(async move {
+                this.download_preload_extensions(&spec)
+                    .in_current_span()
+                    .await
+            });
         }
 
         // Prepare pgdata directory. This downloads the basebackup, among other things.
@@ -706,7 +710,8 @@ impl ComputeNode {
         Ok(())
     }
 
-    fn download_preload_extensions(&self, spec: &ComputeSpec) -> Result<()> {
+    #[instrument(skip_all)]
+    async fn download_preload_extensions(&self, spec: &ComputeSpec) -> Result<()> {
         let remote_extensions = if let Some(remote_extensions) = &spec.remote_extensions {
             remote_extensions
         } else {
@@ -717,8 +722,7 @@ impl ComputeNode {
         extension_server::create_control_files(remote_extensions, &self.params.pgbin);
 
         let library_load_start_time = Utc::now();
-        let rt = tokio::runtime::Handle::current();
-        let remote_ext_metrics = rt.block_on(self.prepare_preload_libraries(spec))?;
+        let remote_ext_metrics = self.prepare_preload_libraries(spec).await?;
 
         let library_load_time = Utc::now()
             .signed_duration_since(library_load_start_time)
