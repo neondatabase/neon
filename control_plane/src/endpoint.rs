@@ -659,7 +659,7 @@ impl Endpoint {
             timeline_id: Some(self.timeline_id),
             mode: self.mode,
             pageserver_connstring: Some(pageserver_connstring),
-            safekeepers_generation,
+            safekeepers_generation: safekeepers_generation.map(|g| g.into_inner()),
             safekeeper_connstrings,
             storage_auth_token: auth_token.clone(),
             remote_extensions,

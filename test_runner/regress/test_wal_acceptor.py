@@ -2315,10 +2315,7 @@ def test_explicit_timeline_creation(neon_env_builder: NeonEnvBuilder):
     # sk timeline creation request expects minor version
     pg_version = ps_timeline_detail["pg_version"] * 10000
     # create inital mconf
-    sk_ids = [
-        SafekeeperId(env.safekeepers[0].id, "localhost", sk.port.pg_tenant_only)
-        for sk in env.safekeepers
-    ]
+    sk_ids = [SafekeeperId(sk.id, "localhost", sk.port.pg_tenant_only) for sk in env.safekeepers]
     mconf = Configuration(generation=1, members=sk_ids, new_members=None)
     create_r = TimelineCreateRequest(
         tenant_id, timeline_id, mconf, pg_version, Lsn(init_lsn), commit_lsn=None

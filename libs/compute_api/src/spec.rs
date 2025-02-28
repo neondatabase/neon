@@ -7,7 +7,6 @@ use std::collections::HashMap;
 
 use regex::Regex;
 use remote_storage::RemotePath;
-use safekeeper_api::membership::SafekeeperGeneration;
 use serde::{Deserialize, Serialize};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
@@ -108,8 +107,11 @@ pub struct ComputeSpec {
     /// 2) If walproposer wants to update list of safekeepers to connect to
     ///    taking them from some safekeeper mconf, it should check what value
     ///    is newer by comparing the generation.
+    ///
+    /// Note: it could be SafekeeperGeneration, but this needs linking
+    /// compute_ctl with postgres_ffi.
     #[serde(default)]
-    pub safekeepers_generation: Option<SafekeeperGeneration>,
+    pub safekeepers_generation: Option<u32>,
     #[serde(default)]
     pub safekeeper_connstrings: Vec<String>,
 
