@@ -89,6 +89,8 @@ will work. That should make it easy to adapt to new PostgreSQL versions.
 In the above example, I assumed a GetPage request, but everything applies to
 other other request types like "smgrnblocks" too.
 
+Q: How we are going to handle backend termination while it is waiting for response? Should we allow it or wait request completion? If PS is down, it can take quite long time during which user will not be able to interrupt the query.
+
 ### Prefetching
 
 A backend can also issue a "blind" prefetch request. When a communicator
@@ -144,7 +146,7 @@ communicator process. But it makes sense to do at the same time:
 
 - Switching to Rust in the communicator process makes it possible to use
   existing libraries
-  
+
 - Using a library might help with managing the pool of pageserver connnection,
   so we want need to implement that ourselves
 
@@ -157,6 +159,10 @@ communicator process. But it makes sense to do at the same time:
 - Could the single communicator process become a bottleneck? In the new v18 AIO
   system, the process needs to execute all the I/O completion callbacks. They're
   very short, but I still wonder if a single process can handle it.
+
+- Goal is to sustain ~2.5GB/s bandwidth (typical EC2 NIC).
+   - John: I'd presume a single process to be capable of that if it's just passing buffers around. If we needed more than one in future it would probably be quite a small lift to make that happen (but I bet we never do). (I don't fully know what's involved in the execute all the I/O completion callbacks part though)
+
 
 ### Security implications (if relevant)
 
@@ -190,7 +196,7 @@ Implentation phases:
 
 - Implement a simple request / response interface in shared memory between the
   backends and the communicator.
-  
+
 - Implement a minimalistic communicator: hold one connection to
   pageserver/shard. No prefetching. Process one request at a time
 
