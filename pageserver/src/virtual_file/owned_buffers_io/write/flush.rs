@@ -153,7 +153,7 @@ where
         &mut self,
         slice: FullSlice<Buf>,
         offset: u64,
-    ) -> std::io::Result<(B, FlushControl)> {
+    ) -> std::io::Result<(FullSlice<Buf>, FlushControl)> {
         let (request, flush_control) = new_flush_op(slice, offset);
 
         // Submits the buffer to the background task.

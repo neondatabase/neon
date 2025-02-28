@@ -43,7 +43,7 @@ pub struct BufferedWriter<B: Buffer, W> {
     writer: Arc<W>,
     /// Immutable buffer for serving tail reads.
     /// `None` if no flush request has been submitted.
-    pub(super) maybe_flushed: Option<FullSlice<Buf>>,
+    pub(super) maybe_flushed: Option<FullSlice<B::IoBuf>>,
     /// invariant: always remains Some(buf) except
     /// - while IO is ongoing => goes back to Some() once the IO completed successfully
     /// - after an IO error => stays `None` forever
@@ -76,6 +76,7 @@ where
         Self {
             writer: writer.clone(),
             mutable: Some(buf_new()),
+            maybe_flushed: None,
             flush_handle: FlushHandle::spawn_new(
                 writer,
                 buf_new(),
@@ -98,13 +99,9 @@ where
     }
 
     pub fn inspect_mutable_pending(&self) -> &[u8] {
-        match mutable
-            .as_ref()
-            .expect("must not use after we returned an error")
-        {
+        match self.mutable.as_ref() {
             Some(mutable) => {
-                let mutable = &mutable[0..mutable.pending()];
-                mutable
+                &mutable[0..mutable.pending()]
             }
             None => &[],
         }
@@ -113,7 +110,7 @@ where
     /// Gets a reference to the maybe flushed read-only buffer.
     /// Returns `None` if the writer has not submitted any flush request.
     pub fn inspect_maybe_flushed(&self) -> Option<&FullSlice<Buf>> {
-        self.flush_handle.maybe_flushed.as_ref()
+        self.maybe_flushed.as_ref()
     }
 
     #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -125,6 +122,7 @@ where
 
         let Self {
             mutable: buf,
+            maybe_flushed: _,
             writer,
             mut flush_handle,
             bytes_submitted: bytes_amount,
@@ -134,9 +132,10 @@ where
         Ok((bytes_amount, writer))
     }
 
-    /// Gets a reference to the mutable in-memory buffer.
-    #[inline(always)]
-    fn mutable(&self) -> &B {}
+    #[cfg(test)]
+    pub(crate) fn mutable(&self) -> &B {
+        self.mutable.as_ref().expect("must not use after an error")
+    }
 
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub async fn write_buffered_borrowed(

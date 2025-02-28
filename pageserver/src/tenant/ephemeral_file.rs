@@ -405,7 +405,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mutable = file.buffered_writer.inspect_mutable_pending();
+        let mutable = file.buffered_writer.mutable();
         let cap = mutable.capacity();
         let align = mutable.align();
 
@@ -463,7 +463,7 @@ mod tests {
             .unwrap();
 
         // mutable buffer and maybe_flushed buffer each has `cap` bytes.
-        let cap = file.buffered_writer.inspect_mutable_pending().capacity();
+        let cap = file.buffered_writer.mutable().capacity();
 
         let content: Vec<u8> = rand::thread_rng()
             .sample_iter(rand::distributions::Standard)
@@ -510,7 +510,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mutable = file.buffered_writer.inspect_mutable_pending();
+        let mutable = file.buffered_writer.mutable();
         let cap = mutable.capacity();
         let align = mutable.align();
         let content: Vec<u8> = rand::thread_rng()
