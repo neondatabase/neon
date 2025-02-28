@@ -4079,6 +4079,7 @@ impl Timeline {
                 self.timeline_id,
                 self.tenant_shard_id,
                 &self.gate,
+                &self.cancel,
                 ctx,
             )
             .await?;
