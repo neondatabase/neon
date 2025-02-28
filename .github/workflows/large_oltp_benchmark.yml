@@ -47,7 +47,7 @@ jobs:
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
-      PLATFORM: staging_us-east-2
+      PLATFORM: ${{ matrix.target }}
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
