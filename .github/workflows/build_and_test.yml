@@ -831,7 +831,7 @@ jobs:
               || needs.meta.outputs.run-kind == 'pr' && needs.meta.outputs.build-tag
               || needs.meta.outputs.run-kind == 'compute-rc-pr' && needs.meta.outputs.previous-storage-release
             }}
-          TEST_EXTENSIONS_TAG: latest
+          TEST_EXTENSIONS_TAG: ${{ needs.meta.outputs.previous-compute-release }}
           NEW_COMPUTE_TAG: ${{ needs.meta.outputs.build-tag }}
           OLD_COMPUTE_TAG: ${{ needs.meta.outputs.previous-compute-release }}
         run: ./docker-compose/test_extensions_upgrade.sh

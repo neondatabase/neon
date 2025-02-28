@@ -58,7 +58,7 @@ function check_timeline() {
 # Accepts the tag for the compute node and the timeline as parameters.
 function restart_compute() {
   docker compose down compute compute_is_ready
-  COMPUTE_TAG=${1} TAG=${OLD_COMPUTE_TAG} TENANT_ID=${tenant_id} TIMELINE_ID=${2} docker compose up --quiet-pull -d --build compute compute_is_ready
+  COMPUTE_TAG=${1} TENANT_ID=${tenant_id} TIMELINE_ID=${2} docker compose up --quiet-pull -d --build compute compute_is_ready
   wait_for_ready
   check_timeline ${2}
 }
@@ -82,7 +82,7 @@ EXTENSIONS='[
 {"extname": "pg_repack", "extdir": "pg_repack-src"}
 ]'
 EXTNAMES=$(echo ${EXTENSIONS} | jq -r '.[].extname' | paste -sd ' ' -)
-TAG=${NEW_COMPUTE_TAG} docker compose --profile test-extensions up --quiet-pull --build -d
+COMPUTE_TAG=${NEW_COMPUTE_TAG} TEST_EXTENSIONS_TAG=${NEW_COMPUTE_TAG} docker compose --profile test-extensions up --quiet-pull --build -d
 wait_for_ready
 docker compose exec neon-test-extensions psql -c "DROP DATABASE IF EXISTS contrib_regression"
 docker compose exec neon-test-extensions psql -c "CREATE DATABASE contrib_regression"
@@ -90,7 +90,7 @@ create_extensions "${EXTNAMES}"
 query="select json_object_agg(extname,extversion) from pg_extension where extname in ('${EXTNAMES// /\',\'}')"
 new_vers=$(docker compose exec neon-test-extensions psql -Aqt -d contrib_regression -c "$query")
 docker compose --profile test-extensions down
-TAG=${OLD_COMPUTE_TAG} docker compose --profile test-extensions up --quiet-pull --build -d --force-recreate
+COMPUTE_TAG=${OLD_COMPUTE_TAG} TEST_EXTENSIONS_TAG=${NEW_COMPUTE_TAG} docker compose --profile test-extensions up --quiet-pull --build -d --force-recreate
 wait_for_ready
 docker compose exec neon-test-extensions psql -c "DROP DATABASE IF EXISTS contrib_regression"
 docker compose exec neon-test-extensions psql -c "CREATE DATABASE contrib_regression"
