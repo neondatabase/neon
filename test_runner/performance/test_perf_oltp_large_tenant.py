@@ -30,7 +30,8 @@ def run_test_pgbench(env: PgCompare, custom_scripts: str, duration: int):
     env.zenbenchmark.record("custom scripts", 0.0, custom_scripts, MetricReport.TEST_PARAM)
     
     password = env.pg.default_options.get("password", None)
-    options = "-cstatement_timeout=0 " + env.pg.default_options.get("options", "")
+    # -cstatement_timeout=0 is NOT supported for pooler connections
+    options = env.pg.default_options.get("options", "")
     # drop password from the connection string by passing password=None and set password separately
     connstr = env.pg.connstr(password=None, options=options)
 
