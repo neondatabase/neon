@@ -13,13 +13,6 @@ pub async fn exponential_backoff(
     max_seconds: f64,
     cancel: &CancellationToken,
 ) {
-    exponential_backoff2(n, base_increment, max_seconds, cancel.cancelled()).await
-}
-
-pub async fn exponential_backoff2<F>(n: u32, base_increment: f64, max_seconds: f64, cancel: F)
-where
-    F: Future<Output = ()>,
-{
     let backoff_duration_seconds =
         exponential_backoff_duration_seconds(n, base_increment, max_seconds);
     if backoff_duration_seconds > 0.0 {
@@ -30,7 +23,7 @@ where
         drop(
             tokio::time::timeout(
                 std::time::Duration::from_secs_f64(backoff_duration_seconds),
-                cancel,
+                cancel.cancelled(),
             )
             .await,
         )

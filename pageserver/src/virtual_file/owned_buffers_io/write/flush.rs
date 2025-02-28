@@ -196,7 +196,7 @@ where
             .inner
             .take()
             .expect("must not use after we returned an error");
-        handle.channel.close();
+        drop(handle.channel.tx);
         handle.join_handle.await.unwrap()
     }
 
@@ -276,14 +276,6 @@ where
             //
             let mut slice_storage = Some(request.slice);
             for attempt in 1.. {
-                if self.channel.is_closed() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!(
-                            "flush handle shutting down or dropped during flush attempt number {attempt}"
-                        ),
-                    ));
-                }
                 let result = async {
                     if attempt > 1 {
                         info!("retrying flush");
@@ -298,7 +290,8 @@ where
                         return ControlFlow::Break(());
                     };
                     warn!(%err, "error flushing buffered writer buffer to disk, retrying after backoff");
-                    utils::backoff::exponential_backoff2(attempt, 1.0, 10.0, self.channel.closed()).await;
+                    static NO_CANCELLATION: Lazy<CancellationToken> = Lazy::new(CancellationToken::new);
+                    utils::backoff::exponential_backoff(attempt, 1.0, 10.0, &NO_CANCELLATION).await;
                     ControlFlow::Continue(())
                 }
                 .instrument(info_span!("flush_attempt", %attempt))
