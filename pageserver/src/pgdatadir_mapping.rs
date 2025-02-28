@@ -604,7 +604,7 @@ impl Timeline {
             slru_block_to_key(kind, segno, 0)..slru_block_to_key(kind, segno, n_blocks),
         );
 
-        let partitions = keyspace.partition(
+        let batches = keyspace.partition(
             self.get_shard_identity(),
             Timeline::MAX_GET_VECTORED_KEYS * BLCKSZ as u64,
         );
@@ -617,9 +617,9 @@ impl Timeline {
         );
 
         let mut segment = BytesMut::with_capacity(n_blocks as usize * BLCKSZ as usize);
-        for part in partitions.parts {
+        for batch in batches.parts {
             let blocks = self
-                .get_vectored(part, lsn, io_concurrency.clone(), ctx)
+                .get_vectored(batch, lsn, io_concurrency.clone(), ctx)
                 .await?;
 
             for (_key, block) in blocks {
