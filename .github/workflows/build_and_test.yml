@@ -699,10 +699,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # TODO: in other places we use x64, but vm-builder has hardcoded list of supported architectures at the moment: amd64, arm64, probably should be extended by x64 as well
         arch: [ amd64, arm64 ]
         version:
-          # see the comment for `compute-node-image-arch` job
           - pg: v14
             debian: bullseye
           - pg: v15
@@ -756,13 +754,9 @@ jobs:
         version:
           # see the comment for `compute-node-image-arch` job
           - pg: v14
-            debian: bullseye
           - pg: v15
-            debian: bullseye
           - pg: v16
-            debian: bullseye
           - pg: v17
-            debian: bookworm
     steps:
       - uses: docker/login-action@v3
         with:
