@@ -31,6 +31,10 @@ def run_test_pgbench(env: PgCompare, custom_scripts: str, duration: int):
     options = env.pg.default_options.get("options", "")
     # drop password from the connection string by passing password=None and set password separately
     connstr = env.pg.connstr(password=None, options=options)
+    # if connstr does not contain pooler we can set statement_timeout to 0
+    if "pooler" not in connstr:
+        options = "-cstatement_timeout=0 " + env.pg.default_options.get("options", "")
+        connstr = env.pg.connstr(password=None, options=options)
 
     script_args = [
         "pgbench",
