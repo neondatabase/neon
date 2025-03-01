@@ -759,6 +759,11 @@ BeginRedoForBlock(StringInfo input_message)
 	{
 		reln->smgr_cached_nblocks[forknum] = blknum + 1;
 	}
+	if (taget_redo_tag.forkNum == MAIN_FORKNUM)
+	{
+		reln->smgr_cached_nblocks[FSM_FORKNUM] = MaxBlockNumber;
+		reln->smgr_cached_nblocks[VISIBILITYMAP_FORKNUM] = MaxBlockNumber;
+	}
 }
 
 /*
