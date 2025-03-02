@@ -11,7 +11,10 @@ use utils::{
 };
 
 use crate::{
-    id_lock_map::trace_shared_lock, persistence::SafekeeperPersistence, safekeeper::Safekeeper,
+    id_lock_map::trace_shared_lock,
+    persistence::{SafekeeperPersistence, SafekeeperTimelineOpKind},
+    safekeeper::Safekeeper,
+    safekeeper_client::SafekeeperClient,
     service::TenantOperations,
 };
 
@@ -51,6 +54,7 @@ pub(crate) struct ScheduleRequest {
     pub(crate) tenant_id: TenantId,
     pub(crate) timeline_id: TimelineId,
     pub(crate) generation: u32,
+    pub(crate) kind: SafekeeperTimelineOpKind,
 }
 
 struct ReconcilerHandle {
@@ -86,31 +90,82 @@ impl SafekeeperReconciler {
             };
             let Some(req) = req else { break };
 
+            let kind = req.kind;
             let tenant_id = req.tenant_id;
             let timeline_id = req.timeline_id;
-            self.reconcile_creation(req)
+            self.reconcile_one(req)
                 .instrument(tracing::info_span!(
-                    "reconcile_creation",
-                    ?tenant_id,
-                    ?timeline_id
+                    "reconcile_one",
+                    ?kind,
+                    %tenant_id,
+                    %timeline_id
                 ))
                 .await;
         }
     }
-    async fn reconcile_creation(&self, req: ScheduleRequest) {
-        let our_id = req.safekeeper.get_id();
-        let http_hosts = req
-            .host_list
-            .iter()
-            .filter(|(node_id, _hostname)| *node_id != our_id)
-            .map(|(_, hostname)| hostname.clone())
-            .collect::<Vec<_>>();
-        let pull_req = PullTimelineRequest {
-            http_hosts,
-            tenant_id: req.tenant_id,
-            timeline_id: req.timeline_id,
-        };
-
+    async fn reconcile_one(&self, req: ScheduleRequest) {
+        let req_host = req.safekeeper.skp.host.clone();
+        match req.kind {
+            SafekeeperTimelineOpKind::Pull => {
+                let our_id = req.safekeeper.get_id();
+                let http_hosts = req
+                    .host_list
+                    .iter()
+                    .filter(|(node_id, _hostname)| *node_id != our_id)
+                    .map(|(_, hostname)| hostname.clone())
+                    .collect::<Vec<_>>();
+                let pull_req = PullTimelineRequest {
+                    http_hosts,
+                    tenant_id: req.tenant_id,
+                    timeline_id: req.timeline_id,
+                };
+                self.reconcile_inner(
+                    req,
+                    async |client| client.pull_timeline(&pull_req).await,
+                    |resp| {
+                        tracing::info!(
+                            "pulled timeline from {} onto {req_host}",
+                            resp.safekeeper_host,
+                        );
+                    },
+                )
+                .await;
+            }
+            SafekeeperTimelineOpKind::Exclude => {
+                // TODO actually exclude instead of delete here
+                let tenant_id = req.tenant_id;
+                let timeline_id = req.timeline_id;
+                self.reconcile_inner(
+                    req,
+                    async |client| client.delete_timeline(tenant_id, timeline_id).await,
+                    |_resp| {
+                        tracing::info!("deleted timeline from {req_host}");
+                    },
+                )
+                .await;
+            }
+            SafekeeperTimelineOpKind::Delete => {
+                let tenant_id = req.tenant_id;
+                let timeline_id = req.timeline_id;
+                self.reconcile_inner(
+                    req,
+                    async |client| client.delete_timeline(tenant_id, timeline_id).await,
+                    |_resp| {
+                        tracing::info!("deleted timeline from {req_host}");
+                    },
+                )
+                .await;
+            }
+        }
+    }
+    async fn reconcile_inner<T, F, U>(
+        &self,
+        req: ScheduleRequest,
+        closure: impl Fn(SafekeeperClient) -> F,
+        log_success: impl FnOnce(T) -> U,
+    ) where
+        F: Future<Output = Result<T, safekeeper_client::mgmt_api::Error>>,
+    {
         let jwt = self
             .service
             .config
@@ -121,8 +176,8 @@ impl SafekeeperReconciler {
             .safekeeper
             .with_client_retries(
                 |client| {
-                    let pull_req = pull_req.clone();
-                    async move { client.pull_timeline(&pull_req).await }
+                    let closure = &closure;
+                    async move { closure(client).await }
                 },
                 &jwt,
                 3,
@@ -133,11 +188,7 @@ impl SafekeeperReconciler {
             .await;
         match res {
             Ok(resp) => {
-                tracing::info!(
-                    "pulled timeline from {} onto {}",
-                    resp.safekeeper_host,
-                    req.safekeeper.skp.host
-                );
+                log_success(resp);
                 let res = self
                     .service
                     .persistence
@@ -157,7 +208,7 @@ impl SafekeeperReconciler {
             }
             Err(e) => {
                 tracing::info!(
-                    "Reconcile attempt to pull timeline onto {} failed: {e:?}",
+                    "Reconcile attempt for safekeeper {} failed: {e:?}",
                     req.safekeeper.skp.host
                 );
                 // TODO we should probably automatically retry on error here

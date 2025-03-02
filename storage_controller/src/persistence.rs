@@ -1888,6 +1888,8 @@ pub(crate) struct TimelinePendingOpPersistence {
 #[diesel(sql_type = diesel::sql_types::VarChar)]
 pub(crate) enum SafekeeperTimelineOpKind {
     Pull,
+    Exclude,
+    Delete,
 }
 
 impl FromSql<diesel::sql_types::VarChar, Pg> for SafekeeperTimelineOpKind {
@@ -1898,6 +1900,8 @@ impl FromSql<diesel::sql_types::VarChar, Pg> for SafekeeperTimelineOpKind {
         match core::str::from_utf8(bytes) {
             Ok(s) => match s {
                 "pull" => Ok(SafekeeperTimelineOpKind::Pull),
+                "exclude" => Ok(SafekeeperTimelineOpKind::Exclude),
+                "delete" => Ok(SafekeeperTimelineOpKind::Delete),
                 _ => Err(format!("can't parse: {s}").into()),
             },
             Err(e) => Err(format!("invalid UTF-8 for op_kind: {e}").into()),
@@ -1912,6 +1916,8 @@ impl ToSql<diesel::sql_types::VarChar, Pg> for SafekeeperTimelineOpKind {
     ) -> diesel::serialize::Result {
         let kind_str = match self {
             SafekeeperTimelineOpKind::Pull => "pull",
+            SafekeeperTimelineOpKind::Exclude => "exclude",
+            SafekeeperTimelineOpKind::Delete => "delete",
         };
         out.write_all(kind_str.as_bytes())
             .map(|_| IsNull::No)
