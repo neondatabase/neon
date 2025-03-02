@@ -2,6 +2,16 @@ pub mod chaos_injector;
 mod context_iterator;
 pub(crate) mod safekeeper_reconciler;
 
+use std::borrow::Cow;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::error::Error;
+use std::ops::Deref;
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use anyhow::Context;
 use context_iterator::TenantShardContextIterator;
 use control_plane::storage_controller::{
@@ -71,8 +81,8 @@ use crate::peer_client::GlobalObservedState;
 use crate::persistence::split_state::SplitState;
 use crate::persistence::{
     AbortShardSplitStatus, ControllerPersistence, DatabaseError, DatabaseResult,
-    MetadataHealthPersistence, Persistence, ShardGenerationState, TenantFilter,
-    TenantShardPersistence, TimelinePendingOpPersistence, TimelinePersistence,
+    MetadataHealthPersistence, Persistence, SafekeeperTimelineOpKind, ShardGenerationState,
+    TenantFilter, TenantShardPersistence, TimelinePendingOpPersistence, TimelinePersistence,
 };
 use crate::reconciler::{
     ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder, ReconcilerPriority,
@@ -3794,6 +3804,7 @@ impl Service {
                     tenant_id,
                     timeline_id,
                     generation: timeline_persist.generation as u32,
+                    kind: crate::persistence::SafekeeperTimelineOpKind::Pull,
                 };
                 locked.safekeeper_reconcilers.schedule_request(self, req);
             }
@@ -4373,7 +4384,7 @@ impl Service {
     }
 
     pub(crate) async fn tenant_timeline_delete(
-        &self,
+        self: &Arc<Self>,
         tenant_id: TenantId,
         timeline_id: TimelineId,
     ) -> Result<StatusCode, ApiError> {
@@ -4385,7 +4396,7 @@ impl Service {
         )
         .await;
 
-        self.tenant_remote_mutation(tenant_id, move |mut targets| async move {
+        let status_code = self.tenant_remote_mutation(tenant_id, move |mut targets| async move {
             if targets.0.is_empty() {
                 return Err(ApiError::NotFound(
                     anyhow::anyhow!("Tenant not found").into(),
@@ -4457,7 +4468,67 @@ impl Service {
             )
             .await?;
             Ok(shard_zero_status)
-        }).await?
+        }).await?;
+
+        self.tenant_timeline_delete_safekeepers(tenant_id, timeline_id)
+            .await?;
+
+        status_code
+    }
+    /// Perform timeline deletion on safekeepers. Will return success: we persist the deletion into the reconciler.
+    async fn tenant_timeline_delete_safekeepers(
+        self: &Arc<Self>,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Result<(), ApiError> {
+        let tl = self
+            .persistence
+            .get_timeline(tenant_id, timeline_id)
+            .await?;
+        let Some(tl) = tl else {
+            tracing::info!(
+                "timeline {tenant_id}/{timeline_id} doesn't exist in timelines table, no deletions on safekeepers needed"
+            );
+            return Ok(());
+        };
+        let all_sks = tl
+            .new_sk_set
+            .iter()
+            .flat_map(|sks| {
+                sks.iter()
+                    .map(|sk| (*sk, SafekeeperTimelineOpKind::Exclude))
+            })
+            .chain(
+                tl.sk_set
+                    .iter()
+                    .map(|v| (*v, SafekeeperTimelineOpKind::Delete)),
+            )
+            .collect::<HashMap<_, _>>();
+
+        // Schedule reconciliations
+        {
+            let mut locked = self.inner.write().unwrap();
+            for (sk_id, kind) in all_sks {
+                let sk_id = NodeId(sk_id as u64);
+                let Some(sk) = locked.safekeepers.get(&sk_id) else {
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                        "Couldn't find safekeeper with id {sk_id}"
+                    )));
+                };
+
+                let req = ScheduleRequest {
+                    safekeeper: Box::new(sk.clone()),
+                    // we don't use this for this kind, put a dummy value
+                    host_list: Vec::new(),
+                    tenant_id,
+                    timeline_id,
+                    generation: tl.generation as u32,
+                    kind,
+                };
+                locked.safekeeper_reconcilers.schedule_request(self, req);
+            }
+        }
+        Ok(())
     }
 
     /// When you need to send an HTTP request to the pageserver that holds shard0 of a tenant, this
