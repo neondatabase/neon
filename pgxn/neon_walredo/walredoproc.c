@@ -759,7 +759,7 @@ BeginRedoForBlock(StringInfo input_message)
 	{
 		reln->smgr_cached_nblocks[forknum] = blknum + 1;
 	}
-	if (taget_redo_tag.forkNum == MAIN_FORKNUM)
+	if (target_redo_tag.forkNum == MAIN_FORKNUM)
 	{
 		reln->smgr_cached_nblocks[FSM_FORKNUM] = MaxBlockNumber;
 		reln->smgr_cached_nblocks[VISIBILITYMAP_FORKNUM] = MaxBlockNumber;
@@ -1009,6 +1009,7 @@ GetPage(StringInfo input_message)
 	Buffer		buf;
 	Page		page;
 	int			tot_written;
+	SMgrRelation reln;
 
 	/*
 	 * message format:
@@ -1058,6 +1059,10 @@ GetPage(StringInfo input_message)
 	ReleaseBuffer(buf);
 	DropRelationAllLocalBuffers(rinfo);
 	wal_redo_buffer = InvalidBuffer;
+
+	/* Remove relation from SMGR relastion cache */
+	reln = smgropen(rinfo, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT);
+	smgrclose(reln);
 
 	elog(TRACE, "Page sent back for block %u", blknum);
 }
