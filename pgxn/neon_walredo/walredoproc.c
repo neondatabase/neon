@@ -1009,7 +1009,6 @@ GetPage(StringInfo input_message)
 	Buffer		buf;
 	Page		page;
 	int			tot_written;
-	SMgrRelation reln;
 
 	/*
 	 * message format:
@@ -1061,8 +1060,7 @@ GetPage(StringInfo input_message)
 	wal_redo_buffer = InvalidBuffer;
 
 	/* Remove relation from SMGR relastion cache */
-	reln = smgropen(rinfo, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT);
-	smgrclose(reln);
+	AtEOXact_SMgr();
 
 	elog(TRACE, "Page sent back for block %u", blknum);
 }
