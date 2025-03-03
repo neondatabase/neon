@@ -144,9 +144,9 @@ class NeonProject:
             raise RuntimeError(f"The branch {branch_id}, probably, has ancestors")
         if branch_id not in self.branches:
             raise RuntimeError(f"The branch with id {branch_id} is not found")
-        for endpoint in self.branches[branch_id].endpoints.values():
-            if endpoint.type == "read_only":
-                endpoint.delete()
+        endpoints_to_delete = [ep for ep in self.branches[branch_id].endpoints.values() if ep.type == "read_only"]
+        for ep in endpoints_to_delete:
+            ep.delete()
         self.neon_api.delete_branch(self.id, branch_id)
         if len(parent.children) == 1:
             self.leaf_branches[parent.id] = parent
