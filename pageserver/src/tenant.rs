@@ -2501,6 +2501,7 @@ impl Tenant {
         initdb_lsn: Lsn,
         pg_version: u32,
         ctx: &RequestContext,
+        in_memory_layer_desc: Vec<timeline::InMemoryLayerTestDesc>,
         delta_layer_desc: Vec<timeline::DeltaLayerTestDesc>,
         image_layer_desc: Vec<(Lsn, Vec<(pageserver_api::key::Key, bytes::Bytes)>)>,
         end_lsn: Lsn,
@@ -2520,6 +2521,11 @@ impl Tenant {
         for (lsn, images) in image_layer_desc {
             tline
                 .force_create_image_layer(lsn, images, Some(initdb_lsn), ctx)
+                .await?;
+        }
+        for in_memory in in_memory_layer_desc {
+            tline
+                .force_create_in_memory_layer(in_memory, Some(initdb_lsn), ctx)
                 .await?;
         }
         let layer_names = tline
@@ -5913,6 +5919,8 @@ mod tests {
     #[cfg(feature = "testing")]
     use timeline::GcInfo;
     #[cfg(feature = "testing")]
+    use timeline::InMemoryLayerTestDesc;
+    #[cfg(feature = "testing")]
     use timeline::compaction::{KeyHistoryRetention, KeyLogAtLsn};
     use timeline::{CompactOptions, DeltaLayerTestDesc};
     use utils::id::TenantId;
@@ -7925,6 +7933,7 @@ mod tests {
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
                 &ctx,
+                Vec::new(), // in-memory layers
                 Vec::new(), // delta layers
                 vec![(Lsn(0x20), vec![(base_key, test_img("data key 1"))])], // image layers
                 Lsn(0x20), // it's fine to not advance LSN to 0x30 while using 0x30 to get below because `get_vectored_impl` does not wait for LSN
@@ -8012,6 +8021,7 @@ mod tests {
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
                 &ctx,
+                Vec::new(), // in-memory layers
                 Vec::new(), // delta layers
                 vec![(
                     Lsn(0x20),
@@ -8227,6 +8237,7 @@ mod tests {
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
                 &ctx,
+                Vec::new(), // in-memory layers
                 // delta layers
                 vec![
                     DeltaLayerTestDesc::new_with_inferred_key_range(
@@ -8307,6 +8318,7 @@ mod tests {
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
                 &ctx,
+                Vec::new(), // in-memory layers
                 // delta layers
                 vec![
                     DeltaLayerTestDesc::new_with_inferred_key_range(
@@ -8380,6 +8392,7 @@ mod tests {
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
                 &ctx,
+                Vec::new(), // in-memory layers
                 // delta layers
                 vec![
                     DeltaLayerTestDesc::new_with_inferred_key_range(
@@ -8512,6 +8525,7 @@ mod tests {
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
                 &ctx,
+                Vec::new(), // in-memory layers
                 vec![
                     DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x20)..Lsn(0x48), delta1),
                     DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x20)..Lsn(0x48), delta2),
@@ -8705,6 +8719,7 @@ mod tests {
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
                 &ctx,
+                Vec::new(), // in-memory layers
                 vec![DeltaLayerTestDesc::new_with_inferred_key_range(
                     Lsn(0x10)..Lsn(0x40),
                     delta1,
@@ -8761,6 +8776,7 @@ mod tests {
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
                 &ctx,
+                Vec::new(), // in-memory layers
                 Vec::new(),
                 image_layers,
                 end_lsn,
@@ -8967,6 +8983,7 @@ mod tests {
                     Lsn(0x08),
                     DEFAULT_PG_VERSION,
                     &ctx,
+                    Vec::new(), // in-memory layers
                     vec![
                         DeltaLayerTestDesc::new_with_inferred_key_range(
                             Lsn(0x08)..Lsn(0x10),
@@ -8985,7 +9002,7 @@ mod tests {
                             delta3,
                         ),
                     ], // delta layers
-                    vec![], // image layers
+                    vec![],     // image layers
                     Lsn(0x50),
                 )
                 .await?
@@ -8996,6 +9013,7 @@ mod tests {
                     Lsn(0x10),
                     DEFAULT_PG_VERSION,
                     &ctx,
+                    Vec::new(), // in-memory layers
                     vec![
                         DeltaLayerTestDesc::new_with_inferred_key_range(
                             Lsn(0x10)..Lsn(0x48),
@@ -9546,6 +9564,7 @@ mod tests {
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
                 &ctx,
+                Vec::new(), // in-memory layers
                 vec![
                     DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x10)..Lsn(0x48), delta1),
                     DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x10)..Lsn(0x48), delta2),
@@ -9793,6 +9812,7 @@ mod tests {
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
                 &ctx,
+                Vec::new(), // in-memory layers
                 vec![
                     // delta1 and delta 2 only contain a single key but multiple updates
                     DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x10)..Lsn(0x30), delta1),
@@ -10028,6 +10048,7 @@ mod tests {
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
                 &ctx,
+                vec![],                       // in-memory layers
                 vec![],                       // delta layers
                 vec![(Lsn(0x18), img_layer)], // image layers
                 Lsn(0x18),
@@ -10274,6 +10295,7 @@ mod tests {
                 baseline_image_layer_lsn,
                 DEFAULT_PG_VERSION,
                 &ctx,
+                vec![], // in-memory layers
                 vec![DeltaLayerTestDesc::new_with_inferred_key_range(
                     delta_layer_start_lsn..delta_layer_end_lsn,
                     delta_layer_spec,
@@ -10300,6 +10322,158 @@ mod tests {
             let value = res.expect("No key errors");
             let expected_value = expected_key_values.remove(&key).expect("No unknown keys");
             assert_eq!(value, Bytes::from(expected_value));
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn test_vectored_read_with_image_layer_inside_inmem() -> anyhow::Result<()> {
+        let harness =
+            TenantHarness::create("test_vectored_read_with_image_layer_inside_inmem").await?;
+        let (tenant, ctx) = harness.load().await;
+
+        let will_init_keys = [2, 6];
+        fn get_key(id: u32) -> Key {
+            let mut key = Key::from_hex("110000000033333333444444445500000000").unwrap();
+            key.field6 = id;
+            key
+        }
+
+        let mut expected_key_values = HashMap::new();
+
+        let baseline_image_layer_lsn = Lsn(0x10);
+        let mut baseline_img_layer = Vec::new();
+        for i in 0..5 {
+            let key = get_key(i);
+            let value = format!("value {i}@{baseline_image_layer_lsn}");
+
+            let removed = expected_key_values.insert(key, value.clone());
+            assert!(removed.is_none());
+
+            baseline_img_layer.push((key, Bytes::from(value)));
+        }
+
+        let nested_image_layer_lsn = Lsn(0x50);
+        let mut nested_img_layer = Vec::new();
+        for i in 5..10 {
+            let key = get_key(i);
+            let value = format!("value {i}@{nested_image_layer_lsn}");
+
+            let removed = expected_key_values.insert(key, value.clone());
+            assert!(removed.is_none());
+
+            nested_img_layer.push((key, Bytes::from(value)));
+        }
+
+        let frozen_layer = {
+            let lsn_range = Lsn(0x40)..Lsn(0x60);
+            let mut data = Vec::new();
+            for i in 0..10 {
+                let key = get_key(i);
+                let key_in_nested = nested_img_layer
+                    .iter()
+                    .any(|(key_with_img, _)| *key_with_img == key);
+                let lsn = {
+                    if key_in_nested {
+                        Lsn(nested_image_layer_lsn.0 + 5)
+                    } else {
+                        lsn_range.start
+                    }
+                };
+
+                let will_init = will_init_keys.contains(&i);
+                if will_init {
+                    data.push((key, lsn, Value::WalRecord(NeonWalRecord::wal_init(""))));
+
+                    expected_key_values.insert(key, "".to_string());
+                } else {
+                    let delta = format!("@{lsn}");
+                    data.push((
+                        key,
+                        lsn,
+                        Value::WalRecord(NeonWalRecord::wal_append(&delta)),
+                    ));
+
+                    expected_key_values
+                        .get_mut(&key)
+                        .expect("An image exists for each key")
+                        .push_str(delta.as_str());
+                }
+            }
+
+            InMemoryLayerTestDesc {
+                lsn_range,
+                is_open: false,
+                data,
+            }
+        };
+
+        let (open_layer, last_record_lsn) = {
+            let start_lsn = Lsn(0x70);
+            let mut data = Vec::new();
+            let mut end_lsn = Lsn(0);
+            for i in 0..10 {
+                let key = get_key(i);
+                let lsn = Lsn(start_lsn.0 + i as u64);
+                let delta = format!("@{lsn}");
+                data.push((
+                    key,
+                    lsn,
+                    Value::WalRecord(NeonWalRecord::wal_append(&delta)),
+                ));
+
+                expected_key_values
+                    .get_mut(&key)
+                    .expect("An image exists for each key")
+                    .push_str(delta.as_str());
+
+                end_lsn = std::cmp::max(end_lsn, lsn);
+            }
+
+            (
+                InMemoryLayerTestDesc {
+                    lsn_range: start_lsn..Lsn::MAX,
+                    is_open: true,
+                    data,
+                },
+                end_lsn,
+            )
+        };
+
+        assert!(
+            nested_image_layer_lsn > frozen_layer.lsn_range.start
+                && nested_image_layer_lsn < frozen_layer.lsn_range.end
+        );
+
+        let tline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                baseline_image_layer_lsn,
+                DEFAULT_PG_VERSION,
+                &ctx,
+                vec![open_layer, frozen_layer], // in-memory layers
+                Vec::new(),                     // delta layers
+                vec![
+                    (baseline_image_layer_lsn, baseline_img_layer),
+                    (nested_image_layer_lsn, nested_img_layer),
+                ], // image layers
+                last_record_lsn,
+            )
+            .await?;
+
+        let keyspace = KeySpace::single(get_key(0)..get_key(10));
+        let results = tline
+            .get_vectored(keyspace, last_record_lsn, IoConcurrency::sequential(), &ctx)
+            .await
+            .expect("No vectored errors");
+        for (key, res) in results {
+            let value = res.expect("No key errors");
+            let expected_value = expected_key_values.remove(&key).expect("No unknown keys");
+            assert_eq!(value, Bytes::from(expected_value.clone()));
+
+            tracing::info!("key={key} value={expected_value}");
         }
 
         Ok(())
@@ -10420,6 +10594,7 @@ mod tests {
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
                 &ctx,
+                vec![], // in-memory layers
                 vec![
                     DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x20)..Lsn(0x48), delta1),
                     DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x20)..Lsn(0x48), delta2),
@@ -10804,6 +10979,7 @@ mod tests {
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
                 &ctx,
+                vec![], // in-memory layers
                 vec![
                     // delta1/2/4 only contain a single key but multiple updates
                     DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x20)..Lsn(0x28), delta1),
@@ -11055,6 +11231,7 @@ mod tests {
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
                 &ctx,
+                vec![], // in-memory layers
                 vec![
                     // delta1/2/4 only contain a single key but multiple updates
                     DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x20)..Lsn(0x28), delta1),
