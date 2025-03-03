@@ -162,23 +162,6 @@ class NeonProject:
         self.endpoints.pop(endpoint_id)
         self.wait()
 
-    def wait_for_sql_availability(self, target, timeout=60, sleep_time=1) -> None:
-        if target.startswith("ep"):
-            connect_env = self.endpoints[target].connect_env
-        else:
-            connect_env = self.branches[target].connect_env
-        start = time.time()
-        while time.time() - start <= timeout:
-            try:
-                self.pg_bin.run(["psql", "-c", "'select 1'"], env=connect_env)
-            except subprocess.CalledProcessError as ex:
-                rc, args = ex.args
-                log.debud('Error code: %s, proc.args: %s', rc, args)
-            else:
-                return
-            time.sleep(sleep_time)
-        raise RuntimeError(f"Timeout waiting for {target}")
-
     def start_benchmark(self, target: str, clients: int = 10) -> subprocess.Popen:
         if target in self.benchmarks:
             raise RuntimeError(f"Benchmark was already started for {target}")
@@ -188,7 +171,6 @@ class NeonProject:
         if read_only:
             cmd.extend(["-S", "-n"])
         log.info("running pgbench on %s, cmd: %s", target, cmd)
-        self.wait_for_sql_availability(target)
         pgbench = self.pg_bin.run_nonblocking(
             cmd,
             env=self.endpoints[target].connect_env
