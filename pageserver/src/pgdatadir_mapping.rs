@@ -21,6 +21,7 @@ use pageserver_api::key::{
     slru_segment_key_range, slru_segment_size_to_key, twophase_file_key, twophase_key_range,
 };
 use pageserver_api::keyspace::SparseKeySpace;
+use pageserver_api::models::RelSizeMigration;
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
@@ -47,7 +48,6 @@ use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id,
     debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id,
 };
-use crate::tenant::remote_timeline_client::index::RelSizeMigration;
 use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::timeline::GetVectoredError;
 
@@ -1741,6 +1741,7 @@ impl DatadirModification<'_> {
                 // The first time we enable it, we need to persist it in `index_part.json`
                 self.tline
                     .update_rel_size_v2_status(RelSizeMigration::Migrating)?;
+                tracing::info!("enabled rel_size_v2");
                 Ok(true)
             }
             (true, RelSizeMigration::Migrating | RelSizeMigration::Migrated) => {

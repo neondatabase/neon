@@ -46,7 +46,7 @@ use pageserver_api::keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPart
 use pageserver_api::models::{
     CompactKeyRange, CompactLsnRange, CompactionAlgorithm, CompactionAlgorithmSettings,
     DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
-    InMemoryLayerInfo, LayerMapInfo, LsnLease, PageTraceEvent, TimelineState,
+    InMemoryLayerInfo, LayerMapInfo, LsnLease, PageTraceEvent, RelSizeMigration, TimelineState,
 };
 use pageserver_api::reltag::{BlockNumber, RelTag};
 use pageserver_api::shard::{ShardIdentity, ShardIndex, ShardNumber, TenantShardId};
@@ -83,7 +83,7 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 use super::config::TenantConf;
-use super::remote_timeline_client::index::{GcCompactionState, IndexPart, RelSizeMigration};
+use super::remote_timeline_client::index::{GcCompactionState, IndexPart};
 use super::remote_timeline_client::{RemoteTimelineClient, WaitCompletionError};
 use super::secondary::heatmap::HeatMapLayer;
 use super::storage_layer::{LayerFringe, LayerVisibilityHint, ReadableLayer};

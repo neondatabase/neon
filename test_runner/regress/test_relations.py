@@ -19,12 +19,26 @@ def test_pageserver_reldir_v2(
     endpoint.safe_psql("CREATE TABLE foo1 (id INTEGER PRIMARY KEY, val text)")
     endpoint.safe_psql("CREATE TABLE foo2 (id INTEGER PRIMARY KEY, val text)")
 
+    assert (
+        env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
+            "rel_size_migration"
+        ]
+        == "legacy"
+    )
+
     # Switch to v2
     env.pageserver.http_client().update_tenant_config(
         env.initial_tenant,
         {
             "rel_size_v2_enabled": True,
         },
+    )
+
+    assert (
+        env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
+            "rel_size_migration"
+        ]
+        == "legacy"
     )
 
     # Check if both relations are still accessible
@@ -81,3 +95,12 @@ def test_pageserver_reldir_v2(
     # Check if the relation is still accessible
     endpoint.safe_psql("SELECT * FROM foo2")
     endpoint.safe_psql("SELECT * FROM foo4")
+
+    env.pageserver.restart()
+
+    assert (
+        env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
+            "rel_size_migration"
+        ]
+        == "migrating"
+    )

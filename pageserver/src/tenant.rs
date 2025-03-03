@@ -31,8 +31,8 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use itertools::Itertools as _;
 use once_cell::sync::Lazy;
-use pageserver_api::models;
 pub use pageserver_api::models::TenantState;
+use pageserver_api::models::{self, RelSizeMigration};
 use pageserver_api::models::{
     CompactInfoResponse, LsnLease, TimelineArchivalState, TimelineState, TopTenantShardItem,
     WalRedoManagerStatus,
@@ -40,7 +40,6 @@ use pageserver_api::models::{
 use pageserver_api::shard::{ShardIdentity, ShardStripeSize, TenantShardId};
 use remote_storage::{DownloadError, GenericRemoteStorage, TimeoutOrCancel};
 use remote_timeline_client::index::GcCompactionState;
-use remote_timeline_client::index::RelSizeMigration;
 use remote_timeline_client::manifest::{
     LATEST_TENANT_MANIFEST_VERSION, OffloadedTimelineManifest, TenantManifest,
 };
