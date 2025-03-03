@@ -98,6 +98,7 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 	wp = palloc0(sizeof(WalProposer));
 	wp->config = config;
 	wp->api = api;
+	wp->state = WPS_COLLECTING_TERMS;
 
 	wp_log(LOG, "neon.safekeepers=%s", wp->config->safekeepers_list);
 
@@ -816,10 +817,6 @@ RecvAcceptorGreeting(Safekeeper *sk)
 		 */
 		for (int j = 0; j < wp->n_safekeepers; j++)
 		{
-			/*
-			 * Remember: SS_VOTING indicates that the safekeeper is
-			 * participating in voting, but hasn't sent anything yet.
-			 */
 			if (wp->safekeeper[j].state == SS_WAIT_VOTING)
 				SendVoteRequest(&wp->safekeeper[j]);
 		}
@@ -1031,9 +1028,10 @@ SkipXLogPageHeader(WalProposer *wp, XLogRecPtr lsn)
 }
 
 /*
- * Called after quorum gave votes and proposer starting position -- highest vote
- * term + flush LSN -- is determined (VotesCollected), adopts it: pushes LSN to
- * shmem, sets wp term history, verifies that the basebackup matches.
+ * Called after quorum gave votes and proposer starting position (highest vote
+ * term + flush LSN) -- is determined (VotesCollected true), this function
+ * adopts it: pushes LSN to shmem, sets wp term history, verifies that the
+ * basebackup matches.
  */
 static void
 ProcessPropStartPos(WalProposer *wp)
