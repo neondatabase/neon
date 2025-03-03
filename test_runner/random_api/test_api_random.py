@@ -157,22 +157,39 @@ class NeonProject:
         self.neon_api.delete_endpoint(self.id, endpoint_id)
         self.wait()
 
+    def wait_for_sql_availability(self, target, timeout=60, sleep_time=1) -> None:
+        if target.startswith("ep"):
+            connect_env = self.endpoints[target].connect_env
+        else:
+            connect_env = self.branches[target].connect_env
+        start = time.time()
+        while time.time() - start <= timeout:
+            try:
+                self.pg_bin.run(["psql", "-c", "select 1"], env=connect_env)
+            except subprocess.CalledProcessError as ex:
+                rc, args = ex.args
+                log.debud('Error code: %s, proc.args: %s', rc, args)
+            else:
+                return
+            time.sleep(sleep_time)
+        raise RuntimeError(f"Timeout waiting for {target}")
+
     def start_benchmark(self, target: str, clients: int = 10) -> subprocess.Popen:
         if target in self.benchmarks:
             raise RuntimeError(f"Benchmark was already started for {target}")
-        target_endpoint = target.startswith("ep")
-        read_only = target_endpoint and self.endpoints[target].type == "read_only"
+        is_endpoint = target.startswith("ep")
+        read_only = is_endpoint and self.endpoints[target].type == "read_only"
         cmd = ["pgbench", f"-c{clients}", "-T10800", "-Mprepared"]
         if read_only:
             cmd.append("-S")
         pgbench = self.pg_bin.run_nonblocking(
             cmd,
             env=self.endpoints[target].connect_env
-            if target_endpoint
+            if is_endpoint
             else self.branches[target].connect_env,
         )
         self.benchmarks[target] = pgbench
-        if target_endpoint:
+        if is_endpoint:
             self.endpoints[target].benchmark = pgbench
         else:
             self.branches[target].benchmark = pgbench
