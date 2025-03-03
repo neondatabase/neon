@@ -46,20 +46,20 @@ class NeonEndpoint:
 
 class NeonBranch:
     def __init__(self, project, branch: dict[str, Any]):
-        self.id = branch["branch"]["id"]
+        self.id: str = branch["branch"]["id"]
         self.desc = branch
-        self.project = project
-        self.neon_api = project.neon_api
-        self.project_id = branch["branch"]["project_id"]
-        self.parent = (
+        self.project: NeonProject = project
+        self.neon_api: NeonAPI = project.neon_api
+        self.project_id: str = branch["branch"]["project_id"]
+        self.parent: NeonBranch | None = (
             self.project.branches[branch["branch"]["parent_id"]]
             if "parent_id" in branch["branch"]
             else None
         )
-        self.children = {}
-        self.endpoints = {}
+        self.children: dict[str, NeonBranch] = {}
+        self.endpoints: dict[str, NeonEndpoint] = {}
         self.connection_parameters = branch["connection_uris"][0]["connection_parameters"]
-        self.benchmark = None
+        self.benchmark: subprocess.Popen | None = None
         self.connect_env = {
             "PGHOST": self.connection_parameters["host"],
             "PGUSER": self.connection_parameters["role"],
@@ -144,6 +144,9 @@ class NeonProject:
             raise RuntimeError(f"The branch {branch_id}, probably, has ancestors")
         if branch_id not in self.branches:
             raise RuntimeError(f"The branch with id {branch_id} is not found")
+        for endpoint in self.branches[branch_id].endpoints.values():
+            if endpoint.type == "read_only":
+                endpoint.delete()
         self.neon_api.delete_branch(self.id, branch_id)
         if len(parent.children) == 1:
             self.leaf_branches[parent.id] = parent
@@ -167,7 +170,7 @@ class NeonProject:
         start = time.time()
         while time.time() - start <= timeout:
             try:
-                self.pg_bin.run(["psql", "-c", "select 1"], env=connect_env)
+                self.pg_bin.run(["psql", "-c", "'select 1'"], env=connect_env)
             except subprocess.CalledProcessError as ex:
                 rc, args = ex.args
                 log.debud('Error code: %s, proc.args: %s', rc, args)
@@ -300,4 +303,5 @@ def test_api_random(
     )
     for _ in range(ACTIONS_LIMIT):
         do_action(project, random.choice(ACTIONS))
+        project.check_all_benchmarks()
     assert True
