@@ -5462,6 +5462,11 @@ impl Service {
                 // No-op case: we will still proceed to wait for reconciliation in case it is
                 // incomplete from an earlier update to the intent.
                 tracing::info!("Migrating: intent is unchanged {:?}", shard.intent);
+
+                // An instruction to migrate to the currently attached node should
+                // cancel any pending graceful migration
+                shard.set_preferred_node(None);
+
                 MigrationOutcome::Reconcile(self.maybe_configured_reconcile_shard(
                     shard,
                     nodes,
