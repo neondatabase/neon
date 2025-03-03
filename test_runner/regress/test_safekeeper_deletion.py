@@ -267,11 +267,12 @@ def test_safekeeper_delete_remote_errors(
     endpoint_a.stop()
 
     # Ensure something is uploaded to remote storage
-    wait_until(
-        lambda: is_segment_offloaded(
+    def assert_is_uploaded():
+        assert is_segment_offloaded(
             env.safekeepers[0], env.initial_tenant, timeline_id_a, Lsn("0/2000000")
         )
-    )
+
+    wait_until(assert_is_uploaded)
 
     def list_timeline_remote():
         assert isinstance(env.safekeepers_remote_storage, S3Storage)
@@ -309,7 +310,10 @@ def test_safekeeper_delete_remote_errors(
         sk_http.configure_failpoints((failpoint, "off"))
 
         # Expect that after unblocking, remote deletion proceeds
-        wait_until(lambda: list_timeline_remote() == [])
+        def assert_remote_deleted():
+            assert list_timeline_remote() == []
+
+        wait_until(assert_remote_deleted)
 
     elif failpoint == RemoteDeleteFailpoint.FAIL:
         # Expect immediate failure
