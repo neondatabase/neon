@@ -56,14 +56,13 @@ jobs:
 
     - name: Create RC branch
       env:
+        RELEASE_BRANCH: ${{ steps.vars.outputs.release-branch }}
         RC_BRANCH: ${{ steps.vars.outputs.rc-branch }}
         TITLE: ${{ steps.vars.outputs.title }}
       run: |
-        git checkout -b "${RC_BRANCH}"
+        git switch -c "${RC_BRANCH}"
 
-        # create an empty commit to distinguish workflow runs
-        # from other possible releases from the same commit
-        git commit --allow-empty -m "${TITLE}"
+        git merge --commit -m "${TITLE}" "${RELEASE_BRANCH}" -s ours
 
         git push origin "${RC_BRANCH}"
 
