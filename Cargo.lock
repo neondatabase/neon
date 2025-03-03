@@ -1309,6 +1309,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "indexmap 2.0.1",
  "jsonwebtoken",
  "regex",
  "remote_storage",
@@ -1339,6 +1340,7 @@ dependencies = [
  "flate2",
  "futures",
  "http 1.1.0",
+ "indexmap 2.0.1",
  "jsonwebtoken",
  "metrics",
  "nix 0.27.1",

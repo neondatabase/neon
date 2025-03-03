@@ -10,8 +10,10 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
+use compute_api::responses::TlsConfig;
 use compute_api::spec::{Database, GenericOption, GenericOptions, PgIdent, Role};
 use futures::StreamExt;
+use indexmap::IndexMap;
 use ini::Ini;
 use notify::{RecursiveMode, Watcher};
 use postgres::config::Config;
@@ -406,7 +408,7 @@ pub fn create_pgdata(pgdata: &str) -> Result<()> {
 
 /// Update pgbouncer.ini with provided options
 fn update_pgbouncer_ini(
-    pgbouncer_config: HashMap<String, String>,
+    pgbouncer_config: IndexMap<String, String>,
     pgbouncer_ini_path: &str,
 ) -> Result<()> {
     let mut conf = Ini::load_from_file(pgbouncer_ini_path)?;
@@ -427,7 +429,10 @@ fn update_pgbouncer_ini(
 /// Tune pgbouncer.
 /// 1. Apply new config using pgbouncer admin console
 /// 2. Add new values to pgbouncer.ini to preserve them after restart
-pub async fn tune_pgbouncer(pgbouncer_config: HashMap<String, String>) -> Result<()> {
+pub async fn tune_pgbouncer(
+    mut pgbouncer_config: IndexMap<String, String>,
+    tls_config: Option<TlsConfig>,
+) -> Result<()> {
     let pgbouncer_connstr = if std::env::var_os("AUTOSCALING").is_some() {
         // for VMs use pgbouncer specific way to connect to
         // pgbouncer admin console without password
@@ -472,6 +477,12 @@ pub async fn tune_pgbouncer(pgbouncer_config: HashMap<String, String>) -> Result
             }
         }
     };
+
+    if let Some(tls_config) = tls_config {
+        pgbouncer_config.insert("client_tls_cert_file".to_string(), tls_config.cert_path);
+        pgbouncer_config.insert("client_tls_key_file".to_string(), tls_config.key_path);
+        pgbouncer_config.insert("client_tls_sslmode".to_string(), "allow".to_string());
+    }
 
     // save values to pgbouncer.ini
     // so that they are preserved after pgbouncer restart

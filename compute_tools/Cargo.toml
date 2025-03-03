@@ -26,6 +26,7 @@ fail.workspace = true
 flate2.workspace = true
 futures.workspace = true
 http.workspace = true
+indexmap.workspace = true
 jsonwebtoken.workspace = true
 metrics.workspace = true
 nix.workspace = true

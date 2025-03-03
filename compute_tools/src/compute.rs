@@ -580,11 +580,13 @@ impl ComputeNode {
         if let Some(pgbouncer_settings) = &pspec.spec.pgbouncer_settings {
             info!("tuning pgbouncer");
 
+            let pgbouncer_settings = pgbouncer_settings.clone();
+            let tls_config = self.compute_ctl_config.tls.clone();
+
             // Spawn a background task to do the tuning,
             // so that we don't block the main thread that starts Postgres.
-            let pgbouncer_settings = pgbouncer_settings.clone();
             let _handle = tokio::spawn(async move {
-                let res = tune_pgbouncer(pgbouncer_settings).await;
+                let res = tune_pgbouncer(pgbouncer_settings, tls_config).await;
                 if let Err(err) = res {
                     error!("error while tuning pgbouncer: {err:?}");
                     // Continue with the startup anyway
@@ -1491,11 +1493,13 @@ impl ComputeNode {
         if let Some(ref pgbouncer_settings) = spec.pgbouncer_settings {
             info!("tuning pgbouncer");
 
+            let pgbouncer_settings = pgbouncer_settings.clone();
+            let tls_config = self.compute_ctl_config.tls.clone();
+
             // Spawn a background task to do the tuning,
             // so that we don't block the main thread that starts Postgres.
-            let pgbouncer_settings = pgbouncer_settings.clone();
             tokio::spawn(async move {
-                let res = tune_pgbouncer(pgbouncer_settings).await;
+                let res = tune_pgbouncer(pgbouncer_settings, tls_config).await;
                 if let Err(err) = res {
                     error!("error while tuning pgbouncer: {err:?}");
                 }
