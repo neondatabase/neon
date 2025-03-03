@@ -658,17 +658,12 @@ impl Timeline {
             ));
         };
 
-        match result
+        result
             .as_ref()
             .expect("We did a wait_for on this being Some above")
-        {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                // Constructing a new error rather than passing through, because this is a borrow of
-                // a non-clonable result that may be consumed by multiple calls to this function.
-                Err(anyhow::anyhow!("remote deletion failed: {e}"))
-            }
-        }
+            .as_ref()
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!("remote deletion failed: {e}"))
     }
 
     /// Spawn background task to do remote deletion, return a receiver for its outcome
