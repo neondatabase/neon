@@ -1165,6 +1165,21 @@ pub struct OffloadedTimelineInfo {
     pub archived_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RelSizeMigration {
+    /// The tenant is using the old rel_size format.
+    /// Note that this enum is persisted as `Option<RelSizeMigration>` in the index part, so
+    /// `None` is the same as `Some(RelSizeMigration::Legacy)`.
+    Legacy,
+    /// The tenant is migrating to the new rel_size format. Both old and new rel_size format are
+    /// persisted in the index part. The read path will read both formats and merge them.
+    Migrating,
+    /// The tenant has migrated to the new rel_size format. Only the new rel_size format is persisted
+    /// in the index part, and the read path will not read the old format.
+    Migrated,
+}
+
 /// This represents the output of the "timeline_detail" and "timeline_list" API calls.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TimelineInfo {
@@ -1243,7 +1258,11 @@ pub struct TimelineInfo {
     // Forward compatibility: a previous version of the pageserver will receive a JSON. serde::Deserialize does
     // not deny unknown fields by default so it's safe to set the field to some value, though it won't be
     // read.
+    /// Whether the timeline is archived.
     pub is_archived: Option<bool>,
+
+    /// The status of the rel_size migration.
+    pub rel_size_migration: Option<RelSizeMigration>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
