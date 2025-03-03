@@ -825,7 +825,7 @@ typedef struct WalProposer
 	XLogRecPtr	propTermStartLsn;
 
 	/* Most advanced acceptor epoch */
-	term_t		donorEpoch;
+	term_t		donorLastLogTerm;
 
 	/* Most advanced acceptor */
 	int			donor;

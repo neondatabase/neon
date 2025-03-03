@@ -59,7 +59,7 @@ static void SendVoteRequest(Safekeeper *sk);
 static void RecvVoteResponse(Safekeeper *sk);
 static void HandleElectedProposer(WalProposer *wp);
 static term_t GetHighestTerm(TermHistory *th);
-static term_t GetEpoch(Safekeeper *sk);
+static term_t GetLastLogTerm(Safekeeper *sk);
 static void DetermineEpochStartLsn(WalProposer *wp);
 static void SendProposerElected(Safekeeper *sk);
 static void StartStreaming(Safekeeper *sk);
@@ -978,7 +978,7 @@ GetHighestTerm(TermHistory *th)
 
 /* safekeeper's epoch is the term of the highest entry in the log */
 static term_t
-GetEpoch(Safekeeper *sk)
+GetLastLogTerm(Safekeeper *sk)
 {
 	return GetHighestTerm(&sk->voteResponse.termHistory);
 }
@@ -1014,7 +1014,7 @@ DetermineEpochStartLsn(WalProposer *wp)
 	WalproposerShmemState *walprop_shared;
 
 	wp->propTermStartLsn = InvalidXLogRecPtr;
-	wp->donorEpoch = 0;
+	wp->donorLastLogTerm = 0;
 	wp->truncateLsn = InvalidXLogRecPtr;
 
 	for (int i = 0; i < wp->n_safekeepers; i++)
@@ -1023,11 +1023,11 @@ DetermineEpochStartLsn(WalProposer *wp)
 		{
 			n_ready++;
 
-			if (GetEpoch(&wp->safekeeper[i]) > wp->donorEpoch ||
-				(GetEpoch(&wp->safekeeper[i]) == wp->donorEpoch &&
+			if (GetLastLogTerm(&wp->safekeeper[i]) > wp->donorLastLogTerm ||
+				(GetLastLogTerm(&wp->safekeeper[i]) == wp->donorLastLogTerm &&
 				 wp->safekeeper[i].voteResponse.flushLsn > wp->propTermStartLsn))
 			{
-				wp->donorEpoch = GetEpoch(&wp->safekeeper[i]);
+				wp->donorLastLogTerm = GetLastLogTerm(&wp->safekeeper[i]);
 				wp->propTermStartLsn = wp->safekeeper[i].voteResponse.flushLsn;
 				wp->donor = i;
 			}
@@ -1056,7 +1056,7 @@ DetermineEpochStartLsn(WalProposer *wp)
 		wp->propTermStartLsn = wp->truncateLsn = wp->api.get_redo_start_lsn(wp);
 		wp_log(LOG, "bumped epochStartLsn to the first record %X/%X", LSN_FORMAT_ARGS(wp->propTermStartLsn));
 	}
-	pg_atomic_write_u64(&wp->api.get_shmem_state(wp)->propTermStartLsn, wp->propEpochStartLsn);
+	pg_atomic_write_u64(&wp->api.get_shmem_state(wp)->propEpochStartLsn, wp->propTermStartLsn);
 
 	Assert(wp->truncateLsn != InvalidXLogRecPtr || wp->config->syncSafekeepers);
 
