@@ -493,7 +493,7 @@ impl Timeline {
         // Otherwise, read the old reldir keyspace.
         // TODO: if IndexPart::rel_size_migration is `Migrated`, we only need to read from v2.
 
-        if let Some(RelSizeMigration::Migrated | RelSizeMigration::Migrating) =
+        if let RelSizeMigration::Migrated | RelSizeMigration::Migrating =
             self.get_rel_size_v2_status()
         {
             // fetch directory listing (new)
@@ -547,7 +547,7 @@ impl Timeline {
                 forknum: *forknum,
             }));
 
-        if let Some(RelSizeMigration::Legacy) | None = self.get_rel_size_v2_status() {
+        if let RelSizeMigration::Legacy = self.get_rel_size_v2_status() {
             return Ok(rels_v1);
         }
 
@@ -1725,25 +1725,25 @@ impl DatadirModification<'_> {
 
     /// Returns `true` if the rel_size_v2 write path is enabled. If it is the first time that
     /// we enable it, we also need to persist it in `index_part.json`.
-    pub fn do_enable_rel_size_v2(&mut self) -> anyhow::Result<bool> {
+    pub fn maybe_enable_rel_size_v2(&mut self) -> anyhow::Result<bool> {
         let status = self.tline.get_rel_size_v2_status();
         let config = self.tline.get_rel_size_v2_enabled();
         match (config, status) {
-            (false, None | Some(RelSizeMigration::Legacy)) => {
+            (false, RelSizeMigration::Legacy) => {
                 // tenant config didn't enable it and we didn't write any reldir_v2 key yet
                 Ok(false)
             }
-            (false, Some(RelSizeMigration::Migrating) | Some(RelSizeMigration::Migrated)) => {
+            (false, RelSizeMigration::Migrating | RelSizeMigration::Migrated) => {
                 // index_part already persisted that the timeline has enabled rel_size_v2
                 Ok(true)
             }
-            (true, None | Some(RelSizeMigration::Legacy)) => {
+            (true, RelSizeMigration::Legacy) => {
                 // The first time we enable it, we need to persist it in `index_part.json`
                 self.tline
                     .update_rel_size_v2_status(RelSizeMigration::Migrating)?;
                 Ok(true)
             }
-            (true, Some(RelSizeMigration::Migrating) | Some(RelSizeMigration::Migrated)) => {
+            (true, RelSizeMigration::Migrating | RelSizeMigration::Migrated) => {
                 // index_part already persisted that the timeline has enabled rel_size_v2
                 // and we don't need to do anything
                 Ok(true)
@@ -1759,7 +1759,7 @@ impl DatadirModification<'_> {
         img: Bytes,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let v2_enabled = self.do_enable_rel_size_v2()?;
+        let v2_enabled = self.maybe_enable_rel_size_v2()?;
 
         // Add it to the directory (if it doesn't exist already)
         let buf = self.get(DBDIR_KEY, ctx).await?;
@@ -1938,7 +1938,7 @@ impl DatadirModification<'_> {
             return Err(RelationError::AlreadyExists);
         }
 
-        let v2_enabled = self.do_enable_rel_size_v2()?;
+        let v2_enabled = self.maybe_enable_rel_size_v2()?;
 
         if v2_enabled {
             let sparse_rel_dir_key =
@@ -2066,7 +2066,7 @@ impl DatadirModification<'_> {
         drop_relations: HashMap<(u32, u32), Vec<RelTag>>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let v2_enabled = self.do_enable_rel_size_v2()?;
+        let v2_enabled = self.maybe_enable_rel_size_v2()?;
         for ((spc_node, db_node), rel_tags) in drop_relations {
             let dir_key = rel_dir_to_key(spc_node, db_node);
             let buf = self.get(dir_key, ctx).await?;

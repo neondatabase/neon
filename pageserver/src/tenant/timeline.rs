@@ -2381,11 +2381,12 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.rel_size_v2_enabled)
     }
 
-    pub(crate) fn get_rel_size_v2_status(&self) -> Option<RelSizeMigration> {
+    pub(crate) fn get_rel_size_v2_status(&self) -> RelSizeMigration {
         self.rel_size_v2_status
             .load()
             .as_ref()
             .map(|s| s.as_ref().clone())
+            .unwrap_or(RelSizeMigration::Legacy)
     }
 
     fn get_compaction_upper_limit(&self) -> usize {

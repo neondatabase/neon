@@ -192,8 +192,8 @@ pub(crate) use download::{
     download_index_part, download_initdb_tar_zst, download_tenant_manifest, is_temp_download_file,
     list_remote_tenant_shards, list_remote_timelines,
 };
-use index::{GcCompactionState, RelSizeMigration};
 pub(crate) use index::LayerFileMetadata;
+use index::{GcCompactionState, RelSizeMigration};
 use pageserver_api::models::TimelineArchivalState;
 use pageserver_api::shard::{ShardIndex, TenantShardId};
 use regex::Regex;
