@@ -57,10 +57,11 @@ static void SendProposerGreeting(Safekeeper *sk);
 static void RecvAcceptorGreeting(Safekeeper *sk);
 static void SendVoteRequest(Safekeeper *sk);
 static void RecvVoteResponse(Safekeeper *sk);
+static bool VotesCollected(WalProposer *wp);
 static void HandleElectedProposer(WalProposer *wp);
 static term_t GetHighestTerm(TermHistory *th);
 static term_t GetLastLogTerm(Safekeeper *sk);
-static void DetermineEpochStartLsn(WalProposer *wp);
+static void ProcessPropStartPos(WalProposer *wp);
 static void SendProposerElected(Safekeeper *sk);
 static void StartStreaming(Safekeeper *sk);
 static void SendMessageToNode(Safekeeper *sk);
@@ -846,6 +847,8 @@ RecvVoteResponse(Safekeeper *sk)
 {
 	WalProposer *wp = sk->wp;
 
+	Assert(wp->state >= WPS_CAMPAIGN);
+
 	sk->voteResponse.apm.tag = 'v';
 	if (!AsyncReadMessage(sk, (AcceptorProposerMessage *) &sk->voteResponse))
 		return;
@@ -864,7 +867,7 @@ RecvVoteResponse(Safekeeper *sk)
 	 * we are not elected yet and thus need the vote.
 	 */
 	if ((!sk->voteResponse.voteGiven) &&
-		(sk->voteResponse.term > wp->propTerm || wp->n_votes < wp->quorum))
+		(sk->voteResponse.term > wp->propTerm || wp->state == WPS_CAMPAIGN))
 	{
 		wp_log(FATAL, "WAL acceptor %s:%s with term " INT64_FORMAT " rejects our connection request with term " INT64_FORMAT "",
 			   sk->host, sk->port,
@@ -872,25 +875,69 @@ RecvVoteResponse(Safekeeper *sk)
 	}
 	Assert(sk->voteResponse.term == wp->propTerm);
 
-	/* Handshake completed, do we have quorum? */
+	/* ready for elected message */
+	sk->state = SS_WAIT_ELECTED;
+
 	wp->n_votes++;
-	if (wp->n_votes < wp->quorum)
+	/* Are we already elected? */
+	if (wp->state == WPS_CAMPAIGN)
 	{
-		sk->state = SS_WAIT_ELECTED;	/* can't do much yet, no quorum */
-	}
-	else if (wp->n_votes > wp->quorum)
-	{
-		/* already elected, start streaming */
-		SendProposerElected(sk);
+		/* no; check if this vote makes us elected */
+		if (VotesCollected(wp))
+		{
+			wp->state = WPS_ELECTED;
+			HandleElectedProposer(wp);
+		}
+		else
+		{
+			/* can't do much yet, no quorum */
+			return;
+		}
 	}
 	else
 	{
-		sk->state = SS_WAIT_ELECTED;
-		/* Idle state waits for read-ready events */
-		wp->api.update_event_set(sk, WL_SOCKET_READABLE);
-
-		HandleElectedProposer(sk->wp);
+		Assert(wp->state == WPS_ELECTED);
+		/* send elected only to this sk */
+		SendProposerElected(sk);
 	}
+}
+
+/*
+ * Checks if enough votes has been collected to get elected and if that's the
+ * case finds the highest vote, setting donor, donorLastLogTerm,
+ * propTermStartLsn fields. Also sets truncateLsn.
+ */
+static bool
+VotesCollected(WalProposer *wp)
+{
+	int			n_ready = 0;
+
+	/* assumed to be called only when not elected yet */
+	Assert(wp->state == WPS_CAMPAIGN);
+
+	wp->propTermStartLsn = InvalidXLogRecPtr;
+	wp->donorLastLogTerm = 0;
+	wp->truncateLsn = InvalidXLogRecPtr;
+
+	for (int i = 0; i < wp->n_safekeepers; i++)
+	{
+		if (wp->safekeeper[i].state == SS_WAIT_ELECTED)
+		{
+			n_ready++;
+
+			if (GetLastLogTerm(&wp->safekeeper[i]) > wp->donorLastLogTerm ||
+				(GetLastLogTerm(&wp->safekeeper[i]) == wp->donorLastLogTerm &&
+				 wp->safekeeper[i].voteResponse.flushLsn > wp->propTermStartLsn))
+			{
+				wp->donorLastLogTerm = GetLastLogTerm(&wp->safekeeper[i]);
+				wp->propTermStartLsn = wp->safekeeper[i].voteResponse.flushLsn;
+				wp->donor = i;
+			}
+			wp->truncateLsn = Max(wp->safekeeper[i].voteResponse.truncateLsn, wp->truncateLsn);
+		}
+	}
+
+	return n_ready >= wp->quorum;
 }
 
 /*
@@ -903,7 +950,8 @@ RecvVoteResponse(Safekeeper *sk)
 static void
 HandleElectedProposer(WalProposer *wp)
 {
-	DetermineEpochStartLsn(wp);
+	ProcessPropStartPos(wp);
+	Assert(wp->propTermStartLsn != InvalidXLogRecPtr);
 
 	/*
 	 * Synchronously download WAL from the most advanced safekeeper. We do
@@ -913,23 +961,6 @@ HandleElectedProposer(WalProposer *wp)
 	if (!wp->api.recovery_download(wp, &wp->safekeeper[wp->donor]))
 	{
 		wp_log(FATAL, "failed to download WAL for logical replicaiton");
-	}
-
-	/*
-	 * Zero propTermStartLsn means majority of safekeepers doesn't have any
-	 * WAL, timeline was just created. Compute bumps it to basebackup LSN,
-	 * otherwise we must be sync-safekeepers and we have nothing to do then.
-	 *
-	 * Proceeding is not only pointless but harmful, because we'd give
-	 * safekeepers term history starting with 0/0. These hacks will go away
-	 * once we disable implicit timeline creation on safekeepers and create it
-	 * with non zero LSN from the start.
-	 */
-	if (wp->propTermStartLsn == InvalidXLogRecPtr)
-	{
-		Assert(wp->config->syncSafekeepers);
-		wp_log(LOG, "elected with zero propTermStartLsn in sync-safekeepers, exiting");
-		wp->api.finish_sync_safekeepers(wp, wp->propTermStartLsn);
 	}
 
 	if (wp->truncateLsn == wp->propTermStartLsn && wp->config->syncSafekeepers)
@@ -947,8 +978,9 @@ HandleElectedProposer(WalProposer *wp)
 
 	/*
 	 * The proposer has been elected, and there will be no quorum waiting
-	 * after this point. There will be no safekeeper with state SS_WAIT_ELECTED also,
-	 * because that state is used only for quorum waiting.
+	 * after this point. There will be no safekeeper with state
+	 * SS_WAIT_ELECTED also, because that state is used only for quorum
+	 * waiting.
 	 */
 
 	if (wp->config->syncSafekeepers)
@@ -999,62 +1031,41 @@ SkipXLogPageHeader(WalProposer *wp, XLogRecPtr lsn)
 }
 
 /*
- * Called after majority of acceptors gave votes, it calculates the most
- * advanced safekeeper (who will be the donor) and epochStartLsn -- LSN since
- * which we'll write WAL in our term.
- *
- * Sets truncateLsn along the way (though it is not of much use at this point --
- * only for skipping recovery).
+ * Called after quorum gave votes and proposer starting position -- highest vote
+ * term + flush LSN -- is determined (VotesCollected), adopts it: pushes LSN to
+ * shmem, sets wp term history, verifies that the basebackup matches.
  */
 static void
-DetermineEpochStartLsn(WalProposer *wp)
+ProcessPropStartPos(WalProposer *wp)
 {
 	TermHistory *dth;
-	int			n_ready = 0;
 	WalproposerShmemState *walprop_shared;
 
-	wp->propTermStartLsn = InvalidXLogRecPtr;
-	wp->donorLastLogTerm = 0;
-	wp->truncateLsn = InvalidXLogRecPtr;
-
-	for (int i = 0; i < wp->n_safekeepers; i++)
-	{
-		if (wp->safekeeper[i].state == SS_WAIT_ELECTED)
-		{
-			n_ready++;
-
-			if (GetLastLogTerm(&wp->safekeeper[i]) > wp->donorLastLogTerm ||
-				(GetLastLogTerm(&wp->safekeeper[i]) == wp->donorLastLogTerm &&
-				 wp->safekeeper[i].voteResponse.flushLsn > wp->propTermStartLsn))
-			{
-				wp->donorLastLogTerm = GetLastLogTerm(&wp->safekeeper[i]);
-				wp->propTermStartLsn = wp->safekeeper[i].voteResponse.flushLsn;
-				wp->donor = i;
-			}
-			wp->truncateLsn = Max(wp->safekeeper[i].voteResponse.truncateLsn, wp->truncateLsn);
-		}
-	}
-
-	if (n_ready < wp->quorum)
-	{
-		/*
-		 * This is a rare case that can be triggered if safekeeper has voted
-		 * and disconnected. In this case, its state will not be SS_WAIT_ELECTED and
-		 * its vote cannot be used, because we clean up `voteResponse` in
-		 * `ShutdownConnection`.
-		 */
-		wp_log(FATAL, "missing majority of votes, collected %d, expected %d, got %d", wp->n_votes, wp->quorum, n_ready);
-	}
+	/* must have collected votes */
+	Assert(wp->state == WPS_ELECTED);
 
 	/*
 	 * If propTermStartLsn is 0, it means flushLsn is 0 everywhere, we are
-	 * bootstrapping and nothing was committed yet. Start streaming then from
-	 * the basebackup LSN.
+	 * bootstrapping and nothing was committed yet. Start streaming from the
+	 * basebackup LSN then.
+	 *
+	 * In case of sync-safekeepers just exit: proceeding is not only pointless
+	 * but harmful, because we'd give safekeepers term history starting with
+	 * 0/0. These hacks will go away once we disable implicit timeline
+	 * creation on safekeepers and create it with non zero LSN from the start.
 	 */
-	if (wp->propTermStartLsn == InvalidXLogRecPtr && !wp->config->syncSafekeepers)
+	if (wp->propTermStartLsn == InvalidXLogRecPtr)
 	{
-		wp->propTermStartLsn = wp->truncateLsn = wp->api.get_redo_start_lsn(wp);
-		wp_log(LOG, "bumped epochStartLsn to the first record %X/%X", LSN_FORMAT_ARGS(wp->propTermStartLsn));
+		if (!wp->config->syncSafekeepers)
+		{
+			wp->propTermStartLsn = wp->truncateLsn = wp->api.get_redo_start_lsn(wp);
+			wp_log(LOG, "bumped epochStartLsn to the first record %X/%X", LSN_FORMAT_ARGS(wp->propTermStartLsn));
+		}
+		else
+		{
+			wp_log(LOG, "elected with zero propTermStartLsn in sync-safekeepers, exiting");
+			wp->api.finish_sync_safekeepers(wp, wp->propTermStartLsn);
+		}
 	}
 	pg_atomic_write_u64(&wp->api.get_shmem_state(wp)->propEpochStartLsn, wp->propTermStartLsn);
 

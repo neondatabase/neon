@@ -77,8 +77,8 @@ typedef enum
 
 	/*
 	 * Already sent voting information, waiting to receive confirmation from
-	 * the node. After receiving, moves to SS_WAIT_ELECTED, if the quorum isn't
-	 * reached yet.
+	 * the node. After receiving, moves to SS_WAIT_ELECTED, if the quorum
+	 * isn't reached yet.
 	 */
 	SS_WAIT_VERDICT,
 
@@ -751,7 +751,8 @@ typedef struct WalProposerConfig
 #endif
 } WalProposerConfig;
 
-typedef enum  {
+typedef enum
+{
 	/* collecting greetings to determine term to campaign for */
 	WPS_COLLECTING_TERMS,
 	/* campaing started, waiting for votes */
