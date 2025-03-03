@@ -26,6 +26,10 @@ def test_pageserver_reldir_v2(
         == "legacy"
     )
 
+    # Ensure the pageserver accepts the table creation SQLs before the migration. In theory, we can also do
+    # a "wait_flush_lsn" here, but it's easier to just do a restart.
+    env.pageserver.restart()
+
     # Switch to v2
     env.pageserver.http_client().update_tenant_config(
         env.initial_tenant,
