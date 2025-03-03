@@ -321,7 +321,7 @@ impl GcCompactionQueue {
                 l1_size, l2_size, l2_lsn, gc_cutoff
             );
         } else {
-            info!(
+            debug!(
                 "did not trigger auto gc-compaction: l1_size={}, l2_size={}, l2_lsn={}, gc_cutoff={}",
                 l1_size, l2_size, l2_lsn, gc_cutoff
             );
