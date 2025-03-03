@@ -22,12 +22,14 @@ extern char *neon_tenant;
 extern char *wal_acceptors_list;
 extern int	wal_acceptor_reconnect_timeout;
 extern int	wal_acceptor_connection_timeout;
+extern int	readahead_getpage_pull_timeout_ms;
 
 #if PG_MAJORVERSION_NUM >= 17
 extern uint32		WAIT_EVENT_NEON_LFC_MAINTENANCE;
 extern uint32		WAIT_EVENT_NEON_LFC_READ;
 extern uint32		WAIT_EVENT_NEON_LFC_TRUNCATE;
 extern uint32		WAIT_EVENT_NEON_LFC_WRITE;
+extern uint32		WAIT_EVENT_NEON_LFC_CV_WAIT;
 extern uint32		WAIT_EVENT_NEON_PS_STARTING;
 extern uint32		WAIT_EVENT_NEON_PS_CONFIGURING;
 extern uint32		WAIT_EVENT_NEON_PS_SEND;
@@ -38,6 +40,7 @@ extern uint32		WAIT_EVENT_NEON_WAL_DL;
 #define WAIT_EVENT_NEON_LFC_READ		WAIT_EVENT_BUFFILE_READ
 #define WAIT_EVENT_NEON_LFC_TRUNCATE	WAIT_EVENT_BUFFILE_TRUNCATE
 #define WAIT_EVENT_NEON_LFC_WRITE		WAIT_EVENT_BUFFILE_WRITE
+#define WAIT_EVENT_NEON_LFC_CV_WAIT 	WAIT_EVENT_BUFFILE_READ
 #define WAIT_EVENT_NEON_PS_STARTING		PG_WAIT_EXTENSION
 #define WAIT_EVENT_NEON_PS_CONFIGURING	PG_WAIT_EXTENSION
 #define WAIT_EVENT_NEON_PS_SEND			PG_WAIT_EXTENSION
@@ -47,6 +50,7 @@ extern uint32		WAIT_EVENT_NEON_WAL_DL;
 
 extern void pg_init_libpagestore(void);
 extern void pg_init_walproposer(void);
+extern void pagestore_smgr_init(void);
 
 extern uint64 BackpressureThrottlingTime(void);
 extern void SetNeonCurrentClusterSize(uint64 size);

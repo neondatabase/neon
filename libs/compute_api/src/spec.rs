@@ -5,12 +5,11 @@
 //! and connect it to the storage nodes.
 use std::collections::HashMap;
 
+use regex::Regex;
+use remote_storage::RemotePath;
 use serde::{Deserialize, Serialize};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
-
-use regex::Regex;
-use remote_storage::RemotePath;
 
 /// String type alias representing Postgres identifier and
 /// intended to be used for DB / role names.
@@ -102,6 +101,17 @@ pub struct ComputeSpec {
     pub timeline_id: Option<TimelineId>,
     pub pageserver_connstring: Option<String>,
 
+    /// Safekeeper membership config generation. It is put in
+    /// neon.safekeepers GUC and serves two purposes:
+    /// 1) Non zero value forces walproposer to use membership configurations.
+    /// 2) If walproposer wants to update list of safekeepers to connect to
+    ///    taking them from some safekeeper mconf, it should check what value
+    ///    is newer by comparing the generation.
+    ///
+    /// Note: it could be SafekeeperGeneration, but this needs linking
+    /// compute_ctl with postgres_ffi.
+    #[serde(default)]
+    pub safekeepers_generation: Option<u32>,
     #[serde(default)]
     pub safekeeper_connstrings: Vec<String>,
 
@@ -339,8 +349,9 @@ pub struct JwksSettings {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs::File;
+
+    use super::*;
 
     #[test]
     fn allow_installing_remote_extensions() {

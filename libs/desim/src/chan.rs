@@ -1,4 +1,5 @@
-use std::{collections::VecDeque, sync::Arc};
+use std::collections::VecDeque;
+use std::sync::Arc;
 
 use parking_lot::{Mutex, MutexGuard};
 

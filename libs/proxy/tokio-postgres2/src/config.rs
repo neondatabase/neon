@@ -1,20 +1,19 @@
 //! Connection configuration.
 
-use crate::connect::connect;
-use crate::connect_raw::connect_raw;
-use crate::connect_raw::RawConnection;
-use crate::tls::MakeTlsConnect;
-use crate::tls::TlsConnect;
-use crate::{Client, Connection, Error};
-use postgres_protocol2::message::frontend::StartupMessageParams;
-use serde::{Deserialize, Serialize};
-use std::fmt;
-use std::str;
+use std::net::IpAddr;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWrite};
+use std::{fmt, str};
 
 pub use postgres_protocol2::authentication::sasl::ScramKeys;
+use postgres_protocol2::message::frontend::StartupMessageParams;
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
+
+use crate::connect::connect;
+use crate::connect_raw::{RawConnection, connect_raw};
+use crate::tls::{MakeTlsConnect, TlsConnect};
+use crate::{Client, Connection, Error};
 
 /// TLS configuration.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +66,7 @@ pub enum AuthKeys {
 /// Connection configuration.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Config {
+    pub(crate) host_addr: Option<IpAddr>,
     pub(crate) host: Host,
     pub(crate) port: u16,
 
@@ -85,6 +85,7 @@ impl Config {
     /// Creates a new configuration.
     pub fn new(host: String, port: u16) -> Config {
         Config {
+            host_addr: None,
             host: Host::Tcp(host),
             port,
             password: None,
@@ -163,6 +164,15 @@ impl Config {
 
         self.server_params.insert(name, value);
         self
+    }
+
+    pub fn set_host_addr(&mut self, addr: IpAddr) -> &mut Config {
+        self.host_addr = Some(addr);
+        self
+    }
+
+    pub fn get_host_addr(&self) -> Option<IpAddr> {
+        self.host_addr
     }
 
     /// Sets the SSL configuration.

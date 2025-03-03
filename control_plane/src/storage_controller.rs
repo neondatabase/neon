@@ -1,43 +1,38 @@
-use crate::{
-    background_process,
-    local_env::{LocalEnv, NeonStorageControllerConf},
-};
+use std::ffi::OsStr;
+use std::fs;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::process::ExitStatus;
+use std::str::FromStr;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
 use camino::{Utf8Path, Utf8PathBuf};
 use hyper0::Uri;
 use nix::unistd::Pid;
-use pageserver_api::{
-    controller_api::{
-        NodeConfigureRequest, NodeDescribeResponse, NodeRegisterRequest, TenantCreateRequest,
-        TenantCreateResponse, TenantLocateResponse, TenantShardMigrateRequest,
-        TenantShardMigrateResponse,
-    },
-    models::{
-        TenantShardSplitRequest, TenantShardSplitResponse, TimelineCreateRequest, TimelineInfo,
-    },
-    shard::{ShardStripeSize, TenantShardId},
+use pageserver_api::controller_api::{
+    NodeConfigureRequest, NodeDescribeResponse, NodeRegisterRequest, TenantCreateRequest,
+    TenantCreateResponse, TenantLocateResponse, TenantShardMigrateRequest,
+    TenantShardMigrateResponse,
 };
+use pageserver_api::models::{
+    TenantShardSplitRequest, TenantShardSplitResponse, TimelineCreateRequest, TimelineInfo,
+};
+use pageserver_api::shard::{ShardStripeSize, TenantShardId};
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
 use reqwest::Method;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{
-    ffi::OsStr,
-    fs,
-    net::SocketAddr,
-    path::PathBuf,
-    process::ExitStatus,
-    str::FromStr,
-    sync::OnceLock,
-    time::{Duration, Instant},
-};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::instrument;
 use url::Url;
-use utils::{
-    auth::{encode_from_key_file, Claims, Scope},
-    id::{NodeId, TenantId},
-};
+use utils::auth::{Claims, Scope, encode_from_key_file};
+use utils::id::{NodeId, TenantId};
 use whoami::username;
+
+use crate::background_process;
+use crate::local_env::{LocalEnv, NeonStorageControllerConf};
 
 pub struct StorageController {
     env: LocalEnv,
@@ -96,7 +91,8 @@ pub struct AttachHookRequest {
 
 #[derive(Serialize, Deserialize)]
 pub struct AttachHookResponse {
-    pub gen: Option<u32>,
+    #[serde(rename = "gen")]
+    pub generation: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -541,6 +537,10 @@ impl StorageController {
             args.push("--start-as-candidate".to_string());
         }
 
+        if self.config.load_safekeepers {
+            args.push("--load-safekeepers".to_string());
+        }
+
         if let Some(private_key) = &self.private_key {
             let claims = Claims::new(None, Scope::PageServerApi);
             let jwt_token =
@@ -779,7 +779,7 @@ impl StorageController {
             )
             .await?;
 
-        Ok(response.gen)
+        Ok(response.generation)
     }
 
     #[instrument(skip(self))]

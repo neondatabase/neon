@@ -1,37 +1,32 @@
 //! This module implements Timeline lifecycle management and has all necessary code
 //! to glue together SafeKeeper and all other background services.
 
-use anyhow::{anyhow, bail, Result};
+use std::cmp::max;
+use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
+
+use anyhow::{Result, anyhow, bail};
 use camino::{Utf8Path, Utf8PathBuf};
+use http_utils::error::ApiError;
 use remote_storage::RemotePath;
+use safekeeper_api::Term;
 use safekeeper_api::membership::Configuration;
 use safekeeper_api::models::{
     PeerInfo, TimelineMembershipSwitchResponse, TimelineTermBumpResponse,
 };
-use safekeeper_api::Term;
+use storage_broker::proto::{SafekeeperTimelineInfo, TenantTimelineId as ProtoTenantTimelineId};
 use tokio::fs::{self};
+use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, watch};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use utils::id::TenantId;
+use tracing::*;
+use utils::id::{NodeId, TenantId, TenantTimelineId};
+use utils::lsn::Lsn;
 use utils::sync::gate::Gate;
 
-use http_utils::error::ApiError;
-use std::cmp::max;
-use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use tokio::{sync::watch, time::Instant};
-use tracing::*;
-use utils::{
-    id::{NodeId, TenantTimelineId},
-    lsn::Lsn,
-};
-
-use storage_broker::proto::SafekeeperTimelineInfo;
-use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
-
-use crate::control_file;
+use crate::metrics::{FullTimelineInfo, MISC_OPERATION_SECONDS, WalStorageMetrics};
 use crate::rate_limit::RateLimiter;
 use crate::receive_wal::WalReceivers;
 use crate::safekeeper::{AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, TermLsn};
@@ -42,11 +37,8 @@ use crate::timeline_manager::{AtomicStatus, ManagerCtl};
 use crate::timelines_set::TimelinesSet;
 use crate::wal_backup::{self, remote_timeline_path};
 use crate::wal_backup_partial::PartialRemoteSegment;
-
-use crate::metrics::{FullTimelineInfo, WalStorageMetrics, MISC_OPERATION_SECONDS};
 use crate::wal_storage::{Storage as wal_storage_iface, WalReader};
-use crate::SafeKeeperConf;
-use crate::{debug_dump, timeline_manager, wal_storage};
+use crate::{SafeKeeperConf, control_file, debug_dump, timeline_manager, wal_storage};
 
 fn peer_info_from_sk_info(sk_info: &SafekeeperTimelineInfo, ts: Instant) -> PeerInfo {
     PeerInfo {
@@ -168,7 +160,7 @@ impl StateSK {
     pub fn state(&self) -> &TimelineState<control_file::FileStorage> {
         match self {
             StateSK::Loaded(sk) => &sk.state,
-            StateSK::Offloaded(ref s) => s,
+            StateSK::Offloaded(s) => s,
             StateSK::Empty => unreachable!(),
         }
     }
@@ -176,7 +168,7 @@ impl StateSK {
     pub fn state_mut(&mut self) -> &mut TimelineState<control_file::FileStorage> {
         match self {
             StateSK::Loaded(sk) => &mut sk.state,
-            StateSK::Offloaded(ref mut s) => s,
+            StateSK::Offloaded(s) => s,
             StateSK::Empty => unreachable!(),
         }
     }
@@ -566,11 +558,18 @@ impl Timeline {
         });
     }
 
-    /// Background timeline activities (which hold Timeline::gate) will no
-    /// longer run once this function completes.
-    pub async fn shutdown(&self) {
+    /// Cancel the timeline, requesting background activity to stop. Closing
+    /// the `self.gate` waits for that.
+    pub async fn cancel(&self) {
         info!("timeline {} shutting down", self.ttid);
         self.cancel.cancel();
+    }
+
+    /// Background timeline activities (which hold Timeline::gate) will no
+    /// longer run once this function completes. `Self::cancel` must have been
+    /// already called.
+    pub async fn close(&self) {
+        assert!(self.cancel.is_cancelled());
 
         // Wait for any concurrent tasks to stop using this timeline, to avoid e.g. attempts
         // to read deleted files.
@@ -582,13 +581,13 @@ impl Timeline {
     /// Also deletes WAL in s3. Might fail if e.g. s3 is unavailable, but
     /// deletion API endpoint is retriable.
     ///
-    /// Timeline must be in shut-down state (i.e. call [`Self::shutdown`] first)
+    /// Timeline must be in shut-down state (i.e. call [`Self::close`] first)
     pub async fn delete(
         &self,
         shared_state: &mut WriteGuardSharedState<'_>,
         only_local: bool,
     ) -> Result<bool> {
-        // Assert that [`Self::shutdown`] was already called
+        // Assert that [`Self::close`] was already called
         assert!(self.cancel.is_cancelled());
         assert!(self.gate.close_complete());
 
@@ -1114,7 +1113,7 @@ impl ManagerTimeline {
 }
 
 /// Deletes directory and it's contents. Returns false if directory does not exist.
-async fn delete_dir(path: &Utf8PathBuf) -> Result<bool> {
+pub async fn delete_dir(path: &Utf8PathBuf) -> Result<bool> {
     match fs::remove_dir_all(path).await {
         Ok(_) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),

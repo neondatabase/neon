@@ -1128,6 +1128,13 @@ class NeonEnv:
         if self.storage_controller_config is not None:
             cfg["storage_controller"] = self.storage_controller_config
 
+        # Disable new storcon flag in compat tests
+        if config.test_may_use_compatibility_snapshot_binaries:
+            if "storage_controller" in cfg:
+                cfg["storage_controller"]["load_safekeepers"] = False
+            else:
+                cfg["storage_controller"] = {"load_safekeepers": False}
+
         # Create config for pageserver
         http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
         pg_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
@@ -2469,12 +2476,21 @@ class NeonStorageController(MetricsGetter, LogUtils):
         response.raise_for_status()
         return [TenantShardId.parse(tid) for tid in response.json()["updated"]]
 
-    def download_heatmap_layers(self, tenant_shard_id: TenantShardId, timeline_id: TimelineId):
+    def download_heatmap_layers(
+        self, tenant_shard_id: TenantShardId, timeline_id: TimelineId, recurse: bool | None = None
+    ):
+        url = (
+            f"{self.api}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/download_heatmap_layers"
+        )
+        if recurse is not None:
+            url = url + f"?recurse={str(recurse).lower()}"
+
         response = self.request(
             "POST",
-            f"{self.api}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/download_heatmap_layers",
+            url,
             headers=self.headers(TokenScope.ADMIN),
         )
+
         response.raise_for_status()
 
     def __enter__(self) -> Self:
@@ -3592,6 +3608,7 @@ class NeonProxy(PgProtocol):
                             "project_id": "test_project_id",
                             "endpoint_id": "test_endpoint_id",
                             "branch_id": "test_branch_id",
+                            "compute_id": "test_compute_id",
                         },
                     }
                 },
@@ -3817,6 +3834,7 @@ def static_auth_broker(
         {
             "address": local_proxy_addr,
             "aux": {
+                "compute_id": "compute-foo-bar-1234-5678",
                 "endpoint_id": "ep-foo-bar-1234",
                 "branch_id": "br-foo-bar",
                 "project_id": "foo-bar",
@@ -3987,10 +4005,12 @@ class Endpoint(PgProtocol, LogUtils):
         self,
         remote_ext_config: str | None = None,
         pageserver_id: int | None = None,
+        safekeeper_generation: int | None = None,
         safekeepers: list[int] | None = None,
         allow_multiple: bool = False,
         create_test_user: bool = False,
         basebackup_request_tries: int | None = None,
+        timeout: str | None = None,
         env: dict[str, str] | None = None,
     ) -> Self:
         """
@@ -4000,19 +4020,21 @@ class Endpoint(PgProtocol, LogUtils):
 
         assert self.endpoint_id is not None
 
-        # If `safekeepers` is not None, they are remember them as active and use
-        # in the following commands.
+        # If `safekeepers` is not None, remember them as active and use in the
+        # following commands.
         if safekeepers is not None:
             self.active_safekeepers = safekeepers
 
         self.env.neon_cli.endpoint_start(
             self.endpoint_id,
+            safekeepers_generation=safekeeper_generation,
             safekeepers=self.active_safekeepers,
             remote_ext_config=remote_ext_config,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
             create_test_user=create_test_user,
             basebackup_request_tries=basebackup_request_tries,
+            timeout=timeout,
             env=env,
         )
         self._running.release(1)
@@ -4522,33 +4544,6 @@ class Safekeeper(LogUtils):
         ]
         for na in not_allowed:
             assert not self.log_contains(na)
-
-    def append_logical_message(
-        self, tenant_id: TenantId, timeline_id: TimelineId, request: dict[str, Any]
-    ) -> dict[str, Any]:
-        """
-        Send JSON_CTRL query to append LogicalMessage to WAL and modify
-        safekeeper state. It will construct LogicalMessage from provided
-        prefix and message, and then will write it to WAL.
-        """
-
-        # "replication=0" hacks psycopg not to send additional queries
-        # on startup, see https://github.com/psycopg/psycopg2/pull/482
-        token = self.env.auth_keys.generate_tenant_token(tenant_id)
-        connstr = f"host=localhost port={self.port.pg} password={token} replication=0 options='-c timeline_id={timeline_id} tenant_id={tenant_id}'"
-
-        with closing(psycopg2.connect(connstr)) as conn:
-            # server doesn't support transactions
-            conn.autocommit = True
-            with conn.cursor() as cur:
-                request_json = json.dumps(request)
-                log.info(f"JSON_CTRL request on port {self.port.pg}: {request_json}")
-                cur.execute("JSON_CTRL " + request_json)
-                all = cur.fetchall()
-                log.info(f"JSON_CTRL response: {all[0][0]}")
-                res = json.loads(all[0][0])
-                assert isinstance(res, dict)
-                return res
 
     def http_client(
         self, auth_token: str | None = None, gen_sk_wide_token: bool = True

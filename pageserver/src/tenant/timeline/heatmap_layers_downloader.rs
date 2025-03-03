@@ -3,11 +3,14 @@
 //! Provides utilities to spawn and abort a background task where the downloads happen.
 //! See /v1/tenant/:tenant_shard_id/timeline/:timeline_id/download_heatmap_layers.
 
+use std::sync::{Arc, Mutex};
+
 use futures::StreamExt;
 use http_utils::error::ApiError;
-use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use utils::sync::gate::Gate;
+
+use crate::context::RequestContext;
 
 use super::Timeline;
 
@@ -29,6 +32,8 @@ impl HeatmapLayersDownloader {
     fn new(
         timeline: Arc<Timeline>,
         concurrency: usize,
+        recurse: bool,
+        ctx: RequestContext,
     ) -> Result<HeatmapLayersDownloader, ApiError> {
         let tl_guard = timeline.gate.enter().map_err(|_| ApiError::Cancelled)?;
 
@@ -62,6 +67,7 @@ impl HeatmapLayersDownloader {
 
                 let stream = futures::stream::iter(heatmap.layers.into_iter().filter_map(
                     |layer| {
+                        let ctx = ctx.attached_child();
                         let tl = timeline.clone();
                         let dl_guard = match downloads_guard.enter() {
                             Ok(g) => g,
@@ -74,7 +80,7 @@ impl HeatmapLayersDownloader {
                         Some(async move {
                             let _dl_guard = dl_guard;
 
-                            let res = tl.download_layer(&layer.name).await;
+                            let res = tl.download_layer(&layer.name, &ctx).await;
                             if let Err(err) = res {
                                 if !err.is_cancelled() {
                                     tracing::warn!(layer=%layer.name,"Failed to download heatmap layer: {err}")
@@ -93,6 +99,20 @@ impl HeatmapLayersDownloader {
                     },
                     _ = cancel.cancelled() => {
                         tracing::info!("Heatmap layers download cancelled");
+                        return;
+                    }
+                }
+
+                if recurse {
+                    if let Some(ancestor) = timeline.ancestor_timeline() {
+                        let ctx = ctx.attached_child();
+                        let res =
+                            ancestor.start_heatmap_layers_download(concurrency, recurse, &ctx);
+                        if let Err(err) = res {
+                            tracing::info!(
+                                "Failed to start heatmap layers download for ancestor: {err}"
+                            );
+                        }
                     }
                 }
             }
@@ -135,13 +155,20 @@ impl HeatmapLayersDownloader {
 }
 
 impl Timeline {
-    pub(crate) async fn start_heatmap_layers_download(
+    pub(crate) fn start_heatmap_layers_download(
         self: &Arc<Self>,
         concurrency: usize,
+        recurse: bool,
+        ctx: &RequestContext,
     ) -> Result<(), ApiError> {
         let mut locked = self.heatmap_layers_downloader.lock().unwrap();
         if locked.as_ref().map(|dl| dl.is_complete()).unwrap_or(true) {
-            let dl = HeatmapLayersDownloader::new(self.clone(), concurrency)?;
+            let dl = HeatmapLayersDownloader::new(
+                self.clone(),
+                concurrency,
+                recurse,
+                ctx.attached_child(),
+            )?;
             *locked = Some(dl);
             Ok(())
         } else {

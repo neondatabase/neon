@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod config_tests {
 
-    use std::fs::{remove_file, File};
+    use std::fs::{File, remove_file};
     use std::io::{Read, Write};
     use std::path::Path;
 

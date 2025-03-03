@@ -1,26 +1,26 @@
-use std::{
-    ops::{Deref, DerefMut},
-    sync::Arc,
-};
+use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 
 use anyhow::Context;
-use pageserver_api::{models::TimelineState, shard::TenantShardId};
+use pageserver_api::models::TimelineState;
+use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use tokio::sync::OwnedMutexGuard;
-use tracing::{error, info, info_span, instrument, Instrument};
-use utils::{crashsafe, fs_ext, id::TimelineId, pausable_failpoint};
+use tracing::{Instrument, error, info, info_span, instrument};
+use utils::id::TimelineId;
+use utils::{crashsafe, fs_ext, pausable_failpoint};
 
-use crate::{
-    config::PageServerConf,
-    task_mgr::{self, TaskKind},
-    tenant::{
-        metadata::TimelineMetadata,
-        remote_timeline_client::{PersistIndexPartWithDeletedFlagError, RemoteTimelineClient},
-        CreateTimelineCause, DeleteTimelineError, MaybeDeletedIndexPart, Tenant,
-        TenantManifestError, Timeline, TimelineOrOffloaded,
-    },
-    virtual_file::MaybeFatalIo,
+use crate::config::PageServerConf;
+use crate::task_mgr::{self, TaskKind};
+use crate::tenant::metadata::TimelineMetadata;
+use crate::tenant::remote_timeline_client::{
+    PersistIndexPartWithDeletedFlagError, RemoteTimelineClient,
 };
+use crate::tenant::{
+    CreateTimelineCause, DeleteTimelineError, MaybeDeletedIndexPart, Tenant, TenantManifestError,
+    Timeline, TimelineOrOffloaded,
+};
+use crate::virtual_file::MaybeFatalIo;
 
 /// Mark timeline as deleted in S3 so we won't pick it up next time
 /// during attach or pageserver restart.
@@ -137,6 +137,11 @@ async fn remove_maybe_offloaded_timeline_from_tenant(
             timelines.remove(&timeline.timeline_id).expect(
                 "timeline that we were deleting was concurrently removed from 'timelines' map",
             );
+            tenant
+                .scheduled_compaction_tasks
+                .lock()
+                .unwrap()
+                .remove(&timeline.timeline_id);
         }
         TimelineOrOffloaded::Offloaded(timeline) => {
             let offloaded_timeline = timelines_offloaded
@@ -300,6 +305,7 @@ impl DeleteTimelineFlow {
                 // Thus we need to skip the validation here.
                 CreateTimelineCause::Delete,
                 crate::tenant::CreateTimelineIdempotency::FailWithConflict, // doesn't matter what we put here
+                None, // doesn't matter what we put here
             )
             .context("create_timeline_struct")?;
 

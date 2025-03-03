@@ -5,12 +5,12 @@ mod mitm;
 
 use std::time::Duration;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use async_trait::async_trait;
 use http::StatusCode;
 use postgres_client::config::SslMode;
 use postgres_client::tls::{MakeTlsConnect, NoTls};
-use retry::{retry_after, ShouldRetryWakeCompute};
+use retry::{ShouldRetryWakeCompute, retry_after};
 use rstest::rstest;
 use rustls::crypto::ring;
 use rustls::pki_types;
@@ -334,8 +334,8 @@ async fn scram_auth_mock() -> anyhow::Result<()> {
         generate_tls_config("generic-project-name.localhost", "localhost")?;
     let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), Scram::mock()));
 
-    use rand::distributions::Alphanumeric;
     use rand::Rng;
+    use rand::distributions::Alphanumeric;
     let password: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)
         .take(rand::random::<u8>() as usize)
@@ -555,6 +555,7 @@ fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeIn
             endpoint_id: (&EndpointId::from("endpoint")).into(),
             project_id: (&ProjectId::from("project")).into(),
             branch_id: (&BranchId::from("branch")).into(),
+            compute_id: "compute".into(),
             cold_start_info: crate::control_plane::messages::ColdStartInfo::Warm,
         },
     };

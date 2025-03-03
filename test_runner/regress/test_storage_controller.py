@@ -182,6 +182,13 @@ def test_storage_controller_smoke(neon_env_builder: NeonEnvBuilder, combination)
     time.sleep(1)
     assert get_node_shard_counts(env, tenant_ids)[env.pageservers[0].id] == 0
 
+    # Exercise live migration of a tenant back to the original pageserver
+    migrate_tenant = env.pageservers[1].http_client().tenant_list_locations()["tenant_shards"][0][0]
+    env.storage_controller.tenant_shard_migrate(
+        TenantShardId.parse(migrate_tenant), env.pageservers[0].id
+    )
+    assert get_node_shard_counts(env, tenant_ids)[env.pageservers[0].id] == 1
+
     # Restarting a pageserver should not detach any tenants (i.e. /re-attach works)
     before_restart = env.pageservers[1].http_client().tenant_list_locations()
     env.pageservers[1].stop()
@@ -2139,8 +2146,9 @@ def test_tenant_import(neon_env_builder: NeonEnvBuilder, shard_count, remote_sto
         workload.validate()
 
 
+@pytest.mark.parametrize(**fixtures.utils.allpairs_versions())
 @pytest.mark.parametrize("num_azs", [1, 2])
-def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder, num_azs: int):
+def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder, num_azs: int, combination):
     """
     Graceful reststart of storage controller clusters use the drain and
     fill hooks in order to migrate attachments away from pageservers before
@@ -3817,3 +3825,43 @@ def test_update_node_on_registration(neon_env_builder: NeonEnvBuilder):
     nodes = env.storage_controller.node_list()
     assert len(nodes) == 1
     assert nodes[0]["listen_https_port"] is None
+
+
+def test_storage_controller_location_conf_equivalence(neon_env_builder: NeonEnvBuilder):
+    """
+    Validate that a storage controller restart with no shards in a transient state
+    performs zero reconciliations at start-up. Implicitly, this means that the location
+    configs returned by the pageserver are identical to the persisted state in the
+    storage controller database.
+    """
+    neon_env_builder.num_pageservers = 1
+    neon_env_builder.storage_controller_config = {
+        "start_as_candidate": False,
+    }
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_id = TenantId.generate()
+    env.storage_controller.tenant_create(
+        tenant_id, shard_count=2, tenant_config={"pitr_interval": "1h2m3s"}
+    )
+
+    env.storage_controller.reconcile_until_idle()
+
+    reconciles_before_restart = env.storage_controller.get_metric_value(
+        "storage_controller_reconcile_complete_total", filter={"status": "ok"}
+    )
+
+    assert reconciles_before_restart != 0
+
+    env.storage_controller.stop()
+    env.storage_controller.start()
+
+    env.storage_controller.reconcile_until_idle()
+
+    reconciles_after_restart = env.storage_controller.get_metric_value(
+        "storage_controller_reconcile_complete_total", filter={"status": "ok"}
+    )
+
+    assert reconciles_after_restart == 0

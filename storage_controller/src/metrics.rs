@@ -7,17 +7,18 @@
 //!
 //! The rest of the code defines label group types and deals with converting outer types to labels.
 //!
+use std::sync::Mutex;
+
 use bytes::Bytes;
-use measured::{label::LabelValue, metric::histogram, FixedCardinalityLabel, MetricGroup};
+use measured::label::LabelValue;
+use measured::metric::histogram;
+use measured::{FixedCardinalityLabel, MetricGroup};
 use metrics::NeonMetrics;
 use once_cell::sync::Lazy;
-use std::sync::Mutex;
 use strum::IntoEnumIterator;
 
-use crate::{
-    persistence::{DatabaseError, DatabaseOperation},
-    service::LeadershipStatus,
-};
+use crate::persistence::{DatabaseError, DatabaseOperation};
+use crate::service::LeadershipStatus;
 
 pub(crate) static METRICS_REGISTRY: Lazy<StorageControllerMetrics> =
     Lazy::new(StorageControllerMetrics::default);

@@ -1,5 +1,6 @@
-use anyhow::Result;
 use std::str::FromStr;
+
+use anyhow::Result;
 
 /// Struct to hold parsed S3 components
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -142,7 +142,7 @@ static BufferTag target_redo_tag;
 
 static XLogReaderState *reader_state;
 
-#define TRACE LOG
+#define TRACE DEBUG1
 
 #ifdef HAVE_LIBSECCOMP
 
@@ -194,6 +194,7 @@ static PgSeccompRule allowed_syscalls[] =
 	 * is stored in MyProcPid anyway.
 	 */
 	PG_SCMP_ALLOW(getpid),
+	PG_SCMP_ALLOW(futex), /* needed for errbacktrace */
 
 	/* Enable those for a proper shutdown. */
 #if 0
@@ -253,7 +254,7 @@ WalRedoMain(int argc, char *argv[])
 	 * which is super strange but that's not something we can solve
 	 * for here. ¯\_(-_-)_/¯
 	 */
-	SetConfigOption("log_min_messages", "FATAL", PGC_SUSET, PGC_S_OVERRIDE);
+	SetConfigOption("log_min_messages", "WARNING", PGC_SUSET, PGC_S_OVERRIDE);
 	SetConfigOption("client_min_messages", "ERROR", PGC_SUSET,
 					PGC_S_OVERRIDE);
 

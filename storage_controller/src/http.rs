@@ -1,32 +1,28 @@
-use crate::http;
-use crate::metrics::{
-    HttpRequestLatencyLabelGroup, HttpRequestStatusLabelGroup, PageserverRequestLabelGroup,
-    METRICS_REGISTRY,
-};
-use crate::persistence::SafekeeperUpsert;
-use crate::reconciler::ReconcileError;
-use crate::service::{LeadershipStatus, Service, RECONCILE_TIMEOUT, STARTUP_RECONCILE_TIMEOUT};
+use std::num::NonZero;
+use std::str::FromStr;
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
+
 use anyhow::Context;
+use control_plane::storage_controller::{AttachHookRequest, InspectRequest};
 use futures::Future;
-use http_utils::{
-    endpoint::{
-        self, auth_middleware, check_permission_with, profile_cpu_handler, profile_heap_handler,
-        request_span,
-    },
-    error::ApiError,
-    failpoints::failpoints_handler,
-    json::{json_request, json_response},
-    request::{must_get_query_param, parse_query_param, parse_request_param},
-    RequestExt, RouterBuilder,
+use http_utils::endpoint::{
+    self, auth_middleware, check_permission_with, profile_cpu_handler, profile_heap_handler,
+    request_span,
 };
+use http_utils::error::ApiError;
+use http_utils::failpoints::failpoints_handler;
+use http_utils::json::{json_request, json_response};
+use http_utils::request::{must_get_query_param, parse_query_param, parse_request_param};
+use http_utils::{RequestExt, RouterBuilder};
 use hyper::header::CONTENT_TYPE;
-use hyper::{Body, Request, Response};
-use hyper::{StatusCode, Uri};
+use hyper::{Body, Request, Response, StatusCode, Uri};
 use metrics::{BuildInfo, NeonMetrics};
 use pageserver_api::controller_api::{
     MetadataHealthListOutdatedRequest, MetadataHealthListOutdatedResponse,
     MetadataHealthListUnhealthyResponse, MetadataHealthUpdateRequest, MetadataHealthUpdateResponse,
-    SafekeeperSchedulingPolicyRequest, ShardsPreferredAzsRequest, TenantCreateRequest,
+    NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, SafekeeperSchedulingPolicyRequest,
+    ShardsPreferredAzsRequest, TenantCreateRequest, TenantPolicyRequest, TenantShardMigrateRequest,
 };
 use pageserver_api::models::{
     TenantConfigPatchRequest, TenantConfigRequest, TenantLocationConfigRequest,
@@ -34,25 +30,22 @@ use pageserver_api::models::{
     TimelineCreateRequest,
 };
 use pageserver_api::shard::TenantShardId;
-use pageserver_client::{mgmt_api, BlockUnblock};
-use std::num::NonZero;
-use std::str::FromStr;
-use std::sync::{Arc, LazyLock};
-use std::time::{Duration, Instant};
+use pageserver_api::upcall_api::{ReAttachRequest, ValidateRequest};
+use pageserver_client::{BlockUnblock, mgmt_api};
+use routerify::Middleware;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use utils::auth::{Scope, SwappableJwtAuth};
 use utils::id::{NodeId, TenantId, TimelineId};
 
-use pageserver_api::controller_api::{
-    NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, TenantPolicyRequest,
-    TenantShardMigrateRequest,
+use crate::http;
+use crate::metrics::{
+    HttpRequestLatencyLabelGroup, HttpRequestStatusLabelGroup, METRICS_REGISTRY,
+    PageserverRequestLabelGroup,
 };
-use pageserver_api::upcall_api::{ReAttachRequest, ValidateRequest};
-
-use control_plane::storage_controller::{AttachHookRequest, InspectRequest};
-
-use routerify::Middleware;
+use crate::persistence::SafekeeperUpsert;
+use crate::reconciler::ReconcileError;
+use crate::service::{LeadershipStatus, RECONCILE_TIMEOUT, STARTUP_RECONCILE_TIMEOUT, Service};
 
 /// State available to HTTP request handlers
 pub struct HttpState {
@@ -583,9 +576,10 @@ async fn handle_tenant_timeline_download_heatmap_layers(
 
     let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
     let concurrency: Option<usize> = parse_query_param(&req, "concurrency")?;
+    let recurse = parse_query_param(&req, "recurse")?.unwrap_or(false);
 
     service
-        .tenant_timeline_download_heatmap_layers(tenant_shard_id, timeline_id, concurrency)
+        .tenant_timeline_download_heatmap_layers(tenant_shard_id, timeline_id, concurrency, recurse)
         .await?;
 
     json_response(StatusCode::OK, ())
@@ -606,9 +600,9 @@ async fn handle_tenant_timeline_passthrough(
     service: Arc<Service>,
     req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
-    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let tenant_or_shard_id: TenantShardId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
-    maybe_rate_limit(tenant_id).await;
+    maybe_rate_limit(tenant_or_shard_id.tenant_id).await;
 
     let req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -622,15 +616,28 @@ async fn handle_tenant_timeline_passthrough(
         return Err(ApiError::BadRequest(anyhow::anyhow!("Missing path")));
     };
 
-    tracing::info!("Proxying request for tenant {} ({})", tenant_id, path);
+    tracing::info!(
+        "Proxying request for tenant {} ({})",
+        tenant_or_shard_id.tenant_id,
+        path
+    );
 
     // Find the node that holds shard zero
-    let (node, tenant_shard_id) = service.tenant_shard0_node(tenant_id).await?;
+    let (node, tenant_shard_id) = if tenant_or_shard_id.is_unsharded() {
+        service
+            .tenant_shard0_node(tenant_or_shard_id.tenant_id)
+            .await?
+    } else {
+        (
+            service.tenant_shard_node(tenant_or_shard_id).await?,
+            tenant_or_shard_id,
+        )
+    };
 
     // Callers will always pass an unsharded tenant ID.  Before proxying, we must
     // rewrite this to a shard-aware shard zero ID.
     let path = format!("{}", path);
-    let tenant_str = tenant_id.to_string();
+    let tenant_str = tenant_or_shard_id.tenant_id.to_string();
     let tenant_shard_str = format!("{}", tenant_shard_id);
     let path = path.replace(&tenant_str, &tenant_shard_str);
 
@@ -651,7 +658,10 @@ async fn handle_tenant_timeline_passthrough(
 
     let _timer = latency.start_timer(labels.clone());
 
-    let client = mgmt_api::Client::new(node.base_url(), service.get_config().jwt_token.as_deref());
+    let client = mgmt_api::Client::new(
+        node.base_url(),
+        service.get_config().pageserver_jwt_token.as_deref(),
+    );
     let resp = client.get_raw(path).await.map_err(|e|
         // We return 503 here because if we can't successfully send a request to the pageserver,
         // either we aren't available or the pageserver is unavailable.
@@ -667,7 +677,7 @@ async fn handle_tenant_timeline_passthrough(
     // Transform 404 into 503 if we raced with a migration
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         // Look up node again: if we migrated it will be different
-        let (new_node, _tenant_shard_id) = service.tenant_shard0_node(tenant_id).await?;
+        let new_node = service.tenant_shard_node(tenant_shard_id).await?;
         if new_node.get_id() != node.get_id() {
             // Rather than retry here, send the client a 503 to prompt a retry: this matches
             // the pageserver's use of 503, and all clients calling this API should retry on 503.
@@ -1413,10 +1423,7 @@ async fn handle_safekeeper_scheduling_policy(
         .set_safekeeper_scheduling_policy(id, body.scheduling_policy)
         .await?;
 
-    Ok(Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(Body::empty())
-        .unwrap())
+    json_response(StatusCode::OK, ())
 }
 
 /// Common wrapper for request handlers that call into Service and will operate on tenants: they must only
@@ -1514,8 +1521,8 @@ pub fn prologue_leadership_status_check_middleware<
     })
 }
 
-fn prologue_metrics_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
-) -> Middleware<B, ApiError> {
+fn prologue_metrics_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>()
+-> Middleware<B, ApiError> {
     Middleware::pre(move |req| async move {
         let meta = RequestMeta {
             method: req.method().clone(),
@@ -1528,8 +1535,8 @@ fn prologue_metrics_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>
     })
 }
 
-fn epilogue_metrics_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
-) -> Middleware<B, ApiError> {
+fn epilogue_metrics_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>()
+-> Middleware<B, ApiError> {
     Middleware::post_with_info(move |resp, req_info| async move {
         let request_name = match req_info.context::<RequestName>() {
             Some(name) => name,
@@ -1680,8 +1687,8 @@ async fn maybe_forward(req: Request<Body>) -> ForwardOutcome {
             Err(err) => {
                 return ForwardOutcome::Forwarded(Err(ApiError::InternalServerError(
                     anyhow::anyhow!(
-                    "Failed to parse leader uri for forwarding while in stepped down state: {err}"
-                ),
+                        "Failed to parse leader uri for forwarding while in stepped down state: {err}"
+                    ),
                 )));
             }
         };
@@ -2214,8 +2221,23 @@ mod test {
 
     #[test]
     fn test_path_without_ids() {
-        assert_eq!(path_without_ids("/v1/tenant/1a2b3344556677881122334455667788/timeline/AA223344556677881122334455667788"), "/v1/tenant//timeline/");
-        assert_eq!(path_without_ids("/v1/tenant/1a2b3344556677881122334455667788-0108/timeline/AA223344556677881122334455667788"), "/v1/tenant//timeline/");
-        assert_eq!(path_without_ids("/v1/tenant/1a2b3344556677881122334455667788-0108/timeline/AA223344556677881122334455667788?parameter=foo"), "/v1/tenant//timeline/");
+        assert_eq!(
+            path_without_ids(
+                "/v1/tenant/1a2b3344556677881122334455667788/timeline/AA223344556677881122334455667788"
+            ),
+            "/v1/tenant//timeline/"
+        );
+        assert_eq!(
+            path_without_ids(
+                "/v1/tenant/1a2b3344556677881122334455667788-0108/timeline/AA223344556677881122334455667788"
+            ),
+            "/v1/tenant//timeline/"
+        );
+        assert_eq!(
+            path_without_ids(
+                "/v1/tenant/1a2b3344556677881122334455667788-0108/timeline/AA223344556677881122334455667788?parameter=foo"
+            ),
+            "/v1/tenant//timeline/"
+        );
     }
 }

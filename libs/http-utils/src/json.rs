@@ -1,6 +1,6 @@
 use anyhow::Context;
 use bytes::Buf;
-use hyper::{header, Body, Request, Response, StatusCode};
+use hyper::{Body, Request, Response, StatusCode, header};
 use serde::{Deserialize, Serialize};
 
 use super::error::ApiError;

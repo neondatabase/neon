@@ -394,12 +394,22 @@ pub enum RedisMsgKind {
     HDel,
 }
 
-#[derive(Default)]
-struct Accumulated {
+#[derive(Default, Clone)]
+pub struct LatencyAccumulated {
     cplane: time::Duration,
     client: time::Duration,
     compute: time::Duration,
     retry: time::Duration,
+}
+
+impl std::fmt::Display for LatencyAccumulated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "client: {:?}, cplane: {:?}, compute: {:?}, retry: {:?}",
+            self.client, self.cplane, self.compute, self.retry
+        )
+    }
 }
 
 pub struct LatencyTimer {
@@ -408,7 +418,7 @@ pub struct LatencyTimer {
     // time since the stopwatch was stopped
     stop: Option<time::Instant>,
     // accumulated time on the stopwatch
-    accumulated: Accumulated,
+    accumulated: LatencyAccumulated,
     // label data
     protocol: Protocol,
     cold_start_info: ColdStartInfo,
@@ -422,7 +432,7 @@ impl LatencyTimer {
         Self {
             start: time::Instant::now(),
             stop: None,
-            accumulated: Accumulated::default(),
+            accumulated: LatencyAccumulated::default(),
             protocol,
             cold_start_info: ColdStartInfo::Unknown,
             // assume failed unless otherwise specified
@@ -435,7 +445,7 @@ impl LatencyTimer {
         Self {
             start: time::Instant::now(),
             stop: None,
-            accumulated: Accumulated::default(),
+            accumulated: LatencyAccumulated::default(),
             protocol,
             cold_start_info: ColdStartInfo::Unknown,
             // assume failed unless otherwise specified
@@ -464,6 +474,10 @@ impl LatencyTimer {
 
         // success
         self.outcome = ConnectOutcome::Success;
+    }
+
+    pub fn accumulated(&self) -> LatencyAccumulated {
+        self.accumulated.clone()
     }
 }
 
@@ -511,7 +525,7 @@ impl Drop for LatencyTimer {
             duration.saturating_sub(accumulated_total).as_secs_f64(),
         );
 
-        // Exclude client cplane, compue communication from the accumulated time.
+        // Exclude client, cplane, compute communication from the accumulated time.
         let accumulated_total =
             self.accumulated.client + self.accumulated.cplane + self.accumulated.compute;
         metric.observe(
@@ -524,7 +538,7 @@ impl Drop for LatencyTimer {
             duration.saturating_sub(accumulated_total).as_secs_f64(),
         );
 
-        // Exclude client cplane, compue, retry communication from the accumulated time.
+        // Exclude client, cplane, compute, retry communication from the accumulated time.
         let accumulated_total = self.accumulated.client
             + self.accumulated.cplane
             + self.accumulated.compute
@@ -543,11 +557,7 @@ impl Drop for LatencyTimer {
 
 impl From<bool> for Bool {
     fn from(value: bool) -> Self {
-        if value {
-            Bool::True
-        } else {
-            Bool::False
-        }
+        if value { Bool::True } else { Bool::False }
     }
 }
 

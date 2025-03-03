@@ -1,7 +1,8 @@
-use pin_project_lite::pin_project;
 use std::io::Read;
 use std::pin::Pin;
 use std::{io, task};
+
+use pin_project_lite::pin_project;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 pin_project! {

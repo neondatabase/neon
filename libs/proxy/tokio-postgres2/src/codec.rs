@@ -1,8 +1,9 @@
+use std::io;
+
 use bytes::{Buf, Bytes, BytesMut};
 use fallible_iterator::FallibleIterator;
 use postgres_protocol2::message::backend;
 use postgres_protocol2::message::frontend::CopyData;
-use std::io;
 use tokio_util::codec::{Decoder, Encoder};
 
 pub enum FrontendMessage {

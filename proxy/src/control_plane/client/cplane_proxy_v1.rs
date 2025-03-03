@@ -1,18 +1,20 @@
 //! Production console backend.
 
+use std::net::IpAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ::http::header::AUTHORIZATION;
 use ::http::HeaderName;
+use ::http::header::AUTHORIZATION;
 use futures::TryFutureExt;
 use postgres_client::config::SslMode;
 use tokio::time::Instant;
-use tracing::{debug, info, info_span, warn, Instrument};
+use tracing::{Instrument, debug, info, info_span, warn};
 
 use super::super::messages::{ControlPlaneErrorMessage, GetEndpointAccessControl, WakeCompute};
-use crate::auth::backend::jwt::AuthRule;
 use crate::auth::backend::ComputeUserInfo;
+use crate::auth::backend::jwt::AuthRule;
 use crate::cache::Cached;
 use crate::context::RequestContext;
 use crate::control_plane::caches::ApiCaches;
@@ -274,11 +276,27 @@ impl NeonControlPlaneClient {
                 Some(x) => x,
             };
 
+            let host_addr = IpAddr::from_str(host).ok();
+
+            let ssl_mode = match &body.server_name {
+                Some(_) => SslMode::Require,
+                None => SslMode::Disable,
+            };
+            let host_name = match body.server_name {
+                Some(host) => host,
+                None => host.to_owned(),
+            };
+
             // Don't set anything but host and port! This config will be cached.
             // We'll set username and such later using the startup message.
             // TODO: add more type safety (in progress).
-            let mut config = compute::ConnCfg::new(host.to_owned(), port);
-            config.ssl_mode(SslMode::Disable); // TLS is not configured on compute nodes.
+            let mut config = compute::ConnCfg::new(host_name, port);
+
+            if let Some(addr) = host_addr {
+                config.set_host_addr(addr);
+            }
+
+            config.ssl_mode(ssl_mode);
 
             let node = NodeInfo {
                 config,

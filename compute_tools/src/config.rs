@@ -1,13 +1,14 @@
+use std::fmt::Write as FmtWrite;
 use std::fs::{File, OpenOptions};
 use std::io;
+use std::io::Write;
 use std::io::prelude::*;
 use std::path::Path;
 
 use anyhow::Result;
-
-use crate::pg_helpers::escape_conf_value;
-use crate::pg_helpers::{GenericOptionExt, PgOptionsSerialize};
 use compute_api::spec::{ComputeMode, ComputeSpec, GenericOption};
+
+use crate::pg_helpers::{GenericOptionExt, PgOptionsSerialize, escape_conf_value};
 
 /// Check that `line` is inside a text file and put it there if it is not.
 /// Create file if it doesn't exist.
@@ -56,10 +57,20 @@ pub fn write_postgres_conf(
         writeln!(file, "neon.stripe_size={stripe_size}")?;
     }
     if !spec.safekeeper_connstrings.is_empty() {
+        let mut neon_safekeepers_value = String::new();
+        tracing::info!(
+            "safekeepers_connstrings is not zero, gen: {:?}",
+            spec.safekeepers_generation
+        );
+        // If generation is given, prepend sk list with g#number:
+        if let Some(generation) = spec.safekeepers_generation {
+            write!(neon_safekeepers_value, "g#{}:", generation)?;
+        }
+        neon_safekeepers_value.push_str(&spec.safekeeper_connstrings.join(","));
         writeln!(
             file,
             "neon.safekeepers={}",
-            escape_conf_value(&spec.safekeeper_connstrings.join(","))
+            escape_conf_value(&neon_safekeepers_value)
         )?;
     }
     if let Some(s) = &spec.tenant_id {

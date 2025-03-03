@@ -1,8 +1,8 @@
 pub mod routes;
-pub use routes::make_router;
-
-pub use safekeeper_api::models;
 use std::sync::Arc;
+
+pub use routes::make_router;
+pub use safekeeper_api::models;
 
 use crate::{GlobalTimelines, SafeKeeperConf};
 
