@@ -547,7 +547,7 @@ AdvancePollState(Safekeeper *sk, uint32 events)
 			/*
 			 * Idle state for waiting votes from quorum.
 			 */
-		case SS_IDLE:
+		case SS_WAIT_ELECTED:
 			wp_log(WARNING, "EOF from node %s:%s in %s state", sk->host,
 				   sk->port, FormatSafekeeperState(sk));
 			ResetConnection(sk);
@@ -876,7 +876,7 @@ RecvVoteResponse(Safekeeper *sk)
 	wp->n_votes++;
 	if (wp->n_votes < wp->quorum)
 	{
-		sk->state = SS_IDLE;	/* can't do much yet, no quorum */
+		sk->state = SS_WAIT_ELECTED;	/* can't do much yet, no quorum */
 	}
 	else if (wp->n_votes > wp->quorum)
 	{
@@ -885,7 +885,7 @@ RecvVoteResponse(Safekeeper *sk)
 	}
 	else
 	{
-		sk->state = SS_IDLE;
+		sk->state = SS_WAIT_ELECTED;
 		/* Idle state waits for read-ready events */
 		wp->api.update_event_set(sk, WL_SOCKET_READABLE);
 
@@ -897,7 +897,7 @@ RecvVoteResponse(Safekeeper *sk)
  * Called once a majority of acceptors have voted for us and current proposer
  * has been elected.
  *
- * Sends ProposerElected message to all acceptors in SS_IDLE state and starts
+ * Sends ProposerElected message to all acceptors in SS_WAIT_ELECTED state and starts
  * replication from walsender.
  */
 static void
@@ -941,13 +941,13 @@ HandleElectedProposer(WalProposer *wp)
 
 	for (int i = 0; i < wp->n_safekeepers; i++)
 	{
-		if (wp->safekeeper[i].state == SS_IDLE)
+		if (wp->safekeeper[i].state == SS_WAIT_ELECTED)
 			SendProposerElected(&wp->safekeeper[i]);
 	}
 
 	/*
 	 * The proposer has been elected, and there will be no quorum waiting
-	 * after this point. There will be no safekeeper with state SS_IDLE also,
+	 * after this point. There will be no safekeeper with state SS_WAIT_ELECTED also,
 	 * because that state is used only for quorum waiting.
 	 */
 
@@ -1019,7 +1019,7 @@ DetermineEpochStartLsn(WalProposer *wp)
 
 	for (int i = 0; i < wp->n_safekeepers; i++)
 	{
-		if (wp->safekeeper[i].state == SS_IDLE)
+		if (wp->safekeeper[i].state == SS_WAIT_ELECTED)
 		{
 			n_ready++;
 
@@ -1039,7 +1039,7 @@ DetermineEpochStartLsn(WalProposer *wp)
 	{
 		/*
 		 * This is a rare case that can be triggered if safekeeper has voted
-		 * and disconnected. In this case, its state will not be SS_IDLE and
+		 * and disconnected. In this case, its state will not be SS_WAIT_ELECTED and
 		 * its vote cannot be used, because we clean up `voteResponse` in
 		 * `ShutdownConnection`.
 		 */
@@ -1664,7 +1664,7 @@ UpdateDonorShmem(WalProposer *wp)
 	 * about its position immediately after election before any feedbacks are
 	 * sent.
 	 */
-	if (wp->safekeeper[wp->donor].state >= SS_IDLE)
+	if (wp->safekeeper[wp->donor].state >= SS_WAIT_ELECTED)
 	{
 		donor = &wp->safekeeper[wp->donor];
 		donor_lsn = wp->propEpochStartLsn;
@@ -2395,7 +2395,7 @@ FormatSafekeeperState(Safekeeper *sk)
 		case SS_SEND_ELECTED_FLUSH:
 			return_val = "send-announcement-flush";
 			break;
-		case SS_IDLE:
+		case SS_WAIT_ELECTED:
 			return_val = "idle";
 			break;
 		case SS_ACTIVE:
@@ -2485,7 +2485,7 @@ SafekeeperStateDesiredEvents(Safekeeper *sk, uint32 *sk_events, uint32 *nwr_even
 			 * has been disconnected.
 			 */
 		case SS_WAIT_VOTING:
-		case SS_IDLE:
+		case SS_WAIT_ELECTED:
 			*sk_events = WL_SOCKET_READABLE;
 			return;
 

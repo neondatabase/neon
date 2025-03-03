@@ -77,7 +77,7 @@ typedef enum
 
 	/*
 	 * Already sent voting information, waiting to receive confirmation from
-	 * the node. After receiving, moves to SS_IDLE, if the quorum isn't
+	 * the node. After receiving, moves to SS_WAIT_ELECTED, if the quorum isn't
 	 * reached yet.
 	 */
 	SS_WAIT_VERDICT,
@@ -91,7 +91,7 @@ typedef enum
 	 *
 	 * Moves to SS_ACTIVE only by call to StartStreaming.
 	 */
-	SS_IDLE,
+	SS_WAIT_ELECTED,
 
 	/*
 	 * Active phase, when we acquired quorum and have WAL to send or feedback
