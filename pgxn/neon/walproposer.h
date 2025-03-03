@@ -822,7 +822,7 @@ typedef struct WalProposer
 	TermHistory propTermHistory;
 
 	/* epoch start lsn of the proposer */
-	XLogRecPtr	propEpochStartLsn;
+	XLogRecPtr	propTermStartLsn;
 
 	/* Most advanced acceptor epoch */
 	term_t		donorEpoch;

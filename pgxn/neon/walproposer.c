@@ -916,7 +916,7 @@ HandleElectedProposer(WalProposer *wp)
 	}
 
 	/*
-	 * Zero propEpochStartLsn means majority of safekeepers doesn't have any
+	 * Zero propTermStartLsn means majority of safekeepers doesn't have any
 	 * WAL, timeline was just created. Compute bumps it to basebackup LSN,
 	 * otherwise we must be sync-safekeepers and we have nothing to do then.
 	 *
@@ -925,17 +925,17 @@ HandleElectedProposer(WalProposer *wp)
 	 * once we disable implicit timeline creation on safekeepers and create it
 	 * with non zero LSN from the start.
 	 */
-	if (wp->propEpochStartLsn == InvalidXLogRecPtr)
+	if (wp->propTermStartLsn == InvalidXLogRecPtr)
 	{
 		Assert(wp->config->syncSafekeepers);
-		wp_log(LOG, "elected with zero propEpochStartLsn in sync-safekeepers, exiting");
-		wp->api.finish_sync_safekeepers(wp, wp->propEpochStartLsn);
+		wp_log(LOG, "elected with zero propTermStartLsn in sync-safekeepers, exiting");
+		wp->api.finish_sync_safekeepers(wp, wp->propTermStartLsn);
 	}
 
-	if (wp->truncateLsn == wp->propEpochStartLsn && wp->config->syncSafekeepers)
+	if (wp->truncateLsn == wp->propTermStartLsn && wp->config->syncSafekeepers)
 	{
 		/* Sync is not needed: just exit */
-		wp->api.finish_sync_safekeepers(wp, wp->propEpochStartLsn);
+		wp->api.finish_sync_safekeepers(wp, wp->propTermStartLsn);
 		/* unreachable */
 	}
 
@@ -965,7 +965,7 @@ HandleElectedProposer(WalProposer *wp)
 		return;
 	}
 
-	wp->api.start_streaming(wp, wp->propEpochStartLsn);
+	wp->api.start_streaming(wp, wp->propTermStartLsn);
 	/* Should not return here */
 }
 
@@ -1013,7 +1013,7 @@ DetermineEpochStartLsn(WalProposer *wp)
 	int			n_ready = 0;
 	WalproposerShmemState *walprop_shared;
 
-	wp->propEpochStartLsn = InvalidXLogRecPtr;
+	wp->propTermStartLsn = InvalidXLogRecPtr;
 	wp->donorEpoch = 0;
 	wp->truncateLsn = InvalidXLogRecPtr;
 
@@ -1025,10 +1025,10 @@ DetermineEpochStartLsn(WalProposer *wp)
 
 			if (GetEpoch(&wp->safekeeper[i]) > wp->donorEpoch ||
 				(GetEpoch(&wp->safekeeper[i]) == wp->donorEpoch &&
-				 wp->safekeeper[i].voteResponse.flushLsn > wp->propEpochStartLsn))
+				 wp->safekeeper[i].voteResponse.flushLsn > wp->propTermStartLsn))
 			{
 				wp->donorEpoch = GetEpoch(&wp->safekeeper[i]);
-				wp->propEpochStartLsn = wp->safekeeper[i].voteResponse.flushLsn;
+				wp->propTermStartLsn = wp->safekeeper[i].voteResponse.flushLsn;
 				wp->donor = i;
 			}
 			wp->truncateLsn = Max(wp->safekeeper[i].voteResponse.truncateLsn, wp->truncateLsn);
@@ -1047,24 +1047,24 @@ DetermineEpochStartLsn(WalProposer *wp)
 	}
 
 	/*
-	 * If propEpochStartLsn is 0, it means flushLsn is 0 everywhere, we are
+	 * If propTermStartLsn is 0, it means flushLsn is 0 everywhere, we are
 	 * bootstrapping and nothing was committed yet. Start streaming then from
 	 * the basebackup LSN.
 	 */
-	if (wp->propEpochStartLsn == InvalidXLogRecPtr && !wp->config->syncSafekeepers)
+	if (wp->propTermStartLsn == InvalidXLogRecPtr && !wp->config->syncSafekeepers)
 	{
-		wp->propEpochStartLsn = wp->truncateLsn = wp->api.get_redo_start_lsn(wp);
-		wp_log(LOG, "bumped epochStartLsn to the first record %X/%X", LSN_FORMAT_ARGS(wp->propEpochStartLsn));
+		wp->propTermStartLsn = wp->truncateLsn = wp->api.get_redo_start_lsn(wp);
+		wp_log(LOG, "bumped epochStartLsn to the first record %X/%X", LSN_FORMAT_ARGS(wp->propTermStartLsn));
 	}
-	pg_atomic_write_u64(&wp->api.get_shmem_state(wp)->propEpochStartLsn, wp->propEpochStartLsn);
+	pg_atomic_write_u64(&wp->api.get_shmem_state(wp)->propTermStartLsn, wp->propEpochStartLsn);
 
 	Assert(wp->truncateLsn != InvalidXLogRecPtr || wp->config->syncSafekeepers);
 
 	/*
-	 * We will be generating WAL since propEpochStartLsn, so we should set
+	 * We will be generating WAL since propTermStartLsn, so we should set
 	 * availableLsn to mark this LSN as the latest available position.
 	 */
-	wp->availableLsn = wp->propEpochStartLsn;
+	wp->availableLsn = wp->propTermStartLsn;
 
 	/*
 	 * Proposer's term history is the donor's + its own entry.
@@ -1075,12 +1075,12 @@ DetermineEpochStartLsn(WalProposer *wp)
 	if (dth->n_entries > 0)
 		memcpy(wp->propTermHistory.entries, dth->entries, sizeof(TermSwitchEntry) * dth->n_entries);
 	wp->propTermHistory.entries[wp->propTermHistory.n_entries - 1].term = wp->propTerm;
-	wp->propTermHistory.entries[wp->propTermHistory.n_entries - 1].lsn = wp->propEpochStartLsn;
+	wp->propTermHistory.entries[wp->propTermHistory.n_entries - 1].lsn = wp->propTermStartLsn;
 
 	wp_log(LOG, "got votes from majority (%d) of nodes, term " UINT64_FORMAT ", epochStartLsn %X/%X, donor %s:%s, truncate_lsn %X/%X",
 		   wp->quorum,
 		   wp->propTerm,
-		   LSN_FORMAT_ARGS(wp->propEpochStartLsn),
+		   LSN_FORMAT_ARGS(wp->propTermStartLsn),
 		   wp->safekeeper[wp->donor].host, wp->safekeeper[wp->donor].port,
 		   LSN_FORMAT_ARGS(wp->truncateLsn));
 
@@ -1098,7 +1098,7 @@ DetermineEpochStartLsn(WalProposer *wp)
 		 * Safekeepers don't skip header as they need continious stream of
 		 * data, so correct LSN for comparison.
 		 */
-		if (SkipXLogPageHeader(wp, wp->propEpochStartLsn) != wp->api.get_redo_start_lsn(wp))
+		if (SkipXLogPageHeader(wp, wp->propTermStartLsn) != wp->api.get_redo_start_lsn(wp))
 		{
 			/*
 			 * However, allow to proceed if last_log_term on the node which
@@ -1119,8 +1119,8 @@ DetermineEpochStartLsn(WalProposer *wp)
 				 */
 				disable_core_dump();
 				wp_log(PANIC,
-					   "collected propEpochStartLsn %X/%X, but basebackup LSN %X/%X",
-					   LSN_FORMAT_ARGS(wp->propEpochStartLsn),
+					   "collected propTermStartLsn %X/%X, but basebackup LSN %X/%X",
+					   LSN_FORMAT_ARGS(wp->propTermStartLsn),
 					   LSN_FORMAT_ARGS(wp->api.get_redo_start_lsn(wp)));
 			}
 		}
@@ -1631,7 +1631,7 @@ GetAcknowledgedByQuorumWALPosition(WalProposer *wp)
 		 * Like in Raft, we aren't allowed to commit entries from previous
 		 * terms, so ignore reported LSN until it gets to epochStartLsn.
 		 */
-		responses[i] = wp->safekeeper[i].appendResponse.flushLsn >= wp->propEpochStartLsn ? wp->safekeeper[i].appendResponse.flushLsn : 0;
+		responses[i] = wp->safekeeper[i].appendResponse.flushLsn >= wp->propTermStartLsn ? wp->safekeeper[i].appendResponse.flushLsn : 0;
 	}
 	qsort(responses, wp->n_safekeepers, sizeof(XLogRecPtr), CompareLsn);
 
@@ -1667,7 +1667,7 @@ UpdateDonorShmem(WalProposer *wp)
 	if (wp->safekeeper[wp->donor].state >= SS_WAIT_ELECTED)
 	{
 		donor = &wp->safekeeper[wp->donor];
-		donor_lsn = wp->propEpochStartLsn;
+		donor_lsn = wp->propTermStartLsn;
 	}
 
 	/*
@@ -1756,7 +1756,7 @@ HandleSafekeeperResponse(WalProposer *wp, Safekeeper *fromsk)
 		for (int i = 0; i < wp->n_safekeepers; i++)
 		{
 			Safekeeper *sk = &wp->safekeeper[i];
-			bool		synced = sk->appendResponse.commitLsn >= wp->propEpochStartLsn;
+			bool		synced = sk->appendResponse.commitLsn >= wp->propTermStartLsn;
 
 			/* alive safekeeper which is not synced yet; wait for it */
 			if (sk->state != SS_OFFLINE && !synced)
@@ -1780,7 +1780,7 @@ HandleSafekeeperResponse(WalProposer *wp, Safekeeper *fromsk)
 			 */
 			BroadcastAppendRequest(wp);
 
-			wp->api.finish_sync_safekeepers(wp, wp->propEpochStartLsn);
+			wp->api.finish_sync_safekeepers(wp, wp->propTermStartLsn);
 			/* unreachable */
 		}
 	}
