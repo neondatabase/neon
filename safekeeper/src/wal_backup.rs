@@ -21,9 +21,9 @@ use tokio::sync::{OnceCell, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::backoff;
 use utils::id::{NodeId, TenantTimelineId};
 use utils::lsn::Lsn;
+use utils::{backoff, pausable_failpoint};
 
 use crate::metrics::{BACKED_UP_SEGMENTS, BACKUP_ERRORS, WAL_BACKUP_TASKS};
 use crate::timeline::WalResidentTimeline;
@@ -563,6 +563,12 @@ pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
     // Note: listing segments might take a long time if there are many of them.
     // We don't currently have http requests timeout cancellation, but if/once
     // we have listing should get streaming interface to make progress.
+
+    pausable_failpoint!("sk-delete-timeline-remote-pause");
+
+    fail::fail_point!("sk-delete-timeline-remote", |_| {
+        Err(anyhow::anyhow!("failpoint: sk-delete-timeline-remote"))
+    });
 
     let cancel = CancellationToken::new(); // not really used
     backoff::retry(
