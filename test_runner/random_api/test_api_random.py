@@ -65,6 +65,7 @@ class NeonBranch:
             "PGUSER": self.connection_parameters["role"],
             "PGDATABASE": self.connection_parameters["database"],
             "PGPASSWORD": self.connection_parameters["password"],
+            "PGSSLMODE": "require",
         }
 
     def __str__(self):
