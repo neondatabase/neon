@@ -650,25 +650,23 @@ impl Timeline {
             }
         };
 
-        loop {
-            // Ignore errors, it's fine for the sender to drop, we will still see its result
-            let sender_dropped = result_rx.changed().await.is_err();
+        // Wait for a result
+        let Ok(result) = result_rx.wait_for(|v| v.is_some()).await else {
+            // Unexpected: sender should always send a result before dropping the channel, even if it has an error
+            return Err(anyhow::anyhow!(
+                "remote deletion task future was dropped without sending a result"
+            ));
+        };
 
-            if let Some(result) = result_rx.borrow().as_ref() {
-                match result {
-                    Ok(()) => {
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        return Err(anyhow::anyhow!("remote deletion failed: {e}"));
-                    }
-                }
-            } else if sender_dropped {
-                // Unexpected: we update exactly one time: this should only happen if the deletion task
-                // future is dropped without sending a result
-                return Err(anyhow::anyhow!(
-                    "remote deletion task future was dropped without sending a result"
-                ));
+        match result
+            .as_ref()
+            .expect("We did a wait_for on this being Some above")
+        {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // Constructing a new error rather than passing through, because this is a borrow of
+                // a non-clonable result that may be consumed by multiple calls to this function.
+                Err(anyhow::anyhow!("remote deletion failed: {e}"))
             }
         }
     }
