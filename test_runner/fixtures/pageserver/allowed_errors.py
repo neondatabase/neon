@@ -125,7 +125,7 @@ DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS = [
     ".*reconciler.*neon_local notification hook failed.*",
     ".*reconciler.*neon_local error.*",
     # Tenant rate limits may fire in tests that submit lots of API requests.
-    "tenant \\S+ is rate limited",
+    ".*tenant \\S+ is rate limited.*",
 ]
 
 
