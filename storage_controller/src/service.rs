@@ -47,7 +47,7 @@ use pageserver_api::upcall_api::{
     ValidateResponseTenant,
 };
 use pageserver_client::{BlockUnblock, mgmt_api};
-use reqwest::StatusCode;
+use reqwest::{Certificate, StatusCode};
 use safekeeper_api::models::SafekeeperUtilization;
 use tokio::sync::TryAcquireError;
 use tokio::sync::mpsc::error::TrySendError;
@@ -389,6 +389,8 @@ pub struct Config {
     pub long_reconcile_threshold: Duration,
 
     pub use_https_pageserver_api: bool,
+    pub use_https_safekeeper_api: bool,
+    pub ssl_ca_cert: Option<Certificate>,
 
     pub load_safekeepers: bool,
 }
@@ -1412,13 +1414,18 @@ impl Service {
                 .list_safekeepers()
                 .await?
                 .into_iter()
-                .map(|skp| Safekeeper::from_persistence(skp, CancellationToken::new()))
-                .collect::<Vec<_>>()
+                .map(|skp| {
+                    Safekeeper::from_persistence(
+                        skp,
+                        CancellationToken::new(),
+                        config.use_https_safekeeper_api,
+                    )
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?
         } else {
             tracing::info!("Skipping safekeeper loading");
             Default::default()
         };
-
         let safekeepers: HashMap<NodeId, Safekeeper> =
             safekeepers.into_iter().map(|n| (n.get_id(), n)).collect();
 
@@ -1553,7 +1560,16 @@ impl Service {
         let cancel = CancellationToken::new();
         let reconcilers_cancel = cancel.child_token();
 
+        let http_client = reqwest::ClientBuilder::new();
+        let http_client = if let Some(ssl_ca_cert) = &config.ssl_ca_cert {
+            http_client.add_root_certificate(ssl_ca_cert.clone())
+        } else {
+            http_client
+        };
+        let http_client = http_client.build()?;
+
         let heartbeater_ps = Heartbeater::new(
+            http_client.clone(),
             config.pageserver_jwt_token.clone(),
             config.max_offline_interval,
             config.max_warming_up_interval,
@@ -1561,6 +1577,7 @@ impl Service {
         );
 
         let heartbeater_sk = Heartbeater::new(
+            http_client,
             config.safekeeper_jwt_token.clone(),
             config.max_offline_interval,
             config.max_warming_up_interval,
@@ -8058,25 +8075,42 @@ impl Service {
     pub(crate) async fn upsert_safekeeper(
         &self,
         record: crate::persistence::SafekeeperUpsert,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<(), ApiError> {
         let node_id = NodeId(record.id as u64);
+        let use_https = self.config.use_https_safekeeper_api;
+
+        if use_https && record.https_port.is_none() {
+            return Err(ApiError::PreconditionFailed(
+                format!(
+                    "cannot upsert safekeeper {node_id}: \
+                    https is enabled, but https port is not specified"
+                )
+                .into(),
+            ));
+        }
+
         self.persistence.safekeeper_upsert(record.clone()).await?;
 
         if self.config.load_safekeepers {
             let mut locked = self.inner.write().unwrap();
             let mut safekeepers = (*locked.safekeepers).clone();
             match safekeepers.entry(node_id) {
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    entry.get_mut().update_from_record(record);
-                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => entry
+                    .get_mut()
+                    .update_from_record(record)
+                    .expect("all preconditions should be checked before upsert to database"),
                 std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(Safekeeper::from_persistence(
-                        crate::persistence::SafekeeperPersistence::from_upsert(
-                            record,
-                            SkSchedulingPolicy::Pause,
-                        ),
-                        CancellationToken::new(),
-                    ));
+                    entry.insert(
+                        Safekeeper::from_persistence(
+                            crate::persistence::SafekeeperPersistence::from_upsert(
+                                record,
+                                SkSchedulingPolicy::Pause,
+                            ),
+                            CancellationToken::new(),
+                            use_https,
+                        )
+                        .expect("all preconditions should be checked before upsert to database"),
+                    );
                 }
             }
             locked.safekeepers = Arc::new(safekeepers);

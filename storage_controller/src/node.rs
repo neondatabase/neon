@@ -1,7 +1,6 @@
 use std::str::FromStr;
 use std::time::Duration;
 
-use anyhow::anyhow;
 use pageserver_api::controller_api::{
     AvailabilityZone, NodeAvailability, NodeDescribeResponse, NodeRegisterRequest,
     NodeSchedulingPolicy, TenantLocateResponseShard,
@@ -211,7 +210,10 @@ impl Node {
         use_https: bool,
     ) -> anyhow::Result<Self> {
         if use_https && listen_https_port.is_none() {
-            return Err(anyhow!("https is enabled, but node has no https port"));
+            anyhow::bail!(
+                "cannot create node {id}: \
+                https is enabled, but https port is not specified"
+            );
         }
 
         Ok(Self {
@@ -244,7 +246,11 @@ impl Node {
 
     pub(crate) fn from_persistent(np: NodePersistence, use_https: bool) -> anyhow::Result<Self> {
         if use_https && np.listen_https_port.is_none() {
-            return Err(anyhow!("https is enabled, but node has no https port"));
+            anyhow::bail!(
+                "cannot load node {} from persistent: \
+                https is enabled, but https port is not specified",
+                np.node_id,
+            );
         }
 
         Ok(Self {
