@@ -680,9 +680,9 @@ impl ComputeNode {
         if pspec.spec.mode == ComputeMode::Primary {
             self.configure_as_primary(&compute_state)?;
 
-            let conf = self.get_conn_conf(None);
-            tokio::task::spawn_blocking(|| {
-                let res = get_installed_extensions(conf);
+            let conf = self.get_tokio_conn_conf(None);
+            tokio::task::spawn(async {
+                let res = get_installed_extensions(conf).await;
                 match res {
                     Ok(extensions) => {
                         info!(
