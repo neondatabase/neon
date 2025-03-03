@@ -19,9 +19,9 @@ def get_custom_scripts(
     # Delimit the custom scripts for one run by spaces and for different runs by commas, for example:
     # "insert_webhooks.sql@2 select_any_webhook_with_skew.sql@4,insert_webhooks.sql@8 select_any_webhook_with_skew.sql@2"
     # Databases/branches  are pre-created and passed through BENCHMARK_CONNSTR env variable.
-    scales = os.getenv("TEST_PGBENCH_CUSTOM_SCRIPTS", default=str(default))
+    scripts = os.getenv("TEST_PGBENCH_CUSTOM_SCRIPTS", default=str(default))
     rv = []
-    for s in scales.split(","):
+    for s in scripts.split(","):
         rv.append(s)
     return rv
 
