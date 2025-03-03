@@ -76,6 +76,10 @@
 #include "access/xlogrecovery.h"
 #endif
 
+#if PG_VERSION_NUM >= 170000
+#include "neon_lwlc.h"
+#endif
+
 /*
  * If DEBUG_COMPARE_LOCAL is defined, we pass through all the SMGR API
  * calls to md.c, and *also* do the calls to the Page Server. On every
@@ -2224,8 +2228,12 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 
 	Assert(nblocks <= PG_IOV_MAX);
 
+	#if PG_MAJORVERSION_NUM < 17
 	GetLastWrittenLSNv(rinfo, forknum, blkno, (int) nblocks, last_written_lsns);
-
+	#else
+	get_lwlsn_v_hook(rinfo, forknum, blkno, (int) nblocks, last_written_lsns);
+	#endif
+	
 	for (int i = 0; i < nblocks; i++)
 	{
 		last_written_lsns[i] = nm_adjust_lsn(last_written_lsns[i]);

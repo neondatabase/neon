@@ -50,6 +50,10 @@
 #include "neon.h"
 #include "neon_perf_counters.h"
 
+#if PG_VERSION_NUM >= 170000
+#include "neon_lwlc.h"
+#endif
+
 #define CriticalAssert(cond) do if (!(cond)) elog(PANIC, "LFC: assertion %s failed at %s:%d: ", #cond, __FILE__, __LINE__); while (0)
 
 /*
@@ -999,7 +1003,12 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 		LWLockRelease(lfc_lock);
 		return false;
 	}
+	#if PG_VERSION_NUM >= 170000
+	lwlsn = get_lwlsn_hook(rinfo, forknum, blkno);
+	#else
 	lwlsn = GetLastWrittenLSN(rinfo, forknum, blkno);
+	#endif
+
 	if (lwlsn > lsn)
 	{
 		elog(DEBUG1, "Skip LFC write for %d because LwLSN=%X/%X is greater than not_nodified_since LSN %X/%X",
