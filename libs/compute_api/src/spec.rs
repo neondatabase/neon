@@ -101,6 +101,17 @@ pub struct ComputeSpec {
     pub timeline_id: Option<TimelineId>,
     pub pageserver_connstring: Option<String>,
 
+    /// Safekeeper membership config generation. It is put in
+    /// neon.safekeepers GUC and serves two purposes:
+    /// 1) Non zero value forces walproposer to use membership configurations.
+    /// 2) If walproposer wants to update list of safekeepers to connect to
+    ///    taking them from some safekeeper mconf, it should check what value
+    ///    is newer by comparing the generation.
+    ///
+    /// Note: it could be SafekeeperGeneration, but this needs linking
+    /// compute_ctl with postgres_ffi.
+    #[serde(default)]
+    pub safekeepers_generation: Option<u32>,
     #[serde(default)]
     pub safekeeper_connstrings: Vec<String>,
 

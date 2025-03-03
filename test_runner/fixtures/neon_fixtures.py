@@ -4005,10 +4005,12 @@ class Endpoint(PgProtocol, LogUtils):
         self,
         remote_ext_config: str | None = None,
         pageserver_id: int | None = None,
+        safekeeper_generation: int | None = None,
         safekeepers: list[int] | None = None,
         allow_multiple: bool = False,
         create_test_user: bool = False,
         basebackup_request_tries: int | None = None,
+        timeout: str | None = None,
         env: dict[str, str] | None = None,
     ) -> Self:
         """
@@ -4018,19 +4020,21 @@ class Endpoint(PgProtocol, LogUtils):
 
         assert self.endpoint_id is not None
 
-        # If `safekeepers` is not None, they are remember them as active and use
-        # in the following commands.
+        # If `safekeepers` is not None, remember them as active and use in the
+        # following commands.
         if safekeepers is not None:
             self.active_safekeepers = safekeepers
 
         self.env.neon_cli.endpoint_start(
             self.endpoint_id,
+            safekeepers_generation=safekeeper_generation,
             safekeepers=self.active_safekeepers,
             remote_ext_config=remote_ext_config,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
             create_test_user=create_test_user,
             basebackup_request_tries=basebackup_request_tries,
+            timeout=timeout,
             env=env,
         )
         self._running.release(1)
