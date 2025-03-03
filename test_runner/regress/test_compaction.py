@@ -550,10 +550,11 @@ def test_pageserver_small_tenant_compaction(neon_env_builder: NeonEnvBuilder):
     log.info("Writing initial data ...")
     workload.write_rows(10000, env.pageserver.id)
 
-    for _ in range(20):
+    for _ in range(100):
         workload.churn_rows(10, env.pageserver.id, upload=False, ingest=False)
         ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
-        time.sleep(3)
+        ps_http.timeline_compact(tenant_id, timeline_id)
+        ps_http.timeline_gc(tenant_id, timeline_id, None)
 
     log.info("Validating at workload end ...")
     workload.validate(env.pageserver.id)
