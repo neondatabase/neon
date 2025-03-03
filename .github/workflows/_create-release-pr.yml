@@ -7,6 +7,10 @@ on:
         description: 'Component name'
         required: true
         type: string
+      source-branch:
+        description: 'Source branch'
+        required: true
+        type: string
     secrets:
       ci-access-token:
         description: 'CI access token'
@@ -26,7 +30,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
       with:
-        ref: main
+        ref: ${{ inputs.source-branch }}
 
     - name: Set variables
       id: vars
