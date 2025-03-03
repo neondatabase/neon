@@ -51,6 +51,7 @@ use crate::service::{LeadershipStatus, RECONCILE_TIMEOUT, STARTUP_RECONCILE_TIME
 pub struct HttpState {
     service: Arc<crate::service::Service>,
     auth: Option<Arc<SwappableJwtAuth>>,
+    rate_limiter: governor::DefaultKeyedRateLimiter<TenantId>,
     neon_metrics: NeonMetrics,
     allowlist_routes: &'static [&'static str],
 }
@@ -64,6 +65,10 @@ impl HttpState {
         Self {
             service,
             auth,
+            // TODO: add a config option.
+            rate_limiter: governor::RateLimiter::keyed(governor::Quota::per_second(
+                NonZero::new(10).unwrap(),
+            )),
             neon_metrics: NeonMetrics::new(build_info),
             allowlist_routes: &[
                 "/status",
@@ -90,18 +95,18 @@ fn get_state(request: &Request<Body>) -> &HttpState {
 /// different URLs in a systematic way.
 ///
 /// TODO: consider returning a 429 response if these start piling up.
-///
-/// TODO: consider adding a config option for the rate.
-async fn maybe_rate_limit(tenant_id: TenantId) {
+async fn maybe_rate_limit(request: &Request<Body>, tenant_id: TenantId) {
     // Check if the tenant should be rate-limited.
-    const TENANT_RATE_LIMIT: governor::Quota =
-        governor::Quota::per_second(NonZero::new(10).unwrap());
-    static TENANT_RATE_LIMITER: LazyLock<governor::DefaultKeyedRateLimiter<TenantId>> =
-        LazyLock::new(|| governor::RateLimiter::keyed(TENANT_RATE_LIMIT));
-
-    if TENANT_RATE_LIMITER.check_key(&tenant_id).is_ok() {
+    let rate_limiter = &get_state(request).rate_limiter;
+    if rate_limiter.check_key(&tenant_id).is_ok() {
         return;
     }
+
+    // Measure the rate limiting delay.
+    let _timer = METRICS_REGISTRY
+        .metrics_group
+        .storage_controller_http_request_rate_limited
+        .start_timer();
 
     // Log rate limited tenants once every 10 seconds.
     static LOG_RATE_LIMITER: LazyLock<governor::DefaultKeyedRateLimiter<TenantId>> =
@@ -114,14 +119,8 @@ async fn maybe_rate_limit(tenant_id: TenantId) {
         warn!("tenant {tenant_id} is rate limited")
     }
 
-    // Measure the rate limiting delay.
-    let _timer = METRICS_REGISTRY
-        .metrics_group
-        .storage_controller_http_request_rate_limited
-        .start_timer();
-
     // Wait for quota.
-    TENANT_RATE_LIMITER.until_key_ready(&tenant_id).await;
+    rate_limiter.until_key_ready(&tenant_id).await;
 }
 
 /// Pageserver calls into this on startup, to learn which tenants it should attach
@@ -289,7 +288,7 @@ async fn handle_tenant_config_get(
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
-    maybe_rate_limit(tenant_id).await;
+    maybe_rate_limit(&req, tenant_id).await;
 
     match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -307,7 +306,7 @@ async fn handle_tenant_time_travel_remote_storage(
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
-    maybe_rate_limit(tenant_id).await;
+    maybe_rate_limit(&req, tenant_id).await;
 
     let mut req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -355,7 +354,7 @@ async fn handle_tenant_secondary_download(
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     let wait = parse_query_param(&req, "wait_ms")?.map(Duration::from_millis);
-    maybe_rate_limit(tenant_id).await;
+    maybe_rate_limit(&req, tenant_id).await;
 
     match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -374,7 +373,7 @@ async fn handle_tenant_delete(
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
-    maybe_rate_limit(tenant_id).await;
+    maybe_rate_limit(&req, tenant_id).await;
 
     match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -402,7 +401,7 @@ async fn handle_tenant_timeline_create(
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
-    maybe_rate_limit(tenant_id).await;
+    maybe_rate_limit(&req, tenant_id).await;
 
     let mut req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -428,7 +427,7 @@ async fn handle_tenant_timeline_delete(
     let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
 
     check_permissions(&req, Scope::PageServerApi)?;
-    maybe_rate_limit(tenant_id).await;
+    maybe_rate_limit(&req, tenant_id).await;
 
     match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -505,7 +504,7 @@ async fn handle_tenant_timeline_archival_config(
     let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
 
     check_permissions(&req, Scope::PageServerApi)?;
-    maybe_rate_limit(tenant_id).await;
+    maybe_rate_limit(&req, tenant_id).await;
 
     let mut req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -531,7 +530,7 @@ async fn handle_tenant_timeline_detach_ancestor(
     let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
 
     check_permissions(&req, Scope::PageServerApi)?;
-    maybe_rate_limit(tenant_id).await;
+    maybe_rate_limit(&req, tenant_id).await;
 
     match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -554,7 +553,7 @@ async fn handle_tenant_timeline_block_unblock_gc(
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
-    maybe_rate_limit(tenant_id).await;
+    maybe_rate_limit(&req, tenant_id).await;
 
     let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
 
@@ -572,7 +571,7 @@ async fn handle_tenant_timeline_download_heatmap_layers(
     let tenant_shard_id: TenantShardId = parse_request_param(&req, "tenant_shard_id")?;
 
     check_permissions(&req, Scope::PageServerApi)?;
-    maybe_rate_limit(tenant_shard_id.tenant_id).await;
+    maybe_rate_limit(&req, tenant_shard_id.tenant_id).await;
 
     let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
     let concurrency: Option<usize> = parse_query_param(&req, "concurrency")?;
@@ -602,7 +601,7 @@ async fn handle_tenant_timeline_passthrough(
 ) -> Result<Response<Body>, ApiError> {
     let tenant_or_shard_id: TenantShardId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
-    maybe_rate_limit(tenant_or_shard_id.tenant_id).await;
+    maybe_rate_limit(&req, tenant_or_shard_id.tenant_id).await;
 
     let req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -1209,7 +1208,7 @@ async fn handle_step_down(req: Request<Body>) -> Result<Response<Body>, ApiError
 async fn handle_tenant_drop(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
-    maybe_rate_limit(tenant_id).await;
+    maybe_rate_limit(&req, tenant_id).await;
 
     let req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -1226,7 +1225,7 @@ async fn handle_tenant_drop(req: Request<Body>) -> Result<Response<Body>, ApiErr
 async fn handle_tenant_import(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
-    maybe_rate_limit(tenant_id).await;
+    maybe_rate_limit(&req, tenant_id).await;
 
     let req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
