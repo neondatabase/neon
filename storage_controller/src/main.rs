@@ -8,6 +8,7 @@ use clap::Parser;
 use hyper0::Uri;
 use metrics::BuildInfo;
 use metrics::launch_timestamp::LaunchTimestamp;
+use reqwest::Certificate;
 use storage_controller::http::make_router;
 use storage_controller::metrics::preinitialize_metrics;
 use storage_controller::persistence::Persistence;
@@ -143,6 +144,13 @@ struct Cli {
     // Flag to use https for requests to pageserver API.
     #[arg(long, default_value = "false")]
     use_https_pageserver_api: bool,
+    // Flag to use https for requests to safekeeper API.
+    #[arg(long, default_value = "false")]
+    use_https_safekeeper_api: bool,
+
+    // Trusted root CA certificate to use in https APIs.
+    #[arg(long)]
+    ssl_ca_file: Option<PathBuf>,
 }
 
 enum StrictMode {
@@ -320,6 +328,15 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
+    let ssl_ca_cert = match args.ssl_ca_file.as_ref() {
+        Some(ssl_ca_file) => {
+            tracing::info!("Using ssl root CA file: {ssl_ca_file:?}");
+            let buf = tokio::fs::read(ssl_ca_file).await?;
+            Some(Certificate::from_pem(&buf)?)
+        }
+        None => None,
+    };
+
     let config = Config {
         pageserver_jwt_token: secrets.pageserver_jwt_token,
         safekeeper_jwt_token: secrets.safekeeper_jwt_token,
@@ -356,6 +373,8 @@ async fn async_main() -> anyhow::Result<()> {
         start_as_candidate: args.start_as_candidate,
         http_service_port: args.listen.port() as i32,
         use_https_pageserver_api: args.use_https_pageserver_api,
+        use_https_safekeeper_api: args.use_https_safekeeper_api,
+        ssl_ca_cert,
     };
 
     // Validate that we can connect to the database
