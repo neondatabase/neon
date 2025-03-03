@@ -17,7 +17,7 @@ defaults:
 permissions: {}
 
 jobs:
-  get-changed-files:
+  meta:
     runs-on: ubuntu-22.04
     outputs:
       python-changed: ${{ steps.python-src.outputs.any_changed }}
@@ -59,9 +59,9 @@ jobs:
   build-build-tools-image:
     if: |
       false
-      || needs.get-changed-files.outputs.python-changed == 'true'
-      || needs.get-changed-files.outputs.rust-changed == 'true'
-    needs: [ get-changed-files ]
+      || needs.meta.outputs.python-changed == 'true'
+      || needs.meta.outputs.rust-changed == 'true'
+    needs: [ meta ]
     uses: ./.github/workflows/build-build-tools-image.yml
     with:
       # Build only one combination to save time
@@ -70,8 +70,8 @@ jobs:
     secrets: inherit
 
   check-codestyle-python:
-    if: needs.get-changed-files.outputs.python-changed == 'true'
-    needs: [ get-changed-files, build-build-tools-image ]
+    if: needs.meta.outputs.python-changed == 'true'
+    needs: [ meta, build-build-tools-image ]
     uses: ./.github/workflows/_check-codestyle-python.yml
     with:
       # `-bookworm-x64` suffix should match the combination in `build-build-tools-image`
@@ -79,8 +79,8 @@ jobs:
     secrets: inherit
 
   check-codestyle-rust:
-    if: needs.get-changed-files.outputs.rust-changed == 'true'
-    needs: [ get-changed-files, build-build-tools-image ]
+    if: needs.meta.outputs.rust-changed == 'true'
+    needs: [ meta, build-build-tools-image ]
     uses: ./.github/workflows/_check-codestyle-rust.yml
     with:
       # `-bookworm-x64` suffix should match the combination in `build-build-tools-image`
@@ -99,7 +99,7 @@ jobs:
       statuses: write # for `github.repos.createCommitStatus(...)`
       contents: write
     needs:
-      - get-changed-files
+      - meta
       - check-codestyle-python
       - check-codestyle-rust
     runs-on: ubuntu-22.04
@@ -127,7 +127,7 @@ jobs:
         run: exit 1
         if: |
           false
-          || (needs.check-codestyle-python.result == 'skipped' && needs.get-changed-files.outputs.python-changed == 'true')
-          || (needs.check-codestyle-rust.result   == 'skipped' && needs.get-changed-files.outputs.rust-changed   == 'true')
+          || (needs.check-codestyle-python.result == 'skipped' && needs.meta.outputs.python-changed == 'true')
+          || (needs.check-codestyle-rust.result   == 'skipped' && needs.meta.outputs.rust-changed   == 'true')
           || contains(needs.*.result, 'failure')
           || contains(needs.*.result, 'cancelled')
