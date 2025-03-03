@@ -3,6 +3,7 @@
 #
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, cast
 
@@ -354,6 +355,73 @@ def test_sql_regress(
         pg_bin.run(pg_regress_command, env=env_vars, cwd=runpath)
 
     post_checks(env, test_output_dir, DBNAME, endpoint)
+
+
+@pytest.mark.parametrize("shard_count", [None])
+def test_max_wal_rate(
+    neon_env_builder: NeonEnvBuilder,
+    test_output_dir: Path,
+    pg_bin: PgBin,
+    capsys: CaptureFixture[str],
+    base_dir: Path,
+    pg_distrib_dir: Path,
+    shard_count: int | None,
+):
+    DBNAME = "regression"
+    superuser_name = "databricks_superuser"
+
+    if shard_count is not None:
+        neon_env_builder.num_pageservers = shard_count
+    env = neon_env_builder.init_start(
+        initial_tenant_conf=TENANT_CONF, initial_tenant_shard_count=shard_count
+    )
+
+    # Connect to postgres and create a database called "regression".
+    endpoint = env.endpoints.create_start("main")
+    endpoint.safe_psql(f"CREATE ROLE {superuser_name}")
+    endpoint.safe_psql(f"CREATE DATABASE {DBNAME}")
+    endpoint.safe_psql("CREATE EXTENSION neon")
+
+    endpoint.safe_psql("CREATE TABLE usertable ( YCSB_KEY INT, FIELD0 TEXT);")
+    # Write ~1 MB data.
+    for _i in range(0, 1000):
+        endpoint.safe_psql(
+            "INSERT INTO usertable SELECT random(), repeat('a', 1000);", log_query=False
+        )
+    # No backpressure
+    tuples = endpoint.safe_psql("SELECT backpressure_throttling_time();")
+    assert tuples[0][0] == 0
+
+    # 0 MB/s max_wal_rate. WAL proposer can still push some WALs but will be super slow.
+    endpoint.safe_psql("ALTER SYSTEM SET databricks.max_wal_mb_per_second = 0;")
+    endpoint.safe_psql("SELECT pg_reload_conf();")
+    endpoint.safe_psql("SELECT pg_sleep(5);")
+
+    # Write ~10 KB data should hit backpressure.
+    for _i in range(0, 10):
+        endpoint.safe_psql(
+            "INSERT INTO usertable SELECT random(), repeat('a', 1000);", log_query=False
+        )
+    tuples = endpoint.safe_psql("SELECT backpressure_throttling_time();")
+    assert tuples[0][0] > 0
+
+    # 1 MB/s max_wal_rate.
+    endpoint.safe_psql("ALTER SYSTEM SET databricks.max_wal_mb_per_second = 1;")
+    endpoint.safe_psql("SELECT pg_reload_conf();")
+    endpoint.safe_psql("SELECT pg_sleep(5);")
+
+    # Write 10 MB data.
+    start = int(time.time())
+    for _i in range(0, 10000):
+        endpoint.safe_psql(
+            "INSERT INTO usertable SELECT random(), repeat('a', 1000);", log_query=False
+        )
+    end = int(time.time())
+    # It should be longer than 10 seconds.
+    assert end - start >= 10
+
+    post_checks(env, test_output_dir, DBNAME, endpoint)
+    endpoint.stop_and_destroy()
 
 
 @skip_in_debug_build("only run with release build")
