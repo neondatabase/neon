@@ -22,6 +22,8 @@ jobs:
     outputs:
       python-changed: ${{ steps.python-src.outputs.any_changed }}
       rust-changed: ${{ steps.rust-src.outputs.any_changed }}
+      branch: ${{ steps.group-metadata.outputs.branch }}
+      pr-number: ${{ steps.group-metadata.outputs.pr-number }}
     steps:
       - uses: actions/checkout@v4
 
@@ -55,6 +57,14 @@ jobs:
         run: |
           echo "${PYTHON_CHANGED_FILES}"
           echo "${RUST_CHANGED_FILES}"
+
+      - name: Merge group metadata
+        if: ${{ github.event_name == 'merge_group' }}
+        id: group-metadata
+        env:
+          MERGE_QUEUE_REF: ${{ github.event.merge_group.head_ref }}
+        run: |
+          echo $MERGE_QUEUE_REF | jq -Rr 'capture("refs/heads/gh-readonly-queue/(?<branch>.*)/pr-(?<pr_number>[0-9]+)-[0-9a-f]{40}") | ["branch=" + .branch, "pr-number=" + .pr_number] | .[]' | tee -a "${GITHUB_OUTPUT}"
 
   build-build-tools-image:
     if: |
@@ -127,7 +137,20 @@ jobs:
         run: exit 1
         if: |
           false
+          || (github.event_name == 'merge_group' && needs.meta.outputs.branch != 'main')
           || (needs.check-codestyle-python.result == 'skipped' && needs.meta.outputs.python-changed == 'true')
           || (needs.check-codestyle-rust.result   == 'skipped' && needs.meta.outputs.rust-changed   == 'true')
           || contains(needs.*.result, 'failure')
           || contains(needs.*.result, 'cancelled')
+
+      - name: Add fast-forward label to PR to trigger fast-forward merge
+        if: >-
+          ${{
+            always()
+            && github.event_name == 'merge_group'
+            && contains(fromJson('["release", "release-proxy", "release-compute"]'), github.base_ref)
+          }}
+        env:
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+        run: >-
+          gh pr edit ${{ needs.meta.outputs.pr-number }} --repo "${GITHUB_REPOSITORY}" --add-label "fast-forward"
