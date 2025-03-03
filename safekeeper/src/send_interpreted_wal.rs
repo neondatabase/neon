@@ -297,7 +297,13 @@ impl InterpretedWalReader {
                 reader
                     .run_impl(start_pos)
                     .await
-                    .inspect_err(|err| critical!("failed to read WAL record: {err:?}"))
+                    .inspect_err(|err| match err {
+                        // TODO: we may want to differentiate these errors further.
+                        InterpretedWalReaderError::Decode(_) => {
+                            critical!("failed to decode WAL record: {err:?}");
+                        }
+                        err => error!("failed to read WAL record: {err}"),
+                    })
             }
             .instrument(info_span!("interpreted wal reader")),
         );
@@ -357,10 +363,12 @@ impl InterpretedWalReader {
             metric.dec();
         }
 
-        if let Err(err) = self.run_impl(start_pos).await {
-            critical!("failed to read WAL record: {err:?}");
-        } else {
-            info!("interpreted wal reader exiting");
+        match self.run_impl(start_pos).await {
+            Err(err @ InterpretedWalReaderError::Decode(_)) => {
+                critical!("failed to decode WAL record: {err:?}");
+            }
+            Err(err) => error!("failed to read WAL record: {err}"),
+            Ok(()) => info!("interpreted wal reader exiting"),
         }
 
         Err(CopyStreamHandlerEnd::Other(anyhow!(
