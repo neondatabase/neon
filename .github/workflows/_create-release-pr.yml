@@ -56,14 +56,25 @@ jobs:
 
     - name: Create RC branch
       env:
+        RELEASE_BRANCH: ${{ steps.vars.outputs.release-branch }}
         RC_BRANCH: ${{ steps.vars.outputs.rc-branch }}
         TITLE: ${{ steps.vars.outputs.title }}
       run: |
-        git checkout -b "${RC_BRANCH}"
+        git switch -c "${RC_BRANCH}"
 
-        # create an empty commit to distinguish workflow runs
-        # from other possible releases from the same commit
-        git commit --allow-empty -m "${TITLE}"
+        # Manually create a merge commit on the current branch, keeping the
+        # tree and setting the parents to the current HEAD and the HEAD of the
+        # release branch. This commit is what we'll fast-forward the release
+        # branch to when merging the release branch.
+        # For details on why, look at
+        # https://docs.neon.build/overview/repositories/neon.html#background-on-commit-history-of-release-prs
+        current_tree=$(git rev-parse 'HEAD^{tree}')
+        release_head=$(git rev-parse "${RELEASE_BRANCH}")
+        current_head=$(git rev-parse HEAD)
+        merge_commit=$(git commit-tree -p "${current_head}" -p "${release_head}" -m "${TITLE}" "${current_tree}")
+
+        # Fast-forward the current branch to the newly created merge_commit
+        git merge --ff-only ${merge_commit}
 
         git push origin "${RC_BRANCH}"
 
