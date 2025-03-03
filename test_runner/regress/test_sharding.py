@@ -1814,14 +1814,3 @@ def test_sharding_gc(
         shard_gc_cutoff_lsn = Lsn(shard_index["metadata_bytes"]["latest_gc_cutoff_lsn"])
         log.info(f"Shard {shard_number} cutoff LSN: {shard_gc_cutoff_lsn}")
         assert shard_gc_cutoff_lsn == shard_0_gc_cutoff_lsn
-
-    for ps in env.pageservers:
-        # This is not okay, but it's not a scrubber bug: it's a pageserver issue that is exposed by
-        # the specific pattern of aggressive checkpointing+image layer generation + GC that this test does.
-        # TODO: remove when https://github.com/neondatabase/neon/issues/10720 is fixed
-        ps.allowed_errors.extend(
-            [
-                ".*could not find data for key.*",
-                ".*could not ingest record.*",
-            ]
-        )
