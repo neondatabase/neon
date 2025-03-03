@@ -8,8 +8,6 @@ on:
       - .github/workflows/build-build-tools-image.yml
       - .github/workflows/pre-merge-checks.yml
   merge_group:
-    branches:
-      - main
 
 defaults:
   run:
