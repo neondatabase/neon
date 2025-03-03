@@ -1,4 +1,3 @@
-use std::num::NonZero;
 use std::str::FromStr;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
@@ -62,13 +61,11 @@ impl HttpState {
         auth: Option<Arc<SwappableJwtAuth>>,
         build_info: BuildInfo,
     ) -> Self {
+        let quota = governor::Quota::per_second(service.get_config().tenant_rate_limit);
         Self {
             service,
             auth,
-            // TODO: add a config option.
-            rate_limiter: governor::RateLimiter::keyed(governor::Quota::per_second(
-                NonZero::new(10).unwrap(),
-            )),
+            rate_limiter: governor::RateLimiter::keyed(quota),
             neon_metrics: NeonMetrics::new(build_info),
             allowlist_routes: &[
                 "/status",
