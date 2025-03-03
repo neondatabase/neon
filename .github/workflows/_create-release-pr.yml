@@ -74,13 +74,6 @@ jobs:
         RELEASE_BRANCH: ${{ steps.vars.outputs.release-branch }}
         TITLE: ${{ steps.vars.outputs.title }}
       run: |
-        cat << EOF > body.md
-          ## ${TITLE}
-
-          **Please merge this Pull Request using 'Create a merge commit' button**
-        EOF
-
         gh pr create --title "${TITLE}" \
-                     --body-file "body.md" \
                      --head "${RC_BRANCH}" \
                      --base "${RELEASE_BRANCH}"
