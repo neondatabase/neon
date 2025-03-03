@@ -153,9 +153,10 @@ class NeonProject:
         self.wait()
 
     def delete_endpoint(self, endpoint_id: str) -> None:
+        self.terminate_benchmark(endpoint_id)
+        self.neon_api.delete_endpoint(self.id, endpoint_id)
         self.endpoints[endpoint_id].branch.endpoints.pop(endpoint_id)
         self.endpoints.pop(endpoint_id)
-        self.neon_api.delete_endpoint(self.id, endpoint_id)
         self.wait()
 
     def wait_for_sql_availability(self, target, timeout=60, sleep_time=1) -> None:
@@ -182,7 +183,7 @@ class NeonProject:
         read_only = is_endpoint and self.endpoints[target].type == "read_only"
         cmd = ["pgbench", f"-c{clients}", "-T10800", "-Mprepared"]
         if read_only:
-            cmd.append("-S")
+            cmd.extend(["-S", "-n"])
         log.info("running pgbench on %s, cmd: %s", target, cmd)
         self.wait_for_sql_availability(target)
         pgbench = self.pg_bin.run_nonblocking(
@@ -256,7 +257,7 @@ def do_action(project, action):
         ro_endpoints = [_ for _ in project.endpoints.values() if _.type == "read_only"]
         if ro_endpoints:
             target = random.choice(ro_endpoints)
-            target.terminate_benchmark()
+            target.delete()
             log.info("endpoint %s deleted", target.id)
         else:
             log.info("no read_only endpoints present, skipping")
