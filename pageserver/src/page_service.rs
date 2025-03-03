@@ -2113,6 +2113,7 @@ impl PageServerHandler {
                 // TODO: passthrough the error site to the final error message?
                 BasebackupError::Client(e, _) => QueryError::Disconnected(ConnectionError::Io(e)),
                 BasebackupError::Server(e) => QueryError::Other(e),
+                BasebackupError::Shutdown => QueryError::Shutdown,
             }
         }
 
