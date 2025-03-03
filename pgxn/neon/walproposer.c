@@ -518,7 +518,7 @@ AdvancePollState(Safekeeper *sk, uint32 events)
 			 * nodes are transferred from SS_VOTING to sending actual vote
 			 * requests.
 			 */
-		case SS_VOTING:
+		case SS_WAIT_VOTING:
 			wp_log(WARNING, "EOF from node %s:%s in %s state", sk->host,
 				   sk->port, FormatSafekeeperState(sk));
 			ResetConnection(sk);
@@ -721,6 +721,15 @@ SendProposerGreeting(Safekeeper *sk)
 	BlockingWrite(sk, sk->outbuf.data, sk->outbuf.len, SS_HANDSHAKE_RECV);
 }
 
+/*
+ * Have we received greeting from enough (quorum) safekeepers to start voting?
+ */
+static bool
+TermsCollected(WalProposer *wp)
+{
+	return wp->n_connected >= wp->quorum;
+}
+
 static void
 RecvAcceptorGreeting(Safekeeper *sk)
 {
@@ -754,7 +763,7 @@ RecvAcceptorGreeting(Safekeeper *sk)
 	}
 
 	/* Protocol is all good, move to voting. */
-	sk->state = SS_VOTING;
+	sk->state = SS_WAIT_VOTING;
 
 	/*
 	 * Note: it would be better to track the counter on per safekeeper basis,
@@ -762,17 +771,18 @@ RecvAcceptorGreeting(Safekeeper *sk)
 	 * as is for now.
 	 */
 	++wp->n_connected;
-	if (wp->n_connected <= wp->quorum)
+	if (wp->state == WPS_COLLECTING_TERMS)
 	{
 		/* We're still collecting terms from the majority. */
 		wp->propTerm = Max(sk->greetResponse.term, wp->propTerm);
 
 		/* Quorum is acquried, prepare the vote request. */
-		if (wp->n_connected == wp->quorum)
+		if (TermsCollected(wp))
 		{
 			wp->propTerm++;
 			wp_log(LOG, "proposer connected to quorum (%d) safekeepers, propTerm=" INT64_FORMAT, wp->quorum, wp->propTerm);
 
+			wp->state = WPS_CAMPAIGN;
 			wp->voteRequest.pam.tag = 'v';
 			wp->voteRequest.generation = wp->mconf.generation;
 			wp->voteRequest.term = wp->propTerm;
@@ -787,12 +797,10 @@ RecvAcceptorGreeting(Safekeeper *sk)
 	}
 
 	/*
-	 * Check if we have quorum. If there aren't enough safekeepers, wait and
-	 * do nothing. We'll eventually get a task when the election starts.
-	 *
-	 * If we do have quorum, we can start an election.
+	 * If we have quorum, start (or just send vote request to newly connected
+	 * node) election, otherwise wait until we have more greetings.
 	 */
-	if (wp->n_connected < wp->quorum)
+	if (wp->state == WPS_COLLECTING_TERMS)
 	{
 		/*
 		 * SS_VOTING is an idle state; read-ready indicates the connection
@@ -811,7 +819,7 @@ RecvAcceptorGreeting(Safekeeper *sk)
 			 * Remember: SS_VOTING indicates that the safekeeper is
 			 * participating in voting, but hasn't sent anything yet.
 			 */
-			if (wp->safekeeper[j].state == SS_VOTING)
+			if (wp->safekeeper[j].state == SS_WAIT_VOTING)
 				SendVoteRequest(&wp->safekeeper[j]);
 		}
 	}
@@ -2378,7 +2386,7 @@ FormatSafekeeperState(Safekeeper *sk)
 		case SS_HANDSHAKE_RECV:
 			return_val = "handshake (receiving)";
 			break;
-		case SS_VOTING:
+		case SS_WAIT_VOTING:
 			return_val = "voting";
 			break;
 		case SS_WAIT_VERDICT:
@@ -2476,7 +2484,7 @@ SafekeeperStateDesiredEvents(Safekeeper *sk, uint32 *sk_events, uint32 *nwr_even
 			 * Idle states use read-readiness as a sign that the connection
 			 * has been disconnected.
 			 */
-		case SS_VOTING:
+		case SS_WAIT_VOTING:
 		case SS_IDLE:
 			*sk_events = WL_SOCKET_READABLE;
 			return;

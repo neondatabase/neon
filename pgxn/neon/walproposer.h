@@ -73,7 +73,7 @@ typedef enum
 	 * Moved externally by execution of SS_HANDSHAKE_RECV, when we received a
 	 * quorum of handshakes.
 	 */
-	SS_VOTING,
+	SS_WAIT_VOTING,
 
 	/*
 	 * Already sent voting information, waiting to receive confirmation from
@@ -751,6 +751,14 @@ typedef struct WalProposerConfig
 #endif
 } WalProposerConfig;
 
+typedef enum  {
+	/* collecting greetings to determine term to campaign for */
+	WPS_COLLECTING_TERMS,
+	/* campaing started, waiting for votes */
+	WPS_CAMPAIGN,
+	/* successfully elected */
+	WPS_ELECTED,
+} WalProposerState;
 
 /*
  * WAL proposer state.
@@ -758,6 +766,7 @@ typedef struct WalProposerConfig
 typedef struct WalProposer
 {
 	WalProposerConfig *config;
+	WalProposerState state;
 	/* Current walproposer membership configuration */
 	MembershipConfiguration mconf;
 
