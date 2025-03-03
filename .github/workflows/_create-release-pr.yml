@@ -7,10 +7,6 @@ on:
         description: 'Component name'
         required: true
         type: string
-      release-branch:
-        description: 'Release branch'
-        required: true
-        type: string
     secrets:
       ci-access-token:
         description: 'CI access token'
@@ -36,11 +32,18 @@ jobs:
       id: vars
       env:
         COMPONENT_NAME: ${{ inputs.component-name }}
-        RELEASE_BRANCH: ${{ inputs.release-branch }}
+        RELEASE_BRANCH: >-
+          ${{
+            false
+            || inputs.component-name == 'Storage' && 'release'
+            || inputs.component-name == 'Proxy' && 'release-proxy'
+            || inputs.component-name == 'Compute' && 'release-compute'
+          }}
       run: |
         today=$(date +'%Y-%m-%d')
         echo "title=${COMPONENT_NAME} release ${today}" | tee -a ${GITHUB_OUTPUT}
         echo "rc-branch=rc/${RELEASE_BRANCH}/${today}"  | tee -a ${GITHUB_OUTPUT}
+        echo "release-branch=${RELEASE_BRANCH}"         | tee -a ${GITHUB_OUTPUT}
 
     - name: Configure git
       run: |
@@ -60,11 +63,11 @@ jobs:
 
         git push origin "${RC_BRANCH}"
 
-    - name: Create a PR into ${{ inputs.release-branch }}
+    - name: Create a PR into ${{ steps.vars.outputs.release-branch }}
       env:
         GH_TOKEN: ${{ secrets.ci-access-token }}
         RC_BRANCH: ${{ steps.vars.outputs.rc-branch }}
-        RELEASE_BRANCH: ${{ inputs.release-branch }}
+        RELEASE_BRANCH: ${{ steps.vars.outputs.release-branch }}
         TITLE: ${{ steps.vars.outputs.title }}
       run: |
         cat << EOF > body.md
