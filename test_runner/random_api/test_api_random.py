@@ -182,6 +182,8 @@ class NeonProject:
         cmd = ["pgbench", f"-c{clients}", "-T10800", "-Mprepared"]
         if read_only:
             cmd.append("-S")
+        log.info("running pgbench on %s, cmd: %s", target, cmd)
+        self.wait_for_sql_availability(target)
         pgbench = self.pg_bin.run_nonblocking(
             cmd,
             env=self.endpoints[target].connect_env
