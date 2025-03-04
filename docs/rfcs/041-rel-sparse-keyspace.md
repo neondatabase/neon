@@ -9,7 +9,7 @@ This is an RFC describing a new storage strategy for storing relation directorie
 Postgres maintains a directory structure for databases and relations. In Neon, we store these information
 by serializing the directory data in a single key (see `pgdatadir_mapping.rs`).
 
-```
+```rust
 // DbDir:
 // 00 00000000 00000000 00000000 00   00000000
 
@@ -57,7 +57,7 @@ We will use the recently introduced sparse keyspace to store actual data. Sparse
 for each of the databases (identified as `spcnode, dbnode`). We encode the `Oid` (`relnode, forknum`),
 into the key.
 
-```
+```plain
 (REL_DIR_KEY_PREFIX, spcnode, dbnode, relnode, forknum, 1) -> deleted
 (REL_DIR_KEY_PREFIX, spcnode, dbnode, relnode, forknum, 1) -> exists
 ```
@@ -117,15 +117,18 @@ to have a table to be recorded in the old reldir key while later having a delete
 
 We will introduce a config item and an index_part record to record the current status of the migration process.
 
-* Config item `enable_reldir_v2`: controls whether the ingestion path writes the reldir info into the new keyspace.
-* `index_part.json` field `reldir_v2_status`: whether the timeline has written any key into the new reldir keyspace.
+- Config item `enable_reldir_v2`: controls whether the ingestion path writes the reldir info into the new keyspace.
+- `index_part.json` field `reldir_v2_status`: whether the timeline has written any key into the new reldir keyspace.
 
 If `enable_reldir_v2` is set to `true` and the timeline ingests the first key into the new reldir keyspace, it will update
 `index_part.json` to set `reldir_v2_status` to `Status::Migrating`. Even if `enable_reldir_v2` gets flipped back to
 `false` (i.e., when the pageserver restarts and such config isn't persisted), the read/write path will still
-read/write to the new keyspace to avoid data inconsistency.
+read/write to the new keyspace to avoid data inconsistency. This also indicates that the migration is one-way only:
+once v2 is enabled, the user cannot go back to v1.
 
-## Full Migration
+## Next Steps
+
+### Full Migration
 
 This won't be implemented in the project's first phase but might be implemented in the future. Having both v1 and
 v2 existing in the system would force us to keep the code to deserialize the old reldir key forever. To entirely deprecate this
@@ -137,7 +140,7 @@ copying them into the corresponding keys in the sparse keyspace in the resulting
 the background during compaction. For example, assume this special process is triggered at LSN 0/180. The `create_image_layers`
 process discovers the following keys at this LSN.
 
-```
+```plain
 db1/reldir_key -> (table 1, table 2, table 3)
 ...db1 rel keys
 db2/reldir_key -> (table 4, table 5, table 6)
@@ -148,7 +151,7 @@ sparse_reldir_db1_table8 -> deleted
 
 It will generate the following keys:
 
-```
+```plain
 db1/reldir_key -> () # we have to keep the key because it is part of `collect_keyspace`.
 ...db1 rel keys
 db2/reldir_key -> ()
@@ -178,13 +181,17 @@ don't need to add the key into `collect_keyspace` and therefore all of them will
 
 The migration process can be proactively triggered across all attached/detached tenants to help us fully remove the old reldir code.
 
-## Next Steps
+### Read Cache
+
+While relv2 reduces the complexity of most operations to O(1), we still need to issue one or multiple I/Os per list/put/delete request. We
+could optimize this in the future by having a relation directory cache on the write path so that we only need to check against the in-memory
+structures.
 
 ### Consolidate Relation Size Keys
 
 We have relsize at the end of all relation nodes.
 
-```
+```plain
 // RelSize:
 // 00 SPCNODE  DBNODE   RELNODE  FORK FFFFFFFF
 ```
