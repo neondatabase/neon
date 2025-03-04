@@ -2231,7 +2231,7 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 	#if PG_MAJORVERSION_NUM < 17
 	GetLastWrittenLSNv(rinfo, forknum, blkno, (int) nblocks, last_written_lsns);
 	#else
-	neon_get_lwlsn_v_hook(rinfo, forknum, blkno, (int) nblocks, last_written_lsns);
+	neon_get_lwlsn_v(rinfo, forknum, blkno, (int) nblocks, last_written_lsns);
 	#endif
 
 	for (int i = 0; i < nblocks; i++)

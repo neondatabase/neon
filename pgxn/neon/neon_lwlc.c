@@ -2,12 +2,14 @@
 
 #include "neon_lwlc.h"
 
-#if PG_MAJORVERSION_NUM >= 170000
+#if PG_MAJORVERSION_NUM >= 17
 
 #include "access/xlog.h"
+#include "storage/ipc.h"
 #include "storage/shmem.h"
 #include "storage/buf_internals.h"
 #include "utils/guc.h"
+#include "utils/hsearch.h"
 
 
 #define INSTALL_HOOK(name, function) \
@@ -85,16 +87,15 @@ static set_lwlsn_block_v_hook_type prev_set_lwlsn_block_v_hook = NULL;
 static set_lwlsn_block_hook_type prev_set_lwlsn_block_hook = NULL;
 static set_lwlsn_relation_hook_type prev_set_lwlsn_relation_hook = NULL;
 static set_lwlsn_db_hook_type prev_set_lwlsn_db_hook = NULL;
-static get_lwlsn_cache_size_type prev_get_lwlsn_cache_size = NULL;
 
-static shmem_startup_hook prev_shmem_startup_hook;
-static shmem_request_hook prev_shmem_request_hook;
+static shmem_startup_hook_type prev_shmem_startup_hook;
+static shmem_request_hook_type prev_shmem_request_hook;
 
 void
 init_lwlc(void)
 {
 	if (!process_shared_preload_libraries_in_progress)
-		return ERROR;
+		return;
 
 	lwlc_register_gucs();
 
@@ -107,7 +108,6 @@ init_lwlc(void)
 	INSTALL_HOOK(set_lwlsn_block_hook, neon_set_lwlsn_block);
 	INSTALL_HOOK(set_lwlsn_relation_hook, neon_set_lwlsn_relation);
 	INSTALL_HOOK(set_lwlsn_db_hook, neon_set_lwlsn_db);
-	INSTALL_HOOK(get_lwlsn_cache_size, neon_get_lwlsn_cache_size);
 
 #if PG_VERSION_NUM >= 150000
 	INSTALL_HOOK(shmem_request_hook, shmemrequest);
@@ -115,7 +115,7 @@ init_lwlc(void)
 	shmemrequest();
 #endif
 
-	INSTALL_HOOK(xlog_pre_recovery_start_hook, lwlc_pre_recovery_start_hook);
+	// INSTALL_HOOK(xlog_pre_recovery_start_hook, lwlc_pre_recovery_start_hook);
 }
 
 void shmemrequest(void) {
@@ -132,13 +132,12 @@ void shmemrequest(void) {
 }
 
 void shmeminit(void) {
-
 if (lastWrittenLsnCacheSize > 0)
 	{
 	if (prev_shmem_startup_hook) {
 		prev_shmem_startup_hook();
 	}
-
+	
 	static HASHCTL info;
 	info.keysize = sizeof(BufferTag);
 	info.entrysize = sizeof(LastWrittenLsnCacheEntry);
@@ -150,10 +149,6 @@ if (lastWrittenLsnCacheSize > 0)
 	}
 	dlist_init(&lastWrittenLsnLRU);
     maxLastWrittenLsn = GetRedoRecPtr();
-}
-
-int neon_get_lwlsn_cache_size (void) {
-	return lastWrittenLsnCacheSize;
 }
 
 /*
