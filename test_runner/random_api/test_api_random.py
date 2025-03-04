@@ -12,7 +12,7 @@ import pytest
 import random
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from fixtures.log_helper import log
 from fixtures.neon_api import NeonAPI
 from fixtures.neon_fixtures import PgBin
@@ -96,7 +96,7 @@ class NeonBranch:
 
     def restore_random_time(self):
         min_time = self.state_changed_at
-        max_time = datetime.now()
+        max_time = datetime.now(timezone.utc)
         target_time = min_time + (max_time-min_time)*random.random()
         self.restore(self.id, source_timestamp=target_time.isoformat())
 
