@@ -21,6 +21,7 @@ serde_path_to_error.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 tokio-util.workspace = true
 url.workspace = true
 uuid.workspace = true

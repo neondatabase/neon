@@ -420,6 +420,7 @@ impl Reconciler {
             node.get_id(),
             node.base_url(),
             self.service_config.pageserver_jwt_token.as_deref(),
+            self.service_config.ssl_ca_cert.clone(),
         );
 
         client
@@ -443,6 +444,7 @@ impl Reconciler {
             node.get_id(),
             node.base_url(),
             self.service_config.pageserver_jwt_token.as_deref(),
+            self.service_config.ssl_ca_cert.clone(),
         );
 
         let timelines = client.timeline_list(&tenant_shard_id).await?;

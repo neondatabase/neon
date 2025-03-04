@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -143,6 +144,10 @@ struct Cli {
     // Flag to use https for requests to pageserver API.
     #[arg(long, default_value = "false")]
     use_https_pageserver_api: bool,
+
+    #[arg(long)]
+    // Additional trusted root CA certificate.
+    ssl_ca_file: Option<PathBuf>,
 }
 
 enum StrictMode {
@@ -320,6 +325,16 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
+    let ssl_ca_cert = match args.ssl_ca_file.as_ref() {
+        Some(ssl_ca_file) => {
+            tracing::info!("Using ssl_ca_file: {}", ssl_ca_file.to_str().unwrap());
+            let mut buf = Vec::new();
+            std::fs::File::open(ssl_ca_file)?.read_to_end(&mut buf)?;
+            Some(reqwest::Certificate::from_pem(&buf)?)
+        }
+        None => None,
+    };
+
     let config = Config {
         pageserver_jwt_token: secrets.pageserver_jwt_token,
         safekeeper_jwt_token: secrets.safekeeper_jwt_token,
@@ -356,6 +371,7 @@ async fn async_main() -> anyhow::Result<()> {
         start_as_candidate: args.start_as_candidate,
         http_service_port: args.listen.port() as i32,
         use_https_pageserver_api: args.use_https_pageserver_api,
+        ssl_ca_cert,
     };
 
     // Validate that we can connect to the database

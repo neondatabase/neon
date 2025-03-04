@@ -2861,6 +2861,7 @@ dependencies = [
  "serde_path_to_error",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-rustls 0.26.0",
  "tokio-stream",
  "tokio-util",
  "tracing",
@@ -4278,6 +4279,9 @@ dependencies = [
  "remote_storage",
  "reqwest",
  "rpds",
+ "rustls 0.23.18",
+ "rustls-pemfile 2.1.1",
+ "rustls-pki-types",
  "scopeguard",
  "send-future",
  "serde",
@@ -4296,6 +4300,7 @@ dependencies = [
  "tokio-epoll-uring",
  "tokio-io-timeout",
  "tokio-postgres",
+ "tokio-rustls 0.26.0",
  "tokio-stream",
  "tokio-tar",
  "tokio-util",
@@ -5877,9 +5882,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-pki-types"
-version = "1.10.0"
+version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16f1201b3c9a7ee8039bcadc17b7e605e2945b27eee7631788c1bd2b0643674b"
+checksum = "917ce264624a4b4db1c364dcc35bfca9ded014d0a958cd47ad3e960e988ea51c"
 
 [[package]]
 name = "rustls-webpki"

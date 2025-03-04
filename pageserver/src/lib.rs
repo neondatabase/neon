@@ -64,6 +64,7 @@ pub struct CancellableTask {
     pub cancel: CancellationToken,
 }
 pub struct HttpEndpointListener(pub CancellableTask);
+pub struct HttpsEndpointListener(pub CancellableTask);
 pub struct ConsumptionMetricsTasks(pub CancellableTask);
 pub struct DiskUsageEvictionTask(pub CancellableTask);
 impl CancellableTask {
@@ -77,6 +78,7 @@ impl CancellableTask {
 #[allow(clippy::too_many_arguments)]
 pub async fn shutdown_pageserver(
     http_listener: HttpEndpointListener,
+    https_listener: Option<HttpsEndpointListener>,
     page_service: page_service::Listener,
     consumption_metrics_worker: ConsumptionMetricsTasks,
     disk_usage_eviction_task: Option<DiskUsageEvictionTask>,
@@ -212,6 +214,15 @@ pub async fn shutdown_pageserver(
         Duration::from_secs(1),
     )
     .await;
+
+    if let Some(https_listener) = https_listener {
+        timed(
+            https_listener.0.shutdown(),
+            "shotdown https",
+            Duration::from_secs(1),
+        )
+        .await;
+    }
 
     // Shut down the HTTP endpoint last, so that you can still check the server's
     // status while it's shutting down.

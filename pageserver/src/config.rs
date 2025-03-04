@@ -53,6 +53,11 @@ pub struct PageServerConf {
     pub listen_pg_addr: String,
     /// Example (default): 127.0.0.1:9898
     pub listen_http_addr: String,
+    /// Example: 127.0.0.1:9899
+    pub listen_https_addr: Option<String>,
+
+    pub ssl_key_file: Utf8PathBuf,
+    pub ssl_cert_file: Utf8PathBuf,
 
     /// Current availability zone. Used for traffic metrics.
     pub availability_zone: Option<String>,
@@ -317,6 +322,9 @@ impl PageServerConf {
         let pageserver_api::config::ConfigToml {
             listen_pg_addr,
             listen_http_addr,
+            listen_https_addr,
+            ssl_key_file,
+            ssl_cert_file,
             availability_zone,
             wait_lsn_timeout,
             wal_redo_timeout,
@@ -375,6 +383,9 @@ impl PageServerConf {
             // ------------------------------------------------------------
             listen_pg_addr,
             listen_http_addr,
+            listen_https_addr,
+            ssl_key_file,
+            ssl_cert_file,
             availability_zone,
             wait_lsn_timeout,
             wal_redo_timeout,
