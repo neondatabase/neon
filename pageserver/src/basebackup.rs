@@ -312,9 +312,7 @@ where
                 self.timeline.pg_version,
             )?;
 
-        let lazy_slru_download = (self.lazy_slru_download_enabled
-            || self.timeline.get_lazy_slru_download())
-            && !self.full_backup;
+        let lazy_slru_download = self.timeline.get_lazy_slru_download(self.lazy_slru_download_enabled) && !self.full_backup;
 
         let pgversion = self.timeline.pg_version;
         let subdirs = dispatch_pgversion!(pgversion, &pgv::bindings::PGDATA_SUBDIRS[..]);
