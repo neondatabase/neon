@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from fixtures.log_helper import log
@@ -118,10 +118,20 @@ def post_checks(env: NeonEnv, test_output_dir: Path, db_name: str, endpoint: End
         pageserver.http_client().timeline_gc(shard, env.initial_timeline, None)
 
 
+def patch_tenant_conf(tenant_conf: dict[str, Any], reldir_type: str) -> dict[str, Any]:
+    tenant_conf = tenant_conf.copy()
+    if reldir_type == "v2":
+        tenant_conf["rel_size_v2_enabled"] = "true"
+    else:
+        tenant_conf["rel_size_v2_enabled"] = "false"
+    return tenant_conf
+
+
 # Run the main PostgreSQL regression tests, in src/test/regress.
 #
 @pytest.mark.timeout(3000)  # Contains many sub-tests, is slow in debug builds
 @pytest.mark.parametrize("shard_count", [None, 4])
+@pytest.mark.parametrize("reldir_type", ["v1", "v2"])
 def test_pg_regress(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
@@ -130,6 +140,7 @@ def test_pg_regress(
     base_dir: Path,
     pg_distrib_dir: Path,
     shard_count: int | None,
+    reldir_type: str,
 ):
     DBNAME = "regression"
 
@@ -142,7 +153,7 @@ def test_pg_regress(
 
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     env = neon_env_builder.init_start(
-        initial_tenant_conf=TENANT_CONF,
+        initial_tenant_conf=patch_tenant_conf(TENANT_CONF, reldir_type),
         initial_tenant_shard_count=shard_count,
     )
 
@@ -196,6 +207,7 @@ def test_pg_regress(
 #
 @pytest.mark.timeout(1500)  # Contains many sub-tests, is slow in debug builds
 @pytest.mark.parametrize("shard_count", [None, 4])
+@pytest.mark.parametrize("reldir_type", ["v1", "v2"])
 def test_isolation(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
@@ -204,6 +216,7 @@ def test_isolation(
     base_dir: Path,
     pg_distrib_dir: Path,
     shard_count: int | None,
+    reldir_type: str,
 ):
     DBNAME = "isolation_regression"
 
@@ -211,7 +224,8 @@ def test_isolation(
         neon_env_builder.num_pageservers = shard_count
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     env = neon_env_builder.init_start(
-        initial_tenant_conf=TENANT_CONF, initial_tenant_shard_count=shard_count
+        initial_tenant_conf=patch_tenant_conf(TENANT_CONF, reldir_type),
+        initial_tenant_shard_count=shard_count,
     )
 
     # Connect to postgres and create a database called "regression".
@@ -267,6 +281,7 @@ def test_isolation(
 # Run extra Neon-specific pg_regress-based tests. The tests and their
 # schedule file are in the sql_regress/ directory.
 @pytest.mark.parametrize("shard_count", [None, 4])
+@pytest.mark.parametrize("reldir_type", ["v1", "v2"])
 def test_sql_regress(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
@@ -275,6 +290,7 @@ def test_sql_regress(
     base_dir: Path,
     pg_distrib_dir: Path,
     shard_count: int | None,
+    reldir_type: str,
 ):
     DBNAME = "regression"
 
@@ -282,7 +298,8 @@ def test_sql_regress(
         neon_env_builder.num_pageservers = shard_count
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     env = neon_env_builder.init_start(
-        initial_tenant_conf=TENANT_CONF, initial_tenant_shard_count=shard_count
+        initial_tenant_conf=patch_tenant_conf(TENANT_CONF, reldir_type),
+        initial_tenant_shard_count=shard_count,
     )
 
     # Connect to postgres and create a database called "regression".
@@ -345,9 +362,7 @@ def test_tx_abort_with_many_relations(
     """
 
     env = neon_env_builder.init_start(
-        initial_tenant_conf={
-            "rel_size_v2_enabled": "true" if reldir_type == "v2" else "false",
-        }
+        initial_tenant_conf=patch_tenant_conf({}, reldir_type),
     )
     ep = env.endpoints.create_start(
         "main",
