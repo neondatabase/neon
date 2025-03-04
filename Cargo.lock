@@ -2798,12 +2798,9 @@ name = "http-utils"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "backtrace",
  "bytes",
  "fail",
- "flate2",
  "hyper 0.14.30",
- "inferno 0.12.0",
  "itertools 0.10.5",
  "jemalloc_pprof",
  "metrics",
@@ -3302,9 +3299,9 @@ checksum = "49f1f14873335454500d59611f1cf4a4b0f786f9ac11f4312a78e4cf2566695b"
 
 [[package]]
 name = "jemalloc_pprof"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a883828bd6a4b957cd9f618886ff19e5f3ebd34e06ba0e855849e049fef32fb"
+checksum = "5622af6d21ff86ed7797ef98e11b8f302da25ec69a7db9f6cde8e2e1c8df9992"
 dependencies = [
  "anyhow",
  "libc",
@@ -3503,9 +3500,9 @@ dependencies = [
 
 [[package]]
 name = "mappings"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce9229c438fbf1c333926e2053c4c091feabbd40a1b590ec62710fea2384af9e"
+checksum = "e434981a332777c2b3062652d16a55f8e74fa78e6b1882633f0d77399c84fc2a"
 dependencies = [
  "anyhow",
  "libc",
@@ -4794,12 +4791,14 @@ dependencies = [
 
 [[package]]
 name = "pprof_util"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65c568b3f8c1c37886ae07459b1946249e725c315306b03be5632f84c239f781"
+checksum = "9fa015c78eed2130951e22c58d2095849391e73817ab2e74f71b0b9f63dd8416"
 dependencies = [
  "anyhow",
+ "backtrace",
  "flate2",
+ "inferno 0.12.0",
  "num",
  "paste",
  "prost",
@@ -7715,7 +7714,6 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "async-compression",
- "backtrace",
  "bincode",
  "byteorder",
  "bytes",
