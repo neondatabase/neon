@@ -16,6 +16,30 @@ fn test_node_metadata_v1_backward_compatibilty() {
             postgres_port: 23,
             http_host: "localhost".to_string(),
             http_port: 42,
+            https_port: None,
+            other: HashMap::new(),
+        }
+    )
+}
+
+#[test]
+fn test_node_metadata_v2_backward_compatibilty() {
+    let v2 = serde_json::to_vec(&serde_json::json!({
+        "host": "localhost",
+        "port": 23,
+        "http_host": "localhost",
+        "http_port": 42,
+        "https_port": 123,
+    }));
+
+    assert_eq!(
+        serde_json::from_slice::<NodeMetadata>(&v2.unwrap()).unwrap(),
+        NodeMetadata {
+            postgres_host: "localhost".to_string(),
+            postgres_port: 23,
+            http_host: "localhost".to_string(),
+            http_port: 42,
+            https_port: Some(123),
             other: HashMap::new(),
         }
     )

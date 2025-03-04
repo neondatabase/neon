@@ -220,6 +220,13 @@ impl PageServerNode {
             .context("write identity toml")?;
         drop(identity_toml);
 
+        if self.env.generate_local_ssl_certs {
+            self.env.generate_ssl_cert(
+                datadir.join("server.crt").as_path(),
+                datadir.join("server.key").as_path(),
+            )?;
+        }
+
         // TODO: invoke a TBD config-check command to validate that pageserver will start with the written config
 
         // Write metadata file, used by pageserver on startup to register itself with
@@ -229,6 +236,15 @@ impl PageServerNode {
         let (_http_host, http_port) =
             parse_host_port(&self.conf.listen_http_addr).expect("Unable to parse listen_http_addr");
         let http_port = http_port.unwrap_or(9898);
+
+        let https_port = match self.conf.listen_https_addr.as_ref() {
+            Some(https_addr) => {
+                let (_https_host, https_port) =
+                    parse_host_port(https_addr).expect("Unable to parse listen_https_addr");
+                Some(https_port.unwrap_or(9899))
+            }
+            None => None,
+        };
 
         // Intentionally hand-craft JSON: this acts as an implicit format compat test
         // in case the pageserver-side structure is edited, and reflects the real life
@@ -240,6 +256,7 @@ impl PageServerNode {
                 postgres_port: self.pg_connection_config.port(),
                 http_host: "localhost".to_string(),
                 http_port,
+                https_port,
                 other: HashMap::from([(
                     "availability_zone_id".to_string(),
                     serde_json::json!(az_id),
