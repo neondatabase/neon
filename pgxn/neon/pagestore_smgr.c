@@ -1026,6 +1026,12 @@ prefetch_lookupv(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blocknum, n
 			if (!neon_prefetch_response_usable(&lsns[i], slot))
 				continue;
 
+			/*
+			 * Ignore errors
+			 */
+			if (response->tag != T_NeonGetPageResponse)
+				continue;
+
 			memcpy(buffers[i], ((NeonGetPageResponse*)slot->response)->page, BLCKSZ);
 			prefetch_set_unused(ring_index);
 			BITMAP_SET(mask, i);
