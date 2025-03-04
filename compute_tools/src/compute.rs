@@ -468,6 +468,8 @@ impl ComputeNode {
                         // Kills the actual task running the monitor
                         handle.abort();
                     }
+                } else {
+                    _ = vm_monitor; // appease unused lint on macOS
                 }
             }
         }
@@ -791,6 +793,7 @@ impl ComputeNode {
                 };
                 StartVmMonitorResult { token, vm_monitor }
             } else {
+                _ = disable_lfc_resizing; // appease unused lint on macOS
                 StartVmMonitorResult { }
             }
         }
