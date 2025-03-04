@@ -96,8 +96,8 @@ class NeonBranch:
 
     def restore_random_time(self):
         min_time = self.state_changed_at
-        max_time = datetime.now(timezone.utc).replace(microsecond=0)
-        target_time = min_time + (max_time-min_time)*random.random()
+        max_time = datetime.now(timezone.utc)
+        target_time = (min_time + (max_time-min_time)*random.random()).replace(microsecond=0)
         self.restore(self.id, source_timestamp=target_time.isoformat().replace("+00:00", "Z"))
 
     def restore(
