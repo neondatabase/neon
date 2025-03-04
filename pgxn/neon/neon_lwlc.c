@@ -1,8 +1,11 @@
-#include "neon_lwlc.h"
+#if PG_MAJORVERSION_NUM >= 17
+
 #include "postgres.h"
+#include "neon_lwlc.h"
 #include "access/xlog.h"
 #include "storage/shmem.h"
 #include "storage/buf_internals.h"
+#include "utils/guc.h"
 
 
 #define INSTALL_HOOK(name, function) \
@@ -56,14 +59,14 @@ lwlc_register_gucs(void)
 							"Size of last written LSN cache used by Neon",
 							NULL,
 							&lastWrittenLsnCacheSize,
-							(128*1024), -1, INT_MAX,
+							(128*1024), 1024, INT_MAX,
 							PGC_POSTMASTER,
 							0, /* plain units */
 							NULL, NULL, NULL);
 }
 
 static XLogRecPtr SetLastWrittenLSNForBlockRangeInternal(XLogRecPtr lsn,
-														 RelFileLocator rlocator,
+														 NRelFileInfo rlocator,
 														 ForkNumber forknum,
 														 BlockNumber from,
 														 BlockNumber n_blocks);
@@ -160,7 +163,7 @@ int neon_get_lwlsn_cache_size (void) {
  * But neon_get_lwlsn(InvalidOid) is used only by neon_dbsize which is not performance critical.
  */
 XLogRecPtr
-neon_get_lwlsn(RelFileLocator rlocator, ForkNumber forknum, BlockNumber blkno)
+neon_get_lwlsn(NRelFileInfo rlocator, ForkNumber forknum, BlockNumber blkno)
 {
 	XLogRecPtr lsn;
 	LastWrittenLsnCacheEntry* entry;
@@ -226,7 +229,7 @@ neon_get_lwlsn(RelFileLocator rlocator, ForkNumber forknum, BlockNumber blkno)
  * But GetLastWrittenLSN(InvalidOid) is used only by neon_dbsize which is not performance critical.
  */
 void
-neon_get_lwlsn_v(RelFileLocator relfilenode, ForkNumber forknum,
+neon_get_lwlsn_v(NRelFileInfo relfilenode, ForkNumber forknum,
 				   BlockNumber blkno, int nblocks, XLogRecPtr *lsns)
 {
 	LastWrittenLsnCacheEntry* entry;
@@ -311,7 +314,7 @@ neon_get_lwlsn_v(RelFileLocator relfilenode, ForkNumber forknum,
  */
 static XLogRecPtr
 SetLastWrittenLSNForBlockRangeInternal(XLogRecPtr lsn,
-									   RelFileLocator rlocator,
+									   NRelFileInfo rlocator,
 									   ForkNumber forknum,
 									   BlockNumber from,
 									   BlockNumber n_blocks)
@@ -379,7 +382,7 @@ SetLastWrittenLSNForBlockRangeInternal(XLogRecPtr lsn,
  * SetLastWrittenLsn with dummy rlocator is used by createdb and dbase_redo functions.
  */
 XLogRecPtr
-neon_set_lwlsn_block_range(XLogRecPtr lsn, RelFileLocator rlocator, ForkNumber forknum, BlockNumber from, BlockNumber n_blocks)
+neon_set_lwlsn_block_range(XLogRecPtr lsn, NRelFileInfo rlocator, ForkNumber forknum, BlockNumber from, BlockNumber n_blocks)
 {
 	if (lsn == InvalidXLogRecPtr || n_blocks == 0 || lastWrittenLsnCacheSize == 0)
 		return lsn;
@@ -401,7 +404,7 @@ neon_set_lwlsn_block_range(XLogRecPtr lsn, RelFileLocator rlocator, ForkNumber f
  * efficient work of prefetch in case massive update operations (like vacuum or remove).
  */
 XLogRecPtr
-neon_set_lwlsn_block_v(const XLogRecPtr *lsns, RelFileLocator relfilenode,
+neon_set_lwlsn_block_v(const XLogRecPtr *lsns, NRelFileInfo relfilenode,
 						   ForkNumber forknum, BlockNumber blockno,
 						   int nblocks)
 {
@@ -464,7 +467,7 @@ neon_set_lwlsn_block_v(const XLogRecPtr *lsns, RelFileLocator relfilenode,
  * SetLastWrittenLSNForBlock -- Set maximal LSN for block
  */
 XLogRecPtr
-neon_set_lwlsn_block(XLogRecPtr lsn, RelFileLocator rlocator, ForkNumber forknum, BlockNumber blkno)
+neon_set_lwlsn_block(XLogRecPtr lsn, NRelFileInfo rlocator, ForkNumber forknum, BlockNumber blkno)
 {
 	return neon_set_lwlsn_block_range(lsn, rlocator, forknum, blkno, 1);
 }
@@ -473,7 +476,7 @@ neon_set_lwlsn_block(XLogRecPtr lsn, RelFileLocator rlocator, ForkNumber forknum
  * neon_set_lwlsn_relation -- Set maximal LSN for relation metadata
  */
 XLogRecPtr
-neon_set_lwlsn_relation(XLogRecPtr lsn, RelFileLocator rlocator, ForkNumber forknum)
+neon_set_lwlsn_relation(XLogRecPtr lsn, NRelFileInfo rlocator, ForkNumber forknum)
 {
 	return neon_set_lwlsn_block(lsn, rlocator, forknum, REL_METADATA_PSEUDO_BLOCKNO);
 }
@@ -484,6 +487,8 @@ neon_set_lwlsn_relation(XLogRecPtr lsn, RelFileLocator rlocator, ForkNumber fork
 XLogRecPtr
 neon_set_lwlsn_db(XLogRecPtr lsn)
 {
-	RelFileLocator dummyNode = {InvalidOid, InvalidOid, InvalidOid};
+	NRelFileInfo dummyNode = {InvalidOid, InvalidOid, InvalidOid};
 	return neon_set_lwlsn_block(lsn, dummyNode, MAIN_FORKNUM, 0);
 }
+
+#endif
