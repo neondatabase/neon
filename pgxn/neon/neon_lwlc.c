@@ -12,18 +12,6 @@
 #include "utils/hsearch.h"
 
 
-#define INSTALL_HOOK(name, function) \
-do { \
-	prev_##name = (name); \
-	name = &(function); \
-} while (false)
-
-#define FORWARD_HOOK_CALL(name, ...) \
-do { \
-	if (prev_##name) \
-		prev_##name(__VA_ARGS__); \
-} while (false)
-
 
 typedef struct LastWrittenLsnCacheEntry
 {
@@ -99,18 +87,27 @@ init_lwlc(void)
 
 	lwlc_register_gucs();
 
-	INSTALL_HOOK(shmem_startup_hook, shmeminit);
-
-	INSTALL_HOOK(get_lwlsn_hook, neon_get_lwlsn);
-	INSTALL_HOOK(get_lwlsn_v_hook, neon_get_lwlsn_v);
-	INSTALL_HOOK(set_lwlsn_block_range_hook, neon_set_lwlsn_block_range);
-	INSTALL_HOOK(set_lwlsn_block_v_hook, neon_set_lwlsn_block_v);
-	INSTALL_HOOK(set_lwlsn_block_hook, neon_set_lwlsn_block);
-	INSTALL_HOOK(set_lwlsn_relation_hook, neon_set_lwlsn_relation);
-	INSTALL_HOOK(set_lwlsn_db_hook, neon_set_lwlsn_db);
+	prev_shmem_startup_hook = shmem_startup_hook;
+	shmem_startup_hook = shmeminit;
+	
+	prev_get_lwlsn_hook = get_lwlsn_hook;
+	get_lwlsn_hook = neon_get_lwlsn;
+	prev_get_lwlsn_v_hook = get_lwlsn_v_hook;
+	get_lwlsn_v_hook = neon_get_lwlsn_v;
+	prev_set_lwlsn_block_range_hook = set_lwlsn_block_range_hook;
+	set_lwlsn_block_range_hook = neon_set_lwlsn_block_range;
+	prev_set_lwlsn_block_v_hook = set_lwlsn_block_v_hook;
+	set_lwlsn_block_v_hook = neon_set_lwlsn_block_v;
+	prev_set_lwlsn_block_hook = set_lwlsn_block_hook;
+	set_lwlsn_block_hook = neon_set_lwlsn_block;
+	prev_set_lwlsn_relation_hook = set_lwlsn_relation_hook;
+	set_lwlsn_relation_hook = neon_set_lwlsn_relation;
+	prev_set_lwlsn_db_hook = set_lwlsn_db_hook;
+	set_lwlsn_db_hook = neon_set_lwlsn_db;
 
 #if PG_VERSION_NUM >= 150000
-	INSTALL_HOOK(shmem_request_hook, shmemrequest);
+	prev_shmem_request_hook = shmem_request_hook;
+	shmem_request_hook = shmeminit;
 #else
 	shmemrequest();
 #endif
@@ -132,16 +129,15 @@ void shmemrequest(void) {
 }
 
 void shmeminit(void) {
-if (lastWrittenLsnCacheSize > 0)
-	{
-	if (prev_shmem_startup_hook) {
-		prev_shmem_startup_hook();
-	}
-	
 	static HASHCTL info;
-	info.keysize = sizeof(BufferTag);
-	info.entrysize = sizeof(LastWrittenLsnCacheEntry);
-	lastWrittenLsnCache = ShmemInitHash("last_written_lsn_cache",
+	if (lastWrittenLsnCacheSize > 0)
+	{
+		if (prev_shmem_startup_hook) {
+			prev_shmem_startup_hook();
+		}
+		info.keysize = sizeof(BufferTag);
+		info.entrysize = sizeof(LastWrittenLsnCacheEntry);
+		lastWrittenLsnCache = ShmemInitHash("last_written_lsn_cache",
 										lastWrittenLsnCacheSize, lastWrittenLsnCacheSize,
 										&info,
 										HASH_ELEM | HASH_BLOBS);
