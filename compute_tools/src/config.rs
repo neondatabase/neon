@@ -12,7 +12,7 @@ use compute_api::spec::{ComputeAudit, ComputeMode, ComputeSpec, GenericOption};
 use crate::pg_helpers::{
     GenericOptionExt, GenericOptionsSearch, PgOptionsSerialize, escape_conf_value,
 };
-use crate::tls::SERVER_KEY;
+use crate::tls::{self, SERVER_CRT, SERVER_KEY};
 
 /// Check that `line` is inside a text file and put it there if it is not.
 /// Create file if it doesn't exist.
@@ -40,11 +40,12 @@ pub fn line_in_file(path: &Path, line: &str) -> Result<bool> {
 
 /// Create or completely rewrite configuration file specified by `path`
 pub fn write_postgres_conf(
-    path: &Path,
+    pgdata_path: &Path,
     spec: &ComputeSpec,
     extension_server_port: u16,
     tls_config: &Option<TlsConfig>,
 ) -> Result<()> {
+    let path = pgdata_path.join("postgresql.conf");
     // File::create() destroys the file content if it exists.
     let mut file = File::create(path)?;
 
@@ -92,7 +93,14 @@ pub fn write_postgres_conf(
     // tls
     if let Some(tls_config) = tls_config {
         writeln!(file, "ssl = on")?;
-        writeln!(file, "ssl_cert_file = '{}'", tls_config.cert_path)?;
+
+        // postgres requires the keyfile to be in a secure file,
+        // currently too complicated to ensure that at the VM level,
+        // so we just copy them to another file instead. :shrug:
+        tls::update_key_path_blocking(pgdata_path, tls_config);
+
+        // these are the default, but good to be explicit.
+        writeln!(file, "ssl_cert_file = '{}'", SERVER_CRT)?;
         writeln!(file, "ssl_key_file = '{}'", SERVER_KEY)?;
     }
 

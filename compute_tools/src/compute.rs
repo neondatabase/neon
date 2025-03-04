@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::os::unix::fs::{PermissionsExt, symlink};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -41,7 +41,7 @@ use crate::rsyslog::configure_audit_rsyslog;
 use crate::spec::*;
 use crate::swap::resize_swap;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
-use crate::tls::{update_key_path, watch_cert_for_changes};
+use crate::tls::watch_cert_for_changes;
 use crate::{config, extension_server, local_proxy};
 
 pub static SYNC_SAFEKEEPERS_PID: AtomicU32 = AtomicU32::new(0);
@@ -340,8 +340,6 @@ impl ComputeNode {
             this.prewarm_postgres()?;
         }
 
-        this.watch_cert_for_changes();
-
         // Launch the external HTTP server first, so that we can serve control plane
         // requests while configuration is still in progress.
         crate::http::server::Server::External {
@@ -524,6 +522,16 @@ impl ComputeNode {
 
         // Collect all the tasks that must finish here
         let mut pre_tasks = tokio::task::JoinSet::new();
+
+        // Make sure TLS certificates are properly loaded and in the right place.
+        if self.compute_ctl_config.tls.is_some() {
+            let this = self.clone();
+            pre_tasks.spawn(async move {
+                this.watch_cert_for_changes().await;
+
+                Ok::<(), anyhow::Error>(())
+            });
+        }
 
         // If there are any remote extensions in shared_preload_libraries, start downloading them
         if pspec.spec.remote_extensions.is_some() {
@@ -1108,7 +1116,7 @@ impl ComputeNode {
         // Remove/create an empty pgdata directory and put configuration there.
         self.create_pgdata()?;
         config::write_postgres_conf(
-            &pgdata_path.join("postgresql.conf"),
+            pgdata_path,
             &pspec.spec,
             self.params.internal_http_port,
             &self.compute_ctl_config.tls,
@@ -1522,9 +1530,8 @@ impl ComputeNode {
 
         // Write new config
         let pgdata_path = Path::new(&self.params.pgdata);
-        let postgresql_conf_path = pgdata_path.join("postgresql.conf");
         config::write_postgres_conf(
-            &postgresql_conf_path,
+            pgdata_path,
             &spec,
             self.params.internal_http_port,
             &self.compute_ctl_config.tls,
@@ -1599,43 +1606,51 @@ impl ComputeNode {
         Ok(())
     }
 
-    pub fn watch_cert_for_changes(self: &Arc<Self>) {
+    pub async fn watch_cert_for_changes(self: Arc<Self>) {
         // update status on cert renewal
         if let Some(tls_config) = &self.compute_ctl_config.tls {
-            let compute = self.clone();
             let tls_config = tls_config.clone();
-            let pg_data = PathBuf::from(&self.params.pgdata);
-            tokio::spawn(async move {
-                let mut cert_watch = watch_cert_for_changes(tls_config.cert_path).await;
-                update_key_path(&pg_data, &tls_config.key_path).await;
-                // wait for certificate update
-                while let Ok(()) = cert_watch.changed().await {
-                    update_key_path(&pg_data, &tls_config.key_path).await;
-                    let mut state = loop {
-                        {
-                            let state = compute.state.lock().unwrap();
-                            match state.status {
-                                // let's update the state to config pending
-                                ComputeStatus::ConfigurationPending | ComputeStatus::Running => {
-                                    break state;
-                                }
 
-                                // exit loop
-                                ComputeStatus::Failed
-                                | ComputeStatus::TerminationPending
-                                | ComputeStatus::Terminated => return,
+            // wait until the cert exists.
+            let mut cert_watch = watch_cert_for_changes(tls_config.cert_path.clone()).await;
 
-                                // drop the lock and sleep
-                                ComputeStatus::Init
-                                | ComputeStatus::Configuration
-                                | ComputeStatus::Empty => {}
+            tokio::task::spawn_blocking(move || {
+                let handle = tokio::runtime::Handle::current();
+                'cert_update: loop {
+                    // let postgres/pgbouncer/local_proxy know the new cert/key exists.
+                    // we need to wait until it's configurable first.
+
+                    let mut state = self.state.lock().unwrap();
+                    'status_update: loop {
+                        match state.status {
+                            // let's update the state to config pending
+                            ComputeStatus::ConfigurationPending | ComputeStatus::Running => {
+                                state.set_status(
+                                    ComputeStatus::ConfigurationPending,
+                                    &self.state_changed,
+                                );
+                                break 'status_update;
+                            }
+
+                            // exit loop
+                            ComputeStatus::Failed
+                            | ComputeStatus::TerminationPending
+                            | ComputeStatus::Terminated => break 'cert_update,
+
+                            // wait
+                            ComputeStatus::Init
+                            | ComputeStatus::Configuration
+                            | ComputeStatus::Empty => {
+                                state = self.state_changed.wait(state).unwrap();
                             }
                         }
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                    };
+                    }
+                    drop(state);
 
-                    // tell compute to reload
-                    state.set_status(ComputeStatus::ConfigurationPending, &compute.state_changed);
+                    // wait for a new certificate update
+                    if handle.block_on(cert_watch.changed()).is_err() {
+                        break;
+                    }
                 }
             });
         }
