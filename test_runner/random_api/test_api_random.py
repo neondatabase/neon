@@ -12,6 +12,7 @@ import pytest
 import random
 import subprocess
 import time
+from datetime import datetime
 from fixtures.log_helper import log
 from fixtures.neon_api import NeonAPI
 from fixtures.neon_fixtures import PgBin
@@ -60,6 +61,7 @@ class NeonBranch:
         self.endpoints: dict[str, NeonEndpoint] = {}
         self.connection_parameters = branch["connection_uris"][0]["connection_parameters"]
         self.benchmark: subprocess.Popen | None = None
+        self.state_changed_at: datetime = datetime.fromisoformat(branch["branch"]["state_changed_at"])
         self.connect_env = {
             "PGHOST": self.connection_parameters["host"],
             "PGUSER": self.connection_parameters["role"],
@@ -91,6 +93,28 @@ class NeonBranch:
 
     def terminate_benchmark(self):
         self.project.terminate_benchmark(self.id)
+
+    def restore_random_time(self):
+        min_time = self.state_changed_at
+        max_time = datetime.now()
+        target_time = min_time + (max_time-min_time)*random.random()
+        self.restore(self.id, source_timestamp=target_time.isoformat())
+
+    def restore(
+            self,
+            source_branch_id: str,
+            source_lsn: str | None = None,
+            source_timestamp: str | None = None,
+            preserve_under_name: str | None = None,
+    ) -> None:
+        endpoints = [ep for ep in self.endpoints.values() if ep.type == "read_only"]
+        for ep in endpoints:
+            ep.terminate_benchmark()
+        self.terminate_benchmark()
+        self.neon_api.restore_branch(self.project_id, self.id, source_branch_id, source_lsn, source_timestamp, preserve_under_name)
+        self.start_benchmark()
+        for ep in endpoints:
+            ep.start_benchmark()
 
 
 class NeonProject:
@@ -246,6 +270,10 @@ def do_action(project, action):
             log.info("endpoint %s deleted", target.id)
         else:
             log.info("no read_only endpoints present, skipping")
+    elif action == "restore_random_time":
+        br: NeonBranch = random.choice(list(project.leaf_branches.values())+[project.main_branch])
+        log.info("Restore %s", br.id)
+        br.restore_random_time()
 
 
 @pytest.mark.timeout(7200)
@@ -278,6 +306,9 @@ def test_api_random(
         "delete_ro_endpoint",
         "delete_branch",
         "delete branch",
+        "restore_random_time",
+        "restore_random_time",
+        "restore_random_time",
     )
     ACTIONS_LIMIT = 250
     pg_bin.run_capture(
