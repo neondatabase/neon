@@ -50,7 +50,6 @@ extern uint32		WAIT_EVENT_NEON_WAL_DL;
 
 extern void pg_init_libpagestore(void);
 extern void pg_init_walproposer(void);
-extern void pg_init_lwlc(void);
 extern void pagestore_smgr_init(void);
 
 extern uint64 BackpressureThrottlingTime(void);

@@ -40,6 +40,9 @@
 #if PG_MAJORVERSION_NUM >= 16
 #include "storage/ipc.h"
 #endif
+#if PG_MAJORVERSION_NUM >= 17
+#include "neon_lwlc.h"
+#endif
 
 PG_MODULE_MAGIC;
 void		_PG_init(void);
@@ -437,6 +440,9 @@ _PG_init(void)
 
 	pg_init_libpagestore();
 	pg_init_walproposer();
+	#if PG_MAJORVERSION_NUM >= 17
+	init_lwlc();
+	#endif
 	pagestore_smgr_init();
 	Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 

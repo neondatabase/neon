@@ -73,23 +73,23 @@ static XLogRecPtr SetLastWrittenLSNForBlockRangeInternal(XLogRecPtr lsn,
 void lwlc_pre_recovery_start_hook(const ControlFileData* controlFile);
 
 // Note: these are the previous hooks
-get_lwlsn_hook_type prev_get_lwlsn_hook = NULL;
-get_lwlsn_v_hook_type prev_get_lwlsn_v_hook = NULL;
-set_lwlsn_block_range_hook_type prev_set_lwlsn_block_range_hook = NULL;
-set_lwlsn_block_v_hook_type prev_set_lwlsn_block_v_hook = NULL;
-set_lwlsn_block_hook_type prev_set_lwlsn_block_hook = NULL;
-set_lwlsn_relation_hook_type prev_set_lwlsn_relation_hook = NULL;
-set_lwlsn_db_hook_type prev_set_lwlsn_db_hook = NULL;
-get_lwlsn_cache_size_type prev_get_lwlsn_cache_size = NULL;
+static get_lwlsn_hook_type prev_get_lwlsn_hook = NULL;
+static get_lwlsn_v_hook_type prev_get_lwlsn_v_hook = NULL;
+static set_lwlsn_block_range_hook_type prev_set_lwlsn_block_range_hook = NULL;
+static set_lwlsn_block_v_hook_type prev_set_lwlsn_block_v_hook = NULL;
+static set_lwlsn_block_hook_type prev_set_lwlsn_block_hook = NULL;
+static set_lwlsn_relation_hook_type prev_set_lwlsn_relation_hook = NULL;
+static set_lwlsn_db_hook_type prev_set_lwlsn_db_hook = NULL;
+static get_lwlsn_cache_size_type prev_get_lwlsn_cache_size = NULL;
 
 static shmem_startup_hook prev_shmem_startup_hook;
 static shmem_request_hook prev_shmem_request_hook;
 
 void
-pg_init_lwlc(void)
+init_lwlc(void)
 {
 	if (!process_shared_preload_libraries_in_progress)
-		return;
+		return ERROR;
 
 	lwlc_register_gucs();
 
@@ -121,7 +121,7 @@ void shmemrequest(void) {
 			prev_shmem_request_hook();
 	#endif
 	
-		requested_size += hash_estimate_size(lastWrittenLsnCacheSize, sizeof(dlist_head));
+		requested_size += hash_estimate_size(lastWrittenLsnCacheSize, sizeof(LastWrittenLsnCacheEntry));
 	
 		RequestAddinShmemSpace(requested_size);
 }

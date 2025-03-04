@@ -1,5 +1,7 @@
 extern int			lastWrittenLsnCacheSize;
 
+extern void init_lwlc(void);
+
 /* Hooks */
 XLogRecPtr neon_get_lwlsn_hook(RelFileLocator rlocator, ForkNumber forknum, BlockNumber blkno);
 void neon_get_lwlsn_v_hook(RelFileLocator relfilenode, ForkNumber forknum, BlockNumber blkno, int nblocks, XLogRecPtr *lsns);
