@@ -156,7 +156,7 @@ class NeonAPI:
             data["preserve_under_name"] = preserve_under_name
         resp = self.__request(
             "POST",
-            f"/{project_id}/branches/{branch_id}",
+            f"/{project_id}/branches/{branch_id}/restore",
             headers={
                 "Accept": "application/json",
             },
@@ -167,7 +167,7 @@ class NeonAPI:
     def reset_branch_to_parent(self, project_id: str, branch_id: str) -> dict[str, Any]:
         resp = self.__request(
             "POST",
-            f"/projects/{project_id}/{branch_id}",
+            f"/projects/{project_id}/{branch_id}/reset_to_parent",
             headers={
                 "Accept": "application/json",
             },
