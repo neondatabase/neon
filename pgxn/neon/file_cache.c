@@ -1004,7 +1004,7 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 		return false;
 	}
 	#if PG_VERSION_NUM >= 170000
-	lwlsn = get_lwlsn_hook(rinfo, forknum, blkno);
+	lwlsn = neon_get_lwlsn_hook(rinfo, forknum, blkno);
 	#else
 	lwlsn = GetLastWrittenLSN(rinfo, forknum, blkno);
 	#endif

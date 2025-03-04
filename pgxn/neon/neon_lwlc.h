@@ -1,7 +1,7 @@
-#include "neon_pgversioncompat.h"
+#ifndef NEON_LWLC_H
+#define NEON_LWLC_H
 
-#ifndef NEON_LWLSN_CACHE
-#define NEON_LWLSN_CACHE
+#include "neon_pgversioncompat.h"
 
 extern int			lastWrittenLsnCacheSize;
 

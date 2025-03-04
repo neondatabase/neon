@@ -1,7 +1,9 @@
-#if PG_MAJORVERSION_NUM >= 17
-
 #include "postgres.h"
+
 #include "neon_lwlc.h"
+
+#if PG_MAJORVERSION_NUM >= 170000
+
 #include "access/xlog.h"
 #include "storage/shmem.h"
 #include "storage/buf_internals.h"
@@ -123,9 +125,9 @@ void shmemrequest(void) {
 		if (prev_shmem_request_hook)
 			prev_shmem_request_hook();
 	#endif
-	
+
 		requested_size += hash_estimate_size(lastWrittenLsnCacheSize, sizeof(LastWrittenLsnCacheEntry));
-	
+
 		RequestAddinShmemSpace(requested_size);
 }
 
@@ -490,5 +492,11 @@ neon_set_lwlsn_db(XLogRecPtr lsn)
 	NRelFileInfo dummyNode = {InvalidOid, InvalidOid, InvalidOid};
 	return neon_set_lwlsn_block(lsn, dummyNode, MAIN_FORKNUM, 0);
 }
+
+#else
+
+void
+init_lwlc(void)
+{}
 
 #endif
