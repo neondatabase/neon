@@ -154,6 +154,7 @@ class NeonAPI:
             data["source_timestamp"] = source_timestamp
         if preserve_under_name:
             data["preserve_under_name"] = preserve_under_name
+        log.info("Data: %s", data)
         resp = self.__request(
             "POST",
             f"/projects/{project_id}/branches/{branch_id}/restore",
