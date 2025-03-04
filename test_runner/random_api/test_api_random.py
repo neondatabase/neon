@@ -271,9 +271,12 @@ def do_action(project, action):
         else:
             log.info("no read_only endpoints present, skipping")
     elif action == "restore_random_time":
-        br: NeonBranch = random.choice(list(project.leaf_branches.values())+[project.main_branch])
-        log.info("Restore %s", br.id)
-        br.restore_random_time()
+        if project.leaf_branches:
+            br: NeonBranch = random.choice(list(project.leaf_branches.values()))
+            log.info("Restore %s", br.id)
+            br.restore_random_time()
+        else:
+            log.info("No leaf branches found")
 
 
 @pytest.mark.timeout(7200)
