@@ -156,7 +156,7 @@ class NeonAPI:
             data["preserve_under_name"] = preserve_under_name
         resp = self.__request(
             "POST",
-            f"/{project_id}/branches/{branch_id}/restore",
+            f"/projects/{project_id}/branches/{branch_id}/restore",
             headers={
                 "Accept": "application/json",
             },
