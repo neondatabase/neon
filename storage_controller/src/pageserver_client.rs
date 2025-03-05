@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use pageserver_api::models::detach_ancestor::AncestorDetached;
 use pageserver_api::models::{
     LocationConfig, LocationConfigListResponse, PageserverUtilization, SecondaryProgress,
@@ -48,32 +50,13 @@ macro_rules! measured_request {
 impl PageserverClient {
     pub(crate) fn new(
         node_id: NodeId,
-        mgmt_api_endpoint: String,
-        jwt: Option<&str>,
-        ca_cert: Option<reqwest::Certificate>,
-    ) -> Self {
-        let mut http_client = reqwest::Client::builder();
-        if let Some(ca_cert) = ca_cert {
-            http_client = http_client.add_root_certificate(ca_cert);
-        }
-        let http_client = http_client
-            .build()
-            .expect("Failed to construct HTTP client");
-
-        Self {
-            inner: Client::from_client(http_client, mgmt_api_endpoint, jwt),
-            node_id_label: node_id.0.to_string(),
-        }
-    }
-
-    pub(crate) fn from_client(
-        node_id: NodeId,
         raw_client: reqwest::Client,
         mgmt_api_endpoint: String,
         jwt: Option<&str>,
+        timeout: Option<Duration>,
     ) -> Self {
         Self {
-            inner: Client::from_client(raw_client, mgmt_api_endpoint, jwt),
+            inner: Client::new(raw_client, mgmt_api_endpoint, jwt, timeout),
             node_id_label: node_id.0.to_string(),
         }
     }

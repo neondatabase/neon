@@ -472,6 +472,9 @@ pub struct Service {
     /// This waits for initial reconciliation with pageservers to complete.  Until this barrier
     /// passes, it isn't safe to do any actions that mutate tenants.
     pub(crate) startup_complete: Barrier,
+
+    /// HTTP client with preconfigured root CA certificate.
+    http_client: reqwest::Client,
 }
 
 impl From<ReconcileWaitError> for ApiError {
@@ -597,6 +600,10 @@ struct TenantMutationLocations(BTreeMap<TenantShardId, ShardMutationLocations>);
 impl Service {
     pub fn get_config(&self) -> &Config {
         &self.config
+    }
+
+    pub fn get_http_client(&self) -> &reqwest::Client {
+        &self.http_client
     }
 
     /// Called once on startup, this function attempts to contact all pageservers to build an up-to-date
@@ -879,6 +886,7 @@ impl Service {
                     let response = node
                         .with_client_retries(
                             |client| async move { client.list_location_config().await },
+                            &self.http_client,
                             &self.config.pageserver_jwt_token,
                             1,
                             5,
@@ -979,9 +987,10 @@ impl Service {
 
             let client = PageserverClient::new(
                 node.get_id(),
+                self.http_client.clone(),
                 node.base_url(),
                 self.config.pageserver_jwt_token.as_deref(),
-                self.config.ssl_ca_cert.clone(),
+                None,
             );
             match client
                 .location_config(
@@ -1403,13 +1412,7 @@ impl Service {
             .list_nodes()
             .await?
             .into_iter()
-            .map(|x| {
-                Node::from_persistent(
-                    x,
-                    config.use_https_pageserver_api,
-                    config.ssl_ca_cert.clone(),
-                )
-            })
+            .map(|x| Node::from_persistent(x, config.use_https_pageserver_api))
             .collect::<anyhow::Result<Vec<Node>>>()?;
         let nodes: HashMap<NodeId, Node> = nodes.into_iter().map(|n| (n.get_id(), n)).collect();
         tracing::info!("Loaded {} nodes from database.", nodes.len());
@@ -1514,7 +1517,6 @@ impl Service {
                     123,
                     AvailabilityZone("test_az".to_string()),
                     false,
-                    None,
                 )
                 .unwrap();
 
@@ -1561,7 +1563,14 @@ impl Service {
         let cancel = CancellationToken::new();
         let reconcilers_cancel = cancel.child_token();
 
+        let mut http_client = reqwest::ClientBuilder::new();
+        if let Some(ssl_ca_cert) = &config.ssl_ca_cert {
+            http_client = http_client.add_root_certificate(ssl_ca_cert.clone())
+        }
+        let http_client = http_client.build()?;
+
         let heartbeater_ps = Heartbeater::new(
+            http_client.clone(),
             config.pageserver_jwt_token.clone(),
             config.max_offline_interval,
             config.max_warming_up_interval,
@@ -1569,6 +1578,7 @@ impl Service {
         );
 
         let heartbeater_sk = Heartbeater::new(
+            http_client.clone(),
             config.safekeeper_jwt_token.clone(),
             config.max_offline_interval,
             config.max_warming_up_interval,
@@ -1611,6 +1621,7 @@ impl Service {
             reconcilers_gate: Gate::default(),
             tenant_op_locks: Default::default(),
             node_op_locks: Default::default(),
+            http_client,
         });
 
         let result_task_this = this.clone();
@@ -1916,6 +1927,7 @@ impl Service {
         let configs = match node
             .with_client_retries(
                 |client| async move { client.list_location_config().await },
+                &self.http_client,
                 &self.config.pageserver_jwt_token,
                 1,
                 5,
@@ -1974,6 +1986,7 @@ impl Service {
                             .location_config(tenant_shard_id, config, None, false)
                             .await
                     },
+                    &self.http_client,
                     &self.config.pageserver_jwt_token,
                     1,
                     5,
@@ -3116,9 +3129,10 @@ impl Service {
             for tenant_shard_id in shard_ids {
                 let client = PageserverClient::new(
                     node.get_id(),
+                    self.http_client.clone(),
                     node.base_url(),
                     self.config.pageserver_jwt_token.as_deref(),
-                    self.config.ssl_ca_cert.clone(),
+                    None,
                 );
 
                 tracing::info!("Doing time travel recovery for shard {tenant_shard_id}",);
@@ -3178,9 +3192,10 @@ impl Service {
         for (tenant_shard_id, node) in targets {
             let client = PageserverClient::new(
                 node.get_id(),
+                self.http_client.clone(),
                 node.base_url(),
                 self.config.pageserver_jwt_token.as_deref(),
-                self.config.ssl_ca_cert.clone(),
+                None,
             );
             futs.push(async move {
                 let result = client
@@ -3303,6 +3318,7 @@ impl Service {
                         .tenant_delete(TenantShardId::unsharded(tenant_id))
                         .await
                 },
+                &self.http_client,
                 &self.config.pageserver_jwt_token,
                 1,
                 3,
@@ -3458,8 +3474,8 @@ impl Service {
             async fn create_one(
                 tenant_shard_id: TenantShardId,
                 locations: ShardMutationLocations,
+                http_client: reqwest::Client,
                 jwt: Option<String>,
-                ca_cert: Option<Certificate>,
                 create_req: TimelineCreateRequest,
             ) -> Result<TimelineInfo, ApiError> {
                 let latest = locations.latest.node;
@@ -3472,7 +3488,7 @@ impl Service {
                 );
 
                 let client =
-                    PageserverClient::new(latest.get_id(), latest.base_url(), jwt.as_deref(), ca_cert.clone());
+                    PageserverClient::new(latest.get_id(), http_client.clone(), latest.base_url(), jwt.as_deref(), None);
 
                 let timeline_info = client
                     .timeline_create(tenant_shard_id, &create_req)
@@ -3493,9 +3509,10 @@ impl Service {
 
                     let client = PageserverClient::new(
                         location.node.get_id(),
+                        http_client.clone(),
                         location.node.base_url(),
                         jwt.as_deref(),
-                        ca_cert.clone(),
+                        None,
                     );
 
                     let res = client
@@ -3524,8 +3541,8 @@ impl Service {
             let timeline_info = create_one(
                 shard_zero_tid,
                 shard_zero_locations,
+                self.http_client.clone(),
                 self.config.pageserver_jwt_token.clone(),
-                self.config.ssl_ca_cert.clone(),
                 create_req.clone(),
             )
             .await?;
@@ -3554,8 +3571,8 @@ impl Service {
                         Box::pin(create_one(
                             tenant_shard_id,
                             mutation_locations,
+                            self.http_client.clone(),
                             jwt.clone(),
-                            self.config.ssl_ca_cert.clone(),
                             create_req,
                         ))
                     },
@@ -3596,15 +3613,15 @@ impl Service {
                 tenant_shard_id: TenantShardId,
                 timeline_id: TimelineId,
                 node: Node,
+                http_client: reqwest::Client,
                 jwt: Option<String>,
-                ca_cert: Option<Certificate>,
                 req: TimelineArchivalConfigRequest,
             ) -> Result<(), ApiError> {
                 tracing::info!(
                     "Setting archival config of timeline on shard {tenant_shard_id}/{timeline_id}, attached to node {node}",
                 );
 
-                let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref(), ca_cert);
+                let client = PageserverClient::new(node.get_id(), http_client, node.base_url(), jwt.as_deref(), None);
 
                 client
                     .timeline_archival_config(tenant_shard_id, timeline_id, &req)
@@ -3626,8 +3643,8 @@ impl Service {
                         tenant_shard_id,
                         timeline_id,
                         node,
+                        self.http_client.clone(),
                         self.config.pageserver_jwt_token.clone(),
-                        self.config.ssl_ca_cert.clone(),
                         req.clone(),
                     ))
                 })
@@ -3663,14 +3680,14 @@ impl Service {
                 tenant_shard_id: TenantShardId,
                 timeline_id: TimelineId,
                 node: Node,
+                http_client: reqwest::Client,
                 jwt: Option<String>,
-                ca_cert: Option<Certificate>,
             ) -> Result<(ShardNumber, models::detach_ancestor::AncestorDetached), ApiError> {
                 tracing::info!(
                     "Detaching timeline on shard {tenant_shard_id}/{timeline_id}, attached to node {node}",
                 );
 
-                let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref(), ca_cert);
+                let client = PageserverClient::new(node.get_id(), http_client, node.base_url(), jwt.as_deref(), None);
 
                 client
                     .timeline_detach_ancestor(tenant_shard_id, timeline_id)
@@ -3709,8 +3726,8 @@ impl Service {
                         tenant_shard_id,
                         timeline_id,
                         node,
+                        self.http_client.clone(),
                         self.config.pageserver_jwt_token.clone(),
-                        self.config.ssl_ca_cert.clone(),
                     ))
                 })
                 .await?;
@@ -3762,12 +3779,17 @@ impl Service {
                 tenant_shard_id: TenantShardId,
                 timeline_id: TimelineId,
                 node: Node,
+                http_client: reqwest::Client,
                 jwt: Option<String>,
-                ca_cert: Option<Certificate>,
                 dir: BlockUnblock,
             ) -> Result<(), ApiError> {
-                let client =
-                    PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref(), ca_cert);
+                let client = PageserverClient::new(
+                    node.get_id(),
+                    http_client,
+                    node.base_url(),
+                    jwt.as_deref(),
+                    None,
+                );
 
                 client
                     .timeline_block_unblock_gc(tenant_shard_id, timeline_id, dir)
@@ -3786,8 +3808,8 @@ impl Service {
                     tenant_shard_id,
                     timeline_id,
                     node,
+                    self.http_client.clone(),
                     self.config.pageserver_jwt_token.clone(),
-                    self.config.ssl_ca_cert.clone(),
                     dir,
                 ))
             })
@@ -3908,6 +3930,7 @@ impl Service {
             futs.push(async move {
                 node.with_client_retries(
                     |client| op(tenant_shard_id, client),
+                    &self.http_client,
                     &self.config.pageserver_jwt_token,
                     warn_threshold,
                     max_retries,
@@ -4131,14 +4154,14 @@ impl Service {
                 tenant_shard_id: TenantShardId,
                 timeline_id: TimelineId,
                 node: Node,
+                http_client: reqwest::Client,
                 jwt: Option<String>,
-                ca_cert: Option<Certificate>,
             ) -> Result<StatusCode, ApiError> {
                 tracing::info!(
                     "Deleting timeline on shard {tenant_shard_id}/{timeline_id}, attached to node {node}",
                 );
 
-                let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref(), ca_cert);
+                let client = PageserverClient::new(node.get_id(), http_client, node.base_url(), jwt.as_deref(), None);
                 let res = client
                     .timeline_delete(tenant_shard_id, timeline_id)
                     .await;
@@ -4164,8 +4187,8 @@ impl Service {
                         tenant_shard_id,
                         timeline_id,
                         node,
+                        self.http_client.clone(),
                         self.config.pageserver_jwt_token.clone(),
-                        self.config.ssl_ca_cert.clone(),
                     ))
                 })
                 .await?;
@@ -4187,8 +4210,8 @@ impl Service {
                 shard_zero_tid,
                 timeline_id,
                 shard_zero_locations.latest.node,
+                self.http_client.clone(),
                 self.config.pageserver_jwt_token.clone(),
-                self.config.ssl_ca_cert.clone(),
             )
             .await?;
             Ok(shard_zero_status)
@@ -4619,6 +4642,7 @@ impl Service {
 
                         client.location_config(child_id, config, None, false).await
                     },
+                    &self.http_client,
                     &self.config.pageserver_jwt_token,
                     1,
                     10,
@@ -5221,9 +5245,10 @@ impl Service {
             } = target;
             let client = PageserverClient::new(
                 node.get_id(),
+                self.http_client.clone(),
                 node.base_url(),
                 self.config.pageserver_jwt_token.as_deref(),
-                self.config.ssl_ca_cert.clone(),
+                None,
             );
             let response = client
                 .tenant_shard_split(
@@ -5557,9 +5582,10 @@ impl Service {
 
         let client = PageserverClient::new(
             node.get_id(),
+            self.http_client.clone(),
             node.base_url(),
             self.config.pageserver_jwt_token.as_deref(),
-            self.config.ssl_ca_cert.clone(),
+            None,
         );
 
         let scan_result = client
@@ -6100,7 +6126,6 @@ impl Service {
             register_req.listen_pg_port,
             register_req.availability_zone_id.clone(),
             self.config.use_https_pageserver_api,
-            self.config.ssl_ca_cert.clone(),
         );
         let new_node = match new_node {
             Ok(new_node) => new_node,
@@ -6795,6 +6820,7 @@ impl Service {
             units,
             gate_guard,
             &self.reconcilers_cancel,
+            self.http_client.clone(),
         )
     }
 
@@ -7198,6 +7224,7 @@ impl Service {
         match attached_node
             .with_client_retries(
                 |client| async move { client.tenant_heatmap_upload(tenant_shard_id).await },
+                &self.http_client,
                 &self.config.pageserver_jwt_token,
                 3,
                 10,
@@ -7234,6 +7261,7 @@ impl Service {
                             )
                             .await
                     },
+                    &self.http_client,
                     &self.config.pageserver_jwt_token,
                     3,
                     10,
@@ -7293,6 +7321,7 @@ impl Service {
                         let request = request_ref.clone();
                         client.top_tenant_shards(request.clone()).await
                     },
+                    &self.http_client,
                     &self.config.pageserver_jwt_token,
                     3,
                     3,
@@ -7468,6 +7497,7 @@ impl Service {
         match node
             .with_client_retries(
                 |client| async move { client.tenant_secondary_status(tenant_shard_id).await },
+                &self.http_client,
                 &self.config.pageserver_jwt_token,
                 1,
                 3,

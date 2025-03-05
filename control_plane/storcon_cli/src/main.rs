@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -269,6 +270,10 @@ struct Cli {
     /// a token with both scopes to use with this tool.
     jwt: Option<String>,
 
+    #[arg(long)]
+    /// Trusted root CA certificate to use in https APIs.
+    ssl_ca_file: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -379,9 +384,17 @@ async fn main() -> anyhow::Result<()> {
 
     let storcon_client = Client::new(cli.api.clone(), cli.jwt.clone());
 
+    let mut http_client = reqwest::Client::builder();
+    if let Some(ssl_ca_file) = &cli.ssl_ca_file {
+        let buf = tokio::fs::read(ssl_ca_file).await?;
+        let cert = reqwest::Certificate::from_pem(&buf)?;
+        http_client = http_client.add_root_certificate(cert);
+    }
+    let http_client = http_client.build()?;
+
     let mut trimmed = cli.api.to_string();
     trimmed.pop();
-    let vps_client = mgmt_api::Client::new(trimmed, cli.jwt.as_deref());
+    let vps_client = mgmt_api::Client::new(http_client, trimmed, cli.jwt.as_deref(), None);
 
     match cli.command {
         Command::NodeRegister {

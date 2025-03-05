@@ -26,6 +26,7 @@ struct HeartbeaterTask<Server, State> {
 
     max_offline_interval: Duration,
     max_warming_up_interval: Duration,
+    http_client: reqwest::Client,
     jwt_token: Option<String>,
 }
 
@@ -74,6 +75,7 @@ where
     HeartbeaterTask<Server, State>: HeartBeat<Server, State>,
 {
     pub(crate) fn new(
+        http_client: reqwest::Client,
         jwt_token: Option<String>,
         max_offline_interval: Duration,
         max_warming_up_interval: Duration,
@@ -83,6 +85,7 @@ where
             tokio::sync::mpsc::unbounded_channel::<HeartbeatRequest<Server, State>>();
         let mut heartbeater = HeartbeaterTask::new(
             receiver,
+            http_client,
             jwt_token,
             max_offline_interval,
             max_warming_up_interval,
@@ -118,6 +121,7 @@ where
 {
     fn new(
         receiver: tokio::sync::mpsc::UnboundedReceiver<HeartbeatRequest<Server, State>>,
+        http_client: reqwest::Client,
         jwt_token: Option<String>,
         max_offline_interval: Duration,
         max_warming_up_interval: Duration,
@@ -129,6 +133,7 @@ where
             state: HashMap::new(),
             max_offline_interval,
             max_warming_up_interval,
+            http_client,
             jwt_token,
         }
     }
@@ -172,6 +177,7 @@ impl HeartBeat<Node, PageserverState> for HeartbeaterTask<Node, PageserverState>
         let mut heartbeat_futs = FuturesUnordered::new();
         for (node_id, node) in &*pageservers {
             heartbeat_futs.push({
+                let http_client = &self.http_client;
                 let jwt_token = self.jwt_token.clone();
                 let cancel = self.cancel.clone();
 
@@ -186,6 +192,7 @@ impl HeartBeat<Node, PageserverState> for HeartbeaterTask<Node, PageserverState>
                     let response = node_clone
                         .with_client_retries(
                             |client| async move { client.get_utilization().await },
+                            http_client,
                             &jwt_token,
                             3,
                             3,

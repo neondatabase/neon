@@ -944,7 +944,6 @@ pub(crate) mod test_utils {
                             .cloned()
                             .unwrap_or(AvailabilityZone("test-az".to_string())),
                         false,
-                        None,
                     )
                     .unwrap();
                     node.set_availability(NodeAvailability::Active(test_utilization::simple(0, 0)));

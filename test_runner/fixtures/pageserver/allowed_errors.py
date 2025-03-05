@@ -106,6 +106,12 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*delaying layer flush by \\S+ for compaction backpressure.*",
     ".*stalling layer flushes for compaction backpressure.*",
     ".*layer roll waiting for flush due to compaction backpressure.*",
+    # Low level HTTP server errors can happen during restart/shutdown.
+    ".*Failed to accept TCP connection.*",
+    ".*Failed to accept TLS connection.*",
+    ".*Failed to serve HTTPS connection.*",
+    ".*Failed to serve HTTP connection.*",
+    ".*read header from client timeout.*",
 )
 
 

@@ -82,8 +82,8 @@ pub struct LocalEnv {
     // https://toml.io/en/v1.0.0 does not contain a concept of "a table inside another table".
     pub branch_name_mappings: HashMap<String, Vec<(TenantId, TimelineId)>>,
 
-    // Flag to generate SSL certificates for components that need it.
-    // Also generates root CA certificate that is used to sign all other certificates.
+    /// Flag to generate SSL certificates for components that need it.
+    /// Also generates root CA certificate that is used to sign all other certificates.
     pub generate_local_ssl_certs: bool,
 }
 

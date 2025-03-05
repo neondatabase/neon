@@ -93,8 +93,6 @@ pub mod try_rcu;
 
 pub mod guard_arc_swap;
 
-pub mod tasks;
-
 #[cfg(target_os = "linux")]
 pub mod linux_socket_ioctl;
 

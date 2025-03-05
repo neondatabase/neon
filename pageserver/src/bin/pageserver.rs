@@ -610,11 +610,11 @@ fn start_pageserver(
         let http_task = {
             let server =
                 http_utils::server::Server::new(Arc::clone(&service), http_listener, None)?;
-            let cancel = server.cancel_token();
+            let cancel = CancellationToken::new();
 
             let task = MGMT_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
                 "http endpoint listener",
-                server.serve(),
+                server.serve(cancel.clone()),
             ));
             HttpEndpointListener(CancellableTask { task, cancel })
         };
@@ -632,11 +632,11 @@ fn start_pageserver(
 
                 let server =
                     http_utils::server::Server::new(service, https_listener, Some(tls_acceptor))?;
-                let cancel = server.cancel_token();
+                let cancel = CancellationToken::new();
 
                 let task = MGMT_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
                     "https endpoint listener",
-                    server.serve(),
+                    server.serve(cancel.clone()),
                 ));
                 Some(HttpsEndpointListener(CancellableTask { task, cancel }))
             }

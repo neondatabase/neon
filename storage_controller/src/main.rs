@@ -1,4 +1,3 @@
-use std::io::Read;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,6 +8,7 @@ use clap::Parser;
 use hyper0::Uri;
 use metrics::BuildInfo;
 use metrics::launch_timestamp::LaunchTimestamp;
+use reqwest::Certificate;
 use storage_controller::http::make_router;
 use storage_controller::metrics::preinitialize_metrics;
 use storage_controller::persistence::Persistence;
@@ -129,24 +129,24 @@ struct Cli {
     #[arg(long)]
     chaos_exit_crontab: Option<cron::Schedule>,
 
-    // Maximum acceptable lag for the secondary location while draining
-    // a pageserver
+    /// Maximum acceptable lag for the secondary location while draining
+    /// a pageserver
     #[arg(long)]
     max_secondary_lag_bytes: Option<u64>,
 
-    // Period with which to send heartbeats to registered nodes
+    /// Period with which to send heartbeats to registered nodes
     #[arg(long)]
     heartbeat_interval: Option<humantime::Duration>,
 
     #[arg(long)]
     long_reconcile_threshold: Option<humantime::Duration>,
 
-    // Flag to use https for requests to pageserver API.
+    /// Flag to use https for requests to pageserver API.
     #[arg(long, default_value = "false")]
     use_https_pageserver_api: bool,
 
     #[arg(long)]
-    // Additional trusted root CA certificate.
+    /// Trusted root CA certificate to use in https APIs.
     ssl_ca_file: Option<PathBuf>,
 }
 
@@ -327,10 +327,9 @@ async fn async_main() -> anyhow::Result<()> {
 
     let ssl_ca_cert = match args.ssl_ca_file.as_ref() {
         Some(ssl_ca_file) => {
-            tracing::info!("Using ssl_ca_file: {}", ssl_ca_file.to_str().unwrap());
-            let mut buf = Vec::new();
-            std::fs::File::open(ssl_ca_file)?.read_to_end(&mut buf)?;
-            Some(reqwest::Certificate::from_pem(&buf)?)
+            tracing::info!("Using ssl root CA file: {ssl_ca_file:?}");
+            let buf = tokio::fs::read(ssl_ca_file).await?;
+            Some(Certificate::from_pem(&buf)?)
         }
         None => None,
     };
