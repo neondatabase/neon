@@ -217,9 +217,6 @@ class NeonLocalCli(AbstractNeonCli):
                 )
             )
 
-            if "rel_size_v2_enabled" not in conf:
-                args.extend(["-c", "rel_size_v2_enabled:true"])
-
         if set_default:
             args.append("--set-default")
 

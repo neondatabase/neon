@@ -437,7 +437,7 @@ impl RemoteTimelineClient {
 
     /// Initialize the upload queue for the case where the remote storage is empty,
     /// i.e., it doesn't have an `IndexPart`.
-    /// 
+    ///
     /// `rel_size_v2_status` needs to be carried over during branching, and that's why
     /// it's passed in here.
     pub fn init_upload_queue_for_empty_remote(
