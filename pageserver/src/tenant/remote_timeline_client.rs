@@ -437,9 +437,13 @@ impl RemoteTimelineClient {
 
     /// Initialize the upload queue for the case where the remote storage is empty,
     /// i.e., it doesn't have an `IndexPart`.
+    ///
+    /// `rel_size_v2_status` needs to be carried over during branching, and that's why
+    /// it's passed in here.
     pub fn init_upload_queue_for_empty_remote(
         &self,
         local_metadata: &TimelineMetadata,
+        rel_size_v2_status: Option<RelSizeMigration>,
     ) -> anyhow::Result<()> {
         // Set the maximum number of inprogress tasks to the remote storage concurrency. There's
         // certainly no point in starting more upload tasks than this.
@@ -449,7 +453,9 @@ impl RemoteTimelineClient {
             .as_ref()
             .map_or(0, |r| r.concurrency_limit());
         let mut upload_queue = self.upload_queue.lock().unwrap();
-        upload_queue.initialize_empty_remote(local_metadata, inprogress_limit)?;
+        let initialized_queue =
+            upload_queue.initialize_empty_remote(local_metadata, inprogress_limit)?;
+        initialized_queue.dirty.rel_size_migration = rel_size_v2_status;
         self.update_remote_physical_size_gauge(None);
         info!("initialized upload queue as empty");
         Ok(())
