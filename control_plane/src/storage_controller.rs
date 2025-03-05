@@ -537,10 +537,6 @@ impl StorageController {
             args.push("--start-as-candidate".to_string());
         }
 
-        if self.config.load_safekeepers {
-            args.push("--load-safekeepers".to_string());
-        }
-
         if let Some(private_key) = &self.private_key {
             let claims = Claims::new(None, Scope::PageServerApi);
             let jwt_token =
