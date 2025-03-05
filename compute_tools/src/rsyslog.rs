@@ -22,12 +22,23 @@ fn get_rsyslog_pid() -> Option<String> {
 }
 
 // Start rsyslogd with the specified configuration file
-// If it is already running, do nothing.
+// If it is already running - restart it.
+// This is necessary, because there is no other way to reload the rsyslog configuration.
+//
+// Rsyslogd shouldn't lose any messages, because of the restart,
+// because it tracks the last read position in the log files
+// and will continue reading from that position.
+// TODO: test it properly
+//
 fn start_rsyslog(rsyslog_conf_path: &str) -> Result<()> {
-    let pid = get_rsyslog_pid();
-    if let Some(pid) = pid {
-        info!("rsyslogd is already running with pid: {}", pid);
-        return Ok(());
+    let old_pid = get_rsyslog_pid();
+    if let Some(pid) = old_pid {
+        info!("rsyslogd is already running with pid: {}, restart it", pid);
+        // kill it to restart
+        let _ = Command::new("pkill")
+            .arg("rsyslogd")
+            .output()
+            .context("Failed to stop rsyslogd")?;
     }
 
     let _ = Command::new("/usr/sbin/rsyslogd")
