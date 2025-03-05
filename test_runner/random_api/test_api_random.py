@@ -227,6 +227,8 @@ class NeonProject:
         log.info("running pgbench on %s, cmd: %s, host: %s", target, cmd, target_object.connect_env["PGHOST"])
         pgbench = self.pg_bin.run_nonblocking(cmd, env=target_object.connect_env)
         self.benchmarks[target] = pgbench
+        # XXX for debug only, please remove
+        log.info("Benchmarks now: %s", list(self.benchmarks.keys()))
         target_object.benchmark = pgbench
         return pgbench
 
