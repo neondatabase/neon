@@ -2341,7 +2341,7 @@ pub(crate) mod tests {
     #[test]
     /// How the optimisation code handles a shard with a preferred node set; this is an example
     /// of the multi-step migration, but driven by a different input.
-    fn optimize_attachment_multi_preferred_nodew() -> anyhow::Result<()> {
+    fn optimize_attachment_multi_preferred_node() -> anyhow::Result<()> {
         let nodes = make_test_nodes(
             4,
             &[
@@ -2381,6 +2381,9 @@ pub(crate) mod tests {
         );
         shard_a.apply_optimization(&mut scheduler, optimization_a_prepare.unwrap());
 
+        // The first step of the optimisation should not have cleared the preferred node
+        assert_eq!(shard_a.preferred_node, Some(NodeId(2)));
+
         let schedule_context = make_schedule_context(&shard_a);
         let optimization_a_migrate = shard_a.optimize_attachment(&mut scheduler, &schedule_context);
         assert_eq!(
@@ -2394,6 +2397,9 @@ pub(crate) mod tests {
             })
         );
         shard_a.apply_optimization(&mut scheduler, optimization_a_migrate.unwrap());
+
+        // The cutover step of the optimisation should have cleared the preferred node
+        assert_eq!(shard_a.preferred_node, None);
 
         let schedule_context = make_schedule_context(&shard_a);
         let optimization_a_cleanup = shard_a.optimize_attachment(&mut scheduler, &schedule_context);
