@@ -1163,6 +1163,13 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 		entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_ENTER, &found);
 
+		/* Approximate working set for the blocks assumed in this entry */
+		for (int i = 0; i < blocks_in_chunk; i++)
+		{
+			tag.blockNum = blkno + i;
+			addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
+		}
+
 		if (found)
 		{
 			/*

@@ -21,8 +21,7 @@ def test_lfc_working_set_approximation(neon_simple_env: NeonEnv):
         "main",
         config_lines=[
             "neon.max_file_cache_size='128MB'",
-            "neon.file_cache_size_limit='64MB'",
-            "neon.store_prefetch_result_in_lfc=on"
+            "neon.file_cache_size_limit='64MB'"
         ],
     )
 
@@ -117,4 +116,4 @@ def test_sliding_working_set_approximation(neon_simple_env: NeonEnv):
     log.info(f"Table size {size} blocks")
 
     assert estimation_1k >= 20 and estimation_1k <= 40
-    assert estimation_10k >= 200 and estimation_10k <= 400
+    assert estimation_10k >= 200 and estimation_10k <= 440
