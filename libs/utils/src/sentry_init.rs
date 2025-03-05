@@ -32,7 +32,7 @@ pub fn init_sentry(
 
     if let Some(dsn) = guard.dsn() {
         info!(
-            "initialized Sentry for project {} environment {} release {} (using API {})",
+            "initialized Sentry for project {}, environment {}, release {} (using API {})",
             dsn.project_id(),
             environment,
             release_name.unwrap_or(Cow::Borrowed("None")),
