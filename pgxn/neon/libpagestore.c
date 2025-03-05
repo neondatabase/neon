@@ -1082,7 +1082,10 @@ pageserver_try_receive(shardno_t shard_no)
 
 	Assert(pageserver_conn);
 
-	rc = PQgetCopyData(shard->conn, &resp_buff.data, 1 /* async = true */);
+	if (PQisBusy(shard->conn))
+		return NULL;
+
+	rc = PQgetCopyData(shard->conn, &resp_buff.data, 0);
 
 	if (rc == 0)
 		return NULL;
