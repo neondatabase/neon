@@ -1,8 +1,11 @@
-SET SESSION ROLE neon_superuser;
+-- Any time you see {role_name}, remember that this SQL script gets embedded
+-- into compute_ctl, and is run with a format!(), so {role_name} is a Rust
+-- variable.
 
 DO $$
 DECLARE
     schema TEXT;
+    grantor TEXT;
     revoke_query TEXT;
 BEGIN
     FOR schema IN
@@ -15,12 +18,21 @@ BEGIN
         -- ii) it's easy to add more schemas to the list if needed.
         WHERE schema_name IN ('public')
     LOOP
-        revoke_query := format(
-            'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM {role_name} GRANTED BY neon_superuser;',
-            schema
-        );
+        FOR grantor IN
+            SELECT DISTINCT rtg.grantor
+            FROM information_schema.role_table_grants AS rtg
+            WHERE grantee = '{role_name}'
+        LOOP
+            EXECUTE format('SET LOCAL ROLE %I', grantor);
 
-        EXECUTE revoke_query;
+            revoke_query := format(
+                'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM "{role_name}" GRANTED BY %I',
+                schema,
+                grantor
+            );
+
+            EXECUTE revoke_query;
+        END LOOP;
     END LOOP;
 END;
 $$;
