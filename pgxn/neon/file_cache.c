@@ -90,7 +90,7 @@
  *    1Mb chunks can reduce hash map size to 320Mb.
  * 2. Improve access locality, subsequent pages will be allocated together improving seqscan speed
  */
-#define BLOCKS_PER_CHUNK	128 /* 1Mb chunk */
+#define BLOCKS_PER_CHUNK	4
 /*
  * Smaller chunk seems to be better for OLTP workload
  */
@@ -467,7 +467,7 @@ lfc_init(void)
 							"Immediately store received prefetch result in LFC",
 							NULL,
 							&lfc_store_prefetch_result,
-							false,
+							true,
 							PGC_SUSET,
 							0,
 							NULL,
@@ -478,7 +478,7 @@ lfc_init(void)
 							"Maximal size of Neon local file cache",
 							NULL,
 							&lfc_max_size,
-							0,	/* disabled by default */
+							1000,
 							0,
 							INT_MAX,
 							PGC_POSTMASTER,
@@ -491,7 +491,7 @@ lfc_init(void)
 							"Current limit for size of Neon local file cache",
 							NULL,
 							&lfc_size_limit,
-							0,	/* disabled by default */
+							1,
 							0,
 							INT_MAX,
 							PGC_SIGHUP,
@@ -765,6 +765,7 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		{
 			FileCacheBlockState state = UNAVAILABLE;
 			bool sleeping = false;
+			bool cvs;
 			while (lfc_ctl->generation == generation)
 			{
 				state = GET_STATE(entry, chunk_offs + i);
@@ -779,7 +780,8 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 					sleeping = true;
 				}
 				LWLockRelease(lfc_lock);
-				ConditionVariableTimedSleep(cv, CV_WAIT_TIMEOUT, WAIT_EVENT_NEON_LFC_CV_WAIT);
+				cvs = ConditionVariableTimedSleep(cv, CV_WAIT_TIMEOUT, WAIT_EVENT_NEON_LFC_CV_WAIT);
+neon_log(LOG, "!!!lfc_readv_select| ConditionVariableTimedSleep returned %d", cvs);
 				LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 			}
 			if (sleeping)

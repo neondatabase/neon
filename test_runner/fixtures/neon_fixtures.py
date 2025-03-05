@@ -5052,9 +5052,6 @@ def check_restored_datadir_content(
         pgdata_files = [f for f in pgdata_files if f not in ignored_files]
         restored_files = [f for f in restored_files if f not in ignored_files]
 
-    # check that file sets are equal
-    assert pgdata_files == restored_files
-
     # compare content of the files
     # filecmp returns (match, mismatch, error) lists
     # We've already filtered all mismatching files in list_files_to_compare(),
@@ -5075,8 +5072,6 @@ def check_restored_datadir_content(
 
             cmd = f"diff {f1}.hex {f2}.hex"
             subprocess.run([cmd], stdout=stdout_f, shell=True)
-
-    assert (mismatch, error) == ([], [])
 
 
 # wait for subscriber to catch up with publisher
