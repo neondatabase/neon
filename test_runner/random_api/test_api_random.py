@@ -243,6 +243,8 @@ class NeonProject:
             raise RuntimeError(f"The benchmark for {target} ended with code {rc}")
 
     def terminate_benchmark(self, target):
+        # XXX for debug only, remove before merging
+        log.info("Terminating the benchmark %s", target)
         target_endpoint = target.startswith("ep")
         self.check_benchmark(target)
         self.benchmarks[target].terminate()
