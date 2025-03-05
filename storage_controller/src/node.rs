@@ -270,9 +270,11 @@ impl Node {
     /// This will return None to indicate cancellation.  Cancellation may happen from
     /// the cancellation token passed in, or from Self's cancellation token (i.e. node
     /// going offline).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn with_client_retries<T, O, F>(
         &self,
         mut op: O,
+        http_client: &reqwest::Client,
         jwt: &Option<String>,
         warn_threshold: u32,
         max_retries: u32,
@@ -297,16 +299,12 @@ impl Node {
 
         backoff::retry(
             || {
-                let http_client = reqwest::ClientBuilder::new()
-                    .timeout(timeout)
-                    .build()
-                    .expect("Failed to construct HTTP client");
-
-                let client = PageserverClient::from_client(
+                let client = PageserverClient::new(
                     self.get_id(),
-                    http_client,
+                    http_client.clone(),
                     self.base_url(),
                     jwt.as_deref(),
+                    Some(timeout),
                 );
 
                 let node_cancel_fut = self.cancel.cancelled();

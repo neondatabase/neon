@@ -1494,6 +1494,7 @@ impl TenantShard {
         units: ReconcileUnits,
         gate_guard: GateGuard,
         cancel: &CancellationToken,
+        http_client: reqwest::Client,
     ) -> Option<ReconcilerWaiter> {
         // Reconcile in flight for a stale sequence?  Our sequence's task will wait for it before
         // doing our sequence's work.
@@ -1539,6 +1540,7 @@ impl TenantShard {
             cancel: reconciler_cancel.clone(),
             persistence: persistence.clone(),
             compute_notify_failure: false,
+            http_client,
         };
 
         let reconcile_seq = self.sequence;

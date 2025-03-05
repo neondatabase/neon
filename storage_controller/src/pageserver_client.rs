@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use pageserver_api::models::detach_ancestor::AncestorDetached;
 use pageserver_api::models::{
     LocationConfig, LocationConfigListResponse, PageserverUtilization, SecondaryProgress,
@@ -46,21 +48,15 @@ macro_rules! measured_request {
 }
 
 impl PageserverClient {
-    pub(crate) fn new(node_id: NodeId, mgmt_api_endpoint: String, jwt: Option<&str>) -> Self {
-        Self {
-            inner: Client::from_client(reqwest::Client::new(), mgmt_api_endpoint, jwt),
-            node_id_label: node_id.0.to_string(),
-        }
-    }
-
-    pub(crate) fn from_client(
+    pub(crate) fn new(
         node_id: NodeId,
         raw_client: reqwest::Client,
         mgmt_api_endpoint: String,
         jwt: Option<&str>,
+        timeout: Option<Duration>,
     ) -> Self {
         Self {
-            inner: Client::from_client(raw_client, mgmt_api_endpoint, jwt),
+            inner: Client::new(raw_client, mgmt_api_endpoint, jwt, timeout),
             node_id_label: node_id.0.to_string(),
         }
     }

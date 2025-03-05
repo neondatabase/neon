@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::error::Error as _;
+use std::time::Duration;
 
 use bytes::Bytes;
 use detach_ancestor::AncestorDetached;
@@ -20,6 +21,7 @@ pub struct Client {
     mgmt_api_endpoint: String,
     authorization_header: Option<String>,
     client: reqwest::Client,
+    timeout: Option<Duration>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -69,19 +71,17 @@ pub enum ForceAwaitLogicalSize {
 }
 
 impl Client {
-    pub fn new(mgmt_api_endpoint: String, jwt: Option<&str>) -> Self {
-        Self::from_client(reqwest::Client::new(), mgmt_api_endpoint, jwt)
-    }
-
-    pub fn from_client(
+    pub fn new(
         client: reqwest::Client,
         mgmt_api_endpoint: String,
         jwt: Option<&str>,
+        timeout: Option<Duration>,
     ) -> Self {
         Self {
             mgmt_api_endpoint,
             authorization_header: jwt.map(|jwt| format!("Bearer {jwt}")),
             client,
+            timeout,
         }
     }
 
@@ -101,12 +101,13 @@ impl Client {
         debug_assert!(path.starts_with('/'));
         let uri = format!("{}{}", self.mgmt_api_endpoint, path);
 
-        let req = self.client.request(Method::GET, uri);
-        let req = if let Some(value) = &self.authorization_header {
-            req.header(reqwest::header::AUTHORIZATION, value)
-        } else {
-            req
-        };
+        let mut req = self.client.request(Method::GET, uri);
+        if let Some(value) = &self.authorization_header {
+            req = req.header(reqwest::header::AUTHORIZATION, value);
+        }
+        if let Some(timeout) = self.timeout {
+            req = req.timeout(timeout);
+        }
         req.send().await.map_err(Error::ReceiveBody)
     }
 
@@ -185,12 +186,14 @@ impl Client {
         method: Method,
         uri: U,
     ) -> reqwest::RequestBuilder {
-        let req = self.client.request(method, uri);
+        let mut req = self.client.request(method, uri);
         if let Some(value) = &self.authorization_header {
-            req.header(reqwest::header::AUTHORIZATION, value)
-        } else {
-            req
+            req = req.header(reqwest::header::AUTHORIZATION, value);
         }
+        if let Some(timeout) = self.timeout {
+            req = req.timeout(timeout);
+        }
+        req
     }
 
     async fn request_noerror<B: serde::Serialize, U: reqwest::IntoUrl>(
