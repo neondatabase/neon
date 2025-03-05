@@ -3,11 +3,7 @@
 
 #include "neon_pgversioncompat.h"
 
-extern int			lastWrittenLsnCacheSize;
-
 void init_lwlc(void);
-void shmeminit(void);
-void shmemrequest(void);
 
 /* Hooks */
 XLogRecPtr neon_get_lwlsn(NRelFileInfo rlocator, ForkNumber forknum, BlockNumber blkno);
@@ -17,6 +13,5 @@ XLogRecPtr neon_set_lwlsn_block_v(const XLogRecPtr *lsns, NRelFileInfo relfileno
 XLogRecPtr neon_set_lwlsn_block(XLogRecPtr lsn, NRelFileInfo rlocator, ForkNumber forknum, BlockNumber blkno);
 XLogRecPtr neon_set_lwlsn_relation(XLogRecPtr lsn, NRelFileInfo rlocator, ForkNumber forknum);
 XLogRecPtr neon_set_lwlsn_db(XLogRecPtr lsn);
-int GetLastWrittenLSNCacheSize(void);
 
 #endif
