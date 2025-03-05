@@ -211,7 +211,7 @@ class NeonProject:
         cmd = ["pgbench", f"-c{clients}", "-T10800", "-Mprepared"]
         if read_only:
             cmd.extend(["-S", "-n"])
-        target_object = self.endpoints[target] if is_endpoint else self.branches[target].connect_env
+        target_object = self.endpoints[target] if is_endpoint else self.branches[target]
         log.info("running pgbench on %s, cmd: %s, host: %s", target, cmd, target_object.connect_env["PGHOST"])
         pgbench = self.pg_bin.run_nonblocking(cmd, env=target_object.connect_env)
         self.benchmarks[target] = pgbench
