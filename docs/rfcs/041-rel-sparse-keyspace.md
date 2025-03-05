@@ -181,12 +181,6 @@ don't need to add the key into `collect_keyspace` and therefore all of them will
 
 The migration process can be proactively triggered across all attached/detached tenants to help us fully remove the old reldir code.
 
-### Read Cache
-
-While relv2 reduces the complexity of most operations to O(1), we still need to issue one or multiple I/Os per list/put/delete request. We
-could optimize this in the future by having a relation directory cache on the write path so that we only need to check against the in-memory
-structures.
-
 ### Consolidate Relation Size Keys
 
 We have relsize at the end of all relation nodes.
