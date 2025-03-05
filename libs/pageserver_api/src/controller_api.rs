@@ -182,18 +182,57 @@ pub struct TenantDescribeResponseShard {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TenantShardMigrateRequest {
     pub node_id: NodeId,
+
+    /// Optionally, callers may specify the node they are migrating _from_, and the server will
+    /// reject the request if the shard is no longer attached there: this enables writing safer
+    /// clients that don't risk fighting with some other movement of the shard.
     #[serde(default)]
-    pub migration_config: Option<MigrationConfig>,
+    pub origin_node_id: Option<NodeId>,
+
+    #[serde(default)]
+    pub migration_config: MigrationConfig,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct MigrationConfig {
+    /// If true, the migration will be executed even if it is to a location with a sub-optimal scheduling
+    /// score: this is usually not what you want, and if you use this then you'll also need to set the
+    /// tenant's scheduling policy to Essential or Pause to avoid the optimiser reverting your migration.
+    ///
+    /// Default: false
+    #[serde(default = "default_migration_override_scheduler")]
+    pub override_scheduler: bool,
+
+    /// If true, the migration will be done gracefully by creating a secondary location first and
+    /// waiting for it to warm up before cutting over.  If false, if there is no existing secondary
+    /// location at the destination, the tenant will be migrated immediately.  If the tenant's data
+    /// can't be downloaded within [`Self::secondary_warmup_timeout`], then the migration will go
+    /// ahead but run with a cold cache that can severely reduce performance until it warms up.
+    ///
+    /// When doing a graceful migration, the migration API returns as soon as it is started.
+    ///
+    /// Default: true
+    #[serde(default = "default_migration_prewarm")]
+    pub prewarm: bool,
+
+    /// For non-prewarm migrations which will immediately enter a cutover to the new node: how long to wait
+    /// overall for secondary warmup before cutting over
     #[serde(default)]
     #[serde(with = "humantime_serde")]
     pub secondary_warmup_timeout: Option<Duration>,
+    /// For non-prewarm migrations which will immediately enter a cutover to the new node: how long to wait
+    /// within each secondary download poll call to pageserver.
     #[serde(default)]
     #[serde(with = "humantime_serde")]
     pub secondary_download_request_timeout: Option<Duration>,
+}
+
+fn default_migration_prewarm() -> bool {
+    true
+}
+
+fn default_migration_override_scheduler() -> bool {
+    false
 }
 
 #[derive(Serialize, Clone, Debug)]

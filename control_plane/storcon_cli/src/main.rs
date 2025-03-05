@@ -5,12 +5,12 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use pageserver_api::controller_api::{
-    AvailabilityZone, NodeAvailabilityWrapper, NodeConfigureRequest, NodeDescribeResponse,
-    NodeRegisterRequest, NodeSchedulingPolicy, NodeShardResponse, PlacementPolicy,
-    SafekeeperDescribeResponse, SafekeeperSchedulingPolicyRequest, ShardSchedulingPolicy,
-    ShardsPreferredAzsRequest, ShardsPreferredAzsResponse, SkSchedulingPolicy, TenantCreateRequest,
-    TenantDescribeResponse, TenantPolicyRequest, TenantShardMigrateRequest,
-    TenantShardMigrateResponse,
+    AvailabilityZone, MigrationConfig, NodeAvailabilityWrapper, NodeConfigureRequest,
+    NodeDescribeResponse, NodeRegisterRequest, NodeSchedulingPolicy, NodeShardResponse,
+    PlacementPolicy, SafekeeperDescribeResponse, SafekeeperSchedulingPolicyRequest,
+    ShardSchedulingPolicy, ShardsPreferredAzsRequest, ShardsPreferredAzsResponse,
+    SkSchedulingPolicy, TenantCreateRequest, TenantDescribeResponse, TenantPolicyRequest,
+    TenantShardMigrateRequest, TenantShardMigrateResponse,
 };
 use pageserver_api::models::{
     EvictionPolicy, EvictionPolicyLayerAccessThreshold, LocationConfigSecondary, ShardParameters,
@@ -112,6 +112,15 @@ enum Command {
         tenant_shard_id: TenantShardId,
         #[arg(long)]
         node: NodeId,
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        prewarm: bool,
+        #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+        override_scheduler: bool,
+    },
+    /// Watch the location of a tenant shard evolve, e.g. while expecting it to migrate
+    TenantShardWatch {
+        #[arg(long)]
+        tenant_shard_id: TenantShardId,
     },
     /// Migrate the secondary location for a tenant shard to a specific pageserver.
     TenantShardMigrateSecondary {
@@ -619,19 +628,43 @@ async fn main() -> anyhow::Result<()> {
         Command::TenantShardMigrate {
             tenant_shard_id,
             node,
+            prewarm,
+            override_scheduler,
         } => {
-            let req = TenantShardMigrateRequest {
-                node_id: node,
-                migration_config: None,
+            let migration_config = MigrationConfig {
+                prewarm,
+                override_scheduler,
+                ..Default::default()
             };
 
-            storcon_client
+            let req = TenantShardMigrateRequest {
+                node_id: node,
+                origin_node_id: None,
+                migration_config,
+            };
+
+            match storcon_client
                 .dispatch::<TenantShardMigrateRequest, TenantShardMigrateResponse>(
                     Method::PUT,
                     format!("control/v1/tenant/{tenant_shard_id}/migrate"),
                     Some(req),
                 )
-                .await?;
+                .await
+            {
+                Err(mgmt_api::Error::ApiError(StatusCode::PRECONDITION_FAILED, msg)) => {
+                    anyhow::bail!(
+                        "Migration to {node} rejected, may require `--force` ({}) ",
+                        msg
+                    );
+                }
+                Err(e) => return Err(e.into()),
+                Ok(_) => {}
+            }
+
+            watch_tenant_shard(storcon_client, tenant_shard_id, Some(node)).await?;
+        }
+        Command::TenantShardWatch { tenant_shard_id } => {
+            watch_tenant_shard(storcon_client, tenant_shard_id, None).await?;
         }
         Command::TenantShardMigrateSecondary {
             tenant_shard_id,
@@ -639,7 +672,8 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let req = TenantShardMigrateRequest {
                 node_id: node,
-                migration_config: None,
+                origin_node_id: None,
+                migration_config: MigrationConfig::default(),
             };
 
             storcon_client
@@ -1105,7 +1139,8 @@ async fn main() -> anyhow::Result<()> {
                                 format!("control/v1/tenant/{}/migrate", mv.tenant_shard_id),
                                 Some(TenantShardMigrateRequest {
                                     node_id: mv.to,
-                                    migration_config: None,
+                                    origin_node_id: Some(mv.from),
+                                    migration_config: MigrationConfig::default(),
                                 }),
                             )
                             .await
@@ -1282,5 +1317,70 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+static WATCH_INTERVAL: Duration = Duration::from_secs(5);
+
+async fn watch_tenant_shard(
+    storcon_client: Client,
+    tenant_shard_id: TenantShardId,
+    until_migrated_to: Option<NodeId>,
+) -> anyhow::Result<()> {
+    if let Some(until_migrated_to) = until_migrated_to {
+        println!(
+            "Waiting for tenant shard {} to be migrated to node {}",
+            tenant_shard_id, until_migrated_to
+        );
+    }
+
+    loop {
+        let desc = storcon_client
+            .dispatch::<(), TenantDescribeResponse>(
+                Method::GET,
+                format!("control/v1/tenant/{}", tenant_shard_id.tenant_id),
+                None,
+            )
+            .await?;
+
+        // Output the current state of the tenant shard
+        let shard = desc
+            .shards
+            .iter()
+            .find(|s| s.tenant_shard_id == tenant_shard_id)
+            .ok_or(anyhow::anyhow!("Tenant shard not found"))?;
+        let summary = format!(
+            "attached: {} secondary: {} {}",
+            shard
+                .node_attached
+                .map(|n| format!("{}", n))
+                .unwrap_or("none".to_string()),
+            shard
+                .node_secondary
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            if shard.is_reconciling {
+                "(reconciler active)"
+            } else {
+                "(reconciler idle)"
+            }
+        );
+        println!("{}", summary);
+
+        // Maybe drop out if we finished migration
+        if let Some(until_migrated_to) = until_migrated_to {
+            if shard.node_attached == Some(until_migrated_to) && !shard.is_reconciling {
+                println!(
+                    "Tenant shard {} is now on node {}",
+                    tenant_shard_id, until_migrated_to
+                );
+                break;
+            }
+        }
+
+        tokio::time::sleep(WATCH_INTERVAL).await;
+    }
     Ok(())
 }
