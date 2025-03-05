@@ -73,25 +73,25 @@ class NeonBranch:
     def __str__(self):
         return f"Branch {self.id}, parent: {self.parent}"
 
-    def create_child_branch(self):
+    def create_child_branch(self) -> NeonBranch:
         return self.project.create_branch(self.id)
 
-    def create_ro_endpoint(self):
+    def create_ro_endpoint(self) -> NeonEndpoint:
         return NeonEndpoint(
             self.project,
             self.neon_api.create_endpoint(self.project_id, self.id, "read_only", {})["endpoint"],
         )
 
-    def delete(self):
+    def delete(self) -> None:
         self.project.delete_branch(self.id)
 
-    def start_benchmark(self, clients=10):
+    def start_benchmark(self, clients=10) -> subprocess.Popen:
         return self.project.start_benchmark(self.id, clients=clients)
 
-    def check_benchmark(self):
+    def check_benchmark(self) -> None:
         self.project.check_benchmark(self.id)
 
-    def terminate_benchmark(self):
+    def terminate_benchmark(self) -> None:
         self.project.terminate_benchmark(self.id)
 
     def restore_random_time(self) -> None:
@@ -104,6 +104,7 @@ class NeonBranch:
             preserve_under_name=self.project.gen_restore_name(),
         )
         self.updated_at: datetime = datetime.fromisoformat(res["branch"]["updated_at"])
+        self.project.wait()
 
     def restore(
         self,
