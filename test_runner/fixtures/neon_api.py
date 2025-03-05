@@ -128,6 +128,16 @@ class NeonAPI:
         )
         return cast("dict[str, Any]", resp.json())
 
+    def get_branch_details(self, project_id: str, branch_id: str) -> dict[str, Any]:
+        resp = self.__request(
+            "GET",
+            f"/projects/{project_id}/branches/{branch_id}",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+        return cast("dict[str, Any]", resp.json())
+
     def delete_branch(self, project_id: str, branch_id: str) -> dict[str, Any]:
         resp = self.__request(
             "DELETE",

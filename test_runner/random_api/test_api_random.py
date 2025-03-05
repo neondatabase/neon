@@ -104,6 +104,12 @@ class NeonBranch:
             preserve_under_name=self.project.gen_restore_name(),
         )
         self.updated_at: datetime = datetime.fromisoformat(res["branch"]["updated_at"])
+        parent_id: str = res["branch"]["parent"]
+        parent = NeonBranch(self.project, self.neon_api.get_branch_details(self.project_id,parent_id))
+        self.project.branches[parent_id] = parent
+        self.parent = parent
+        parent.children[self.id] = self
+        self.project.reset_branches.add(parent_id)
         self.project.wait()
 
     def restore(
@@ -155,6 +161,7 @@ class NeonProject:
         self.neon_api.wait_for_operation_to_finish(self.id)
         self.benchmarks: dict[str, subprocess.Popen] = {}
         self.restore_num: int = 0
+        self.reset_branches: set[str] = set()
 
     def delete(self):
         self.neon_api.delete_project(self.id)
@@ -188,12 +195,16 @@ class NeonProject:
         ]
         for ep in endpoints_to_delete:
             ep.delete()
+        if branch_id not in self.reset_branches:
+            self.terminate_benchmark(branch_id)
         self.neon_api.delete_branch(self.id, branch_id)
         if len(parent.children) == 1 and parent.id != self.main_branch.id:
             self.leaf_branches[parent.id] = parent
         parent.children.pop(branch_id)
         self.leaf_branches.pop(branch_id)
         self.branches.pop(branch_id)
+        if parent.id in self.reset_branches:
+            parent.delete()
         self.wait()
 
     def delete_endpoint(self, endpoint_id: str) -> None:
