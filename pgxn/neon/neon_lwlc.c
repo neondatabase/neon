@@ -1,7 +1,6 @@
 #include "postgres.h"
 
 #include "neon_lwlc.h"
-
 #if PG_MAJORVERSION_NUM >= 17
 
 #include "access/xlog.h"
@@ -131,9 +130,9 @@ static void shmemrequest(void) {
 
 static void shmeminit(void) {
 	static HASHCTL info;
+	bool found;
 	if (LwLsnCache->lastWrittenLsnCacheSize > 0)
 	{
-		bool found;
 		info.keysize = sizeof(BufferTag);
 		info.entrysize = sizeof(LastWrittenLsnCacheEntry);
 		lastWrittenLsnCache = ShmemInitHash("last_written_lsn_cache",
@@ -141,7 +140,9 @@ static void shmeminit(void) {
 										&info,
 										HASH_ELEM | HASH_BLOBS);
 		LwLsnCache = ShmemInitStruct("neon/LwLsnCacheCtl", sizeof(LwLsnCacheCtl), &found);
-
+		if (found) {
+			return;
+		}
 	}
 	dlist_init(&LwLsnCache->lastWrittenLsnLRU);
     LwLsnCache->maxLastWrittenLsn = GetRedoRecPtr();
@@ -485,9 +486,5 @@ neon_set_lwlsn_db(XLogRecPtr lsn)
 }
 
 #else /* ! PG_MAJORVERSION_NUM == 17 */
-
-void
-init_lwlc(void)
-{}
 
 #endif

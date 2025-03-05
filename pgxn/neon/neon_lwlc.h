@@ -1,3 +1,5 @@
+#if PG_MAJORVERSION_NUM >= 17
+
 #ifndef NEON_LWLC_H
 #define NEON_LWLC_H
 
@@ -14,4 +16,5 @@ XLogRecPtr neon_set_lwlsn_block(XLogRecPtr lsn, NRelFileInfo rlocator, ForkNumbe
 XLogRecPtr neon_set_lwlsn_relation(XLogRecPtr lsn, NRelFileInfo rlocator, ForkNumber forknum);
 XLogRecPtr neon_set_lwlsn_db(XLogRecPtr lsn);
 
+#endif
 #endif
