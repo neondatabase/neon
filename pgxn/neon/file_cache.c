@@ -1196,6 +1196,7 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				if (state == PENDING) {
 					SET_STATE(entry, chunk_offs + i, REQUESTED);
 				} else if (state != REQUESTED) {
+					lfc_ctl->used_pages -= state == AVAILABLE;
 					SET_STATE(entry, chunk_offs + i, PENDING);
 					break;
 				}
