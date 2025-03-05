@@ -12,6 +12,7 @@
 
 #include <curl/curl.h>
 
+#include "tcop/utility.h"
 #include "utils/guc.h"
 
 #include "extension_server.h"
@@ -22,6 +23,7 @@ static int	extension_server_request_timeout = 60;
 static int	extension_server_connect_timeout = 60;
 
 static download_extension_file_hook_type prev_download_extension_file_hook = NULL;
+static ProcessUtility_hook_type	PreviousProcessUtility_hook = NULL;
 
 /*
   * to download all SQL (and data) files for an extension:
@@ -77,6 +79,62 @@ neon_download_extension_file_http(const char *filename, bool is_library)
 	return ret;
 }
 
+static void
+DownloadRemoteExtensionOnUpdate(
+	PlannedStmt *pstmt,
+	const char *queryString,
+	bool readOnlyTree,
+	ProcessUtilityContext context,
+	ParamListInfo params,
+	QueryEnvironment *queryEnv,
+	DestReceiver *dest,
+	QueryCompletion *qc)
+{
+	Node	   *parseTree = pstmt->utilityStmt;
+
+	switch (nodeTag(parseTree))
+	{
+		case T_AlterExtensionStmt:
+		{
+			AlterExtensionStmt *stmt = castNode(AlterExtensionStmt, parseTree);
+
+			/*
+			 * Unconditionally try to download a remote extension when updating
+			 */
+			neon_download_extension_file_http(stmt->extname, false);
+
+			break;
+		}
+		default:
+			break;
+	}
+
+	if (PreviousProcessUtility_hook)
+	{
+		PreviousProcessUtility_hook(
+			pstmt,
+			queryString,
+			readOnlyTree,
+			context,
+			params,
+			queryEnv,
+			dest,
+			qc);
+	}
+	else
+	{
+		standard_ProcessUtility(
+			pstmt,
+			queryString,
+			readOnlyTree,
+			context,
+			params,
+			queryEnv,
+			dest,
+			qc);
+	}
+}
+
 void
 pg_init_extension_server()
 {
@@ -112,4 +170,7 @@ pg_init_extension_server()
 	/* set download_extension_file_hook */
 	prev_download_extension_file_hook = download_extension_file_hook;
 	download_extension_file_hook = neon_download_extension_file_http;
+
+	PreviousProcessUtility_hook = ProcessUtility_hook;
+	ProcessUtility_hook = DownloadRemoteExtensionOnUpdate;
 }
