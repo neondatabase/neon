@@ -277,6 +277,8 @@ impl ComputeNode {
                 phases.push(FinalizeDropLogicalSubscriptions);
             }
 
+            // Keep DisablePostgresDBPgAudit phase at the end,
+            // so that all config operations are audit logged.
             match spec.audit_log_level
             {
                 ComputeAudit::Hipaa => {

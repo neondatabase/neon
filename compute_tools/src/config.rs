@@ -1,5 +1,4 @@
 use anyhow::Result;
-use base64::write;
 use std::fmt::Write as FmtWrite;
 use std::fs::{File, OpenOptions};
 use std::io;

@@ -679,6 +679,23 @@ impl ComputeNode {
             });
         }
 
+        // Configure and start rsyslog if necessary
+        if let ComputeAudit::Hipaa = pspec.spec.audit_log_level {
+            let remote_endpoint = std::env::var("AUDIT_LOGGING_ENDPOINT").unwrap_or("".to_string());
+            if remote_endpoint.is_empty() {
+                anyhow::bail!("AUDIT_LOGGING_ENDPOINT is empty");
+            }
+
+            let log_directory_path = Path::new(&self.params.pgdata).join("log");
+            // TODO: make this more robust
+            // now rsyslog starts once and there is no monitoring or restart if it fails
+            configure_and_start_rsyslog(
+                log_directory_path.to_str().unwrap(),
+                "hipaa",
+                &remote_endpoint,
+            )?;
+        }
+
         // Launch remaining service threads
         let _monitor_handle = launch_monitor(self);
         let _configurator_handle = launch_configurator(self);
@@ -1639,21 +1656,6 @@ impl ComputeNode {
             self.pg_reload_conf()?;
         }
         self.post_apply_config()?;
-
-        // Configure rsyslog for HIPAA audit logging
-        if let ComputeAudit::Hipaa = pspec.spec.audit_log_level {
-            let remote_endpoint = std::env::var("AUDIT_LOGGING_ENDPOINT").unwrap_or("".to_string());
-            if remote_endpoint.is_empty() {
-                anyhow::bail!("AUDIT_LOGGING_ENDPOINT is empty");
-            }
-
-            let log_directory_path = Path::new(&self.params.pgdata).join("log");
-            configure_and_start_rsyslog(
-                log_directory_path.to_str().unwrap(),
-                "hipaa",
-                &remote_endpoint,
-            )?;
-        }
 
         Ok(())
     }
