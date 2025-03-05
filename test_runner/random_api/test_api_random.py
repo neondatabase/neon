@@ -196,7 +196,8 @@ class NeonProject:
         for ep in endpoints_to_delete:
             ep.delete()
         if branch_id not in self.reset_branches:
-            log.info("Benchmarks: %s", self.benchmarks)
+            # XXX for debug only, please remove before merging
+            log.info("Benchmarks: %s", list(self.benchmarks.keys()))
             self.terminate_benchmark(branch_id)
         self.neon_api.delete_branch(self.id, branch_id)
         if len(parent.children) == 1 and parent.id != self.main_branch.id:
