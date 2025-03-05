@@ -1,3 +1,4 @@
+use anyhow::Result;
 use std::fmt::Write as FmtWrite;
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -5,10 +6,11 @@ use std::io::Write;
 use std::io::prelude::*;
 use std::path::Path;
 
-use anyhow::Result;
-use compute_api::spec::{ComputeMode, ComputeSpec, GenericOption};
+use compute_api::spec::{ComputeAudit, ComputeMode, ComputeSpec, GenericOption};
 
-use crate::pg_helpers::{GenericOptionExt, PgOptionsSerialize, escape_conf_value};
+use crate::pg_helpers::{
+    GenericOptionExt, GenericOptionsSearch, PgOptionsSerialize, escape_conf_value,
+};
 
 /// Check that `line` is inside a text file and put it there if it is not.
 /// Create file if it doesn't exist.
@@ -136,6 +138,51 @@ pub fn write_postgres_conf(
         writeln!(file, "# Managed by compute_ctl: begin")?;
         write!(file, "{}", spec.cluster.settings.as_pg_settings())?;
         writeln!(file, "# Managed by compute_ctl: end")?;
+    }
+
+    // If audit logging is enabled, configure pgaudit.
+    //
+    // Note, that this is called after the settings from spec are written.
+    // This way we always override the settings from the spec
+    // and don't allow the user or the control plane admin to change them.
+    if let ComputeAudit::Hipaa = spec.audit_log_level {
+        // This log level is very verbose
+        // but this is necessary for HIPAA compliance.
+        writeln!(file, "# Managed by compute_ctl audit settings: begin")?;
+        writeln!(file, "pgaudit.log='all'")?;
+        writeln!(file, "pgaudit.log_parameter='on'")?;
+        // Set log rotation to 5 minutes
+        // TODO: tune this after performance testing
+        writeln!(file, "pgaudit.log_rotation_age=5")?;
+
+        // Add audit shared_preload_libraries, if they are not present.
+        //
+        // The caller who sets the flag is responsible for ensuring that the necessary
+        // shared_preload_libraries are present in the compute image,
+        // otherwise the compute start will fail.
+        if let Some(libs) = spec.cluster.settings.find("shared_preload_libraries") {
+            let mut extra_shared_preload_libraries = String::new();
+            if !libs.contains("pgaudit") {
+                extra_shared_preload_libraries.push_str(",pgaudit");
+            }
+            if !libs.contains("pgauditlogtofile") {
+                extra_shared_preload_libraries.push_str(",pgauditlogtofile");
+            }
+            writeln!(
+                file,
+                "shared_preload_libraries='{}{}'",
+                libs, extra_shared_preload_libraries
+            )?;
+        } else {
+            // Typically, this should be unreacheable,
+            // because we always set at least some shared_preload_libraries in the spec
+            // but let's handle it explicitly anyway.
+            writeln!(
+                file,
+                "shared_preload_libraries='neon,pgaudit,pgauditlogtofile'"
+            )?;
+        }
+        writeln!(file, "# Managed by compute_ctl audit settings: end")?;
     }
 
     writeln!(file, "neon.extension_server_port={}", extension_server_port)?;

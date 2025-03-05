@@ -12,7 +12,9 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
 use compute_api::responses::{ComputeCtlConfig, ComputeMetrics, ComputeStatus};
-use compute_api::spec::{ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PgIdent};
+use compute_api::spec::{
+    ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PgIdent,
+};
 use futures::StreamExt;
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
@@ -35,6 +37,7 @@ use crate::logger::startup_context_from_env;
 use crate::lsn_lease::launch_lsn_lease_bg_task_for_static;
 use crate::monitor::launch_monitor;
 use crate::pg_helpers::*;
+use crate::rsyslog::configure_and_start_rsyslog;
 use crate::spec::*;
 use crate::swap::resize_swap;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
@@ -1636,6 +1639,21 @@ impl ComputeNode {
             self.pg_reload_conf()?;
         }
         self.post_apply_config()?;
+
+        // Configure rsyslog for HIPAA audit logging
+        if let ComputeAudit::Hipaa = pspec.spec.audit_log_level {
+            let remote_endpoint = std::env::var("AUDIT_LOGGING_ENDPOINT").unwrap_or("".to_string());
+            if remote_endpoint.is_empty() {
+                anyhow::bail!("AUDIT_LOGGING_ENDPOINT is empty");
+            }
+
+            let log_directory_path = Path::new(&self.params.pgdata).join("log");
+            configure_and_start_rsyslog(
+                log_directory_path.to_str().unwrap(),
+                "hipaa",
+                &remote_endpoint,
+            )?;
+        }
 
         Ok(())
     }

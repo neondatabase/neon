@@ -48,7 +48,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use compute_api::requests::ConfigurationRequest;
 use compute_api::responses::{ComputeCtlConfig, ComputeStatus, ComputeStatusResponse};
 use compute_api::spec::{
-    Cluster, ComputeFeature, ComputeMode, ComputeSpec, Database, PgIdent, RemoteExtSpec, Role,
+    Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, PgIdent,
+    RemoteExtSpec, Role,
 };
 use nix::sys::signal::{Signal, kill};
 use pageserver_api::shard::ShardStripeSize;
@@ -668,6 +669,7 @@ impl Endpoint {
             local_proxy_config: None,
             reconfigure_concurrency: self.reconfigure_concurrency,
             drop_subscriptions_before_start: self.drop_subscriptions_before_start,
+            audit_log_level: ComputeAudit::Disabled,
         };
 
         // this strange code is needed to support respec() in tests
