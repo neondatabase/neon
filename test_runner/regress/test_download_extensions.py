@@ -137,6 +137,8 @@ def test_remote_extensions(
     metrics = parse_metrics(raw_metrics)
     remote_ext_requests = metrics.query_all(
         "compute_ctl_remote_ext_requests_total",
+        # Check that we properly report the filename in the metrics
+        {"filename": "anon.tar.zst"},
     )
     assert len(remote_ext_requests) == 1
     for sample in remote_ext_requests:
