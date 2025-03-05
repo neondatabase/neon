@@ -38,8 +38,10 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
     let args: &'static Args = Box::leak(Box::new(args));
 
     let mgmt_api_client = Arc::new(pageserver_client::mgmt_api::Client::new(
+        reqwest::Client::new(),
         args.mgmt_api_endpoint.clone(),
         args.pageserver_jwt.as_deref(),
+        None,
     ));
 
     // discover targets

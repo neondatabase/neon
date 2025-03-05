@@ -8,7 +8,7 @@ use pageserver_api::controller_api::{
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
-use reqwest::{Certificate, StatusCode};
+use reqwest::StatusCode;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use utils::backoff;
@@ -43,9 +43,6 @@ pub(crate) struct Node {
     // Flag from storcon's config to use https for pageserver admin API.
     // Invariant: if |true|, listen_https_port should contain a value.
     use_https: bool,
-    // Trusted root CA certificate for https requests.
-    #[serde(skip)]
-    ssl_ca_cert: Option<Certificate>,
     // This cancellation token means "stop any RPCs in flight to this node, and don't start
     // any more". It is not related to process shutdown.
     #[serde(skip)]
@@ -212,7 +209,6 @@ impl Node {
         listen_pg_port: u16,
         availability_zone_id: AvailabilityZone,
         use_https: bool,
-        ssl_ca_cert: Option<Certificate>,
     ) -> anyhow::Result<Self> {
         if use_https && listen_https_port.is_none() {
             return Err(anyhow!("https is enabled, but node has no https port"));
@@ -229,7 +225,6 @@ impl Node {
             availability: NodeAvailability::Offline,
             availability_zone_id,
             use_https,
-            ssl_ca_cert,
             cancel: CancellationToken::new(),
         })
     }
@@ -247,11 +242,7 @@ impl Node {
         }
     }
 
-    pub(crate) fn from_persistent(
-        np: NodePersistence,
-        use_https: bool,
-        ssl_ca_cert: Option<Certificate>,
-    ) -> anyhow::Result<Self> {
+    pub(crate) fn from_persistent(np: NodePersistence, use_https: bool) -> anyhow::Result<Self> {
         if use_https && np.listen_https_port.is_none() {
             return Err(anyhow!("https is enabled, but node has no https port"));
         }
@@ -269,7 +260,6 @@ impl Node {
             listen_pg_port: np.listen_pg_port as u16,
             availability_zone_id: AvailabilityZone(np.availability_zone_id),
             use_https,
-            ssl_ca_cert,
             cancel: CancellationToken::new(),
         })
     }
@@ -280,9 +270,11 @@ impl Node {
     /// This will return None to indicate cancellation.  Cancellation may happen from
     /// the cancellation token passed in, or from Self's cancellation token (i.e. node
     /// going offline).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn with_client_retries<T, O, F>(
         &self,
         mut op: O,
+        http_client: &reqwest::Client,
         jwt: &Option<String>,
         warn_threshold: u32,
         max_retries: u32,
@@ -307,19 +299,12 @@ impl Node {
 
         backoff::retry(
             || {
-                let mut http_client = reqwest::ClientBuilder::new().timeout(timeout);
-                if let Some(cert) = &self.ssl_ca_cert {
-                    http_client = http_client.add_root_certificate(cert.clone());
-                }
-                let http_client = http_client
-                    .build()
-                    .expect("Failed to construct HTTP client");
-
-                let client = PageserverClient::from_client(
+                let client = PageserverClient::new(
                     self.get_id(),
-                    http_client,
+                    http_client.clone(),
                     self.base_url(),
                     jwt.as_deref(),
+                    Some(timeout),
                 );
 
                 let node_cancel_fut = self.cancel.cancelled();

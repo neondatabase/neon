@@ -21,6 +21,7 @@ use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use postgres_backend::AuthType;
 use postgres_connection::{PgConnectionConfig, parse_host_port};
+use reqwest::Certificate;
 use utils::auth::{Claims, Scope};
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
@@ -49,12 +50,33 @@ impl PageServerNode {
         let (host, port) =
             parse_host_port(&conf.listen_pg_addr).expect("Unable to parse listen_pg_addr");
         let port = port.unwrap_or(5432);
+
+        let mut http_client = reqwest::Client::builder();
+        if let Some(ssl_ca_file) = env.ssl_ca_cert_path() {
+            let buf = std::fs::read(ssl_ca_file).expect("SSL root CA file should exist");
+            let cert = Certificate::from_pem(&buf).expect("CA certificate should be valid");
+            http_client = http_client.add_root_certificate(cert)
+        }
+        let http_client = http_client.build().expect("Client should exist");
+
+        let endpoint = if env.storage_controller.use_https_pageserver_api {
+            format!(
+                "https://{}",
+                conf.listen_https_addr.as_ref().expect(
+                    "listen https address should be specified if use_https_pageserver_api is on"
+                )
+            )
+        } else {
+            format!("http://{}", conf.listen_http_addr)
+        };
+
         Self {
             pg_connection_config: PgConnectionConfig::new_host_port(host, port),
             conf: conf.clone(),
             env: env.clone(),
             http_client: mgmt_api::Client::new(
-                format!("http://{}", conf.listen_http_addr),
+                http_client,
+                endpoint,
                 {
                     match conf.http_auth_type {
                         AuthType::Trust => None,
@@ -65,6 +87,7 @@ impl PageServerNode {
                     }
                 }
                 .as_deref(),
+                None,
             ),
         }
     }
