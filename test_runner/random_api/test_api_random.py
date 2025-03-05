@@ -5,14 +5,14 @@ Run the regression tests on the cloud instance of Neon
 from __future__ import annotations
 
 import os
+import random
+import subprocess
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
-import random
-import subprocess
-import time
-from datetime import datetime, timezone
 from fixtures.log_helper import log
 from fixtures.neon_api import NeonAPI
 from fixtures.neon_fixtures import PgBin
@@ -30,7 +30,7 @@ class NeonEndpoint:
         self.host: str = endpoint["host"]
         self.benchmark: subprocess.Popen | None = None
         self.connect_env: dict[str, str] = self.branch.connect_env
-        self.connect_env['PGHOST'] = self.host
+        self.connect_env["PGHOST"] = self.host
 
     def delete(self):
         self.project.delete_endpoint(self.id)
@@ -61,7 +61,7 @@ class NeonBranch:
         self.endpoints: dict[str, NeonEndpoint] = {}
         self.connection_parameters = branch["connection_uris"][0]["connection_parameters"]
         self.benchmark: subprocess.Popen | None = None
-        self.state_changed_at: datetime = datetime.fromisoformat(branch["branch"]["state_changed_at"])
+        self.updated_at: datetime = datetime.fromisoformat(branch["branch"]["updated_at"])
         self.connect_env = {
             "PGHOST": self.connection_parameters["host"],
             "PGUSER": self.connection_parameters["role"],
@@ -94,27 +94,40 @@ class NeonBranch:
     def terminate_benchmark(self):
         self.project.terminate_benchmark(self.id)
 
-    def restore_random_time(self):
-        min_time = self.state_changed_at
-        max_time = datetime.now(timezone.utc)
-        target_time = (min_time + (max_time-min_time)*random.random()).replace(microsecond=0)
-        self.restore(self.id, source_timestamp=target_time.isoformat().replace("+00:00", "Z"))
+    def restore_random_time(self) -> None:
+        min_time = self.updated_at
+        max_time = datetime.now(UTC)
+        target_time = (min_time + (max_time - min_time) * random.random()).replace(microsecond=0)
+        res = self.restore(
+            self.id,
+            source_timestamp=target_time.isoformat().replace("+00:00", "Z"),
+            preserve_under_name=self.project.gen_restore_name(),
+        )
+        self.updated_at: datetime = datetime.fromisoformat(res["branch"]["updated_at"])
 
     def restore(
-            self,
-            source_branch_id: str,
-            source_lsn: str | None = None,
-            source_timestamp: str | None = None,
-            preserve_under_name: str | None = None,
-    ) -> None:
+        self,
+        source_branch_id: str,
+        source_lsn: str | None = None,
+        source_timestamp: str | None = None,
+        preserve_under_name: str | None = None,
+    ) -> dict[str, Any]:
         endpoints = [ep for ep in self.endpoints.values() if ep.type == "read_only"]
         for ep in endpoints:
             ep.terminate_benchmark()
         self.terminate_benchmark()
-        self.neon_api.restore_branch(self.project_id, self.id, source_branch_id, source_lsn, source_timestamp, preserve_under_name)
+        res = self.neon_api.restore_branch(
+            self.project_id,
+            self.id,
+            source_branch_id,
+            source_lsn,
+            source_timestamp,
+            preserve_under_name,
+        )
         self.start_benchmark()
         for ep in endpoints:
             ep.start_benchmark()
+        return res
 
 
 class NeonProject:
@@ -140,6 +153,7 @@ class NeonProject:
             NeonEndpoint(self, endpoint)
         self.neon_api.wait_for_operation_to_finish(self.id)
         self.benchmarks: dict[str, subprocess.Popen] = {}
+        self.restore_num: int = 0
 
     def delete(self):
         self.neon_api.delete_project(self.id)
@@ -168,7 +182,9 @@ class NeonProject:
             raise RuntimeError(f"The branch {branch_id}, probably, has ancestors")
         if branch_id not in self.branches:
             raise RuntimeError(f"The branch with id {branch_id} is not found")
-        endpoints_to_delete = [ep for ep in self.branches[branch_id].endpoints.values() if ep.type == "read_only"]
+        endpoints_to_delete = [
+            ep for ep in self.branches[branch_id].endpoints.values() if ep.type == "read_only"
+        ]
         for ep in endpoints_to_delete:
             ep.delete()
         self.neon_api.delete_branch(self.id, branch_id)
@@ -229,6 +245,10 @@ class NeonProject:
 
     def wait(self):
         return self.neon_api.wait_for_operation_to_finish(self.id)
+
+    def gen_restore_name(self):
+        self.restore_num += 1
+        return f"restore{self.restore_num}"
 
 
 @pytest.fixture()
