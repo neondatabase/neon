@@ -30,7 +30,7 @@ pub(crate) struct RelDirectory {
 }
 ```
 
-The current codebase has the following two access patterns for the relation directory.
+The current codebase has the following three access patterns for the relation directory.
 
 1. Check if a relation exists.
 2. List all relations.
