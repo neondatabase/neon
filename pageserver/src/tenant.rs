@@ -1149,7 +1149,7 @@ impl Tenant {
         // a previous heatmap which contains all visible layers in the layer map.
         // This previous heatmap will be used whenever a fresh heatmap is generated
         // for the timeline.
-        if matches!(cause, LoadTimelineCause::Unoffload) {
+        if self.conf.generate_unarchival_heatmap && matches!(cause, LoadTimelineCause::Unoffload) {
             let mut tline_ending_at = Some((&timeline, timeline.get_last_record_lsn()));
             while let Some((tline, end_lsn)) = tline_ending_at {
                 let unarchival_heatmap = tline.generate_unarchival_heatmap(end_lsn).await;
@@ -1578,6 +1578,10 @@ impl Tenant {
     }
 
     async fn read_on_disk_heatmap(&self) -> Option<(HeatMapTenant, std::time::Instant)> {
+        if !self.conf.load_previous_heatmap {
+            return None;
+        }
+
         let on_disk_heatmap_path = self.conf.tenant_heatmap_path(&self.tenant_shard_id);
         match tokio::fs::read_to_string(on_disk_heatmap_path).await {
             Ok(heatmap) => match serde_json::from_str::<HeatMapTenant>(&heatmap) {
