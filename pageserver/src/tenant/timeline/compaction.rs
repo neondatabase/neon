@@ -2598,7 +2598,6 @@ impl Timeline {
         let gc_lock = async {
             tokio::select! {
                 guard = self.gc_lock.lock() => Ok(guard),
-                // TODO: refactor to CompactionError to correctly pass cancelled error
                 _ = cancel.cancelled() => Err(CompactionError::ShuttingDown),
             }
         };
@@ -2608,7 +2607,7 @@ impl Timeline {
             "acquires gc lock",
             std::time::Duration::from_secs(5),
         )
-        .await;
+        .await?;
 
         let dry_run = job.dry_run;
         let compact_key_range = job.compact_key_range;
