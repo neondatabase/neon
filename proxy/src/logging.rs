@@ -286,17 +286,16 @@ where
 
     /// Registers a SpanFields instance as span extension.
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
-        let csid = self.callsite_id(attrs.metadata().callsite());
         let span = ctx.span(id).expect("span must exist");
         let fields = SpanFields::default();
         fields.record_fields(attrs);
+
         // This could deadlock when there's a panic somewhere in the tracing
         // event handling and a read or write guard is still held. This includes
         // the OTel subscriber.
         let mut exts = span.extensions_mut();
 
         exts.insert(fields);
-        exts.insert(csid);
     }
 
     fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>) {
@@ -565,6 +564,13 @@ impl EventFormatter {
                 )?;
             }
 
+            let spans = SerializableSpans {
+                ctx,
+                callsite_ids,
+                extract: ExtractedSpanFields::<'_, F>::new(extract_fields),
+            };
+            serializer.serialize_entry("spans", &spans)?;
+
             // TODO: thread-local cache?
             let pid = std::process::id();
             // Skip adding pid 1 to reduce noise for services running in containers.
@@ -614,15 +620,9 @@ impl EventFormatter {
                 }
             }
 
-            let stack = SerializableSpans {
-                ctx,
-                callsite_ids,
-                fields: ExtractedSpanFields::<'_, F>::new(extract_fields),
-            };
-            serializer.serialize_entry("spans", &stack)?;
-
-            if stack.fields.has_values() {
-                serializer.serialize_entry("extract", &stack.fields)?;
+            if spans.extract.has_values() {
+                // TODO: add fields from event, too?
+                serializer.serialize_entry("extract", &spans.extract)?;
             }
 
             serializer.end()
@@ -911,7 +911,7 @@ where
 {
     ctx: &'a Context<'ctx, Span>,
     callsite_ids: &'a papaya::HashMap<callsite::Identifier, CallsiteId>,
-    fields: ExtractedSpanFields<'a, F>,
+    extract: ExtractedSpanFields<'a, F>,
 }
 
 impl<Span, const F: usize> serde::ser::Serialize for SerializableSpans<'_, '_, Span, F>
@@ -940,7 +940,7 @@ where
 
                 serializer.serialize_value(&SerializableSpanFields {
                     span: &span,
-                    fields: &self.fields,
+                    extract: &self.extract,
                 })?;
             }
         }
@@ -955,7 +955,7 @@ where
     Span: for<'lookup> LookupSpan<'lookup>,
 {
     span: &'a SpanRef<'span, Span>,
-    fields: &'a ExtractedSpanFields<'a, F>,
+    extract: &'a ExtractedSpanFields<'a, F>,
 }
 
 impl<Span, const F: usize> serde::ser::Serialize for SerializableSpanFields<'_, '_, Span, F>
@@ -973,7 +973,7 @@ where
             for (name, value) in &data.fields.pin() {
                 serializer.serialize_entry(name, value)?;
                 // TODO: replace clone with reference, if possible.
-                self.fields.set(name, value.clone());
+                self.extract.set(name, value.clone());
             }
         }
 
