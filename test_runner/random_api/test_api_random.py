@@ -189,7 +189,7 @@ class NeonProject:
         for ep in endpoints_to_delete:
             ep.delete()
         self.neon_api.delete_branch(self.id, branch_id)
-        if len(parent.children) == 1:
+        if len(parent.children) == 1 and parent.id != self.main_branch.id:
             self.leaf_branches[parent.id] = parent
         parent.children.pop(branch_id)
         self.leaf_branches.pop(branch_id)
