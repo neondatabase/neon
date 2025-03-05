@@ -22,6 +22,7 @@ def test_lfc_working_set_approximation(neon_simple_env: NeonEnv):
         config_lines=[
             "neon.max_file_cache_size='128MB'",
             "neon.file_cache_size_limit='64MB'",
+            "neon.store_prefetch_result_in_lfc=on"
         ],
     )
 

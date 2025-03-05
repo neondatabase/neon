@@ -1010,6 +1010,9 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 
 	entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_ENTER, &found);
 
+	tag.blockNum = blkno;
+	addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
+
 	if (found)
 	{
 		state = GET_STATE(entry, chunk_offs);
