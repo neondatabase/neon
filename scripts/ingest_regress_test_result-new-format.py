@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS results (
     arch         arch DEFAULT 'X64',
     lfc          BOOLEAN DEFAULT false NOT NULL,
     sanitizers   BOOLEAN DEFAULT false NOT NULL,
+    special_kind TEXT DEFAULT '' NOT NULL,
     build_type   TEXT NOT NULL,
     pg_version   INT NOT NULL,
     run_id       BIGINT NOT NULL,
@@ -40,7 +41,7 @@ CREATE TABLE IF NOT EXISTS results (
     reference    TEXT NOT NULL,
     revision     CHAR(40) NOT NULL,
     raw          JSONB COMPRESSION lz4 NOT NULL,
-    UNIQUE (parent_suite, suite, name, arch, lfc, sanitizers, build_type, pg_version, started_at, stopped_at, run_id)
+    UNIQUE (parent_suite, suite, name, arch, lfc, sanitizers, special_kind, build_type, pg_version, started_at, stopped_at, run_id)
 );
 """
 
@@ -58,6 +59,7 @@ class Row:
     arch: str
     lfc: bool
     sanitizers: bool
+    special_kind: str
     build_type: str
     pg_version: int
     run_id: int
@@ -138,6 +140,7 @@ def ingest_test_result(
         arch = parameters.get("arch", "UNKNOWN").strip("'")
         lfc = parameters.get("lfc", "without-lfc").strip("'") == "with-lfc"
         sanitizers = parameters.get("sanitizers", "disabled").strip("'") == "enabled"
+        special_kind = parameters.get("special_kind", "").strip("'")
 
         build_type, pg_version, unparametrized_name = parse_test_name(test["name"])
         labels = {label["name"]: label["value"] for label in test["labels"]}
@@ -153,6 +156,7 @@ def ingest_test_result(
             arch=arch,
             lfc=lfc,
             sanitizers=sanitizers,
+            special_kind=special_kind,
             build_type=build_type,
             pg_version=pg_version,
             run_id=run_id,
