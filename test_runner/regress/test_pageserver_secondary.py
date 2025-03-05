@@ -955,6 +955,17 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
 
         raise RuntimeError(f"No heatmap for timeline: {tlid}")
 
+    def count_timeline_heatmap_layers(tlid) -> (int, int):
+        cold, hot = 0, 0
+        layers = timeline_heatmap(tlid)["layers"]
+        for layer in layers:
+            if layer["cold"]:
+                cold += 1
+            else:
+                hot += 1
+
+        return cold, hot
+
     env.storage_controller.allowed_errors.extend(
         [
             ".*Timed out.*downloading layers.*",
@@ -988,13 +999,19 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
         TenantShardId(tenant_id, shard_number=0, shard_count=0), timeline_id
     )
 
-    def all_layers_downloaded(expected_layer_count: int):
-        local_layers_count = len(ps_secondary.list_layers(tenant_id, timeline_id))
+    def all_layers_downloaded(node, expected_layer_count: int):
+        local_layers_count = len(node.list_layers(tenant_id, timeline_id))
 
         log.info(f"{local_layers_count=} {after_migration_heatmap_layers_count=}")
         assert local_layers_count >= expected_layer_count
 
-    wait_until(lambda: all_layers_downloaded(after_migration_heatmap_layers_count))
+    def no_layers_downloaded(node):
+        local_layers_count = len(node.list_layers(tenant_id, timeline_id))
+
+        log.info(f"{local_layers_count=} {after_migration_heatmap_layers_count=}")
+        assert local_layers_count == 0
+
+    wait_until(lambda: all_layers_downloaded(ps_secondary, after_migration_heatmap_layers_count))
 
     # Read everything and make sure that we're not downloading anything extra.
     # All hot layers should be available locally now.
@@ -1047,13 +1064,35 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
     wait_until(lambda: check_archival_state(TimelineArchivalState.UNARCHIVED, child_timeline_id))
 
     ps_secondary.http_client().tenant_heatmap_upload(tenant_id)
-    log.info(f"Parent timeline heatmap size: {len(timeline_heatmap(timeline_id)['layers'])}")
-    log.info(f"Child timeline heatmap size: {len(timeline_heatmap(child_timeline_id)['layers'])}")
 
-    expected_locally = len(timeline_heatmap(timeline_id)["layers"])
-    assert expected_locally > 0
+    parent_cold, parent_hot = count_timeline_heatmap_layers(timeline_id)
+    child_cold, child_hot = count_timeline_heatmap_layers(child_timeline_id)
+
+    log.info(f"Parent timeline heatmap size: cold={parent_cold}, hot={parent_hot}")
+    log.info(f"Child timeline heatmap size: cold={child_cold}, hot={child_hot}")
+
+    # All layers in the heatmap should come from the generation on unarchival.
+    # Hence, they should be cold.
+    assert parent_cold > 0
+    assert parent_hot == 0
+
+    expected_locally = parent_cold
 
     env.storage_controller.download_heatmap_layers(
         TenantShardId(tenant_id, shard_number=0, shard_count=0), child_timeline_id, recurse=True
     )
-    wait_until(lambda: all_layers_downloaded(expected_locally))
+    wait_until(lambda: all_layers_downloaded(ps_secondary, expected_locally))
+
+    for ps in env.pageservers:
+        ps.http_client().configure_failpoints([("secondary-layer-download-sleep", "off")])
+
+    # The uploaded heatmap is still empty. Clean up all layers on the secondary.
+    ps_attached.http_client().tenant_secondary_download(tenant_id, wait_ms=100)
+    wait_until(lambda: no_layers_downloaded(ps_attached))
+
+    # Upload a new heatmap. The previously cold layers become hot since they're now resident.
+    ps_secondary.http_client().tenant_heatmap_upload(tenant_id)
+
+    # Warm up the current secondary.
+    ps_attached.http_client().tenant_secondary_download(tenant_id, wait_ms=100)
+    wait_until(lambda: all_layers_downloaded(ps_secondary, expected_locally))

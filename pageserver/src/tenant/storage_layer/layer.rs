@@ -1563,9 +1563,9 @@ impl LayerInner {
 
         self.access_stats.record_residence_event();
 
-        self.status.as_ref().unwrap().send_replace(Status::Evicted);
-
         *self.last_evicted_at.lock().unwrap() = Some(std::time::Instant::now());
+
+        self.status.as_ref().unwrap().send_replace(Status::Evicted);
 
         Ok(())
     }

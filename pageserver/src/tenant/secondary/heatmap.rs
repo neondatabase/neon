@@ -42,7 +42,7 @@ pub(crate) struct HeatMapTimeline {
     #[serde_as(as = "DisplayFromStr")]
     pub(crate) timeline_id: TimelineId,
 
-    pub(crate) layers: Vec<HeatMapLayer>,
+    layers: Vec<HeatMapLayer>,
 }
 
 #[serde_as]
@@ -53,8 +53,10 @@ pub(crate) struct HeatMapLayer {
 
     #[serde_as(as = "TimestampSeconds<i64>")]
     pub(crate) access_time: SystemTime,
-    // TODO: an actual 'heat' score that would let secondary locations prioritize downloading
-    // the hottest layers, rather than trying to simply mirror whatever layers are on-disk on the primary.
+
+    #[serde(default)]
+    pub(crate) cold: bool, // TODO: an actual 'heat' score that would let secondary locations prioritize downloading
+                           // the hottest layers, rather than trying to simply mirror whatever layers are on-disk on the primary.
 }
 
 impl HeatMapLayer {
@@ -62,11 +64,13 @@ impl HeatMapLayer {
         name: LayerName,
         metadata: LayerFileMetadata,
         access_time: SystemTime,
+        cold: bool,
     ) -> Self {
         Self {
             name,
             metadata,
             access_time,
+            cold,
         }
     }
 }
@@ -77,6 +81,18 @@ impl HeatMapTimeline {
             timeline_id,
             layers,
         }
+    }
+
+    pub(crate) fn into_hot_layers(self) -> impl Iterator<Item = HeatMapLayer> {
+        self.layers.into_iter().filter(|l| !l.cold)
+    }
+
+    pub(crate) fn hot_layers(&self) -> impl Iterator<Item = &HeatMapLayer> {
+        self.layers.iter().filter(|l| !l.cold)
+    }
+
+    pub(crate) fn all_layers(&self) -> impl Iterator<Item = &HeatMapLayer> {
+        self.layers.iter()
     }
 }
 
@@ -92,7 +108,7 @@ impl HeatMapTenant {
             layers: 0,
         };
         for timeline in &self.timelines {
-            for layer in &timeline.layers {
+            for layer in timeline.hot_layers() {
                 stats.layers += 1;
                 stats.bytes += layer.metadata.file_size;
             }
