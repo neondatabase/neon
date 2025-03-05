@@ -196,6 +196,7 @@ class NeonProject:
         for ep in endpoints_to_delete:
             ep.delete()
         if branch_id not in self.reset_branches:
+            log.info("Benchmarks: %s", self.benchmarks)
             self.terminate_benchmark(branch_id)
         self.neon_api.delete_branch(self.id, branch_id)
         if len(parent.children) == 1 and parent.id != self.main_branch.id:
@@ -318,6 +319,8 @@ def test_api_random(
         seed = int(seed_env)
     else:
         seed = int(time.time())
+    # XXX: for debug only, please remove
+    seed = 1741191401
     log.info("Using random seed: %s", seed)
     random.seed(seed)
     pg_bin, project = setup_class
