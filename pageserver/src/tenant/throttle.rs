@@ -1,10 +1,6 @@
-use std::{
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
-    time::Instant,
-};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use arc_swap::ArcSwap;
 use utils::leaky_bucket::{LeakyBucketConfig, RateLimiter};

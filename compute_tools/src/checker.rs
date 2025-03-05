@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Ok, Result};
+use anyhow::{Ok, Result, anyhow};
 use tokio_postgres::NoTls;
 use tracing::{error, instrument, warn};
 

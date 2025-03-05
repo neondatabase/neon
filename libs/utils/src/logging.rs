@@ -7,7 +7,7 @@ use metrics::{IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
 use strum_macros::{EnumString, VariantNames};
 use tokio::time::Instant;
-use tracing::warn;
+use tracing::info;
 
 /// Logs a critical error, similarly to `tracing::error!`. This will:
 ///
@@ -273,7 +273,9 @@ fn log_panic_to_stderr(
     location: Option<PrettyLocation<'_, '_>>,
     backtrace: &std::backtrace::Backtrace,
 ) {
-    eprintln!("panic while tracing is unconfigured: thread '{thread}' panicked at '{msg}', {location:?}\nStack backtrace:\n{backtrace}");
+    eprintln!(
+        "panic while tracing is unconfigured: thread '{thread}' panicked at '{msg}', {location:?}\nStack backtrace:\n{backtrace}"
+    );
 }
 
 struct PrettyLocation<'a, 'b>(&'a std::panic::Location<'b>);
@@ -322,11 +324,13 @@ impl std::fmt::Debug for SecretString {
     }
 }
 
-/// Logs a periodic warning if a future is slow to complete.
+/// Logs a periodic message if a future is slow to complete.
 ///
 /// This is performance-sensitive as it's used on the GetPage read path.
+///
+/// TODO: consider upgrading this to a warning, but currently it fires too often.
 #[inline]
-pub async fn warn_slow<O>(name: &str, threshold: Duration, f: impl Future<Output = O>) -> O {
+pub async fn log_slow<O>(name: &str, threshold: Duration, f: impl Future<Output = O>) -> O {
     // TODO: we unfortunately have to pin the future on the heap, since GetPage futures are huge and
     // won't fit on the stack.
     let mut f = Box::pin(f);
@@ -345,13 +349,13 @@ pub async fn warn_slow<O>(name: &str, threshold: Duration, f: impl Future<Output
             // false negatives.
             let elapsed = started.elapsed();
             if elapsed >= threshold {
-                warn!("slow {name} completed after {:.3}s", elapsed.as_secs_f64());
+                info!("slow {name} completed after {:.3}s", elapsed.as_secs_f64());
             }
             return output;
         }
 
         let elapsed = started.elapsed().as_secs_f64();
-        warn!("slow {name} still running after {elapsed:.3}s",);
+        info!("slow {name} still running after {elapsed:.3}s",);
 
         attempt += 1;
     }
@@ -359,7 +363,8 @@ pub async fn warn_slow<O>(name: &str, threshold: Duration, f: impl Future<Output
 
 #[cfg(test)]
 mod tests {
-    use metrics::{core::Opts, IntCounterVec};
+    use metrics::IntCounterVec;
+    use metrics::core::Opts;
 
     use crate::logging::{TracingEventCountLayer, TracingEventCountMetric};
 

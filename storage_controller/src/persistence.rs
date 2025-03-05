@@ -2,45 +2,40 @@ pub(crate) mod split_state;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use self::split_state::SplitState;
+use diesel::deserialize::{FromSql, FromSqlRow};
+use diesel::pg::Pg;
 use diesel::prelude::*;
 use diesel_async::async_connection_wrapper::AsyncConnectionWrapper;
 use diesel_async::pooled_connection::bb8::Pool;
-use diesel_async::pooled_connection::AsyncDieselConnectionManager;
-use diesel_async::pooled_connection::ManagerConfig;
-use diesel_async::AsyncPgConnection;
-use diesel_async::RunQueryDsl;
-use futures::future::BoxFuture;
+use diesel_async::pooled_connection::{AsyncDieselConnectionManager, ManagerConfig};
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_migrations::{EmbeddedMigrations, embed_migrations};
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use itertools::Itertools;
-use pageserver_api::controller_api::AvailabilityZone;
-use pageserver_api::controller_api::MetadataHealthRecord;
-use pageserver_api::controller_api::SafekeeperDescribeResponse;
-use pageserver_api::controller_api::ShardSchedulingPolicy;
-use pageserver_api::controller_api::SkSchedulingPolicy;
-use pageserver_api::controller_api::{NodeSchedulingPolicy, PlacementPolicy};
+use pageserver_api::controller_api::{
+    AvailabilityZone, MetadataHealthRecord, NodeSchedulingPolicy, PlacementPolicy,
+    SafekeeperDescribeResponse, ShardSchedulingPolicy, SkSchedulingPolicy,
+};
 use pageserver_api::models::TenantConfig;
-use pageserver_api::shard::ShardConfigError;
-use pageserver_api::shard::ShardIdentity;
-use pageserver_api::shard::ShardStripeSize;
-use pageserver_api::shard::{ShardCount, ShardNumber, TenantShardId};
-use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
+use pageserver_api::shard::{
+    ShardConfigError, ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId,
+};
 use rustls::client::WebPkiServerVerifier;
+use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::ring;
 use scoped_futures::ScopedBoxFuture;
 use serde::{Deserialize, Serialize};
 use utils::generation::Generation;
 use utils::id::{NodeId, TenantId};
 
+use self::split_state::SplitState;
 use crate::metrics::{
     DatabaseQueryErrorLabelGroup, DatabaseQueryLatencyLabelGroup, METRICS_REGISTRY,
 };
 use crate::node::Node;
-
-use diesel_migrations::{embed_migrations, EmbeddedMigrations};
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations");
 
 /// ## What do we store?
@@ -479,8 +474,7 @@ impl Persistence {
         &self,
         shards: Vec<TenantShardPersistence>,
     ) -> DatabaseResult<()> {
-        use crate::schema::metadata_health;
-        use crate::schema::tenant_shards;
+        use crate::schema::{metadata_health, tenant_shards};
 
         let now = chrono::Utc::now();
 
@@ -554,8 +548,7 @@ impl Persistence {
         &self,
         input_node_id: NodeId,
     ) -> DatabaseResult<HashMap<TenantShardId, Generation>> {
-        use crate::schema::nodes::dsl::scheduling_policy;
-        use crate::schema::nodes::dsl::*;
+        use crate::schema::nodes::dsl::{scheduling_policy, *};
         use crate::schema::tenant_shards::dsl::*;
         let updated = self
             .with_measured_conn(DatabaseOperation::ReAttach, move |conn| {
@@ -1565,7 +1558,33 @@ pub(crate) struct SafekeeperPersistence {
     pub(crate) port: i32,
     pub(crate) http_port: i32,
     pub(crate) availability_zone_id: String,
-    pub(crate) scheduling_policy: String,
+    pub(crate) scheduling_policy: SkSchedulingPolicyFromSql,
+}
+
+/// Wrapper struct around [`SkSchedulingPolicy`] because both it and [`FromSql`] are from foreign crates,
+/// and we don't want to make [`safekeeper_api`] depend on [`diesel`].
+#[derive(Serialize, Deserialize, FromSqlRow, Eq, PartialEq, Debug, Copy, Clone)]
+pub(crate) struct SkSchedulingPolicyFromSql(pub(crate) SkSchedulingPolicy);
+
+impl From<SkSchedulingPolicy> for SkSchedulingPolicyFromSql {
+    fn from(value: SkSchedulingPolicy) -> Self {
+        SkSchedulingPolicyFromSql(value)
+    }
+}
+
+impl FromSql<diesel::sql_types::VarChar, Pg> for SkSchedulingPolicyFromSql {
+    fn from_sql(
+        bytes: <Pg as diesel::backend::Backend>::RawValue<'_>,
+    ) -> diesel::deserialize::Result<Self> {
+        let bytes = bytes.as_bytes();
+        match core::str::from_utf8(bytes) {
+            Ok(s) => match SkSchedulingPolicy::from_str(s) {
+                Ok(policy) => Ok(SkSchedulingPolicyFromSql(policy)),
+                Err(e) => Err(format!("can't parse: {e}").into()),
+            },
+            Err(e) => Err(format!("invalid UTF-8 for scheduling policy: {e}").into()),
+        }
+    }
 }
 
 impl SafekeeperPersistence {
@@ -1581,14 +1600,10 @@ impl SafekeeperPersistence {
             port: upsert.port,
             http_port: upsert.http_port,
             availability_zone_id: upsert.availability_zone_id,
-            scheduling_policy: String::from(scheduling_policy),
+            scheduling_policy: SkSchedulingPolicyFromSql(scheduling_policy),
         }
     }
     pub(crate) fn as_describe_response(&self) -> Result<SafekeeperDescribeResponse, DatabaseError> {
-        let scheduling_policy =
-            SkSchedulingPolicy::from_str(&self.scheduling_policy).map_err(|e| {
-                DatabaseError::Logical(format!("can't construct SkSchedulingPolicy: {e:?}"))
-            })?;
         Ok(SafekeeperDescribeResponse {
             id: NodeId(self.id as u64),
             region_id: self.region_id.clone(),
@@ -1597,7 +1612,7 @@ impl SafekeeperPersistence {
             port: self.port,
             http_port: self.http_port,
             availability_zone_id: self.availability_zone_id.clone(),
-            scheduling_policy,
+            scheduling_policy: self.scheduling_policy.0,
         })
     }
 }

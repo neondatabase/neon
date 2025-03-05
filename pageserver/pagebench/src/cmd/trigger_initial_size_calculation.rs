@@ -2,10 +2,9 @@ use std::sync::Arc;
 
 use humantime::Duration;
 use pageserver_api::shard::TenantShardId;
+use pageserver_client::mgmt_api::ForceAwaitLogicalSize;
 use tokio::task::JoinSet;
 use utils::id::TenantTimelineId;
-
-use pageserver_client::mgmt_api::ForceAwaitLogicalSize;
 
 #[derive(clap::Parser)]
 pub(crate) struct Args {

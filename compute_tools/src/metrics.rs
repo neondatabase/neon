@@ -1,6 +1,6 @@
 use metrics::core::Collector;
 use metrics::proto::MetricFamily;
-use metrics::{register_int_counter_vec, register_uint_gauge_vec, IntCounterVec, UIntGaugeVec};
+use metrics::{IntCounterVec, UIntGaugeVec, register_int_counter_vec, register_uint_gauge_vec};
 use once_cell::sync::Lazy;
 
 pub(crate) static INSTALLED_EXTENSIONS: Lazy<UIntGaugeVec> = Lazy::new(|| {

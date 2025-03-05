@@ -438,6 +438,14 @@ async fn request_handler(
             &config.region,
         );
 
+        ctx.set_user_agent(
+            request
+                .headers()
+                .get(hyper::header::USER_AGENT)
+                .and_then(|h| h.to_str().ok())
+                .map(Into::into),
+        );
+
         let span = ctx.span();
         info!(parent: &span, "performing websocket upgrade");
 

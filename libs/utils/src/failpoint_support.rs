@@ -127,6 +127,9 @@ pub async fn failpoint_sleep_cancellable_helper(
     tracing::info!("failpoint {:?}: sleep done", name);
 }
 
+/// Initialize the configured failpoints
+///
+/// You must call this function before any concurrent threads do operations.
 pub fn init() -> fail::FailScenario<'static> {
     // The failpoints lib provides support for parsing the `FAILPOINTS` env var.
     // We want non-default behavior for `exit`, though, so, we handle it separately.
@@ -134,7 +137,10 @@ pub fn init() -> fail::FailScenario<'static> {
     // Format for FAILPOINTS is "name=actions" separated by ";".
     let actions = std::env::var("FAILPOINTS");
     if actions.is_ok() {
-        std::env::remove_var("FAILPOINTS");
+        // SAFETY: this function should before any threads start and access env vars concurrently
+        unsafe {
+            std::env::remove_var("FAILPOINTS");
+        }
     } else {
         // let the library handle non-utf8, or nothing for not present
     }

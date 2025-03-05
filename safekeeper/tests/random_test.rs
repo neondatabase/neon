@@ -1,11 +1,9 @@
 use rand::Rng;
 use tracing::{info, warn};
 
-use crate::walproposer_sim::{
-    log::{init_logger, init_tracing_logger},
-    simulation::{generate_network_opts, generate_schedule, TestConfig},
-    simulation_logs::validate_events,
-};
+use crate::walproposer_sim::log::{init_logger, init_tracing_logger};
+use crate::walproposer_sim::simulation::{TestConfig, generate_network_opts, generate_schedule};
+use crate::walproposer_sim::simulation_logs::validate_events;
 
 pub mod walproposer_sim;
 
@@ -18,7 +16,7 @@ fn test_random_schedules() -> anyhow::Result<()> {
     let mut config = TestConfig::new(Some(clock));
 
     for _ in 0..500 {
-        let seed: u64 = rand::thread_rng().gen();
+        let seed: u64 = rand::thread_rng().r#gen();
         config.network = generate_network_opts(seed);
 
         let test = config.start(seed);

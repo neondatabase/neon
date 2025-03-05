@@ -121,9 +121,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::io;
+
     use tokio::sync::Mutex;
+
+    use super::*;
 
     #[test]
     fn backoff_defaults_produce_growing_backoff_sequence() {

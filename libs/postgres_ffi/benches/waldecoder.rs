@@ -1,6 +1,6 @@
 use std::ffi::CStr;
 
-use criterion::{criterion_group, criterion_main, Bencher, Criterion};
+use criterion::{Bencher, Criterion, criterion_group, criterion_main};
 use postgres_ffi::v17::wal_generator::LogicalMessageGenerator;
 use postgres_ffi::v17::waldecoder_handler::WalStreamDecoderHandler;
 use postgres_ffi::waldecoder::WalStreamDecoder;

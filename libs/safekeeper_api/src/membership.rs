@@ -2,7 +2,8 @@
 //! rfcs/035-safekeeper-dynamic-membership-change.md
 //! for details.
 
-use std::{collections::HashSet, fmt::Display};
+use std::collections::HashSet;
+use std::fmt::Display;
 
 use anyhow;
 use anyhow::bail;
@@ -68,14 +69,12 @@ impl Display for SafekeeperId {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(transparent)]
 pub struct MemberSet {
-    pub members: Vec<SafekeeperId>,
+    pub m: Vec<SafekeeperId>,
 }
 
 impl MemberSet {
     pub fn empty() -> Self {
-        MemberSet {
-            members: Vec::new(),
-        }
+        MemberSet { m: Vec::new() }
     }
 
     pub fn new(members: Vec<SafekeeperId>) -> anyhow::Result<Self> {
@@ -83,21 +82,21 @@ impl MemberSet {
         if hs.len() != members.len() {
             bail!("duplicate safekeeper id in the set {:?}", members);
         }
-        Ok(MemberSet { members })
+        Ok(MemberSet { m: members })
     }
 
-    pub fn contains(&self, sk: &SafekeeperId) -> bool {
-        self.members.iter().any(|m| m.id == sk.id)
+    pub fn contains(&self, sk: NodeId) -> bool {
+        self.m.iter().any(|m| m.id == sk)
     }
 
     pub fn add(&mut self, sk: SafekeeperId) -> anyhow::Result<()> {
-        if self.contains(&sk) {
+        if self.contains(sk.id) {
             bail!(format!(
                 "sk {} is already member of the set {}",
                 sk.id, self
             ));
         }
-        self.members.push(sk);
+        self.m.push(sk);
         Ok(())
     }
 }
@@ -105,11 +104,7 @@ impl MemberSet {
 impl Display for MemberSet {
     /// Display as a comma separated list of members.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let sks_str = self
-            .members
-            .iter()
-            .map(|m| m.to_string())
-            .collect::<Vec<_>>();
+        let sks_str = self.m.iter().map(|sk| sk.to_string()).collect::<Vec<_>>();
         write!(f, "({})", sks_str.join(", "))
     }
 }
@@ -135,6 +130,11 @@ impl Configuration {
             new_members: None,
         }
     }
+
+    /// Is `sk_id` member of the configuration?
+    pub fn contains(&self, sk_id: NodeId) -> bool {
+        self.members.contains(sk_id) || self.new_members.as_ref().is_some_and(|m| m.contains(sk_id))
+    }
 }
 
 impl Display for Configuration {
@@ -154,8 +154,9 @@ impl Display for Configuration {
 
 #[cfg(test)]
 mod tests {
-    use super::{MemberSet, SafekeeperId};
     use utils::id::NodeId;
+
+    use super::{MemberSet, SafekeeperId};
 
     #[test]
     fn test_member_set() {

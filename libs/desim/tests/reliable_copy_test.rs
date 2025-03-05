@@ -1,14 +1,15 @@
 //! Simple test to verify that simulator is working.
 #[cfg(test)]
 mod reliable_copy_test {
+    use std::sync::Arc;
+
     use anyhow::Result;
     use desim::executor::{self, PollSome};
+    use desim::node_os::NodeOs;
     use desim::options::{Delay, NetworkOptions};
-    use desim::proto::{NetEvent, NodeEvent, ReplCell};
+    use desim::proto::{AnyMessage, NetEvent, NodeEvent, ReplCell};
     use desim::world::{NodeId, World};
-    use desim::{node_os::NodeOs, proto::AnyMessage};
     use parking_lot::Mutex;
-    use std::sync::Arc;
     use tracing::info;
 
     /// Disk storage trait and implementation.

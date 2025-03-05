@@ -5,12 +5,11 @@
 //! and connect it to the storage nodes.
 use std::collections::HashMap;
 
+use regex::Regex;
+use remote_storage::RemotePath;
 use serde::{Deserialize, Serialize};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
-
-use regex::Regex;
-use remote_storage::RemotePath;
 
 /// String type alias representing Postgres identifier and
 /// intended to be used for DB / role names.
@@ -339,8 +338,9 @@ pub struct JwksSettings {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs::File;
+
+    use super::*;
 
     #[test]
     fn allow_installing_remote_extensions() {
