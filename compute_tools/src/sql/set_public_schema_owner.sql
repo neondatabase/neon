@@ -1,5 +1,4 @@
-DO
-$$
+DO ${outer_tag}$
     DECLARE
         schema_owner TEXT;
     BEGIN
@@ -16,8 +15,8 @@ $$
 
             IF schema_owner = 'cloud_admin' OR schema_owner = 'zenith_admin'
             THEN
-                ALTER SCHEMA public OWNER TO {db_owner};
+                EXECUTE format('ALTER SCHEMA public OWNER TO %I', {db_owner});
             END IF;
         END IF;
     END
-$$;
+${outer_tag}$;
