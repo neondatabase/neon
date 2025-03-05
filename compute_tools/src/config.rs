@@ -1,4 +1,5 @@
 use anyhow::Result;
+use base64::write;
 use std::fmt::Write as FmtWrite;
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -146,11 +147,14 @@ pub fn write_postgres_conf(
     // This way we always override the settings from the spec
     // and don't allow the user or the control plane admin to change them.
     if let ComputeAudit::Hipaa = spec.audit_log_level {
+        writeln!(file, "# Managed by compute_ctl audit settings: begin")?;
         // This log level is very verbose
         // but this is necessary for HIPAA compliance.
-        writeln!(file, "# Managed by compute_ctl audit settings: begin")?;
         writeln!(file, "pgaudit.log='all'")?;
-        writeln!(file, "pgaudit.log_parameter='on'")?;
+        writeln!(file, "pgaudit.log_parameter=on")?;
+        // Disable logging of catalog queries
+        // The catalog doesn't contain sensitive data, so we don't need to audit it.
+        writeln!(file, "pgaudit.log_catalog=off")?;
         // Set log rotation to 5 minutes
         // TODO: tune this after performance testing
         writeln!(file, "pgaudit.log_rotation_age=5")?;
