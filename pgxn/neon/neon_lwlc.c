@@ -132,9 +132,6 @@ void shmeminit(void) {
 	static HASHCTL info;
 	if (lastWrittenLsnCacheSize > 0)
 	{
-		if (prev_shmem_startup_hook) {
-			prev_shmem_startup_hook();
-		}
 		info.keysize = sizeof(BufferTag);
 		info.entrysize = sizeof(LastWrittenLsnCacheEntry);
 		lastWrittenLsnCache = ShmemInitHash("last_written_lsn_cache",
