@@ -1,14 +1,16 @@
 import itertools
 import json
 import os
+import sys
 
-build_tag = os.environ["BUILD_TAG"]
-branch = os.environ["BRANCH"]
-dev_acr = os.environ["DEV_ACR"]
-prod_acr = os.environ["PROD_ACR"]
-dev_aws = os.environ["DEV_AWS"]
-prod_aws = os.environ["PROD_AWS"]
-aws_region = os.environ["AWS_REGION"]
+source_tag = os.getenv("SOURCE_TAG")
+target_tag = os.getenv("TARGET_TAG")
+branch = os.getenv("BRANCH")
+dev_acr = os.getenv("DEV_ACR")
+prod_acr = os.getenv("PROD_ACR")
+dev_aws = os.getenv("DEV_AWS")
+prod_aws = os.getenv("PROD_AWS")
+aws_region = os.getenv("AWS_REGION")
 
 components = {
     "neon": ["neon"],
@@ -39,24 +41,23 @@ registries = {
 
 outputs: dict[str, dict[str, list[str]]] = {}
 
-target_tags = [build_tag, "latest"] if branch == "main" else [build_tag]
-target_stages = ["dev", "prod"] if branch.startswith("release") else ["dev"]
+target_tags = [target_tag, "latest"] if branch == "main" else [target_tag]
+target_stages = (
+    ["dev", "prod"] if branch in ["release", "release-proxy", "release-compute"] else ["dev"]
+)
 
 for component_name, component_images in components.items():
     for stage in target_stages:
-        outputs[f"{component_name}-{stage}"] = dict(
-            [
-                (
-                    f"docker.io/neondatabase/{component_image}:{build_tag}",
-                    [
-                        f"{combo[0]}/{component_image}:{combo[1]}"
-                        for combo in itertools.product(registries[stage], target_tags)
-                    ],
-                )
-                for component_image in component_images
+        outputs[f"{component_name}-{stage}"] = {
+            f"docker.io/neondatabase/{component_image}:{source_tag}": [
+                f"{registry}/{component_image}:{tag}"
+                for registry, tag in itertools.product(registries[stage], target_tags)
+                if not (registry == "docker.io/neondatabase" and tag == source_tag)
             ]
-        )
+            for component_image in component_images
+        }
 
-with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+with open(os.getenv("GITHUB_OUTPUT", "/dev/null"), "a") as f:
     for key, value in outputs.items():
         f.write(f"{key}={json.dumps(value)}\n")
+        print(f"Image map for {key}:\n{json.dumps(value, indent=2)}\n\n", file=sys.stderr)
