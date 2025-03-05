@@ -35,6 +35,7 @@ num_cpus.workspace = true
 once_cell.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
+p256 = { version = "0.13", features = ["pem"] }
 postgres.workspace = true
 regex.workspace = true
 reqwest = { workspace = true, features = ["json"] }
@@ -43,6 +44,7 @@ serde.workspace = true
 serde_with.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true
+spki = { version = "0.7.3", features = ["std"] }
 tar.workspace = true
 tower.workspace = true
 tower-http.workspace = true
@@ -59,6 +61,7 @@ thiserror.workspace = true
 url.workspace = true
 uuid.workspace = true
 walkdir.workspace = true
+x509-cert = { version = "0.2.5" }
 
 postgres_initdb.workspace = true
 compute_api.workspace = true

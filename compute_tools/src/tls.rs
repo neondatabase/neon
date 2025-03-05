@@ -1,8 +1,11 @@
 use std::{io::Write, os::unix::fs::OpenOptionsExt, path::Path, time::Duration};
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use compute_api::responses::TlsConfig;
 use ring::digest;
+use spki::ObjectIdentifier;
+use spki::der::{Decode, PemReader};
+use x509_cert::Certificate;
 
 #[derive(Clone, Copy)]
 pub struct CertDigest(digest::Digest);
@@ -61,6 +64,12 @@ pub fn update_key_path_blocking(pg_data: &Path, tls_config: &TlsConfig) {
 // 1. Owned by the postgres user.
 // 2. Have permission 600.
 fn try_update_key_path_blocking(pg_data: &Path, tls_config: &TlsConfig) -> Result<()> {
+    let key = std::fs::read_to_string(&tls_config.key_path)?;
+    let crt = std::fs::read_to_string(&tls_config.cert_path)?;
+
+    // to mitigate a race condition during renewal.
+    verify_key_cert(&key, &crt)?;
+
     let mut key_file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -73,21 +82,37 @@ fn try_update_key_path_blocking(pg_data: &Path, tls_config: &TlsConfig) -> Resul
         .create(true)
         .truncate(true)
         .mode(0o600)
-        .open(pg_data.join(SERVER_KEY))?;
+        .open(pg_data.join(SERVER_CRT))?;
 
-    // Race condition risk:
-    // 1. key is read
-    // 2. key and crt are updated
-    // 3. crt is read
-    // key does not match crt.
-    // We can either:
-    // 1. Accept this as an unlikely risk (chance to occur every 23 hours).
-    // 2. Parse the certificate and verify that the key matches (seems awkward).
-    let key = std::fs::read(&tls_config.key_path)?;
-    let crt = std::fs::read(&tls_config.cert_path)?;
+    key_file.write_all(key.as_bytes())?;
+    crt_file.write_all(crt.as_bytes())?;
 
-    key_file.write_all(&key)?;
-    crt_file.write_all(&crt)?;
+    Ok(())
+}
+
+fn verify_key_cert(key: &str, cert: &str) -> Result<()> {
+    const ECDSA_WITH_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2");
+
+    let cert = Certificate::decode(&mut PemReader::new(cert.as_bytes()).context("pem reader")?)
+        .context("decode cert")?;
+
+    match cert.signature_algorithm.oid {
+        ECDSA_WITH_SHA256 => {
+            let key = p256::SecretKey::from_sec1_pem(key).context("parse key")?;
+
+            let a = key.public_key().to_sec1_bytes();
+            let b = cert
+                .tbs_certificate
+                .subject_public_key_info
+                .subject_public_key
+                .raw_bytes();
+
+            if *a != *b {
+                bail!("private key file does not match certificate")
+            }
+        }
+        _ => bail!("unknown TLS key type"),
+    }
 
     Ok(())
 }
