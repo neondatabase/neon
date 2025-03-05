@@ -4788,43 +4788,41 @@ impl Timeline {
         let mut wrote_keys = false;
 
         let mut key_request_accum = KeySpaceAccum::new();
-        for range in &partition.ranges {
-            let mut key = range.start;
-            while key < range.end {
-                // Decide whether to retain this key: usually we do, but sharded tenants may
-                // need to drop keys that don't belong to them.  If we retain the key, add it
-                // to `key_request_accum` for later issuing a vectored get
-                if self.shard_identity.is_key_disposable(&key) {
-                    debug!(
-                        "Dropping key {} during compaction (it belongs on shard {:?})",
-                        key,
-                        self.shard_identity.get_shard_number(&key)
-                    );
-                } else {
-                    key_request_accum.add_key(key);
+
+        for (key, range_end) in partition.iter() {
+            // Decide whether to retain this key: usually we do, but sharded tenants may
+            // need to drop keys that don't belong to them.  If we retain the key, add it
+            // to `key_request_accum` for later issuing a vectored get
+            if self.shard_identity.is_key_disposable(&key) {
+                debug!(
+                    "Dropping key {} during compaction (it belongs on shard {:?})",
+                    key,
+                    self.shard_identity.get_shard_number(&key)
+                );
+            } else {
+                key_request_accum.add_key(key);
+            }
+
+            let last_key_in_range = key.next() == range_end;
+
+            // Maybe flush `key_rest_accum`
+            if key_request_accum.raw_size() >= Timeline::MAX_GET_VECTORED_KEYS
+                || (last_key_in_range && key_request_accum.raw_size() > 0)
+            {
+                let results = self
+                    .get_vectored(
+                        key_request_accum.consume_keyspace(),
+                        lsn,
+                        io_concurrency.clone(),
+                        ctx,
+                    )
+                    .await?;
+
+                if self.cancel.is_cancelled() {
+                    return Err(CreateImageLayersError::Cancelled);
                 }
 
-                let last_key_in_range = key.next() == range.end;
-                key = key.next();
-
-                // Maybe flush `key_rest_accum`
-                if key_request_accum.raw_size() >= Timeline::MAX_GET_VECTORED_KEYS
-                    || (last_key_in_range && key_request_accum.raw_size() > 0)
-                {
-                    let results = self
-                        .get_vectored(
-                            key_request_accum.consume_keyspace(),
-                            lsn,
-                            io_concurrency.clone(),
-                            ctx,
-                        )
-                        .await?;
-
-                    if self.cancel.is_cancelled() {
-                        return Err(CreateImageLayersError::Cancelled);
-                    }
-
-                    for (img_key, img) in results {
+                for (img_key, img) in results {
                         let img = match img {
                             Ok(img) => img,
                             Err(err) => {
@@ -4852,12 +4850,12 @@ impl Timeline {
                                     return Err(CreateImageLayersError::from(err));
                                 }
                             }
-                        };
+                        }
+                    };
 
-                        // Write all the keys we just read into our new image layer.
-                        image_layer_writer.put_image(img_key, img, ctx).await?;
-                        wrote_keys = true;
-                    }
+                    // Write all the keys we just read into our new image layer.
+                    image_layer_writer.put_image(img_key, img, ctx).await?;
+                    wrote_keys = true;
                 }
             }
         }
