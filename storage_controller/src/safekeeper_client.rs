@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use safekeeper_api::models::{
     PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization, TimelineCreateRequest,
     TimelineStatus,
@@ -45,26 +47,15 @@ macro_rules! measured_request {
 }
 
 impl SafekeeperClient {
-    #[allow(dead_code)]
     pub(crate) fn new(
-        node_id: NodeId,
-        mgmt_api_endpoint: String,
-        jwt: Option<SecretString>,
-    ) -> Self {
-        Self {
-            inner: Client::from_client(reqwest::Client::new(), mgmt_api_endpoint, jwt),
-            node_id_label: node_id.0.to_string(),
-        }
-    }
-
-    pub(crate) fn from_client(
         node_id: NodeId,
         raw_client: reqwest::Client,
         mgmt_api_endpoint: String,
         jwt: Option<SecretString>,
+        timeout: Option<Duration>,
     ) -> Self {
         Self {
-            inner: Client::from_client(raw_client, mgmt_api_endpoint, jwt),
+            inner: Client::new(raw_client, mgmt_api_endpoint, jwt, timeout),
             node_id_label: node_id.0.to_string(),
         }
     }
