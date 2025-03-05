@@ -337,6 +337,9 @@ def allure_add_grafana_link(host: str, timeline_id: TimelineId, start_ms: int, e
     """
     # We expect host to be in format like ep-holy-mouse-w2u462gi.us-east-2.aws.neon.build
     endpoint_id, region_id, _ = host.split(".", 2)
+    # Remove "-pooler" suffix if present
+    if endpoint_id.endswith("-pooler"):
+        endpoint_id = endpoint_id[:-7]
 
     params = {
         "orgId": 1,
