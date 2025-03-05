@@ -253,27 +253,31 @@ pub fn create_control_files(remote_extensions: &RemoteExtSpec, pgbin: &str) {
     }
 }
 
-// Do request to extension storage proxy, i.e.
+// Do request to extension storage proxy, e.g.,
 // curl http://pg-ext-s3-gateway/latest/v15/extensions/anon.tar.zst
-// using HHTP GET
-// and return the response body as bytes
-//
+// using HTTP GET and return the response body as bytes.
 async fn download_extension_tar(ext_remote_storage: &str, ext_path: &str) -> Result<Bytes> {
     let uri = format!("{}/{}", ext_remote_storage, ext_path);
+    let filename = Path::new(ext_path)
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
+        .to_str()
+        .unwrap_or("unknown")
+        .to_string();
 
-    info!("Download extension {} from uri {}", ext_path, uri);
+    info!("Downloading extension file '{}' from uri {}", filename, uri);
 
     match do_extension_server_request(&uri).await {
         Ok(resp) => {
             info!("Successfully downloaded remote extension data {}", ext_path);
             REMOTE_EXT_REQUESTS_TOTAL
-                .with_label_values(&[&StatusCode::OK.to_string()])
+                .with_label_values(&[&StatusCode::OK.to_string(), &filename])
                 .inc();
             Ok(resp)
         }
         Err((msg, status)) => {
             REMOTE_EXT_REQUESTS_TOTAL
-                .with_label_values(&[&status])
+                .with_label_values(&[&status, &filename])
                 .inc();
             bail!(msg);
         }
