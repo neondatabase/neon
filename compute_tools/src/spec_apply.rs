@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use compute_api::responses::ComputeStatus;
-use compute_api::spec::{ComputeFeature, ComputeSpec, Database, PgIdent, Role};
+use compute_api::spec::{ComputeAudit, ComputeFeature, ComputeSpec, Database, PgIdent, Role};
 use futures::future::join_all;
 use tokio::sync::RwLock;
 use tokio_postgres::Client;
@@ -19,10 +19,10 @@ use crate::pg_helpers::{
     get_existing_roles_async,
 };
 use crate::spec_apply::ApplySpecPhase::{
-    CreateAndAlterDatabases, CreateAndAlterRoles, CreateAvailabilityCheck, CreateSchemaNeon,
-    CreateSuperUser, DropInvalidDatabases, DropRoles, FinalizeDropLogicalSubscriptions,
-    HandleNeonExtension, HandleOtherExtensions, RenameAndDeleteDatabases, RenameRoles,
-    RunInEachDatabase,
+    CreateAndAlterDatabases, CreateAndAlterRoles, CreateAvailabilityCheck, CreatePgauditExtension,
+    CreatePgauditlogtofileExtension, CreateSchemaNeon, CreateSuperUser, DisablePostgresDBPgAudit,
+    DropInvalidDatabases, DropRoles, FinalizeDropLogicalSubscriptions, HandleNeonExtension,
+    HandleOtherExtensions, RenameAndDeleteDatabases, RenameRoles, RunInEachDatabase,
 };
 use crate::spec_apply::PerDatabasePhase::{
     ChangeSchemaPerms, DeleteDBRoleReferences, DropLogicalSubscriptions, HandleAnonExtension,
@@ -277,6 +277,19 @@ impl ComputeNode {
                 phases.push(FinalizeDropLogicalSubscriptions);
             }
 
+            // Keep DisablePostgresDBPgAudit phase at the end,
+            // so that all config operations are audit logged.
+            match spec.audit_log_level
+            {
+                ComputeAudit::Hipaa => {
+                    phases.push(CreatePgauditExtension);
+                    phases.push(CreatePgauditlogtofileExtension);
+                    phases.push(DisablePostgresDBPgAudit);
+                }
+                ComputeAudit::Log => { /* not implemented yet */ }
+                ComputeAudit::Disabled => {}
+            }
+
             for phase in phases {
                 debug!("Applying phase {:?}", &phase);
                 apply_operations(
@@ -463,6 +476,9 @@ pub enum ApplySpecPhase {
     CreateAndAlterDatabases,
     CreateSchemaNeon,
     RunInEachDatabase { db: DB, subphase: PerDatabasePhase },
+    CreatePgauditExtension,
+    CreatePgauditlogtofileExtension,
+    DisablePostgresDBPgAudit,
     HandleOtherExtensions,
     HandleNeonExtension,
     CreateAvailabilityCheck,
@@ -1097,6 +1113,25 @@ async fn get_operations<'a>(
                 }
             }
             Ok(Box::new(empty()))
+        }
+        ApplySpecPhase::CreatePgauditExtension => Ok(Box::new(once(Operation {
+            query: String::from("CREATE EXTENSION IF NOT EXISTS pgaudit"),
+            comment: Some(String::from("create pgaudit extensions")),
+        }))),
+        ApplySpecPhase::CreatePgauditlogtofileExtension => Ok(Box::new(once(Operation {
+            query: String::from("CREATE EXTENSION IF NOT EXISTS pgauditlogtofile"),
+            comment: Some(String::from("create pgauditlogtofile extensions")),
+        }))),
+        // Disable pgaudit logging for postgres database.
+        // Postgres is neon system database used by monitors
+        // and compute_ctl tuning functions and thus generates a lot of noise.
+        // We do not consider data stored in this database as sensitive.
+        ApplySpecPhase::DisablePostgresDBPgAudit => {
+            let query = "ALTER DATABASE postgres SET pgaudit.log to 'none'";
+            Ok(Box::new(once(Operation {
+                query: query.to_string(),
+                comment: Some(query.to_string()),
+            })))
         }
         ApplySpecPhase::HandleNeonExtension => {
             let operations = vec![

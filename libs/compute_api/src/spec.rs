@@ -155,6 +155,16 @@ pub struct ComputeSpec {
     /// over the same replication content from publisher.
     #[serde(default)] // Default false
     pub drop_subscriptions_before_start: bool,
+
+    /// Log level for audit logging:
+    ///
+    /// Disabled - no audit logging. This is the default.
+    /// log - log masked statements to the postgres log using pgaudit extension
+    /// hipaa - log unmasked statements to the file using pgaudit and pgauditlogtofile extension
+    ///
+    /// Extensions should be present in shared_preload_libraries
+    #[serde(default)]
+    pub audit_log_level: ComputeAudit,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
@@ -260,6 +270,17 @@ pub enum ComputeMode {
     /// Future versions may want to distinguish between replicas with hot standby
     /// feedback and other kinds of replication configurations.
     Replica,
+}
+
+/// Log level for audit logging
+/// Disabled, log, hipaa
+/// Default is Disabled
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+pub enum ComputeAudit {
+    #[default]
+    Disabled,
+    Log,
+    Hipaa,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
