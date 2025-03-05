@@ -19,6 +19,7 @@ use std::pin::{Pin, pin};
 use std::sync::Arc;
 
 use anyhow::Context;
+use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use atomic_take::AtomicTake;
 use bytes::Bytes;
@@ -117,18 +118,7 @@ pub async fn task_main(
         auth_backend,
         endpoint_rate_limiter: Arc::clone(&endpoint_rate_limiter),
     });
-    let tls_acceptor: Arc<dyn MaybeTlsAcceptor> = match config.tls_config.as_ref() {
-        Some(config) => {
-            let mut tls_server_config = rustls::ServerConfig::clone(&config.to_server_config());
-            // prefer http2, but support http/1.1
-            tls_server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-            Arc::new(tls_server_config)
-        }
-        None => {
-            warn!("TLS config is missing");
-            Arc::new(NoTls)
-        }
-    };
+    let tls_acceptor: Arc<dyn MaybeTlsAcceptor> = Arc::new(&config.tls_config);
 
     let connections = tokio_util::task::task_tracker::TaskTracker::new();
     connections.close(); // allows `connections.wait to complete`
@@ -216,22 +206,20 @@ pub(crate) type AsyncRW = Pin<Box<dyn AsyncReadWrite>>;
 
 #[async_trait]
 trait MaybeTlsAcceptor: Send + Sync + 'static {
-    async fn accept(self: Arc<Self>, conn: ChainRW<TcpStream>) -> std::io::Result<AsyncRW>;
+    async fn accept(&self, conn: ChainRW<TcpStream>) -> std::io::Result<AsyncRW>;
 }
 
 #[async_trait]
-impl MaybeTlsAcceptor for rustls::ServerConfig {
-    async fn accept(self: Arc<Self>, conn: ChainRW<TcpStream>) -> std::io::Result<AsyncRW> {
-        Ok(Box::pin(TlsAcceptor::from(self).accept(conn).await?))
-    }
-}
-
-struct NoTls;
-
-#[async_trait]
-impl MaybeTlsAcceptor for NoTls {
-    async fn accept(self: Arc<Self>, conn: ChainRW<TcpStream>) -> std::io::Result<AsyncRW> {
-        Ok(Box::pin(conn))
+impl MaybeTlsAcceptor for &'static ArcSwapOption<crate::config::TlsConfig> {
+    async fn accept(&self, conn: ChainRW<TcpStream>) -> std::io::Result<AsyncRW> {
+        match &*self.load() {
+            Some(config) => Ok(Box::pin(
+                TlsAcceptor::from(config.http_config.clone())
+                    .accept(conn)
+                    .await?,
+            )),
+            None => Ok(Box::pin(conn)),
+        }
     }
 }
 

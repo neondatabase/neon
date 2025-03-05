@@ -26,6 +26,7 @@ fail.workspace = true
 flate2.workspace = true
 futures.workspace = true
 http.workspace = true
+indexmap.workspace = true
 jsonwebtoken.workspace = true
 metrics.workspace = true
 nix.workspace = true
@@ -34,18 +35,22 @@ num_cpus.workspace = true
 once_cell.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
+p256 = { version = "0.13", features = ["pem"] }
 postgres.workspace = true
 regex.workspace = true
+ring = "0.17"
 serde.workspace = true
 serde_with.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true
+spki = { version = "0.7.3", features = ["std"] }
 tar.workspace = true
 tower.workspace = true
 tower-http.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 tokio-postgres.workspace = true
+tokio-rustls.workspace = true
 tokio-util.workspace = true
 tokio-stream.workspace = true
 tower-otel.workspace = true
@@ -57,6 +62,7 @@ thiserror.workspace = true
 url.workspace = true
 uuid.workspace = true
 walkdir.workspace = true
+x509-cert = { version = "0.2.5" }
 
 postgres_initdb.workspace = true
 compute_api.workspace = true

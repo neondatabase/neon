@@ -601,7 +601,9 @@ async fn handle_inner(
         &config.authentication_config,
         ctx,
         request.headers(),
-        config.tls_config.as_ref(),
+        // todo: race condition?
+        // we're unlikely to change the common names.
+        config.tls_config.load().as_deref(),
     )?;
     info!(
         user = conn_info.conn_info.user_info.user.as_str(),

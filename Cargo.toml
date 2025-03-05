@@ -112,7 +112,7 @@ hyper0 = { package = "hyper", version = "0.14" }
 hyper = "1.4"
 hyper-util = "0.1"
 tokio-tungstenite = "0.21.0"
-indexmap = "2"
+indexmap = { version = "2", features = ["serde"] }
 indoc = "2"
 ipnet = "2.10.0"
 itertools = "0.10"

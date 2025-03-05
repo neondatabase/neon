@@ -9,8 +9,8 @@ use axum::extract::Request;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use compute_api::responses::ComputeCtlConfig;
 use http::StatusCode;
-use jsonwebtoken::jwk::JwkSet;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::{
@@ -42,7 +42,7 @@ pub enum Server {
     },
     External {
         port: u16,
-        jwks: JwkSet,
+        config: ComputeCtlConfig,
         compute_id: String,
     },
 }
@@ -80,7 +80,7 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                 router
             }
             Server::External {
-                jwks, compute_id, ..
+                config, compute_id, ..
             } => {
                 let unauthenticated_router =
                     Router::<Arc<ComputeNode>>::new().route("/metrics", get(metrics::get_metrics));
@@ -96,7 +96,7 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                     .route("/terminate", post(terminate::terminate))
                     .layer(AsyncRequireAuthorizationLayer::new(Authorize::new(
                         compute_id.clone(),
-                        jwks.clone(),
+                        config.jwks.clone(),
                     )));
 
                 router
