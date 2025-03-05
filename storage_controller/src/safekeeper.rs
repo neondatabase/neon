@@ -56,6 +56,9 @@ impl Safekeeper {
         self.scheduling_policy = scheduling_policy;
         self.skp.scheduling_policy = scheduling_policy.into();
     }
+    pub(crate) fn availability(&self) -> SafekeeperState {
+        self.availability.clone()
+    }
     /// Perform an operation (which is given a [`SafekeeperClient`]) with retries
     pub(crate) async fn with_client_retries<T, O, F>(
         &self,
