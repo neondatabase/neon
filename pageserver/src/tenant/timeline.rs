@@ -46,7 +46,7 @@ use pageserver_api::keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPart
 use pageserver_api::models::{
     CompactKeyRange, CompactLsnRange, CompactionAlgorithm, CompactionAlgorithmSettings,
     DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
-    InMemoryLayerInfo, LayerMapInfo, LsnLease, PageTraceEvent, TimelineState,
+    InMemoryLayerInfo, LayerMapInfo, LsnLease, PageTraceEvent, RelSizeMigration, TimelineState,
 };
 use pageserver_api::reltag::{BlockNumber, RelTag};
 use pageserver_api::shard::{ShardIdentity, ShardIndex, ShardNumber, TenantShardId};
@@ -436,6 +436,8 @@ pub struct Timeline {
     /// May host a background Tokio task which downloads all the layers from the current
     /// heatmap on demand.
     heatmap_layers_downloader: Mutex<Option<heatmap_layers_downloader::HeatmapLayersDownloader>>,
+
+    pub(crate) rel_size_v2_status: ArcSwapOption<RelSizeMigration>,
 }
 
 pub(crate) enum PreviousHeatmap {
@@ -2368,12 +2370,23 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
     }
 
+    /// Returns `true` if the rel_size_v2 config is enabled. NOTE: the write path and read path
+    /// should look at `get_rel_size_v2_status()` to get the actual status of the timeline. It is
+    /// possible that the index part persists the state while the config doesn't get persisted.
     pub(crate) fn get_rel_size_v2_enabled(&self) -> bool {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
             .tenant_conf
             .rel_size_v2_enabled
             .unwrap_or(self.conf.default_tenant_conf.rel_size_v2_enabled)
+    }
+
+    pub(crate) fn get_rel_size_v2_status(&self) -> RelSizeMigration {
+        self.rel_size_v2_status
+            .load()
+            .as_ref()
+            .map(|s| s.as_ref().clone())
+            .unwrap_or(RelSizeMigration::Legacy)
     }
 
     fn get_compaction_upper_limit(&self) -> usize {
@@ -2636,6 +2649,7 @@ impl Timeline {
         attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
         create_idempotency: crate::tenant::CreateTimelineIdempotency,
         gc_compaction_state: Option<GcCompactionState>,
+        rel_size_v2_status: Option<RelSizeMigration>,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -2794,6 +2808,8 @@ impl Timeline {
                 previous_heatmap: ArcSwapOption::from_pointee(previous_heatmap),
 
                 heatmap_layers_downloader: Mutex::new(None),
+
+                rel_size_v2_status: ArcSwapOption::from_pointee(rel_size_v2_status),
             };
 
             result.repartition_threshold =
@@ -2868,6 +2884,16 @@ impl Timeline {
             .store(Arc::new(Some(gc_compaction_state.clone())));
         self.remote_client
             .schedule_index_upload_for_gc_compaction_state_update(gc_compaction_state)
+    }
+
+    pub(crate) fn update_rel_size_v2_status(
+        &self,
+        rel_size_v2_status: RelSizeMigration,
+    ) -> anyhow::Result<()> {
+        self.rel_size_v2_status
+            .store(Some(Arc::new(rel_size_v2_status.clone())));
+        self.remote_client
+            .schedule_index_upload_for_rel_size_v2_status_update(rel_size_v2_status)
     }
 
     pub(crate) fn get_gc_compaction_state(&self) -> Option<GcCompactionState> {
@@ -3914,39 +3940,22 @@ impl Timeline {
                 let guard = timeline.layers.read().await;
                 let layers = guard.layer_map()?;
 
-                let in_memory_layer = layers.find_in_memory_layer(|l| {
-                    let start_lsn = l.get_lsn_range().start;
-                    cont_lsn > start_lsn
-                });
+                for range in unmapped_keyspace.ranges.iter() {
+                    let results = layers.range_search(range.clone(), cont_lsn);
 
-                match in_memory_layer {
-                    Some(l) => {
-                        let lsn_range = l.get_lsn_range().start..cont_lsn;
-                        fringe.update(
-                            ReadableLayer::InMemoryLayer(l),
-                            unmapped_keyspace.clone(),
-                            lsn_range,
-                        );
-                    }
-                    None => {
-                        for range in unmapped_keyspace.ranges.iter() {
-                            let results = layers.range_search(range.clone(), cont_lsn);
-
-                            results
-                                .found
-                                .into_iter()
-                                .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
-                                    (
-                                        ReadableLayer::PersistentLayer(guard.get_from_desc(&layer)),
-                                        keyspace_accum.to_keyspace(),
-                                        lsn_floor..cont_lsn,
-                                    )
-                                })
-                                .for_each(|(layer, keyspace, lsn_range)| {
-                                    fringe.update(layer, keyspace, lsn_range)
-                                });
-                        }
-                    }
+                    results
+                        .found
+                        .into_iter()
+                        .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
+                            (
+                                guard.upgrade(layer),
+                                keyspace_accum.to_keyspace(),
+                                lsn_floor..cont_lsn,
+                            )
+                        })
+                        .for_each(|(layer, keyspace, lsn_range)| {
+                            fringe.update(layer, keyspace, lsn_range)
+                        });
                 }
 
                 // It's safe to drop the layer map lock after planning the next round of reads.
@@ -5556,6 +5565,14 @@ pub struct DeltaLayerTestDesc {
 }
 
 #[cfg(test)]
+#[derive(Clone)]
+pub struct InMemoryLayerTestDesc {
+    pub lsn_range: Range<Lsn>,
+    pub data: Vec<(Key, Lsn, Value)>,
+    pub is_open: bool,
+}
+
+#[cfg(test)]
 impl DeltaLayerTestDesc {
     pub fn new(lsn_range: Range<Lsn>, key_range: Range<Key>, data: Vec<(Key, Lsn, Value)>) -> Self {
         Self {
@@ -6567,6 +6584,92 @@ impl Timeline {
         Ok(())
     }
 
+    /// Force create an in-memory layer and place them into the layer map.
+    #[cfg(test)]
+    pub(super) async fn force_create_in_memory_layer(
+        self: &Arc<Timeline>,
+        mut in_memory: InMemoryLayerTestDesc,
+        check_start_lsn: Option<Lsn>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        use utils::bin_ser::BeSer;
+
+        // Validate LSNs
+        if let Some(check_start_lsn) = check_start_lsn {
+            assert!(in_memory.lsn_range.start >= check_start_lsn);
+        }
+
+        let last_record_lsn = self.get_last_record_lsn();
+        let layer_end_lsn = if in_memory.is_open {
+            in_memory
+                .data
+                .iter()
+                .map(|(_key, lsn, _value)| lsn)
+                .max()
+                .cloned()
+        } else {
+            Some(in_memory.lsn_range.end)
+        };
+
+        if let Some(end) = layer_end_lsn {
+            assert!(
+                end <= last_record_lsn,
+                "advance last record lsn before inserting a layer, end_lsn={}, last_record_lsn={}",
+                end,
+                last_record_lsn,
+            );
+        }
+
+        in_memory.data.iter().for_each(|(_key, lsn, _value)| {
+            assert!(*lsn >= in_memory.lsn_range.start);
+            assert!(*lsn < in_memory.lsn_range.end);
+        });
+
+        // Build the batch
+        in_memory
+            .data
+            .sort_unstable_by(|(ka, la, _), (kb, lb, _)| (ka, la).cmp(&(kb, lb)));
+
+        let data = in_memory
+            .data
+            .into_iter()
+            .map(|(key, lsn, value)| {
+                let value_size = value.serialized_size().unwrap() as usize;
+                (key.to_compact(), lsn, value_size, value)
+            })
+            .collect::<Vec<_>>();
+
+        let batch = SerializedValueBatch::from_values(data);
+
+        // Create the in-memory layer and write the batch into it
+        let layer = InMemoryLayer::create(
+            self.conf,
+            self.timeline_id,
+            self.tenant_shard_id,
+            in_memory.lsn_range.start,
+            &self.gate,
+            ctx,
+        )
+        .await
+        .unwrap();
+
+        layer.put_batch(batch, ctx).await.unwrap();
+        if !in_memory.is_open {
+            layer.freeze(in_memory.lsn_range.end).await;
+        }
+
+        info!("force created in-memory layer {:?}", in_memory.lsn_range);
+
+        // Link the layer to the layer map
+        {
+            let mut guard = self.layers.write().await;
+            let layer_map = guard.open_mut().unwrap();
+            layer_map.force_insert_in_memory_layer(Arc::new(layer));
+        }
+
+        Ok(())
+    }
+
     /// Return all keys at the LSN in the image layers
     #[cfg(test)]
     pub(crate) async fn inspect_image_layers(
@@ -6999,6 +7102,7 @@ mod tests {
                 Lsn(0x10),
                 14,
                 &ctx,
+                Vec::new(), // in-memory layers
                 delta_layers,
                 image_layers,
                 Lsn(0x100),
@@ -7132,6 +7236,7 @@ mod tests {
                 Lsn(0x10),
                 14,
                 &ctx,
+                Vec::new(), // in-memory layers
                 delta_layers,
                 image_layers,
                 Lsn(0x100),

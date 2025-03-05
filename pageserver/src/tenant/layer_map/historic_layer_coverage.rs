@@ -63,6 +63,8 @@ pub struct HistoricLayerCoverage<Value> {
     /// The latest state
     head: LayerCoverageTuple<Value>,
 
+    /// TODO: this could be an ordered vec using binary search.
+    /// We push into this map everytime we add a layer, so might see some benefit
     /// All previous states
     historic: BTreeMap<u64, LayerCoverageTuple<Value>>,
 }
@@ -419,6 +421,10 @@ pub struct BufferedHistoricLayerCoverage<Value> {
     buffer: BTreeMap<LayerKey, Option<Value>>,
 
     /// All current layers. This is not used for search. Only to make rebuilds easier.
+    // TODO: This map is never cleared. Rebuilds could use the post-trim last entry of
+    // [`Self::historic_coverage`] instead of doubling memory usage.
+    // [`Self::len`]: can require rebuild and serve from latest historic
+    // [`Self::iter`]: already requires rebuild => can serve from latest historic
     layers: BTreeMap<LayerKey, Value>,
 }
 

@@ -194,7 +194,7 @@ pub(crate) use download::{
 };
 use index::GcCompactionState;
 pub(crate) use index::LayerFileMetadata;
-use pageserver_api::models::TimelineArchivalState;
+use pageserver_api::models::{RelSizeMigration, TimelineArchivalState};
 use pageserver_api::shard::{ShardIndex, TenantShardId};
 use regex::Regex;
 use remote_storage::{
@@ -900,7 +900,7 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
-    /// Launch an index-file upload operation in the background, setting `import_pgdata` field.
+    /// Launch an index-file upload operation in the background, setting `gc_compaction_state` field.
     pub(crate) fn schedule_index_upload_for_gc_compaction_state_update(
         self: &Arc<Self>,
         gc_compaction_state: GcCompactionState,
@@ -909,6 +909,21 @@ impl RemoteTimelineClient {
         let upload_queue = guard.initialized_mut()?;
         upload_queue.dirty.gc_compaction = Some(gc_compaction_state);
         self.schedule_index_upload(upload_queue);
+        Ok(())
+    }
+
+    /// Launch an index-file upload operation in the background, setting `rel_size_v2_status` field.
+    pub(crate) fn schedule_index_upload_for_rel_size_v2_status_update(
+        self: &Arc<Self>,
+        rel_size_v2_status: RelSizeMigration,
+    ) -> anyhow::Result<()> {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+        upload_queue.dirty.rel_size_migration = Some(rel_size_v2_status);
+        // TODO: allow this operation to bypass the validation check because we might upload the index part
+        // with no layers but the flag updated. For now, we just modify the index part in memory and the next
+        // upload will include the flag.
+        // self.schedule_index_upload(upload_queue);
         Ok(())
     }
 
