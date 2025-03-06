@@ -480,12 +480,16 @@ impl Client {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         concurrency: Option<usize>,
+        recurse: bool,
     ) -> Result<()> {
         let mut path = reqwest::Url::parse(&format!(
             "{}/v1/tenant/{}/timeline/{}/download_heatmap_layers",
             self.mgmt_api_endpoint, tenant_shard_id, timeline_id
         ))
         .expect("Cannot build URL");
+
+        path.query_pairs_mut()
+            .append_pair("recurse", &format!("{}", recurse));
 
         if let Some(concurrency) = concurrency {
             path.query_pairs_mut()

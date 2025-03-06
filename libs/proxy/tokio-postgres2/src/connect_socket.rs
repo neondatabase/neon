@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::io;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use tokio::net::{self, TcpStream};
@@ -9,15 +10,20 @@ use crate::Error;
 use crate::config::Host;
 
 pub(crate) async fn connect_socket(
+    host_addr: Option<IpAddr>,
     host: &Host,
     port: u16,
     connect_timeout: Option<Duration>,
 ) -> Result<TcpStream, Error> {
     match host {
         Host::Tcp(host) => {
-            let addrs = net::lookup_host((&**host, port))
-                .await
-                .map_err(Error::connect)?;
+            let addrs = match host_addr {
+                Some(addr) => vec![SocketAddr::new(addr, port)],
+                None => net::lookup_host((&**host, port))
+                    .await
+                    .map_err(Error::connect)?
+                    .collect(),
+            };
 
             let mut last_err = None;
 

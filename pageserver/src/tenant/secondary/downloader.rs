@@ -869,8 +869,7 @@ impl<'a> TenantDownloader<'a> {
                 let heatmap_timeline = heatmap.timelines.get(heatmap_timeline_index).unwrap();
 
                 let layers_in_heatmap = heatmap_timeline
-                    .layers
-                    .iter()
+                    .hot_layers()
                     .map(|l| (&l.name, l.metadata.generation))
                     .collect::<HashSet<_>>();
                 let layers_on_disk = timeline_state
@@ -1015,7 +1014,8 @@ impl<'a> TenantDownloader<'a> {
         // Accumulate updates to the state
         let mut touched = Vec::new();
 
-        for layer in timeline.layers {
+        let timeline_id = timeline.timeline_id;
+        for layer in timeline.into_hot_layers() {
             if self.secondary_state.cancel.is_cancelled() {
                 tracing::debug!("Cancelled -- dropping out of layer loop");
                 return (Err(UpdateError::Cancelled), touched);
@@ -1040,7 +1040,7 @@ impl<'a> TenantDownloader<'a> {
             }
 
             match self
-                .download_layer(tenant_shard_id, &timeline.timeline_id, layer, ctx)
+                .download_layer(tenant_shard_id, &timeline_id, layer, ctx)
                 .await
             {
                 Ok(Some(layer)) => touched.push(layer),
@@ -1148,7 +1148,7 @@ impl<'a> TenantDownloader<'a> {
         let tenant_shard_id = self.secondary_state.get_tenant_shard_id();
         let timeline_id = timeline.timeline_id;
 
-        tracing::debug!(timeline_id=%timeline_id, "Downloading layers, {} in heatmap", timeline.layers.len());
+        tracing::debug!(timeline_id=%timeline_id, "Downloading layers, {} in heatmap", timeline.hot_layers().count());
 
         let (result, touched) = self
             .download_timeline_layers(tenant_shard_id, timeline, timeline_state, deadline, ctx)
@@ -1316,11 +1316,11 @@ async fn init_timeline_state(
     // As we iterate through layers found on disk, we will look up their metadata from this map.
     // Layers not present in metadata will be discarded.
     let heatmap_metadata: HashMap<&LayerName, &HeatMapLayer> =
-        heatmap.layers.iter().map(|l| (&l.name, l)).collect();
+        heatmap.hot_layers().map(|l| (&l.name, l)).collect();
 
     let last_heatmap_metadata: HashMap<&LayerName, &HeatMapLayer> =
         if let Some(last_heatmap) = last_heatmap {
-            last_heatmap.layers.iter().map(|l| (&l.name, l)).collect()
+            last_heatmap.hot_layers().map(|l| (&l.name, l)).collect()
         } else {
             HashMap::new()
         };
