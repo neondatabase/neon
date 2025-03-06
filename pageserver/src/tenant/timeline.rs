@@ -4840,32 +4840,31 @@ impl Timeline {
                 }
 
                 for (img_key, img) in results {
-                        let img = match img {
-                            Ok(img) => img,
-                            Err(err) => {
-                                // If we fail to reconstruct a VM or FSM page, we can zero the
-                                // page without losing any actual user data. That seems better
-                                // than failing repeatedly and getting stuck.
-                                //
-                                // We had a bug at one point, where we truncated the FSM and VM
-                                // in the pageserver, but the Postgres didn't know about that
-                                // and continued to generate incremental WAL records for pages
-                                // that didn't exist in the pageserver. Trying to replay those
-                                // WAL records failed to find the previous image of the page.
-                                // This special case allows us to recover from that situation.
-                                // See https://github.com/neondatabase/neon/issues/2601.
-                                //
-                                // Unfortunately we cannot do this for the main fork, or for
-                                // any metadata keys, keys, as that would lead to actual data
-                                // loss.
-                                if img_key.is_rel_fsm_block_key() || img_key.is_rel_vm_block_key() {
-                                    warn!(
-                                        "could not reconstruct FSM or VM key {img_key}, filling with zeros: {err:?}"
-                                    );
-                                    ZERO_PAGE.clone()
-                                } else {
-                                    return Err(CreateImageLayersError::from(err));
-                                }
+                    let img = match img {
+                        Ok(img) => img,
+                        Err(err) => {
+                            // If we fail to reconstruct a VM or FSM page, we can zero the
+                            // page without losing any actual user data. That seems better
+                            // than failing repeatedly and getting stuck.
+                            //
+                            // We had a bug at one point, where we truncated the FSM and VM
+                            // in the pageserver, but the Postgres didn't know about that
+                            // and continued to generate incremental WAL records for pages
+                            // that didn't exist in the pageserver. Trying to replay those
+                            // WAL records failed to find the previous image of the page.
+                            // This special case allows us to recover from that situation.
+                            // See https://github.com/neondatabase/neon/issues/2601.
+                            //
+                            // Unfortunately we cannot do this for the main fork, or for
+                            // any metadata keys, keys, as that would lead to actual data
+                            // loss.
+                            if img_key.is_rel_fsm_block_key() || img_key.is_rel_vm_block_key() {
+                                warn!(
+                                    "could not reconstruct FSM or VM key {img_key}, filling with zeros: {err:?}"
+                                );
+                                ZERO_PAGE.clone()
+                            } else {
+                                return Err(CreateImageLayersError::from(err));
                             }
                         }
                     };

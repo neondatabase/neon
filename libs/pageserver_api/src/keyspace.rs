@@ -37,41 +37,30 @@ impl<'a> Iterator for KeySpaceIter<'a> {
     type Item = (Key, Key);
 
     fn next(&mut self) -> Option<Self::Item> {
-        // if we've gone through all ranges, stop iteration
-        if self.current_range >= self.ranges.len() {
-            return None;
-        }
+        while self.current_range < self.ranges.len() {
+            let range = &self.ranges[self.current_range];
 
-        let range = &self.ranges[self.current_range];
+            // Initialize or use the current key
+            let current = match self.current_key {
+                Some(key) => key,
+                None => {
+                    self.current_key = Some(range.start);
+                    range.start
+                }
+            };
 
-        // if current_key is None, initialize it with range.start
-        if self.current_key.is_none() {
-            self.current_key = Some(range.start);
-        }
-
-        if let Some(current_key) = self.current_key {
-            // check if the current_key is still within the range
-            if current_key < range.end {
-                // get the next key
-                let next_key = current_key.next();
-                // move current_key forward
-                self.current_key = Some(next_key);
-                // return the range from current_key to the current range_end
-                return Some((current_key, range.end));
+            // If the current key is within the current range
+            if current < range.end {
+                // Prepare for next iteration and return current key
+                self.current_key = Some(current.next());
+                return Some((current, range.end));
+            } else {
+                // Move to the next range and reset current key
+                self.current_range += 1;
+                self.current_key = None;
             }
         }
-
-        // move to the next range
-        self.current_range += 1;
-
-        // if there are more ranges, initialize the next key from the start of the next range
-        if self.current_range < self.ranges.len() {
-            self.current_key = Some(self.ranges[self.current_range].start);
-            self.next() // Recurse to continue iterating with the new range
-        } else {
-            // no more ranges, end iteration
-            None
-        }
+        None
     }
 }
 
@@ -488,7 +477,7 @@ impl KeySpace {
         KeySpaceIter {
             ranges: &self.ranges,
             current_range: 0,
-            current_key: self.ranges.first().map(|r| r.start),
+            current_key: None,
         }
     }
 }
