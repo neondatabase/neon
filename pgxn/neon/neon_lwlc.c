@@ -135,9 +135,11 @@ static void shmemrequest(void) {
 }
 
 static void shmeminit(void) {
-	elog(DEBUG3, "Started shmeminit");
 	static HASHCTL info;
 	bool found;
+	if (prev_shmem_startup_hook) {
+		prev_shmem_startup_hook();
+	}
 	if (LwLsnCache->lastWrittenLsnCacheSize > 0)
 	{
 		info.keysize = sizeof(BufferTag);
