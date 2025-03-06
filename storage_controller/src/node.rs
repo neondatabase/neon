@@ -8,7 +8,7 @@ use pageserver_api::controller_api::{
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
-use reqwest::StatusCode;
+use reqwest::{Certificate, StatusCode};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use utils::backoff;
@@ -274,8 +274,8 @@ impl Node {
     pub(crate) async fn with_client_retries<T, O, F>(
         &self,
         mut op: O,
-        http_client: &reqwest::Client,
         jwt: &Option<String>,
+        ssl_ca_cert: &Option<Certificate>,
         warn_threshold: u32,
         max_retries: u32,
         timeout: Duration,
@@ -294,17 +294,27 @@ impl Node {
                 | ApiError(StatusCode::REQUEST_TIMEOUT, _) => false,
                 ApiError(_, _) => true,
                 Cancelled => true,
+                CreateClient(_) => true,
             }
         }
 
+        let mut http_client = reqwest::ClientBuilder::new().timeout(timeout);
+        if let Some(ssl_ca_cert) = ssl_ca_cert.as_ref() {
+            http_client = http_client.add_root_certificate(ssl_ca_cert.clone())
+        }
+
+        let http_client = match http_client.build() {
+            Ok(http_client) => http_client,
+            Err(err) => return Some(Err(mgmt_api::Error::CreateClient(err))),
+        };
+
         backoff::retry(
             || {
-                let client = PageserverClient::new(
+                let client = PageserverClient::from_client(
                     self.get_id(),
                     http_client.clone(),
                     self.base_url(),
                     jwt.as_deref(),
-                    Some(timeout),
                 );
 
                 let node_cancel_fut = self.cancel.cancelled();

@@ -51,13 +51,10 @@ impl PageServerNode {
             parse_host_port(&conf.listen_pg_addr).expect("Unable to parse listen_pg_addr");
         let port = port.unwrap_or(5432);
 
-        let mut http_client = reqwest::Client::builder();
-        if let Some(ssl_ca_file) = env.ssl_ca_cert_path() {
+        let ssl_ca_cert = env.ssl_ca_cert_path().map(|ssl_ca_file| {
             let buf = std::fs::read(ssl_ca_file).expect("SSL root CA file should exist");
-            let cert = Certificate::from_pem(&buf).expect("CA certificate should be valid");
-            http_client = http_client.add_root_certificate(cert)
-        }
-        let http_client = http_client.build().expect("Client should exist");
+            Certificate::from_pem(&buf).expect("CA certificate should be valid")
+        });
 
         let endpoint = if env.storage_controller.use_https_pageserver_api {
             format!(
@@ -75,7 +72,6 @@ impl PageServerNode {
             conf: conf.clone(),
             env: env.clone(),
             http_client: mgmt_api::Client::new(
-                http_client,
                 endpoint,
                 {
                     match conf.http_auth_type {
@@ -87,8 +83,9 @@ impl PageServerNode {
                     }
                 }
                 .as_deref(),
-                None,
-            ),
+                ssl_ca_cert,
+            )
+            .expect("Client constructs with no errors"),
         }
     }
 

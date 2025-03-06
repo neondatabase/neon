@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::error::Error as _;
-use std::time::Duration;
 
 use bytes::Bytes;
 use detach_ancestor::AncestorDetached;
@@ -8,6 +7,7 @@ use http_utils::error::HttpErrorBody;
 use pageserver_api::models::*;
 use pageserver_api::shard::TenantShardId;
 pub use reqwest::Body as ReqwestBody;
+use reqwest::Certificate;
 use reqwest::{IntoUrl, Method, StatusCode};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
@@ -21,7 +21,6 @@ pub struct Client {
     mgmt_api_endpoint: String,
     authorization_header: Option<String>,
     client: reqwest::Client,
-    timeout: Option<Duration>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -40,6 +39,9 @@ pub enum Error {
 
     #[error("Cancelled")]
     Cancelled,
+
+    #[error("create client: {0}{}", .0.source().map(|e| format!(": {e}")).unwrap_or_default())]
+    CreateClient(reqwest::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -72,16 +74,27 @@ pub enum ForceAwaitLogicalSize {
 
 impl Client {
     pub fn new(
+        mgmt_api_endpoint: String,
+        jwt: Option<&str>,
+        ssl_ca_cert: Option<Certificate>,
+    ) -> Result<Self> {
+        let mut http_client = reqwest::Client::builder();
+        if let Some(ssl_ca_cert) = ssl_ca_cert {
+            http_client = http_client.add_root_certificate(ssl_ca_cert);
+        }
+        let http_client = http_client.build().map_err(Error::CreateClient)?;
+        Ok(Self::from_client(http_client, mgmt_api_endpoint, jwt))
+    }
+
+    pub fn from_client(
         client: reqwest::Client,
         mgmt_api_endpoint: String,
         jwt: Option<&str>,
-        timeout: Option<Duration>,
     ) -> Self {
         Self {
             mgmt_api_endpoint,
             authorization_header: jwt.map(|jwt| format!("Bearer {jwt}")),
             client,
-            timeout,
         }
     }
 
@@ -104,9 +117,6 @@ impl Client {
         let mut req = self.client.request(Method::GET, uri);
         if let Some(value) = &self.authorization_header {
             req = req.header(reqwest::header::AUTHORIZATION, value);
-        }
-        if let Some(timeout) = self.timeout {
-            req = req.timeout(timeout);
         }
         req.send().await.map_err(Error::ReceiveBody)
     }
@@ -186,14 +196,12 @@ impl Client {
         method: Method,
         uri: U,
     ) -> reqwest::RequestBuilder {
-        let mut req = self.client.request(method, uri);
+        let req = self.client.request(method, uri);
         if let Some(value) = &self.authorization_header {
-            req = req.header(reqwest::header::AUTHORIZATION, value);
+            req.header(reqwest::header::AUTHORIZATION, value)
+        } else {
+            req
         }
-        if let Some(timeout) = self.timeout {
-            req = req.timeout(timeout);
-        }
-        req
     }
 
     async fn request_noerror<B: serde::Serialize, U: reqwest::IntoUrl>(

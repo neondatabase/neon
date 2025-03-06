@@ -111,7 +111,6 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*Failed to accept TLS connection.*",
     ".*Failed to serve HTTPS connection.*",
     ".*Failed to serve HTTP connection.*",
-    ".*read header from client timeout.*",
 )
 
 

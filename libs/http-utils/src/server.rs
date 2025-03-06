@@ -1,6 +1,4 @@
 use std::sync::Arc;
-#[cfg(feature = "testing")]
-use std::time::Duration;
 
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -112,21 +110,7 @@ impl Server {
     where
         I: AsyncRead + AsyncWrite + Unpin + std::marker::Send + 'static,
     {
-        #[allow(unused_mut)]
-        let mut http = Http::new();
-
-        // Note: if a client shutdowns without gracefuly closing a keep-alive connection
-        // to the server, the server will wait for the connection to be timed out.
-        // It may slow down tests' teardown, as the server will try gracefully close all
-        // hanging keep-alive connections during its shutdown.
-        // There is no way to specify "keep alive connection timeout" in hyper,
-        // but "header_read_timeout" does the trick and closes a keep-alive connection
-        // if the server doesn't hear from the client for specified duration.
-        // For example, this workaround speeds up test_graceful_cluster_restart by 5-10s.
-        #[cfg(feature = "testing")]
-        http.http1_header_read_timeout(Duration::from_secs(1));
-
-        let mut conn = http.serve_connection(io, service).with_upgrades();
+        let mut conn = Http::new().serve_connection(io, service).with_upgrades();
 
         tokio::select! {
             res = &mut conn => res,

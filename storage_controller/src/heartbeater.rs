@@ -8,6 +8,7 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use pageserver_api::controller_api::{NodeAvailability, SkSchedulingPolicy};
 use pageserver_api::models::PageserverUtilization;
+use reqwest::Certificate;
 use safekeeper_api::models::SafekeeperUtilization;
 use safekeeper_client::mgmt_api;
 use thiserror::Error;
@@ -26,8 +27,8 @@ struct HeartbeaterTask<Server, State> {
 
     max_offline_interval: Duration,
     max_warming_up_interval: Duration,
-    http_client: reqwest::Client,
     jwt_token: Option<String>,
+    ssl_ca_cert: Option<Certificate>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,8 +76,8 @@ where
     HeartbeaterTask<Server, State>: HeartBeat<Server, State>,
 {
     pub(crate) fn new(
-        http_client: reqwest::Client,
         jwt_token: Option<String>,
+        ssl_ca_cert: Option<Certificate>,
         max_offline_interval: Duration,
         max_warming_up_interval: Duration,
         cancel: CancellationToken,
@@ -85,8 +86,8 @@ where
             tokio::sync::mpsc::unbounded_channel::<HeartbeatRequest<Server, State>>();
         let mut heartbeater = HeartbeaterTask::new(
             receiver,
-            http_client,
             jwt_token,
+            ssl_ca_cert,
             max_offline_interval,
             max_warming_up_interval,
             cancel,
@@ -121,8 +122,8 @@ where
 {
     fn new(
         receiver: tokio::sync::mpsc::UnboundedReceiver<HeartbeatRequest<Server, State>>,
-        http_client: reqwest::Client,
         jwt_token: Option<String>,
+        ssl_ca_cert: Option<Certificate>,
         max_offline_interval: Duration,
         max_warming_up_interval: Duration,
         cancel: CancellationToken,
@@ -133,8 +134,8 @@ where
             state: HashMap::new(),
             max_offline_interval,
             max_warming_up_interval,
-            http_client,
             jwt_token,
+            ssl_ca_cert,
         }
     }
     async fn run(&mut self) {
@@ -177,7 +178,7 @@ impl HeartBeat<Node, PageserverState> for HeartbeaterTask<Node, PageserverState>
         let mut heartbeat_futs = FuturesUnordered::new();
         for (node_id, node) in &*pageservers {
             heartbeat_futs.push({
-                let http_client = &self.http_client;
+                let ssl_ca_cert = self.ssl_ca_cert.clone();
                 let jwt_token = self.jwt_token.clone();
                 let cancel = self.cancel.clone();
 
@@ -192,8 +193,8 @@ impl HeartBeat<Node, PageserverState> for HeartbeaterTask<Node, PageserverState>
                     let response = node_clone
                         .with_client_retries(
                             |client| async move { client.get_utilization().await },
-                            http_client,
                             &jwt_token,
+                            &ssl_ca_cert,
                             3,
                             3,
                             Duration::from_secs(1),
