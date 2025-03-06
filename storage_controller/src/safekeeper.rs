@@ -20,6 +20,7 @@ pub struct Safekeeper {
     listen_http_port: u16,
     scheduling_policy: SkSchedulingPolicy,
     id: NodeId,
+    /// Heartbeating result.
     availability: SafekeeperState,
 }
 

@@ -1049,6 +1049,7 @@ impl Service {
             }
         }
     }
+    /// Heartbeat all storage nodes once in a while.
     #[instrument(skip_all)]
     async fn spawn_heartbeat_driver(&self) {
         self.startup_complete.clone().wait().await;
@@ -3703,6 +3704,10 @@ impl Service {
         Ok(remaining)
     }
 
+    /// Create timeline in controller database and on safekeepers.
+    /// `timeline_info` is result of timeline creation on pageserver.
+    ///
+    /// Note: all actions must be idempotent as call is retried until success.
     async fn tenant_timeline_create_safekeepers(
         self: &Arc<Self>,
         tenant_id: TenantId,
@@ -3711,6 +3716,12 @@ impl Service {
     ) -> Result<SafekeepersInfo, ApiError> {
         let timeline_id = timeline_info.timeline_id;
         let pg_version = timeline_info.pg_version;
+        // Initially start_lsn is determined by last_record_lsn in pageserver
+        // response as it does initdb. However, later we persist it and in sk
+        // creation calls replace with the value from the timeline row if it
+        // previously existed as on retries in theory endpoint might have
+        // already written some data and advanced last_record_lsn, while we want
+        // safekeepers to have consistent start_lsn.
         let start_lsn = match create_mode {
             models::TimelineCreateRequestMode::Bootstrap { .. } => timeline_info.last_record_lsn,
             models::TimelineCreateRequestMode::Branch { .. } => timeline_info.last_record_lsn,
@@ -8401,6 +8412,7 @@ impl Service {
         global_observed
     }
 
+    /// Choose safekeepers for the new timeline: 3 in different azs.
     pub(crate) async fn safekeepers_for_new_timeline(
         &self,
     ) -> Result<Vec<SafekeeperInfo>, ApiError> {
