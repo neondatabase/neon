@@ -725,9 +725,9 @@ struct CompactionStatisticsNumSize {
 
 #[derive(Debug, Serialize, Default)]
 pub struct CompactionStatistics {
-    /// Delta layer produced (maybe compressed, physical size)
+    /// Delta layer visited (maybe compressed, physical size)
     delta_layer_visited: CompactionStatisticsNumSize,
-    /// Image layer produced (maybe compressed, physical size)
+    /// Image layer visited (maybe compressed, physical size)
     image_layer_visited: CompactionStatisticsNumSize,
     /// Delta layer produced (maybe compressed, physical size)
     delta_layer_produced: CompactionStatisticsNumSize,
@@ -740,7 +740,7 @@ pub struct CompactionStatistics {
     num_unique_keys_visited: usize,
     /// Delta visited (uncompressed, original size)
     wal_keys_visited: CompactionStatisticsNumSize,
-    /// Delta visited (uncompressed, original size)
+    /// Image visited (uncompressed, original size)
     image_keys_visited: CompactionStatisticsNumSize,
     /// Delta produced (uncompressed, original size)
     wal_produced: CompactionStatisticsNumSize,
@@ -826,7 +826,7 @@ impl CompactionStatistics {
         self.image_layer_produced.size += size;
     }
     fn finalize(&mut self) {
-        let original_key_value_size = self.image_produced.size + self.wal_produced.size;
+        let original_key_value_size = self.image_keys_visited.size + self.wal_keys_visited.size;
         let produced_key_value_size = self.image_produced.size + self.wal_produced.size;
         self.uncompressed_size_ratio =
             original_key_value_size as f64 / (produced_key_value_size as f64 + 1.0); // avoid div by 0
