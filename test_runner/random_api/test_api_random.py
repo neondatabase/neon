@@ -29,8 +29,10 @@ class NeonEndpoint:
         self.project.endpoints[self.id] = self
         self.host: str = endpoint["host"]
         self.benchmark: subprocess.Popen | None = None
-        self.connect_env: dict[str, str] = self.branch.connect_env.copy()
-        self.connect_env["PGHOST"] = self.host
+        self.connect_env: dict[str, str] | None = None
+        if self.branch.connect_env:
+            self.connect_env = self.branch.connect_env.copy()
+            self.connect_env["PGHOST"] = self.host
 
     def delete(self):
         self.project.delete_endpoint(self.id)
