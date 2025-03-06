@@ -59,7 +59,9 @@ class NeonBranch:
             if "parent_id" in branch["branch"]
             else None
         )
-        if not is_reset:
+        if is_reset:
+            self.project.reset_branches.add(self.id)
+        else:
             self.project.leaf_branches[self.id] = self
         if self.parent is not None and self.parent.id in self.project.leaf_branches:
             self.project.leaf_branches.pop(self.parent.id)
@@ -130,7 +132,6 @@ class NeonBranch:
         self.project.branches[parent_id] = parent
         self.parent = parent
         parent.children[self.id] = self
-        self.project.reset_branches.add(parent_id)
         self.project.wait()
 
     def restore(

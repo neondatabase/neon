@@ -36,7 +36,7 @@ class NeonAPI:
         log.debug("%s %s returned a %d: %s", method, endpoint, resp.status_code, resp.text)
         # XXX for debug only remove before merge
         if resp.status_code >= 400:
-            log.info("%s %s returned a %d: %s", method, endpoint, resp.status_code, resp.text)
+            log.error("%s %s returned a %d: %s", method, endpoint, resp.status_code, resp.text)
         resp.raise_for_status()
 
         return resp
