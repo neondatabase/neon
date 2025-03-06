@@ -5,20 +5,16 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use utils::{
-    failpoint_support,
     id::{NodeId, TenantId, TimelineId},
     logging::SecretString,
 };
 
 use crate::{
-    id_lock_map::trace_shared_lock,
-    persistence::{SafekeeperPersistence, SafekeeperTimelineOpKind},
-    safekeeper::Safekeeper,
+    persistence::SafekeeperTimelineOpKind, safekeeper::Safekeeper,
     safekeeper_client::SafekeeperClient,
-    service::TenantOperations,
 };
 
-use super::{Service, TimelinePersistence};
+use super::Service;
 
 pub(crate) struct SafekeeperReconcilers {
     reconcilers: HashMap<NodeId, ReconcilerHandle>,

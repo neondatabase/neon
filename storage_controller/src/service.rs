@@ -50,7 +50,7 @@ use pageserver_api::upcall_api::{
 };
 use pageserver_client::{BlockUnblock, mgmt_api};
 use reqwest::StatusCode;
-use safekeeper_api::membership::{MemberSet, SafekeeperGeneration, SafekeeperId};
+use safekeeper_api::membership::{MemberSet, SafekeeperId};
 use safekeeper_api::models::SafekeeperUtilization;
 use safekeeper_reconciler::{SafekeeperReconcilers, ScheduleRequest};
 use tokio::sync::TryAcquireError;
