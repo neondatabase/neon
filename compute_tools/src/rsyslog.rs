@@ -21,40 +21,34 @@ fn get_rsyslog_pid() -> Option<String> {
     }
 }
 
-// Start rsyslogd with the specified configuration file
-// If it is already running, do nothing.
-fn start_rsyslog(rsyslog_conf_path: &str) -> Result<()> {
-    let pid = get_rsyslog_pid();
-    if let Some(pid) = pid {
-        info!("rsyslogd is already running with pid: {}", pid);
-        return Ok(());
-    }
+// Restart rsyslogd to apply the new configuration.
+// This is necessary, because there is no other way to reload the rsyslog configuration.
+//
+// Rsyslogd shouldn't lose any messages, because of the restart,
+// because it tracks the last read position in the log files
+// and will continue reading from that position.
+// TODO: test it properly
+//
+fn restart_rsyslog() -> Result<()> {
+    let old_pid = get_rsyslog_pid().context("rsyslogd is not running")?;
+    info!("rsyslogd is running with pid: {}, restart it", old_pid);
 
-    let _ = Command::new("/usr/sbin/rsyslogd")
-        .arg("-f")
-        .arg(rsyslog_conf_path)
-        .arg("-i")
-        .arg("/var/run/rsyslogd/rsyslogd.pid")
+    // kill it to restart
+    let _ = Command::new("pkill")
+        .arg("rsyslogd")
         .output()
-        .context("Failed to start rsyslogd")?;
-
-    // Check that rsyslogd is running
-    if let Some(pid) = get_rsyslog_pid() {
-        info!("rsyslogd started successfully with pid: {}", pid);
-    } else {
-        return Err(anyhow::anyhow!("Failed to start rsyslogd"));
-    }
+        .context("Failed to stop rsyslogd")?;
 
     Ok(())
 }
 
-pub fn configure_and_start_rsyslog(
+pub fn configure_audit_rsyslog(
     log_directory: &str,
     tag: &str,
     remote_endpoint: &str,
 ) -> Result<()> {
     let config_content: String = format!(
-        include_str!("config_template/compute_rsyslog_template.conf"),
+        include_str!("config_template/compute_audit_rsyslog_template.conf"),
         log_directory = log_directory,
         tag = tag,
         remote_endpoint = remote_endpoint
@@ -62,7 +56,7 @@ pub fn configure_and_start_rsyslog(
 
     info!("rsyslog config_content: {}", config_content);
 
-    let rsyslog_conf_path = "/etc/compute_rsyslog.conf";
+    let rsyslog_conf_path = "/etc/rsyslog.d/compute_audit_rsyslog.conf";
     let mut file = OpenOptions::new()
         .create(true)
         .write(true)
@@ -71,10 +65,13 @@ pub fn configure_and_start_rsyslog(
 
     file.write_all(config_content.as_bytes())?;
 
-    info!("rsyslog configuration added successfully. Starting rsyslogd");
+    info!(
+        "rsyslog configuration file {} added successfully. Starting rsyslogd",
+        rsyslog_conf_path
+    );
 
     // start the service, using the configuration
-    start_rsyslog(rsyslog_conf_path)?;
+    restart_rsyslog()?;
 
     Ok(())
 }
