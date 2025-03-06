@@ -19,7 +19,7 @@ use crate::error::ApiError;
 /// 2. hyper0's Server doesn't support TLS out of the box, and there is no way
 ///    to support it efficiently with the Accept trait that hyper0's Server uses.
 ///    That's one of the reasons why it was removed from v1.
-///    https://github.com/hyperium/hyper/blob/115339d3df50f20c8717680aa35f48858e9a6205/docs/ROADMAP.md#higher-level-client-and-server-problems
+///    <https://github.com/hyperium/hyper/blob/115339d3df50f20c8717680aa35f48858e9a6205/docs/ROADMAP.md#higher-level-client-and-server-problems>
 pub struct Server {
     request_service: Arc<RequestServiceBuilder<Body, ApiError>>,
     listener: tokio::net::TcpListener,

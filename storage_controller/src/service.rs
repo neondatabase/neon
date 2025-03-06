@@ -3617,7 +3617,7 @@ impl Service {
                 );
 
                 let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref(), ssl_ca_cert)
-                .map_err(|e| passthrough_api_error(&node, e))?;
+                    .map_err(|e| passthrough_api_error(&node, e))?;
 
                 client
                     .timeline_archival_config(tenant_shard_id, timeline_id, &req)

@@ -298,6 +298,7 @@ impl Node {
             }
         }
 
+        // TODO: refactor PageserverClient and with_client_retires (#11113).
         let mut http_client = reqwest::ClientBuilder::new().timeout(timeout);
         if let Some(ssl_ca_cert) = ssl_ca_cert.as_ref() {
             http_client = http_client.add_root_certificate(ssl_ca_cert.clone())

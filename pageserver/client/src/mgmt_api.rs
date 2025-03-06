@@ -7,8 +7,7 @@ use http_utils::error::HttpErrorBody;
 use pageserver_api::models::*;
 use pageserver_api::shard::TenantShardId;
 pub use reqwest::Body as ReqwestBody;
-use reqwest::Certificate;
-use reqwest::{IntoUrl, Method, StatusCode};
+use reqwest::{Certificate, IntoUrl, Method, StatusCode};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
