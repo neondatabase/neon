@@ -309,7 +309,9 @@ def do_action(project, action):
         else:
             log.info("Leaf branches not found, skipping")
     elif action == "new_ro_endpoint":
-        ep = random.choice(list(project.branches.values())).create_ro_endpoint()
+        ep = random.choice(
+            [br for br in project.branches.values() if br.id not in project.reset_branches]
+        ).create_ro_endpoint()
         log.info("Created the RO endpoint with id %s branch: %s", ep.id, ep.branch.id)
         ep.start_benchmark()
     elif action == "delete_ro_endpoint":
