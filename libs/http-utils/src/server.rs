@@ -8,7 +8,7 @@ use routerify::{RequestService, RequestServiceBuilder};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
-use tracing::error;
+use tracing::{error, info};
 
 use crate::error::ApiError;
 
@@ -51,7 +51,7 @@ impl Server {
                     let (tcp_stream, remote_addr) = match stream {
                         Ok(stream) => stream,
                         Err(err) => {
-                            error!("Failed to accept TCP connection: {err:#}");
+                            info!("Failed to accept TCP connection: {err:#}");
                             continue;
                         }
                     };
@@ -65,34 +65,41 @@ impl Server {
                             match tls_acceptor {
                                 Some(tls_acceptor) => {
                                     // Handle HTTPS connection.
-                                    let tls_stream = match tls_acceptor.accept(tcp_stream).await {
+                                    let tls_stream = tokio::select! {
+                                        tls_stream = tls_acceptor.accept(tcp_stream) => tls_stream,
+                                        _ = cancel.cancelled() => return,
+                                    };
+                                    let tls_stream = match tls_stream {
                                         Ok(tls_stream) => tls_stream,
                                         Err(err) => {
-                                            error!("Failed to accept TLS connection: {err:#}");
+                                            info!("Failed to accept TLS connection: {err:#}");
                                             return;
                                         }
                                     };
                                     if let Err(err) = Self::serve_connection(tls_stream, service, cancel).await {
-                                        error!("Failed to serve HTTPS connection: {err:#}");
+                                        info!("Failed to serve HTTPS connection: {err:#}");
                                     }
                                 }
                                 None => {
                                     // Handle HTTP connection.
                                     if let Err(err) = Self::serve_connection(tcp_stream, service, cancel).await {
-                                        error!("Failed to serve HTTP connection: {err:#}");
+                                        info!("Failed to serve HTTP connection: {err:#}");
                                     }
                                 }
                             };
                         }));
                  }
                 Some(conn) = connections.next() => {
-                    // Propagate connection panic to the caller.
-                    conn.expect("http connection should not panic");
+                    if let Err(err) = conn {
+                        error!("Connection panicked: {err:#}");
+                    }
                 }
                 _ = cancel.cancelled() => {
                     // Wait for graceful shutdown of all connections.
                     while let Some(conn) = connections.next().await {
-                        conn.expect("http connection should not panic");
+                        if let Err(err) = conn {
+                            error!("Connection panicked: {err:#}");
+                        }
                     }
                     break;
                 }

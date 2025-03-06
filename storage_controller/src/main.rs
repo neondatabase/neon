@@ -145,8 +145,8 @@ struct Cli {
     #[arg(long, default_value = "false")]
     use_https_pageserver_api: bool,
 
-    #[arg(long)]
     /// Trusted root CA certificate to use in https APIs.
+    #[arg(long)]
     ssl_ca_file: Option<PathBuf>,
 }
 

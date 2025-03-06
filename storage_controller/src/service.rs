@@ -988,9 +988,9 @@ impl Service {
                 Ok(client) => client,
                 Err(e) => {
                     tracing::error!(
-                        "Failed to create client to detach unknkown shard {tenant_shard_id} on pageserver {node_id}: {e}"
+                        "Failed to create client to detach unknown shard {tenant_shard_id} on pageserver {node_id}: {e}"
                     );
-                    return;
+                    continue;
                 }
             };
             match client
@@ -1019,7 +1019,7 @@ impl Service {
                     // Non-fatal error: leaving a tenant shard behind that we are not managing shouldn't
                     // break anything.
                     tracing::error!(
-                        "Failed to detach unknkown shard {tenant_shard_id} on pageserver {node_id}: {e}"
+                        "Failed to detach unknown shard {tenant_shard_id} on pageserver {node_id}: {e}"
                     );
                 }
             }

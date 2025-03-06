@@ -218,7 +218,7 @@ pub async fn shutdown_pageserver(
     if let Some(https_listener) = https_listener {
         timed(
             https_listener.0.shutdown(),
-            "shotdown https",
+            "shutdown https",
             Duration::from_secs(1),
         )
         .await;
