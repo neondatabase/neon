@@ -411,12 +411,7 @@ pub async fn handle_request(
     // Figure out statuses of potential donors.
     let responses: Vec<Result<TimelineStatus, mgmt_api::Error>> =
         futures::future::join_all(http_hosts.iter().map(|url| async {
-            let cclient = Client::new(
-                http_client.clone(),
-                url.clone(),
-                sk_auth_token.clone(),
-                None,
-            );
+            let cclient = Client::new(http_client.clone(), url.clone(), sk_auth_token.clone());
             let info = cclient
                 .timeline_status(request.tenant_id, request.timeline_id)
                 .await?;
@@ -472,7 +467,7 @@ async fn pull_timeline(
     // TODO(DimasKovas): add ssl root CA certificate when implementing safekeeper's
     // part of https support (#24836).
     let http_client = reqwest::Client::new();
-    let client = Client::new(http_client, host.clone(), sk_auth_token.clone(), None);
+    let client = Client::new(http_client, host.clone(), sk_auth_token.clone());
     // Request stream with basebackup archive.
     let bb_resp = client
         .snapshot(status.tenant_id, status.timeline_id, conf.my_id)

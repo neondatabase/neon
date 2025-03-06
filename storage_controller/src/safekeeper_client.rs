@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use safekeeper_api::models::{
     PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization, TimelineCreateRequest,
     TimelineStatus,
@@ -52,10 +50,9 @@ impl SafekeeperClient {
         raw_client: reqwest::Client,
         mgmt_api_endpoint: String,
         jwt: Option<SecretString>,
-        timeout: Option<Duration>,
     ) -> Self {
         Self {
-            inner: Client::new(raw_client, mgmt_api_endpoint, jwt, timeout),
+            inner: Client::new(raw_client, mgmt_api_endpoint, jwt),
             node_id_label: node_id.0.to_string(),
         }
     }

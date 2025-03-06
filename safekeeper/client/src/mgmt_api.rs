@@ -4,7 +4,6 @@
 //! united.
 
 use std::error::Error as _;
-use std::time::Duration;
 
 use http_utils::error::HttpErrorBody;
 use reqwest::{IntoUrl, Method, StatusCode};
@@ -20,7 +19,6 @@ pub struct Client {
     mgmt_api_endpoint: String,
     authorization_header: Option<SecretString>,
     client: reqwest::Client,
-    timeout: Option<Duration>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -39,6 +37,10 @@ pub enum Error {
 
     #[error("Cancelled")]
     Cancelled,
+
+    /// Failed to create client.
+    #[error("create client: {0}{}", .0.source().map(|e| format!(": {e}")).unwrap_or_default())]
+    CreateClient(reqwest::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -70,14 +72,12 @@ impl Client {
         client: reqwest::Client,
         mgmt_api_endpoint: String,
         jwt: Option<SecretString>,
-        timeout: Option<Duration>,
     ) -> Self {
         Self {
             mgmt_api_endpoint,
             authorization_header: jwt
                 .map(|jwt| SecretString::from(format!("Bearer {}", jwt.get_contents()))),
             client,
-            timeout,
         }
     }
 
@@ -172,17 +172,10 @@ impl Client {
         uri: U,
         body: B,
     ) -> Result<reqwest::Response> {
-        let req = self.client.request(method, uri);
-        let req = if let Some(value) = &self.authorization_header {
-            req.header(reqwest::header::AUTHORIZATION, value.get_contents())
-        } else {
-            req
-        };
-        let req = if let Some(timeout) = self.timeout {
-            req.timeout(timeout)
-        } else {
-            req
-        };
+        let mut req = self.client.request(method, uri);
+        if let Some(value) = &self.authorization_header {
+            req = req.header(reqwest::header::AUTHORIZATION, value.get_contents())
+        }
         req.json(&body).send().await.map_err(Error::ReceiveBody)
     }
 }

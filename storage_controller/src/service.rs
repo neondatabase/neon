@@ -1560,25 +1560,17 @@ impl Service {
         let cancel = CancellationToken::new();
         let reconcilers_cancel = cancel.child_token();
 
-        let http_client = reqwest::ClientBuilder::new();
-        let http_client = if let Some(ssl_ca_cert) = &config.ssl_ca_cert {
-            http_client.add_root_certificate(ssl_ca_cert.clone())
-        } else {
-            http_client
-        };
-        let http_client = http_client.build()?;
-
         let heartbeater_ps = Heartbeater::new(
-            http_client.clone(),
             config.pageserver_jwt_token.clone(),
+            config.ssl_ca_cert.clone(),
             config.max_offline_interval,
             config.max_warming_up_interval,
             cancel.clone(),
         );
 
         let heartbeater_sk = Heartbeater::new(
-            http_client,
             config.safekeeper_jwt_token.clone(),
+            config.ssl_ca_cert.clone(),
             config.max_offline_interval,
             config.max_warming_up_interval,
             cancel.clone(),

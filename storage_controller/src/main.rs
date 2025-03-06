@@ -129,26 +129,26 @@ struct Cli {
     #[arg(long)]
     chaos_exit_crontab: Option<cron::Schedule>,
 
-    // Maximum acceptable lag for the secondary location while draining
-    // a pageserver
+    /// Maximum acceptable lag for the secondary location while draining
+    /// a pageserver
     #[arg(long)]
     max_secondary_lag_bytes: Option<u64>,
 
-    // Period with which to send heartbeats to registered nodes
+    /// Period with which to send heartbeats to registered nodes
     #[arg(long)]
     heartbeat_interval: Option<humantime::Duration>,
 
     #[arg(long)]
     long_reconcile_threshold: Option<humantime::Duration>,
 
-    // Flag to use https for requests to pageserver API.
+    /// Flag to use https for requests to pageserver API.
     #[arg(long, default_value = "false")]
     use_https_pageserver_api: bool,
-    // Flag to use https for requests to safekeeper API.
+    /// Flag to use https for requests to safekeeper API.
     #[arg(long, default_value = "false")]
     use_https_safekeeper_api: bool,
 
-    // Trusted root CA certificate to use in https APIs.
+    /// Trusted root CA certificate to use in https APIs.
     #[arg(long)]
     ssl_ca_file: Option<PathBuf>,
 }
