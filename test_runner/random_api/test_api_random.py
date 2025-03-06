@@ -171,10 +171,10 @@ class NeonProject:
             "connection_parameters"
         ]
         self.pg_version: PgVersion = pg_version
+        self.leaf_branches: dict[str, NeonBranch] = {}
         self.main_branch: NeonBranch = NeonBranch(self, proj)
         self.main_branch.connection_parameters = self.connection_parameters
         self.branches: dict[str, NeonBranch] = {self.main_branch.id: self.main_branch}
-        self.leaf_branches: dict[str, NeonBranch] = {}
         self.endpoints: dict[str, NeonEndpoint] = {}
         for endpoint in proj["endpoints"]:
             NeonEndpoint(self, endpoint)
