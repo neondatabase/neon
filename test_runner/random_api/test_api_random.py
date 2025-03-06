@@ -48,7 +48,7 @@ class NeonEndpoint:
 
 
 class NeonBranch:
-    def __init__(self, project, branch: dict[str, Any]):
+    def __init__(self, project, branch: dict[str, Any], is_reset=False):
         self.id: str = branch["branch"]["id"]
         self.desc = branch
         self.project: NeonProject = project
@@ -59,13 +59,14 @@ class NeonBranch:
             if "parent_id" in branch["branch"]
             else None
         )
-        self.project.leaf_branches[self.id] = self
+        if not is_reset:
+            self.project.leaf_branches[self.id] = self
         if self.parent is not None and self.parent.id in self.project.leaf_branches:
             self.project.leaf_branches.pop(self.parent.id)
         self.project.branches[self.id] = self
+        self.children: dict[str, NeonBranch] = {}
         if self.parent is not None:
             self.parent.children[self.id] = self
-        self.children: dict[str, NeonBranch] = {}
         self.endpoints: dict[str, NeonEndpoint] = {}
         self.connection_parameters: dict[str, str] | None = (
             branch["connection_uris"][0]["connection_parameters"]
@@ -124,7 +125,7 @@ class NeonBranch:
         self.updated_at: datetime = datetime.fromisoformat(res["branch"]["updated_at"])
         parent_id: str = res["branch"]["parent_id"]
         parent = NeonBranch(
-            self.project, self.neon_api.get_branch_details(self.project_id, parent_id)
+            self.project, self.neon_api.get_branch_details(self.project_id, parent_id), True
         )
         self.project.branches[parent_id] = parent
         self.parent = parent
@@ -215,9 +216,9 @@ class NeonProject:
         parent.children.pop(branch_id)
         self.leaf_branches.pop(branch_id)
         self.branches.pop(branch_id)
+        self.wait()
         if parent.id in self.reset_branches:
             parent.delete()
-        self.wait()
 
     def delete_endpoint(self, endpoint_id: str) -> None:
         self.terminate_benchmark(endpoint_id)
@@ -293,7 +294,7 @@ def do_action(project, action):
     if action == "new_branch":
         parent = random.choice(list(project.branches.values()))
         child = parent.create_child_branch()
-        log.info("Created branch %s, parent: %s", child.id, parent.id)
+        log.info("Created branch %s", child)
         child.start_benchmark()
     elif action == "delete_branch":
         if project.leaf_branches:
