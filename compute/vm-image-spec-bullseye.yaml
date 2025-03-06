@@ -42,7 +42,7 @@ commands:
   - name: rsyslogd
     user: postgres
     sysvInitAction: respawn
-    shell: '/usr/sbin/rsyslogd -i /var/run/rsyslogd/rsyslogd.pid -f /etc/compute_rsyslog.conf'
+    shell: '/usr/sbin/rsyslogd -n -i /var/run/rsyslogd/rsyslogd.pid -f /etc/compute_rsyslog.conf'
 shutdownHook: |
   su -p postgres --session-command '/usr/local/bin/pg_ctl stop -D /var/db/postgres/compute/pgdata -m fast --wait -t 10'
 files:
