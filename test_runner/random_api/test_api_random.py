@@ -319,7 +319,7 @@ def do_action(project, action):
     elif action == "restore_random_time":
         if project.leaf_branches:
             br: NeonBranch = random.choice(list(project.leaf_branches.values()))
-            log.info("Restore %s", br.id)
+            log.info("Restore %s", br)
             br.restore_random_time()
         else:
             log.info("No leaf branches found")
