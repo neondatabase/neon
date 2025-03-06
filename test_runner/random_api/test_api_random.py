@@ -103,6 +103,8 @@ class NeonBranch:
             source_timestamp=target_time.isoformat().replace("+00:00", "Z"),
             preserve_under_name=self.project.gen_restore_name(),
         )
+        # XXX debug only, remove before merge
+        log.info("res: %s", res)
         self.updated_at: datetime = datetime.fromisoformat(res["branch"]["updated_at"])
         parent_id: str = res["branch"]["parent"]
         parent = NeonBranch(self.project, self.neon_api.get_branch_details(self.project_id,parent_id))
