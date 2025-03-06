@@ -1980,12 +1980,10 @@ COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neo
 RUN echo '/usr/local/lib' >> /etc/ld.so.conf && /sbin/ldconfig
 
 # rsyslog config permissions
-RUN chown postgres:postgres /etc/rsyslog.conf && \
-    touch /etc/compute_rsyslog.conf && \
-    chown -R postgres:postgres /etc/compute_rsyslog.conf && \
-    # directory for rsyslogd pid file
-    mkdir /var/run/rsyslogd && \
-    chown -R postgres:postgres /var/run/rsyslogd
+# directory for rsyslogd pid file
+RUN mkdir /var/run/rsyslogd && \
+    chown -R postgres:postgres /var/run/rsyslogd && \
+    chown -R postgres:postgres /etc/rsyslog.d/
 
 
 ENV LANG=en_US.utf8

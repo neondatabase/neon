@@ -39,6 +39,10 @@ commands:
     user: nobody
     sysvInitAction: respawn
     shell: '/bin/sql_exporter -config.file=/etc/sql_exporter_autoscaling.yml -web.listen-address=:9499'
+  - name: rsyslogd
+    user: postgres
+    sysvInitAction: respawn
+    shell: '/usr/sbin/rsyslogd -n -i /var/run/rsyslogd/rsyslogd.pid -f /etc/compute_rsyslog.conf'
 shutdownHook: |
   su -p postgres --session-command '/usr/local/bin/pg_ctl stop -D /var/db/postgres/compute/pgdata -m fast --wait -t 10'
 files:
@@ -69,6 +73,12 @@ files:
           }
           memory {}
       }
+# Create dummy rsyslog config, because it refuses to start without at least one action configured.
+# compute_ctl will rewrite this file with the actual configuration, if needed.
+  - filename: compute_rsyslog.conf
+    content: |
+      *.*    /dev/null
+      $IncludeConfig /etc/rsyslog.d/*.conf
 build: |
   # Build cgroup-tools
   #
@@ -131,6 +141,12 @@ merge: |
 
   RUN set -e \
       && chmod 0644 /etc/cgconfig.conf
+
+
+  COPY compute_rsyslog.conf /etc/compute_rsyslog.conf
+  RUN chmod 0666 /etc/compute_rsyslog.conf
+  RUN chmod 0666 /var/log/
+
 
   COPY --from=libcgroup-builder /libcgroup-install/bin/*  /usr/bin/
   COPY --from=libcgroup-builder /libcgroup-install/lib/*  /usr/lib/
