@@ -51,6 +51,7 @@ LwLsnCacheCtl* LwLsnCache;
 static void
 lwlc_register_gucs(void)
 {
+	elog(DEBUG3, "Registering lwlc gucs");
 	DefineCustomIntVariable("neon.last_written_lsn_cache_size",
 							"Size of last written LSN cache used by Neon",
 							NULL,
@@ -89,9 +90,13 @@ static void shmeminit(void);
 void
 init_lwlc(void)
 {
+	elog(DEBUG3, "Started init");
+	elog(DEBUG3, "Shared preload librares status: %d", process_shared_preload_libraries_in_progress);
 	if (!process_shared_preload_libraries_in_progress)
+		elog(DEBUG3, "Shared preload libraries not in progress, exiting");
 		return;
-
+	
+	elog(DEBUG3, "Shared preload libraries in progress");
 	lwlc_register_gucs();
 
 	prev_shmem_startup_hook = shmem_startup_hook;
@@ -113,6 +118,7 @@ init_lwlc(void)
 	set_lwlsn_relation_hook = neon_set_lwlsn_relation;
 	prev_set_lwlsn_db_hook = set_lwlsn_db_hook;
 	set_lwlsn_db_hook = neon_set_lwlsn_db;
+	elog(DEBUG3, "Finished installing hooks, leaving init");
 }
 
 static void shmemrequest(void) {
@@ -129,6 +135,7 @@ static void shmemrequest(void) {
 }
 
 static void shmeminit(void) {
+	elog(DEBUG3, "Started shmeminit");
 	static HASHCTL info;
 	bool found;
 	if (LwLsnCache->lastWrittenLsnCacheSize > 0)
