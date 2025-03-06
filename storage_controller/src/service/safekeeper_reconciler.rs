@@ -19,21 +19,22 @@ use crate::{
 use super::Service;
 
 pub(crate) struct SafekeeperReconcilers {
+    cancel: CancellationToken,
     reconcilers: HashMap<NodeId, ReconcilerHandle>,
 }
 
 impl SafekeeperReconcilers {
-    pub fn new() -> Self {
+    pub fn new(cancel: CancellationToken) -> Self {
         SafekeeperReconcilers {
+            cancel,
             reconcilers: HashMap::new(),
         }
     }
     pub(crate) fn schedule_request(&mut self, service: &Arc<Service>, req: ScheduleRequest) {
         let node_id = req.safekeeper.get_id();
-        let reconciler_handle = self
-            .reconcilers
-            .entry(node_id)
-            .or_insert_with(|| SafekeeperReconciler::spawn(service.clone()));
+        let reconciler_handle = self.reconcilers.entry(node_id).or_insert_with(|| {
+            SafekeeperReconciler::spawn(self.cancel.child_token(), service.clone())
+        });
         reconciler_handle.schedule_reconcile(req);
     }
     pub(crate) fn cancel_safekeeper(&mut self, node_id: NodeId) {
@@ -96,8 +97,7 @@ pub(crate) struct SafekeeperReconciler {
 }
 
 impl SafekeeperReconciler {
-    fn spawn(service: Arc<Service>) -> ReconcilerHandle {
-        let cancel = CancellationToken::new();
+    fn spawn(cancel: CancellationToken, service: Arc<Service>) -> ReconcilerHandle {
         // We hold the ServiceInner lock so we don't want to make sending to the reconciler channel to be blocking.
         let (tx, rx) = mpsc::unbounded_channel();
         let mut reconciler = SafekeeperReconciler {

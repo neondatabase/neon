@@ -278,6 +278,7 @@ impl ServiceState {
         scheduler: Scheduler,
         delayed_reconcile_rx: tokio::sync::mpsc::Receiver<TenantShardId>,
         initial_leadership_status: LeadershipStatus,
+        reconcilers_cancel: CancellationToken,
     ) -> Self {
         metrics::update_leadership_status(initial_leadership_status);
 
@@ -286,7 +287,7 @@ impl ServiceState {
             tenants,
             nodes: Arc::new(nodes),
             safekeepers: Arc::new(safekeepers),
-            safekeeper_reconcilers: SafekeeperReconcilers::new(),
+            safekeeper_reconcilers: SafekeeperReconcilers::new(reconcilers_cancel),
             scheduler,
             ongoing_operation: None,
             delayed_reconcile_rx,
@@ -1590,6 +1591,7 @@ impl Service {
                 scheduler,
                 delayed_reconcile_rx,
                 initial_leadership_status,
+                reconcilers_cancel.clone(),
             ))),
             config: config.clone(),
             persistence,
