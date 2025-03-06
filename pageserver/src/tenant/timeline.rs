@@ -99,7 +99,8 @@ use crate::disk_usage_eviction_task::{DiskUsageEvictionInfo, EvictionCandidate, 
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::l0_flush::{self, L0FlushGlobalState};
 use crate::metrics::{
-    DELTAS_PER_READ_GLOBAL, LAYERS_PER_READ_GLOBAL, ScanLatencyOngoingRecording, TimelineMetrics,
+    DELTAS_PER_READ_GLOBAL, LAYERS_PER_READ_AMORTIZED_GLOBAL, LAYERS_PER_READ_BATCH_GLOBAL,
+    LAYERS_PER_READ_GLOBAL, ScanLatencyOngoingRecording, TimelineMetrics,
 };
 use crate::page_service::TenantManagerTypes;
 use crate::pgdatadir_mapping::{
@@ -1330,10 +1331,6 @@ impl Timeline {
         // (this is a requirement, not a bug). Skip updating the metric in these cases
         // to avoid infinite results.
         if !results.is_empty() {
-            // Record the total number of layers visited towards each key in the batch. While some
-            // layers may not intersect with a given read, and the cost of layer visits are
-            // amortized across the batch, each visited layer contributes directly to the observed
-            // latency for every read in the batch, which is what we care about.
             if layers_visited >= Self::LAYERS_VISITED_WARN_THRESHOLD {
                 static LOG_PACER: Lazy<Mutex<RateLimit>> =
                     Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(60))));
@@ -1348,9 +1345,23 @@ impl Timeline {
                 });
             }
 
+            // Records the number of layers visited in a few different ways:
+            //
+            // * LAYERS_PER_READ: all layers count towards every read in the batch, because each
+            //   layer directly affects its observed latency.
+            //
+            // * LAYERS_PER_READ_BATCH: all layers count towards each batch, to get the per-batch
+            //   layer visits and access cost.
+            //
+            // * LAYERS_PER_READ_AMORTIZED: the average layer count per read, to get the amortized
+            //   read amplification after batching.
+            let layers_visited = layers_visited as f64;
+            let avg_layers_visited = layers_visited / results.len() as f64;
+            LAYERS_PER_READ_BATCH_GLOBAL.observe(layers_visited);
             for _ in &results {
-                self.metrics.layers_per_read.observe(layers_visited as f64);
-                LAYERS_PER_READ_GLOBAL.observe(layers_visited as f64);
+                self.metrics.layers_per_read.observe(layers_visited);
+                LAYERS_PER_READ_GLOBAL.observe(layers_visited);
+                LAYERS_PER_READ_AMORTIZED_GLOBAL.observe(avg_layers_visited);
             }
         }
 
