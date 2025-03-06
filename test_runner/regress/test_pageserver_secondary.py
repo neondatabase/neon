@@ -955,7 +955,7 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
 
         raise RuntimeError(f"No heatmap for timeline: {tlid}")
 
-    def count_timeline_heatmap_layers(tlid) -> (int, int):
+    def count_timeline_heatmap_layers(tlid) -> tuple[int, int]:
         cold, hot = 0, 0
         layers = timeline_heatmap(tlid)["layers"]
         for layer in layers:
