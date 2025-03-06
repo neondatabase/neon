@@ -4303,6 +4303,7 @@ dependencies = [
  "tracing",
  "url",
  "utils",
+ "uuid",
  "wal_decoder",
  "walkdir",
  "workspace_hack",
