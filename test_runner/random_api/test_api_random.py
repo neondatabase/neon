@@ -81,7 +81,7 @@ class NeonBranch:
         )
 
     def __str__(self):
-        return f"Branch {self.id}, parent: {self.parent}"
+        return f"{self.id}{'(r)' if self in self.project.reset_branches else ''}, parent: {self.parent}"
 
     def create_child_branch(self) -> NeonBranch:
         return self.project.create_branch(self.id)
