@@ -1,5 +1,6 @@
 -- enforce a controlled number of getpages prefetch requests from a range of
 -- 40 million first pages (320 GB) of a 500 GiB table
+-- the table has 55 million pages
 
 
 -- Zipfian distributions model real-world access patterns where:
@@ -9,7 +10,7 @@
 
 \set alpha 1.2  
 \set min_page 1
-\set max_page 40000000 -- table has 55 million pages
+\set max_page 40000000 
 
 \set zipf_random_page random_zipfian(:min_page, :max_page, :alpha)
 
