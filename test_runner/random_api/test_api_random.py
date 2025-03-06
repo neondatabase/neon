@@ -172,16 +172,16 @@ class NeonProject:
         ]
         self.pg_version: PgVersion = pg_version
         self.leaf_branches: dict[str, NeonBranch] = {}
+        self.branches: dict[str, NeonBranch] = {}
+        self.reset_branches: set[str] = set()
         self.main_branch: NeonBranch = NeonBranch(self, proj)
         self.main_branch.connection_parameters = self.connection_parameters
-        self.branches: dict[str, NeonBranch] = {self.main_branch.id: self.main_branch}
         self.endpoints: dict[str, NeonEndpoint] = {}
         for endpoint in proj["endpoints"]:
             NeonEndpoint(self, endpoint)
         self.neon_api.wait_for_operation_to_finish(self.id)
         self.benchmarks: dict[str, subprocess.Popen] = {}
         self.restore_num: int = 0
-        self.reset_branches: set[str] = set()
 
     def delete(self):
         self.neon_api.delete_project(self.id)
