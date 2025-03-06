@@ -3621,8 +3621,8 @@ impl Service {
             let safekeepers = safekeepers.clone();
             let jwt = jwt.clone();
             let req = req.clone();
-            // Unwrap is fine as we already would have returned error above
             joinset.spawn(async move {
+                // Unwrap is fine as we already would have returned error above
                 let sk_p = safekeepers.get(&sk_id).unwrap();
                 sk_p.with_client_retries(
                     |client| {
