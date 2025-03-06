@@ -42,13 +42,13 @@ fn restart_rsyslog() -> Result<()> {
     Ok(())
 }
 
-pub fn configure_and_start_rsyslog(
+pub fn configure_audit_rsyslog(
     log_directory: &str,
     tag: &str,
     remote_endpoint: &str,
 ) -> Result<()> {
     let config_content: String = format!(
-        include_str!("config_template/compute_rsyslog_template.conf"),
+        include_str!("config_template/compute_audit_rsyslog_template.conf"),
         log_directory = log_directory,
         tag = tag,
         remote_endpoint = remote_endpoint
@@ -56,7 +56,7 @@ pub fn configure_and_start_rsyslog(
 
     info!("rsyslog config_content: {}", config_content);
 
-    let rsyslog_conf_path = "/etc/rsyslog.d/hipaa_rsyslog.conf";
+    let rsyslog_conf_path = "/etc/rsyslog.d/compute_audit_rsyslog.conf";
     let mut file = OpenOptions::new()
         .create(true)
         .write(true)
