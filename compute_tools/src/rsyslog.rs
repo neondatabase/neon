@@ -21,8 +21,7 @@ fn get_rsyslog_pid() -> Option<String> {
     }
 }
 
-// Start rsyslogd with the specified configuration file
-// If it is already running - restart it.
+// Restart rsyslogd to apply the new configuration.
 // This is necessary, because there is no other way to reload the rsyslog configuration.
 //
 // Rsyslogd shouldn't lose any messages, because of the restart,
@@ -30,30 +29,22 @@ fn get_rsyslog_pid() -> Option<String> {
 // and will continue reading from that position.
 // TODO: test it properly
 //
-fn start_rsyslog(rsyslog_conf_path: &str) -> Result<()> {
-    let old_pid = get_rsyslog_pid();
-    if let Some(pid) = old_pid {
-        info!("rsyslogd is already running with pid: {}, restart it", pid);
-        // kill it to restart
-        let _ = Command::new("pkill")
-            .arg("rsyslogd")
-            .output()
-            .context("Failed to stop rsyslogd")?;
-    }
+fn restart_rsyslog() -> Result<()> {
+    let old_pid = get_rsyslog_pid().context("rsyslogd is not running")?;
+    info!(
+        "rsyslogd is already running with pid: {}, restart it",
+        old_pid
+    );
 
-    let _ = Command::new("/usr/sbin/rsyslogd")
-        .arg("-f")
-        .arg(rsyslog_conf_path)
-        .arg("-i")
-        .arg("/var/run/rsyslogd/rsyslogd.pid")
+    // kill it to restart
+    let _ = Command::new("pkill")
+        .arg("rsyslogd")
         .output()
-        .context("Failed to start rsyslogd")?;
+        .context("Failed to stop rsyslogd")?;
 
-    // Check that rsyslogd is running
+    // debug only
     if let Some(pid) = get_rsyslog_pid() {
-        info!("rsyslogd started successfully with pid: {}", pid);
-    } else {
-        return Err(anyhow::anyhow!("Failed to start rsyslogd"));
+        info!("rsyslogd is alive with pid: {}", pid);
     }
 
     Ok(())
@@ -73,7 +64,7 @@ pub fn configure_and_start_rsyslog(
 
     info!("rsyslog config_content: {}", config_content);
 
-    let rsyslog_conf_path = "/etc/compute_rsyslog.conf";
+    let rsyslog_conf_path = "/etc/rsyslog.d/hipaa_rsyslog.conf";
     let mut file = OpenOptions::new()
         .create(true)
         .write(true)
@@ -85,7 +76,7 @@ pub fn configure_and_start_rsyslog(
     info!("rsyslog configuration added successfully. Starting rsyslogd");
 
     // start the service, using the configuration
-    start_rsyslog(rsyslog_conf_path)?;
+    restart_rsyslog()?;
 
     Ok(())
 }

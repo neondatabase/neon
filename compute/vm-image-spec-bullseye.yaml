@@ -78,6 +78,7 @@ files:
   - filename: compute_rsyslog.conf
     content: |
       *.*    /dev/null
+      $IncludeConfig /etc/rsyslog.d/*.conf
 build: |
   # Build cgroup-tools
   #
@@ -138,8 +139,9 @@ merge: |
       && chmod 0644 /etc/cgconfig.conf
 
   COPY compute_rsyslog.conf /etc/compute_rsyslog.conf
-  RUN set -e \
-      && chmod 0644 /etc/compute_rsyslog.conf
+  RUN chmod 0666 /etc/compute_rsyslog.conf
+  RUN chmod 0666 /var/log/
+
 
   COPY --from=libcgroup-builder /libcgroup-install/bin/*  /usr/bin/
   COPY --from=libcgroup-builder /libcgroup-install/lib/*  /usr/lib/
