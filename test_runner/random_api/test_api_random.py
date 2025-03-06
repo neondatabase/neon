@@ -8,7 +8,7 @@ import os
 import random
 import subprocess
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -105,8 +105,8 @@ class NeonBranch:
         self.project.terminate_benchmark(self.id)
 
     def restore_random_time(self) -> None:
-        min_time = self.updated_at
-        max_time = datetime.now(UTC)
+        min_time = self.updated_at + timedelta(seconds=1)
+        max_time = datetime.now(UTC) - timedelta(seconds=1)
         target_time = (min_time + (max_time - min_time) * random.random()).replace(microsecond=0)
         res = self.restore(
             self.id,
@@ -250,6 +250,7 @@ class NeonProject:
         # XXX for debug only, please remove
         log.info("Benchmarks now: %s", list(self.benchmarks.keys()))
         target_object.benchmark = pgbench
+        time.sleep(2)
         return pgbench
 
     def check_all_benchmarks(self) -> None:
