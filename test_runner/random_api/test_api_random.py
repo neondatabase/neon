@@ -59,6 +59,12 @@ class NeonBranch:
             if "parent_id" in branch["branch"]
             else None
         )
+        self.project.leaf_branches[self.id] = self
+        if self.parent is not None and self.parent.id in self.project.leaf_branches:
+            self.project.leaf_branches.pop(self.parent.id)
+        self.project.branches[self.id] = self
+        if self.parent is not None:
+            self.parent.children[self.id] = self
         self.children: dict[str, NeonBranch] = {}
         self.endpoints: dict[str, NeonEndpoint] = {}
         self.connection_parameters: dict[str, str] | None = (
@@ -185,14 +191,6 @@ class NeonProject:
 
     def create_branch(self, parent_id: str | None = None) -> NeonBranch:
         new_branch = NeonBranch(self, self.neon_api.create_branch(self.id, parent_id=parent_id))
-        self.leaf_branches[new_branch.id] = new_branch
-        self.branches[new_branch.id] = new_branch
-        if parent_id and parent_id in self.leaf_branches:
-            self.leaf_branches.pop(parent_id)
-        if parent_id is None:
-            self.main_branch.children[new_branch.id] = new_branch
-        else:
-            self.branches[parent_id].children[new_branch.id] = new_branch
         self.wait()
         return new_branch
 
@@ -210,8 +208,6 @@ class NeonProject:
         for ep in endpoints_to_delete:
             ep.delete()
         if branch_id not in self.reset_branches:
-            # XXX for debug only, please remove before merging
-            log.info("Benchmarks: %s", list(self.benchmarks.keys()))
             self.terminate_benchmark(branch_id)
         self.neon_api.delete_branch(self.id, branch_id)
         if len(parent.children) == 1 and parent.id != self.main_branch.id:
@@ -247,8 +243,6 @@ class NeonProject:
         )
         pgbench = self.pg_bin.run_nonblocking(cmd, env=target_object.connect_env)
         self.benchmarks[target] = pgbench
-        # XXX for debug only, please remove
-        log.info("Benchmarks now: %s", list(self.benchmarks.keys()))
         target_object.benchmark = pgbench
         time.sleep(2)
         return pgbench
