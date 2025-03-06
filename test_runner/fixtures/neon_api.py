@@ -33,7 +33,8 @@ class NeonAPI:
         kwargs["headers"]["Authorization"] = f"Bearer {self.__neon_api_key}"
 
         resp = requests.request(method, f"{self.__neon_api_base_url}{endpoint}", **kwargs)
-        log.debug("%s %s returned a %d: %s", method, endpoint, resp.status_code, resp.text)
+        # XXX return log.debug before merge
+        log.info("%s %s returned a %d: %s", method, endpoint, resp.status_code, resp.text)
         resp.raise_for_status()
 
         return resp
