@@ -1146,6 +1146,15 @@ pub struct TimelineArchivalConfigRequest {
     pub state: TimelineArchivalState,
 }
 
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct TimelinePatchIndexPartRequest {
+    pub rel_size_migration: Option<RelSizeMigration>,
+    pub gc_compaction_last_completed_lsn: Option<Lsn>,
+    pub applied_gc_cutoff_lsn: Option<Lsn>,
+    #[serde(default)]
+    pub force_index_update: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TimelinesInfoAndOffloaded {
     pub timelines: Vec<TimelineInfo>,

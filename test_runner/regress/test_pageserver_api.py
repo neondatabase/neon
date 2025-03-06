@@ -138,3 +138,24 @@ def test_pageserver_http_api_client_auth_enabled(neon_env_builder: NeonEnvBuilde
 
     with env.pageserver.http_client(auth_token=pageserver_token) as client:
         check_client(env, client)
+
+
+def test_pageserver_http_index_part_force_patch(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+    with env.pageserver.http_client() as client:
+        client.timeline_patch_index_part(
+            tenant_id,
+            timeline_id,
+            {"rel_size_migration": "migrating"},
+        )
+        assert client.timeline_detail(tenant_id, timeline_id)["rel_size_migration"] == "migrating"
+        # This is invalid in practice: we should never rollback the migrating state to legacy.
+        # But we do it here to test the API.
+        client.timeline_patch_index_part(
+            tenant_id,
+            timeline_id,
+            {"rel_size_migration": "legacy"},
+        )
+        assert client.timeline_detail(tenant_id, timeline_id)["rel_size_migration"] == "legacy"
