@@ -7049,7 +7049,7 @@ mod tests {
     use crate::tenant::{PreviousHeatmap, Timeline};
 
     fn assert_heatmaps_have_same_layers(lhs: &HeatMapTimeline, rhs: &HeatMapTimeline) {
-        // assert_eq!(lhs.all_layers().count(), rhs.all_layers().count());
+        assert_eq!(lhs.all_layers().count(), rhs.all_layers().count());
         let lhs_rhs = lhs.all_layers().zip(rhs.all_layers());
         for (l, r) in lhs_rhs {
             assert_eq!(l.name, r.name);
