@@ -860,6 +860,17 @@ async fn timeline_archival_config_handler(
     json_response(StatusCode::OK, ())
 }
 
+/// This API is used to patch the index part of a timeline. You must ensure such patches are safe to apply. Use this API as an emergency
+/// measure only.
+///
+/// Some examples of safe patches:
+/// - Increase the gc_cutoff and gc_compaction_cutoff to a larger value in case of a bug that didn't bump the cutoff and cause read errors.
+/// - Force set the index part to use reldir v2 (migrating/migrated).
+///
+/// Some examples of unsafe patches:
+/// - Force set the index part from v2 to v1 (legacy). This will cause the code path to ignore anything written to the new keyspace and cause
+///   errors.
+/// - Decrease the gc_cutoff without validating the data really exists. It will cause read errors in the background.
 async fn timeline_patch_index_part_handler(
     mut request: Request<Body>,
     _cancel: CancellationToken,
