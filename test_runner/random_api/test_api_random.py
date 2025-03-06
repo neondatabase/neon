@@ -59,16 +59,24 @@ class NeonBranch:
         )
         self.children: dict[str, NeonBranch] = {}
         self.endpoints: dict[str, NeonEndpoint] = {}
-        self.connection_parameters = branch["connection_uris"][0]["connection_parameters"]
+        self.connection_parameters: dict[str, str] | None = (
+            branch["connection_uris"][0]["connection_parameters"]
+            if "connection_uris" in branch
+            else None
+        )
         self.benchmark: subprocess.Popen | None = None
         self.updated_at: datetime = datetime.fromisoformat(branch["branch"]["updated_at"])
-        self.connect_env = {
-            "PGHOST": self.connection_parameters["host"],
-            "PGUSER": self.connection_parameters["role"],
-            "PGDATABASE": self.connection_parameters["database"],
-            "PGPASSWORD": self.connection_parameters["password"],
-            "PGSSLMODE": "require",
-        }
+        self.connect_env = (
+            {
+                "PGHOST": self.connection_parameters["host"],
+                "PGUSER": self.connection_parameters["role"],
+                "PGDATABASE": self.connection_parameters["database"],
+                "PGPASSWORD": self.connection_parameters["password"],
+                "PGSSLMODE": "require",
+            }
+            if self.connection_parameters
+            else None
+        )
 
     def __str__(self):
         return f"Branch {self.id}, parent: {self.parent}"
@@ -107,7 +115,9 @@ class NeonBranch:
         log.info("res: %s", res)
         self.updated_at: datetime = datetime.fromisoformat(res["branch"]["updated_at"])
         parent_id: str = res["branch"]["parent_id"]
-        parent = NeonBranch(self.project, self.neon_api.get_branch_details(self.project_id,parent_id))
+        parent = NeonBranch(
+            self.project, self.neon_api.get_branch_details(self.project_id, parent_id)
+        )
         self.project.branches[parent_id] = parent
         self.parent = parent
         parent.children[self.id] = self
@@ -227,7 +237,12 @@ class NeonProject:
         if read_only:
             cmd.extend(["-S", "-n"])
         target_object = self.endpoints[target] if is_endpoint else self.branches[target]
-        log.info("running pgbench on %s, cmd: %s, host: %s", target, cmd, target_object.connect_env["PGHOST"])
+        log.info(
+            "running pgbench on %s, cmd: %s, host: %s",
+            target,
+            cmd,
+            target_object.connect_env["PGHOST"],
+        )
         pgbench = self.pg_bin.run_nonblocking(cmd, env=target_object.connect_env)
         self.benchmarks[target] = pgbench
         # XXX for debug only, please remove
