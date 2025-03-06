@@ -3,12 +3,12 @@ name: Periodic pagebench performance test on dedicated EC2 machine in eu-central
 on:
   schedule:
     # * is a special character in YAML so you have to quote this string
-    #          ┌───────────── minute (0 - 59)
-    #          │ ┌───────────── hour (0 - 23)
-    #          │ │ ┌───────────── day of the month (1 - 31)
-    #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
-    #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
-    - cron:  '0 18 * * *' # Runs at 6 PM UTC every day
+    #        ┌───────────── minute (0 - 59)
+    #        │   ┌───────────── hour (0 - 23)
+    #        │   │ ┌───────────── day of the month (1 - 31)
+    #        │   │ │ ┌───────────── month (1 - 12 or JAN-DEC)
+    #        │   │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
+    - cron: '0 */3 * * *' # Runs every 3 hours
   workflow_dispatch: # Allows manual triggering of the workflow
     inputs:
       commit_hash:
