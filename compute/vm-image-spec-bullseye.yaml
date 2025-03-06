@@ -54,7 +54,7 @@ files:
       # regardless of hostname (ALL)
       #
       # Also allow it to shut down the VM. The fast_import job does that when it's finished.
-      postgres ALL=(root) NOPASSWD: /neonvm/bin/resize-swap, /neonvm/bin/set-disk-quota, /neonvm/bin/poweroff
+      postgres ALL=(root) NOPASSWD: /neonvm/bin/resize-swap, /neonvm/bin/set-disk-quota, /neonvm/bin/poweroff, /usr/sbin/rsyslogd
   - filename: cgconfig.conf
     content: |
       # Configuration for cgroups in VM compute nodes

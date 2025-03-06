@@ -194,6 +194,13 @@ pub struct PageServerConf {
     /// Interpreted protocol feature: if enabled, validate that the logical WAL received from
     /// safekeepers does not have gaps.
     pub validate_wal_contiguity: bool,
+
+    /// When set, the previously written to disk heatmap is loaded on tenant attach and used
+    /// to avoid clobbering the heatmap from new, cold, attached locations.
+    pub load_previous_heatmap: bool,
+
+    /// When set, include visible layers in the next uploaded heatmaps of an unarchived timeline.
+    pub generate_unarchival_heatmap: bool,
 }
 
 /// Token for authentication to safekeepers
@@ -358,6 +365,8 @@ impl PageServerConf {
             get_vectored_concurrent_io,
             enable_read_path_debugging,
             validate_wal_contiguity,
+            load_previous_heatmap,
+            generate_unarchival_heatmap,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -447,6 +456,8 @@ impl PageServerConf {
             no_sync: no_sync.unwrap_or(false),
             enable_read_path_debugging: enable_read_path_debugging.unwrap_or(false),
             validate_wal_contiguity: validate_wal_contiguity.unwrap_or(false),
+            load_previous_heatmap: load_previous_heatmap.unwrap_or(false),
+            generate_unarchival_heatmap: generate_unarchival_heatmap.unwrap_or(false),
         };
 
         // ------------------------------------------------------------
@@ -493,6 +504,8 @@ impl PageServerConf {
             metric_collection_interval: Duration::from_secs(60),
             synthetic_size_calculation_interval: Duration::from_secs(60),
             background_task_maximum_delay: Duration::ZERO,
+            load_previous_heatmap: Some(true),
+            generate_unarchival_heatmap: Some(true),
             ..Default::default()
         };
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &repo_dir).unwrap()

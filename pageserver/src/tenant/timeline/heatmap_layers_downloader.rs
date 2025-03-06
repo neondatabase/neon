@@ -32,6 +32,7 @@ impl HeatmapLayersDownloader {
     fn new(
         timeline: Arc<Timeline>,
         concurrency: usize,
+        recurse: bool,
         ctx: RequestContext,
     ) -> Result<HeatmapLayersDownloader, ApiError> {
         let tl_guard = timeline.gate.enter().map_err(|_| ApiError::Cancelled)?;
@@ -98,6 +99,20 @@ impl HeatmapLayersDownloader {
                     },
                     _ = cancel.cancelled() => {
                         tracing::info!("Heatmap layers download cancelled");
+                        return;
+                    }
+                }
+
+                if recurse {
+                    if let Some(ancestor) = timeline.ancestor_timeline() {
+                        let ctx = ctx.attached_child();
+                        let res =
+                            ancestor.start_heatmap_layers_download(concurrency, recurse, &ctx);
+                        if let Err(err) = res {
+                            tracing::info!(
+                                "Failed to start heatmap layers download for ancestor: {err}"
+                            );
+                        }
                     }
                 }
             }
@@ -140,14 +155,20 @@ impl HeatmapLayersDownloader {
 }
 
 impl Timeline {
-    pub(crate) async fn start_heatmap_layers_download(
+    pub(crate) fn start_heatmap_layers_download(
         self: &Arc<Self>,
         concurrency: usize,
+        recurse: bool,
         ctx: &RequestContext,
     ) -> Result<(), ApiError> {
         let mut locked = self.heatmap_layers_downloader.lock().unwrap();
         if locked.as_ref().map(|dl| dl.is_complete()).unwrap_or(true) {
-            let dl = HeatmapLayersDownloader::new(self.clone(), concurrency, ctx.attached_child())?;
+            let dl = HeatmapLayersDownloader::new(
+                self.clone(),
+                concurrency,
+                recurse,
+                ctx.attached_child(),
+            )?;
             *locked = Some(dl);
             Ok(())
         } else {

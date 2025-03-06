@@ -1,4 +1,5 @@
 use std::io;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,11 +7,15 @@ use async_trait::async_trait;
 use ed25519_dalek::SigningKey;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use jose_jwk::jose_b64;
+use postgres_client::config::SslMode;
 use rand::rngs::OsRng;
+use rustls::pki_types::{DnsName, ServerName};
 use tokio::net::{TcpStream, lookup_host};
+use tokio_rustls::TlsConnector;
 use tracing::field::display;
 use tracing::{debug, info};
 
+use super::AsyncRW;
 use super::conn_pool::poll_client;
 use super::conn_pool_lib::{Client, ConnInfo, EndpointConnPool, GlobalConnPool};
 use super::http_conn_pool::{self, HttpConnPool, Send, poll_http2_client};
@@ -190,7 +195,11 @@ impl PoolingBackend {
     // Wake up the destination if needed. Code here is a bit involved because
     // we reuse the code from the usual proxy and we need to prepare few structures
     // that this code expects.
-    #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
+    #[tracing::instrument(skip_all, fields(
+        pid = tracing::field::Empty,
+        compute_id = tracing::field::Empty,
+        conn_id = tracing::field::Empty,
+    ))]
     pub(crate) async fn connect_to_compute(
         &self,
         ctx: &RequestContext,
@@ -229,7 +238,10 @@ impl PoolingBackend {
     }
 
     // Wake up the destination if needed
-    #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
+    #[tracing::instrument(skip_all, fields(
+        compute_id = tracing::field::Empty,
+        conn_id = tracing::field::Empty,
+    ))]
     pub(crate) async fn connect_to_local_proxy(
         &self,
         ctx: &RequestContext,
@@ -276,7 +288,10 @@ impl PoolingBackend {
     /// # Panics
     ///
     /// Panics if called with a non-local_proxy backend.
-    #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
+    #[tracing::instrument(skip_all, fields(
+        pid = tracing::field::Empty,
+        conn_id = tracing::field::Empty,
+    ))]
     pub(crate) async fn connect_to_local_postgres(
         &self,
         ctx: &RequestContext,
@@ -552,6 +567,10 @@ impl ConnectMechanism for TokioMechanism {
         let (client, connection) = permit.release_result(res)?;
 
         tracing::Span::current().record("pid", tracing::field::display(client.get_process_id()));
+        tracing::Span::current().record(
+            "compute_id",
+            tracing::field::display(&node_info.aux.compute_id),
+        );
         Ok(poll_client(
             self.pool.clone(),
             ctx,
@@ -587,15 +606,27 @@ impl ConnectMechanism for HyperMechanism {
         node_info: &CachedNodeInfo,
         config: &ComputeConfig,
     ) -> Result<Self::Connection, Self::ConnectError> {
+        let host_addr = node_info.config.get_host_addr();
         let host = node_info.config.get_host();
         let permit = self.locks.get_permit(&host).await?;
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
 
+        let tls = if node_info.config.get_ssl_mode() == SslMode::Disable {
+            None
+        } else {
+            Some(&config.tls)
+        };
+
         let port = node_info.config.get_port();
-        let res = connect_http2(&host, port, config.timeout).await;
+        let res = connect_http2(host_addr, &host, port, config.timeout, tls).await;
         drop(pause);
         let (client, connection) = permit.release_result(res)?;
+
+        tracing::Span::current().record(
+            "compute_id",
+            tracing::field::display(&node_info.aux.compute_id),
+        );
 
         Ok(poll_http2_client(
             self.pool.clone(),
@@ -612,18 +643,22 @@ impl ConnectMechanism for HyperMechanism {
 }
 
 async fn connect_http2(
+    host_addr: Option<IpAddr>,
     host: &str,
     port: u16,
     timeout: Duration,
+    tls: Option<&Arc<rustls::ClientConfig>>,
 ) -> Result<(http_conn_pool::Send, http_conn_pool::Connect), LocalProxyConnError> {
-    // assumption: host is an ip address so this should not actually perform any requests.
-    // todo: add that assumption as a guarantee in the control-plane API.
-    let mut addrs = lookup_host((host, port))
-        .await
-        .map_err(LocalProxyConnError::Io)?;
-
+    let addrs = match host_addr {
+        Some(addr) => vec![SocketAddr::new(addr, port)],
+        None => lookup_host((host, port))
+            .await
+            .map_err(LocalProxyConnError::Io)?
+            .collect(),
+    };
     let mut last_err = None;
 
+    let mut addrs = addrs.into_iter();
     let stream = loop {
         let Some(addr) = addrs.next() else {
             return Err(last_err.unwrap_or_else(|| {
@@ -649,6 +684,20 @@ async fn connect_http2(
                 )));
             }
         }
+    };
+
+    let stream = if let Some(tls) = tls {
+        let host = DnsName::try_from(host)
+            .map_err(io::Error::other)
+            .map_err(LocalProxyConnError::Io)?
+            .to_owned();
+        let stream = TlsConnector::from(tls.clone())
+            .connect(ServerName::DnsName(host), stream)
+            .await
+            .map_err(LocalProxyConnError::Io)?;
+        Box::pin(stream) as AsyncRW
+    } else {
+        Box::pin(stream) as AsyncRW
     };
 
     let (client, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())

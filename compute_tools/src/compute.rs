@@ -1,5 +1,4 @@
-use std::collections::{HashMap, HashSet};
-use std::iter::once;
+use std::collections::HashMap;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -12,9 +11,9 @@ use std::{env, fs};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
-use compute_api::responses::{ComputeMetrics, ComputeStatus};
+use compute_api::responses::{ComputeCtlConfig, ComputeMetrics, ComputeStatus};
 use compute_api::spec::{
-    ComputeFeature, ComputeMode, ComputeSpec, Database, ExtVersion, PgIdent, Role,
+    ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PgIdent,
 };
 use futures::StreamExt;
 use futures::future::join_all;
@@ -26,43 +25,59 @@ use postgres::NoTls;
 use postgres::error::SqlState;
 use remote_storage::{DownloadError, RemotePath};
 use tokio::spawn;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{Instrument, debug, error, info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 use utils::measured_stream::MeasuredReader;
 
+use crate::configurator::launch_configurator;
+use crate::disk_quota::set_disk_quota;
 use crate::installed_extensions::get_installed_extensions;
+use crate::logger::startup_context_from_env;
+use crate::lsn_lease::launch_lsn_lease_bg_task_for_static;
+use crate::monitor::launch_monitor;
 use crate::pg_helpers::*;
+use crate::rsyslog::configure_and_start_rsyslog;
 use crate::spec::*;
-use crate::spec_apply::ApplySpecPhase::{
-    CreateAndAlterDatabases, CreateAndAlterRoles, CreateAvailabilityCheck, CreateSchemaNeon,
-    CreateSuperUser, DropInvalidDatabases, DropRoles, FinalizeDropLogicalSubscriptions,
-    HandleNeonExtension, HandleOtherExtensions, RenameAndDeleteDatabases, RenameRoles,
-    RunInEachDatabase,
-};
-use crate::spec_apply::PerDatabasePhase::{
-    ChangeSchemaPerms, DeleteDBRoleReferences, DropLogicalSubscriptions, HandleAnonExtension,
-};
-use crate::spec_apply::{DB, MutableApplyContext, PerDatabasePhase, apply_operations};
+use crate::swap::resize_swap;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
 use crate::{config, extension_server, local_proxy};
 
 pub static SYNC_SAFEKEEPERS_PID: AtomicU32 = AtomicU32::new(0);
 pub static PG_PID: AtomicU32 = AtomicU32::new(0);
 
-/// Compute node info shared across several `compute_ctl` threads.
-pub struct ComputeNode {
+/// Static configuration params that don't change after startup. These mostly
+/// come from the CLI args, or are derived from them.
+pub struct ComputeNodeParams {
     /// The ID of the compute
     pub compute_id: String,
     // Url type maintains proper escaping
     pub connstr: url::Url,
-    // We connect to Postgres from many different places, so build configs once
-    // and reuse them where needed.
-    pub conn_conf: postgres::config::Config,
-    pub tokio_conn_conf: tokio_postgres::config::Config,
+
+    pub resize_swap_on_bind: bool,
+    pub set_disk_quota_for_fs: Option<String>,
+
+    // VM monitor parameters
+    #[cfg(target_os = "linux")]
+    pub filecache_connstr: String,
+    #[cfg(target_os = "linux")]
+    pub cgroup: String,
+    #[cfg(target_os = "linux")]
+    pub vm_monitor_addr: String,
+
     pub pgdata: String,
     pub pgbin: String,
     pub pgversion: String,
+    pub build_tag: String,
+
+    /// The port that the compute's external HTTP server listens on
+    pub external_http_port: u16,
+    /// The port that the compute's internal HTTP server listens on
+    pub internal_http_port: u16,
+
+    /// the address of extension storage proxy gateway
+    pub ext_remote_storage: Option<String>,
+
     /// We should only allow live re- / configuration of the compute node if
     /// it uses 'pull model', i.e. it can go to control-plane and fetch
     /// the latest configuration. Otherwise, there could be a case:
@@ -76,10 +91,17 @@ pub struct ComputeNode {
     /// - we push spec and it does configuration
     /// - but then it is restarted without any spec again
     pub live_config_allowed: bool,
-    /// The port that the compute's external HTTP server listens on
-    pub external_http_port: u16,
-    /// The port that the compute's internal HTTP server listens on
-    pub internal_http_port: u16,
+}
+
+/// Compute node info shared across several `compute_ctl` threads.
+pub struct ComputeNode {
+    pub params: ComputeNodeParams,
+
+    // We connect to Postgres from many different places, so build configs once
+    // and reuse them where needed. These are derived from 'params.connstr'
+    pub conn_conf: postgres::config::Config,
+    pub tokio_conn_conf: tokio_postgres::config::Config,
+
     /// Volatile part of the `ComputeNode`, which should be used under `Mutex`.
     /// To allow HTTP API server to serving status requests, while configuration
     /// is in progress, lock should be held only for short periods of time to do
@@ -87,11 +109,9 @@ pub struct ComputeNode {
     pub state: Mutex<ComputeState>,
     /// `Condvar` to allow notifying waiters about state changes.
     pub state_changed: Condvar,
-    /// the address of extension storage proxy gateway
-    pub ext_remote_storage: Option<String>,
+
     // key: ext_archive_name, value: started download time, download_completed?
     pub ext_download_progress: RwLock<HashMap<String, (DateTime<Utc>, bool)>>,
-    pub build_tag: String,
 }
 
 // store some metrics about download size that might impact startup time
@@ -114,6 +134,8 @@ pub struct ComputeState {
     /// Compute spec. This can be received from the CLI or - more likely -
     /// passed by the control plane with a /configure HTTP request.
     pub pspec: Option<ParsedSpec>,
+
+    pub compute_ctl_config: ComputeCtlConfig,
 
     /// If the spec is passed by a /configure request, 'startup_span' is the
     /// /configure request's tracing span. The main thread enters it when it
@@ -138,6 +160,7 @@ impl ComputeState {
             last_active: None,
             error: None,
             pspec: None,
+            compute_ctl_config: ComputeCtlConfig::default(),
             startup_span: None,
             metrics: ComputeMetrics::default(),
         }
@@ -255,6 +278,25 @@ fn maybe_cgexec(cmd: &str) -> Command {
     }
 }
 
+struct PostgresHandle {
+    postgres: std::process::Child,
+    log_collector: tokio::task::JoinHandle<Result<()>>,
+}
+
+impl PostgresHandle {
+    /// Return PID of the postgres (postmaster) process
+    fn pid(&self) -> Pid {
+        Pid::from_raw(self.postgres.id() as i32)
+    }
+}
+
+struct StartVmMonitorResult {
+    #[cfg(target_os = "linux")]
+    token: tokio_util::sync::CancellationToken,
+    #[cfg(target_os = "linux")]
+    vm_monitor: Option<tokio::task::JoinHandle<Result<()>>>,
+}
+
 pub(crate) fn construct_superuser_query(spec: &ComputeSpec) -> String {
     let roles = spec
         .cluster
@@ -329,6 +371,498 @@ pub(crate) fn construct_superuser_query(spec: &ComputeSpec) -> String {
 }
 
 impl ComputeNode {
+    pub fn new(
+        params: ComputeNodeParams,
+        cli_spec: Option<ComputeSpec>,
+        compute_ctl_config: ComputeCtlConfig,
+    ) -> Result<Self> {
+        let connstr = params.connstr.as_str();
+        let conn_conf = postgres::config::Config::from_str(connstr)
+            .context("cannot build postgres config from connstr")?;
+        let tokio_conn_conf = tokio_postgres::config::Config::from_str(connstr)
+            .context("cannot build tokio postgres config from connstr")?;
+
+        let mut new_state = ComputeState::new();
+        if let Some(cli_spec) = cli_spec {
+            let pspec = ParsedSpec::try_from(cli_spec).map_err(|msg| anyhow::anyhow!(msg))?;
+            new_state.pspec = Some(pspec);
+        }
+        new_state.compute_ctl_config = compute_ctl_config;
+
+        Ok(ComputeNode {
+            params,
+            conn_conf,
+            tokio_conn_conf,
+            state: Mutex::new(new_state),
+            state_changed: Condvar::new(),
+            ext_download_progress: RwLock::new(HashMap::new()),
+        })
+    }
+
+    /// Top-level control flow of compute_ctl. Returns a process exit code we should
+    /// exit with.
+    pub fn run(self) -> Result<Option<i32>> {
+        let this = Arc::new(self);
+
+        let cli_spec = this.state.lock().unwrap().pspec.clone();
+
+        // If this is a pooled VM, prewarm before starting HTTP server and becoming
+        // available for binding. Prewarming helps Postgres start quicker later,
+        // because QEMU will already have its memory allocated from the host, and
+        // the necessary binaries will already be cached.
+        if cli_spec.is_none() {
+            this.prewarm_postgres()?;
+        }
+
+        // Launch the external HTTP server first, so that we can serve control plane
+        // requests while configuration is still in progress.
+        crate::http::server::Server::External {
+            port: this.params.external_http_port,
+            jwks: this.state.lock().unwrap().compute_ctl_config.jwks.clone(),
+            compute_id: this.params.compute_id.clone(),
+        }
+        .launch(&this);
+
+        // The internal HTTP server could be launched later, but there isn't much
+        // sense in waiting.
+        crate::http::server::Server::Internal {
+            port: this.params.internal_http_port,
+        }
+        .launch(&this);
+
+        // If we got a spec from the CLI already, use that. Otherwise wait for the
+        // control plane to pass it to us with a /configure HTTP request
+        let pspec = if let Some(cli_spec) = cli_spec {
+            cli_spec
+        } else {
+            this.wait_spec()?
+        };
+
+        launch_lsn_lease_bg_task_for_static(&this);
+
+        // We have a spec, start the compute
+        let mut delay_exit = false;
+        let mut vm_monitor = None;
+        let mut pg_process: Option<PostgresHandle> = None;
+
+        match this.start_compute(&mut pg_process) {
+            Ok(()) => {
+                // Success! Launch remaining services (just vm-monitor currently)
+                vm_monitor =
+                    Some(this.start_vm_monitor(pspec.spec.disable_lfc_resizing.unwrap_or(false)));
+            }
+            Err(err) => {
+                // Something went wrong with the startup. Log it and expose the error to
+                // HTTP status requests.
+                error!("could not start the compute node: {:#}", err);
+                this.set_failed_status(err);
+                delay_exit = true;
+
+                // If the error happened after starting PostgreSQL, kill it
+                if let Some(ref pg_process) = pg_process {
+                    kill(pg_process.pid(), Signal::SIGQUIT).ok();
+                }
+            }
+        }
+
+        // If startup was successful, or it failed in the late stages,
+        // PostgreSQL is now running. Wait until it exits.
+        let exit_code = if let Some(pg_handle) = pg_process {
+            let exit_status = this.wait_postgres(pg_handle);
+            info!("Postgres exited with code {}, shutting down", exit_status);
+            exit_status.code()
+        } else {
+            None
+        };
+
+        // Terminate the vm_monitor so it releases the file watcher on
+        // /sys/fs/cgroup/neon-postgres.
+        // Note: the vm-monitor only runs on linux because it requires cgroups.
+        if let Some(vm_monitor) = vm_monitor {
+            cfg_if::cfg_if! {
+                if #[cfg(target_os = "linux")] {
+                    // Kills all threads spawned by the monitor
+                    vm_monitor.token.cancel();
+                    if let Some(handle) = vm_monitor.vm_monitor {
+                        // Kills the actual task running the monitor
+                        handle.abort();
+                    }
+                } else {
+                    _ = vm_monitor; // appease unused lint on macOS
+                }
+            }
+        }
+
+        // Reap the postgres process
+        delay_exit |= this.cleanup_after_postgres_exit()?;
+
+        // If launch failed, keep serving HTTP requests for a while, so the cloud
+        // control plane can get the actual error.
+        if delay_exit {
+            info!("giving control plane 30s to collect the error before shutdown");
+            std::thread::sleep(Duration::from_secs(30));
+        }
+        Ok(exit_code)
+    }
+
+    pub fn wait_spec(&self) -> Result<ParsedSpec> {
+        info!("no compute spec provided, waiting");
+        let mut state = self.state.lock().unwrap();
+        while state.status != ComputeStatus::ConfigurationPending {
+            state = self.state_changed.wait(state).unwrap();
+        }
+
+        info!("got spec, continue configuration");
+        let spec = state.pspec.as_ref().unwrap().clone();
+
+        // Record for how long we slept waiting for the spec.
+        let now = Utc::now();
+        state.metrics.wait_for_spec_ms = now
+            .signed_duration_since(state.start_time)
+            .to_std()
+            .unwrap()
+            .as_millis() as u64;
+
+        // Reset start time, so that the total startup time that is calculated later will
+        // not include the time that we waited for the spec.
+        state.start_time = now;
+
+        Ok(spec)
+    }
+
+    /// Start compute.
+    ///
+    /// Prerequisites:
+    /// - the compute spec has been placed in self.state.pspec
+    ///
+    /// On success:
+    /// - status is set to ComputeStatus::Running
+    /// - self.running_postgres is set
+    ///
+    /// On error:
+    /// - status is left in ComputeStatus::Init. The caller is responsible for setting it to Failed
+    /// - if Postgres was started before the fatal error happened, self.running_postgres is
+    ///   set. The caller is responsible for killing it.
+    ///
+    /// Note that this is in the critical path of a compute cold start. Keep this fast.
+    /// Try to do things concurrently, to hide the latencies.
+    fn start_compute(self: &Arc<Self>, pg_handle: &mut Option<PostgresHandle>) -> Result<()> {
+        let compute_state: ComputeState;
+
+        let start_compute_span;
+        let _this_entered;
+        {
+            let mut state_guard = self.state.lock().unwrap();
+
+            // Create a tracing span for the startup operation.
+            //
+            // We could otherwise just annotate the function with #[instrument], but if
+            // we're being configured from a /configure HTTP request, we want the
+            // startup to be considered part of the /configure request.
+            //
+            // Similarly, if a trace ID was passed in env variables, attach it to the span.
+            start_compute_span = {
+                // Temporarily enter the parent span, so that the new span becomes its child.
+                if let Some(p) = state_guard.startup_span.take() {
+                    let _parent_entered = p.entered();
+                    tracing::info_span!("start_compute")
+                } else if let Some(otel_context) = startup_context_from_env() {
+                    use tracing_opentelemetry::OpenTelemetrySpanExt;
+                    let span = tracing::info_span!("start_compute");
+                    span.set_parent(otel_context);
+                    span
+                } else {
+                    tracing::info_span!("start_compute")
+                }
+            };
+            _this_entered = start_compute_span.enter();
+
+            state_guard.set_status(ComputeStatus::Init, &self.state_changed);
+            compute_state = state_guard.clone()
+        }
+
+        let pspec = compute_state.pspec.as_ref().expect("spec must be set");
+        info!(
+            "starting compute for project {}, operation {}, tenant {}, timeline {}, features {:?}, spec.remote_extensions {:?}",
+            pspec.spec.cluster.cluster_id.as_deref().unwrap_or("None"),
+            pspec.spec.operation_uuid.as_deref().unwrap_or("None"),
+            pspec.tenant_id,
+            pspec.timeline_id,
+            pspec.spec.features,
+            pspec.spec.remote_extensions,
+        );
+
+        ////// PRE-STARTUP PHASE: things that need to be finished before we start the Postgres process
+
+        // Collect all the tasks that must finish here
+        let mut pre_tasks = tokio::task::JoinSet::new();
+
+        // If there are any remote extensions in shared_preload_libraries, start downloading them
+        if pspec.spec.remote_extensions.is_some() {
+            let (this, spec) = (self.clone(), pspec.spec.clone());
+            pre_tasks.spawn(async move {
+                this.download_preload_extensions(&spec)
+                    .in_current_span()
+                    .await
+            });
+        }
+
+        // Prepare pgdata directory. This downloads the basebackup, among other things.
+        {
+            let (this, cs) = (self.clone(), compute_state.clone());
+            pre_tasks.spawn_blocking_child(move || this.prepare_pgdata(&cs));
+        }
+
+        // Resize swap to the desired size if the compute spec says so
+        if let (Some(size_bytes), true) =
+            (pspec.spec.swap_size_bytes, self.params.resize_swap_on_bind)
+        {
+            pre_tasks.spawn_blocking_child(move || {
+                // To avoid 'swapoff' hitting postgres startup, we need to run resize-swap to completion
+                // *before* starting postgres.
+                //
+                // In theory, we could do this asynchronously if SkipSwapon was enabled for VMs, but this
+                // carries a risk of introducing hard-to-debug issues - e.g. if postgres sometimes gets
+                // OOM-killed during startup because swap wasn't available yet.
+                resize_swap(size_bytes).context("failed to resize swap")?;
+                let size_mib = size_bytes as f32 / (1 << 20) as f32; // just for more coherent display.
+                info!(%size_bytes, %size_mib, "resized swap");
+
+                Ok::<(), anyhow::Error>(())
+            });
+        }
+
+        // Set disk quota if the compute spec says so
+        if let (Some(disk_quota_bytes), Some(disk_quota_fs_mountpoint)) = (
+            pspec.spec.disk_quota_bytes,
+            self.params.set_disk_quota_for_fs.as_ref(),
+        ) {
+            let disk_quota_fs_mountpoint = disk_quota_fs_mountpoint.clone();
+            pre_tasks.spawn_blocking_child(move || {
+                set_disk_quota(disk_quota_bytes, &disk_quota_fs_mountpoint)
+                    .context("failed to set disk quota")?;
+                let size_mib = disk_quota_bytes as f32 / (1 << 20) as f32; // just for more coherent display.
+                info!(%disk_quota_bytes, %size_mib, "set disk quota");
+
+                Ok::<(), anyhow::Error>(())
+            });
+        }
+
+        // tune pgbouncer
+        if let Some(pgbouncer_settings) = &pspec.spec.pgbouncer_settings {
+            info!("tuning pgbouncer");
+
+            // Spawn a background task to do the tuning,
+            // so that we don't block the main thread that starts Postgres.
+            let pgbouncer_settings = pgbouncer_settings.clone();
+            let _handle = tokio::spawn(async move {
+                let res = tune_pgbouncer(pgbouncer_settings).await;
+                if let Err(err) = res {
+                    error!("error while tuning pgbouncer: {err:?}");
+                    // Continue with the startup anyway
+                }
+            });
+        }
+
+        // configure local_proxy
+        if let Some(local_proxy) = &pspec.spec.local_proxy_config {
+            info!("configuring local_proxy");
+
+            // Spawn a background task to do the configuration,
+            // so that we don't block the main thread that starts Postgres.
+            let local_proxy = local_proxy.clone();
+            let _handle = tokio::spawn(async move {
+                if let Err(err) = local_proxy::configure(&local_proxy) {
+                    error!("error while configuring local_proxy: {err:?}");
+                    // Continue with the startup anyway
+                }
+            });
+        }
+
+        // Configure and start rsyslog if necessary
+        if let ComputeAudit::Hipaa = pspec.spec.audit_log_level {
+            let remote_endpoint = std::env::var("AUDIT_LOGGING_ENDPOINT").unwrap_or("".to_string());
+            if remote_endpoint.is_empty() {
+                anyhow::bail!("AUDIT_LOGGING_ENDPOINT is empty");
+            }
+
+            let log_directory_path = Path::new(&self.params.pgdata).join("log");
+            // TODO: make this more robust
+            // now rsyslog starts once and there is no monitoring or restart if it fails
+            configure_and_start_rsyslog(
+                log_directory_path.to_str().unwrap(),
+                "hipaa",
+                &remote_endpoint,
+            )?;
+        }
+
+        // Launch remaining service threads
+        let _monitor_handle = launch_monitor(self);
+        let _configurator_handle = launch_configurator(self);
+
+        // Wait for all the pre-tasks to finish before starting postgres
+        let rt = tokio::runtime::Handle::current();
+        while let Some(res) = rt.block_on(pre_tasks.join_next()) {
+            res??;
+        }
+
+        ////// START POSTGRES
+        let start_time = Utc::now();
+        let pg_process = self.start_postgres(pspec.storage_auth_token.clone())?;
+        let postmaster_pid = pg_process.pid();
+        *pg_handle = Some(pg_process);
+
+        // If this is a primary endpoint, perform some post-startup configuration before
+        // opening it up for the world.
+        let config_time = Utc::now();
+        if pspec.spec.mode == ComputeMode::Primary {
+            self.configure_as_primary(&compute_state)?;
+
+            let conf = self.get_conn_conf(None);
+            tokio::task::spawn_blocking(|| {
+                let res = get_installed_extensions(conf);
+                match res {
+                    Ok(extensions) => {
+                        info!(
+                            "[NEON_EXT_STAT] {}",
+                            serde_json::to_string(&extensions)
+                                .expect("failed to serialize extensions list")
+                        );
+                    }
+                    Err(err) => error!("could not get installed extensions: {err:?}"),
+                }
+            });
+        }
+
+        // All done!
+        let startup_end_time = Utc::now();
+        let metrics = {
+            let mut state = self.state.lock().unwrap();
+            state.metrics.start_postgres_ms = config_time
+                .signed_duration_since(start_time)
+                .to_std()
+                .unwrap()
+                .as_millis() as u64;
+            state.metrics.config_ms = startup_end_time
+                .signed_duration_since(config_time)
+                .to_std()
+                .unwrap()
+                .as_millis() as u64;
+            state.metrics.total_startup_ms = startup_end_time
+                .signed_duration_since(compute_state.start_time)
+                .to_std()
+                .unwrap()
+                .as_millis() as u64;
+            state.metrics.clone()
+        };
+        self.set_status(ComputeStatus::Running);
+
+        // Log metrics so that we can search for slow operations in logs
+        info!(?metrics, postmaster_pid = %postmaster_pid, "compute start finished");
+
+        Ok(())
+    }
+
+    #[instrument(skip_all)]
+    async fn download_preload_extensions(&self, spec: &ComputeSpec) -> Result<()> {
+        let remote_extensions = if let Some(remote_extensions) = &spec.remote_extensions {
+            remote_extensions
+        } else {
+            return Ok(());
+        };
+
+        // First, create control files for all available extensions
+        extension_server::create_control_files(remote_extensions, &self.params.pgbin);
+
+        let library_load_start_time = Utc::now();
+        let remote_ext_metrics = self.prepare_preload_libraries(spec).await?;
+
+        let library_load_time = Utc::now()
+            .signed_duration_since(library_load_start_time)
+            .to_std()
+            .unwrap()
+            .as_millis() as u64;
+        let mut state = self.state.lock().unwrap();
+        state.metrics.load_ext_ms = library_load_time;
+        state.metrics.num_ext_downloaded = remote_ext_metrics.num_ext_downloaded;
+        state.metrics.largest_ext_size = remote_ext_metrics.largest_ext_size;
+        state.metrics.total_ext_download_size = remote_ext_metrics.total_ext_download_size;
+        info!(
+            "Loading shared_preload_libraries took {:?}ms",
+            library_load_time
+        );
+        info!("{:?}", remote_ext_metrics);
+
+        Ok(())
+    }
+
+    /// Start the vm-monitor if directed to. The vm-monitor only runs on linux
+    /// because it requires cgroups.
+    fn start_vm_monitor(&self, disable_lfc_resizing: bool) -> StartVmMonitorResult {
+        cfg_if::cfg_if! {
+            if #[cfg(target_os = "linux")] {
+                use std::env;
+                use tokio_util::sync::CancellationToken;
+
+                // This token is used internally by the monitor to clean up all threads
+                let token = CancellationToken::new();
+
+                // don't pass postgres connection string to vm-monitor if we don't want it to resize LFC
+                let pgconnstr = if disable_lfc_resizing {
+                    None
+                } else {
+                    Some(self.params.filecache_connstr.clone())
+                };
+
+                let vm_monitor = if env::var_os("AUTOSCALING").is_some() {
+                    let vm_monitor = tokio::spawn(vm_monitor::start(
+                        Box::leak(Box::new(vm_monitor::Args {
+                            cgroup: Some(self.params.cgroup.clone()),
+                            pgconnstr,
+                            addr: self.params.vm_monitor_addr.clone(),
+                        })),
+                        token.clone(),
+                    ));
+                    Some(vm_monitor)
+                } else {
+                    None
+                };
+                StartVmMonitorResult { token, vm_monitor }
+            } else {
+                _ = disable_lfc_resizing; // appease unused lint on macOS
+                StartVmMonitorResult { }
+            }
+        }
+    }
+
+    fn cleanup_after_postgres_exit(&self) -> Result<bool> {
+        // Maybe sync safekeepers again, to speed up next startup
+        let compute_state = self.state.lock().unwrap().clone();
+        let pspec = compute_state.pspec.as_ref().expect("spec must be set");
+        if matches!(pspec.spec.mode, compute_api::spec::ComputeMode::Primary) {
+            info!("syncing safekeepers on shutdown");
+            let storage_auth_token = pspec.storage_auth_token.clone();
+            let lsn = self.sync_safekeepers(storage_auth_token)?;
+            info!("synced safekeepers at lsn {lsn}");
+        }
+
+        let mut delay_exit = false;
+        let mut state = self.state.lock().unwrap();
+        if state.status == ComputeStatus::TerminationPending {
+            state.status = ComputeStatus::Terminated;
+            self.state_changed.notify_all();
+            // we were asked to terminate gracefully, don't exit to avoid restart
+            delay_exit = true
+        }
+        drop(state);
+
+        if let Err(err) = self.check_for_core_dumps() {
+            error!("error while checking for core dumps: {err:?}");
+        }
+
+        Ok(delay_exit)
+    }
+
     /// Check that compute node has corresponding feature enabled.
     pub fn has_feature(&self, feature: ComputeFeature) -> bool {
         let state = self.state.lock().unwrap();
@@ -367,9 +901,10 @@ impl ComputeNode {
     fn create_pgdata(&self) -> Result<()> {
         // Ignore removal error, likely it is a 'No such file or directory (os error 2)'.
         // If it is something different then create_dir() will error out anyway.
-        let _ok = fs::remove_dir_all(&self.pgdata);
-        fs::create_dir(&self.pgdata)?;
-        fs::set_permissions(&self.pgdata, fs::Permissions::from_mode(0o700))?;
+        let pgdata = &self.params.pgdata;
+        let _ok = fs::remove_dir_all(pgdata);
+        fs::create_dir(pgdata)?;
+        fs::set_permissions(pgdata, fs::Permissions::from_mode(0o700))?;
 
         Ok(())
     }
@@ -434,7 +969,7 @@ impl ComputeNode {
         // sends an Error after finishing the tarball, we will not notice it.
         let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(&mut bufreader));
         ar.set_ignore_zeros(true);
-        ar.unpack(&self.pgdata)?;
+        ar.unpack(&self.params.pgdata)?;
 
         // Report metrics
         let mut state = self.state.lock().unwrap();
@@ -579,9 +1114,9 @@ impl ComputeNode {
     pub fn sync_safekeepers(&self, storage_auth_token: Option<String>) -> Result<Lsn> {
         let start_time = Utc::now();
 
-        let mut sync_handle = maybe_cgexec(&self.pgbin)
+        let mut sync_handle = maybe_cgexec(&self.params.pgbin)
             .args(["--sync-safekeepers"])
-            .env("PGDATA", &self.pgdata) // we cannot use -D in this mode
+            .env("PGDATA", &self.params.pgdata) // we cannot use -D in this mode
             .envs(if let Some(storage_auth_token) = &storage_auth_token {
                 vec![("NEON_AUTH_TOKEN", storage_auth_token)]
             } else {
@@ -638,14 +1173,14 @@ impl ComputeNode {
     pub fn prepare_pgdata(&self, compute_state: &ComputeState) -> Result<()> {
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
         let spec = &pspec.spec;
-        let pgdata_path = Path::new(&self.pgdata);
+        let pgdata_path = Path::new(&self.params.pgdata);
 
         // Remove/create an empty pgdata directory and put configuration there.
         self.create_pgdata()?;
         config::write_postgres_conf(
             &pgdata_path.join("postgresql.conf"),
             &pspec.spec,
-            self.internal_http_port,
+            self.params.internal_http_port,
         )?;
 
         // Syncing safekeepers is only safe with primary nodes: if a primary
@@ -745,12 +1280,15 @@ impl ComputeNode {
         info!("prewarming");
 
         // Create pgdata
-        let pgdata = &format!("{}.warmup", self.pgdata);
+        let pgdata = &format!("{}.warmup", self.params.pgdata);
         create_pgdata(pgdata)?;
 
         // Run initdb to completion
         info!("running initdb");
-        let initdb_bin = Path::new(&self.pgbin).parent().unwrap().join("initdb");
+        let initdb_bin = Path::new(&self.params.pgbin)
+            .parent()
+            .unwrap()
+            .join("initdb");
         Command::new(initdb_bin)
             .args(["--pgdata", pgdata])
             .output()
@@ -766,7 +1304,7 @@ impl ComputeNode {
 
         // Start postgres
         info!("starting postgres");
-        let mut pg = maybe_cgexec(&self.pgbin)
+        let mut pg = maybe_cgexec(&self.params.pgbin)
             .args(["-D", pgdata])
             .spawn()
             .expect("cannot start postgres process");
@@ -793,15 +1331,12 @@ impl ComputeNode {
     ///
     /// Returns a handle to the child process and a handle to the logs thread.
     #[instrument(skip_all)]
-    pub fn start_postgres(
-        &self,
-        storage_auth_token: Option<String>,
-    ) -> Result<(std::process::Child, tokio::task::JoinHandle<Result<()>>)> {
-        let pgdata_path = Path::new(&self.pgdata);
+    pub fn start_postgres(&self, storage_auth_token: Option<String>) -> Result<PostgresHandle> {
+        let pgdata_path = Path::new(&self.params.pgdata);
 
         // Run postgres as a child process.
-        let mut pg = maybe_cgexec(&self.pgbin)
-            .args(["-D", &self.pgdata])
+        let mut pg = maybe_cgexec(&self.params.pgbin)
+            .args(["-D", &self.params.pgdata])
             .envs(if let Some(storage_auth_token) = &storage_auth_token {
                 vec![("NEON_AUTH_TOKEN", storage_auth_token)]
             } else {
@@ -818,7 +1353,29 @@ impl ComputeNode {
 
         wait_for_postgres(&mut pg, pgdata_path)?;
 
-        Ok((pg, logs_handle))
+        Ok(PostgresHandle {
+            postgres: pg,
+            log_collector: logs_handle,
+        })
+    }
+
+    /// Wait for the child Postgres process forever. In this state Ctrl+C will
+    /// propagate to Postgres and it will be shut down as well.
+    fn wait_postgres(&self, mut pg_handle: PostgresHandle) -> std::process::ExitStatus {
+        info!(postmaster_pid = %pg_handle.postgres.id(), "Waiting for Postgres to exit");
+
+        let ecode = pg_handle
+            .postgres
+            .wait()
+            .expect("failed to start waiting on Postgres process");
+        PG_PID.store(0, Ordering::SeqCst);
+
+        // Process has exited. Wait for the log collecting task to finish.
+        let _ = tokio::runtime::Handle::current()
+            .block_on(pg_handle.log_collector)
+            .map_err(|e| tracing::error!("log task panicked: {:?}", e));
+
+        ecode
     }
 
     /// Do post configuration of the already started Postgres. This function spawns a background task to
@@ -928,388 +1485,6 @@ impl ComputeNode {
         Ok(client)
     }
 
-    /// Apply the spec to the running PostgreSQL instance.
-    /// The caller can decide to run with multiple clients in parallel, or
-    /// single mode.  Either way, the commands executed will be the same, and
-    /// only commands run in different databases are parallelized.
-    #[instrument(skip_all)]
-    pub fn apply_spec_sql(
-        &self,
-        spec: Arc<ComputeSpec>,
-        conf: Arc<tokio_postgres::Config>,
-        concurrency: usize,
-    ) -> Result<()> {
-        info!("Applying config with max {} concurrency", concurrency);
-        debug!("Config: {:?}", spec);
-
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async {
-            // Proceed with post-startup configuration. Note, that order of operations is important.
-            let client = Self::get_maintenance_client(&conf).await?;
-            let spec = spec.clone();
-
-            let databases = get_existing_dbs_async(&client).await?;
-            let roles = get_existing_roles_async(&client)
-                .await?
-                .into_iter()
-                .map(|role| (role.name.clone(), role))
-                .collect::<HashMap<String, Role>>();
-
-            // Check if we need to drop subscriptions before starting the endpoint.
-            //
-            // It is important to do this operation exactly once when endpoint starts on a new branch.
-            // Otherwise, we may drop not inherited, but newly created subscriptions.
-            //
-            // We cannot rely only on spec.drop_subscriptions_before_start flag,
-            // because if for some reason compute restarts inside VM,
-            // it will start again with the same spec and flag value.
-            //
-            // To handle this, we save the fact of the operation in the database
-            // in the neon.drop_subscriptions_done table.
-            // If the table does not exist, we assume that the operation was never performed, so we must do it.
-            // If table exists, we check if the operation was performed on the current timelilne.
-            //
-            let mut drop_subscriptions_done = false;
-
-            if spec.drop_subscriptions_before_start {
-                let timeline_id = self.get_timeline_id().context("timeline_id must be set")?;
-                let query = format!("select 1 from neon.drop_subscriptions_done where timeline_id = '{}'", timeline_id);
-
-                info!("Checking if drop subscription operation was already performed for timeline_id: {}", timeline_id);
-
-                drop_subscriptions_done =  match
-                    client.simple_query(&query).await {
-                    Ok(result) => {
-                        matches!(&result[0], postgres::SimpleQueryMessage::Row(_))
-                    },
-                    Err(e) =>
-                    {
-                        match e.code() {
-                            Some(&SqlState::UNDEFINED_TABLE) => false,
-                            _ => {
-                                // We don't expect any other error here, except for the schema/table not existing
-                                error!("Error checking if drop subscription operation was already performed: {}", e);
-                                return Err(e.into());
-                            }
-                        }
-                    }
-                }
-            };
-
-
-            let jwks_roles = Arc::new(
-                spec.as_ref()
-                    .local_proxy_config
-                    .iter()
-                    .flat_map(|it| &it.jwks)
-                    .flatten()
-                    .flat_map(|setting| &setting.role_names)
-                    .cloned()
-                    .collect::<HashSet<_>>(),
-            );
-
-            let ctx = Arc::new(tokio::sync::RwLock::new(MutableApplyContext {
-                roles,
-                dbs: databases,
-            }));
-
-            // Apply special pre drop database phase.
-            // NOTE: we use the code of RunInEachDatabase phase for parallelism
-            // and connection management, but we don't really run it in *each* database,
-            // only in databases, we're about to drop.
-            info!("Applying PerDatabase (pre-dropdb) phase");
-            let concurrency_token = Arc::new(tokio::sync::Semaphore::new(concurrency));
-
-            // Run the phase for each database that we're about to drop.
-            let db_processes = spec
-                .delta_operations
-                .iter()
-                .flatten()
-                .filter_map(move |op| {
-                    if op.action.as_str() == "delete_db" {
-                        Some(op.name.clone())
-                    } else {
-                        None
-                    }
-                })
-                .map(|dbname| {
-                    let spec = spec.clone();
-                    let ctx = ctx.clone();
-                    let jwks_roles = jwks_roles.clone();
-                    let mut conf = conf.as_ref().clone();
-                    let concurrency_token = concurrency_token.clone();
-                    // We only need dbname field for this phase, so set other fields to dummy values
-                    let db = DB::UserDB(Database {
-                        name: dbname.clone(),
-                        owner: "cloud_admin".to_string(),
-                        options: None,
-                        restrict_conn: false,
-                        invalid: false,
-                    });
-
-                    debug!("Applying per-database phases for Database {:?}", &db);
-
-                    match &db {
-                        DB::SystemDB => {}
-                        DB::UserDB(db) => {
-                            conf.dbname(db.name.as_str());
-                        }
-                    }
-
-                    let conf = Arc::new(conf);
-                    let fut = Self::apply_spec_sql_db(
-                        spec.clone(),
-                        conf,
-                        ctx.clone(),
-                        jwks_roles.clone(),
-                        concurrency_token.clone(),
-                        db,
-                        [DropLogicalSubscriptions].to_vec(),
-                    );
-
-                    Ok(spawn(fut))
-                })
-                .collect::<Vec<Result<_, anyhow::Error>>>();
-
-            for process in db_processes.into_iter() {
-                let handle = process?;
-                if let Err(e) = handle.await? {
-                    // Handle the error case where the database does not exist
-                    // We do not check whether the DB exists or not in the deletion phase,
-                    // so we shouldn't be strict about it in pre-deletion cleanup as well.
-                    if e.to_string().contains("does not exist") {
-                        warn!("Error dropping subscription: {}", e);
-                    } else {
-                        return Err(e);
-                    }
-                };
-            }
-
-            for phase in [
-                CreateSuperUser,
-                DropInvalidDatabases,
-                RenameRoles,
-                CreateAndAlterRoles,
-                RenameAndDeleteDatabases,
-                CreateAndAlterDatabases,
-                CreateSchemaNeon,
-            ] {
-                info!("Applying phase {:?}", &phase);
-                apply_operations(
-                    spec.clone(),
-                    ctx.clone(),
-                    jwks_roles.clone(),
-                    phase,
-                    || async { Ok(&client) },
-                )
-                .await?;
-            }
-
-            info!("Applying RunInEachDatabase2 phase");
-            let concurrency_token = Arc::new(tokio::sync::Semaphore::new(concurrency));
-
-            let db_processes = spec
-                .cluster
-                .databases
-                .iter()
-                .map(|db| DB::new(db.clone()))
-                // include
-                .chain(once(DB::SystemDB))
-                .map(|db| {
-                    let spec = spec.clone();
-                    let ctx = ctx.clone();
-                    let jwks_roles = jwks_roles.clone();
-                    let mut conf = conf.as_ref().clone();
-                    let concurrency_token = concurrency_token.clone();
-                    let db = db.clone();
-
-                    debug!("Applying per-database phases for Database {:?}", &db);
-
-                    match &db {
-                        DB::SystemDB => {}
-                        DB::UserDB(db) => {
-                            conf.dbname(db.name.as_str());
-                        }
-                    }
-
-                    let conf = Arc::new(conf);
-                    let mut phases = vec![
-                        DeleteDBRoleReferences,
-                        ChangeSchemaPerms,
-                        HandleAnonExtension,
-                    ];
-
-                    if spec.drop_subscriptions_before_start && !drop_subscriptions_done {
-                        info!("Adding DropLogicalSubscriptions phase because drop_subscriptions_before_start is set");
-                        phases.push(DropLogicalSubscriptions);
-                    }
-
-                    let fut = Self::apply_spec_sql_db(
-                        spec.clone(),
-                        conf,
-                        ctx.clone(),
-                        jwks_roles.clone(),
-                        concurrency_token.clone(),
-                        db,
-                        phases,
-                    );
-
-                    Ok(spawn(fut))
-                })
-                .collect::<Vec<Result<_, anyhow::Error>>>();
-
-            for process in db_processes.into_iter() {
-                let handle = process?;
-                handle.await??;
-            }
-
-            let mut phases = vec![
-                HandleOtherExtensions,
-                HandleNeonExtension, // This step depends on CreateSchemaNeon
-                CreateAvailabilityCheck,
-                DropRoles,
-            ];
-
-            // This step depends on CreateSchemaNeon
-            if spec.drop_subscriptions_before_start && !drop_subscriptions_done {
-                info!("Adding FinalizeDropLogicalSubscriptions phase because drop_subscriptions_before_start is set");
-                phases.push(FinalizeDropLogicalSubscriptions);
-            }
-
-            for phase in phases {
-                debug!("Applying phase {:?}", &phase);
-                apply_operations(
-                    spec.clone(),
-                    ctx.clone(),
-                    jwks_roles.clone(),
-                    phase,
-                    || async { Ok(&client) },
-                )
-                .await?;
-            }
-
-            Ok::<(), anyhow::Error>(())
-        })?;
-
-        Ok(())
-    }
-
-    /// Apply SQL migrations of the RunInEachDatabase phase.
-    ///
-    /// May opt to not connect to databases that don't have any scheduled
-    /// operations.  The function is concurrency-controlled with the provided
-    /// semaphore.  The caller has to make sure the semaphore isn't exhausted.
-    async fn apply_spec_sql_db(
-        spec: Arc<ComputeSpec>,
-        conf: Arc<tokio_postgres::Config>,
-        ctx: Arc<tokio::sync::RwLock<MutableApplyContext>>,
-        jwks_roles: Arc<HashSet<String>>,
-        concurrency_token: Arc<tokio::sync::Semaphore>,
-        db: DB,
-        subphases: Vec<PerDatabasePhase>,
-    ) -> Result<()> {
-        let _permit = concurrency_token.acquire().await?;
-
-        let mut client_conn = None;
-
-        for subphase in subphases {
-            apply_operations(
-                spec.clone(),
-                ctx.clone(),
-                jwks_roles.clone(),
-                RunInEachDatabase {
-                    db: db.clone(),
-                    subphase,
-                },
-                // Only connect if apply_operation actually wants a connection.
-                // It's quite possible this database doesn't need any queries,
-                // so by not connecting we save time and effort connecting to
-                // that database.
-                || async {
-                    if client_conn.is_none() {
-                        let db_client = Self::get_maintenance_client(&conf).await?;
-                        client_conn.replace(db_client);
-                    }
-                    let client = client_conn.as_ref().unwrap();
-                    Ok(client)
-                },
-            )
-            .await?;
-        }
-
-        drop(client_conn);
-
-        Ok::<(), anyhow::Error>(())
-    }
-
-    /// Choose how many concurrent connections to use for applying the spec changes.
-    pub fn max_service_connections(
-        &self,
-        compute_state: &ComputeState,
-        spec: &ComputeSpec,
-    ) -> usize {
-        // If the cluster is in Init state we don't have to deal with user connections,
-        // and can thus use all `max_connections` connection slots. However, that's generally not
-        // very efficient, so we generally still limit it to a smaller number.
-        if compute_state.status == ComputeStatus::Init {
-            // If the settings contain 'max_connections', use that as template
-            if let Some(config) = spec.cluster.settings.find("max_connections") {
-                config.parse::<usize>().ok()
-            } else {
-                // Otherwise, try to find the setting in the postgresql_conf string
-                spec.cluster
-                    .postgresql_conf
-                    .iter()
-                    .flat_map(|conf| conf.split("\n"))
-                    .filter_map(|line| {
-                        if !line.contains("max_connections") {
-                            return None;
-                        }
-
-                        let (key, value) = line.split_once("=")?;
-                        let key = key
-                            .trim_start_matches(char::is_whitespace)
-                            .trim_end_matches(char::is_whitespace);
-
-                        let value = value
-                            .trim_start_matches(char::is_whitespace)
-                            .trim_end_matches(char::is_whitespace);
-
-                        if key != "max_connections" {
-                            return None;
-                        }
-
-                        value.parse::<usize>().ok()
-                    })
-                    .next()
-            }
-            // If max_connections is present, use at most 1/3rd of that.
-            // When max_connections is lower than 30, try to use at least 10 connections, but
-            // never more than max_connections.
-            .map(|limit| match limit {
-                0..10 => limit,
-                10..30 => 10,
-                30.. => limit / 3,
-            })
-            // If we didn't find max_connections, default to 10 concurrent connections.
-            .unwrap_or(10)
-        } else {
-            // state == Running
-            // Because the cluster is already in the Running state, we should assume users are
-            // already connected to the cluster, and high concurrency could negatively
-            // impact user connectivity. Therefore, we can limit concurrency to the number of
-            // reserved superuser connections, which users wouldn't be able to use anyway.
-            spec.cluster
-                .settings
-                .find("superuser_reserved_connections")
-                .iter()
-                .filter_map(|val| val.parse::<usize>().ok())
-                .map(|val| if val > 1 { val - 1 } else { 1 })
-                .last()
-                .unwrap_or(3)
-        }
-    }
-
     /// Do initial configuration of the already started Postgres.
     #[instrument(skip_all)]
     pub fn apply_config(&self, compute_state: &ComputeState) -> Result<()> {
@@ -1367,9 +1542,12 @@ impl ComputeNode {
     // `pg_ctl` for start / stop.
     #[instrument(skip_all)]
     fn pg_reload_conf(&self) -> Result<()> {
-        let pgctl_bin = Path::new(&self.pgbin).parent().unwrap().join("pg_ctl");
+        let pgctl_bin = Path::new(&self.params.pgbin)
+            .parent()
+            .unwrap()
+            .join("pg_ctl");
         Command::new(pgctl_bin)
-            .args(["reload", "-D", &self.pgdata])
+            .args(["reload", "-D", &self.params.pgdata])
             .output()
             .expect("cannot run pg_ctl process");
         Ok(())
@@ -1409,9 +1587,9 @@ impl ComputeNode {
         }
 
         // Write new config
-        let pgdata_path = Path::new(&self.pgdata);
+        let pgdata_path = Path::new(&self.params.pgdata);
         let postgresql_conf_path = pgdata_path.join("postgresql.conf");
-        config::write_postgres_conf(&postgresql_conf_path, &spec, self.internal_http_port)?;
+        config::write_postgres_conf(&postgresql_conf_path, &spec, self.params.internal_http_port)?;
 
         if !spec.skip_pg_catalog_updates {
             let max_concurrent_connections = spec.reconfigure_concurrency;
@@ -1422,7 +1600,8 @@ impl ComputeNode {
                 self.pg_reload_conf()?;
 
                 if spec.mode == ComputeMode::Primary {
-                    let mut conf = tokio_postgres::Config::from_str(self.connstr.as_str()).unwrap();
+                    let mut conf =
+                        tokio_postgres::Config::from_str(self.params.connstr.as_str()).unwrap();
                     conf.application_name("apply_config");
                     let conf = Arc::new(conf);
 
@@ -1448,166 +1627,37 @@ impl ComputeNode {
     }
 
     #[instrument(skip_all)]
-    pub fn start_compute(
-        &self,
-    ) -> Result<(std::process::Child, tokio::task::JoinHandle<Result<()>>)> {
-        let compute_state = self.state.lock().unwrap().clone();
+    pub fn configure_as_primary(&self, compute_state: &ComputeState) -> Result<()> {
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
-        info!(
-            "starting compute for project {}, operation {}, tenant {}, timeline {}",
-            pspec.spec.cluster.cluster_id.as_deref().unwrap_or("None"),
-            pspec.spec.operation_uuid.as_deref().unwrap_or("None"),
-            pspec.tenant_id,
-            pspec.timeline_id,
-        );
 
-        // tune pgbouncer
-        if let Some(pgbouncer_settings) = &pspec.spec.pgbouncer_settings {
-            info!("tuning pgbouncer");
-
-            // Spawn a background task to do the tuning,
-            // so that we don't block the main thread that starts Postgres.
-            let pgbouncer_settings = pgbouncer_settings.clone();
-            let _handle = tokio::spawn(async move {
-                let res = tune_pgbouncer(pgbouncer_settings).await;
-                if let Err(err) = res {
-                    error!("error while tuning pgbouncer: {err:?}");
-                }
-            });
-        }
-
-        if let Some(local_proxy) = &pspec.spec.local_proxy_config {
-            info!("configuring local_proxy");
-
-            // Spawn a background task to do the configuration,
-            // so that we don't block the main thread that starts Postgres.
-            let local_proxy = local_proxy.clone();
-            let _handle = tokio::spawn(async move {
-                if let Err(err) = local_proxy::configure(&local_proxy) {
-                    error!("error while configuring local_proxy: {err:?}");
-                }
-            });
-        }
-
-        info!(
-            "start_compute spec.remote_extensions {:?}",
-            pspec.spec.remote_extensions
-        );
-
-        // This part is sync, because we need to download
-        // remote shared_preload_libraries before postgres start (if any)
-        if let Some(remote_extensions) = &pspec.spec.remote_extensions {
-            // First, create control files for all availale extensions
-            extension_server::create_control_files(remote_extensions, &self.pgbin);
-
-            let library_load_start_time = Utc::now();
-            let rt = tokio::runtime::Handle::current();
-            let remote_ext_metrics = rt.block_on(self.prepare_preload_libraries(&pspec.spec))?;
-
-            let library_load_time = Utc::now()
-                .signed_duration_since(library_load_start_time)
-                .to_std()
-                .unwrap()
-                .as_millis() as u64;
-            let mut state = self.state.lock().unwrap();
-            state.metrics.load_ext_ms = library_load_time;
-            state.metrics.num_ext_downloaded = remote_ext_metrics.num_ext_downloaded;
-            state.metrics.largest_ext_size = remote_ext_metrics.largest_ext_size;
-            state.metrics.total_ext_download_size = remote_ext_metrics.total_ext_download_size;
-            info!(
-                "Loading shared_preload_libraries took {:?}ms",
-                library_load_time
-            );
-            info!("{:?}", remote_ext_metrics);
-        }
-
-        self.prepare_pgdata(&compute_state)?;
-
-        let start_time = Utc::now();
-        let pg_process = self.start_postgres(pspec.storage_auth_token.clone())?;
-
-        let config_time = Utc::now();
-        if pspec.spec.mode == ComputeMode::Primary {
-            if !pspec.spec.skip_pg_catalog_updates {
-                let pgdata_path = Path::new(&self.pgdata);
-                // temporarily reset max_cluster_size in config
-                // to avoid the possibility of hitting the limit, while we are applying config:
-                // creating new extensions, roles, etc...
-                config::with_compute_ctl_tmp_override(
-                    pgdata_path,
-                    "neon.max_cluster_size=-1",
-                    || {
-                        self.pg_reload_conf()?;
-
-                        self.apply_config(&compute_state)?;
-
-                        Ok(())
-                    },
-                )?;
-
-                let postgresql_conf_path = pgdata_path.join("postgresql.conf");
-                if config::line_in_file(
-                    &postgresql_conf_path,
-                    "neon.disable_logical_replication_subscribers=false",
-                )? {
-                    info!(
-                        "updated postgresql.conf to set neon.disable_logical_replication_subscribers=false"
-                    );
-                }
+        assert!(pspec.spec.mode == ComputeMode::Primary);
+        if !pspec.spec.skip_pg_catalog_updates {
+            let pgdata_path = Path::new(&self.params.pgdata);
+            // temporarily reset max_cluster_size in config
+            // to avoid the possibility of hitting the limit, while we are applying config:
+            // creating new extensions, roles, etc...
+            config::with_compute_ctl_tmp_override(pgdata_path, "neon.max_cluster_size=-1", || {
                 self.pg_reload_conf()?;
+
+                self.apply_config(compute_state)?;
+
+                Ok(())
+            })?;
+
+            let postgresql_conf_path = pgdata_path.join("postgresql.conf");
+            if config::line_in_file(
+                &postgresql_conf_path,
+                "neon.disable_logical_replication_subscribers=false",
+            )? {
+                info!(
+                    "updated postgresql.conf to set neon.disable_logical_replication_subscribers=false"
+                );
             }
-            self.post_apply_config()?;
-
-            let conf = self.get_conn_conf(None);
-            tokio::task::spawn_blocking(|| {
-                let res = get_installed_extensions(conf);
-                match res {
-                    Ok(extensions) => {
-                        info!(
-                            "[NEON_EXT_STAT] {}",
-                            serde_json::to_string(&extensions)
-                                .expect("failed to serialize extensions list")
-                        );
-                    }
-                    Err(err) => error!("could not get installed extensions: {err:?}"),
-                }
-            });
+            self.pg_reload_conf()?;
         }
+        self.post_apply_config()?;
 
-        let startup_end_time = Utc::now();
-        {
-            let mut state = self.state.lock().unwrap();
-            state.metrics.start_postgres_ms = config_time
-                .signed_duration_since(start_time)
-                .to_std()
-                .unwrap()
-                .as_millis() as u64;
-            state.metrics.config_ms = startup_end_time
-                .signed_duration_since(config_time)
-                .to_std()
-                .unwrap()
-                .as_millis() as u64;
-            state.metrics.total_startup_ms = startup_end_time
-                .signed_duration_since(compute_state.start_time)
-                .to_std()
-                .unwrap()
-                .as_millis() as u64;
-        }
-        self.set_status(ComputeStatus::Running);
-
-        info!(
-            "finished configuration of compute for project {}",
-            pspec.spec.cluster.cluster_id.as_deref().unwrap_or("None")
-        );
-
-        // Log metrics so that we can search for slow operations in logs
-        let metrics = {
-            let state = self.state.lock().unwrap();
-            state.metrics.clone()
-        };
-        info!(?metrics, "compute start finished");
-
-        Ok(pg_process)
+        Ok(())
     }
 
     /// Update the `last_active` in the shared state, but ensure that it's a more recent one.
@@ -1636,7 +1686,7 @@ impl ComputeNode {
     pub fn check_for_core_dumps(&self) -> Result<()> {
         let core_dump_dir = match std::env::consts::OS {
             "macos" => Path::new("/cores/"),
-            _ => Path::new(&self.pgdata),
+            _ => Path::new(&self.params.pgdata),
         };
 
         // Collect core dump paths if any
@@ -1666,7 +1716,7 @@ impl ComputeNode {
 
             // Try first with gdb
             let backtrace = Command::new("gdb")
-                .args(["--batch", "-q", "-ex", "bt", &self.pgbin])
+                .args(["--batch", "-q", "-ex", "bt", &self.params.pgbin])
                 .arg(&core_path)
                 .output();
 
@@ -1743,7 +1793,8 @@ LIMIT 100",
         ext_path: RemotePath,
     ) -> Result<u64, DownloadError> {
         let ext_remote_storage =
-            self.ext_remote_storage
+            self.params
+                .ext_remote_storage
                 .as_ref()
                 .ok_or(DownloadError::BadInput(anyhow::anyhow!(
                     "Remote extensions storage is not configured",
@@ -1806,7 +1857,7 @@ LIMIT 100",
             &real_ext_name,
             &ext_path,
             ext_remote_storage,
-            &self.pgbin,
+            &self.params.pgbin,
         )
         .await
         .map_err(DownloadError::Other);
@@ -1914,7 +1965,7 @@ LIMIT 100",
         &self,
         spec: &ComputeSpec,
     ) -> Result<RemoteExtensionMetrics> {
-        if self.ext_remote_storage.is_none() {
+        if self.params.ext_remote_storage.is_none() {
             return Ok(RemoteExtensionMetrics {
                 num_ext_downloaded: 0,
                 largest_ext_size: 0,
@@ -1965,8 +2016,12 @@ LIMIT 100",
 
         let mut download_tasks = Vec::new();
         for library in &libs_vec {
-            let (ext_name, ext_path) =
-                remote_extensions.get_ext(library, true, &self.build_tag, &self.pgversion)?;
+            let (ext_name, ext_path) = remote_extensions.get_ext(
+                library,
+                true,
+                &self.params.build_tag,
+                &self.params.pgversion,
+            )?;
             download_tasks.push(self.download_extension(ext_name, ext_path));
         }
         let results = join_all(download_tasks).await;
@@ -2041,5 +2096,28 @@ pub fn forward_termination_signal() {
         // ROs to get a list of running xacts faster instead of going through the CLOG.
         // See https://www.postgresql.org/docs/current/server-shutdown.html for the list of modes and signals.
         kill(pg_pid, Signal::SIGINT).ok();
+    }
+}
+
+// helper trait to call JoinSet::spawn_blocking(f), but propagates the current
+// tracing span to the thread.
+trait JoinSetExt<T> {
+    fn spawn_blocking_child<F>(&mut self, f: F) -> tokio::task::AbortHandle
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send;
+}
+
+impl<T: 'static> JoinSetExt<T> for tokio::task::JoinSet<T> {
+    fn spawn_blocking_child<F>(&mut self, f: F) -> tokio::task::AbortHandle
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send,
+    {
+        let sp = tracing::Span::current();
+        self.spawn_blocking(move || {
+            let _e = sp.enter();
+            f()
+        })
     }
 }

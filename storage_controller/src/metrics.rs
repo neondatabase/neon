@@ -76,6 +76,10 @@ pub(crate) struct StorageControllerMetricGroup {
     pub(crate) storage_controller_http_request_latency:
         measured::HistogramVec<HttpRequestLatencyLabelGroupSet, 5>,
 
+    /// HTTP rate limiting latency across all tenants and endpoints
+    #[metric(metadata = histogram::Thresholds::exponential_buckets(0.1, 10.0))]
+    pub(crate) storage_controller_http_request_rate_limited: measured::Histogram<10>,
+
     /// Count of HTTP requests to the pageserver that resulted in an error,
     /// broken down by the pageserver node id, request name and method
     pub(crate) storage_controller_pageserver_request_error:
