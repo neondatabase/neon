@@ -31,21 +31,13 @@ fn get_rsyslog_pid() -> Option<String> {
 //
 fn restart_rsyslog() -> Result<()> {
     let old_pid = get_rsyslog_pid().context("rsyslogd is not running")?;
-    info!(
-        "rsyslogd is already running with pid: {}, restart it",
-        old_pid
-    );
+    info!("rsyslogd is running with pid: {}, restart it", old_pid);
 
     // kill it to restart
     let _ = Command::new("pkill")
         .arg("rsyslogd")
         .output()
         .context("Failed to stop rsyslogd")?;
-
-    // debug only
-    if let Some(pid) = get_rsyslog_pid() {
-        info!("rsyslogd is alive with pid: {}", pid);
-    }
 
     Ok(())
 }
@@ -73,7 +65,10 @@ pub fn configure_and_start_rsyslog(
 
     file.write_all(config_content.as_bytes())?;
 
-    info!("rsyslog configuration added successfully. Starting rsyslogd");
+    info!(
+        "rsyslog configuration file {} added successfully. Starting rsyslogd",
+        rsyslog_conf_path
+    );
 
     // start the service, using the configuration
     restart_rsyslog()?;
