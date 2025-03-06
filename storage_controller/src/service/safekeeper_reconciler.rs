@@ -1,6 +1,8 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use dashmap::{DashMap, Entry};
 use safekeeper_api::models::PullTimelineRequest;
+use safekeeper_client::mgmt_api;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -28,14 +30,11 @@ impl SafekeeperReconcilers {
     }
     pub(crate) fn schedule_request(&mut self, service: &Arc<Service>, req: ScheduleRequest) {
         let node_id = req.safekeeper.get_id();
-        let hostname = req.safekeeper.skp.host.clone();
         let reconciler_handle = self
             .reconcilers
             .entry(node_id)
             .or_insert_with(|| SafekeeperReconciler::spawn(service.clone()));
-        if let Err(err) = reconciler_handle.tx.send(req) {
-            tracing::info!("scheduling request onto {hostname} returned error: {err}",);
-        }
+        reconciler_handle.schedule_reconcile(req);
     }
     pub(crate) fn cancel_safekeeper(&mut self, node_id: NodeId) {
         if let Some(handle) = self.reconcilers.remove(&node_id) {
@@ -54,12 +53,45 @@ pub(crate) struct ScheduleRequest {
 }
 
 struct ReconcilerHandle {
-    tx: UnboundedSender<ScheduleRequest>,
+    tx: UnboundedSender<(ScheduleRequest, Arc<CancellationToken>)>,
+    ongoing_tokens: Arc<DashMap<(TenantId, TimelineId), Arc<CancellationToken>>>,
     cancel: CancellationToken,
 }
+
+impl ReconcilerHandle {
+    /// Obtain a new token slot, cancelling any existing reconciliations for that timeline
+    fn new_token_slot(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Arc<CancellationToken> {
+        let entry = self.ongoing_tokens.entry((tenant_id, timeline_id));
+        if let Entry::Occupied(entry) = &entry {
+            let cancel: &CancellationToken = entry.get();
+            cancel.cancel();
+        }
+        entry.insert(Arc::new(self.cancel.child_token())).clone()
+    }
+    fn cancel_timeline_reconcile(&self, tenant_id: TenantId, timeline_id: TimelineId) {
+        let entry = self.ongoing_tokens.entry((tenant_id, timeline_id));
+        if let Entry::Occupied(entry) = entry {
+            let cancel: &CancellationToken = entry.get();
+            cancel.cancel();
+            entry.remove();
+        }
+    }
+    fn schedule_reconcile(&self, req: ScheduleRequest) {
+        let cancel = self.new_token_slot(req.tenant_id, req.timeline_id);
+        let hostname = req.safekeeper.skp.host.clone();
+        if let Err(err) = self.tx.send((req, cancel)) {
+            tracing::info!("scheduling request onto {hostname} returned error: {err}");
+        }
+    }
+}
+
 pub(crate) struct SafekeeperReconciler {
     service: Arc<Service>,
-    rx: UnboundedReceiver<ScheduleRequest>,
+    rx: UnboundedReceiver<(ScheduleRequest, Arc<CancellationToken>)>,
     cancel: CancellationToken,
 }
 
@@ -73,7 +105,11 @@ impl SafekeeperReconciler {
             rx,
             cancel: cancel.clone(),
         };
-        let handle = ReconcilerHandle { tx, cancel };
+        let handle = ReconcilerHandle {
+            tx,
+            ongoing_tokens: Arc::new(DashMap::new()),
+            cancel,
+        };
         tokio::spawn(async move { reconciler.run().await });
         handle
     }
@@ -84,12 +120,15 @@ impl SafekeeperReconciler {
                 req = self.rx.recv() => req,
                 _ = self.cancel.cancelled() => break,
             };
-            let Some(req) = req else { break };
+            let Some((req, req_cancel)) = req else { break };
+            if req_cancel.is_cancelled() {
+                continue;
+            }
 
             let kind = req.kind;
             let tenant_id = req.tenant_id;
             let timeline_id = req.timeline_id;
-            self.reconcile_one(req)
+            self.reconcile_one(req, req_cancel)
                 .instrument(tracing::info_span!(
                     "reconcile_one",
                     ?kind,
@@ -99,7 +138,7 @@ impl SafekeeperReconciler {
                 .await;
         }
     }
-    async fn reconcile_one(&self, req: ScheduleRequest) {
+    async fn reconcile_one(&self, req: ScheduleRequest, req_cancel: Arc<CancellationToken>) {
         let req_host = req.safekeeper.skp.host.clone();
         match req.kind {
             SafekeeperTimelineOpKind::Pull => {
@@ -124,6 +163,7 @@ impl SafekeeperReconciler {
                             resp.safekeeper_host,
                         );
                     },
+                    req_cancel,
                 )
                 .await;
             }
@@ -137,6 +177,7 @@ impl SafekeeperReconciler {
                     |_resp| {
                         tracing::info!("deleted timeline from {req_host}");
                     },
+                    req_cancel,
                 )
                 .await;
             }
@@ -149,6 +190,7 @@ impl SafekeeperReconciler {
                     |_resp| {
                         tracing::info!("deleted timeline from {req_host}");
                     },
+                    req_cancel,
                 )
                 .await;
             }
@@ -159,6 +201,7 @@ impl SafekeeperReconciler {
         req: ScheduleRequest,
         closure: impl Fn(SafekeeperClient) -> F,
         log_success: impl FnOnce(T) -> U,
+        req_cancel: Arc<CancellationToken>,
     ) where
         F: Future<Output = Result<T, safekeeper_client::mgmt_api::Error>>,
     {
@@ -168,46 +211,54 @@ impl SafekeeperReconciler {
             .safekeeper_jwt_token
             .clone()
             .map(SecretString::from);
-        let res = req
-            .safekeeper
-            .with_client_retries(
-                |client| {
-                    let closure = &closure;
-                    async move { closure(client).await }
-                },
-                &jwt,
-                3,
-                10,
-                Duration::from_secs(10),
-                &self.cancel,
-            )
-            .await;
-        match res {
-            Ok(resp) => {
-                log_success(resp);
-                let res = self
-                    .service
-                    .persistence
-                    .remove_pending_op(
-                        req.tenant_id,
-                        req.timeline_id,
-                        req.safekeeper.get_id(),
-                        req.generation,
-                    )
-                    .await;
-                if let Err(err) = res {
+        loop {
+            let res = req
+                .safekeeper
+                .with_client_retries(
+                    |client| {
+                        let closure = &closure;
+                        async move { closure(client).await }
+                    },
+                    &jwt,
+                    3,
+                    10,
+                    Duration::from_secs(10),
+                    &req_cancel,
+                )
+                .await;
+            match res {
+                Ok(resp) => {
+                    log_success(resp);
+                    let res = self
+                        .service
+                        .persistence
+                        .remove_pending_op(
+                            req.tenant_id,
+                            req.timeline_id,
+                            req.safekeeper.get_id(),
+                            req.generation,
+                        )
+                        .await;
+                    if let Err(err) = res {
+                        tracing::info!(
+                            "couldn't remove reconciliation request onto {} from persistence: {err:?}",
+                            req.safekeeper.skp.host
+                        );
+                    }
+                    return;
+                }
+                Err(mgmt_api::Error::Cancelled) => {
+                    // On cancellation, the code that issued it will take care of removing db entries (if needed)
+                    return;
+                }
+                Err(e) => {
                     tracing::info!(
-                        "couldn't remove reconciliation request onto {} from persistence: {err:?}",
+                        "Reconcile attempt for safekeeper {} failed, retrying after sleep: {e:?}",
                         req.safekeeper.skp.host
                     );
+                    const SLEEP_TIME: Duration = Duration::from_secs(1);
+                    tokio::time::sleep(SLEEP_TIME).await;
                 }
-            }
-            Err(e) => {
-                tracing::info!(
-                    "Reconcile attempt for safekeeper {} failed: {e:?}",
-                    req.safekeeper.skp.host
-                );
-                // TODO we should probably automatically retry on error here
             }
         }
     }
