@@ -506,7 +506,8 @@ impl GcCompactionQueue {
                 let compaction_result = timeline.compact_with_options(cancel, options, ctx).await?;
                 if compaction_result == CompactionOutcome::YieldForL0 {
                     // We will permenantly give up a task if we yield for L0 compaction: the preempted subcompaction job won't be running
-                    // again. This ensures that we don't keep doing duplicated work within gc-compaction.
+                    // again. This ensures that we don't keep doing duplicated work within gc-compaction. Not directly returning here because
+                    // we need to clean things up before returning from the function.
                     yield_for_l0 = true;
                 }
             }
@@ -538,6 +539,7 @@ impl GcCompactionQueue {
             guard.running = None;
         }
         Ok(if yield_for_l0 {
+            tracing::info!("give up gc-compaction: yield for L0 compaction");
             CompactionOutcome::YieldForL0
         } else if has_pending_tasks {
             CompactionOutcome::Pending
