@@ -2,8 +2,8 @@ name: large oltp benchmark
 
 on:
   # uncomment to run on push for debugging your PR
-  push:
-    branches: [ bodobolero/synthetic_oltp_workload ]
+  #push:
+  #  branches: [ bodobolero/synthetic_oltp_workload ]
 
   schedule:
     # * is a special character in YAML so you have to quote this string
@@ -31,16 +31,16 @@ jobs:
       matrix:
         include:
           - target: new_branch 
-            custom_scripts: insert_webhooks.sql@2 select_any_webhook_with_skew.sql@4 select_recent_webhook.sql@4 
+            custom_scripts: insert_webhooks.sql@2 select_any_webhook_with_skew.sql@4 select_recent_webhook.sql@4 select_prefetch_webhook.sql@1
           - target: reuse_branch 
-            custom_scripts: insert_webhooks.sql@2 select_any_webhook_with_skew.sql@4 select_recent_webhook.sql@4 
+            custom_scripts: insert_webhooks.sql@2 select_any_webhook_with_skew.sql@4 select_recent_webhook.sql@4 select_prefetch_webhook.sql@1
       max-parallel: 1 # we want to run each stripe size sequentially to be able to compare the results
     permissions:
       contents: write
       statuses: write
       id-token: write # aws-actions/configure-aws-credentials
     env:
-      TEST_PG_BENCH_DURATIONS_MATRIX: "1h" # todo update to > 1 h 
+      TEST_PG_BENCH_DURATIONS_MATRIX: "20m" # todo update to > 1 h 
       TEST_PGBENCH_CUSTOM_SCRIPTS: ${{ matrix.custom_scripts }}
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       PG_VERSION: 16 # pre-determined by pre-determined project
@@ -103,6 +103,19 @@ jobs:
           esac
 
           echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
+
+    - name: Delete rows from prior runs in reuse branch
+      if: ${{ matrix.target == 'reuse_branch' }}
+      env:
+          BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+          PG_CONFIG: /tmp/neon/pg_install/v16/bin/pg_config
+          PSQL: /tmp/neon/pg_install/v16/bin/psql
+          PG_16_LIB_PATH: /tmp/neon/pg_install/v16/lib
+      run: |
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Deleting rows in table webhook.incoming_webhooks from prior runs"
+        export LD_LIBRARY_PATH=${PG_16_LIB_PATH}
+        ${PSQL} "${BENCHMARK_CONNSTR}" -c "SET statement_timeout = 0; DELETE FROM webhook.incoming_webhooks WHERE created_at > '2025-02-27 23:59:59+00';"
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Finished deleting rows in table webhook.incoming_webhooks from prior runs"
 
     - name: Benchmark pgbench with custom-scripts
       uses: ./.github/actions/run-python-test-set
