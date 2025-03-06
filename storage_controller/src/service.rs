@@ -3649,46 +3649,43 @@ impl Service {
         // because then we won't have a successful quorum.
         // For the third task, we don't rely on it succeeding, and we need this to support
         // continuing operations even if one safekeeper is down.
-        let timeout_or_quorum = tokio::time::timeout_at(reconcile_deadline, async {
-            (
-                joinset.join_next().await.unwrap(),
-                joinset.join_next().await.unwrap(),
-            )
-        })
-        .await;
+
         let mut reconcile_results = Vec::new();
-        match timeout_or_quorum {
-            Ok((Ok(res_1), Ok(res_2))) => {
-                reconcile_results.push(res_1);
-                reconcile_results.push(res_2);
-            }
-            Ok((Err(_), Ok(_)) | (_, Err(_))) => {
-                return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                    "task was cancelled while reconciling timeline creation"
-                )));
-            }
-            Err(_) => {
-                return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                    "couldn't reconcile timeline creation on safekeepers within timeout"
-                )));
+
+        let mut outstanding = timeline_persistence.sk_set.len();
+        while outstanding > 0 {
+            if let Ok(res) = tokio::time::timeout_at(reconcile_deadline, joinset.join_next()).await
+            {
+                // unwrap is fine as we know the number of stuff we put into the joinset
+                let res = res.unwrap();
+                match res {
+                    Ok(res) => reconcile_results.push(res),
+                    Err(join_err) => {
+                        tracing::info!("join_err: {join_err} for task in joinset");
+                    }
+                }
+                outstanding -= 1;
+            } else {
+                if outstanding > 1 {
+                    // Failed to create on a quorum
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                        "couldn't issue initial timeline creation on safekeepers within timeout"
+                    )));
+                } else {
+                    // We already have a quorum of results within the timeline, so we can do something with it, maybe.
+                    tracing::info!("timeout for third reconciliation");
+                }
             }
         }
-        let timeout_or_last =
-            tokio::time::timeout_at(reconcile_deadline, joinset.join_next().map(Option::unwrap))
-                .await;
-        if let Ok(Ok(res)) = timeout_or_last {
-            reconcile_results.push(res);
-        } else {
-            // No error if cancelled or timed out: we already have feedback from a quorum of safekeepers
-            tracing::info!("timeout for third reconciliation");
-        }
+
         // check now if quorum was reached in reconcile_results
+        let total_result_count = reconcile_results.len();
         let remaining = reconcile_results
             .into_iter()
             .filter_map(|res| res.err())
             .collect::<Vec<_>>();
         tracing::info!(
-            "Got {} non-successful results from initial creation request",
+            "Got {} non-successful responses from initial creation request of total {total_result_count} responses",
             remaining.len()
         );
         if remaining.len() >= 2 {
@@ -8422,22 +8419,38 @@ impl Service {
                 .safekeepers
                 .iter()
                 .filter_map(|sk| {
-                    let SafekeeperState::Available {
+                    if sk.1.scheduling_policy() != SkSchedulingPolicy::Active {
+                        // If we don't want to schedule stuff onto the safekeeper, respect that.
+                        return None;
+                    }
+                    let utilization_opt = if let SafekeeperState::Available {
                         last_seen_at: _,
                         utilization,
                     } = sk.1.availability()
-                    else {
-                        return None;
+                    {
+                        Some(utilization)
+                    } else {
+                        // non-available safekeepers still get a chance for new timelines,
+                        // but put them last in the list.
+                        None
                     };
                     let info = SafekeeperInfo {
                         hostname: sk.1.skp.host.clone(),
                         id: NodeId(sk.1.skp.id as u64),
                     };
-                    Some((utilization, info, sk.1.skp.availability_zone_id.clone()))
+                    Some((utilization_opt, info, sk.1.skp.availability_zone_id.clone()))
                 })
                 .collect::<Vec<_>>()
         };
-        all_safekeepers.sort_by_key(|sk| sk.0.timeline_count);
+        all_safekeepers.sort_by_key(|sk| {
+            (
+                sk.0.as_ref()
+                    .map(|ut| ut.timeline_count)
+                    .unwrap_or(u64::MAX),
+                // Use the id to decide on equal scores for reliability
+                sk.1.id.0,
+            )
+        });
         let mut sks = Vec::new();
         let mut azs = HashSet::new();
         for (_sk_util, sk_info, az_id) in all_safekeepers.iter() {
