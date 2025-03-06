@@ -106,7 +106,7 @@ class NeonBranch:
         # XXX debug only, remove before merge
         log.info("res: %s", res)
         self.updated_at: datetime = datetime.fromisoformat(res["branch"]["updated_at"])
-        parent_id: str = res["branch"]["parent"]
+        parent_id: str = res["branch"]["parent_id"]
         parent = NeonBranch(self.project, self.neon_api.get_branch_details(self.project_id,parent_id))
         self.project.branches[parent_id] = parent
         self.parent = parent
