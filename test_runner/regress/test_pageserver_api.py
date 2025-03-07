@@ -7,7 +7,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
 )
 from fixtures.pageserver.http import PageserverHttpClient
-from fixtures.utils import wait_until
+from fixtures.utils import run_only_on_default_postgres, wait_until
 
 
 def check_client(env: NeonEnv, client: PageserverHttpClient):
@@ -140,6 +140,7 @@ def test_pageserver_http_api_client_auth_enabled(neon_env_builder: NeonEnvBuilde
         check_client(env, client)
 
 
+@run_only_on_default_postgres("it does not use any postgres functionality")
 def test_pageserver_http_index_part_force_patch(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     tenant_id = env.initial_tenant
