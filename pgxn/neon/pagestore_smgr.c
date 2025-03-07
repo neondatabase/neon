@@ -76,6 +76,10 @@
 #include "access/xlogrecovery.h"
 #endif
 
+#if PG_VERSION_NUM >= 170000
+#include "neon_lwlc.h"
+#endif
+
 /*
  * If DEBUG_COMPARE_LOCAL is defined, we pass through all the SMGR API
  * calls to md.c, and *also* do the calls to the Page Server. On every
@@ -860,7 +864,7 @@ prefetch_on_ps_disconnect(void)
 
 	/*
 	 * We can have gone into retry due to network error, so update stats with
-	 * the latest available 
+	 * the latest available
 	 */
 	MyNeonCounters->pageserver_open_requests =
 		MyPState->n_requests_inflight;
@@ -1101,7 +1105,7 @@ prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frlsns,
 Retry:
 	/*
 	 * We can have gone into retry due to network error, so update stats with
-	 * the latest available 
+	 * the latest available
 	 */
 	MyNeonCounters->pageserver_open_requests =
 		MyPState->ring_unused - MyPState->ring_receive;
@@ -2237,7 +2241,11 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 
 	Assert(nblocks <= PG_IOV_MAX);
 
+	#if PG_MAJORVERSION_NUM < 17
 	GetLastWrittenLSNv(rinfo, forknum, blkno, (int) nblocks, last_written_lsns);
+	#else
+	neon_get_lwlsn_v(rinfo, forknum, blkno, (int) nblocks, last_written_lsns);
+	#endif
 
 	for (int i = 0; i < nblocks; i++)
 	{
@@ -3604,7 +3612,7 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 					/* assume btree */
 					RmgrTable[RM_BTREE_ID].rm_mask(mdbuf_masked, blkno);
 					RmgrTable[RM_BTREE_ID].rm_mask(pageserver_masked, blkno);
-	
+
 					if (memcmp(mdbuf_masked, pageserver_masked, BLCKSZ) != 0)
 					{
 						neon_log(PANIC, "btree buffers differ at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n------ MD ------\n%s\n------ Page Server ------\n%s\n",
