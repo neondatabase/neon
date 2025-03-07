@@ -456,8 +456,8 @@ impl PageServerConf {
             no_sync: no_sync.unwrap_or(false),
             enable_read_path_debugging: enable_read_path_debugging.unwrap_or(false),
             validate_wal_contiguity: validate_wal_contiguity.unwrap_or(false),
-            load_previous_heatmap: load_previous_heatmap.unwrap_or(false),
-            generate_unarchival_heatmap: generate_unarchival_heatmap.unwrap_or(false),
+            load_previous_heatmap: load_previous_heatmap.unwrap_or(true),
+            generate_unarchival_heatmap: generate_unarchival_heatmap.unwrap_or(true),
         };
 
         // ------------------------------------------------------------
