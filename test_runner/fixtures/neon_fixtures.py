@@ -1715,8 +1715,12 @@ class StorageControllerLeadershipStatus(StrEnum):
 
 @dataclass
 class StorageControllerMigrationConfig:
-    secondary_warmup_timeout: str | None
-    secondary_download_request_timeout: str | None
+    # Unlike the API itself, tests default to prewarm=False because it's a simpler API and doesn't
+    # require the test to go poll for the migration actually completing.
+    prewarm: bool = False
+    override_scheduler: bool = False
+    secondary_warmup_timeout: str | None = None
+    secondary_download_request_timeout: str | None = None
 
 
 class NeonStorageController(MetricsGetter, LogUtils):
@@ -2120,8 +2124,10 @@ class NeonStorageController(MetricsGetter, LogUtils):
         config: StorageControllerMigrationConfig | None = None,
     ):
         payload = {"tenant_shard_id": str(tenant_shard_id), "node_id": dest_ps_id}
-        if config is not None:
-            payload["migration_config"] = dataclasses.asdict(config)
+        if config is None:
+            config = StorageControllerMigrationConfig()
+
+        payload["migration_config"] = dataclasses.asdict(config)
 
         self.request(
             "PUT",
@@ -2129,8 +2135,13 @@ class NeonStorageController(MetricsGetter, LogUtils):
             json=payload,
             headers=self.headers(TokenScope.ADMIN),
         )
-        log.info(f"Migrated tenant {tenant_shard_id} to pageserver {dest_ps_id}")
-        assert self.env.get_tenant_pageserver(tenant_shard_id).id == dest_ps_id
+        if config.prewarm:
+            log.info(
+                f"Started prewarm migration of tenant {tenant_shard_id} to pageserver {dest_ps_id}"
+            )
+        else:
+            log.info(f"Migrated tenant {tenant_shard_id} to pageserver {dest_ps_id}")
+            assert self.env.get_tenant_pageserver(tenant_shard_id).id == dest_ps_id
 
     def tenant_policy_update(self, tenant_id: TenantId, body: dict[str, Any]):
         log.info(f"tenant_policy_update({tenant_id}, {body})")

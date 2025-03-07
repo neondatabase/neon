@@ -976,7 +976,7 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
     # We can't hydrate everything anyway because of the failpoints.
     # Implicitly, this also uploads a heatmap from the current attached location.
     config = StorageControllerMigrationConfig(
-        secondary_warmup_timeout="5s", secondary_download_request_timeout="2s"
+        secondary_warmup_timeout="5s", secondary_download_request_timeout="2s", prewarm=False
     )
     env.storage_controller.tenant_shard_migrate(
         TenantShardId(tenant_id, shard_number=0, shard_count=0), ps_secondary.id, config
