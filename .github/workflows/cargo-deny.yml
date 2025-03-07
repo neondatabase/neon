@@ -54,4 +54,4 @@ jobs:
             text: |
               Periodic cargo-deny on ${{ matrix.ref }}: ${{ job.status }}
               <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
-              Pinging @oncall-devprod.
+              Pinging <!subteam^S0838JPSH32|@oncall-devprod>.
