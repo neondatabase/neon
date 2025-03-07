@@ -193,14 +193,14 @@ pub struct TenantShardMigrateRequest {
     pub migration_config: MigrationConfig,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct MigrationConfig {
     /// If true, the migration will be executed even if it is to a location with a sub-optimal scheduling
     /// score: this is usually not what you want, and if you use this then you'll also need to set the
     /// tenant's scheduling policy to Essential or Pause to avoid the optimiser reverting your migration.
     ///
     /// Default: false
-    #[serde(default = "default_migration_override_scheduler")]
+    #[serde(default)]
     pub override_scheduler: bool,
 
     /// If true, the migration will be done gracefully by creating a secondary location first and
@@ -212,7 +212,7 @@ pub struct MigrationConfig {
     /// When doing a graceful migration, the migration API returns as soon as it is started.
     ///
     /// Default: true
-    #[serde(default = "default_migration_prewarm")]
+    #[serde(default)]
     pub prewarm: bool,
 
     /// For non-prewarm migrations which will immediately enter a cutover to the new node: how long to wait
@@ -227,12 +227,15 @@ pub struct MigrationConfig {
     pub secondary_download_request_timeout: Option<Duration>,
 }
 
-fn default_migration_prewarm() -> bool {
-    true
-}
-
-fn default_migration_override_scheduler() -> bool {
-    false
+impl Default for MigrationConfig {
+    fn default() -> Self {
+        Self {
+            override_scheduler: false,
+            prewarm: true,
+            secondary_warmup_timeout: None,
+            secondary_download_request_timeout: None,
+        }
+    }
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -525,5 +528,42 @@ mod test {
             "expect unknown field `unknown_field` error, got: {}",
             err
         );
+    }
+
+    /// Check that a minimal migrate request with no config results in the expected default settings
+    #[test]
+    fn test_migrate_request_decode_defaults() {
+        let json = r#"{
+            "node_id": 123
+        }"#;
+
+        let request: TenantShardMigrateRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.node_id, NodeId(123));
+        assert_eq!(request.origin_node_id, None);
+        assert_eq!(request.migration_config.override_scheduler, false);
+        assert_eq!(request.migration_config.prewarm, true);
+        assert_eq!(request.migration_config.secondary_warmup_timeout, None);
+        assert_eq!(
+            request.migration_config.secondary_download_request_timeout,
+            None
+        );
+    }
+
+    /// Check that a partially specified migration config results in the expected default settings
+    #[test]
+    fn test_migration_config_decode_defaults() {
+        // Specify just one field of the config
+        let json = r#"{
+            "secondary_warmup_timeout": "10s"
+        }"#;
+
+        let config: MigrationConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.override_scheduler, false);
+        assert_eq!(config.prewarm, true);
+        assert_eq!(
+            config.secondary_warmup_timeout,
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(config.secondary_download_request_timeout, None);
     }
 }
