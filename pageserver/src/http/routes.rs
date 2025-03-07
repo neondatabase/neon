@@ -2579,9 +2579,10 @@ async fn getpage_at_lsn_handler_inner(
     let lsn: Option<Lsn> = parse_query_param(&request, "lsn")?;
 
     async {
-        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-        // Enable read path debugging
-        let ctx = RequestContextBuilder::extend(&ctx).read_path_debug(true).build();
+        let ctx = RequestContextBuilder::new(TaskKind::MgmtRequest)
+            .download_behavior(DownloadBehavior::Download)
+            .read_path_debug(true)
+            .root();
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
 
         // Use last_record_lsn if no lsn is provided
