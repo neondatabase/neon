@@ -192,6 +192,7 @@ class NeonProject:
         return self.neon_api.get_branches(self.id)["branches"]
 
     def create_branch(self, parent_id: str | None = None) -> NeonBranch:
+        self.wait()
         new_branch = NeonBranch(self, self.neon_api.create_branch(self.id, parent_id=parent_id))
         self.wait()
         return new_branch
@@ -293,6 +294,7 @@ def setup_class(
 
 def do_action(project, action):
     if action == "new_branch":
+        log.info("Trying to create a new branch")
         parent = random.choice(list(project.branches.values()))
         child = parent.create_child_branch()
         log.info("Created branch %s", child)
