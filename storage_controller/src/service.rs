@@ -7250,6 +7250,9 @@ impl Service {
         let Some(split_threshold) = self.config.split_threshold else {
             return; // auto-splits are disabled
         };
+        if split_threshold == 0 {
+            return;
+        }
 
         // Fetch the largest eligible shards by logical size.
         const MAX_SHARDS: ShardCount = ShardCount::new(8);
