@@ -4301,6 +4301,7 @@ dependencies = [
  "tokio-util",
  "toml_edit",
  "tracing",
+ "tracing-utils",
  "url",
  "utils",
  "uuid",
@@ -7837,6 +7838,7 @@ dependencies = [
  "tracing",
  "tracing-error",
  "tracing-subscriber",
+ "tracing-utils",
  "walkdir",
 ]
 

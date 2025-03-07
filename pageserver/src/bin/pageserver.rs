@@ -110,9 +110,11 @@ fn main() -> anyhow::Result<()> {
     } else {
         TracingErrorLayerEnablement::Disabled
     };
+
     logging::init(
         conf.log_format,
         tracing_error_layer_enablement,
+        utils::logging::OtelEnablement::Disabled,
         logging::Output::Stdout,
     )?;
 
