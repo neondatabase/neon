@@ -283,6 +283,8 @@ pub struct TimelineCreateResponseStorcon {
     pub safekeepers: Option<SafekeepersInfo>,
 }
 
+/// Safekeepers as returned in timeline creation request to storcon or pushed to
+/// cplane in the post migration hook.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SafekeepersInfo {
     pub tenant_id: TenantId,
