@@ -1174,15 +1174,6 @@ class NeonEnv:
                 "max_batch_size": 32,
             }
 
-            if config.test_may_use_compatibility_snapshot_binaries:
-                log.info(
-                    "Skipping prev heatmap settings to avoid forward-compatibility related test failures"
-                )
-            else:
-                # Look for gaps in WAL received from safekeepeers
-                ps_cfg["load_previous_heatmap"] = True
-                ps_cfg["generate_unarchival_heatmap"] = True
-
             get_vectored_concurrent_io = self.pageserver_get_vectored_concurrent_io
             if get_vectored_concurrent_io is not None:
                 ps_cfg["get_vectored_concurrent_io"] = {
