@@ -8,7 +8,7 @@ from fixtures.neon_fixtures import NeonEnv
 
 
 @pytest.mark.timeout(120)
-def test_compute_ctl_api(
+def test_compute_ctl_api_latencies(
     neon_simple_env: NeonEnv,
     zenbenchmark: NeonBenchmarker,
 ):
