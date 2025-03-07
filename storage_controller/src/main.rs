@@ -286,18 +286,13 @@ async fn async_main() -> anyhow::Result<()> {
 
     let secrets = Secrets::load(&args).await?;
 
-    // TODO: once we've rolled out the safekeeper JWT token everywhere, put it into the validation code below
-    tracing::info!(
-        "safekeeper_jwt_token set: {:?}",
-        secrets.safekeeper_jwt_token.is_some()
-    );
-
     // Validate required secrets and arguments are provided in strict mode
     match strict_mode {
         StrictMode::Strict
             if (secrets.public_key.is_none()
                 || secrets.pageserver_jwt_token.is_none()
-                || secrets.control_plane_jwt_token.is_none()) =>
+                || secrets.control_plane_jwt_token.is_none()
+                || secrets.safekeeper_jwt_token.is_none()) =>
         {
             // Production systems should always have secrets configured: if public_key was not set
             // then we would implicitly disable auth.
