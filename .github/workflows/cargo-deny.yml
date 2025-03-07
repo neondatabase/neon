@@ -50,7 +50,7 @@ jobs:
           method: chat.postMessage
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
-            channel: ${{ vars.SLACK_CICD_CHANNEL_ID }}
+            channel: ${{ vars.SLACK_ON_CALL_DEVPROD_STREAM }}
             text: |
               Periodic cargo-deny on ${{ matrix.ref }}: ${{ job.status }}
               <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
