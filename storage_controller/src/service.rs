@@ -370,8 +370,8 @@ pub struct Config {
     /// tenant-scoped API endpoints. Further API requests queue until ready.
     pub tenant_rate_limit: NonZeroU32,
 
-    /// The size at which an unsharded tenant should be split (into 8 shards). This uses the logical size of the
-    /// largest timeline in the shard (i.e. max_logical_size).
+    /// The size at which an unsharded tenant should be split (into 8 shards). This uses the logical
+    /// size of the largest timeline in the shard (i.e. max_logical_size).
     ///
     /// None or 0 disables auto-splitting.
     ///
