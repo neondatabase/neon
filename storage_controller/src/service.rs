@@ -3627,8 +3627,8 @@ impl Service {
                 pg_port: safekeeper.skp.port as u16,
             });
         }
-        let mut mconf = safekeeper_api::membership::Configuration::empty();
-        mconf.members = MemberSet::new(members).map_err(ApiError::InternalServerError)?;
+        let mset = MemberSet::new(members).map_err(ApiError::InternalServerError)?;
+        let mconf = safekeeper_api::membership::Configuration::new(mset);
 
         let req = safekeeper_api::models::TimelineCreateRequest {
             commit_lsn: None,
