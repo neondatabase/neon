@@ -7,7 +7,6 @@ use std::time::Instant;
 
 use criterion::measurement::WallTime;
 use criterion::{BenchmarkGroup, Criterion, black_box, criterion_group, criterion_main};
-use pageserver::keyspace::{KeyPartitioning, KeySpace};
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::storage_layer::{LayerName, PersistentLayerDesc};
 use pageserver_api::key::Key;
@@ -72,41 +71,6 @@ fn uniform_query_pattern(layer_map: &LayerMap) -> Vec<(Key, Lsn)> {
         .collect()
 }
 
-// Construct a partitioning for testing get_difficulty map when we
-// don't have an exact result of `collect_keyspace` to work with.
-fn uniform_key_partitioning(layer_map: &LayerMap, _lsn: Lsn) -> KeyPartitioning {
-    let mut parts = Vec::new();
-
-    // We add a partition boundary at the start of each image layer,
-    // no matter what lsn range it covers. This is just the easiest
-    // thing to do. A better thing to do would be to get a real
-    // partitioning from some database. Even better, remove the need
-    // for key partitions by deciding where to create image layers
-    // directly based on a coverage-based difficulty map.
-    let mut keys: Vec<_> = layer_map
-        .iter_historic_layers()
-        .filter_map(|l| {
-            if l.is_incremental() {
-                None
-            } else {
-                let kr = l.get_key_range();
-                Some(kr.start.next())
-            }
-        })
-        .collect();
-    keys.sort();
-
-    let mut current_key = Key::from_hex("000000000000000000000000000000000000").unwrap();
-    for key in keys {
-        parts.push(KeySpace {
-            ranges: vec![current_key..key],
-        });
-        current_key = key;
-    }
-
-    KeyPartitioning { parts }
-}
-
 // Benchmark using metadata extracted from our performance test environment, from
 // a project where we have run pgbench many timmes. The pgbench database was initialized
 // between each test run.
@@ -148,41 +112,6 @@ fn bench_from_real_project(c: &mut Criterion) {
     // Choose uniformly distributed queries
     let queries: Vec<(Key, Lsn)> = uniform_query_pattern(&layer_map);
 
-    // Choose inputs for get_difficulty_map
-    let latest_lsn = layer_map
-        .iter_historic_layers()
-        .map(|l| l.get_lsn_range().end)
-        .max()
-        .unwrap();
-    let partitioning = uniform_key_partitioning(&layer_map, latest_lsn);
-
-    // Check correctness of get_difficulty_map
-    // TODO put this in a dedicated test outside of this mod
-    {
-        println!("running correctness check");
-
-        let now = Instant::now();
-        let result_bruteforce = layer_map.get_difficulty_map_bruteforce(latest_lsn, &partitioning);
-        assert!(result_bruteforce.len() == partitioning.parts.len());
-        println!("Finished bruteforce in {:?}", now.elapsed());
-
-        let now = Instant::now();
-        let result_fast = layer_map.get_difficulty_map(latest_lsn, &partitioning, None);
-        assert!(result_fast.len() == partitioning.parts.len());
-        println!("Finished fast in {:?}", now.elapsed());
-
-        // Assert results are equal. Manually iterate for easier debugging.
-        let zip = std::iter::zip(
-            &partitioning.parts,
-            std::iter::zip(result_bruteforce, result_fast),
-        );
-        for (_part, (bruteforce, fast)) in zip {
-            assert_eq!(bruteforce, fast);
-        }
-
-        println!("No issues found");
-    }
-
     // Define and name the benchmark function
     let mut group = c.benchmark_group("real_map");
     group.bench_function("uniform_queries", |b| {
@@ -190,11 +119,6 @@ fn bench_from_real_project(c: &mut Criterion) {
             for q in queries.clone().into_iter() {
                 black_box(layer_map.search(q.0, q.1));
             }
-        });
-    });
-    group.bench_function("get_difficulty_map", |b| {
-        b.iter(|| {
-            layer_map.get_difficulty_map(latest_lsn, &partitioning, Some(3));
         });
     });
     group.finish();

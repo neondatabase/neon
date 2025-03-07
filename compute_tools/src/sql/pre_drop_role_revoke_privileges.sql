@@ -1,6 +1,6 @@
 SET SESSION ROLE neon_superuser;
 
-DO $$
+DO ${outer_tag}$
 DECLARE
     schema TEXT;
     revoke_query TEXT;
@@ -16,13 +16,15 @@ BEGIN
         WHERE schema_name IN ('public')
     LOOP
         revoke_query := format(
-            'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM {role_name} GRANTED BY neon_superuser;',
-            schema
+            'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM %I GRANTED BY neon_superuser;',
+            schema,
+            -- N.B. this has to be properly dollar-escaped with `pg_quote_dollar()`
+            {role_name}
         );
 
         EXECUTE revoke_query;
     END LOOP;
 END;
-$$;
+${outer_tag}$;
 
 RESET ROLE;

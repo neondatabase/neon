@@ -282,6 +282,17 @@ class S3Storage:
     def timeline_path(self, tenant_id: TenantShardId | TenantId, timeline_id: TimelineId) -> str:
         return f"{self.tenant_path(tenant_id)}/timelines/{timeline_id}"
 
+    def safekeeper_tenants_path(self) -> str:
+        return f"{self.prefix_in_bucket}"
+
+    def safekeeper_tenant_path(self, tenant_id: TenantShardId | TenantId) -> str:
+        return f"{self.safekeeper_tenants_path()}/{tenant_id}"
+
+    def safekeeper_timeline_path(
+        self, tenant_id: TenantShardId | TenantId, timeline_id: TimelineId
+    ) -> str:
+        return f"{self.safekeeper_tenant_path(tenant_id)}/{timeline_id}"
+
     def get_latest_generation_key(self, prefix: str, suffix: str, keys: list[str]) -> str:
         """
         Gets the latest generation key from a list of keys.
