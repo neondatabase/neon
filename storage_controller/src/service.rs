@@ -7268,9 +7268,9 @@ impl Service {
 
         // Filter out tenants in a prohibiting scheduling mode.
         {
-            let locked = self.inner.read().unwrap();
+            let state = self.inner.read().unwrap();
             top_n.retain(|i| {
-                let policy = locked.tenants.get(&i.id).map(|s| s.get_scheduling_policy());
+                let policy = state.tenants.get(&i.id).map(|s| s.get_scheduling_policy());
                 policy == Some(ShardSchedulingPolicy::Active)
             });
         }
