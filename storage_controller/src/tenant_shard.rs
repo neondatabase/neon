@@ -1710,8 +1710,8 @@ impl TenantShard {
         self.scheduling_policy = p;
     }
 
-    pub(crate) fn get_scheduling_policy(&self) -> &ShardSchedulingPolicy {
-        &self.scheduling_policy
+    pub(crate) fn get_scheduling_policy(&self) -> ShardSchedulingPolicy {
+        self.scheduling_policy
     }
 
     pub(crate) fn set_last_error(&mut self, sequence: Sequence, error: ReconcileError) {
