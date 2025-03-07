@@ -954,6 +954,14 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    /// Only used in the `patch_index_part` HTTP API to force trigger an index upload.
+    pub fn force_schedule_index_upload(self: &Arc<Self>) -> Result<(), NotInitialized> {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+        self.schedule_index_upload(upload_queue);
+        Ok(())
+    }
+
     /// Launch an index-file upload operation in the background (internal function)
     fn schedule_index_upload(self: &Arc<Self>, upload_queue: &mut UploadQueueInitialized) {
         let disk_consistent_lsn = upload_queue.dirty.metadata.disk_consistent_lsn();
