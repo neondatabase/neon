@@ -49,6 +49,7 @@ async fn smoke_test() {
             Lsn(0x10),
             14,
             &ctx,
+            Default::default(), // in-memory layers
             Default::default(),
             image_layers,
             Lsn(0x100),

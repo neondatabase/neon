@@ -11,15 +11,16 @@ ICU_PREFIX_DIR := /usr/local/icu
 #
 BUILD_TYPE ?= debug
 WITH_SANITIZERS ?= no
+PG_CFLAGS = -fsigned-char
 ifeq ($(BUILD_TYPE),release)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl
-	PG_CFLAGS = -O2 -g3 $(CFLAGS)
+	PG_CFLAGS += -O2 -g3 $(CFLAGS)
 	PG_LDFLAGS = $(LDFLAGS)
 	# Unfortunately, `--profile=...` is a nightly feature
 	CARGO_BUILD_FLAGS += --release
 else ifeq ($(BUILD_TYPE),debug)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --enable-cassert --enable-depend
-	PG_CFLAGS = -O0 -g3 $(CFLAGS)
+	PG_CFLAGS += -O0 -g3 $(CFLAGS)
 	PG_LDFLAGS = $(LDFLAGS)
 else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
@@ -159,6 +160,8 @@ postgres-%: postgres-configure-% \
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pg_visibility install
 	+@echo "Compiling pageinspect $*"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pageinspect install
+	+@echo "Compiling pg_trgm $*"
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pg_trgm install
 	+@echo "Compiling amcheck $*"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/amcheck install
 	+@echo "Compiling test_decoding $*"

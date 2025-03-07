@@ -1369,6 +1369,10 @@ neon_get_lfc_stats(PG_FUNCTION_ARGS)
 			if (lfc_ctl)
 				value = lfc_ctl->limit;
 			break;
+		case 8:
+			key = "file_cache_chunk_size_pages";
+			value = BLOCKS_PER_CHUNK;
+			break;
 		default:
 			SRF_RETURN_DONE(funcctx);
 	}

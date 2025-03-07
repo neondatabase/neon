@@ -7,6 +7,8 @@ use serde::Serialize;
 use tracing::error;
 
 mod extract;
+mod headers;
+mod middleware;
 mod routes;
 pub mod server;
 

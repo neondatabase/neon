@@ -186,15 +186,40 @@ impl DatabaseExt for Database {
 /// Postgres SQL queries and DATABASE_URL.
 pub trait Escaping {
     fn pg_quote(&self) -> String;
+    fn pg_quote_dollar(&self) -> (String, String);
 }
 
 impl Escaping for PgIdent {
     /// This is intended to mimic Postgres quote_ident(), but for simplicity it
     /// always quotes provided string with `""` and escapes every `"`.
     /// **Not idempotent**, i.e. if string is already escaped it will be escaped again.
+    /// N.B. it's not useful for escaping identifiers that are used inside WHERE
+    /// clause, use `escape_literal()` instead.
     fn pg_quote(&self) -> String {
-        let result = format!("\"{}\"", self.replace('"', "\"\""));
-        result
+        format!("\"{}\"", self.replace('"', "\"\""))
+    }
+
+    /// This helper is intended to be used for dollar-escaping strings for usage
+    /// inside PL/pgSQL procedures. In addition to dollar-escaping the string,
+    /// it also returns a tag that is intended to be used inside the outer
+    /// PL/pgSQL procedure. If you do not need an outer tag, just discard it.
+    /// Here we somewhat mimic the logic of Postgres' `pg_get_functiondef()`,
+    /// <https://github.com/postgres/postgres/blob/8b49392b270b4ac0b9f5c210e2a503546841e832/src/backend/utils/adt/ruleutils.c#L2924>
+    fn pg_quote_dollar(&self) -> (String, String) {
+        let mut tag: String = "".to_string();
+        let mut outer_tag = "x".to_string();
+
+        // Find the first suitable tag that is not present in the string.
+        // Postgres' max role/DB name length is 63 bytes, so even in the
+        // worst case it won't take long.
+        while self.contains(&format!("${tag}$")) || self.contains(&format!("${outer_tag}$")) {
+            tag += "x";
+            outer_tag = tag.clone() + "x";
+        }
+
+        let escaped = format!("${tag}${self}${tag}$");
+
+        (escaped, outer_tag)
     }
 }
 
@@ -226,10 +251,13 @@ pub async fn get_existing_dbs_async(
     // invalid state. See:
     //   https://github.com/postgres/postgres/commit/a4b4cc1d60f7e8ccfcc8ff8cb80c28ee411ad9a9
     let rowstream = client
+        // We use a subquery instead of a fancy `datdba::regrole::text AS owner`,
+        // because the latter automatically wraps the result in double quotes,
+        // if the role name contains special characters.
         .query_raw::<str, &String, &[String; 0]>(
             "SELECT
                 datname AS name,
-                datdba::regrole::text AS owner,
+                (SELECT rolname FROM pg_roles WHERE oid = datdba) AS owner,
                 NOT datallowconn AS restrict_conn,
                 datconnlimit = - 2 AS invalid
             FROM

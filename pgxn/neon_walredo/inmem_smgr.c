@@ -32,8 +32,8 @@
 
 #include "inmem_smgr.h"
 
-/* Size of the in-memory smgr: XLR_MAX_BLOCK_ID is 32, but we can update up to 3 forks for each block */
-#define MAX_PAGES 100
+/* Size of the in-memory smgr: XLR_MAX_BLOCK_ID is 32, so assume that 64 will be enough */
+#define MAX_PAGES 64
 
 /* If more than WARN_PAGES are used, print a warning in the log */
 #define WARN_PAGES 32
@@ -174,10 +174,7 @@ static void
 inmem_zeroextend(SMgrRelation reln, ForkNumber forknum,
 				 BlockNumber blocknum, int nblocks, bool skipFsync)
 {
-	char buffer[BLCKSZ] = {0};
-
-	for (int i = 0; i < nblocks; i++)
-		inmem_extend(reln, forknum, blocknum + i, buffer, skipFsync);
+	/* Do nothing: inmem_read will return zero page in any case */
 }
 #endif
 

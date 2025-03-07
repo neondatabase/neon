@@ -2,7 +2,6 @@ pub mod endpoint;
 pub mod error;
 pub mod failpoints;
 pub mod json;
-pub mod pprof;
 pub mod request;
 
 extern crate hyper0 as hyper;

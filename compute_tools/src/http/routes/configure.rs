@@ -22,7 +22,7 @@ pub(in crate::http) async fn configure(
     State(compute): State<Arc<ComputeNode>>,
     request: Json<ConfigurationRequest>,
 ) -> Response {
-    if !compute.live_config_allowed {
+    if !compute.params.live_config_allowed {
         return JsonResponse::error(
             StatusCode::PRECONDITION_FAILED,
             "live configuration is not allowed for this compute node".to_string(),

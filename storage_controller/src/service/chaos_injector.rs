@@ -46,48 +46,51 @@ impl ChaosInjector {
         }
     }
 
+    fn get_cron_interval_sleep_future(&self) -> Option<tokio::time::Sleep> {
+        if let Some(ref chaos_exit_crontab) = self.chaos_exit_crontab {
+            match cron_to_next_duration(chaos_exit_crontab) {
+                Ok(interval_exit) => Some(interval_exit),
+                Err(e) => {
+                    tracing::error!("Error processing the cron schedule: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
     pub async fn run(&mut self, cancel: CancellationToken) {
         let mut interval = tokio::time::interval(self.interval);
-        let cron_interval = {
-            if let Some(ref chaos_exit_crontab) = self.chaos_exit_crontab {
-                match cron_to_next_duration(chaos_exit_crontab) {
-                    Ok(interval_exit) => Some(interval_exit),
-                    Err(e) => {
-                        tracing::error!("Error processing the cron schedule: {e}");
-                        None
-                    }
-                }
-            } else {
-                None
-            }
-        };
+        #[derive(Debug)]
         enum ChaosEvent {
             ShuffleTenant,
             ForceKill,
         }
-        let chaos_type = tokio::select! {
-            _ = interval.tick() => {
-                ChaosEvent::ShuffleTenant
-            }
-            Some(_) = maybe_sleep(cron_interval) => {
-                ChaosEvent::ForceKill
-            }
-            _ = cancel.cancelled() => {
-                tracing::info!("Shutting down");
-                return;
-            }
-        };
-
-        match chaos_type {
-            ChaosEvent::ShuffleTenant => {
-                self.inject_chaos().await;
-            }
-            ChaosEvent::ForceKill => {
-                self.force_kill().await;
+        loop {
+            let cron_interval = self.get_cron_interval_sleep_future();
+            let chaos_type = tokio::select! {
+                _ = interval.tick() => {
+                    ChaosEvent::ShuffleTenant
+                }
+                Some(_) = maybe_sleep(cron_interval) => {
+                    ChaosEvent::ForceKill
+                }
+                _ = cancel.cancelled() => {
+                    tracing::info!("Shutting down");
+                    return;
+                }
+            };
+            tracing::info!("Chaos iteration: {chaos_type:?}...");
+            match chaos_type {
+                ChaosEvent::ShuffleTenant => {
+                    self.inject_chaos().await;
+                }
+                ChaosEvent::ForceKill => {
+                    self.force_kill().await;
+                }
             }
         }
-
-        tracing::info!("Chaos iteration...");
     }
 
     /// If a shard has a secondary and attached location, then re-assign the secondary to be

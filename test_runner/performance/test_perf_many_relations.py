@@ -83,6 +83,13 @@ def test_perf_simple_many_relations_reldir_v2(
         ],
     )
 
+    assert (
+        env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
+            "rel_size_migration"
+        ]
+        != "legacy"
+    )
+
     n = 100000
     step = 5000
     # Create many relations

@@ -33,8 +33,9 @@ use utils::lsn::Lsn;
 
 use crate::context::RequestContext;
 use crate::pgdatadir_mapping::Version;
-use crate::tenant::Timeline;
 use crate::tenant::storage_layer::IoConcurrency;
+use crate::tenant::timeline::GetVectoredError;
+use crate::tenant::{PageReconstructError, Timeline};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BasebackupError {
@@ -42,6 +43,26 @@ pub enum BasebackupError {
     Server(#[from] anyhow::Error),
     #[error("basebackup client error {0:#} when {1}")]
     Client(#[source] io::Error, &'static str),
+    #[error("basebackup during shutdown")]
+    Shutdown,
+}
+
+impl From<PageReconstructError> for BasebackupError {
+    fn from(value: PageReconstructError) -> Self {
+        match value {
+            PageReconstructError::Cancelled => BasebackupError::Shutdown,
+            err => BasebackupError::Server(err.into()),
+        }
+    }
+}
+
+impl From<GetVectoredError> for BasebackupError {
+    fn from(value: GetVectoredError) -> Self {
+        match value {
+            GetVectoredError::Cancelled => BasebackupError::Shutdown,
+            err => BasebackupError::Server(err.into()),
+        }
+    }
 }
 
 /// Create basebackup with non-rel data in it.
@@ -127,7 +148,7 @@ where
             timeline
                 .gate
                 .enter()
-                .map_err(|e| BasebackupError::Server(e.into()))?,
+                .map_err(|_| BasebackupError::Shutdown)?,
         ),
     };
     basebackup
@@ -323,8 +344,7 @@ where
             let slru_partitions = self
                 .timeline
                 .get_slru_keyspace(Version::Lsn(self.lsn), self.ctx)
-                .await
-                .map_err(|e| BasebackupError::Server(e.into()))?
+                .await?
                 .partition(
                     self.timeline.get_shard_identity(),
                     Timeline::MAX_GET_VECTORED_KEYS * BLCKSZ as u64,
@@ -336,11 +356,10 @@ where
                 let blocks = self
                     .timeline
                     .get_vectored(part, self.lsn, self.io_concurrency.clone(), self.ctx)
-                    .await
-                    .map_err(|e| BasebackupError::Server(e.into()))?;
+                    .await?;
 
                 for (key, block) in blocks {
-                    let block = block.map_err(|e| BasebackupError::Server(e.into()))?;
+                    let block = block?;
                     slru_builder.add_block(&key, block).await?;
                 }
             }
@@ -349,11 +368,8 @@ where
 
         let mut min_restart_lsn: Lsn = Lsn::MAX;
         // Create tablespace directories
-        for ((spcnode, dbnode), has_relmap_file) in self
-            .timeline
-            .list_dbdirs(self.lsn, self.ctx)
-            .await
-            .map_err(|e| BasebackupError::Server(e.into()))?
+        for ((spcnode, dbnode), has_relmap_file) in
+            self.timeline.list_dbdirs(self.lsn, self.ctx).await?
         {
             self.add_dbdir(spcnode, dbnode, has_relmap_file).await?;
 
@@ -362,8 +378,7 @@ where
             let rels = self
                 .timeline
                 .list_rels(spcnode, dbnode, Version::Lsn(self.lsn), self.ctx)
-                .await
-                .map_err(|e| BasebackupError::Server(e.into()))?;
+                .await?;
             for &rel in rels.iter() {
                 // Send init fork as main fork to provide well formed empty
                 // contents of UNLOGGED relations. Postgres copies it in
@@ -391,8 +406,7 @@ where
         let aux_files = self
             .timeline
             .list_aux_files(self.lsn, self.ctx, self.io_concurrency.clone())
-            .await
-            .map_err(|e| BasebackupError::Server(e.into()))?;
+            .await?;
         let aux_scan_time = start_time.elapsed();
         let aux_estimated_size = aux_files
             .values()
@@ -451,16 +465,14 @@ where
         for xid in self
             .timeline
             .list_twophase_files(self.lsn, self.ctx)
-            .await
-            .map_err(|e| BasebackupError::Server(e.into()))?
+            .await?
         {
             self.add_twophase_file(xid).await?;
         }
         let repl_origins = self
             .timeline
             .get_replorigins(self.lsn, self.ctx, self.io_concurrency.clone())
-            .await
-            .map_err(|e| BasebackupError::Server(e.into()))?;
+            .await?;
         let n_origins = repl_origins.len();
         if n_origins != 0 {
             //
@@ -505,8 +517,7 @@ where
         let nblocks = self
             .timeline
             .get_rel_size(src, Version::Lsn(self.lsn), self.ctx)
-            .await
-            .map_err(|e| BasebackupError::Server(e.into()))?;
+            .await?;
 
         // If the relation is empty, create an empty file
         if nblocks == 0 {
@@ -532,8 +543,7 @@ where
                     // TODO: investigate using get_vectored for the entire startblk..endblk range.
                     // But this code path is not on the critical path for most basebackups (?).
                     .get(rel_block_to_key(src, blknum), self.lsn, self.ctx)
-                    .await
-                    .map_err(|e| BasebackupError::Server(e.into()))?;
+                    .await?;
                 segment_data.extend_from_slice(&img[..]);
             }
 
@@ -567,8 +577,7 @@ where
             let img = self
                 .timeline
                 .get_relmap_file(spcnode, dbnode, Version::Lsn(self.lsn), self.ctx)
-                .await
-                .map_err(|e| BasebackupError::Server(e.into()))?;
+                .await?;
 
             if img.len()
                 != dispatch_pgversion!(self.timeline.pg_version, pgv::bindings::SIZEOF_RELMAPFILE)
@@ -622,8 +631,7 @@ where
                 && self
                     .timeline
                     .list_rels(spcnode, dbnode, Version::Lsn(self.lsn), self.ctx)
-                    .await
-                    .map_err(|e| BasebackupError::Server(e.into()))?
+                    .await?
                     .is_empty()
             {
                 return Ok(());
@@ -674,8 +682,7 @@ where
         let img = self
             .timeline
             .get_twophase_file(xid, self.lsn, self.ctx)
-            .await
-            .map_err(|e| BasebackupError::Server(e.into()))?;
+            .await?;
 
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&img[..]);

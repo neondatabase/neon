@@ -1026,6 +1026,19 @@ prefetch_lookupv(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blocknum, n
 			if (!neon_prefetch_response_usable(&lsns[i], slot))
 				continue;
 
+			/*
+			 * Ignore errors
+			 */
+			if (slot->response->tag != T_NeonGetPageResponse)
+			{
+				if (slot->response->tag != T_NeonErrorResponse)
+				{
+					NEON_PANIC_CONNECTION_STATE(slot->shard_no, PANIC,
+											"Expected GetPage (0x%02x) or Error (0x%02x) response to GetPageRequest, but got 0x%02x",
+											T_NeonGetPageResponse, T_NeonErrorResponse, slot->response->tag);
+				}
+				continue;
+			}
 			memcpy(buffers[i], ((NeonGetPageResponse*)slot->response)->page, BLCKSZ);
 			prefetch_set_unused(ring_index);
 			BITMAP_SET(mask, i);

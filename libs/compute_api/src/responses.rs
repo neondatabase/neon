@@ -134,8 +134,10 @@ pub struct CatalogObjects {
     pub databases: Vec<Database>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ComputeCtlConfig {
+    /// Set of JSON web keys that the compute can use to authenticate
+    /// communication from the control plane.
     pub jwks: JwkSet,
 }
 

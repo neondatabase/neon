@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use chrono::NaiveDateTime;
 use pageserver_api::models::AuxFilePolicy;
+use pageserver_api::models::RelSizeMigration;
 use pageserver_api::shard::ShardIndex;
 use serde::{Deserialize, Serialize};
 use utils::id::TimelineId;
@@ -115,21 +116,6 @@ pub struct IndexPart {
 pub struct GcCompactionState {
     /// The upper bound of the last completed garbage-collecting compaction, aka. L2 LSN.
     pub(crate) last_completed_lsn: Lsn,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum RelSizeMigration {
-    /// The tenant is using the old rel_size format.
-    /// Note that this enum is persisted as `Option<RelSizeMigration>` in the index part, so
-    /// `None` is the same as `Some(RelSizeMigration::Legacy)`.
-    Legacy,
-    /// The tenant is migrating to the new rel_size format. Both old and new rel_size format are
-    /// persisted in the index part. The read path will read both formats and merge them.
-    Migrating,
-    /// The tenant has migrated to the new rel_size format. Only the new rel_size format is persisted
-    /// in the index part, and the read path will not read the old format.
-    Migrated,
 }
 
 impl IndexPart {

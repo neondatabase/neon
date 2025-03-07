@@ -42,17 +42,19 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use compute_api::requests::ConfigurationRequest;
 use compute_api::responses::{ComputeCtlConfig, ComputeStatus, ComputeStatusResponse};
 use compute_api::spec::{
-    Cluster, ComputeFeature, ComputeMode, ComputeSpec, Database, PgIdent, RemoteExtSpec, Role,
+    Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, PgIdent,
+    RemoteExtSpec, Role,
 };
 use nix::sys::signal::{Signal, kill};
 use pageserver_api::shard::ShardStripeSize;
 use reqwest::header::CONTENT_TYPE;
+use safekeeper_api::membership::SafekeeperGeneration;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 use url::Host;
@@ -576,14 +578,17 @@ impl Endpoint {
         Ok(safekeeper_connstrings)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         &self,
         auth_token: &Option<String>,
+        safekeepers_generation: Option<SafekeeperGeneration>,
         safekeepers: Vec<NodeId>,
         pageservers: Vec<(Host, u16)>,
         remote_ext_config: Option<&String>,
         shard_stripe_size: usize,
         create_test_user: bool,
+        start_timeout: Duration,
     ) -> Result<()> {
         if self.status() == EndpointStatus::Running {
             anyhow::bail!("The endpoint is already running");
@@ -655,6 +660,7 @@ impl Endpoint {
             timeline_id: Some(self.timeline_id),
             mode: self.mode,
             pageserver_connstring: Some(pageserver_connstring),
+            safekeepers_generation: safekeepers_generation.map(|g| g.into_inner()),
             safekeeper_connstrings,
             storage_auth_token: auth_token.clone(),
             remote_extensions,
@@ -663,6 +669,7 @@ impl Endpoint {
             local_proxy_config: None,
             reconfigure_concurrency: self.reconfigure_concurrency,
             drop_subscriptions_before_start: self.drop_subscriptions_before_start,
+            audit_log_level: ComputeAudit::Disabled,
         };
 
         // this strange code is needed to support respec() in tests
@@ -770,17 +777,18 @@ impl Endpoint {
         std::fs::write(pidfile_path, pid.to_string())?;
 
         // Wait for it to start
-        let mut attempt = 0;
         const ATTEMPT_INTERVAL: Duration = Duration::from_millis(100);
-        const MAX_ATTEMPTS: u32 = 10 * 90; // Wait up to 1.5 min
+        let start_at = Instant::now();
         loop {
-            attempt += 1;
             match self.get_status().await {
                 Ok(state) => {
                     match state.status {
                         ComputeStatus::Init => {
-                            if attempt == MAX_ATTEMPTS {
-                                bail!("compute startup timed out; still in Init state");
+                            if Instant::now().duration_since(start_at) > start_timeout {
+                                bail!(
+                                    "compute startup timed out {:?}; still in Init state",
+                                    start_timeout
+                                );
                             }
                             // keep retrying
                         }
@@ -807,8 +815,11 @@ impl Endpoint {
                     }
                 }
                 Err(e) => {
-                    if attempt == MAX_ATTEMPTS {
-                        return Err(e).context("timed out waiting to connect to compute_ctl HTTP");
+                    if Instant::now().duration_since(start_at) > start_timeout {
+                        return Err(e).context(format!(
+                            "timed out {:?} waiting to connect to compute_ctl HTTP",
+                            start_timeout,
+                        ));
                     }
                 }
             }

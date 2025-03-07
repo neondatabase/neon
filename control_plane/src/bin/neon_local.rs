@@ -40,6 +40,7 @@ use pageserver_api::models::{ShardParameters, TimelineCreateRequest, TimelineInf
 use pageserver_api::shard::{ShardCount, ShardStripeSize, TenantShardId};
 use postgres_backend::AuthType;
 use postgres_connection::parse_host_port;
+use safekeeper_api::membership::SafekeeperGeneration;
 use safekeeper_api::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_SAFEKEEPER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
@@ -596,7 +597,15 @@ struct EndpointStartCmdArgs {
     #[clap(long = "pageserver-id")]
     endpoint_pageserver_id: Option<NodeId>,
 
-    #[clap(long)]
+    #[clap(
+        long,
+        help = "Safekeepers membership generation to prefix neon.safekeepers with. Normally neon_local sets it on its own, but this option allows to override. Non zero value forces endpoint to use membership configurations."
+    )]
+    safekeepers_generation: Option<u32>,
+    #[clap(
+        long,
+        help = "List of safekeepers endpoint will talk to. Normally neon_local chooses them on its own, but this option allows to override."
+    )]
     safekeepers: Option<String>,
 
     #[clap(
@@ -617,9 +626,9 @@ struct EndpointStartCmdArgs {
     )]
     allow_multiple: bool,
 
-    #[clap(short = 't', long, help = "timeout until we fail the command")]
-    #[arg(default_value = "10s")]
-    start_timeout: humantime::Duration,
+    #[clap(short = 't', long, value_parser= humantime::parse_duration, help = "timeout until we fail the command")]
+    #[arg(default_value = "90s")]
+    start_timeout: Duration,
 }
 
 #[derive(clap::Args)]
@@ -1350,6 +1359,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             let pageserver_id = args.endpoint_pageserver_id;
             let remote_ext_config = &args.remote_ext_config;
 
+            let safekeepers_generation = args.safekeepers_generation.map(SafekeeperGeneration::new);
             // If --safekeepers argument is given, use only the listed
             // safekeeper nodes; otherwise all from the env.
             let safekeepers = if let Some(safekeepers) = parse_safekeepers(&args.safekeepers)? {
@@ -1425,11 +1435,13 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             endpoint
                 .start(
                     &auth_token,
+                    safekeepers_generation,
                     safekeepers,
                     pageservers,
                     remote_ext_config.as_ref(),
                     stripe_size.0 as usize,
                     args.create_test_user,
+                    args.start_timeout,
                 )
                 .await?;
         }

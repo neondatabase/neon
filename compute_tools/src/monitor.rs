@@ -18,7 +18,7 @@ const MONITOR_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 // should be handled gracefully.
 fn watch_compute_activity(compute: &ComputeNode) {
     // Suppose that `connstr` doesn't change
-    let connstr = compute.connstr.clone();
+    let connstr = compute.params.connstr.clone();
     let conf = compute.get_conn_conf(Some("compute_ctl:activity_monitor"));
 
     // During startup and configuration we connect to every Postgres database,

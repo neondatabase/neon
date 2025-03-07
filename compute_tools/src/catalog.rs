@@ -58,14 +58,14 @@ pub async fn get_database_schema(
     compute: &Arc<ComputeNode>,
     dbname: &str,
 ) -> Result<impl Stream<Item = Result<bytes::Bytes, std::io::Error>> + use<>, SchemaDumpError> {
-    let pgbin = &compute.pgbin;
+    let pgbin = &compute.params.pgbin;
     let basepath = Path::new(pgbin).parent().unwrap();
     let pgdump = basepath.join("pg_dump");
 
     // Replace the DB in the connection string and disable it to parts.
     // This is the only option to handle DBs with special characters.
-    let conf =
-        postgres_conf_for_db(&compute.connstr, dbname).map_err(|_| SchemaDumpError::Unexpected)?;
+    let conf = postgres_conf_for_db(&compute.params.connstr, dbname)
+        .map_err(|_| SchemaDumpError::Unexpected)?;
     let host = conf
         .get_hosts()
         .first()

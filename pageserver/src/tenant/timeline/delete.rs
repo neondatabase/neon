@@ -306,6 +306,7 @@ impl DeleteTimelineFlow {
                 CreateTimelineCause::Delete,
                 crate::tenant::CreateTimelineIdempotency::FailWithConflict, // doesn't matter what we put here
                 None, // doesn't matter what we put here
+                None, // doesn't matter what we put here
             )
             .context("create_timeline_struct")?;
 

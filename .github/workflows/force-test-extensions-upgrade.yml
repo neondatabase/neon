@@ -52,8 +52,9 @@ jobs:
       - name: Test extension upgrade
         timeout-minutes: 20
         env:
-          NEWTAG: latest
-          OLDTAG: ${{ steps.get-last-compute-release-tag.outputs.tag }}
+          NEW_COMPUTE_TAG: latest
+          OLD_COMPUTE_TAG: ${{ steps.get-last-compute-release-tag.outputs.tag }}
+          TEST_EXTENSIONS_TAG: ${{ steps.get-last-compute-release-tag.outputs.tag }}
           PG_VERSION: ${{ matrix.pg-version }}
           FORCE_ALL_UPGRADE_TESTS: true
         run: ./docker-compose/test_extensions_upgrade.sh

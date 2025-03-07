@@ -6,8 +6,11 @@ generate_id() {
     local -n resvar=$1
     printf -v resvar '%08x%08x%08x%08x' $SRANDOM $SRANDOM $SRANDOM $SRANDOM
 }
-if [ -z ${OLD_COMPUTE_TAG+x} ] || [ -z ${NEW_COMPUTE_TAG+x} ] || [ -z "${OLD_COMPUTE_TAG}" ] || [ -z "${NEW_COMPUTE_TAG}" ]; then
-  echo OLD_COMPUTE_TAG and NEW_COMPUTE_TAG must be defined
+echo "${OLD_COMPUTE_TAG}"
+echo "${NEW_COMPUTE_TAG}"
+echo "${TEST_EXTENSIONS_TAG}"
+if [ -z "${OLD_COMPUTE_TAG:-}" ] || [ -z "${NEW_COMPUTE_TAG:-}" ] || [ -z "${TEST_EXTENSIONS_TAG:-}" ]; then
+  echo OLD_COMPUTE_TAG, NEW_COMPUTE_TAG and TEST_EXTENSIONS_TAG must be set
   exit 1
 fi
 export PG_VERSION=${PG_VERSION:-16}
@@ -82,7 +85,7 @@ EXTENSIONS='[
 {"extname": "pg_repack", "extdir": "pg_repack-src"}
 ]'
 EXTNAMES=$(echo ${EXTENSIONS} | jq -r '.[].extname' | paste -sd ' ' -)
-COMPUTE_TAG=${NEW_COMPUTE_TAG} TEST_EXTENSIONS_TAG=${NEW_COMPUTE_TAG} docker compose --profile test-extensions up --quiet-pull --build -d
+COMPUTE_TAG=${NEW_COMPUTE_TAG} docker compose --profile test-extensions up --quiet-pull --build -d
 wait_for_ready
 docker compose exec neon-test-extensions psql -c "DROP DATABASE IF EXISTS contrib_regression"
 docker compose exec neon-test-extensions psql -c "CREATE DATABASE contrib_regression"
@@ -90,7 +93,7 @@ create_extensions "${EXTNAMES}"
 query="select json_object_agg(extname,extversion) from pg_extension where extname in ('${EXTNAMES// /\',\'}')"
 new_vers=$(docker compose exec neon-test-extensions psql -Aqt -d contrib_regression -c "$query")
 docker compose --profile test-extensions down
-COMPUTE_TAG=${OLD_COMPUTE_TAG} TEST_EXTENSIONS_TAG=${NEW_COMPUTE_TAG} docker compose --profile test-extensions up --quiet-pull --build -d --force-recreate
+COMPUTE_TAG=${OLD_COMPUTE_TAG} docker compose --profile test-extensions up --quiet-pull --build -d --force-recreate
 wait_for_ready
 docker compose exec neon-test-extensions psql -c "DROP DATABASE IF EXISTS contrib_regression"
 docker compose exec neon-test-extensions psql -c "CREATE DATABASE contrib_regression"

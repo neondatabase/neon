@@ -160,7 +160,10 @@ typedef struct MemberSet
 	SafekeeperId *m;			/* ids themselves */
 } MemberSet;
 
-/* Timeline safekeeper membership configuration. */
+/*
+ * Timeline safekeeper membership configuration as sent in the
+ * protocol.
+ */
 typedef struct MembershipConfiguration
 {
 	Generation	generation;
@@ -761,8 +764,22 @@ typedef struct WalProposer
 	/* (n_safekeepers / 2) + 1 */
 	int			quorum;
 
+	/*
+	 * Generation of the membership conf of which safekeepers[] are presumably
+	 * members. To make cplane life a bit easier and have more control in
+	 * tests with which sks walproposer gets connected neon.safekeepers GUC
+	 * doesn't provide full mconf, only the list of endpoints to connect to.
+	 * We still would like to know generation associated with it because 1) we
+	 * need some handle to enforce using generations in walproposer, and
+	 * non-zero value of this serves the purpose; 2) currently we don't do
+	 * that, but in theory walproposer can update list of safekeepers to
+	 * connect to upon receiving mconf from safekeepers, and generation number
+	 * must be checked to see which list is newer.
+	 */
+	Generation	safekeepers_generation;
 	/* Number of occupied slots in safekeepers[] */
 	int			n_safekeepers;
+	/* Safekeepers walproposer is connecting to. */
 	Safekeeper	safekeeper[MAX_SAFEKEEPERS];
 
 	/* WAL has been generated up to this point */

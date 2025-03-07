@@ -842,6 +842,12 @@ paths:
         required: false
         schema:
           type: integer
+      - name: recurse
+        description: When set, will recurse with the downloads into ancestor timelines
+        in: query
+        required: false
+        schema:
+          type: boolean
     post:
       description: |
         Download all layers in the specified timeline's heatmap. The `tenant_shard_id` parameter

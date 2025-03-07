@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
+use std::num::NonZeroU32;
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -364,6 +365,10 @@ pub struct Config {
 
     /// How many high-priority Reconcilers may be spawned concurrently
     pub priority_reconciler_concurrency: usize,
+
+    /// How many API requests per second to allow per tenant, across all
+    /// tenant-scoped API endpoints. Further API requests queue until ready.
+    pub tenant_rate_limit: NonZeroU32,
 
     /// How large must a shard grow in bytes before we split it?
     /// None disables auto-splitting.

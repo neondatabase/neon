@@ -229,13 +229,14 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
 
     # only_local doesn't remove segments in the remote storage.
     def timeline_delete(
-        self, tenant_id: TenantId, timeline_id: TimelineId, only_local: bool = False
+        self, tenant_id: TenantId, timeline_id: TimelineId, only_local: bool = False, **kwargs
     ) -> dict[Any, Any]:
         res = self.delete(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}",
             params={
                 "only_local": str(only_local).lower(),
             },
+            **kwargs,
         )
         res.raise_for_status()
         res_json = res.json()
