@@ -228,7 +228,7 @@ pub struct MigrationConfig {
 }
 
 fn default_prewarm() -> bool {
-    return true;
+    true
 }
 
 impl Default for MigrationConfig {
@@ -565,10 +565,7 @@ mod test {
         // Check each field's expected default value
         assert!(!config.override_scheduler);
         assert!(config.prewarm);
-        assert_eq!(
-            config.secondary_warmup_timeout,
-            Some(Duration::from_secs(10))
-        );
+        assert_eq!(config.secondary_warmup_timeout, None);
         assert_eq!(config.secondary_download_request_timeout, None);
         assert_eq!(config.secondary_warmup_timeout, None);
 
