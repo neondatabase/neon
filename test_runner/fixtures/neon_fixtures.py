@@ -463,6 +463,10 @@ class NeonEnvBuilder:
         self.control_plane_compute_hook_api: str | None = None
         self.storage_controller_config: dict[Any, Any] | None = None
 
+        # Flag to enable https listener in pageserver, generate local ssl certs,
+        # and force storage controller to use https for pageserver api.
+        self.use_https_pageserver_api: bool = False
+
         self.pageserver_virtual_file_io_engine: str | None = pageserver_virtual_file_io_engine
         self.pageserver_get_vectored_concurrent_io: str | None = (
             pageserver_get_vectored_concurrent_io
@@ -1059,6 +1063,11 @@ class NeonEnv:
         self.initial_tenant = config.initial_tenant
         self.initial_timeline = config.initial_timeline
 
+        self.generate_local_ssl_certs = config.use_https_pageserver_api
+        self.ssl_ca_file = (
+            self.repo_dir.joinpath("rootCA.crt") if self.generate_local_ssl_certs else None
+        )
+
         neon_local_env_vars = {}
         if self.rust_log_override is not None:
             neon_local_env_vars["RUST_LOG"] = self.rust_log_override
@@ -1122,6 +1131,7 @@ class NeonEnv:
             },
             "safekeepers": [],
             "pageservers": [],
+            "generate_local_ssl_certs": self.generate_local_ssl_certs,
         }
 
         if self.control_plane_api is not None:
@@ -1130,8 +1140,14 @@ class NeonEnv:
         if self.control_plane_compute_hook_api is not None:
             cfg["control_plane_compute_hook_api"] = self.control_plane_compute_hook_api
 
-        if self.storage_controller_config is not None:
-            cfg["storage_controller"] = self.storage_controller_config
+        storage_controller_config = self.storage_controller_config
+
+        if config.use_https_pageserver_api:
+            storage_controller_config = storage_controller_config or {}
+            storage_controller_config["use_https_pageserver_api"] = True
+
+        if storage_controller_config is not None:
+            cfg["storage_controller"] = storage_controller_config
 
         # Create config for pageserver
         http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
@@ -1142,6 +1158,7 @@ class NeonEnv:
             pageserver_port = PageserverPort(
                 pg=self.port_distributor.get_port(),
                 http=self.port_distributor.get_port(),
+                https=self.port_distributor.get_port() if config.use_https_pageserver_api else None,
             )
 
             # Availabilty zones may also be configured manually with `NeonEnvBuilder.pageserver_config_override`
@@ -1156,6 +1173,9 @@ class NeonEnv:
                 "id": ps_id,
                 "listen_pg_addr": f"localhost:{pageserver_port.pg}",
                 "listen_http_addr": f"localhost:{pageserver_port.http}",
+                "listen_https_addr": f"localhost:{pageserver_port.https}"
+                if config.use_https_pageserver_api
+                else None,
                 "pg_auth_type": pg_auth_type,
                 "http_auth_type": http_auth_type,
                 "availability_zone": availability_zone,

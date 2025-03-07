@@ -40,7 +40,8 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
     let mgmt_api_client = Arc::new(pageserver_client::mgmt_api::Client::new(
         args.mgmt_api_endpoint.clone(),
         args.pageserver_jwt.as_deref(),
-    ));
+        None, // TODO: support ssl_ca_file for https APIs in pagebench.
+    )?);
 
     // discover targets
     let timelines: Vec<TenantTimelineId> = crate::util::cli::targets::discover(

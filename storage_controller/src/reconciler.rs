@@ -299,6 +299,7 @@ impl Reconciler {
                         .await
                 },
                 &self.service_config.pageserver_jwt_token,
+                &self.service_config.ssl_ca_cert,
                 1,
                 3,
                 timeout,
@@ -420,7 +421,8 @@ impl Reconciler {
             node.get_id(),
             node.base_url(),
             self.service_config.pageserver_jwt_token.as_deref(),
-        );
+            self.service_config.ssl_ca_cert.clone(),
+        )?;
 
         client
             .wait_lsn(
@@ -443,7 +445,8 @@ impl Reconciler {
             node.get_id(),
             node.base_url(),
             self.service_config.pageserver_jwt_token.as_deref(),
-        );
+            self.service_config.ssl_ca_cert.clone(),
+        )?;
 
         let timelines = client.timeline_list(&tenant_shard_id).await?;
         Ok(timelines
@@ -481,6 +484,7 @@ impl Reconciler {
                             .await
                     },
                     &self.service_config.pageserver_jwt_token,
+                    &self.service_config.ssl_ca_cert,
                     1,
                     3,
                     request_download_timeout * 2,
@@ -775,6 +779,7 @@ impl Reconciler {
                 .with_client_retries(
                     |client| async move { client.get_location_config(tenant_shard_id).await },
                     &self.service_config.pageserver_jwt_token,
+                    &self.service_config.ssl_ca_cert,
                     1,
                     1,
                     Duration::from_secs(5),
@@ -1123,6 +1128,7 @@ impl Reconciler {
                 .with_client_retries(
                     |client| async move { client.get_location_config(tenant_shard_id).await },
                     &self.service_config.pageserver_jwt_token,
+                    &self.service_config.ssl_ca_cert,
                     1,
                     3,
                     Duration::from_secs(5),
