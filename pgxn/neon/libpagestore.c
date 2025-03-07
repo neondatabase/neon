@@ -1082,18 +1082,29 @@ pageserver_try_receive(shardno_t shard_no)
 
 	Assert(pageserver_conn);
 
-	if (PQisBusy(shard->conn))
+	while (true)
 	{
-		WaitEvent	event;
-		if (WaitEventSetWait(shard->wes_read, 0, &event, 1,
-							 WAIT_EVENT_NEON_PS_READ) != 1
-			|| (event.events & WL_SOCKET_READABLE) == 0)
+		if (PQisBusy(shard->conn))
 		{
-			return NULL;
+			WaitEvent	event;
+			if (WaitEventSetWait(shard->wes_read, 0, &event, 1,
+								 WAIT_EVENT_NEON_PS_READ) != 1
+				|| (event.events & WL_SOCKET_READABLE) == 0)
+			{
+				return NULL;
+			}
 		}
+		rc = PQgetCopyData(shard->conn, &resp_buff.data, 1 /* async */);
+		if (rc == 0)
+		{
+			if (!PQconsumeInput(shard->conn))
+			{
+				return NULL;
+			}
+		}
+		else
+			break;
 	}
-	rc = call_PQgetCopyData(shard_no, &resp_buff.data);
-
 	if (rc == 0)
 		return NULL;
 	else if (rc > 0)
