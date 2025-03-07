@@ -19,8 +19,8 @@ use control_plane::storage_controller::{
     AttachHookRequest, AttachHookResponse, InspectRequest, InspectResponse,
 };
 use diesel::result::DatabaseErrorKind;
+use futures::StreamExt;
 use futures::stream::FuturesUnordered;
-use futures::{FutureExt, StreamExt};
 use http_utils::error::ApiError;
 use hyper::Uri;
 use itertools::Itertools;
@@ -743,7 +743,30 @@ impl Service {
             std::process::exit(1);
         }
 
-        self.inner.write().unwrap().become_leader();
+        let safekeepers = self.inner.read().unwrap().safekeepers.clone();
+        let sk_schedule_requests = match safekeeper_reconciler::load_schedule_requests(
+            self,
+            &safekeepers,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to load safekeeper pending ops at startup: {e}. Aborting start-up..."
+                );
+                std::process::exit(1);
+            }
+        };
+
+        {
+            let mut locked = self.inner.write().unwrap();
+            locked.become_leader();
+
+            locked
+                .safekeeper_reconcilers
+                .schedule_request_vec(&self, sk_schedule_requests);
+        }
 
         // TODO: if any tenant's intent now differs from its loaded generation_pageserver, we should clear that
         // generation_pageserver in the database.

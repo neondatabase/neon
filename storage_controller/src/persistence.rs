@@ -124,6 +124,8 @@ pub(crate) enum DatabaseOperation {
     InsertTimeline,
     GetTimeline,
     InsertTimelineReconcile,
+    RemoveTimelineReconcile,
+    ListTimelineReconcile,
 }
 
 #[must_use]
@@ -1357,7 +1359,7 @@ impl Persistence {
         use crate::schema::safekeeper_timeline_pending_ops as skpo;
 
         let entry = &entry;
-        self.with_measured_conn(DatabaseOperation::InsertTimeline, move |conn| {
+        self.with_measured_conn(DatabaseOperation::InsertTimelineReconcile, move |conn| {
             Box::pin(async move {
                 let inserted_updated = diesel::insert_into(skpo::table)
                     .values(entry)
@@ -1390,7 +1392,7 @@ impl Persistence {
 
         let tenant_id = &tenant_id;
         let timeline_id = &timeline_id;
-        self.with_measured_conn(DatabaseOperation::InsertTimeline, move |conn| {
+        self.with_measured_conn(DatabaseOperation::RemoveTimelineReconcile, move |conn| {
             Box::pin(async move {
                 diesel::delete(dsl::safekeeper_timeline_pending_ops)
                     .filter(dsl::tenant_id.eq(tenant_id.to_string()))
@@ -1403,6 +1405,36 @@ impl Persistence {
             })
         })
         .await
+    }
+
+    /// Load pending operations from db.
+    pub(crate) async fn list_pending_ops(
+        &self,
+        filter_for_sk: Option<NodeId>,
+    ) -> DatabaseResult<Vec<TimelinePendingOpPersistence>> {
+        use crate::schema::safekeeper_timeline_pending_ops::dsl;
+
+        const FILTER_VAL_1: i64 = 1;
+        const FILTER_VAL_2: i64 = 2;
+        let filter_opt = filter_for_sk.map(|id| id.0 as i64);
+        let timeline_from_db = self
+            .with_measured_conn(DatabaseOperation::ListTimelineReconcile, move |conn| {
+                Box::pin(async move {
+                    let from_db: Vec<TimelinePendingOpPersistence> =
+                        dsl::safekeeper_timeline_pending_ops
+                            .filter(
+                                dsl::sk_id
+                                    .eq(filter_opt.unwrap_or(FILTER_VAL_1))
+                                    .and(dsl::sk_id.eq(filter_opt.unwrap_or(FILTER_VAL_2))),
+                            )
+                            .load(conn)
+                            .await?;
+                    Ok(from_db)
+                })
+            })
+            .await?;
+
+        Ok(timeline_from_db)
     }
 }
 
@@ -1877,9 +1909,9 @@ impl TimelineFromDb {
 #[derive(Insertable, AsChangeset, Queryable, Selectable, Clone)]
 #[diesel(table_name = crate::schema::safekeeper_timeline_pending_ops)]
 pub(crate) struct TimelinePendingOpPersistence {
+    pub(crate) sk_id: i64,
     pub(crate) tenant_id: String,
     pub(crate) timeline_id: String,
-    pub(crate) sk_id: i64,
     pub(crate) generation: i32,
     pub(crate) op_kind: SafekeeperTimelineOpKind,
 }

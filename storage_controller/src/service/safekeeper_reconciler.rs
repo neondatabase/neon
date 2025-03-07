@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
 
 use dashmap::{DashMap, Entry};
 use safekeeper_api::models::PullTimelineRequest;
@@ -30,6 +30,15 @@ impl SafekeeperReconcilers {
             reconcilers: HashMap::new(),
         }
     }
+    pub(crate) fn schedule_request_vec(
+        &mut self,
+        service: &Arc<Service>,
+        reqs: Vec<ScheduleRequest>,
+    ) {
+        for req in reqs {
+            self.schedule_request(service, req);
+        }
+    }
     pub(crate) fn schedule_request(&mut self, service: &Arc<Service>, req: ScheduleRequest) {
         let node_id = req.safekeeper.get_id();
         let reconciler_handle = self.reconcilers.entry(node_id).or_insert_with(|| {
@@ -42,6 +51,78 @@ impl SafekeeperReconcilers {
             handle.cancel.cancel();
         }
     }
+}
+
+/// Initial load of the pending operations from the db
+pub(crate) async fn load_schedule_requests(
+    service: &Arc<Service>,
+    safekeepers: &HashMap<NodeId, Safekeeper>,
+) -> anyhow::Result<Vec<ScheduleRequest>> {
+    let pending_ops = service.persistence.list_pending_ops(None).await?;
+    let mut res = Vec::with_capacity(pending_ops.len());
+    for op_persist in pending_ops {
+        let node_id = NodeId(op_persist.sk_id as u64);
+        let Some(sk) = safekeepers.get(&node_id) else {
+            // This shouldn't happen, at least the safekeeper should exist as decomissioned.
+            tracing::warn!(
+                tenant_id = op_persist.tenant_id,
+                timeline_id = op_persist.timeline_id,
+                "couldn't find safekeeper with pending op id {node_id} in list of stored safekeepers"
+            );
+            continue;
+        };
+        let sk = Box::new(sk.clone());
+        let tenant_id = TenantId::from_str(&op_persist.tenant_id)?;
+        let timeline_id = TimelineId::from_str(&op_persist.timeline_id)?;
+        let host_list = match op_persist.op_kind {
+            SafekeeperTimelineOpKind::Delete => Vec::new(),
+            SafekeeperTimelineOpKind::Exclude => Vec::new(),
+            SafekeeperTimelineOpKind::Pull => {
+                // TODO this code is super hacky, it doesn't take migrations into account
+                let timeline_persist = service
+                    .persistence
+                    .get_timeline(tenant_id, timeline_id)
+                    .await?;
+                let Some(timeline_persist) = timeline_persist else {
+                    // This shouldn't happen, the timeline should still exist
+                    tracing::warn!(
+                        tenant_id = op_persist.tenant_id,
+                        timeline_id = op_persist.timeline_id,
+                        "couldn't find timeline for corresponding pull op"
+                    );
+                    continue;
+                };
+                timeline_persist
+                    .sk_set
+                    .iter()
+                    .filter_map(|sk_id| {
+                        let other_node_id = NodeId(*sk_id as u64);
+                        if node_id == other_node_id {
+                            // We obviously don't want to pull from ourselves
+                            return None;
+                        }
+                        let Some(sk) = safekeepers.get(&other_node_id) else {
+                            tracing::warn!(
+                                "couldnt find safekeeper with pending op id {other_node_id}, not pulling from it"
+                            );
+                            return None;
+                        };
+                        Some((other_node_id, sk.base_url()))
+                    })
+                    .collect::<Vec<_>>()
+            }
+        };
+        let req = ScheduleRequest {
+            safekeeper: sk,
+            host_list,
+            tenant_id,
+            timeline_id,
+            generation: op_persist.generation as u32,
+            kind: op_persist.op_kind,
+        };
+        res.push(req);
+    }
+    Ok(res)
 }
 
 pub(crate) struct ScheduleRequest {
