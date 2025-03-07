@@ -3226,6 +3226,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
         "host": "localhost",
         "port": sk_0.port.pg,
         "http_port": sk_0.port.http,
+        "https_port": None,
         "version": 5957,
         "availability_zone_id": "us-east-2b",
     }
@@ -3259,6 +3260,24 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     assert inserted_now is not None
 
     assert eq_safekeeper_records(body, inserted_now)
+
+    # https_port appears during migration
+    body["https_port"] = 123
+    target.on_safekeeper_deploy(fake_id, body)
+    inserted_now = target.get_safekeeper(fake_id)
+    assert target.get_safekeepers() == [inserted_now]
+    assert inserted_now is not None
+    assert eq_safekeeper_records(body, inserted_now)
+    env.storage_controller.consistency_check()
+
+    # https_port rollback
+    body["https_port"] = None
+    target.on_safekeeper_deploy(fake_id, body)
+    inserted_now = target.get_safekeeper(fake_id)
+    assert target.get_safekeepers() == [inserted_now]
+    assert inserted_now is not None
+    assert eq_safekeeper_records(body, inserted_now)
+    env.storage_controller.consistency_check()
 
     # some small tests for the scheduling policy querying and returning APIs
     newest_info = target.get_safekeeper(inserted["id"])
@@ -3792,6 +3811,7 @@ def test_storage_controller_node_flap_detach_race(
     wait_until(validate_locations, timeout=10)
 
 
+@run_only_on_default_postgres("this is like a 'unit test' against storcon db")
 def test_update_node_on_registration(neon_env_builder: NeonEnvBuilder):
     """
     Check that storage controller handles node_register requests with updated fields correctly.
