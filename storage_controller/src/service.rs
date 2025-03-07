@@ -3729,7 +3729,16 @@ impl Service {
     /// Create timeline in controller database and on safekeepers.
     /// `timeline_info` is result of timeline creation on pageserver.
     ///
-    /// Note: all actions must be idempotent as call is retried until success.
+    /// All actions must be idempotent as the call is retried until success. It
+    /// tries to create timeline in the db and on at least majority of
+    /// safekeepers + queue creation for safekeepers which missed it in the db
+    /// for infinite retries; after that, call returns Ok.
+    ///  
+    /// The idea is that once this is reached as long as we have alive majority
+    /// of safekeepers it is expected to get eventually operational as storcon
+    /// will be able to seed timeline on nodes which missed creation by making
+    /// pull_timeline from peers. On the other hand we don't want to fail
+    /// timeline creation if one safekeeper is down.
     async fn tenant_timeline_create_safekeepers(
         self: &Arc<Self>,
         tenant_id: TenantId,
