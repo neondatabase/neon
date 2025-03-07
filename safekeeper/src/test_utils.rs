@@ -1,3 +1,4 @@
+use std::ffi::CStr;
 use std::sync::Arc;
 
 use camino_tempfile::Utf8TempDir;
@@ -124,6 +125,7 @@ impl Env {
         start_lsn: Lsn,
         msg_size: usize,
         msg_count: usize,
+        prefix: &CStr,
         mut next_record_lsns: Option<&mut Vec<Lsn>>,
     ) -> anyhow::Result<EndWatch> {
         let (msg_tx, msg_rx) = tokio::sync::mpsc::channel(receive_wal::MSG_QUEUE_SIZE);
@@ -133,7 +135,6 @@ impl Env {
 
         WalAcceptor::spawn(tli.wal_residence_guard().await?, msg_rx, reply_tx, Some(0));
 
-        let prefix = c"neon-file:";
         let prefixlen = prefix.to_bytes_with_nul().len();
         assert!(msg_size >= prefixlen);
         let message = vec![0; msg_size - prefixlen];
