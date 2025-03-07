@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
+use std::num::NonZeroU32;
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -364,6 +365,10 @@ pub struct Config {
 
     /// How many high-priority Reconcilers may be spawned concurrently
     pub priority_reconciler_concurrency: usize,
+
+    /// How many API requests per second to allow per tenant, across all
+    /// tenant-scoped API endpoints. Further API requests queue until ready.
+    pub tenant_rate_limit: NonZeroU32,
 
     /// How large must a shard grow in bytes before we split it?
     /// None disables auto-splitting.
@@ -3781,6 +3786,7 @@ impl Service {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         concurrency: Option<usize>,
+        recurse: bool,
     ) -> Result<(), ApiError> {
         let _tenant_lock = trace_shared_lock(
             &self.tenant_op_locks,
@@ -3818,7 +3824,12 @@ impl Service {
             targets,
             |tenant_shard_id, client| async move {
                 client
-                    .timeline_download_heatmap_layers(tenant_shard_id, timeline_id, concurrency)
+                    .timeline_download_heatmap_layers(
+                        tenant_shard_id,
+                        timeline_id,
+                        concurrency,
+                        recurse,
+                    )
                     .await
             },
             1,
@@ -4165,22 +4176,43 @@ impl Service {
         }).await?
     }
 
-    /// When you need to send an HTTP request to the pageserver that holds shard0 of a tenant, this
-    /// function looks up and returns node. If the tenant isn't found, returns Err(ApiError::NotFound)
+    /// When you know the TenantId but not a specific shard, and would like to get the node holding shard 0.
     pub(crate) async fn tenant_shard0_node(
         &self,
         tenant_id: TenantId,
     ) -> Result<(Node, TenantShardId), ApiError> {
-        // Look up in-memory state and maybe use the node from there.
-        {
+        let tenant_shard_id = {
             let locked = self.inner.read().unwrap();
-            let Some((tenant_shard_id, shard)) = locked
+            let Some((tenant_shard_id, _shard)) = locked
                 .tenants
                 .range(TenantShardId::tenant_range(tenant_id))
                 .next()
             else {
                 return Err(ApiError::NotFound(
                     anyhow::anyhow!("Tenant {tenant_id} not found").into(),
+                ));
+            };
+
+            *tenant_shard_id
+        };
+
+        self.tenant_shard_node(tenant_shard_id)
+            .await
+            .map(|node| (node, tenant_shard_id))
+    }
+
+    /// When you need to send an HTTP request to the pageserver that holds a shard of a tenant, this
+    /// function looks up and returns node. If the shard isn't found, returns Err(ApiError::NotFound)
+    pub(crate) async fn tenant_shard_node(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<Node, ApiError> {
+        // Look up in-memory state and maybe use the node from there.
+        {
+            let locked = self.inner.read().unwrap();
+            let Some(shard) = locked.tenants.get(&tenant_shard_id) else {
+                return Err(ApiError::NotFound(
+                    anyhow::anyhow!("Tenant shard {tenant_shard_id} not found").into(),
                 ));
             };
 
@@ -4204,7 +4236,7 @@ impl Service {
                         "Shard refers to nonexistent node"
                     )));
                 };
-                return Ok((node.clone(), *tenant_shard_id));
+                return Ok(node.clone());
             }
         };
 
@@ -4212,29 +4244,34 @@ impl Service {
         // generation state: this will reflect the progress of any ongoing migration.
         // Note that it is not guaranteed to _stay_ here, our caller must still handle
         // the case where they call through to the pageserver and get a 404.
-        let db_result = self.persistence.tenant_generations(tenant_id).await?;
+        let db_result = self
+            .persistence
+            .tenant_generations(tenant_shard_id.tenant_id)
+            .await?;
         let Some(ShardGenerationState {
-            tenant_shard_id,
+            tenant_shard_id: _,
             generation: _,
             generation_pageserver: Some(node_id),
-        }) = db_result.first()
+        }) = db_result
+            .into_iter()
+            .find(|s| s.tenant_shard_id == tenant_shard_id)
         else {
             // This can happen if we raced with a tenant deletion or a shard split.  On a retry
             // the caller will either succeed (shard split case), get a proper 404 (deletion case),
             // or a conflict response (case where tenant was detached in background)
             return Err(ApiError::ResourceUnavailable(
-                "Shard {} not found in database, or is not attached".into(),
+                format!("Shard {tenant_shard_id} not found in database, or is not attached").into(),
             ));
         };
         let locked = self.inner.read().unwrap();
-        let Some(node) = locked.nodes.get(node_id) else {
+        let Some(node) = locked.nodes.get(&node_id) else {
             // This should never happen
             return Err(ApiError::InternalServerError(anyhow::anyhow!(
                 "Shard refers to nonexistent node"
             )));
         };
 
-        Ok((node.clone(), *tenant_shard_id))
+        Ok(node.clone())
     }
 
     pub(crate) fn tenant_locate(

@@ -6,9 +6,9 @@ use hyper::client::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use parking_lot::RwLock;
 use smol_str::ToSmolStr;
-use tokio::net::TcpStream;
 use tracing::{Instrument, debug, error, info, info_span};
 
+use super::AsyncRW;
 use super::backend::HttpConnError;
 use super::conn_pool_lib::{
     ClientDataEnum, ClientInnerCommon, ClientInnerExt, ConnInfo, ConnPoolEntry,
@@ -22,8 +22,7 @@ use crate::types::EndpointCacheKey;
 use crate::usage_metrics::{Ids, MetricCounter, TrafficDirection, USAGE_METRICS};
 
 pub(crate) type Send = http2::SendRequest<hyper::body::Incoming>;
-pub(crate) type Connect =
-    http2::Connection<TokioIo<TcpStream>, hyper::body::Incoming, TokioExecutor>;
+pub(crate) type Connect = http2::Connection<TokioIo<AsyncRW>, hyper::body::Incoming, TokioExecutor>;
 
 #[derive(Clone)]
 pub(crate) struct ClientDataHttp();

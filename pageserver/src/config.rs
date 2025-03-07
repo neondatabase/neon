@@ -456,8 +456,8 @@ impl PageServerConf {
             no_sync: no_sync.unwrap_or(false),
             enable_read_path_debugging: enable_read_path_debugging.unwrap_or(false),
             validate_wal_contiguity: validate_wal_contiguity.unwrap_or(false),
-            load_previous_heatmap: load_previous_heatmap.unwrap_or(false),
-            generate_unarchival_heatmap: generate_unarchival_heatmap.unwrap_or(false),
+            load_previous_heatmap: load_previous_heatmap.unwrap_or(true),
+            generate_unarchival_heatmap: generate_unarchival_heatmap.unwrap_or(true),
         };
 
         // ------------------------------------------------------------
@@ -491,7 +491,9 @@ impl PageServerConf {
     #[cfg(test)]
     pub fn test_repo_dir(test_name: &str) -> Utf8PathBuf {
         let test_output_dir = std::env::var("TEST_OUTPUT").unwrap_or("../tmp_check".into());
-        Utf8PathBuf::from(format!("{test_output_dir}/test_{test_name}"))
+
+        let test_id = uuid::Uuid::new_v4();
+        Utf8PathBuf::from(format!("{test_output_dir}/test_{test_name}_{test_id}"))
     }
 
     pub fn dummy_conf(repo_dir: Utf8PathBuf) -> Self {

@@ -53,7 +53,7 @@ measured = { workspace = true, features = ["lasso"] }
 metrics.workspace = true
 once_cell.workspace = true
 opentelemetry = { workspace = true, features = ["trace"] }
-papaya = "0.1.8"
+papaya = "0.2.0"
 parking_lot.workspace = true
 parquet.workspace = true
 parquet_derive.workspace = true
