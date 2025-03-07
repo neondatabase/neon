@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{error::Error, sync::Arc};
 
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -44,6 +44,22 @@ impl Server {
     }
 
     pub async fn serve(self, cancel: CancellationToken) -> anyhow::Result<()> {
+        fn suppress_io_error(err: &std::io::Error) -> bool {
+            use std::io::ErrorKind::*;
+            matches!(err.kind(), ConnectionReset | ConnectionAborted | BrokenPipe)
+        }
+        fn suppress_hyper_error(err: &hyper0::Error) -> bool {
+            if err.is_incomplete_message() || err.is_closed() || err.is_timeout() {
+                return true;
+            }
+            if let Some(inner) = err.source() {
+                if let Some(io) = inner.downcast_ref::<std::io::Error>() {
+                    return suppress_io_error(io);
+                }
+            }
+            false
+        }
+
         let mut connections = FuturesUnordered::new();
         loop {
             tokio::select! {
@@ -51,7 +67,9 @@ impl Server {
                     let (tcp_stream, remote_addr) = match stream {
                         Ok(stream) => stream,
                         Err(err) => {
-                            info!("Failed to accept TCP connection: {err:#}");
+                            if !suppress_io_error(&err) {
+                                info!("Failed to accept TCP connection: {err:#}");
+                            }
                             continue;
                         }
                     };
@@ -72,18 +90,24 @@ impl Server {
                                     let tls_stream = match tls_stream {
                                         Ok(tls_stream) => tls_stream,
                                         Err(err) => {
-                                            info!("Failed to accept TLS connection: {err:#}");
+                                            if !suppress_io_error(&err) {
+                                                info!("Failed to accept TLS connection: {err:#}");
+                                            }
                                             return;
                                         }
                                     };
                                     if let Err(err) = Self::serve_connection(tls_stream, service, cancel).await {
-                                        info!("Failed to serve HTTPS connection: {err:#}");
+                                        if !suppress_hyper_error(&err) {
+                                            info!("Failed to serve HTTPS connection: {err:#}");
+                                        }
                                     }
                                 }
                                 None => {
                                     // Handle HTTP connection.
                                     if let Err(err) = Self::serve_connection(tcp_stream, service, cancel).await {
-                                        info!("Failed to serve HTTP connection: {err:#}");
+                                        if !suppress_hyper_error(&err) {
+                                            info!("Failed to serve HTTP connection: {err:#}");
+                                        }
                                     }
                                 }
                             };
@@ -115,7 +139,7 @@ impl Server {
         cancel: CancellationToken,
     ) -> Result<(), hyper0::Error>
     where
-        I: AsyncRead + AsyncWrite + Unpin + std::marker::Send + 'static,
+        I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let mut conn = Http::new().serve_connection(io, service).with_upgrades();
 
