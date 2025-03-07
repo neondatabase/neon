@@ -193,7 +193,7 @@ pub struct TenantShardMigrateRequest {
     pub migration_config: MigrationConfig,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct MigrationConfig {
     /// If true, the migration will be executed even if it is to a location with a sub-optimal scheduling
     /// score: this is usually not what you want, and if you use this then you'll also need to set the
@@ -212,7 +212,7 @@ pub struct MigrationConfig {
     /// When doing a graceful migration, the migration API returns as soon as it is started.
     ///
     /// Default: true
-    #[serde(default)]
+    #[serde(default = "default_prewarm")]
     pub prewarm: bool,
 
     /// For non-prewarm migrations which will immediately enter a cutover to the new node: how long to wait
@@ -227,11 +227,15 @@ pub struct MigrationConfig {
     pub secondary_download_request_timeout: Option<Duration>,
 }
 
+fn default_prewarm() -> bool {
+    return true;
+}
+
 impl Default for MigrationConfig {
     fn default() -> Self {
         Self {
             override_scheduler: false,
-            prewarm: true,
+            prewarm: default_prewarm(),
             secondary_warmup_timeout: None,
             secondary_download_request_timeout: None,
         }
@@ -554,10 +558,11 @@ mod test {
     fn test_migration_config_decode_defaults() {
         // Specify just one field of the config
         let json = r#"{
-            "secondary_warmup_timeout": "10s"
         }"#;
 
         let config: MigrationConfig = serde_json::from_str(json).unwrap();
+
+        // Check each field's expected default value
         assert!(!config.override_scheduler);
         assert!(config.prewarm);
         assert_eq!(
@@ -565,5 +570,9 @@ mod test {
             Some(Duration::from_secs(10))
         );
         assert_eq!(config.secondary_download_request_timeout, None);
+        assert_eq!(config.secondary_warmup_timeout, None);
+
+        // Consistency check that the Default impl agrees with our serde defaults
+        assert_eq!(MigrationConfig::default(), config);
     }
 }
