@@ -1092,7 +1092,7 @@ pageserver_try_receive(shardno_t shard_no)
 			return NULL;
 		}
 	}
-	rc = PQgetCopyData(shard->conn, &resp_buff.data, 0);
+	rc = call_PQgetCopyData(shard_no, &resp_buff.data);
 
 	if (rc == 0)
 		return NULL;
