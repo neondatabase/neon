@@ -3668,28 +3668,19 @@ impl Service {
         // continuing operations even if one safekeeper is down.
 
         let mut reconcile_results = Vec::new();
-
-        let mut outstanding = timeline_persistence.sk_set.len();
-        while outstanding > 0 {
+        loop {
             if let Ok(res) = tokio::time::timeout_at(reconcile_deadline, joinset.join_next()).await
             {
                 // unwrap is fine as we know the number of stuff we put into the joinset
-                let res = res.unwrap();
+                let Some(res) = res else { break };
                 match res {
                     Ok(res) => reconcile_results.push(res),
                     Err(join_err) => {
-                        tracing::info!("join_err: {join_err} for task in joinset");
+                        tracing::info!("join_err for task in joinset: {join_err}");
                     }
                 }
-                outstanding -= 1;
-            } else if outstanding > 1 {
-                // Failed to create on a quorum
-                return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                    "couldn't issue initial timeline creation on safekeepers within timeout"
-                )));
             } else {
-                // We already have a quorum of results within the timeline, so we can do something with it, maybe.
-                tracing::info!("timeout for third reconciliation");
+                tracing::info!("timeout for reconciliation");
             }
         }
 
