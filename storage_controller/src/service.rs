@@ -765,7 +765,7 @@ impl Service {
 
             locked
                 .safekeeper_reconcilers
-                .schedule_request_vec(&self, sk_schedule_requests);
+                .schedule_request_vec(self, sk_schedule_requests);
         }
 
         // TODO: if any tenant's intent now differs from its loaded generation_pageserver, we should clear that
@@ -3460,14 +3460,6 @@ impl Service {
             create_req.new_timeline_id,
         );
 
-        let _tenant_lock = trace_shared_lock(
-            &self.tenant_op_locks,
-            tenant_id,
-            TenantOperations::TimelineCreate,
-        )
-        .await;
-        failpoint_support::sleep_millis_async!("tenant-create-timeline-shared-lock");
-
         self.tenant_remote_mutation(tenant_id, move |mut targets| async move {
             if targets.0.is_empty() {
                 return Err(ApiError::NotFound(
@@ -3690,16 +3682,14 @@ impl Service {
                     }
                 }
                 outstanding -= 1;
+            } else if outstanding > 1 {
+                // Failed to create on a quorum
+                return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                    "couldn't issue initial timeline creation on safekeepers within timeout"
+                )));
             } else {
-                if outstanding > 1 {
-                    // Failed to create on a quorum
-                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                        "couldn't issue initial timeline creation on safekeepers within timeout"
-                    )));
-                } else {
-                    // We already have a quorum of results within the timeline, so we can do something with it, maybe.
-                    tracing::info!("timeout for third reconciliation");
-                }
+                // We already have a quorum of results within the timeline, so we can do something with it, maybe.
+                tracing::info!("timeout for third reconciliation");
             }
         }
 

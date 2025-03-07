@@ -154,14 +154,6 @@ impl ReconcilerHandle {
         }
         entry.insert(Arc::new(self.cancel.child_token())).clone()
     }
-    fn cancel_timeline_reconcile(&self, tenant_id: TenantId, timeline_id: TimelineId) {
-        let entry = self.ongoing_tokens.entry((tenant_id, timeline_id));
-        if let Entry::Occupied(entry) = entry {
-            let cancel: &CancellationToken = entry.get();
-            cancel.cancel();
-            entry.remove();
-        }
-    }
     fn schedule_reconcile(&self, req: ScheduleRequest) {
         let cancel = self.new_token_slot(req.tenant_id, req.timeline_id);
         let hostname = req.safekeeper.skp.host.clone();
