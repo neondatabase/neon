@@ -20,6 +20,7 @@ pub struct Safekeeper {
     listen_http_port: u16,
     scheduling_policy: SkSchedulingPolicy,
     id: NodeId,
+    /// Heartbeating result.
     availability: SafekeeperState,
 }
 
@@ -55,6 +56,9 @@ impl Safekeeper {
     pub(crate) fn set_scheduling_policy(&mut self, scheduling_policy: SkSchedulingPolicy) {
         self.scheduling_policy = scheduling_policy;
         self.skp.scheduling_policy = scheduling_policy.into();
+    }
+    pub(crate) fn availability(&self) -> SafekeeperState {
+        self.availability.clone()
     }
     /// Perform an operation (which is given a [`SafekeeperClient`]) with retries
     pub(crate) async fn with_client_retries<T, O, F>(

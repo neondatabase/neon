@@ -19,6 +19,7 @@ bytes.workspace = true
 chrono.workspace = true
 clap.workspace = true
 cron.workspace = true
+dashmap.workspace = true
 fail.workspace = true
 futures.workspace = true
 governor.workspace = true

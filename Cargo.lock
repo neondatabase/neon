@@ -6586,6 +6586,7 @@ dependencies = [
  "clap",
  "control_plane",
  "cron",
+ "dashmap 6.1.0",
  "diesel",
  "diesel-async",
  "diesel_migrations",

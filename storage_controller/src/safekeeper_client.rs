@@ -69,7 +69,6 @@ impl SafekeeperClient {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn create_timeline(
         &self,
         req: &TimelineCreateRequest,
@@ -82,7 +81,6 @@ impl SafekeeperClient {
         )
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn delete_timeline(
         &self,
         tenant_id: TenantId,
@@ -96,7 +94,6 @@ impl SafekeeperClient {
         )
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn pull_timeline(
         &self,
         req: &PullTimelineRequest,
