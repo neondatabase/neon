@@ -1357,6 +1357,8 @@ impl Persistence {
         entry: TimelinePendingOpPersistence,
     ) -> DatabaseResult<bool> {
         use crate::schema::safekeeper_timeline_pending_ops as skpo;
+        // This overrides the `filter` fn used in other functions, so contain the mayhem via a function-local use
+        use diesel::query_dsl::methods::FilterDsl;
 
         let entry = &entry;
         self.with_measured_conn(DatabaseOperation::InsertTimelineReconcile, move |conn| {
@@ -1364,7 +1366,9 @@ impl Persistence {
                 let inserted_updated = diesel::insert_into(skpo::table)
                     .values(entry)
                     .on_conflict((skpo::tenant_id, skpo::timeline_id, skpo::sk_id))
-                    .do_nothing()
+                    .do_update()
+                    .set(entry)
+                    .filter(skpo::generation.lt(entry.generation))
                     .execute(conn)
                     .await?;
 
