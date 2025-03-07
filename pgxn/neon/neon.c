@@ -457,6 +457,15 @@ _PG_init(void)
 							PGC_SIGHUP,
 							0,
 							NULL, NULL, NULL);
+	DefineCustomBoolVariable(
+							"neon.disable_wal_prevlink_checks",
+							"Disable validation of prev link in WAL records",
+							NULL,
+							&disable_wal_prev_lsn_checks,
+							false,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
 							"neon.allow_replica_misconfig",
