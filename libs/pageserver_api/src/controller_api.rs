@@ -540,8 +540,8 @@ mod test {
         let request: TenantShardMigrateRequest = serde_json::from_str(json).unwrap();
         assert_eq!(request.node_id, NodeId(123));
         assert_eq!(request.origin_node_id, None);
-        assert_eq!(request.migration_config.override_scheduler, false);
-        assert_eq!(request.migration_config.prewarm, true);
+        assert!(!request.migration_config.override_scheduler);
+        assert!(request.migration_config.prewarm);
         assert_eq!(request.migration_config.secondary_warmup_timeout, None);
         assert_eq!(
             request.migration_config.secondary_download_request_timeout,
@@ -558,8 +558,8 @@ mod test {
         }"#;
 
         let config: MigrationConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.override_scheduler, false);
-        assert_eq!(config.prewarm, true);
+        assert!(!config.override_scheduler);
+        assert!(config.prewarm);
         assert_eq!(
             config.secondary_warmup_timeout,
             Some(Duration::from_secs(10))
