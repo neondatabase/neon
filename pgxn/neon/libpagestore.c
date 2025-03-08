@@ -16,7 +16,7 @@
 
 #include <math.h>
 
-#include "postgresql/internal/libpq-int.h"
+#include "libpq-int.h"
 
 #include "access/xlog.h"
 #include "common/hashfn.h"
