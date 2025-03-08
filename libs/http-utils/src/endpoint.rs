@@ -399,12 +399,10 @@ pub async fn profile_cpu_handler(req: Request<Body>) -> Result<Response<Body>, A
     // Return the report in the requested format.
     match format {
         Format::Pprof => {
-            let mut body = Vec::new();
-            report
+            let body = report
                 .pprof()
                 .map_err(|err| ApiError::InternalServerError(err.into()))?
-                .write_to_vec(&mut body)
-                .map_err(|err| ApiError::InternalServerError(err.into()))?;
+                .encode_to_vec();
 
             Response::builder()
                 .status(200)
