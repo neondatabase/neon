@@ -53,7 +53,7 @@ use safekeeper_api::models::SafekeeperUtilization;
 use tokio::sync::TryAcquireError;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, debug, error, info, info_span, instrument, warn};
+use tracing::{Instrument, error, info, info_span, instrument, warn};
 use utils::completion::Barrier;
 use utils::generation::Generation;
 use utils::id::{NodeId, TenantId, TimelineId};
@@ -372,13 +372,37 @@ pub struct Config {
     /// tenant-scoped API endpoints. Further API requests queue until ready.
     pub tenant_rate_limit: NonZeroU32,
 
-    /// The size at which an unsharded tenant should be split (into 8 shards). This uses the logical
-    /// size of the largest timeline in the shard (i.e. max_logical_size).
+    /// If a tenant shard's largest timeline (max_logical_size) exceeds this value, all tenant
+    /// shards will be split in 2 until they fall below split_threshold (up to max_split_shards).
+    ///
+    /// This will greedily split into as many shards as necessary to fall below split_threshold, as
+    /// powers of 2: if a tenant shard is 7 times larger than split_threshold, it will split into 8
+    /// immediately, rather than first 2 then 4 then 8.
     ///
     /// None or 0 disables auto-splitting.
     ///
     /// TODO: consider using total logical size of all timelines instead.
     pub split_threshold: Option<u64>,
+
+    /// The maximum number of shards a tenant can be split into during autosplits. Does not affect
+    /// manual split requests. 0 or 1 disables autosplits.
+    pub max_split_shards: u8,
+
+    /// The size at which an unsharded tenant should initially split. Ingestion is significantly
+    /// faster with multiple shards, so eagerly splitting below split_threshold will typically speed
+    /// up initial ingestion of large tenants.
+    ///
+    /// This should be below split_threshold, but it is not required. If both split_threshold and
+    /// initial_split_threshold qualify, the largest number of target shards will be used.
+    ///
+    /// None or 0 disables initial splits.
+    pub initial_split_threshold: Option<u64>,
+
+    /// The number of shards to split into when reaching initial_split_threshold. Will
+    /// be clamped to max_split_shards.
+    ///
+    /// 0 or 1 disables initial splits. Has no effect if initial_split_threshold is disabled.
+    pub initial_split_shards: u8,
 
     // TODO: make this cfg(feature  = "testing")
     pub neon_local_repo_dir: Option<PathBuf>,
@@ -552,6 +576,16 @@ enum TenantShardSplitAbortError {
     Remote(#[from] mgmt_api::Error),
     #[error("Unavailable")]
     Unavailable,
+}
+
+/// Inputs for computing a target shard count for a tenant.
+struct ShardSplitInputs {
+    shard_count: ShardCount,
+    max_logical_size: u64, // largest timeline on any shard
+    split_threshold: u64,
+    max_split_shards: u8,
+    initial_split_threshold: u64,
+    initial_split_shards: u8,
 }
 
 struct ShardUpdate {
@@ -7402,14 +7436,30 @@ impl Service {
         }
     }
 
-    /// Asynchronously split a tenant that's eligible for automatic splits:
+    /// Asynchronously split a tenant that's eligible for automatic splits. At most one tenant will
+    /// be split per call.
     ///
-    /// * The tenant is unsharded.
-    /// * The logical size of its largest timeline exceeds split_threshold.
-    /// * The tenant's scheduling policy is active.
+    /// Two sets of criteria are used: initial splits and size-based splits (in that order).
+    /// Initial splits are used to eagerly split tenants that may be performing initial ingestion,
+    /// since sharded tenants have significantly better ingestion throughput. Size-based splits are
+    /// used to bound the maximum shard size.
     ///
-    /// At most one tenant will be split per call: the one with the largest max logical size. It
-    /// will split 1 → 8 shards.
+    /// Initial splits (initial_split_threshold):
+    /// * Applies to tenants with 1 shard.
+    /// * The largest timeline (max_logical_size) exceeds initial_split_threshold.
+    /// * Splits into initial_split_shards.
+    ///
+    /// Size-based splits (split_threshold):
+    /// * Applies to all tenants.
+    /// * The largest timeline (max_logical_size) on a shard exceeds split_threshold.
+    /// * Splits such that the largest max_logical_size on any shard is below split_threshold, in
+    ///   powers of 2.
+    ///
+    /// Tenant shards are ordered by descending max_logical_size, first initial split candidates
+    /// then size-based split candidates. The first matching candidate is split.
+    ///
+    /// The candidate's target shard count is the largest of the initial and size-based splits,
+    /// clamped to max_split_shards.
     ///
     /// TODO: consider splitting based on total logical size rather than max logical size.
     ///
@@ -7417,69 +7467,165 @@ impl Service {
     /// seconds, so a large backlog can take a long time, and if a tenant fails to split it will
     /// block all other splits.
     async fn autosplit_tenants(self: &Arc<Self>) {
-        let Some(split_threshold) = self.config.split_threshold else {
-            return; // auto-splits are disabled
-        };
-        if split_threshold == 0 {
+        // If max_split_shards is set to 0 or 1, we can't split.
+        let max_split_shards = self.config.max_split_shards;
+        if max_split_shards <= 1 {
             return;
         }
 
-        // Fetch the largest eligible shards by logical size.
-        const MAX_SHARDS: ShardCount = ShardCount::new(8);
+        // If initial_split_shards is set to 0 or 1, disable initial splits.
+        let mut initial_split_threshold = self.config.initial_split_threshold.unwrap_or(0);
+        let initial_split_shards = self.config.initial_split_shards;
+        if initial_split_shards <= 1 {
+            initial_split_threshold = 0;
+        }
 
-        let mut top_n = self
-            .get_top_tenant_shards(&TopTenantShardsRequest {
-                order_by: TenantSorting::MaxLogicalSize,
-                limit: 10,
-                where_shards_lt: Some(MAX_SHARDS),
-                where_gt: Some(split_threshold),
-            })
-            .await;
+        // No split_threshold nor initial_split_threshold disables autosplits.
+        let split_threshold = self.config.split_threshold.unwrap_or(0);
+        if split_threshold == 0 && initial_split_threshold == 0 {
+            return;
+        }
+
+        // Fetch split candidates in prioritized order.
+        //
+        // If initial splits are enabled, fetch the largest eligible unsharded tenants by logical
+        // size first. We prioritize initial splits over size-based splits, since these are often
+        // performing initial ingestion and rely on splits to improve ingest throughput.
+        let mut candidates = Vec::new();
+
+        if initial_split_threshold > 0 {
+            let initial_candidates = self
+                .get_top_tenant_shards(&TopTenantShardsRequest {
+                    order_by: TenantSorting::MaxLogicalSize,
+                    limit: 10,
+                    where_shards_lt: Some(ShardCount(2)), // unsharded tenants
+                    where_gt: Some(initial_split_threshold),
+                })
+                .await;
+            candidates.extend(initial_candidates);
+        }
+
+        if split_threshold > 0 {
+            let size_candidates = self
+                .get_top_tenant_shards(&TopTenantShardsRequest {
+                    order_by: TenantSorting::MaxLogicalSize,
+                    limit: 10,
+                    where_shards_lt: Some(ShardCount(max_split_shards)),
+                    where_gt: Some(split_threshold),
+                })
+                .await;
+            candidates.extend(size_candidates);
+        }
 
         // Filter out tenants in a prohibiting scheduling mode.
         {
             let state = self.inner.read().unwrap();
-            top_n.retain(|i| {
+            candidates.retain(|i| {
                 let policy = state.tenants.get(&i.id).map(|s| s.get_scheduling_policy());
                 policy == Some(ShardSchedulingPolicy::Active)
             });
         }
 
-        let Some(split_candidate) = top_n.into_iter().next() else {
-            debug!("No split-elegible shards found");
-            return;
-        };
+        // Iterate over candidates in prioritized order until we find one to split. This should
+        // always be the first one, but we keep going to guard against a no-split candidate at the
+        // head of the queue. We should probably extend this to spawn multiple splits in any case.
+        for candidate in candidates {
+            // Compute the number of target shards. If it doesn't split, try the next candidate.
+            let inputs = ShardSplitInputs {
+                shard_count: candidate.id.shard_count,
+                max_logical_size: candidate.max_logical_size,
+                split_threshold,
+                max_split_shards,
+                initial_split_threshold,
+                initial_split_shards,
+            };
+            let Some(ShardCount(new_shard_count)) = Self::compute_split_shards(inputs) else {
+                warn!("split candidate didn't split: {candidate:?}");
+                continue;
+            };
 
-        // We spawn a task to run this, so it's exactly like some external API client requesting it.
-        // We don't want to block the background reconcile loop on this.
-        info!(
-            "Auto-splitting tenant for size threshold {split_threshold}: current size {split_candidate:?}"
-        );
+            // We spawn a task to run this, so it's exactly like some external API client requesting
+            // it.  We don't want to block the background reconcile loop on this.
+            let old_shard_count = candidate.id.shard_count.count();
+            info!(
+                "auto-splitting tenant {old_shard_count} → {new_shard_count} shards, \
+                current size {candidate:?} (split_threshold={split_threshold} \
+                initial_split_threshold={initial_split_threshold})"
+            );
 
-        let this = self.clone();
-        tokio::spawn(
-            async move {
-                match this
-                    .tenant_shard_split(
-                        split_candidate.id.tenant_id,
-                        TenantShardSplitRequest {
-                            // Always split to the max number of shards: this avoids stepping
-                            // through intervening shard counts and encountering the overhead of a
-                            // split+cleanup each time as a tenant grows, and is not too expensive
-                            // because our max shard count is relatively low anyway. This policy
-                            // will be adjusted in future once we support higher shard count.
-                            new_shard_count: MAX_SHARDS.literal(),
-                            new_stripe_size: Some(ShardParameters::DEFAULT_STRIPE_SIZE),
-                        },
-                    )
-                    .await
-                {
-                    Ok(_) => info!("Successful auto-split"),
-                    Err(err) => error!("Auto-split failed: {err}"),
+            let this = self.clone();
+            tokio::spawn(
+                async move {
+                    match this
+                        .tenant_shard_split(
+                            candidate.id.tenant_id,
+                            TenantShardSplitRequest {
+                                new_shard_count,
+                                new_stripe_size: Some(ShardParameters::DEFAULT_STRIPE_SIZE),
+                            },
+                        )
+                        .await
+                    {
+                        Ok(_) => info!("Successful auto-split"),
+                        Err(err) => error!("auto-split failed: {err}"),
+                    }
                 }
+                .instrument(info_span!("auto_split", tenant_id=%candidate.id.tenant_id)),
+            );
+
+            // We're done after we spawn the first split.
+            return;
+        }
+    }
+
+    /// Returns the number of shards to split a tenant into, or None if the tenant shouldn't split,
+    /// based on the logical size of the largest timeline across all the tenant's shards. Uses the
+    /// larger of size-based and initial splits, clamped to max_split_shards.
+    ///
+    /// NB: the thresholds are exclusive, since TopTenantShardsRequest uses where_gt.
+    ///
+    /// TODO: add unit tests.
+    fn compute_split_shards(inputs: ShardSplitInputs) -> Option<ShardCount> {
+        let ShardSplitInputs {
+            shard_count,
+            max_logical_size,
+            split_threshold,
+            max_split_shards,
+            initial_split_threshold,
+            initial_split_shards,
+        } = inputs;
+        let mut new_shard_count = shard_count.count();
+
+        // Size-based splits.
+        if split_threshold > 0 {
+            // We could be fancy and use base-2 logs/exponents, but we keep it simple and obvious.
+            let mut split_size = max_logical_size;
+            while split_size > split_threshold && new_shard_count < u8::MAX {
+                split_size /= 2;
+                new_shard_count = new_shard_count.saturating_mul(2);
             }
-            .instrument(info_span!("auto_split", tenant_id=%split_candidate.id.tenant_id)),
-        );
+        }
+
+        // Initial splits. Use larger of size-based and initial split shard counts.
+        //
+        // TODO: consider making this retroactive, i.e. that already split tenants could
+        // split based on it.
+        if initial_split_threshold > 0
+            && shard_count.count() <= 1
+            && max_logical_size > initial_split_threshold
+        {
+            new_shard_count = new_shard_count.max(initial_split_shards);
+        }
+
+        // Clamp to max shards.
+        new_shard_count = new_shard_count.min(max_split_shards);
+
+        // Don't split if we're not increasing the shard count.
+        if new_shard_count <= shard_count.count() {
+            return None;
+        }
+
+        Some(ShardCount(new_shard_count))
     }
 
     /// Fetches the top tenant shards from every node, in descending order of
