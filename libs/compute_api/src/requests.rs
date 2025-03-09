@@ -30,3 +30,9 @@ pub struct SetRoleGrantsRequest {
     pub privileges: Vec<Privilege>,
     pub role: PgIdent,
 }
+
+/// Request of the /configure_telemetry API
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ConfigureTelemetryRequest {
+    pub logs_export_host: Option<String>,
+}

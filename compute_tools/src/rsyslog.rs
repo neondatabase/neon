@@ -1,8 +1,11 @@
+use std::io::ErrorKind;
 use std::process::Command;
 use std::{fs::OpenOptions, io::Write};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use tracing::info;
+
+const POSTGRES_LOGS_CONF_PATH: &str = "/etc/rsyslog.d/postgres_logs.conf";
 
 fn get_rsyslog_pid() -> Option<String> {
     let output = Command::new("pgrep")
@@ -74,4 +77,138 @@ pub fn configure_audit_rsyslog(
     restart_rsyslog()?;
 
     Ok(())
+}
+
+/// Configuration for enabling Postgres logs forwarding from rsyslogd
+pub struct PostgresLogsRsyslogConfig<'a> {
+    pub host: Option<&'a str>,
+}
+
+impl<'a> PostgresLogsRsyslogConfig<'a> {
+    pub fn new(host: Option<&'a str>) -> Self {
+        Self { host }
+    }
+
+    pub fn build(&self) -> Result<String> {
+        match self.host {
+            Some(host) => {
+                if let Some((target, port)) = host.split_once(":") {
+                    Ok(format!(
+                        include_str!(
+                            "config_template/compute_rsyslog_postgres_export_template.conf"
+                        ),
+                        logs_export_target = target,
+                        logs_export_port = port,
+                    ))
+                } else {
+                    Err(anyhow!("Invalid host format for Postgres logs export"))
+                }
+            }
+            None => Ok("".to_string()),
+        }
+    }
+
+    fn current_config() -> Result<String> {
+        let config_content = match std::fs::read_to_string(POSTGRES_LOGS_CONF_PATH) {
+            Ok(c) => c,
+            Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
+            Err(err) => return Err(err.into()),
+        };
+        Ok(config_content)
+    }
+
+    /// Returns the default host for otel collector that receives Postgres logs
+    pub fn default_host(project_id: &str) -> String {
+        format!(
+            "config-{}-collector-monitoring.neon-telemetry.svc.cluster.local:54526",
+            project_id
+        )
+    }
+}
+
+pub fn configure_postgres_logs_export(conf: PostgresLogsRsyslogConfig) -> Result<()> {
+    let new_config = conf.build()?;
+    let current_config = PostgresLogsRsyslogConfig::current_config()?;
+
+    if new_config == current_config {
+        info!("postgres logs rsyslog configuration is up-to-date");
+        return Ok(());
+    }
+
+    // When new config is empty we can simply remove the configuration file.
+    if new_config.is_empty() {
+        info!("removing rsyslog config file: {}", POSTGRES_LOGS_CONF_PATH);
+        match std::fs::remove_file(POSTGRES_LOGS_CONF_PATH) {
+            Ok(_) => {}
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+        restart_rsyslog()?;
+        return Ok(());
+    }
+
+    info!(
+        "configuring rsyslog for postgres logs export: {}",
+        new_config
+    );
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(POSTGRES_LOGS_CONF_PATH)?;
+    file.write_all(new_config.as_bytes())?;
+
+    info!(
+        "rsyslog configuration file {} added successfully. Starting rsyslogd",
+        POSTGRES_LOGS_CONF_PATH
+    );
+
+    restart_rsyslog()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::rsyslog::PostgresLogsRsyslogConfig;
+
+    #[test]
+    fn test_postgres_logs_config() {
+        {
+            // Verify empty config
+            let conf = PostgresLogsRsyslogConfig::new(None);
+            let res = conf.build();
+            assert!(res.is_ok());
+            let conf_str = res.unwrap();
+            assert_eq!(&conf_str, "");
+        }
+
+        {
+            // Verify config
+            let conf = PostgresLogsRsyslogConfig::new(Some("collector.cvc.local:514"));
+            let res = conf.build();
+            assert!(res.is_ok());
+            let conf_str = res.unwrap();
+            assert!(conf_str.contains("imuxsock"));
+            assert!(conf_str.contains(r#"target="collector.cvc.local""#));
+            assert!(conf_str.contains(r#"port="514""#));
+        }
+
+        {
+            // Verify invalid config
+            let conf = PostgresLogsRsyslogConfig::new(Some("invalid"));
+            let res = conf.build();
+            assert!(res.is_err());
+        }
+
+        {
+            // Verify config with default host
+            let host = PostgresLogsRsyslogConfig::default_host("shy-breeze-123");
+            let conf = PostgresLogsRsyslogConfig::new(Some(&host));
+            let res = conf.build();
+            assert!(res.is_ok());
+            let conf_str = res.unwrap();
+            assert!(conf_str.contains(r#"shy-breeze-123"#));
+        }
+    }
 }

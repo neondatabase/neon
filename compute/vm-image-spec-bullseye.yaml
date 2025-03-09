@@ -40,7 +40,7 @@ commands:
     sysvInitAction: respawn
     shell: '/bin/sql_exporter -config.file=/etc/sql_exporter_autoscaling.yml -web.listen-address=:9499'
   - name: rsyslogd
-    user: postgres
+    user: root
     sysvInitAction: respawn
     shell: '/usr/sbin/rsyslogd -n -i /var/run/rsyslogd/rsyslogd.pid -f /etc/compute_rsyslog.conf'
 shutdownHook: |
