@@ -1040,6 +1040,9 @@ prefetch_lookupv(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blocknum, n
 				continue;
 			}
 			memcpy(buffers[i], ((NeonGetPageResponse*)slot->response)->page, BLCKSZ);
+			if (!lfc_store_prefetch_result)
+				lfc_write(rinfo, forknum, blocknum + i, buffers[i]);
+
 			prefetch_set_unused(ring_index);
 			BITMAP_SET(mask, i);
 
