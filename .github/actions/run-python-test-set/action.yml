@@ -40,6 +40,10 @@ inputs:
     description: 'Whether to rerun failed tests'
     required: false
     default: 'false'
+  special_kind:
+    description: 'Special type of testing, e. g. test_stability, to distinguish a specific test run from regular runs'
+    required: false
+    default: ''
   pg_version:
     description: 'Postgres version to use for tests'
     required: false
@@ -116,6 +120,7 @@ runs:
         ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE: contains(github.event.pull_request.labels.*.name, 'backward compatibility breakage')
         ALLOW_FORWARD_COMPATIBILITY_BREAKAGE: contains(github.event.pull_request.labels.*.name, 'forward compatibility breakage')
         RERUN_FAILED: ${{ inputs.rerun_failed }}
+        SPECIAL_KIND: ${{ inputs.special_kind }}
         PG_VERSION: ${{ inputs.pg_version }}
         SANITIZERS: ${{ inputs.sanitizers }}
       shell: bash -euxo pipefail {0}
