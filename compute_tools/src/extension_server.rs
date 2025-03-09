@@ -202,8 +202,24 @@ pub async fn download_extension(
     // move contents of the libdir / sharedir in unzipped archive to the correct local paths
     for paths in [sharedir_paths, libdir_paths] {
         let (zip_dir, real_dir) = paths;
+
+        let dir = match std::fs::read_dir(&zip_dir) {
+            Ok(dir) => dir,
+            Err(e) => match e.kind() {
+                // In the event of a SQL-only extension, there would be nothing
+                // to move from the lib/ directory, so note that in the log and
+                // move on.
+                std::io::ErrorKind::NotFound => {
+                    info!("nothing to move from {}", zip_dir);
+                    continue;
+                }
+                _ => return Err(anyhow::anyhow!(e)),
+            },
+        };
+
         info!("mv {zip_dir:?}/*  {real_dir:?}");
-        for file in std::fs::read_dir(zip_dir)? {
+
+        for file in dir {
             let old_file = file?.path();
             let new_file =
                 Path::new(&real_dir).join(old_file.file_name().context("error parsing file")?);
