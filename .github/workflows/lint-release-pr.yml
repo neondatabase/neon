@@ -1,0 +1,23 @@
+name: Lint Release PR
+
+on:
+  pull_request:
+    branches:
+      - release
+      - release-proxy
+      - release-compute
+
+jobs:
+  lint-release-pr:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch full history for git operations
+
+      - name: Run lint script
+        env:
+          RELEASE_BRANCH: ${{ github.base_ref }}
+        run: |
+          ./.github/scripts/lint-release-pr.sh

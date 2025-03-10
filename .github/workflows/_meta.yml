@@ -21,6 +21,9 @@ on:
       run-kind:
         description: "The kind of run we're currently in. Will be one of `push-main`, `storage-release`, `compute-release`, `proxy-release`, `storage-rc-pr`, `compute-rc-pr`,  `proxy-rc-pr`, `pr`, or `workflow-dispatch`"
         value: ${{ jobs.tags.outputs.run-kind }}
+      release-pr-run-id:
+        description: "Only available if `run-kind in [storage-release, proxy-release, compute-release]`. Contains the run ID of the `Build and Test` workflow, assuming one with the current commit can be found."
+        value: ${{ jobs.tags.outputs.release-pr-run-id }}
 
 permissions: {}
 
@@ -33,6 +36,7 @@ jobs:
       proxy: ${{ steps.previous-releases.outputs.proxy }}
       storage: ${{ steps.previous-releases.outputs.storage }}
       run-kind: ${{ steps.run-kind.outputs.run-kind }}
+      release-pr-run-id: ${{ steps.release-pr-run-id.outputs.release-pr-run-id }}
     permissions:
       contents: read
     steps:
@@ -105,3 +109,13 @@ jobs:
             "/repos/${GITHUB_REPOSITORY}/releases" \
           | jq -f .github/scripts/previous-releases.jq -r \
           | tee -a "${GITHUB_OUTPUT}"
+
+      - name: Get the release PR run ID
+        id: release-pr-run-id
+        if: ${{ contains(fromJson('["storage-release", "compute-release", "proxy-release"]'), steps.run-kind.outputs.run-kind) }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CURRENT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          RELEASE_PR_RUN_ID=$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=$CURRENT_SHA" | jq '[.workflow_runs[] | select(.name == "Build and Test") | select(.head_branch | test("^rc/release(-(proxy)|(compute))?/[0-9]{4}-[0-9]{2}-[0-9]{2}$"; "s"))] | first | .id // "Faied to find Build and Test run from  RC PR!" | halt_error(1)')
+          echo "release-pr-run-id=$RELEASE_PR_RUN_ID" | tee -a $GITHUB_OUTPUT

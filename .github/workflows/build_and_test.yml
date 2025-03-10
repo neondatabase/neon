@@ -476,7 +476,7 @@ jobs:
         (
           !github.event.pull_request.draft
           || contains( github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft')
-          || contains(fromJSON('["push-main", "storage-release", "proxy-release", "compute-release"]'), needs.meta.outputs.run-kind)
+          || needs.meta.outputs.run-kind == 'push-main'
         ) && !failure() && !cancelled()
       }}
     needs: [ check-permissions, push-neon-image-dev, push-compute-image-dev, meta ]
@@ -487,7 +487,7 @@ jobs:
 
   neon-image-arch:
     needs: [ check-permissions, build-build-tools-image, meta ]
-    if: ${{ contains(fromJSON('["push-main", "pr", "storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    if: ${{ contains(fromJSON('["push-main", "pr", "storage-rc-pr", "proxy-rc-pr"]'), needs.meta.outputs.run-kind) }}
     strategy:
       matrix:
         arch: [ x64, arm64 ]
@@ -537,7 +537,7 @@ jobs:
 
   neon-image:
     needs: [ neon-image-arch, meta ]
-    if: ${{ contains(fromJSON('["push-main", "pr", "storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    if: ${{ contains(fromJSON('["push-main", "pr", "storage-rc-pr", "proxy-rc-pr"]'), needs.meta.outputs.run-kind) }}
     runs-on: ubuntu-22.04
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
@@ -559,7 +559,7 @@ jobs:
 
   compute-node-image-arch:
     needs: [ check-permissions, build-build-tools-image, meta ]
-    if: ${{ contains(fromJSON('["push-main", "pr", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    if: ${{ contains(fromJSON('["push-main", "pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
       statuses: write
@@ -651,7 +651,7 @@ jobs:
 
   compute-node-image:
     needs: [ compute-node-image-arch, meta ]
-    if: ${{ contains(fromJSON('["push-main", "pr", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    if: ${{ contains(fromJSON('["push-main", "pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
       statuses: write
@@ -694,7 +694,7 @@ jobs:
 
   vm-compute-node-image-arch:
     needs: [ check-permissions, meta, compute-node-image ]
-    if: ${{ contains(fromJSON('["push-main", "pr", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    if: ${{ contains(fromJSON('["push-main", "pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
     strategy:
       fail-fast: false
@@ -747,7 +747,7 @@ jobs:
 
   vm-compute-node-image:
     needs: [ vm-compute-node-image-arch, meta ]
-    if: ${{ contains(fromJSON('["push-main", "pr", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    if: ${{ contains(fromJSON('["push-main", "pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     runs-on: ubuntu-22.04
     strategy:
       matrix:
@@ -773,7 +773,12 @@ jobs:
   test-images:
     needs: [ check-permissions, meta, neon-image, compute-node-image ]
     # Depends on jobs that can get skipped
-    if: "!failure() && !cancelled()"
+    if: >-
+      ${{
+        !failure()
+        && !cancelled()
+        && contains(fromJSON('["push-main", "pr", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind)
+      }}
     strategy:
       fail-fast: false
       matrix:
@@ -800,7 +805,7 @@ jobs:
       # Ensure that we don't have bad versions.
       - name: Verify image versions
         shell: bash # ensure no set -e for better error messages
-        if: ${{ contains(fromJSON('["push-main", "pr", "storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind) }}
+        if: ${{ contains(fromJSON('["push-main", "pr", "storage-rc-pr", "proxy-rc-pr"]'), needs.meta.outputs.run-kind) }}
         run: |
           pageserver_version=$(docker run --rm neondatabase/neon:${{ needs.meta.outputs.build-tag }} "/bin/sh" "-c" "/usr/local/bin/pageserver --version")
 
@@ -821,19 +826,19 @@ jobs:
         env:
           TAG: >-
             ${{
-              contains(fromJSON('["compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind)
+              needs.meta.outputs.run-kind == 'compute-rc-pr'
               && needs.meta.outputs.previous-storage-release
               || needs.meta.outputs.build-tag
             }}
           COMPUTE_TAG: >-
             ${{
-              contains(fromJSON('["storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind)
+              contains(fromJSON('["storage-rc-pr", "proxy-rc-pr"]'), needs.meta.outputs.run-kind)
               && needs.meta.outputs.previous-compute-release
               || needs.meta.outputs.build-tag
             }}
           TEST_EXTENSIONS_TAG: >-
             ${{
-              contains(fromJSON('["storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind)
+              contains(fromJSON('["storage-rc-pr", "proxy-rc-pr"]'), needs.meta.outputs.run-kind)
               && 'latest'
               || needs.meta.outputs.build-tag
             }}
@@ -885,7 +890,13 @@ jobs:
         id: generate
         run: python3 .github/scripts/generate_image_maps.py
         env:
-          BUILD_TAG: "${{ needs.meta.outputs.build-tag }}"
+          SOURCE_TAG: >-
+            ${{
+              contains(fromJson('["storage-release", "compute-release", "proxy-release"]'), needs.meta.outputs.run-kind)
+              && needs.meta.outputs.release-pr-run-id
+              || needs.meta.outputs.build-tag
+            }}
+          TARGET_TAG: ${{ needs.meta.outputs.build-tag }}
           BRANCH: "${{ github.ref_name }}"
           DEV_ACR: "${{ vars.AZURE_DEV_REGISTRY_NAME }}"
           PROD_ACR: "${{ vars.AZURE_PROD_REGISTRY_NAME }}"
@@ -895,7 +906,7 @@ jobs:
 
   push-neon-image-dev:
     needs: [ meta, generate-image-maps, neon-image ]
-    if: ${{ contains(fromJSON('["push-main", "pr", "storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    if: ${{ !failure() && !cancelled() && contains(fromJSON('["push-main", "pr", "storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind) }}
     uses: ./.github/workflows/_push-to-container-registry.yml
     permissions:
       id-token: write  # Required for aws/azure login
@@ -913,7 +924,7 @@ jobs:
 
   push-compute-image-dev:
     needs: [ meta, generate-image-maps, vm-compute-node-image ]
-    if: ${{ contains(fromJSON('["push-main", "pr", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    if: ${{ !failure() && !cancelled() && contains(fromJSON('["push-main", "pr", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     uses: ./.github/workflows/_push-to-container-registry.yml
     permissions:
       id-token: write  # Required for aws/azure login
@@ -1235,7 +1246,7 @@ jobs:
 
   # The job runs on `release` branch and copies compatibility data and Neon artifact from the last *release PR* to the latest directory
   promote-compatibility-data:
-    needs: [ deploy ]
+    needs: [ meta, deploy ]
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
       statuses: write
@@ -1245,37 +1256,6 @@ jobs:
 
     runs-on: ubuntu-22.04
     steps:
-      - name: Fetch GITHUB_RUN_ID and COMMIT_SHA for the last merged release PR
-        id: fetch-last-release-pr-info
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          branch_name_and_pr_number=$(gh pr list \
-            --repo "${GITHUB_REPOSITORY}" \
-            --base release \
-            --state merged \
-            --limit 10 \
-            --json mergeCommit,headRefName,number \
-            --jq ".[] | select(.mergeCommit.oid==\"${GITHUB_SHA}\") | { branch_name: .headRefName, pr_number: .number }")
-          branch_name=$(echo "${branch_name_and_pr_number}" | jq -r '.branch_name')
-          pr_number=$(echo "${branch_name_and_pr_number}" | jq -r '.pr_number')
-
-          run_id=$(gh run list \
-            --repo "${GITHUB_REPOSITORY}" \
-            --workflow build_and_test.yml \
-            --branch "${branch_name}" \
-            --json databaseId \
-            --limit 1 \
-            --jq '.[].databaseId')
-
-          last_commit_sha=$(gh pr view "${pr_number}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --json commits \
-            --jq '.commits[-1].oid')
-
-          echo "run-id=${run_id}" | tee -a ${GITHUB_OUTPUT}
-          echo "commit-sha=${last_commit_sha}" | tee -a ${GITHUB_OUTPUT}
-
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: eu-central-1
@@ -1286,8 +1266,8 @@ jobs:
         env:
           BUCKET: neon-github-public-dev
           AWS_REGION: eu-central-1
-          COMMIT_SHA: ${{ steps.fetch-last-release-pr-info.outputs.commit-sha }}
-          RUN_ID: ${{ steps.fetch-last-release-pr-info.outputs.run-id }}
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_ID: ${{ needs.meta.outputs.release-pr-run-id }}
         run: |
           old_prefix="artifacts/${COMMIT_SHA}/${RUN_ID}"
           new_prefix="artifacts/latest"
@@ -1376,5 +1356,5 @@ jobs:
           || needs.files-changed.result == 'skipped'
           || (needs.push-compute-image-dev.result == 'skipped' && contains(fromJSON('["push-main", "pr", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind))
           || (needs.push-neon-image-dev.result == 'skipped' && contains(fromJSON('["push-main", "pr", "storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind))
-          || needs.test-images.result == 'skipped'
+          || (needs.test-images.result == 'skipped' && contains(fromJSON('["push-main", "pr", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind))
           || (needs.trigger-custom-extensions-build-and-wait.result == 'skipped' && contains(fromJSON('["push-main", "pr", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind))
