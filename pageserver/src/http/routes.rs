@@ -3213,6 +3213,7 @@ async fn post_top_tenants(
         match order_by {
             TenantSorting::ResidentSize => sizes.resident_size,
             TenantSorting::MaxLogicalSize => sizes.max_logical_size,
+            TenantSorting::MaxLogicalSizePerShard => sizes.max_logical_size_per_shard,
         }
     }
 
