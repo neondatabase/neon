@@ -133,7 +133,9 @@ fn init_tracing_internal<S>(service_name: String, export_config: ExportConfig) -
 where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
-    // Sets up exporter from the OTEL_EXPORTER_* environment variables.
+    // Sets up exporter from the provided [`ExportConfig`] parameter.
+    // If the endpoint is not specified, it is loaded from the
+    // OTEL_EXPORTER_OTLP_ENDPOINT environment variable.
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_http()
         .with_export_config(export_config)
