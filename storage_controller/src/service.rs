@@ -744,20 +744,17 @@ impl Service {
         }
 
         let safekeepers = self.inner.read().unwrap().safekeepers.clone();
-        let sk_schedule_requests = match safekeeper_reconciler::load_schedule_requests(
-            self,
-            &safekeepers,
-        )
-        .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!(
-                    "Failed to load safekeeper pending ops at startup: {e}. Aborting start-up..."
-                );
-                std::process::exit(1);
-            }
-        };
+        let sk_schedule_requests =
+            match safekeeper_reconciler::load_schedule_requests(self, &safekeepers).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to load safekeeper pending ops at startup: {e}." // Don't abort for now: " Aborting start-up..."
+                    );
+                    // std::process::exit(1);
+                    Vec::new()
+                }
+            };
 
         {
             let mut locked = self.inner.write().unwrap();
@@ -3641,20 +3638,20 @@ impl Service {
             joinset.spawn(async move {
                 // Unwrap is fine as we already would have returned error above
                 let sk_p = safekeepers.get(&sk_id).unwrap();
-                sk_p.with_client_retries(
-                    |client| {
-                        let req = req.clone();
-                        async move { client.create_timeline(&req).await }
-                    },
-                    &jwt,
-                    3,
-                    3,
-                    SK_CREATE_TIMELINE_RECONCILE_TIMEOUT,
-                    &CancellationToken::new(),
-                )
-                .await
-                .map_err(|e| (sk_id, e))?;
-                Ok(())
+                let res = sk_p
+                    .with_client_retries(
+                        |client| {
+                            let req = req.clone();
+                            async move { client.create_timeline(&req).await }
+                        },
+                        &jwt,
+                        3,
+                        3,
+                        SK_CREATE_TIMELINE_RECONCILE_TIMEOUT,
+                        &CancellationToken::new(),
+                    )
+                    .await;
+                (sk_id, sk_p.skp.host.clone(), res)
             });
         }
         // After we have built the joinset, we now wait for the tasks to complete,
@@ -3668,16 +3665,27 @@ impl Service {
         loop {
             if let Ok(res) = tokio::time::timeout_at(reconcile_deadline, joinset.join_next()).await
             {
-                // unwrap is fine as we know the number of stuff we put into the joinset
                 let Some(res) = res else { break };
                 match res {
-                    Ok(res) => reconcile_results.push(res),
+                    Ok(res) => {
+                        tracing::info!(
+                            "response from safekeeper id:{} at {}: {:?}",
+                            res.0,
+                            res.1,
+                            res.2
+                        );
+                        reconcile_results.push(res);
+                    }
                     Err(join_err) => {
                         tracing::info!("join_err for task in joinset: {join_err}");
                     }
                 }
             } else {
-                tracing::info!("timeout for reconciliation");
+                tracing::info!(
+                    "timeout for creation call after {} responses",
+                    reconcile_results.len()
+                );
+                break;
             }
         }
 
@@ -3685,7 +3693,7 @@ impl Service {
         let total_result_count = reconcile_results.len();
         let remaining = reconcile_results
             .into_iter()
-            .filter_map(|res| res.err())
+            .filter_map(|res| res.2.is_err().then_some(res.0))
             .collect::<Vec<_>>();
         tracing::info!(
             "Got {} non-successful responses from initial creation request of total {total_result_count} responses",
@@ -3698,8 +3706,6 @@ impl Service {
                 remaining.len()
             )));
         }
-
-        let remaining = remaining.iter().map(|(id, _err)| *id).collect::<Vec<_>>();
 
         Ok(remaining)
     }
