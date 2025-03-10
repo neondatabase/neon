@@ -111,10 +111,6 @@ pub struct RequestContext {
     scope: Scope,
 }
 
-// We wrap the `Arc<StorageIoSizeMetrics>`s inside another Arc to avoid child
-// context creation contending for the ref counters of the Arc<Timeline>,
-// which are shared among all tasks that operate on the timeline, especially
-// concurrent page_service connections.
 #[derive(Clone)]
 pub(crate) enum Scope {
     Global {
@@ -127,6 +123,10 @@ pub(crate) enum Scope {
         io_size_metrics: crate::metrics::StorageIoSizeMetrics,
     },
     Timeline {
+        // We wrap the `Arc<TimelineMetrics>`s inside another Arc to avoid child
+        // context creation contending for the ref counters of the Arc<TimelineMetrics>,
+        // which are shared among all tasks that operate on the timeline, especially
+        // concurrent page_service connections.
         #[allow(clippy::redundant_allocation)]
         arc_arc: Arc<Arc<TimelineMetrics>>,
     },
@@ -165,7 +165,7 @@ impl Scope {
         tenant_shard_id: &TenantShardId,
         timeline_id: &TimelineId,
     ) -> Self {
-        // NB: Secondaries never took proper care of metrics lifecycle, and we don't start doing it now.
+        // TODO(https://github.com/neondatabase/neon/issues/11156): secondary timelines have no infrastructure for metrics lifecycle.
 
         let tenant_id = tenant_shard_id.tenant_id.to_string();
         let shard_id = tenant_shard_id.shard_slug().to_string();
