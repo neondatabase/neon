@@ -1,8 +1,8 @@
 # Autoscaling
 /libs/vm_monitor/ @neondatabase/autoscaling
 
-# DevProd
-/.github/ @neondatabase/developer-productivity
+# DevProd & PerfCorr
+/.github/ @neondatabase/developer-productivity @neondatabase/performance-correctness
 
 # Compute
 /pgxn/ @neondatabase/compute

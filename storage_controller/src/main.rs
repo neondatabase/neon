@@ -144,6 +144,9 @@ struct Cli {
     /// Flag to use https for requests to pageserver API.
     #[arg(long, default_value = "false")]
     use_https_pageserver_api: bool,
+    /// Flag to use https for requests to safekeeper API.
+    #[arg(long, default_value = "false")]
+    use_https_safekeeper_api: bool,
 
     /// Trusted root CA certificate to use in https APIs.
     #[arg(long)]
@@ -291,18 +294,13 @@ async fn async_main() -> anyhow::Result<()> {
 
     let secrets = Secrets::load(&args).await?;
 
-    // TODO: once we've rolled out the safekeeper JWT token everywhere, put it into the validation code below
-    tracing::info!(
-        "safekeeper_jwt_token set: {:?}",
-        secrets.safekeeper_jwt_token.is_some()
-    );
-
     // Validate required secrets and arguments are provided in strict mode
     match strict_mode {
         StrictMode::Strict
             if (secrets.public_key.is_none()
                 || secrets.pageserver_jwt_token.is_none()
-                || secrets.control_plane_jwt_token.is_none()) =>
+                || secrets.control_plane_jwt_token.is_none()
+                || secrets.safekeeper_jwt_token.is_none()) =>
         {
             // Production systems should always have secrets configured: if public_key was not set
             // then we would implicitly disable auth.
@@ -370,6 +368,7 @@ async fn async_main() -> anyhow::Result<()> {
         start_as_candidate: args.start_as_candidate,
         http_service_port: args.listen.port() as i32,
         use_https_pageserver_api: args.use_https_pageserver_api,
+        use_https_safekeeper_api: args.use_https_safekeeper_api,
         ssl_ca_cert,
     };
 

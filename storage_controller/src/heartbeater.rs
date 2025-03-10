@@ -333,6 +333,7 @@ impl HeartBeat<Safekeeper, SafekeeperState> for HeartbeaterTask<Safekeeper, Safe
                     .jwt_token
                     .as_ref()
                     .map(|t| SecretString::from(t.to_owned()));
+                let ssl_ca_cert = self.ssl_ca_cert.clone();
                 let cancel = self.cancel.clone();
 
                 async move {
@@ -340,6 +341,7 @@ impl HeartBeat<Safekeeper, SafekeeperState> for HeartbeaterTask<Safekeeper, Safe
                         .with_client_retries(
                             |client| async move { client.get_utilization().await },
                             &jwt_token,
+                            &ssl_ca_cert,
                             3,
                             3,
                             Duration::from_secs(1),

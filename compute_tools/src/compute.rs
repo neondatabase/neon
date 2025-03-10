@@ -37,7 +37,7 @@ use crate::logger::startup_context_from_env;
 use crate::lsn_lease::launch_lsn_lease_bg_task_for_static;
 use crate::monitor::launch_monitor;
 use crate::pg_helpers::*;
-use crate::rsyslog::configure_and_start_rsyslog;
+use crate::rsyslog::configure_audit_rsyslog;
 use crate::spec::*;
 use crate::swap::resize_swap;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
@@ -295,79 +295,6 @@ struct StartVmMonitorResult {
     token: tokio_util::sync::CancellationToken,
     #[cfg(target_os = "linux")]
     vm_monitor: Option<tokio::task::JoinHandle<Result<()>>>,
-}
-
-pub(crate) fn construct_superuser_query(spec: &ComputeSpec) -> String {
-    let roles = spec
-        .cluster
-        .roles
-        .iter()
-        .map(|r| escape_literal(&r.name))
-        .collect::<Vec<_>>();
-
-    let dbs = spec
-        .cluster
-        .databases
-        .iter()
-        .map(|db| escape_literal(&db.name))
-        .collect::<Vec<_>>();
-
-    let roles_decl = if roles.is_empty() {
-        String::from("roles text[] := NULL;")
-    } else {
-        format!(
-            r#"
-               roles text[] := ARRAY(SELECT rolname
-                                     FROM pg_catalog.pg_roles
-                                     WHERE rolname IN ({}));"#,
-            roles.join(", ")
-        )
-    };
-
-    let database_decl = if dbs.is_empty() {
-        String::from("dbs text[] := NULL;")
-    } else {
-        format!(
-            r#"
-               dbs text[] := ARRAY(SELECT datname
-                                   FROM pg_catalog.pg_database
-                                   WHERE datname IN ({}));"#,
-            dbs.join(", ")
-        )
-    };
-
-    // ALL PRIVILEGES grants CREATE, CONNECT, and TEMPORARY on all databases
-    // (see https://www.postgresql.org/docs/current/ddl-priv.html)
-    let query = format!(
-        r#"
-            DO $$
-                DECLARE
-                    r text;
-                    {}
-                    {}
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT FROM pg_catalog.pg_roles WHERE rolname = 'neon_superuser')
-                    THEN
-                        CREATE ROLE neon_superuser CREATEDB CREATEROLE NOLOGIN REPLICATION BYPASSRLS IN ROLE pg_read_all_data, pg_write_all_data;
-                        IF array_length(roles, 1) IS NOT NULL THEN
-                            EXECUTE format('GRANT neon_superuser TO %s',
-                                           array_to_string(ARRAY(SELECT quote_ident(x) FROM unnest(roles) as x), ', '));
-                            FOREACH r IN ARRAY roles LOOP
-                                EXECUTE format('ALTER ROLE %s CREATEROLE CREATEDB', quote_ident(r));
-                            END LOOP;
-                        END IF;
-                        IF array_length(dbs, 1) IS NOT NULL THEN
-                            EXECUTE format('GRANT ALL PRIVILEGES ON DATABASE %s TO neon_superuser',
-                                           array_to_string(ARRAY(SELECT quote_ident(x) FROM unnest(dbs) as x), ', '));
-                        END IF;
-                    END IF;
-                END
-            $$;"#,
-        roles_decl, database_decl,
-    );
-
-    query
 }
 
 impl ComputeNode {
@@ -689,7 +616,7 @@ impl ComputeNode {
             let log_directory_path = Path::new(&self.params.pgdata).join("log");
             // TODO: make this more robust
             // now rsyslog starts once and there is no monitoring or restart if it fails
-            configure_and_start_rsyslog(
+            configure_audit_rsyslog(
                 log_directory_path.to_str().unwrap(),
                 "hipaa",
                 &remote_endpoint,

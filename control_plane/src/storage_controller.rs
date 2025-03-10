@@ -12,13 +12,10 @@ use hyper0::Uri;
 use nix::unistd::Pid;
 use pageserver_api::controller_api::{
     NodeConfigureRequest, NodeDescribeResponse, NodeRegisterRequest, TenantCreateRequest,
-    TenantCreateResponse, TenantLocateResponse, TenantShardMigrateRequest,
-    TenantShardMigrateResponse,
+    TenantCreateResponse, TenantLocateResponse,
 };
-use pageserver_api::models::{
-    TenantShardSplitRequest, TenantShardSplitResponse, TimelineCreateRequest, TimelineInfo,
-};
-use pageserver_api::shard::{ShardStripeSize, TenantShardId};
+use pageserver_api::models::{TimelineCreateRequest, TimelineInfo};
+use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
 use reqwest::Method;
@@ -829,41 +826,6 @@ impl StorageController {
             Method::GET,
             format!("debug/v1/tenant/{tenant_id}/locate"),
             None,
-        )
-        .await
-    }
-
-    #[instrument(skip(self))]
-    pub async fn tenant_migrate(
-        &self,
-        tenant_shard_id: TenantShardId,
-        node_id: NodeId,
-    ) -> anyhow::Result<TenantShardMigrateResponse> {
-        self.dispatch(
-            Method::PUT,
-            format!("control/v1/tenant/{tenant_shard_id}/migrate"),
-            Some(TenantShardMigrateRequest {
-                node_id,
-                migration_config: None,
-            }),
-        )
-        .await
-    }
-
-    #[instrument(skip(self), fields(%tenant_id, %new_shard_count))]
-    pub async fn tenant_split(
-        &self,
-        tenant_id: TenantId,
-        new_shard_count: u8,
-        new_stripe_size: Option<ShardStripeSize>,
-    ) -> anyhow::Result<TenantShardSplitResponse> {
-        self.dispatch(
-            Method::PUT,
-            format!("control/v1/tenant/{tenant_id}/shard_split"),
-            Some(TenantShardSplitRequest {
-                new_shard_count,
-                new_stripe_size,
-            }),
         )
         .await
     }

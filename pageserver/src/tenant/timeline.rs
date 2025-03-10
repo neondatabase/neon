@@ -99,7 +99,8 @@ use crate::disk_usage_eviction_task::{DiskUsageEvictionInfo, EvictionCandidate, 
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::l0_flush::{self, L0FlushGlobalState};
 use crate::metrics::{
-    DELTAS_PER_READ_GLOBAL, LAYERS_PER_READ_GLOBAL, ScanLatencyOngoingRecording, TimelineMetrics,
+    DELTAS_PER_READ_GLOBAL, LAYERS_PER_READ_AMORTIZED_GLOBAL, LAYERS_PER_READ_BATCH_GLOBAL,
+    LAYERS_PER_READ_GLOBAL, ScanLatencyOngoingRecording, TimelineMetrics,
 };
 use crate::page_service::TenantManagerTypes;
 use crate::pgdatadir_mapping::{
@@ -1330,10 +1331,6 @@ impl Timeline {
         // (this is a requirement, not a bug). Skip updating the metric in these cases
         // to avoid infinite results.
         if !results.is_empty() {
-            // Record the total number of layers visited towards each key in the batch. While some
-            // layers may not intersect with a given read, and the cost of layer visits are
-            // amortized across the batch, each visited layer contributes directly to the observed
-            // latency for every read in the batch, which is what we care about.
             if layers_visited >= Self::LAYERS_VISITED_WARN_THRESHOLD {
                 static LOG_PACER: Lazy<Mutex<RateLimit>> =
                     Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(60))));
@@ -1348,9 +1345,23 @@ impl Timeline {
                 });
             }
 
+            // Records the number of layers visited in a few different ways:
+            //
+            // * LAYERS_PER_READ: all layers count towards every read in the batch, because each
+            //   layer directly affects its observed latency.
+            //
+            // * LAYERS_PER_READ_BATCH: all layers count towards each batch, to get the per-batch
+            //   layer visits and access cost.
+            //
+            // * LAYERS_PER_READ_AMORTIZED: the average layer count per read, to get the amortized
+            //   read amplification after batching.
+            let layers_visited = layers_visited as f64;
+            let avg_layers_visited = layers_visited / results.len() as f64;
+            LAYERS_PER_READ_BATCH_GLOBAL.observe(layers_visited);
             for _ in &results {
-                self.metrics.layers_per_read.observe(layers_visited as f64);
-                LAYERS_PER_READ_GLOBAL.observe(layers_visited as f64);
+                self.metrics.layers_per_read.observe(layers_visited);
+                LAYERS_PER_READ_GLOBAL.observe(layers_visited);
+                LAYERS_PER_READ_AMORTIZED_GLOBAL.observe(avg_layers_visited);
             }
         }
 
@@ -3637,7 +3648,7 @@ impl Timeline {
         let visible_non_resident = match previous_heatmap.as_deref() {
             Some(PreviousHeatmap::Active {
                 heatmap, read_at, ..
-            }) => Some(heatmap.layers.iter().filter_map(|hl| {
+            }) => Some(heatmap.all_layers().filter_map(|hl| {
                 let desc: PersistentLayerDesc = hl.name.clone().into();
                 let layer = guard.try_get_from_key(&desc.key())?;
 
@@ -3653,7 +3664,7 @@ impl Timeline {
                     return None;
                 }
 
-                Some((desc, hl.metadata.clone(), hl.access_time))
+                Some((desc, hl.metadata.clone(), hl.access_time, hl.cold))
             })),
             Some(PreviousHeatmap::Obsolete) => None,
             None => None,
@@ -3669,6 +3680,7 @@ impl Timeline {
                         layer.layer_desc().clone(),
                         layer.metadata(),
                         last_activity_ts,
+                        false, // these layers are not cold
                     ))
                 }
                 LayerVisibilityHint::Covered => {
@@ -3695,12 +3707,14 @@ impl Timeline {
         // Sort layers in order of which to download first.  For a large set of layers to download, we
         // want to prioritize those layers which are most likely to still be in the resident many minutes
         // or hours later:
+        // - Cold layers go last for convenience when a human inspects the heatmap.
         // - Download L0s last, because they churn the fastest: L0s on a fast-writing tenant might
         //   only exist for a few minutes before being compacted into L1s.
         // - For L1 & image layers, download most recent LSNs first: the older the LSN, the sooner
         //   the layer is likely to be covered by an image layer during compaction.
-        layers.sort_by_key(|(desc, _meta, _atime)| {
+        layers.sort_by_key(|(desc, _meta, _atime, cold)| {
             std::cmp::Reverse((
+                *cold,
                 !LayerMap::is_l0(&desc.key_range, desc.is_delta),
                 desc.lsn_range.end,
             ))
@@ -3708,7 +3722,9 @@ impl Timeline {
 
         let layers = layers
             .into_iter()
-            .map(|(desc, meta, atime)| HeatMapLayer::new(desc.layer_name(), meta, atime))
+            .map(|(desc, meta, atime, cold)| {
+                HeatMapLayer::new(desc.layer_name(), meta, atime, cold)
+            })
             .collect();
 
         Some(HeatMapTimeline::new(self.timeline_id, layers))
@@ -3728,6 +3744,7 @@ impl Timeline {
                 name: vl.layer_desc().layer_name(),
                 metadata: vl.metadata(),
                 access_time: now,
+                cold: true,
             };
             heatmap_layers.push(hl);
         }
@@ -7029,6 +7046,7 @@ mod tests {
 
     use pageserver_api::key::Key;
     use pageserver_api::value::Value;
+    use std::iter::Iterator;
     use tracing::Instrument;
     use utils::id::TimelineId;
     use utils::lsn::Lsn;
@@ -7042,8 +7060,8 @@ mod tests {
     use crate::tenant::{PreviousHeatmap, Timeline};
 
     fn assert_heatmaps_have_same_layers(lhs: &HeatMapTimeline, rhs: &HeatMapTimeline) {
-        assert_eq!(lhs.layers.len(), rhs.layers.len());
-        let lhs_rhs = lhs.layers.iter().zip(rhs.layers.iter());
+        assert_eq!(lhs.all_layers().count(), rhs.all_layers().count());
+        let lhs_rhs = lhs.all_layers().zip(rhs.all_layers());
         for (l, r) in lhs_rhs {
             assert_eq!(l.name, r.name);
             assert_eq!(l.metadata, r.metadata);
@@ -7121,10 +7139,11 @@ mod tests {
         assert_eq!(heatmap.timeline_id, timeline.timeline_id);
 
         // L0 should come last
-        assert_eq!(heatmap.layers.last().unwrap().name, l0_delta.layer_name());
+        let heatmap_layers = heatmap.all_layers().collect::<Vec<_>>();
+        assert_eq!(heatmap_layers.last().unwrap().name, l0_delta.layer_name());
 
         let mut last_lsn = Lsn::MAX;
-        for layer in &heatmap.layers {
+        for layer in heatmap_layers {
             // Covered layer should be omitted
             assert!(layer.name != covered_delta.layer_name());
 
@@ -7253,7 +7272,7 @@ mod tests {
             .expect("Infallible while timeline is not shut down");
 
         // Both layers should be in the heatmap
-        assert!(!heatmap.layers.is_empty());
+        assert!(heatmap.all_layers().count() > 0);
 
         // Now simulate a migration.
         timeline
@@ -7279,7 +7298,7 @@ mod tests {
             .await
             .expect("Infallible while timeline is not shut down");
 
-        assert!(post_eviction_heatmap.layers.is_empty());
+        assert_eq!(post_eviction_heatmap.all_layers().count(), 0);
         assert!(matches!(
             timeline.previous_heatmap.load().as_deref(),
             Some(PreviousHeatmap::Obsolete)
