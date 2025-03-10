@@ -3827,6 +3827,7 @@ impl Tenant {
             resident_size: 0,
             physical_size: 0,
             max_logical_size: 0,
+            max_logical_size_per_shard: 0,
         };
 
         for timeline in self.timelines.lock().unwrap().values() {
@@ -3842,6 +3843,9 @@ impl Tenant {
                 timeline.metrics.current_logical_size_gauge.get(),
             );
         }
+
+        result.max_logical_size_per_shard =
+            result.max_logical_size / self.tenant_shard_id.shard_count.count() as u64;
 
         result
     }
