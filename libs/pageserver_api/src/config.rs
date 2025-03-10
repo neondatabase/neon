@@ -123,6 +123,10 @@ pub struct ConfigToml {
     pub enable_read_path_debugging: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validate_wal_contiguity: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load_previous_heatmap: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generate_unarchival_heatmap: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -523,6 +527,8 @@ impl Default for ConfigToml {
                 None
             },
             validate_wal_contiguity: None,
+            load_previous_heatmap: None,
+            generate_unarchival_heatmap: None,
         }
     }
 }

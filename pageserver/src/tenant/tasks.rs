@@ -473,21 +473,15 @@ async fn wait_for_active_tenant(
     }
 
     let mut update_rx = tenant.subscribe_for_state_updates();
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => return ControlFlow::Break(()),
-            result = update_rx.changed() => if result.is_err() {
+    tokio::select! {
+        result = update_rx.wait_for(|s| s == &TenantState::Active) => {
+            if result.is_err() {
                 return ControlFlow::Break(());
             }
-        }
-
-        match &*update_rx.borrow() {
-            TenantState::Active => {
-                debug!("Tenant state changed to active, continuing the task loop");
-                return ControlFlow::Continue(());
-            }
-            state => debug!("Not running the task loop, tenant is not active: {state:?}"),
-        }
+            debug!("Tenant state changed to active, continuing the task loop");
+            ControlFlow::Continue(())
+        },
+        _ = cancel.cancelled() => ControlFlow::Break(()),
     }
 }
 

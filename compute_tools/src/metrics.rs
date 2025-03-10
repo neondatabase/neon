@@ -54,9 +54,7 @@ pub(crate) static REMOTE_EXT_REQUESTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| 
     register_int_counter_vec!(
         "compute_ctl_remote_ext_requests_total",
         "Total number of requests made by compute_ctl to download extensions from S3 proxy by status",
-        // Do not use any labels like extension name yet.
-        // We can add them later if needed.
-        &["http_status"]
+        &["http_status", "filename"]
     )
     .expect("failed to define a metric")
 });

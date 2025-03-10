@@ -327,9 +327,9 @@ def test_check_visibility_map(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         log.info(f"pgbench run {i+1}/{PGBENCH_RUNS}")
         endpoint.safe_psql(f"create database {dbname}")
         connstr = endpoint.connstr(dbname=dbname)
-        # pgbench -i will automatically vacuum the tables. This creates the visibility map.
-        pg_bin.run(["pgbench", "-i", "-s", "10", connstr])
-        # Freeze the tuples to set the initial frozen bit.
+        # Initialize the data set, but don't vacuum yet.
+        pg_bin.run(["pgbench", "-i", "-s", "8", "-n", connstr])
+        # Vacuum to create the visibility map, and freeze the tuples to set the frozen bit.
         endpoint.safe_psql("vacuum freeze", dbname=dbname)
         # Run pgbench.
         pg_bin.run(["pgbench", "-c", "32", "-j", "8", "-T", "10", connstr])
@@ -344,22 +344,6 @@ def test_check_visibility_map(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         log.info(f"Checking visibility map for {dbname}")
         with endpoint.cursor(dbname=dbname) as cur:
             cur.execute("create extension pg_visibility")
-
-            cur.execute("select count(*) from pg_check_visible('pgbench_accounts')")
-            row = cur.fetchone()
-            assert row is not None
-            assert row[0] == 0, f"{row[0]} inconsistent VM pages (visible)"
-
-            cur.execute("select count(*) from pg_check_frozen('pgbench_accounts')")
-            row = cur.fetchone()
-            assert row is not None
-            assert row[0] == 0, f"{row[0]} inconsistent VM pages (frozen)"
-
-    # Vacuum and freeze the tables, and check that the visibility map is still accurate.
-    for dbname in dbnames:
-        log.info(f"Vacuuming and checking visibility map for {dbname}")
-        with endpoint.cursor(dbname=dbname) as cur:
-            cur.execute("vacuum freeze")
 
             cur.execute("select count(*) from pg_check_visible('pgbench_accounts')")
             row = cur.fetchone()

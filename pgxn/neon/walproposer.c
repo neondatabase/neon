@@ -83,6 +83,7 @@ static void AssertEventsOkForState(uint32 events, Safekeeper *sk);
 static char *FormatEvents(WalProposer *wp, uint32 events);
 static void UpdateDonorShmem(WalProposer *wp);
 static char *MembershipConfigurationToString(MembershipConfiguration *mconf);
+static void MembershipConfigurationCopy(MembershipConfiguration *src, MembershipConfiguration *dst);
 static void MembershipConfigurationFree(MembershipConfiguration *mconf);
 
 WalProposer *
@@ -97,7 +98,32 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 	wp->config = config;
 	wp->api = api;
 
-	for (host = wp->config->safekeepers_list; host != NULL && *host != '\0'; host = sep)
+	wp_log(LOG, "neon.safekeepers=%s", wp->config->safekeepers_list);
+
+	/*
+	 * If safekeepers list starts with g# parse generation number followed by
+	 * :
+	 */
+	if (strncmp(wp->config->safekeepers_list, "g#", 2) == 0)
+	{
+		char	   *endptr;
+
+		errno = 0;
+		wp->safekeepers_generation = strtoul(wp->config->safekeepers_list + 2, &endptr, 10);
+		if (errno != 0)
+		{
+			wp_log(FATAL, "failed to parse neon.safekeepers generation number: %m");
+		}
+		/* Skip past : to the first hostname. */
+		host = endptr + 1;
+	}
+	else
+	{
+		host = wp->config->safekeepers_list;
+	}
+	wp_log(LOG, "safekeepers_generation=%u", wp->safekeepers_generation);
+
+	for (; host != NULL && *host != '\0'; host = sep)
 	{
 		port = strchr(host, ':');
 		if (port == NULL)
@@ -181,6 +207,12 @@ WalProposerFree(WalProposer *wp)
 	wp->propTermHistory.entries = NULL;
 
 	pfree(wp);
+}
+
+static bool
+WalProposerGenerationsEnabled(WalProposer *wp)
+{
+	return wp->safekeepers_generation != 0;
 }
 
 /*
@@ -600,10 +632,14 @@ static void
 SendStartWALPush(Safekeeper *sk)
 {
 	WalProposer *wp = sk->wp;
+
+	/* Forbid implicit timeline creation if generations are enabled. */
+	char	   *allow_timeline_creation = WalProposerGenerationsEnabled(wp) ? "false" : "true";
 #define CMD_LEN 512
 	char		cmd[CMD_LEN];
 
-	snprintf(cmd, CMD_LEN, "START_WAL_PUSH (proto_version '%d')", wp->config->proto_version);
+
+	snprintf(cmd, CMD_LEN, "START_WAL_PUSH (proto_version '%d', allow_timeline_creation '%s')", wp->config->proto_version, allow_timeline_creation);
 	if (!wp->api.conn_send_query(sk, cmd))
 	{
 		wp_log(WARNING, "failed to send '%s' query to safekeeper %s:%s: %s",
@@ -704,6 +740,18 @@ RecvAcceptorGreeting(Safekeeper *sk)
 	wp_log(LOG, "received AcceptorGreeting from safekeeper %s:%s, node_id = %lu, mconf = %s, term=" UINT64_FORMAT,
 		   sk->host, sk->port, sk->greetResponse.nodeId, mconf_toml, sk->greetResponse.term);
 	pfree(mconf_toml);
+
+	/*
+	 * Adopt mconf of safekeepers if it is higher. TODO: mconf change should
+	 * restart wp if it started voting.
+	 */
+	if (sk->greetResponse.mconf.generation > wp->mconf.generation)
+	{
+		MembershipConfigurationFree(&wp->mconf);
+		MembershipConfigurationCopy(&sk->greetResponse.mconf, &wp->mconf);
+		/* full conf was just logged above */
+		wp_log(LOG, "changed mconf to generation %u", wp->mconf.generation);
+	}
 
 	/* Protocol is all good, move to voting. */
 	sk->state = SS_VOTING;
@@ -1896,7 +1944,8 @@ PAMessageSerialize(WalProposer *wp, ProposerAcceptorMessage *msg, StringInfo buf
 						pq_sendint64_le(buf, m->termHistory->entries[i].term);
 						pq_sendint64_le(buf, m->termHistory->entries[i].lsn);
 					}
-					/* 
+
+					/*
 					 * Removed timeline_start_lsn. Still send it as a valid
 					 * value until safekeepers taking it from term history are
 					 * deployed.
@@ -2162,7 +2211,7 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage *anymsg)
 		}
 	}
 	wp_log(FATAL, "unsupported proto_version %d", wp->config->proto_version);
-	return false; /* keep the compiler quiet */
+	return false;				/* keep the compiler quiet */
 }
 
 /*
@@ -2568,6 +2617,18 @@ MembershipConfigurationToString(MembershipConfiguration *mconf)
 	}
 	appendStringInfoString(&s, "]}");
 	return s.data;
+}
+
+static void
+MembershipConfigurationCopy(MembershipConfiguration *src, MembershipConfiguration *dst)
+{
+	dst->generation = src->generation;
+	dst->members.len = src->members.len;
+	dst->members.m = palloc0(sizeof(SafekeeperId) * dst->members.len);
+	memcpy(dst->members.m, src->members.m, sizeof(SafekeeperId) * dst->members.len);
+	dst->new_members.len = src->new_members.len;
+	dst->new_members.m = palloc0(sizeof(SafekeeperId) * dst->new_members.len);
+	memcpy(dst->new_members.m, src->new_members.m, sizeof(SafekeeperId) * dst->new_members.len);
 }
 
 static void

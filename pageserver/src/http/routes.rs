@@ -481,6 +481,7 @@ async fn build_timeline_info_common(
 
         state,
         is_archived: Some(is_archived),
+        rel_size_migration: Some(timeline.get_rel_size_v2_status()),
 
         walreceiver_status,
     };

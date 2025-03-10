@@ -61,11 +61,11 @@ impl HeatmapLayersDownloader {
 
                 tracing::info!(
                     resident_size=%timeline.resident_physical_size(),
-                    heatmap_layers=%heatmap.layers.len(),
+                    heatmap_layers=%heatmap.all_layers().count(),
                     "Starting heatmap layers download"
                 );
 
-                let stream = futures::stream::iter(heatmap.layers.into_iter().filter_map(
+                let stream = futures::stream::iter(heatmap.all_layers().cloned().filter_map(
                     |layer| {
                         let ctx = ctx.attached_child();
                         let tl = timeline.clone();
