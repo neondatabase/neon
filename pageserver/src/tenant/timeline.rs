@@ -287,7 +287,7 @@ pub struct Timeline {
     // The LSN of gc-compaction that was last applied to this timeline.
     gc_compaction_state: ArcSwap<Option<GcCompactionState>>,
 
-    pub(super) metrics: TimelineMetrics,
+    pub(crate) metrics: Arc<TimelineMetrics>,
 
     // `Timeline` doesn't write these metrics itself, but it manages the lifetime.  Code
     // in `crate::page_service` writes these metrics.
@@ -2685,14 +2685,14 @@ impl Timeline {
         }
 
         Arc::new_cyclic(|myself| {
-            let metrics = TimelineMetrics::new(
+            let metrics = Arc::new(TimelineMetrics::new(
                 &tenant_shard_id,
                 &timeline_id,
                 crate::metrics::EvictionsWithLowResidenceDurationBuilder::new(
                     "mtime",
                     evictions_low_residence_duration_metric_threshold,
                 ),
-            );
+            ));
             let aux_file_metrics = metrics.aux_file_size_gauge.clone();
 
             let mut result = Timeline {
@@ -2876,7 +2876,7 @@ impl Timeline {
             "layer flush task",
             async move {
                 let _guard = guard;
-                let background_ctx = RequestContext::todo_child(TaskKind::LayerFlushTask, DownloadBehavior::Error);
+                let background_ctx = RequestContext::todo_child(TaskKind::LayerFlushTask, DownloadBehavior::Error).with_scope_timeline(&self_clone);
                 self_clone.flush_loop(layer_flush_start_rx, &background_ctx).await;
                 let mut flush_loop_state = self_clone.flush_loop_state.lock().unwrap();
                 assert!(matches!(*flush_loop_state, FlushLoopState::Running{..}));
@@ -7127,6 +7127,7 @@ mod tests {
             )
             .await
             .unwrap();
+        let ctx = &ctx.with_scope_timeline(&timeline);
 
         // Layer visibility is an input to heatmap generation, so refresh it first
         timeline.update_layer_visibility().await.unwrap();
@@ -7192,7 +7193,7 @@ mod tests {
 
             eprintln!("Downloading {layer} and re-generating heatmap");
 
-            let ctx = &RequestContextBuilder::extend(&ctx)
+            let ctx = &RequestContextBuilder::extend(ctx)
                 .download_behavior(crate::context::DownloadBehavior::Download)
                 .build();
 

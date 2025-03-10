@@ -2758,7 +2758,7 @@ mod tests {
             TimelineId::from_array(hex!("11223344556677881122334455667788"));
 
         let (tenant, ctx) = harness.load().await;
-        let tline = tenant
+        let (tline, ctx) = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
         let tline = tline.raw_timeline().unwrap();
