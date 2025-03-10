@@ -8386,6 +8386,7 @@ dependencies = [
  "hyper-util",
  "indexmap 1.9.3",
  "indexmap 2.0.1",
+ "itertools 0.10.5",
  "itertools 0.12.1",
  "lazy_static",
  "libc",
