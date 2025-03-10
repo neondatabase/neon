@@ -1367,7 +1367,7 @@ impl Persistence {
                 // per (tenant, timeline, sk) tuple: if we migrated a timeline
                 // from node and adding it back it is not necessary to remove
                 // data on it. Hence, generation is not part of primary key and
-                // we override row with lower generation here.
+                // we override any rows with lower generations here.
                 let inserted_updated = diesel::insert_into(skpo::table)
                     .values(entry)
                     .on_conflict((skpo::tenant_id, skpo::timeline_id, skpo::sk_id))
