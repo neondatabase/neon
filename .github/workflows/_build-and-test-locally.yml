@@ -28,6 +28,16 @@ on:
         required: false
         default: 'disabled'
         type: string
+      test-selection:
+        description: 'specification of selected test(s) to run'
+        required: false
+        default: ''
+        type: string
+      test-run-count:
+        description: 'number of runs to perform for selected tests'
+        required: false
+        default: 1
+        type: number
 
 defaults:
   run:
@@ -345,14 +355,16 @@ jobs:
           run_with_real_s3: true
           real_s3_bucket: neon-github-ci-tests
           real_s3_region: eu-central-1
-          rerun_failed: true
+          rerun_failed: ${{ inputs.test-run-count == 1 }}
+          special_kind: ${{ inputs.test-selection != '' && 'test_stability' || '' }}
           pg_version: ${{ matrix.pg_version }}
           sanitizers: ${{ inputs.sanitizers }}
           aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
           # `--session-timeout` is equal to (timeout-minutes - 10 minutes) * 60 seconds.
           # Attempt to stop tests gracefully to generate test reports
           # until they are forcibly stopped by the stricter `timeout-minutes` limit.
-          extra_params: --session-timeout=${{ inputs.sanitizers != 'enabled' && 3000 || 10200 }}
+          extra_params: --session-timeout=${{ inputs.sanitizers != 'enabled' && 3000 || 10200 }} --count=${{ inputs.test-run-count }}
+                        ${{ inputs.test-selection != '' && format('-k "{0}"', inputs.test-selection) || '' }}
         env:
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
