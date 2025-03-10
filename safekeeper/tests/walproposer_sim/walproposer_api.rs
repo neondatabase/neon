@@ -511,8 +511,7 @@ impl ApiImpl for SimulationApi {
                 // collected quorum with lower term, then got rejected by next connected safekeeper
                 executor::exit(1, msg.to_owned());
             }
-            if msg.contains("collected propEpochStartLsn") && msg.contains(", but basebackup LSN ")
-            {
+            if msg.contains("collected propTermStartLsn") && msg.contains(", but basebackup LSN ") {
                 // sync-safekeepers collected wrong quorum, walproposer collected another quorum
                 executor::exit(1, msg.to_owned());
             }
@@ -529,7 +528,7 @@ impl ApiImpl for SimulationApi {
     }
 
     fn after_election(&self, wp: &mut walproposer::bindings::WalProposer) {
-        let prop_lsn = wp.propEpochStartLsn;
+        let prop_lsn = wp.propTermStartLsn;
         let prop_term = wp.propTerm;
 
         let mut prev_lsn: u64 = 0;
@@ -612,7 +611,7 @@ impl ApiImpl for SimulationApi {
         sk: &mut walproposer::bindings::Safekeeper,
     ) -> bool {
         let mut startpos = wp.truncateLsn;
-        let endpos = wp.propEpochStartLsn;
+        let endpos = wp.propTermStartLsn;
 
         if startpos == endpos {
             debug!("recovery_download: nothing to download");
