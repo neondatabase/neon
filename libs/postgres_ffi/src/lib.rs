@@ -396,6 +396,14 @@ pub mod waldecoder {
             self.lsn + self.inputbuf.remaining() as u64
         }
 
+        /// Returns the LSN up to which the WAL decoder has processed.
+        ///
+        /// If [`Self::poll_decode`] returned a record, then this will return
+        /// the end LSN of said record.
+        pub fn lsn(&self) -> Lsn {
+            self.lsn
+        }
+
         pub fn feed_bytes(&mut self, buf: &[u8]) {
             self.inputbuf.extend_from_slice(buf);
         }

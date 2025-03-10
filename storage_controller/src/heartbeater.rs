@@ -178,6 +178,7 @@ impl HeartBeat<Node, PageserverState> for HeartbeaterTask<Node, PageserverState>
         let mut heartbeat_futs = FuturesUnordered::new();
         for (node_id, node) in &*pageservers {
             heartbeat_futs.push({
+                let ssl_ca_cert = self.ssl_ca_cert.clone();
                 let jwt_token = self.jwt_token.clone();
                 let cancel = self.cancel.clone();
 
@@ -193,6 +194,7 @@ impl HeartBeat<Node, PageserverState> for HeartbeaterTask<Node, PageserverState>
                         .with_client_retries(
                             |client| async move { client.get_utilization().await },
                             &jwt_token,
+                            &ssl_ca_cert,
                             3,
                             3,
                             Duration::from_secs(1),

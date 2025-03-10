@@ -69,6 +69,9 @@ def gc_feedback_impl(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
                 env.create_branch("child")
                 branch_created += 1
 
+    # Ensure L0 layers are compacted so that gc-compaction doesn't get preempted.
+    client.timeline_checkpoint(tenant_id, timeline_id, force_l0_compaction=True)
+
     max_num_of_deltas_above_image = 0
     max_total_num_of_deltas = 0
     for key_range in client.perf_info(tenant_id, timeline_id):

@@ -81,6 +81,10 @@ pub struct LocalEnv {
     // but deserialization into a generic toml object as `toml::Value::try_from` fails with an error.
     // https://toml.io/en/v1.0.0 does not contain a concept of "a table inside another table".
     pub branch_name_mappings: HashMap<String, Vec<(TenantId, TimelineId)>>,
+
+    /// Flag to generate SSL certificates for components that need it.
+    /// Also generates root CA certificate that is used to sign all other certificates.
+    pub generate_local_ssl_certs: bool,
 }
 
 /// On-disk state stored in `.neon/config`.
@@ -102,6 +106,10 @@ pub struct OnDiskConfig {
     pub control_plane_api: Option<Url>,
     pub control_plane_compute_hook_api: Option<Url>,
     branch_name_mappings: HashMap<String, Vec<(TenantId, TimelineId)>>,
+    // Note: skip serializing because in compat tests old storage controller fails
+    // to load new config file. May be removed after this field is in release branch.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub generate_local_ssl_certs: bool,
 }
 
 fn fail_if_pageservers_field_specified<'de, D>(_: D) -> Result<Vec<PageServerConf>, D::Error>
@@ -129,6 +137,7 @@ pub struct NeonLocalInitConf {
     pub safekeepers: Vec<SafekeeperConf>,
     pub control_plane_api: Option<Url>,
     pub control_plane_compute_hook_api: Option<Option<Url>>,
+    pub generate_local_ssl_certs: bool,
 }
 
 /// Broker config for cluster internal communication.
@@ -166,7 +175,11 @@ pub struct NeonStorageControllerConf {
     #[serde(with = "humantime_serde")]
     pub long_reconcile_threshold: Option<Duration>,
 
+    #[serde(default)]
+    pub use_https_pageserver_api: bool,
+
     pub timelines_onto_safekeepers: bool,
+
 }
 
 impl NeonStorageControllerConf {
@@ -190,6 +203,7 @@ impl Default for NeonStorageControllerConf {
             max_secondary_lag_bytes: None,
             heartbeat_interval: Self::DEFAULT_HEARTBEAT_INTERVAL,
             long_reconcile_threshold: None,
+            use_https_pageserver_api: false,
             timelines_onto_safekeepers: false,
         }
     }
@@ -220,6 +234,7 @@ pub struct PageServerConf {
     pub id: NodeId,
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
+    pub listen_https_addr: Option<String>,
     pub pg_auth_type: AuthType,
     pub http_auth_type: AuthType,
     pub no_sync: bool,
@@ -231,6 +246,7 @@ impl Default for PageServerConf {
             id: NodeId(0),
             listen_pg_addr: String::new(),
             listen_http_addr: String::new(),
+            listen_https_addr: None,
             pg_auth_type: AuthType::Trust,
             http_auth_type: AuthType::Trust,
             no_sync: false,
@@ -246,6 +262,7 @@ pub struct NeonLocalInitPageserverConf {
     pub id: NodeId,
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
+    pub listen_https_addr: Option<String>,
     pub pg_auth_type: AuthType,
     pub http_auth_type: AuthType,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -260,6 +277,7 @@ impl From<&NeonLocalInitPageserverConf> for PageServerConf {
             id,
             listen_pg_addr,
             listen_http_addr,
+            listen_https_addr,
             pg_auth_type,
             http_auth_type,
             no_sync,
@@ -269,6 +287,7 @@ impl From<&NeonLocalInitPageserverConf> for PageServerConf {
             id: *id,
             listen_pg_addr: listen_pg_addr.clone(),
             listen_http_addr: listen_http_addr.clone(),
+            listen_https_addr: listen_https_addr.clone(),
             pg_auth_type: *pg_auth_type,
             http_auth_type: *http_auth_type,
             no_sync: *no_sync,
@@ -413,6 +432,41 @@ impl LocalEnv {
         }
     }
 
+    pub fn ssl_ca_cert_path(&self) -> Option<PathBuf> {
+        if self.generate_local_ssl_certs {
+            Some(self.base_data_dir.join("rootCA.crt"))
+        } else {
+            None
+        }
+    }
+
+    pub fn ssl_ca_key_path(&self) -> Option<PathBuf> {
+        if self.generate_local_ssl_certs {
+            Some(self.base_data_dir.join("rootCA.key"))
+        } else {
+            None
+        }
+    }
+
+    pub fn generate_ssl_ca_cert(&self) -> anyhow::Result<()> {
+        let cert_path = self.ssl_ca_cert_path().unwrap();
+        let key_path = self.ssl_ca_key_path().unwrap();
+        if !fs::exists(cert_path.as_path())? {
+            generate_ssl_ca_cert(cert_path.as_path(), key_path.as_path())?;
+        }
+        Ok(())
+    }
+
+    pub fn generate_ssl_cert(&self, cert_path: &Path, key_path: &Path) -> anyhow::Result<()> {
+        self.generate_ssl_ca_cert()?;
+        generate_ssl_cert(
+            cert_path,
+            key_path,
+            self.ssl_ca_cert_path().unwrap().as_path(),
+            self.ssl_ca_key_path().unwrap().as_path(),
+        )
+    }
+
     /// Inspect the base data directory and extract the instance id and instance directory path
     /// for all storage controller instances
     pub async fn storage_controller_instances(&self) -> std::io::Result<Vec<(u8, PathBuf)>> {
@@ -522,6 +576,7 @@ impl LocalEnv {
                 control_plane_api,
                 control_plane_compute_hook_api,
                 branch_name_mappings,
+                generate_local_ssl_certs,
             } = on_disk_config;
             LocalEnv {
                 base_data_dir: repopath.to_owned(),
@@ -536,6 +591,7 @@ impl LocalEnv {
                 control_plane_api: control_plane_api.unwrap(),
                 control_plane_compute_hook_api,
                 branch_name_mappings,
+                generate_local_ssl_certs,
             }
         };
 
@@ -571,6 +627,7 @@ impl LocalEnv {
                 struct PageserverConfigTomlSubset {
                     listen_pg_addr: String,
                     listen_http_addr: String,
+                    listen_https_addr: Option<String>,
                     pg_auth_type: AuthType,
                     http_auth_type: AuthType,
                     #[serde(default)]
@@ -595,6 +652,7 @@ impl LocalEnv {
                 let PageserverConfigTomlSubset {
                     listen_pg_addr,
                     listen_http_addr,
+                    listen_https_addr,
                     pg_auth_type,
                     http_auth_type,
                     no_sync,
@@ -612,6 +670,7 @@ impl LocalEnv {
                     },
                     listen_pg_addr,
                     listen_http_addr,
+                    listen_https_addr,
                     pg_auth_type,
                     http_auth_type,
                     no_sync,
@@ -639,6 +698,7 @@ impl LocalEnv {
                 control_plane_api: Some(self.control_plane_api.clone()),
                 control_plane_compute_hook_api: self.control_plane_compute_hook_api.clone(),
                 branch_name_mappings: self.branch_name_mappings.clone(),
+                generate_local_ssl_certs: self.generate_local_ssl_certs,
             },
         )
     }
@@ -721,6 +781,7 @@ impl LocalEnv {
             safekeepers,
             control_plane_api,
             control_plane_compute_hook_api,
+            generate_local_ssl_certs,
         } = conf;
 
         // Find postgres binaries.
@@ -769,7 +830,12 @@ impl LocalEnv {
             control_plane_api: control_plane_api.unwrap(),
             control_plane_compute_hook_api: control_plane_compute_hook_api.unwrap_or_default(),
             branch_name_mappings: Default::default(),
+            generate_local_ssl_certs,
         };
+
+        if generate_local_ssl_certs {
+            env.generate_ssl_ca_cert()?;
+        }
 
         // create endpoints dir
         fs::create_dir_all(env.endpoints_path())?;
@@ -852,5 +918,82 @@ fn generate_auth_keys(private_key_path: &Path, public_key_path: &Path) -> anyhow
             String::from_utf8_lossy(&keygen_output.stderr)
         );
     }
+    Ok(())
+}
+
+fn generate_ssl_ca_cert(cert_path: &Path, key_path: &Path) -> anyhow::Result<()> {
+    // openssl req -x509 -newkey rsa:2048 -nodes -subj "/CN=Neon Local CA" -days 36500 \
+    // -out rootCA.crt -keyout rootCA.key
+    let keygen_output = Command::new("openssl")
+        .args([
+            "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "36500",
+        ])
+        .args(["-subj", "/CN=Neon Local CA"])
+        .args(["-out", cert_path.to_str().unwrap()])
+        .args(["-keyout", key_path.to_str().unwrap()])
+        .output()
+        .context("failed to generate CA certificate")?;
+    if !keygen_output.status.success() {
+        bail!(
+            "openssl failed: '{}'",
+            String::from_utf8_lossy(&keygen_output.stderr)
+        );
+    }
+    Ok(())
+}
+
+fn generate_ssl_cert(
+    cert_path: &Path,
+    key_path: &Path,
+    ca_cert_path: &Path,
+    ca_key_path: &Path,
+) -> anyhow::Result<()> {
+    // Generate Certificate Signing Request (CSR).
+    let mut csr_path = cert_path.to_path_buf();
+    csr_path.set_extension(".csr");
+
+    // openssl req -new -nodes -newkey rsa:2048 -keyout server.key -out server.csr \
+    // -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+    let keygen_output = Command::new("openssl")
+        .args(["req", "-new", "-nodes"])
+        .args(["-newkey", "rsa:2048"])
+        .args(["-subj", "/CN=localhost"])
+        .args(["-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"])
+        .args(["-keyout", key_path.to_str().unwrap()])
+        .args(["-out", csr_path.to_str().unwrap()])
+        .output()
+        .context("failed to generate CSR")?;
+    if !keygen_output.status.success() {
+        bail!(
+            "openssl failed: '{}'",
+            String::from_utf8_lossy(&keygen_output.stderr)
+        );
+    }
+
+    // Sign CSR with CA key.
+    //
+    // openssl x509 -req -in server.csr -CA rootCA.crt -CAkey rootCA.key -CAcreateserial \
+    // -out server.crt -days 36500 -copy_extensions copyall
+    let keygen_output = Command::new("openssl")
+        .args(["x509", "-req"])
+        .args(["-in", csr_path.to_str().unwrap()])
+        .args(["-CA", ca_cert_path.to_str().unwrap()])
+        .args(["-CAkey", ca_key_path.to_str().unwrap()])
+        .arg("-CAcreateserial")
+        .args(["-out", cert_path.to_str().unwrap()])
+        .args(["-days", "36500"])
+        .args(["-copy_extensions", "copyall"])
+        .output()
+        .context("failed to sign CSR")?;
+    if !keygen_output.status.success() {
+        bail!(
+            "openssl failed: '{}'",
+            String::from_utf8_lossy(&keygen_output.stderr)
+        );
+    }
+
+    // Remove CSR file as it's not needed anymore.
+    fs::remove_file(csr_path)?;
+
     Ok(())
 }
