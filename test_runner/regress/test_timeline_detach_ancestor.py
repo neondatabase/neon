@@ -342,6 +342,128 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
     wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline)
 
 
+def test_ancestor_detach_two_level_ancestors(neon_env_builder: NeonEnvBuilder):
+    """
+    old main -------|---------X--------->
+                    |         |         |
+                    |         |         +-> after
+                    |         +--X empty snapshot branch
+                    |            |
+                    |            +-> branch-to-detach
+                    |
+                    +-> reparented
+
+    Ends up as:
+
+    old main -------|---------X--------->
+                              |         |
+                              |         +-> after
+                              +--> empty snapshot branch
+
+    new main -------|--------------> branch-to-detach
+                    |
+                    +-> reparented
+    """
+
+    env = neon_env_builder.init_start()
+
+    env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+
+    client = env.pageserver.http_client()
+
+    with env.endpoints.create_start("main", tenant_id=env.initial_tenant) as ep:
+        ep.safe_psql("CREATE TABLE foo (i BIGINT);")
+        ep.safe_psql("CREATE TABLE audit AS SELECT 1 as starts;")
+
+        branchpoint_pipe = wait_for_last_flush_lsn(
+            env, ep, env.initial_tenant, env.initial_timeline
+        )
+
+        ep.safe_psql("INSERT INTO foo SELECT i::bigint FROM generate_series(0, 8191) g(i);")
+
+        branchpoint_x = wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
+        client.timeline_checkpoint(env.initial_tenant, env.initial_timeline)
+
+        ep.safe_psql("INSERT INTO foo SELECT i::bigint FROM generate_series(8192, 16383) g(i);")
+        wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
+
+    reparented = env.create_branch(
+        "reparented", ancestor_branch_name="main", ancestor_start_lsn=branchpoint_pipe
+    )
+
+    snapshot_branchpoint = env.create_branch(
+        "snapshot_branchpoint", ancestor_branch_name="main", ancestor_start_lsn=branchpoint_x
+    )
+
+    branch_to_detach = env.create_branch(
+        "branch_to_detach", ancestor_branch_name="snapshot_branchpoint", ancestor_start_lsn=branchpoint_x
+    )
+
+    after = env.create_branch("after", ancestor_branch_name="main", ancestor_start_lsn=None)
+
+    all_reparented = client.detach_ancestor(env.initial_tenant, branch_to_detach)
+    assert set(all_reparented) == {reparented, snapshot_branchpoint}
+
+    env.pageserver.quiesce_tenants()
+
+    # checking the ancestor after is much faster than waiting for the endpoint not start
+    expected_result = [
+        ("main", env.initial_timeline, None, 16384, 1),
+        ("after", after, env.initial_timeline, 16384, 1),
+        ("snapshot_branchpoint", snapshot_branchpoint, branch_to_detach, 16384, 1), # not correct
+        ("branch_to_detach", branch_to_detach, None, 8192, 1),
+        ("reparented", reparented, env.initial_timeline, 0, 1),
+    ]
+
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
+
+    for branch_name, queried_timeline, expected_ancestor, _, _ in expected_result:
+        details = client.timeline_detail(env.initial_tenant, queried_timeline)
+        ancestor_timeline_id = details["ancestor_timeline_id"]
+        if expected_ancestor is None:
+            assert ancestor_timeline_id is None
+        else:
+            assert TimelineId(ancestor_timeline_id) == expected_ancestor, f"when checking branch {branch_name}, mapping={expected_result}"
+
+        index_part = env.pageserver_remote_storage.index_content(
+            env.initial_tenant, queried_timeline
+        )
+        lineage = index_part["lineage"]
+        assert lineage is not None
+
+        assert lineage.get("reparenting_history_overflown", "false") == "false"
+
+        if queried_timeline == branch_to_detach:
+            original_ancestor = lineage["original_ancestor"]
+            assert original_ancestor is not None
+            assert original_ancestor[0] == str(env.initial_timeline)
+            assert original_ancestor[1] == str(branchpoint_x)
+
+            # this does not contain Z in the end, so fromisoformat accepts it
+            # it is to be in line with the deletion timestamp.. well, almost.
+            when = original_ancestor[2][:26]
+            when_ts = datetime.datetime.fromisoformat(when)
+            assert when_ts < datetime.datetime.now()
+            assert len(lineage.get("reparenting_history", [])) == 0
+        elif expected_ancestor == branch_to_detach:
+            assert len(lineage.get("original_ancestor", [])) == 0
+            assert lineage["reparenting_history"] == [str(env.initial_timeline)]
+        else:
+            assert len(lineage.get("original_ancestor", [])) == 0
+            assert len(lineage.get("reparenting_history", [])) == 0
+
+    for name, _, _, rows, starts in expected_result:
+        with env.endpoints.create_start(name, tenant_id=env.initial_tenant) as ep:
+            assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
+            assert ep.safe_psql(f"SELECT count(*) FROM audit WHERE starts = {starts}")[0][0] == 1
+
+    # delete the timelines to confirm detach actually worked
+    client.timeline_delete(env.initial_tenant, after)
+    wait_timeline_detail_404(client, env.initial_tenant, after)
+
+    client.timeline_delete(env.initial_tenant, env.initial_timeline)
+    wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline)
+
 def test_detached_receives_flushes_while_being_detached(neon_env_builder: NeonEnvBuilder):
     """
     Makes sure that the timeline is able to receive writes through-out the detach process.

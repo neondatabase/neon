@@ -1957,7 +1957,13 @@ impl TenantManager {
             .map_err(Error::NotFound)?;
 
         let resp = timeline
-            .detach_from_ancestor_and_reparent(&tenant, prepared, ctx)
+            .detach_from_ancestor_and_reparent(
+                &tenant,
+                prepared,
+                attempt.ancestor_timeline_id,
+                attempt.ancestor_lsn,
+                ctx,
+            )
             .await?;
 
         let mut slot_guard = slot_guard;

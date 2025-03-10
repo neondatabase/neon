@@ -5406,9 +5406,19 @@ impl Timeline {
         self: &Arc<Timeline>,
         tenant: &crate::tenant::Tenant,
         prepared: detach_ancestor::PreparedTimelineDetach,
+        ancestor_timeline_id: TimelineId,
+        ancestor_lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<detach_ancestor::DetachingAndReparenting, detach_ancestor::Error> {
-        detach_ancestor::detach_and_reparent(self, tenant, prepared, ctx).await
+        detach_ancestor::detach_and_reparent(
+            self,
+            tenant,
+            prepared,
+            ancestor_timeline_id,
+            ancestor_lsn,
+            ctx,
+        )
+        .await
     }
 
     /// Final step which unblocks the GC.
