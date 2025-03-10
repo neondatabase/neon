@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::num::NonZeroU32;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -8321,10 +8321,11 @@ impl Service {
         let mut updated_in_mem_and_db = Vec::default();
 
         let mut locked = self.inner.write().unwrap();
+        let state = locked.deref_mut();
         for (tid, az_id) in updated {
-            let shard = locked.tenants.get_mut(&tid);
+            let shard = state.tenants.get_mut(&tid);
             if let Some(shard) = shard {
-                shard.set_preferred_az(az_id);
+                shard.set_preferred_az(&mut state.scheduler, az_id);
                 updated_in_mem_and_db.push(tid);
             }
         }
