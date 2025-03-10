@@ -5240,6 +5240,7 @@ impl Tenant {
     /// An empty layer map is initialized, and new data and WAL can be imported starting
     /// at 'disk_consistent_lsn'. After any initial data has been imported, call
     /// `finish_creation` to insert the Timeline into the timelines map.
+    #[allow(clippy::too_many_arguments)]
     async fn prepare_new_timeline<'a>(
         &'a self,
         new_timeline_id: TimelineId,
