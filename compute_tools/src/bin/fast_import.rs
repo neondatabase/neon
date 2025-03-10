@@ -592,7 +592,6 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     utils::logging::init(
         utils::logging::LogFormat::Json,
         utils::logging::TracingErrorLayerEnablement::EnableWithRustLogFilter,
-        utils::logging::OtelEnablement::Disabled,
         utils::logging::Output::Stdout,
     )?;
 

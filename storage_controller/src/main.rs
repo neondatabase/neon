@@ -240,7 +240,6 @@ fn main() -> anyhow::Result<()> {
     logging::init(
         LogFormat::Plain,
         logging::TracingErrorLayerEnablement::Disabled,
-        utils::logging::OtelEnablement::Disabled,
         logging::Output::Stdout,
     )?;
 

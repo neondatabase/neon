@@ -10,6 +10,8 @@ use tokio::time::Instant;
 use tracing::Dispatch;
 use tracing::info;
 use tracing::level_filters::LevelFilter;
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::SubscriberExt;
 
 /// Logs a critical error, similarly to `tracing::error!`. This will:
 ///
@@ -156,9 +158,8 @@ impl Drop for OtelGuard {
 pub fn init(
     log_format: LogFormat,
     tracing_error_layer_enablement: TracingErrorLayerEnablement,
-    otel_enablement: OtelEnablement,
     output: Output,
-) -> anyhow::Result<Option<OtelGuard>> {
+) -> anyhow::Result<()> {
     // We fall back to printing all spans at info-level or above if
     // the RUST_LOG environment variable is not set.
     let rust_log_env_filter = || {
@@ -198,6 +199,10 @@ pub fn init(
         TracingErrorLayerEnablement::Disabled => r.init(),
     }
 
+    Ok(())
+}
+
+pub fn init_otel_tracing(otel_enablement: OtelEnablement) -> anyhow::Result<Option<OtelGuard>> {
     let otel_subscriber = match otel_enablement {
         OtelEnablement::Disabled => None,
         OtelEnablement::Enabled {

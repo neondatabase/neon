@@ -10,7 +10,6 @@ pub(crate) fn setup_logging() {
         logging::init(
             logging::LogFormat::Test,
             logging::TracingErrorLayerEnablement::EnableWithRustLogFilter,
-            utils::logging::OtelEnablement::Disabled,
             logging::Output::Stdout,
         )
         .expect("Failed to init test logging");

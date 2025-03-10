@@ -117,7 +117,6 @@ async fn main() -> anyhow::Result<()> {
     logging::init(
         LogFormat::Plain,
         TracingErrorLayerEnablement::EnableWithRustLogFilter,
-        utils::logging::OtelEnablement::Disabled,
         logging::Output::Stdout,
     )?;
 
