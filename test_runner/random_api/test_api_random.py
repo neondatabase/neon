@@ -121,25 +121,27 @@ class NeonBranch:
         max_time = datetime.now(UTC) - timedelta(seconds=1)
         target_time = (min_time + (max_time - min_time) * random.random()).replace(microsecond=0)
         res = None
-        try:
-            res = self.restore(
-                self.id,
-                source_timestamp=target_time.isoformat().replace("+00:00", "Z"),
-                preserve_under_name=self.project.gen_restore_name(),
-            )
-        except HTTPError as he:
-            if he.response.status_code == 524:
-                log.info("The request was timed out, trying to get operations")
-                for op in self.neon_api.get_operations(self.project_id)["operations"]:
-                    if datetime.fromisoformat(op["created_at"]) >= start_time and op["action"] == "create_branch" and op["branch_id"] == self.id:
-                        res = self.neon_api.get_branch_details(self.project_id, self.id)
-                        break
+        for _ in range(10):
+            try:
+                res = self.restore(
+                    self.id,
+                    source_timestamp=target_time.isoformat().replace("+00:00", "Z"),
+                    preserve_under_name=self.project.gen_restore_name(),
+                )
+            except HTTPError as he:
+                if he.response.status_code == 524:
+                    log.info("The request was timed out, trying to get operations")
+                    for op in self.neon_api.get_operations(self.project_id)["operations"]:
+                        if datetime.fromisoformat(op["created_at"]) >= start_time and op["action"] == "create_branch" and op["branch_id"] == self.id:
+                            res = self.neon_api.get_branch_details(self.project_id, self.id)
+                            break
+                    else:
+                        continue
+                    raise RuntimeError("The operation started")
                 else:
-                    raise RuntimeError("The operation was not started")
-
-
+                    raise HTTPError(he)
             else:
-                raise HTTPError(he)
+                break
         # XXX debug only, remove before merge
         log.info("res: %s", res)
         self.updated_at: datetime = datetime.fromisoformat(res["branch"]["updated_at"])
