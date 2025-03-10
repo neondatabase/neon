@@ -1949,17 +1949,12 @@ impl Service {
 
         let mut cleanup = Vec::new();
         {
-            let mut locked = self.inner.write().unwrap();
+            let locked = self.inner.read().unwrap();
 
-            for (tenant_shard_id, observed_loc) in configs.tenant_shards {
-                let Some(tenant_shard) = locked.tenants.get_mut(&tenant_shard_id) else {
+            for (tenant_shard_id, _observed_loc) in configs.tenant_shards {
+                if !locked.tenants.contains_key(&tenant_shard_id) {
                     cleanup.push(tenant_shard_id);
-                    continue;
-                };
-                tenant_shard
-                    .observed
-                    .locations
-                    .insert(node.get_id(), ObservedStateLocation { conf: observed_loc });
+                }
             }
         }
 
