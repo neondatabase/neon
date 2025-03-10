@@ -1363,6 +1363,11 @@ impl Persistence {
         let entry = &entry;
         self.with_measured_conn(DatabaseOperation::InsertTimelineReconcile, move |conn| {
             Box::pin(async move {
+                // For simplicity it makes sense to keep only the last operation
+                // per (tenant, timeline, sk) tuple: if we migrated a timeline
+                // from node and adding it back it is not necessary to remove
+                // data on it. Hence, generation is not part of primary key and
+                // we override row with lower generation here.
                 let inserted_updated = diesel::insert_into(skpo::table)
                     .values(entry)
                     .on_conflict((skpo::tenant_id, skpo::timeline_id, skpo::sk_id))

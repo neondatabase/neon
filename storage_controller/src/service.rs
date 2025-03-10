@@ -3662,11 +3662,8 @@ impl Service {
         // a failure or success.
         let reconcile_deadline = tokio::time::Instant::now() + SK_CREATE_TIMELINE_RECONCILE_TIMEOUT;
 
-        // Treat the first two tasks to finish differently, mostly when they timeout,
-        // because then we won't have a successful quorum.
-        // For the third task, we don't rely on it succeeding, and we need this to support
-        // continuing operations even if one safekeeper is down.
-
+        // Wait until all tasks finish or timeout is hit, whichever occurs
+        // first.
         let mut reconcile_results = Vec::new();
         loop {
             if let Ok(res) = tokio::time::timeout_at(reconcile_deadline, joinset.join_next()).await
@@ -3684,7 +3681,7 @@ impl Service {
             }
         }
 
-        // check now if quorum was reached in reconcile_results
+        // Now check now if quorum was reached in reconcile_results.
         let total_result_count = reconcile_results.len();
         let remaining = reconcile_results
             .into_iter()
