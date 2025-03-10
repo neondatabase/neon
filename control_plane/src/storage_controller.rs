@@ -568,6 +568,20 @@ impl StorageController {
             args.push(format!("--split-threshold={split_threshold}"))
         }
 
+        if let Some(max_split_shards) = self.config.max_split_shards.as_ref() {
+            args.push(format!("--max-split-shards={max_split_shards}"))
+        }
+
+        if let Some(initial_split_threshold) = self.config.initial_split_threshold.as_ref() {
+            args.push(format!(
+                "--initial-split-threshold={initial_split_threshold}"
+            ))
+        }
+
+        if let Some(initial_split_shards) = self.config.initial_split_shards.as_ref() {
+            args.push(format!("--initial-split-shards={initial_split_shards}"))
+        }
+
         if let Some(lag) = self.config.max_secondary_lag_bytes.as_ref() {
             args.push(format!("--max-secondary-lag-bytes={lag}"))
         }

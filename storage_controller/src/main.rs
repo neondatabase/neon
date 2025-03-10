@@ -92,6 +92,21 @@ struct Cli {
     #[arg(long)]
     split_threshold: Option<u64>,
 
+    /// Maximum number of shards during autosplits. 0 disables autosplits.
+    // TODO: defaults to 8 for backwards compatibility, should default to 255.
+    #[arg(long, default_value = "8")]
+    max_split_shards: u8,
+
+    /// Size threshold for initial shard splits of unsharded tenants. 0 disables initial splits.
+    // TODO: defaults to 64 GB for backwards compatibility. Should default to None.
+    #[arg(long, default_value = "68719476736")]
+    initial_split_threshold: u64,
+
+    /// Number of target shards for initial splits. 0 or 1 disables initial splits.
+    // TODO: defaults to 8 for backwards compatibility. Should default to 2.
+    #[arg(long, default_value = "8")]
+    initial_split_shards: u8,
+
     /// Maximum number of normal-priority reconcilers that may run in parallel
     #[arg(long)]
     reconciler_concurrency: Option<usize>,
@@ -354,6 +369,9 @@ async fn async_main() -> anyhow::Result<()> {
             .unwrap_or(PRIORITY_RECONCILER_CONCURRENCY_DEFAULT),
         tenant_rate_limit: args.tenant_rate_limit,
         split_threshold: args.split_threshold,
+        max_split_shards: args.max_split_shards,
+        initial_split_threshold: Some(args.initial_split_threshold),
+        initial_split_shards: args.initial_split_shards,
         neon_local_repo_dir: args.neon_local_repo_dir,
         max_secondary_lag_bytes: args.max_secondary_lag_bytes,
         heartbeat_interval: args

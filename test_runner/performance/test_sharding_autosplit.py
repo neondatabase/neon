@@ -37,7 +37,11 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         # Split tenants at 500MB: it's up to the storage controller how it interprets this (logical
         # sizes, physical sizes, etc).  We will write this much data logically, therefore other sizes
         # will reliably be greater.
-        "split_threshold": 1024 * 1024 * 500
+        "split_threshold": 1024 * 1024 * 500,
+        "max_split_shards": 16,
+        # Also add some initial splits into the mix.
+        "initial_split_threshold": 1024 * 1024 * 10,
+        "initial_split_shards": 4,
     }
 
     tenant_conf = {
@@ -235,7 +239,7 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     # this test is not properly doing its job of validating that splits work nicely under load.
     assert_all_split()
 
-    env.storage_controller.assert_log_contains(".*Successful auto-split.*")
+    env.storage_controller.assert_log_contains(".*successful auto-split .*")
 
     # Log timeline sizes, useful for debug, and implicitly validates that the shards
     # are available in the places the controller thinks they should be.
