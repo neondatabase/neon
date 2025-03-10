@@ -1,9 +1,14 @@
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
+use once_cell::sync::Lazy;
+use tokio_util::sync::CancellationToken;
+use tracing::{Instrument, info, info_span, warn};
 use utils::sync::duplex;
 
 use super::{Buffer, CheapCloneForRead, OwnedAsyncWriter};
 use crate::context::RequestContext;
+use crate::virtual_file::MaybeFatalIo;
 use crate::virtual_file::owned_buffers_io::io_buf_aligned::IoBufAligned;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::FullSlice;
 
@@ -118,6 +123,7 @@ where
         buf: B,
         gate_guard: utils::sync::gate::GateGuard,
         ctx: RequestContext,
+        span: tracing::Span,
     ) -> Self
     where
         B: Buffer<IoBuf = Buf> + Send + 'static,
@@ -125,11 +131,14 @@ where
         // It is fine to buffer up to only 1 message. We only 1 message in-flight at a time.
         let (front, back) = duplex::mpsc::channel(1);
 
-        let join_handle = tokio::spawn(async move {
-            FlushBackgroundTask::new(back, file, gate_guard, ctx)
-                .run(buf.flush())
-                .await
-        });
+        let join_handle = tokio::spawn(
+            async move {
+                FlushBackgroundTask::new(back, file, gate_guard, ctx)
+                    .run(buf.flush())
+                    .await
+            }
+            .instrument(span),
+        );
 
         FlushHandle {
             inner: Some(FlushHandleInner {
@@ -236,6 +245,7 @@ where
     /// The passed in slice is immediately sent back to the flush handle through the duplex channel.
     async fn run(mut self, slice: FullSlice<Buf>) -> std::io::Result<Arc<W>> {
         // Sends the extra buffer back to the handle.
+        // TODO: can this ever await and or fail? I think not.
         self.channel.send(slice).await.map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::BrokenPipe, "flush handle closed early")
         })?;
@@ -251,10 +261,47 @@ where
             }
 
             // Write slice to disk at `offset`.
-            let slice = self
-                .writer
-                .write_all_at(request.slice, request.offset, &self.ctx)
-                .await?;
+            //
+            // Error handling happens according to the current policy of crashing
+            // on fatal IO errors and retrying in place otherwise (deeming all other errors retryable).
+            // (The upper layers of the Pageserver write path are not equipped to retry write errors
+            //  becasuse they often deallocate the buffers that were already written).
+            //
+            // TODO: cancellation sensitiity.
+            // Without it, if we hit a bug where retrying is never successful,
+            // then we can't shut down the timeline/tenant/pageserver cleanly because
+            // layers of the Pageserver write path are holding the gate open for EphemeralFile.
+            //
+            // TODO: use utils::backoff::retry once async closures are actually usable
+            //
+            let mut slice_storage = Some(request.slice);
+            for attempt in 1.. {
+                let result = async {
+                    if attempt > 1 {
+                        info!("retrying flush");
+                    }
+                    let slice = slice_storage.take().expect(
+                        "likely previous invocation of this future didn't get polled to completion",
+                    );
+                    let (slice, res) = self.writer.write_all_at(slice, request.offset, &self.ctx).await;
+                    slice_storage = Some(slice);
+                    let res = res.maybe_fatal_err("owned_buffers_io flush");
+                    let Err(err) = res else {
+                        return ControlFlow::Break(());
+                    };
+                    warn!(%err, "error flushing buffered writer buffer to disk, retrying after backoff");
+                    static NO_CANCELLATION: Lazy<CancellationToken> = Lazy::new(CancellationToken::new);
+                    utils::backoff::exponential_backoff(attempt, 1.0, 10.0, &NO_CANCELLATION).await;
+                    ControlFlow::Continue(())
+                }
+                .instrument(info_span!("flush_attempt", %attempt))
+                .await;
+                match result {
+                    ControlFlow::Break(()) => break,
+                    ControlFlow::Continue(()) => continue,
+                }
+            }
+            let slice = slice_storage.expect("loop must have run at least once");
 
             #[cfg(test)]
             {
