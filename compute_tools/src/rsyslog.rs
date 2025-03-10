@@ -148,8 +148,8 @@ pub fn configure_postgres_logs_export(conf: PostgresLogsRsyslogConfig) -> Result
     }
 
     info!(
-        "configuring rsyslog for postgres logs export: {}",
-        new_config
+        "configuring rsyslog for postgres logs export to: {:?}",
+        conf.host
     );
 
     let mut file = OpenOptions::new()
