@@ -319,8 +319,9 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
             # this does not contain Z in the end, so fromisoformat accepts it
             # it is to be in line with the deletion timestamp.. well, almost.
             when = original_ancestor[2][:26]
-            when_ts = datetime.datetime.fromisoformat(when)
-            assert when_ts < datetime.datetime.now()
+            when_ts = datetime.datetime.fromisoformat(when).replace(tzinfo=datetime.UTC)
+            now = datetime.datetime.utcnow().replace(tzinfo=datetime.UTC)
+            assert when_ts < now
             assert len(lineage.get("reparenting_history", [])) == 0
         elif expected_ancestor == timeline_id:
             assert len(lineage.get("original_ancestor", [])) == 0
@@ -356,12 +357,12 @@ def test_ancestor_detach_two_level_ancestors(neon_env_builder: NeonEnvBuilder):
     Ends up as:
 
     old main -------|---------X--------->
-                              |         |
-                              |         +-> after
-                              +--> empty snapshot branch
+                                        |
+                                       +-> after
+                              
 
-    new main -------|--------------> branch-to-detach
-                    |
+    new main -------|---------X----> branch-to-detach
+                    |         +----> empty snapshot branch
                     +-> reparented
     """
 
@@ -396,7 +397,9 @@ def test_ancestor_detach_two_level_ancestors(neon_env_builder: NeonEnvBuilder):
     )
 
     branch_to_detach = env.create_branch(
-        "branch_to_detach", ancestor_branch_name="snapshot_branchpoint", ancestor_start_lsn=branchpoint_x
+        "branch_to_detach",
+        ancestor_branch_name="snapshot_branchpoint",
+        ancestor_start_lsn=branchpoint_x,
     )
 
     after = env.create_branch("after", ancestor_branch_name="main", ancestor_start_lsn=None)
@@ -410,9 +413,9 @@ def test_ancestor_detach_two_level_ancestors(neon_env_builder: NeonEnvBuilder):
     expected_result = [
         ("main", env.initial_timeline, None, 16384, 1),
         ("after", after, env.initial_timeline, 16384, 1),
-        ("snapshot_branchpoint", snapshot_branchpoint, branch_to_detach, 16384, 1), # not correct
+        ("snapshot_branchpoint", snapshot_branchpoint, branch_to_detach, 8192, 1),
         ("branch_to_detach", branch_to_detach, None, 8192, 1),
-        ("reparented", reparented, env.initial_timeline, 0, 1),
+        ("reparented", reparented, branch_to_detach, 0, 1),
     ]
 
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
@@ -423,7 +426,9 @@ def test_ancestor_detach_two_level_ancestors(neon_env_builder: NeonEnvBuilder):
         if expected_ancestor is None:
             assert ancestor_timeline_id is None
         else:
-            assert TimelineId(ancestor_timeline_id) == expected_ancestor, f"when checking branch {branch_name}, mapping={expected_result}"
+            assert (
+                TimelineId(ancestor_timeline_id) == expected_ancestor
+            ), f"when checking branch {branch_name}, mapping={expected_result}"
 
         index_part = env.pageserver_remote_storage.index_content(
             env.initial_tenant, queried_timeline
@@ -442,8 +447,9 @@ def test_ancestor_detach_two_level_ancestors(neon_env_builder: NeonEnvBuilder):
             # this does not contain Z in the end, so fromisoformat accepts it
             # it is to be in line with the deletion timestamp.. well, almost.
             when = original_ancestor[2][:26]
-            when_ts = datetime.datetime.fromisoformat(when)
-            assert when_ts < datetime.datetime.now()
+            when_ts = datetime.datetime.fromisoformat(when).replace(tzinfo=datetime.UTC)
+            now = datetime.datetime.utcnow().replace(tzinfo=datetime.UTC)
+            assert when_ts < now
             assert len(lineage.get("reparenting_history", [])) == 0
         elif expected_ancestor == branch_to_detach:
             assert len(lineage.get("original_ancestor", [])) == 0
@@ -463,6 +469,7 @@ def test_ancestor_detach_two_level_ancestors(neon_env_builder: NeonEnvBuilder):
 
     client.timeline_delete(env.initial_tenant, env.initial_timeline)
     wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline)
+
 
 def test_detached_receives_flushes_while_being_detached(neon_env_builder: NeonEnvBuilder):
     """
