@@ -692,15 +692,15 @@ jobs:
                                              neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-x64 \
                                              neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
 
-  vm-compute-node-image:
+  vm-compute-node-image-arch:
     needs: [ check-permissions, meta, compute-node-image ]
     if: ${{ contains(fromJSON('["push-main", "pr", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
-    runs-on: [ self-hosted, large ]
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
     strategy:
       fail-fast: false
       matrix:
+        arch: [ amd64, arm64 ]
         version:
-          # see the comment for `compute-node-image-arch` job
           - pg: v14
             debian: bullseye
           - pg: v15
@@ -717,7 +717,7 @@ jobs:
 
       - name: Downloading vm-builder
         run: |
-          curl -fL https://github.com/neondatabase/autoscaling/releases/download/$VM_BUILDER_VERSION/vm-builder-amd64 -o vm-builder
+          curl -fL https://github.com/neondatabase/autoscaling/releases/download/$VM_BUILDER_VERSION/vm-builder-${{ matrix.arch }} -o vm-builder
           chmod +x vm-builder
 
       - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
@@ -738,12 +738,37 @@ jobs:
             -size=2G \
             -spec=compute/vm-image-spec-${{ matrix.version.debian }}.yaml \
             -src=neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }} \
-            -dst=neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }} \
-            -target-arch=linux/amd64
+            -dst=neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.arch }} \
+            -target-arch=linux/${{ matrix.arch }}
 
       - name: Pushing vm-compute-node image
         run: |
-          docker push neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}
+          docker push neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.arch }}
+
+  vm-compute-node-image:
+    needs: [ vm-compute-node-image-arch, meta ]
+    if: ${{ contains(fromJSON('["push-main", "pr", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        version:
+          # see the comment for `compute-node-image-arch` job
+          - pg: v14
+          - pg: v15
+          - pg: v16
+          - pg: v17
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
+      - name: Create multi-arch compute-node image
+        run: |
+          docker buildx imagetools create -t neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }} \
+                                             neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-amd64 \
+                                             neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-arm64
+
 
   test-images:
     needs: [ check-permissions, meta, neon-image, compute-node-image ]
@@ -831,7 +856,7 @@ jobs:
               || needs.meta.outputs.run-kind == 'pr' && needs.meta.outputs.build-tag
               || needs.meta.outputs.run-kind == 'compute-rc-pr' && needs.meta.outputs.previous-storage-release
             }}
-          TEST_EXTENSIONS_TAG: latest
+          TEST_EXTENSIONS_TAG: ${{ needs.meta.outputs.previous-compute-release }}
           NEW_COMPUTE_TAG: ${{ needs.meta.outputs.build-tag }}
           OLD_COMPUTE_TAG: ${{ needs.meta.outputs.previous-compute-release }}
         run: ./docker-compose/test_extensions_upgrade.sh
@@ -906,7 +931,8 @@ jobs:
 
   push-neon-image-prod:
     needs: [ meta, generate-image-maps, neon-image, test-images ]
-    if: ${{ contains(fromJSON('["storage-release", "proxy-release"]'), needs.meta.outputs.run-kind) }}
+    # Depends on jobs that can get skipped
+    if: ${{ !failure() && !cancelled() && contains(fromJSON('["storage-release", "proxy-release"]'), needs.meta.outputs.run-kind) }}
     uses: ./.github/workflows/_push-to-container-registry.yml
     permissions:
       id-token: write  # Required for aws/azure login
@@ -924,7 +950,8 @@ jobs:
 
   push-compute-image-prod:
     needs: [ meta, generate-image-maps, vm-compute-node-image, test-images ]
-    if: ${{ needs.meta.outputs.run-kind == 'compute-release' }}
+    # Depends on jobs that can get skipped
+    if: ${{ !failure() && !cancelled() && needs.meta.outputs.run-kind == 'compute-release' }}
     uses: ./.github/workflows/_push-to-container-registry.yml
     permissions:
       id-token: write  # Required for aws/azure login
@@ -1034,7 +1061,7 @@ jobs:
           exit 1
 
   deploy:
-    needs: [ check-permissions, push-neon-image-prod, push-compute-image-prod, meta, build-and-test-locally, trigger-custom-extensions-build-and-wait ]
+    needs: [ check-permissions, push-neon-image-dev, push-compute-image-dev, push-neon-image-prod, push-compute-image-prod, meta, build-and-test-locally, trigger-custom-extensions-build-and-wait ]
     # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `push-neon-image-prod` and `push-compute-image-prod`
     if: ${{ contains(fromJSON('["push-main", "storage-release", "proxy-release", "compute-release"]'), needs.meta.outputs.run-kind) && !failure() && !cancelled() }}
     permissions:

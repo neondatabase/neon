@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::fmt;
+
 ///
 /// Module for parsing postgresql.conf file.
 ///
@@ -6,8 +9,6 @@
 /// funny stuff like include-directives or funny escaping.
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::collections::HashMap;
-use std::fmt;
 
 /// In-memory representation of a postgresql.conf file
 #[derive(Default, Debug)]

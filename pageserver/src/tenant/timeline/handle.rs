@@ -143,8 +143,11 @@
 //! - Connection shutdown (=> dropping the `Cache`).
 //!
 //! Both transition the `HandleInner` from [`HandleInner::Open`] to
-//! [`HandleInner::ShutDown`], which drops the only long-lived strong ref to the
-//! `Arc<GateGuard>` that is stored inside the `Types::Timeline`.
+//! [`HandleInner::ShutDown`], which drops the only long-lived
+//! `Arc<Types::Timeline>`. Once the last short-lived Arc<Types::Timeline>
+//! is dropped, the `Types::Timeline` gets dropped and thereby
+//! the `GateGuard` and the `Arc<Timeline>` that it stores,
+//! thereby breaking both cycles.
 //!
 //! `PerTimelineState::shutdown` drops all the `HandleInners` it contains,
 //! thereby breaking the cycle.

@@ -5,7 +5,16 @@
 //! easier to work with locally. The python tests in `test_runner`
 //! rely on `neon_local` to set up the environment for each test.
 //!
-use anyhow::{anyhow, bail, Context, Result};
+use std::borrow::Cow;
+use std::collections::{BTreeSet, HashMap};
+use std::fs::File;
+use std::os::fd::AsRawFd;
+use std::path::PathBuf;
+use std::process::exit;
+use std::str::FromStr;
+use std::time::Duration;
+
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use compute_api::spec::ComputeMode;
 use control_plane::endpoint::ComputeControlPlane;
@@ -19,7 +28,7 @@ use control_plane::storage_controller::{
     NeonStorageControllerStartArgs, NeonStorageControllerStopArgs, StorageController,
 };
 use control_plane::{broker, local_env};
-use nix::fcntl::{flock, FlockArg};
+use nix::fcntl::{FlockArg, flock};
 use pageserver_api::config::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
@@ -31,27 +40,18 @@ use pageserver_api::models::{ShardParameters, TimelineCreateRequest, TimelineInf
 use pageserver_api::shard::{ShardCount, ShardStripeSize, TenantShardId};
 use postgres_backend::AuthType;
 use postgres_connection::parse_host_port;
+use safekeeper_api::membership::SafekeeperGeneration;
 use safekeeper_api::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_SAFEKEEPER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
 };
-use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap};
-use std::fs::File;
-use std::os::fd::AsRawFd;
-use std::path::PathBuf;
-use std::process::exit;
-use std::str::FromStr;
-use std::time::Duration;
 use storage_broker::DEFAULT_LISTEN_ADDR as DEFAULT_BROKER_ADDR;
 use tokio::task::JoinSet;
 use url::Host;
-use utils::{
-    auth::{Claims, Scope},
-    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
-    lsn::Lsn,
-    project_git_version,
-};
+use utils::auth::{Claims, Scope};
+use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
+use utils::lsn::Lsn;
+use utils::project_git_version;
 
 // Default id of a safekeeper node, if not specified on the command line.
 const DEFAULT_SAFEKEEPER_ID: NodeId = NodeId(1);
@@ -597,7 +597,15 @@ struct EndpointStartCmdArgs {
     #[clap(long = "pageserver-id")]
     endpoint_pageserver_id: Option<NodeId>,
 
-    #[clap(long)]
+    #[clap(
+        long,
+        help = "Safekeepers membership generation to prefix neon.safekeepers with. Normally neon_local sets it on its own, but this option allows to override. Non zero value forces endpoint to use membership configurations."
+    )]
+    safekeepers_generation: Option<u32>,
+    #[clap(
+        long,
+        help = "List of safekeepers endpoint will talk to. Normally neon_local chooses them on its own, but this option allows to override."
+    )]
     safekeepers: Option<String>,
 
     #[clap(
@@ -618,9 +626,9 @@ struct EndpointStartCmdArgs {
     )]
     allow_multiple: bool,
 
-    #[clap(short = 't', long, help = "timeout until we fail the command")]
-    #[arg(default_value = "10s")]
-    start_timeout: humantime::Duration,
+    #[clap(short = 't', long, value_parser= humantime::parse_duration, help = "timeout until we fail the command")]
+    #[arg(default_value = "90s")]
+    start_timeout: Duration,
 }
 
 #[derive(clap::Args)]
@@ -921,7 +929,9 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
     let init_conf: NeonLocalInitConf = if let Some(config_path) = &args.config {
         // User (likely the Python test suite) provided a description of the environment.
         if args.num_pageservers.is_some() {
-            bail!("Cannot specify both --num-pageservers and --config, use key `pageservers` in the --config file instead");
+            bail!(
+                "Cannot specify both --num-pageservers and --config, use key `pageservers` in the --config file instead"
+            );
         }
         // load and parse the file
         let contents = std::fs::read_to_string(config_path).with_context(|| {
@@ -1315,10 +1325,14 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
 
             match (mode, args.hot_standby) {
                 (ComputeMode::Static(_), true) => {
-                    bail!("Cannot start a node in hot standby mode when it is already configured as a static replica")
+                    bail!(
+                        "Cannot start a node in hot standby mode when it is already configured as a static replica"
+                    )
                 }
                 (ComputeMode::Primary, true) => {
-                    bail!("Cannot start a node as a hot standby replica, it is already configured as primary node")
+                    bail!(
+                        "Cannot start a node as a hot standby replica, it is already configured as primary node"
+                    )
                 }
                 _ => {}
             }
@@ -1345,6 +1359,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             let pageserver_id = args.endpoint_pageserver_id;
             let remote_ext_config = &args.remote_ext_config;
 
+            let safekeepers_generation = args.safekeepers_generation.map(SafekeeperGeneration::new);
             // If --safekeepers argument is given, use only the listed
             // safekeeper nodes; otherwise all from the env.
             let safekeepers = if let Some(safekeepers) = parse_safekeepers(&args.safekeepers)? {
@@ -1420,11 +1435,13 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             endpoint
                 .start(
                     &auth_token,
+                    safekeepers_generation,
                     safekeepers,
                     pageservers,
                     remote_ext_config.as_ref(),
                     stripe_size.0 as usize,
                     args.create_test_user,
+                    args.start_timeout,
                 )
                 .await?;
         }

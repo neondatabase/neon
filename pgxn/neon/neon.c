@@ -437,6 +437,7 @@ _PG_init(void)
 
 	pg_init_libpagestore();
 	pg_init_walproposer();
+	pagestore_smgr_init();
 	Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 
 	InitUnstableExtensionsSupport();

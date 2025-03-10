@@ -1,17 +1,15 @@
-use std::{collections::HashMap, error::Error as _};
+use std::collections::HashMap;
+use std::error::Error as _;
 
 use bytes::Bytes;
-use reqwest::{IntoUrl, Method, StatusCode};
-
 use detach_ancestor::AncestorDetached;
 use http_utils::error::HttpErrorBody;
-use pageserver_api::{models::*, shard::TenantShardId};
-use utils::{
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
-
+use pageserver_api::models::*;
+use pageserver_api::shard::TenantShardId;
 pub use reqwest::Body as ReqwestBody;
+use reqwest::{IntoUrl, Method, StatusCode};
+use utils::id::{TenantId, TimelineId};
+use utils::lsn::Lsn;
 
 use crate::BlockUnblock;
 
@@ -482,12 +480,16 @@ impl Client {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         concurrency: Option<usize>,
+        recurse: bool,
     ) -> Result<()> {
         let mut path = reqwest::Url::parse(&format!(
             "{}/v1/tenant/{}/timeline/{}/download_heatmap_layers",
             self.mgmt_api_endpoint, tenant_shard_id, timeline_id
         ))
         .expect("Cannot build URL");
+
+        path.query_pairs_mut()
+            .append_pair("recurse", &format!("{}", recurse));
 
         if let Some(concurrency) = concurrency {
             path.query_pairs_mut()

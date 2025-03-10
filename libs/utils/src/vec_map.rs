@@ -1,4 +1,6 @@
-use std::{alloc::Layout, cmp::Ordering, ops::RangeBounds};
+use std::alloc::Layout;
+use std::cmp::Ordering;
+use std::ops::RangeBounds;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VecMapOrdering {
@@ -214,7 +216,8 @@ fn extract_key<K, V>(entry: &(K, V)) -> &K {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, ops::Bound};
+    use std::collections::BTreeMap;
+    use std::ops::Bound;
 
     use super::{VecMap, VecMapOrdering};
 

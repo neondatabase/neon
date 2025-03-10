@@ -37,7 +37,8 @@ use pageserver_api::models::{
     TenantShardSplitResponse, TenantSorting, TenantState, TenantWaitLsnRequest,
     TimelineArchivalConfigRequest, TimelineCreateRequest, TimelineCreateRequestMode,
     TimelineCreateRequestModeImportPgdata, TimelineGcRequest, TimelineInfo,
-    TimelinesInfoAndOffloaded, TopTenantShardItem, TopTenantShardsRequest, TopTenantShardsResponse,
+    TimelinePatchIndexPartRequest, TimelinesInfoAndOffloaded, TopTenantShardItem,
+    TopTenantShardsRequest, TopTenantShardsResponse,
 };
 use pageserver_api::shard::{ShardCount, TenantShardId};
 use remote_storage::{DownloadError, GenericRemoteStorage, TimeTravelError};
@@ -64,6 +65,7 @@ use crate::tenant::mgr::{
     GetActiveTenantError, GetTenantError, TenantManager, TenantMapError, TenantMapInsertError,
     TenantSlot, TenantSlotError, TenantSlotUpsertError, TenantStateError, UpsertLocationError,
 };
+use crate::tenant::remote_timeline_client::index::GcCompactionState;
 use crate::tenant::remote_timeline_client::{
     download_index_part, list_remote_tenant_shards, list_remote_timelines,
 };
@@ -482,6 +484,7 @@ async fn build_timeline_info_common(
 
         state,
         is_archived: Some(is_archived),
+        rel_size_migration: Some(timeline.get_rel_size_v2_status()),
 
         walreceiver_status,
     };
@@ -852,6 +855,75 @@ async fn timeline_archival_config_handler(
                 tenant_id = %tenant_shard_id.tenant_id,
                 shard_id = %tenant_shard_id.shard_slug(),
                 state = ?request_data.state,
+                %timeline_id))
+    .await?;
+
+    json_response(StatusCode::OK, ())
+}
+
+/// This API is used to patch the index part of a timeline. You must ensure such patches are safe to apply. Use this API as an emergency
+/// measure only.
+///
+/// Some examples of safe patches:
+/// - Increase the gc_cutoff and gc_compaction_cutoff to a larger value in case of a bug that didn't bump the cutoff and cause read errors.
+/// - Force set the index part to use reldir v2 (migrating/migrated).
+///
+/// Some examples of unsafe patches:
+/// - Force set the index part from v2 to v1 (legacy). This will cause the code path to ignore anything written to the new keyspace and cause
+///   errors.
+/// - Decrease the gc_cutoff without validating the data really exists. It will cause read errors in the background.
+async fn timeline_patch_index_part_handler(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+
+    let request_data: TimelinePatchIndexPartRequest = json_request(&mut request).await?;
+    check_permission(&request, None)?; // require global permission for this request
+    let state = get_state(&request);
+
+    async {
+        let timeline =
+            active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+                .await?;
+
+        if let Some(rel_size_migration) = request_data.rel_size_migration {
+            timeline
+                .update_rel_size_v2_status(rel_size_migration)
+                .map_err(ApiError::InternalServerError)?;
+        }
+
+        if let Some(gc_compaction_last_completed_lsn) =
+            request_data.gc_compaction_last_completed_lsn
+        {
+            timeline
+                .update_gc_compaction_state(GcCompactionState {
+                    last_completed_lsn: gc_compaction_last_completed_lsn,
+                })
+                .map_err(ApiError::InternalServerError)?;
+        }
+
+        if let Some(applied_gc_cutoff_lsn) = request_data.applied_gc_cutoff_lsn {
+            {
+                let guard = timeline.applied_gc_cutoff_lsn.lock_for_write();
+                guard.store_and_unlock(applied_gc_cutoff_lsn);
+            }
+        }
+
+        if request_data.force_index_update {
+            timeline
+                .remote_client
+                .force_schedule_index_upload()
+                .context("force schedule index upload")
+                .map_err(ApiError::InternalServerError)?;
+        }
+
+        Ok::<_, ApiError>(())
+    }
+    .instrument(info_span!("timeline_patch_index_part",
+                tenant_id = %tenant_shard_id.tenant_id,
+                shard_id = %tenant_shard_id.shard_slug(),
                 %timeline_id))
     .await?;
 
@@ -1440,6 +1512,7 @@ async fn timeline_download_heatmap_layers_handler(
 
     let desired_concurrency =
         parse_query_param(&request, "concurrency")?.unwrap_or(DEFAULT_CONCURRENCY);
+    let recurse = parse_query_param(&request, "recurse")?.unwrap_or(false);
 
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
@@ -1457,9 +1530,7 @@ async fn timeline_download_heatmap_layers_handler(
         .unwrap_or(DEFAULT_MAX_CONCURRENCY);
     let concurrency = std::cmp::min(max_concurrency, desired_concurrency);
 
-    timeline
-        .start_heatmap_layers_download(concurrency, &ctx)
-        .await?;
+    timeline.start_heatmap_layers_download(concurrency, recurse, &ctx)?;
 
     json_response(StatusCode::ACCEPTED, ())
 }
@@ -3645,6 +3716,10 @@ pub fn make_router(
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/get_timestamp_of_lsn",
             |r| api_handler(r, get_timestamp_of_lsn_handler),
+        )
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/patch_index_part",
+            |r| api_handler(r, timeline_patch_index_part_handler),
         )
         .post(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/lsn_lease",

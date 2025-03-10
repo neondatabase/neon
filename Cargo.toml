@@ -43,7 +43,7 @@ members = [
 ]
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0"
 
 ## All dependency versions, used in the project
@@ -53,7 +53,6 @@ anyhow = { version = "1.0", features = ["backtrace"] }
 arc-swap = "1.6"
 async-compression = { version = "0.4.0", features = ["tokio", "gzip", "zstd"] }
 atomic-take = "1.1.0"
-backtrace = "0.3.74"
 flate2 = "1.0.26"
 assert-json-diff = "2"
 async-stream = "0.3"
@@ -68,9 +67,10 @@ aws-credential-types = "1.2.0"
 aws-sigv4 = { version = "1.2", features = ["sign-http"] }
 aws-types = "1.3"
 axum = { version = "0.8.1", features = ["ws"] }
+axum-extra = { version = "0.10.0", features = ["typed-header"] }
 base64 = "0.13.0"
 bincode = "1.3"
-bindgen = "0.70"
+bindgen = "0.71"
 bit_field = "0.10.2"
 bstr = "1.0"
 byteorder = "1.4"
@@ -95,6 +95,7 @@ futures = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
 git-version = "0.3"
+governor = "0.8"
 hashbrown = "0.14"
 hashlink = "0.9.1"
 hdrhistogram = "7.5.2"
@@ -113,11 +114,10 @@ hyper-util = "0.1"
 tokio-tungstenite = "0.21.0"
 indexmap = "2"
 indoc = "2"
-inferno = "0.12.0"
 ipnet = "2.10.0"
 itertools = "0.10"
 itoa = "1.0.11"
-jemalloc_pprof = "0.6"
+jemalloc_pprof = { version = "0.7", features = ["symbolize", "flamegraph"] }
 jsonwebtoken = "9"
 lasso = "0.7"
 libc = "0.2"
@@ -192,7 +192,7 @@ toml = "0.8"
 toml_edit = "0.22"
 tonic = {version = "0.12.3", default-features = false, features = ["channel", "tls", "tls-roots"]}
 tower = { version = "0.5.2", default-features = false }
-tower-http = { version = "0.6.2", features = ["request-id", "trace"] }
+tower-http = { version = "0.6.2", features = ["auth", "request-id", "trace"] }
 
 # This revision uses opentelemetry 0.27. There's no tag for it.
 tower-otel = { git = "https://github.com/mattiapenati/tower-otel", rev = "56a7321053bcb72443888257b622ba0d43a11fcd" }

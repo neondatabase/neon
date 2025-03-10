@@ -76,7 +76,10 @@ pub fn draw_svg(
 
     let mut result = String::new();
 
-    writeln!(result, "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" height=\"300\" width=\"500\">")?;
+    writeln!(
+        result,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" height=\"300\" width=\"500\">"
+    )?;
 
     draw.calculate_svg_layout();
 

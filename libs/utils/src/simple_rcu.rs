@@ -44,8 +44,7 @@
 #![warn(missing_docs)]
 
 use std::ops::Deref;
-use std::sync::{Arc, Weak};
-use std::sync::{RwLock, RwLockWriteGuard};
+use std::sync::{Arc, RwLock, RwLockWriteGuard, Weak};
 
 use tokio::sync::watch;
 
@@ -219,9 +218,10 @@ impl RcuWaitList {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Mutex;
     use std::time::Duration;
+
+    use super::*;
 
     #[tokio::test]
     async fn two_writers() {

@@ -1,43 +1,35 @@
-use crate::{
-    background_process,
-    local_env::{LocalEnv, NeonStorageControllerConf},
-};
+use std::ffi::OsStr;
+use std::fs;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::process::ExitStatus;
+use std::str::FromStr;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
 use camino::{Utf8Path, Utf8PathBuf};
 use hyper0::Uri;
 use nix::unistd::Pid;
-use pageserver_api::{
-    controller_api::{
-        NodeConfigureRequest, NodeDescribeResponse, NodeRegisterRequest, TenantCreateRequest,
-        TenantCreateResponse, TenantLocateResponse, TenantShardMigrateRequest,
-        TenantShardMigrateResponse,
-    },
-    models::{
-        TenantShardSplitRequest, TenantShardSplitResponse, TimelineCreateRequest, TimelineInfo,
-    },
-    shard::{ShardStripeSize, TenantShardId},
+use pageserver_api::controller_api::{
+    NodeConfigureRequest, NodeDescribeResponse, NodeRegisterRequest, TenantCreateRequest,
+    TenantCreateResponse, TenantLocateResponse,
 };
+use pageserver_api::models::{TimelineCreateRequest, TimelineInfo};
+use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
 use reqwest::Method;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{
-    ffi::OsStr,
-    fs,
-    net::SocketAddr,
-    path::PathBuf,
-    process::ExitStatus,
-    str::FromStr,
-    sync::OnceLock,
-    time::{Duration, Instant},
-};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::instrument;
 use url::Url;
-use utils::{
-    auth::{encode_from_key_file, Claims, Scope},
-    id::{NodeId, TenantId},
-};
+use utils::auth::{Claims, Scope, encode_from_key_file};
+use utils::id::{NodeId, TenantId};
 use whoami::username;
+
+use crate::background_process;
+use crate::local_env::{LocalEnv, NeonStorageControllerConf};
 
 pub struct StorageController {
     env: LocalEnv,
@@ -96,7 +88,8 @@ pub struct AttachHookRequest {
 
 #[derive(Serialize, Deserialize)]
 pub struct AttachHookResponse {
-    pub gen: Option<u32>,
+    #[serde(rename = "gen")]
+    pub generation: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -779,7 +772,7 @@ impl StorageController {
             )
             .await?;
 
-        Ok(response.gen)
+        Ok(response.generation)
     }
 
     #[instrument(skip(self))]
@@ -825,41 +818,6 @@ impl StorageController {
             Method::GET,
             format!("debug/v1/tenant/{tenant_id}/locate"),
             None,
-        )
-        .await
-    }
-
-    #[instrument(skip(self))]
-    pub async fn tenant_migrate(
-        &self,
-        tenant_shard_id: TenantShardId,
-        node_id: NodeId,
-    ) -> anyhow::Result<TenantShardMigrateResponse> {
-        self.dispatch(
-            Method::PUT,
-            format!("control/v1/tenant/{tenant_shard_id}/migrate"),
-            Some(TenantShardMigrateRequest {
-                node_id,
-                migration_config: None,
-            }),
-        )
-        .await
-    }
-
-    #[instrument(skip(self), fields(%tenant_id, %new_shard_count))]
-    pub async fn tenant_split(
-        &self,
-        tenant_id: TenantId,
-        new_shard_count: u8,
-        new_stripe_size: Option<ShardStripeSize>,
-    ) -> anyhow::Result<TenantShardSplitResponse> {
-        self.dispatch(
-            Method::PUT,
-            format!("control/v1/tenant/{tenant_id}/shard_split"),
-            Some(TenantShardSplitRequest {
-                new_shard_count,
-                new_stripe_size,
-            }),
         )
         .await
     }

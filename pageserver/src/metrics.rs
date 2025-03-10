@@ -143,6 +143,29 @@ pub(crate) static LAYERS_PER_READ_GLOBAL: Lazy<Histogram> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub(crate) static LAYERS_PER_READ_BATCH_GLOBAL: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_layers_per_read_batch_global",
+        "Layers visited to serve a single read batch (read amplification), regardless of number of reads.",
+        vec![
+            1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0
+        ],
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static LAYERS_PER_READ_AMORTIZED_GLOBAL: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_layers_per_read_amortized_global",
+        "Layers visited to serve a single read (read amplification). Amortized across a batch: \
+            all visited layers are divided by number of reads.",
+        vec![
+            1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0
+        ],
+    )
+    .expect("failed to define a metric")
+});
+
 pub(crate) static DELTAS_PER_READ_GLOBAL: Lazy<Histogram> = Lazy::new(|| {
     // We expect this to be low because of Postgres checkpoints. Let's see if that holds.
     register_histogram!(
@@ -4119,6 +4142,8 @@ pub fn preinitialize_metrics(conf: &'static PageServerConf) {
     // histograms
     [
         &LAYERS_PER_READ_GLOBAL,
+        &LAYERS_PER_READ_BATCH_GLOBAL,
+        &LAYERS_PER_READ_AMORTIZED_GLOBAL,
         &DELTAS_PER_READ_GLOBAL,
         &WAIT_LSN_TIME,
         &WAL_REDO_TIME,

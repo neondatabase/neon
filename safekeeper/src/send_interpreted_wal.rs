@@ -184,6 +184,16 @@ impl InterpretedWalReaderState {
                         to: *current_position,
                     }
                 } else {
+                    // Edge case: The new shard is at the same current position as
+                    // the reader. Note that the current position is WAL record aligned,
+                    // so the reader might have done some partial reads and updated the
+                    // batch start. If that's the case, adjust the batch start to match
+                    // starting position of the new shard. It can lead to some shards
+                    // seeing overlaps, but in that case the actual record LSNs are checked
+                    // which should be fine based on the filtering logic.
+                    if let Some(start) = current_batch_wal_start {
+                        *start = std::cmp::min(*start, new_shard_start_pos);
+                    }
                     CurrentPositionUpdate::NotReset(*current_position)
                 }
             }
@@ -287,7 +297,13 @@ impl InterpretedWalReader {
                 reader
                     .run_impl(start_pos)
                     .await
-                    .inspect_err(|err| critical!("failed to read WAL record: {err:?}"))
+                    .inspect_err(|err| match err {
+                        // TODO: we may want to differentiate these errors further.
+                        InterpretedWalReaderError::Decode(_) => {
+                            critical!("failed to decode WAL record: {err:?}");
+                        }
+                        err => error!("failed to read WAL record: {err}"),
+                    })
             }
             .instrument(info_span!("interpreted wal reader")),
         );
@@ -347,10 +363,12 @@ impl InterpretedWalReader {
             metric.dec();
         }
 
-        if let Err(err) = self.run_impl(start_pos).await {
-            critical!("failed to read WAL record: {err:?}");
-        } else {
-            info!("interpreted wal reader exiting");
+        match self.run_impl(start_pos).await {
+            Err(err @ InterpretedWalReaderError::Decode(_)) => {
+                critical!("failed to decode WAL record: {err:?}");
+            }
+            Err(err) => error!("failed to read WAL record: {err}"),
+            Ok(()) => info!("interpreted wal reader exiting"),
         }
 
         Err(CopyStreamHandlerEnd::Other(anyhow!(
@@ -412,7 +430,10 @@ impl InterpretedWalReader {
                         .with_context(|| "Failed to interpret WAL")?;
 
                         for (shard, record) in interpreted {
-                            if record.is_empty() {
+                            // Shard zero needs to track the start LSN of the latest record
+                            // in adition to the LSN of the next record to ingest. The former
+                            // is included in basebackup persisted by the compute in WAL.
+                            if !shard.is_shard_zero() && record.is_empty() {
                                 continue;
                             }
 
@@ -722,7 +743,7 @@ mod tests {
             .unwrap();
 
         let resident_tli = tli.wal_residence_guard().await.unwrap();
-        let end_watch = Env::write_wal(tli, start_lsn, SIZE, MSG_COUNT, None)
+        let end_watch = Env::write_wal(tli, start_lsn, SIZE, MSG_COUNT, c"neon-file:", None)
             .await
             .unwrap();
         let end_pos = end_watch.get();
@@ -865,10 +886,16 @@ mod tests {
 
         let resident_tli = tli.wal_residence_guard().await.unwrap();
         let mut next_record_lsns = Vec::default();
-        let end_watch =
-            Env::write_wal(tli, start_lsn, SIZE, MSG_COUNT, Some(&mut next_record_lsns))
-                .await
-                .unwrap();
+        let end_watch = Env::write_wal(
+            tli,
+            start_lsn,
+            SIZE,
+            MSG_COUNT,
+            c"neon-file:",
+            Some(&mut next_record_lsns),
+        )
+        .await
+        .unwrap();
         let end_pos = end_watch.get();
 
         let streaming_wal_reader = StreamingWalReader::new(
@@ -1009,10 +1036,16 @@ mod tests {
             .unwrap();
 
         let resident_tli = tli.wal_residence_guard().await.unwrap();
-        let end_watch =
-            Env::write_wal(tli, start_lsn, SIZE, MSG_COUNT, Some(&mut next_record_lsns))
-                .await
-                .unwrap();
+        let end_watch = Env::write_wal(
+            tli,
+            start_lsn,
+            SIZE,
+            MSG_COUNT,
+            c"neon-file:",
+            Some(&mut next_record_lsns),
+        )
+        .await
+        .unwrap();
 
         assert!(next_record_lsns.len() > 3);
         let shard_0_start_lsn = next_record_lsns[3];
@@ -1105,5 +1138,89 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_shard_zero_does_not_skip_empty_records() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        const SIZE: usize = 8 * 1024;
+        const MSG_COUNT: usize = 10;
+        const PG_VERSION: u32 = 17;
+
+        let start_lsn = Lsn::from_str("0/149FD18").unwrap();
+        let env = Env::new(true).unwrap();
+        let tli = env
+            .make_timeline(NodeId(1), TenantTimelineId::generate(), start_lsn)
+            .await
+            .unwrap();
+
+        let resident_tli = tli.wal_residence_guard().await.unwrap();
+        let mut next_record_lsns = Vec::new();
+        let end_watch = Env::write_wal(
+            tli,
+            start_lsn,
+            SIZE,
+            MSG_COUNT,
+            // This is a logical message prefix that is not persisted to key value storage.
+            // We use it in order to validate that shard zero receives emtpy interpreted records.
+            c"test:",
+            Some(&mut next_record_lsns),
+        )
+        .await
+        .unwrap();
+        let end_pos = end_watch.get();
+
+        let streaming_wal_reader = StreamingWalReader::new(
+            resident_tli,
+            None,
+            start_lsn,
+            end_pos,
+            end_watch,
+            MAX_SEND_SIZE,
+        );
+
+        let shard = ShardIdentity::unsharded();
+        let (records_tx, mut records_rx) = tokio::sync::mpsc::channel::<Batch>(MSG_COUNT * 2);
+
+        let handle = InterpretedWalReader::spawn(
+            streaming_wal_reader,
+            start_lsn,
+            records_tx,
+            shard,
+            PG_VERSION,
+            &Some("pageserver".to_string()),
+        );
+
+        let mut interpreted_records = Vec::new();
+        while let Some(batch) = records_rx.recv().await {
+            interpreted_records.push(batch.records);
+            if batch.wal_end_lsn == batch.available_wal_end_lsn {
+                break;
+            }
+        }
+
+        let received_next_record_lsns = interpreted_records
+            .into_iter()
+            .flat_map(|b| b.records)
+            .map(|rec| rec.next_record_lsn)
+            .collect::<Vec<_>>();
+
+        // By default this also includes the start LSN. Trim it since it shouldn't be received.
+        let next_record_lsns = next_record_lsns.into_iter().skip(1).collect::<Vec<_>>();
+
+        assert_eq!(received_next_record_lsns, next_record_lsns);
+
+        handle.abort();
+        let mut done = false;
+        for _ in 0..5 {
+            if handle.current_position().is_none() {
+                done = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        assert!(done);
     }
 }

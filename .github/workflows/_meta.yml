@@ -19,7 +19,7 @@ on:
         description: "Tag of the last compute release"
         value: ${{ jobs.tags.outputs.compute }}
       run-kind:
-        description: "The kind of run we're currently in. Will be one of `pr`, `push-main`, `storage-rc`, `storage-release`, `proxy-rc`, `proxy-release`, `compute-rc`, `compute-release` or `merge_queue`"
+        description: "The kind of run we're currently in. Will be one of `push-main`, `storage-release`, `compute-release`, `proxy-release`, `storage-rc-pr`, `compute-rc-pr`,  `proxy-rc-pr`, `pr`, or `workflow-dispatch`"
         value: ${{ jobs.tags.outputs.run-kind }}
 
 permissions: {}
@@ -55,6 +55,7 @@ jobs:
               || (inputs.github-event-name == 'pull_request' && github.base_ref == 'release-compute') && 'compute-rc-pr'
               || (inputs.github-event-name == 'pull_request' && github.base_ref == 'release-proxy')   && 'proxy-rc-pr'
               || (inputs.github-event-name == 'pull_request')                                         && 'pr'
+              || (inputs.github-event-name == 'workflow_dispatch')                                    && 'workflow-dispatch'
               || 'unknown'
             }}
         run: |
@@ -84,6 +85,9 @@ jobs:
           pr|storage-rc-pr|compute-rc-pr|proxy-rc-pr)
             BUILD_AND_TEST_RUN_ID=$(gh run list -b $CURRENT_BRANCH -c $CURRENT_SHA -w 'Build and Test' -L 1 --json databaseId --jq '.[].databaseId')
             echo "tag=$BUILD_AND_TEST_RUN_ID" | tee -a $GITHUB_OUTPUT
+            ;;
+          workflow-dispatch)
+            echo "tag=$GITHUB_RUN_ID" | tee -a $GITHUB_OUTPUT
             ;;
           *)
             echo "Unexpected RUN_KIND ('${RUN_KIND}'), failing to assign build-tag!"
