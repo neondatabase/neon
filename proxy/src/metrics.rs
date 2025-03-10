@@ -406,8 +406,11 @@ impl std::fmt::Display for LatencyAccumulated {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "client: {:?}, cplane: {:?}, compute: {:?}, retry: {:?}",
-            self.client, self.cplane, self.compute, self.retry
+            "client: {}, cplane: {}, compute: {}, retry: {}",
+            self.client.as_micros(),
+            self.cplane.as_micros(),
+            self.compute.as_micros(),
+            self.retry.as_micros()
         )
     }
 }

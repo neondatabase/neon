@@ -63,6 +63,7 @@ struct RequestContextInner {
     success: bool,
     pub(crate) cold_start_info: ColdStartInfo,
     pg_options: Option<StartupMessageParams>,
+    testodrome_query_id: Option<String>,
 
     // extra
     // This sender is here to keep the request monitoring channel open while requests are taking place.
@@ -110,6 +111,7 @@ impl Clone for RequestContext {
             rejected: inner.rejected,
             cold_start_info: inner.cold_start_info,
             pg_options: inner.pg_options.clone(),
+            testodrome_query_id: inner.testodrome_query_id.clone(),
 
             sender: None,
             disconnect_sender: None,
@@ -160,6 +162,7 @@ impl RequestContext {
             rejected: None,
             cold_start_info: ColdStartInfo::Unknown,
             pg_options: None,
+            testodrome_query_id: None,
 
             sender: LOG_CHAN.get().and_then(|tx| tx.upgrade()),
             disconnect_sender: LOG_CHAN_DISCONNECT.get().and_then(|tx| tx.upgrade()),
@@ -208,6 +211,19 @@ impl RequestContext {
         }
         if let Some(dbname) = options.get("database") {
             this.set_dbname(dbname.into());
+        }
+
+        // Try to get testodrome_query_id directly from parameters
+        if let Some(options_str) = options.get("options") {
+            // If not found directly, try to extract it from the options string
+            for option in options_str.split_whitespace() {
+                if option.starts_with("neon_query_id:") {
+                    if let Some(value) = option.strip_prefix("neon_query_id:") {
+                        this.set_testodrome_id(value.to_string());
+                        break;
+                    }
+                }
+            }
         }
 
         this.pg_options = Some(options);
@@ -355,6 +371,15 @@ impl RequestContext {
             .accumulated()
     }
 
+    pub(crate) fn get_testodrome_id(&self) -> String {
+        self.0
+            .try_lock()
+            .expect("should not deadlock")
+            .testodrome_query_id
+            .clone()
+            .unwrap_or_default()
+    }
+
     pub(crate) fn success(&self) {
         self.0
             .try_lock()
@@ -414,6 +439,10 @@ impl RequestContextInner {
     fn set_user(&mut self, user: RoleName) {
         self.span.record("role", display(&user));
         self.user = Some(user);
+    }
+
+    fn set_testodrome_id(&mut self, query_id: String) {
+        self.testodrome_query_id = Some(query_id);
     }
 
     fn has_private_peer_addr(&self) -> bool {
