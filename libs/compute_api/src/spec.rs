@@ -179,6 +179,9 @@ pub enum ComputeFeature {
     /// Pre-install and initialize anon extension for every database in the cluster
     AnonExtension,
 
+    /// Allow to configure rsyslog for Postgres logs export
+    PostgresLogsExport,
+
     /// This is a special feature flag that is used to represent unknown feature flags.
     /// Basically all unknown to enum flags are represented as this one. See unit test
     /// `parse_unknown_features()` for more details.

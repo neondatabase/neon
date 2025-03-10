@@ -6,7 +6,7 @@ use std::io::Write;
 use std::io::prelude::*;
 use std::path::Path;
 
-use compute_api::spec::{ComputeAudit, ComputeMode, ComputeSpec, GenericOption};
+use compute_api::spec::{ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, GenericOption};
 
 use crate::pg_helpers::{
     GenericOptionExt, GenericOptionsSearch, PgOptionsSerialize, escape_conf_value,
@@ -195,6 +195,12 @@ pub fn write_postgres_conf(
     } else {
         // be explicit about the default value
         writeln!(file, "neon.disable_logical_replication_subscribers=false")?;
+    }
+
+    // We need Postgres to send logs to rsyslog so that we can forward them
+    // further to customers' log aggregation systems.
+    if spec.features.contains(&ComputeFeature::PostgresLogsExport) {
+        writeln!(file, "log_destination='stderr,syslog'")?;
     }
 
     // This is essential to keep this line at the end of the file,
