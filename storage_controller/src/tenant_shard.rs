@@ -324,6 +324,37 @@ impl IntentState {
             false
         }
     }
+
+    pub(crate) fn set_preferred_az(
+        &mut self,
+        scheduler: &mut Scheduler,
+        preferred_az: Option<AvailabilityZone>,
+    ) {
+        let new_az = preferred_az.as_ref();
+        let old_az = self.preferred_az_id.as_ref();
+
+        if old_az != new_az {
+            if let Some(node_id) = self.attached {
+                scheduler.update_node_ref_counts(
+                    node_id,
+                    new_az,
+                    RefCountUpdate::ChangePreferredAzFrom(old_az),
+                );
+            }
+            for node_id in &self.secondary {
+                scheduler.update_node_ref_counts(
+                    *node_id,
+                    new_az,
+                    RefCountUpdate::ChangePreferredAzFrom(old_az),
+                );
+            }
+            self.preferred_az_id = preferred_az;
+        }
+    }
+
+    pub(crate) fn get_preferred_az(&self) -> Option<&AvailabilityZone> {
+        self.preferred_az_id.as_ref()
+    }
 }
 
 impl Drop for IntentState {
@@ -1770,11 +1801,15 @@ impl TenantShard {
     }
 
     pub(crate) fn preferred_az(&self) -> Option<&AvailabilityZone> {
-        self.intent.preferred_az_id.as_ref()
+        self.intent.get_preferred_az()
     }
 
-    pub(crate) fn set_preferred_az(&mut self, preferred_az_id: Option<AvailabilityZone>) {
-        self.intent.preferred_az_id = preferred_az_id;
+    pub(crate) fn set_preferred_az(
+        &mut self,
+        scheduler: &mut Scheduler,
+        preferred_az_id: Option<AvailabilityZone>,
+    ) {
+        self.intent.set_preferred_az(scheduler, preferred_az_id);
     }
 
     /// Returns all the nodes to which this tenant shard is attached according to the
