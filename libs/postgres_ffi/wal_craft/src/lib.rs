@@ -122,18 +122,11 @@ impl Conf {
         let unix_socket_dir_path = unix_socket_dir.path().to_owned();
         let server_process = self
             .new_pg_command("postgres")?
-            // .args(["-c", "logging_collector=on"])
-            // .args(["-c", "log_destination=stderr"])
-            // .args(["-c", "log_directory=/Users/suhasthalanki/Documents/neon/logs"])
             .args(["-c", "listen_addresses="])
             .arg("-k")
             .arg(&unix_socket_dir_path)
             .arg("-D")
             .arg(&self.datadir)
-            .arg("-d")
-            .arg("5")
-            // .arg("-r")
-            // .arg(Path::new("/Users/suhasthalanki/Documents/neon/test.log"))
             .args(REQUIRED_POSTGRES_CONFIG.iter().flat_map(|cfg| ["-c", cfg]))
             .spawn()?;
         let server = PostgresServer {

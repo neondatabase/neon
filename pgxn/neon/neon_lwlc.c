@@ -47,6 +47,8 @@ static HTAB *lastWrittenLsnCache;
 
 LwLsnCacheCtl* LwLsnCache;
 
+static int lwlsn_cache_size; 
+
 
 static void
 lwlc_register_gucs(void)
@@ -54,7 +56,7 @@ lwlc_register_gucs(void)
 	DefineCustomIntVariable("neon.last_written_lsn_cache_size",
 							"Size of last written LSN cache used by Neon",
 							NULL,
-							&LwLsnCache->lastWrittenLsnCacheSize,
+							&lwlsn_cache_size,
 							(128*1024), 1024, INT_MAX,
 							PGC_POSTMASTER,
 							0, /* plain units */
@@ -123,7 +125,7 @@ static void shmemrequest(void) {
 			prev_shmem_request_hook();
 	#endif
 
-		requested_size += hash_estimate_size(LwLsnCache->lastWrittenLsnCacheSize, sizeof(LastWrittenLsnCacheEntry));
+		requested_size += hash_estimate_size(lwlsn_cache_size, sizeof(LastWrittenLsnCacheEntry));
 
 		RequestAddinShmemSpace(requested_size);
 }
@@ -134,15 +136,17 @@ static void shmeminit(void) {
 	if (prev_shmem_startup_hook) {
 		prev_shmem_startup_hook();
 	}
-	if (LwLsnCache->lastWrittenLsnCacheSize > 0)
+	if (lwlsn_cache_size > 0)
 	{
 		info.keysize = sizeof(BufferTag);
 		info.entrysize = sizeof(LastWrittenLsnCacheEntry);
 		lastWrittenLsnCache = ShmemInitHash("last_written_lsn_cache",
-			LwLsnCache->lastWrittenLsnCacheSize, LwLsnCache->lastWrittenLsnCacheSize,
+			lwlsn_cache_size, lwlsn_cache_size,
 										&info,
 										HASH_ELEM | HASH_BLOBS);
 		LwLsnCache = ShmemInitStruct("neon/LwLsnCacheCtl", sizeof(LwLsnCacheCtl), &found);
+		// Now set the size in the struct
+		LwLsnCache->lastWrittenLsnCacheSize = lwlsn_cache_size;
 		if (found) {
 			return;
 		}
