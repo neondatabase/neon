@@ -31,9 +31,9 @@ jobs:
       matrix:
         include:
           - target: new_branch 
-            custom_scripts: insert_webhooks.sql@200 select_any_webhook_with_skew.sql@400 select_recent_webhook.sql@400 select_prefetch_webhook.sql@3 IUD_one_transaction.sql@20
+            custom_scripts: insert_webhooks.sql@200 select_any_webhook_with_skew.sql@400 select_recent_webhook.sql@400 select_prefetch_webhook.sql@3 IUD_one_transaction.sql@50
           - target: reuse_branch 
-            custom_scripts: insert_webhooks.sql@200 select_any_webhook_with_skew.sql@400 select_recent_webhook.sql@397 select_prefetch_webhook.sql@3 IUD_one_transaction.sql@20
+            custom_scripts: insert_webhooks.sql@200 select_any_webhook_with_skew.sql@400 select_recent_webhook.sql@397 select_prefetch_webhook.sql@3 IUD_one_transaction.sql@50
       max-parallel: 1 # we want to run each stripe size sequentially to be able to compare the results
     permissions:
       contents: write
