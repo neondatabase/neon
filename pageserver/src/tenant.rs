@@ -2451,6 +2451,7 @@ impl Tenant {
             create_guard,
             initdb_lsn,
             None,
+            None,
         )
         .await
     }
@@ -2781,6 +2782,7 @@ impl Tenant {
                     &new_metadata,
                     timeline_create_guard,
                     initdb_lsn,
+                    None,
                     None,
                 )
                 .await
@@ -4869,6 +4871,7 @@ impl Tenant {
                 timeline_create_guard,
                 start_lsn + 1,
                 Some(Arc::clone(src_timeline)),
+                Some(src_timeline.get_rel_size_v2_status()),
             )
             .await?;
 
@@ -5142,6 +5145,7 @@ impl Tenant {
                 timeline_create_guard,
                 pgdata_lsn,
                 None,
+                None,
             )
             .await?;
 
@@ -5220,13 +5224,14 @@ impl Tenant {
         create_guard: TimelineCreateGuard,
         start_lsn: Lsn,
         ancestor: Option<Arc<Timeline>>,
+        rel_size_v2_status: Option<RelSizeMigration>,
     ) -> anyhow::Result<UninitializedTimeline<'a>> {
         let tenant_shard_id = self.tenant_shard_id;
 
         let resources = self.build_timeline_resources(new_timeline_id);
         resources
             .remote_client
-            .init_upload_queue_for_empty_remote(new_metadata)?;
+            .init_upload_queue_for_empty_remote(new_metadata, rel_size_v2_status.clone())?;
 
         let timeline_struct = self
             .create_timeline_struct(
@@ -5238,7 +5243,7 @@ impl Tenant {
                 CreateTimelineCause::Load,
                 create_guard.idempotency.clone(),
                 None,
-                None,
+                rel_size_v2_status,
             )
             .context("Failed to create timeline data structure")?;
 

@@ -1964,14 +1964,12 @@ impl DatadirModification<'_> {
                 .context("deserialize db")?
         };
 
-        // Add the new relation to the rel directory entry, and write it back
-        if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
-            return Err(RelationError::AlreadyExists);
-        }
-
         let v2_enabled = self.maybe_enable_rel_size_v2()?;
 
         if v2_enabled {
+            if rel_dir.rels.contains(&(rel.relnode, rel.forknum)) {
+                return Err(RelationError::AlreadyExists);
+            }
             let sparse_rel_dir_key =
                 rel_tag_sparse_key(rel.spcnode, rel.dbnode, rel.relnode, rel.forknum);
             // check if the rel_dir_key exists in v2
@@ -2006,6 +2004,10 @@ impl DatadirModification<'_> {
             self.pending_directory_entries
                 .push((DirectoryKind::RelV2, MetricsUpdate::Add(1)));
         } else {
+            // Add the new relation to the rel directory entry, and write it back
+            if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
+                return Err(RelationError::AlreadyExists);
+            }
             if !dbdir_exists {
                 self.pending_directory_entries
                     .push((DirectoryKind::Rel, MetricsUpdate::Set(0)))
@@ -2019,6 +2021,7 @@ impl DatadirModification<'_> {
                 )),
             );
         }
+
         // Put size
         let size_key = rel_size_to_key(rel);
         let buf = nblocks.to_le_bytes();
@@ -2141,7 +2144,7 @@ impl DatadirModification<'_> {
                     // Remove entry from relation size cache
                     self.tline.remove_cached_rel_size(&rel_tag);
 
-                    // Delete size entry, as well as all blocks
+                    // Delete size entry, as well as all blocks; this is currently a no-op because we haven't implemented tombstones in storage.
                     self.delete(rel_key_range(rel_tag));
                 }
             }

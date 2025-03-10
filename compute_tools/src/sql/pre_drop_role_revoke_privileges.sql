@@ -1,8 +1,7 @@
-SET SESSION ROLE neon_superuser;
-
-DO $$
+DO ${outer_tag}$
 DECLARE
     schema TEXT;
+    grantor TEXT;
     revoke_query TEXT;
 BEGIN
     FOR schema IN
@@ -15,14 +14,25 @@ BEGIN
         -- ii) it's easy to add more schemas to the list if needed.
         WHERE schema_name IN ('public')
     LOOP
-        revoke_query := format(
-            'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM {role_name} GRANTED BY neon_superuser;',
-            schema
-        );
+        FOR grantor IN EXECUTE
+            format(
+                'SELECT DISTINCT rtg.grantor FROM information_schema.role_table_grants AS rtg WHERE grantee = %s',
+                -- N.B. this has to be properly dollar-escaped with `pg_quote_dollar()`
+                quote_literal({role_name})
+            )
+        LOOP
+            EXECUTE format('SET LOCAL ROLE %I', grantor);
 
-        EXECUTE revoke_query;
+            revoke_query := format(
+                'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM %I GRANTED BY %I',
+                schema,
+                -- N.B. this has to be properly dollar-escaped with `pg_quote_dollar()`
+                {role_name},
+                grantor
+            );
+
+            EXECUTE revoke_query;
+        END LOOP;
     END LOOP;
 END;
-$$;
-
-RESET ROLE;
+${outer_tag}$;

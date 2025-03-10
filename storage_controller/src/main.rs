@@ -8,6 +8,7 @@ use clap::Parser;
 use hyper0::Uri;
 use metrics::BuildInfo;
 use metrics::launch_timestamp::LaunchTimestamp;
+use reqwest::Certificate;
 use storage_controller::http::make_router;
 use storage_controller::metrics::preinitialize_metrics;
 use storage_controller::persistence::Persistence;
@@ -128,25 +129,28 @@ struct Cli {
     #[arg(long)]
     chaos_exit_crontab: Option<cron::Schedule>,
 
-    // Maximum acceptable lag for the secondary location while draining
-    // a pageserver
+    /// Maximum acceptable lag for the secondary location while draining
+    /// a pageserver
     #[arg(long)]
     max_secondary_lag_bytes: Option<u64>,
 
-    // Period with which to send heartbeats to registered nodes
+    /// Period with which to send heartbeats to registered nodes
     #[arg(long)]
     heartbeat_interval: Option<humantime::Duration>,
 
     #[arg(long)]
     long_reconcile_threshold: Option<humantime::Duration>,
 
-    // Flag to use https for requests to pageserver API.
+    /// Flag to use https for requests to pageserver API.
     #[arg(long, default_value = "false")]
     use_https_pageserver_api: bool,
-
-    /// Whether to load safekeeprs from the database and heartbeat them
+    /// Flag to use https for requests to safekeeper API.
     #[arg(long, default_value = "false")]
-    load_safekeepers: bool,
+    use_https_safekeeper_api: bool,
+
+    /// Trusted root CA certificate to use in https APIs.
+    #[arg(long)]
+    ssl_ca_file: Option<PathBuf>,
 }
 
 enum StrictMode {
@@ -290,18 +294,13 @@ async fn async_main() -> anyhow::Result<()> {
 
     let secrets = Secrets::load(&args).await?;
 
-    // TODO: once we've rolled out the safekeeper JWT token everywhere, put it into the validation code below
-    tracing::info!(
-        "safekeeper_jwt_token set: {:?}",
-        secrets.safekeeper_jwt_token.is_some()
-    );
-
     // Validate required secrets and arguments are provided in strict mode
     match strict_mode {
         StrictMode::Strict
             if (secrets.public_key.is_none()
                 || secrets.pageserver_jwt_token.is_none()
-                || secrets.control_plane_jwt_token.is_none()) =>
+                || secrets.control_plane_jwt_token.is_none()
+                || secrets.safekeeper_jwt_token.is_none()) =>
         {
             // Production systems should always have secrets configured: if public_key was not set
             // then we would implicitly disable auth.
@@ -323,6 +322,15 @@ async fn async_main() -> anyhow::Result<()> {
             tracing::warn!("Starting in dev mode: this may be an insecure configuration.")
         }
     }
+
+    let ssl_ca_cert = match args.ssl_ca_file.as_ref() {
+        Some(ssl_ca_file) => {
+            tracing::info!("Using ssl root CA file: {ssl_ca_file:?}");
+            let buf = tokio::fs::read(ssl_ca_file).await?;
+            Some(Certificate::from_pem(&buf)?)
+        }
+        None => None,
+    };
 
     let config = Config {
         pageserver_jwt_token: secrets.pageserver_jwt_token,
@@ -360,7 +368,8 @@ async fn async_main() -> anyhow::Result<()> {
         start_as_candidate: args.start_as_candidate,
         http_service_port: args.listen.port() as i32,
         use_https_pageserver_api: args.use_https_pageserver_api,
-        load_safekeepers: args.load_safekeepers,
+        use_https_safekeeper_api: args.use_https_safekeeper_api,
+        ssl_ca_cert,
     };
 
     // Validate that we can connect to the database

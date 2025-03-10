@@ -963,6 +963,7 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
                         id: pageserver_id,
                         listen_pg_addr: format!("127.0.0.1:{pg_port}"),
                         listen_http_addr: format!("127.0.0.1:{http_port}"),
+                        listen_https_addr: None,
                         pg_auth_type: AuthType::Trust,
                         http_auth_type: AuthType::Trust,
                         other: Default::default(),
@@ -977,6 +978,7 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
             default_tenant_id: TenantId::from_array(std::array::from_fn(|_| 0)),
             storage_controller: None,
             control_plane_compute_hook_api: None,
+            generate_local_ssl_certs: false,
         }
     };
 

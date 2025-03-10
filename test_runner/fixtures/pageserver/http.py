@@ -375,6 +375,19 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/reset", params=params)
         self.verbose_error(res)
 
+    def timeline_patch_index_part(
+        self,
+        tenant_id: TenantId | TenantShardId,
+        timeline_id: TimelineId,
+        data: dict[str, Any],
+    ):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/patch_index_part",
+            json=data,
+        )
+        self.verbose_error(res)
+        return res.json()
+
     def tenant_location_conf(
         self,
         tenant_id: TenantId | TenantShardId,

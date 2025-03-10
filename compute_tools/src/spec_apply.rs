@@ -6,21 +6,22 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use compute_api::responses::ComputeStatus;
-use compute_api::spec::{ComputeFeature, ComputeSpec, Database, PgIdent, Role};
+use compute_api::spec::{ComputeAudit, ComputeFeature, ComputeSpec, Database, PgIdent, Role};
 use futures::future::join_all;
 use tokio::sync::RwLock;
 use tokio_postgres::Client;
 use tokio_postgres::error::SqlState;
 use tracing::{Instrument, debug, error, info, info_span, instrument, warn};
 
-use crate::compute::{ComputeNode, ComputeState, construct_superuser_query};
+use crate::compute::{ComputeNode, ComputeState};
 use crate::pg_helpers::{
-    DatabaseExt, Escaping, GenericOptionsSearch, RoleExt, escape_literal, get_existing_dbs_async,
+    DatabaseExt, Escaping, GenericOptionsSearch, RoleExt, get_existing_dbs_async,
     get_existing_roles_async,
 };
 use crate::spec_apply::ApplySpecPhase::{
-    CreateAndAlterDatabases, CreateAndAlterRoles, CreateAvailabilityCheck, CreateSchemaNeon,
-    CreateSuperUser, DropInvalidDatabases, DropRoles, FinalizeDropLogicalSubscriptions,
+    CreateAndAlterDatabases, CreateAndAlterRoles, CreateAvailabilityCheck, CreateNeonSuperuser,
+    CreatePgauditExtension, CreatePgauditlogtofileExtension, CreateSchemaNeon,
+    DisablePostgresDBPgAudit, DropInvalidDatabases, DropRoles, FinalizeDropLogicalSubscriptions,
     HandleNeonExtension, HandleOtherExtensions, RenameAndDeleteDatabases, RenameRoles,
     RunInEachDatabase,
 };
@@ -187,7 +188,7 @@ impl ComputeNode {
             }
 
             for phase in [
-                CreateSuperUser,
+                CreateNeonSuperuser,
                 DropInvalidDatabases,
                 RenameRoles,
                 CreateAndAlterRoles,
@@ -275,6 +276,19 @@ impl ComputeNode {
             if spec.drop_subscriptions_before_start && !drop_subscriptions_done {
                 info!("Adding FinalizeDropLogicalSubscriptions phase because drop_subscriptions_before_start is set");
                 phases.push(FinalizeDropLogicalSubscriptions);
+            }
+
+            // Keep DisablePostgresDBPgAudit phase at the end,
+            // so that all config operations are audit logged.
+            match spec.audit_log_level
+            {
+                ComputeAudit::Hipaa => {
+                    phases.push(CreatePgauditExtension);
+                    phases.push(CreatePgauditlogtofileExtension);
+                    phases.push(DisablePostgresDBPgAudit);
+                }
+                ComputeAudit::Log => { /* not implemented yet */ }
+                ComputeAudit::Disabled => {}
             }
 
             for phase in phases {
@@ -455,7 +469,7 @@ pub enum PerDatabasePhase {
 
 #[derive(Clone, Debug)]
 pub enum ApplySpecPhase {
-    CreateSuperUser,
+    CreateNeonSuperuser,
     DropInvalidDatabases,
     RenameRoles,
     CreateAndAlterRoles,
@@ -463,6 +477,9 @@ pub enum ApplySpecPhase {
     CreateAndAlterDatabases,
     CreateSchemaNeon,
     RunInEachDatabase { db: DB, subphase: PerDatabasePhase },
+    CreatePgauditExtension,
+    CreatePgauditlogtofileExtension,
+    DisablePostgresDBPgAudit,
     HandleOtherExtensions,
     HandleNeonExtension,
     CreateAvailabilityCheck,
@@ -579,14 +596,10 @@ async fn get_operations<'a>(
     apply_spec_phase: &'a ApplySpecPhase,
 ) -> Result<Box<dyn Iterator<Item = Operation> + 'a + Send>> {
     match apply_spec_phase {
-        ApplySpecPhase::CreateSuperUser => {
-            let query = construct_superuser_query(spec);
-
-            Ok(Box::new(once(Operation {
-                query,
-                comment: None,
-            })))
-        }
+        ApplySpecPhase::CreateNeonSuperuser => Ok(Box::new(once(Operation {
+            query: include_str!("sql/create_neon_superuser.sql").to_string(),
+            comment: None,
+        }))),
         ApplySpecPhase::DropInvalidDatabases => {
             let mut ctx = ctx.write().await;
             let databases = &mut ctx.dbs;
@@ -720,14 +733,15 @@ async fn get_operations<'a>(
                         // We do not check whether the DB exists or not,
                         // Postgres will take care of it for us
                         "delete_db" => {
+                            let (db_name, outer_tag) = op.name.pg_quote_dollar();
                             // In Postgres we can't drop a database if it is a template.
                             // So we need to unset the template flag first, but it could
                             // be a retry, so we could've already dropped the database.
                             // Check that database exists first to make it idempotent.
                             let unset_template_query: String = format!(
                                 include_str!("sql/unset_template_for_drop_dbs.sql"),
-                                datname_str = escape_literal(&op.name),
-                                datname = &op.name.pg_quote()
+                                datname = db_name,
+                                outer_tag = outer_tag,
                             );
 
                             // Use FORCE to drop database even if there are active connections.
@@ -834,6 +848,8 @@ async fn get_operations<'a>(
                                 comment: None,
                             },
                             Operation {
+                                // ALL PRIVILEGES grants CREATE, CONNECT, and TEMPORARY on the database
+                                // (see https://www.postgresql.org/docs/current/ddl-priv.html)
                                 query: format!(
                                     "GRANT ALL PRIVILEGES ON DATABASE {} TO neon_superuser",
                                     db.name.pg_quote()
@@ -893,9 +909,11 @@ async fn get_operations<'a>(
                 PerDatabasePhase::DropLogicalSubscriptions => {
                     match &db {
                         DB::UserDB(db) => {
+                            let (db_name, outer_tag) = db.name.pg_quote_dollar();
                             let drop_subscription_query: String = format!(
                                 include_str!("sql/drop_subscriptions.sql"),
-                                datname_str = escape_literal(&db.name),
+                                datname_str = db_name,
+                                outer_tag = outer_tag,
                             );
 
                             let operations = vec![Operation {
@@ -934,6 +952,7 @@ async fn get_operations<'a>(
                                     DB::SystemDB => PgIdent::from("cloud_admin").pg_quote(),
                                     DB::UserDB(db) => db.owner.pg_quote(),
                                 };
+                                let (escaped_role, outer_tag) = op.name.pg_quote_dollar();
 
                                 Some(vec![
                                     // This will reassign all dependent objects to the db owner
@@ -948,7 +967,9 @@ async fn get_operations<'a>(
                                     Operation {
                                         query: format!(
                                             include_str!("sql/pre_drop_role_revoke_privileges.sql"),
-                                            role_name = quoted,
+                                            // N.B. this has to be properly dollar-escaped with `pg_quote_dollar()`
+                                            role_name = escaped_role,
+                                            outer_tag = outer_tag,
                                         ),
                                         comment: None,
                                     },
@@ -973,12 +994,14 @@ async fn get_operations<'a>(
                         DB::SystemDB => return Ok(Box::new(empty())),
                         DB::UserDB(db) => db,
                     };
+                    let (db_owner, outer_tag) = db.owner.pg_quote_dollar();
 
                     let operations = vec![
                         Operation {
                             query: format!(
                                 include_str!("sql/set_public_schema_owner.sql"),
-                                db_owner = db.owner.pg_quote()
+                                db_owner = db_owner,
+                                outer_tag = outer_tag,
                             ),
                             comment: None,
                         },
@@ -1097,6 +1120,25 @@ async fn get_operations<'a>(
                 }
             }
             Ok(Box::new(empty()))
+        }
+        ApplySpecPhase::CreatePgauditExtension => Ok(Box::new(once(Operation {
+            query: String::from("CREATE EXTENSION IF NOT EXISTS pgaudit"),
+            comment: Some(String::from("create pgaudit extensions")),
+        }))),
+        ApplySpecPhase::CreatePgauditlogtofileExtension => Ok(Box::new(once(Operation {
+            query: String::from("CREATE EXTENSION IF NOT EXISTS pgauditlogtofile"),
+            comment: Some(String::from("create pgauditlogtofile extensions")),
+        }))),
+        // Disable pgaudit logging for postgres database.
+        // Postgres is neon system database used by monitors
+        // and compute_ctl tuning functions and thus generates a lot of noise.
+        // We do not consider data stored in this database as sensitive.
+        ApplySpecPhase::DisablePostgresDBPgAudit => {
+            let query = "ALTER DATABASE postgres SET pgaudit.log to 'none'";
+            Ok(Box::new(once(Operation {
+                query: query.to_string(),
+                comment: Some(query.to_string()),
+            })))
         }
         ApplySpecPhase::HandleNeonExtension => {
             let operations = vec![
