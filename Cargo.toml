@@ -155,6 +155,7 @@ rpds = "0.13"
 rustc-hash = "1.1.0"
 rustls = { version = "0.23.16", default-features = false }
 rustls-pemfile = "2"
+rustls-pki-types = "1.11"
 scopeguard = "1.1"
 sysinfo = "0.29.2"
 sd-notify = "0.4.1"

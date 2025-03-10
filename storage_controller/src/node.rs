@@ -7,7 +7,7 @@ use pageserver_api::controller_api::{
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
-use reqwest::StatusCode;
+use reqwest::{Certificate, StatusCode};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use utils::backoff;
@@ -276,10 +276,12 @@ impl Node {
     /// This will return None to indicate cancellation.  Cancellation may happen from
     /// the cancellation token passed in, or from Self's cancellation token (i.e. node
     /// going offline).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn with_client_retries<T, O, F>(
         &self,
         mut op: O,
         jwt: &Option<String>,
+        ssl_ca_cert: &Option<Certificate>,
         warn_threshold: u32,
         max_retries: u32,
         timeout: Duration,
@@ -298,19 +300,26 @@ impl Node {
                 | ApiError(StatusCode::REQUEST_TIMEOUT, _) => false,
                 ApiError(_, _) => true,
                 Cancelled => true,
+                CreateClient(_) => true,
             }
         }
 
+        // TODO: refactor PageserverClient and with_client_retires (#11113).
+        let mut http_client = reqwest::ClientBuilder::new().timeout(timeout);
+        if let Some(ssl_ca_cert) = ssl_ca_cert.as_ref() {
+            http_client = http_client.add_root_certificate(ssl_ca_cert.clone())
+        }
+
+        let http_client = match http_client.build() {
+            Ok(http_client) => http_client,
+            Err(err) => return Some(Err(mgmt_api::Error::CreateClient(err))),
+        };
+
         backoff::retry(
             || {
-                let http_client = reqwest::ClientBuilder::new()
-                    .timeout(timeout)
-                    .build()
-                    .expect("Failed to construct HTTP client");
-
                 let client = PageserverClient::from_client(
                     self.get_id(),
-                    http_client,
+                    http_client.clone(),
                     self.base_url(),
                     jwt.as_deref(),
                 );
