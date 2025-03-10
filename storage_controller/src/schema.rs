@@ -56,6 +56,7 @@ diesel::table! {
         http_port -> Int4,
         availability_zone_id -> Text,
         scheduling_policy -> Varchar,
+        https_port -> Nullable<Int4>,
     }
 }
 

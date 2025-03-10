@@ -1728,6 +1728,7 @@ pub(crate) struct SafekeeperPersistence {
     pub(crate) http_port: i32,
     pub(crate) availability_zone_id: String,
     pub(crate) scheduling_policy: SkSchedulingPolicyFromSql,
+    pub(crate) https_port: Option<i32>,
 }
 
 /// Wrapper struct around [`SkSchedulingPolicy`] because both it and [`FromSql`] are from foreign crates,
@@ -1768,6 +1769,7 @@ impl SafekeeperPersistence {
             host: upsert.host,
             port: upsert.port,
             http_port: upsert.http_port,
+            https_port: upsert.https_port,
             availability_zone_id: upsert.availability_zone_id,
             scheduling_policy: SkSchedulingPolicyFromSql(scheduling_policy),
         }
@@ -1780,6 +1782,7 @@ impl SafekeeperPersistence {
             host: self.host.clone(),
             port: self.port,
             http_port: self.http_port,
+            https_port: self.https_port,
             availability_zone_id: self.availability_zone_id.clone(),
             scheduling_policy: self.scheduling_policy.0,
         })
@@ -1800,6 +1803,7 @@ pub(crate) struct SafekeeperUpsert {
     /// The active flag will not be stored in the database and will be ignored.
     pub(crate) active: Option<bool>,
     pub(crate) http_port: i32,
+    pub(crate) https_port: Option<i32>,
     pub(crate) availability_zone_id: String,
 }
 
@@ -1815,6 +1819,7 @@ impl SafekeeperUpsert {
             host: &self.host,
             port: self.port,
             http_port: self.http_port,
+            https_port: self.https_port,
             availability_zone_id: &self.availability_zone_id,
             // None means a wish to not update this column. We expose abilities to update it via other means.
             scheduling_policy: None,
@@ -1831,6 +1836,7 @@ struct InsertUpdateSafekeeper<'a> {
     host: &'a str,
     port: i32,
     http_port: i32,
+    https_port: Option<i32>,
     availability_zone_id: &'a str,
     scheduling_policy: Option<&'a str>,
 }

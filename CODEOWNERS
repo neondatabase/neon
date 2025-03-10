@@ -3,7 +3,6 @@
 
 # DevProd & PerfCorr
 /.github/ @neondatabase/developer-productivity @neondatabase/performance-correctness
-/test_runner/	@neondatabase/performance-correctness
 
 # Compute
 /pgxn/ @neondatabase/compute
