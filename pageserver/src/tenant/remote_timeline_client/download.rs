@@ -740,7 +740,7 @@ where
         op,
         DownloadError::is_permanent,
         FAILED_DOWNLOAD_WARN_THRESHOLD,
-        backoff::INFINITE_RETRIES,
+        u32::MAX,
         description,
         cancel,
     )

@@ -43,8 +43,6 @@ pub fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_sec
     }
 }
 
-pub const INFINITE_RETRIES: u32 = u32::MAX;
-
 /// Retries passed operation until one of the following conditions are met:
 /// - encountered error is considered as permanent (non-retryable)
 /// - retries have been exhausted
@@ -57,8 +55,6 @@ pub const INFINITE_RETRIES: u32 = u32::MAX;
 ///
 /// If attempts fail, they are being logged with `{:#}` which works for anyhow, but does not work
 /// for any other error type. Final failed attempt is logged with `{:?}`.
-///
-/// Pass [`INFINITE_RETRIES`] as `max_retries` to retry forever.
 ///
 /// Returns `None` if cancellation was noticed during backoff or the terminal result.
 pub async fn retry<T, O, F, E>(
@@ -100,7 +96,7 @@ where
             Err(err) if attempts < warn_threshold => {
                 tracing::info!("{description} failed, will retry (attempt {attempts}): {err:#}");
             }
-            Err(err) if attempts < max_retries || max_retries == INFINITE_RETRIES => {
+            Err(err) if attempts < max_retries => {
                 tracing::warn!("{description} failed, will retry (attempt {attempts}): {err:#}");
             }
             Err(err) => {
@@ -125,9 +121,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::io;
+
     use tokio::sync::Mutex;
+
+    use super::*;
 
     #[test]
     fn backoff_defaults_produce_growing_backoff_sequence() {
