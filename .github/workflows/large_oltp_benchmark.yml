@@ -40,7 +40,7 @@ jobs:
       statuses: write
       id-token: write # aws-actions/configure-aws-credentials
     env:
-      TEST_PG_BENCH_DURATIONS_MATRIX: "20m" # todo update to > 1 h 
+      TEST_PG_BENCH_DURATIONS_MATRIX: "1h" # todo update to > 1 h 
       TEST_PGBENCH_CUSTOM_SCRIPTS: ${{ matrix.custom_scripts }}
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       PG_VERSION: 16 # pre-determined by pre-determined project
@@ -57,8 +57,9 @@ jobs:
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
-    # Increase timeout to 16h, default timeout is 6h
-    timeout-minutes: 960
+    # Increase timeout to 18h, default timeout is 6h 
+    # (1h pgbench, 3h vacuum analyze 3.5h re-index) x 2 = 15h, leave some buffer for regressions
+    timeout-minutes: 1080
 
     steps:
     - uses: actions/checkout@v4
