@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import os
 import uuid
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
 from fixtures.utils import run_only_on_default_postgres, wait_until
 
 
@@ -50,3 +51,34 @@ def test_logging_event_count(neon_env_builder: NeonEnvBuilder, level: str):
         assert val > (before or 0.0)
 
     wait_until(assert_metric_value)
+
+
+def test_base_audit_logging(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+
+    endpoint = env.endpoints.create("main")
+
+    endpoint.respec(
+        audit_log_level="Log",
+    )
+
+    endpoint.start()
+
+    with endpoint.cursor() as cursor:
+        cursor.execute("CREATE DATABASE test")
+
+    with endpoint.cursor(dbname="test") as cursor:
+        cursor.execute("CREATE TABLE tbl(a int)")
+        cursor.execute("DROP TABLE tbl")
+
+    endpoint.stop()
+
+    log_path = os.path.join(endpoint.endpoint_path(), "compute.log")
+    with open(log_path) as log_file:
+        logs = log_file.read()
+        # Check that audit log is present in the logs
+        # expected log entries:
+        # LOG:  AUDIT: SESSION,1,1,DDL,CREATE TABLE,,,CREATE TABLE tbl(a int),<not logged>
+        # LOG:  AUDIT: SESSION,2,1,DDL,DROP TABLE,,,DROP TABLE tbl,<not logged>
+        assert "CREATE TABLE tbl" in logs
+        assert "DROP TABLE tbl" in logs
