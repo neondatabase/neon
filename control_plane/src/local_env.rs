@@ -179,7 +179,6 @@ pub struct NeonStorageControllerConf {
     pub use_https_pageserver_api: bool,
 
     pub timelines_onto_safekeepers: bool,
-
 }
 
 impl NeonStorageControllerConf {
