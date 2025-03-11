@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import os
 import timeit
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 from fixtures.benchmark_fixture import PgBenchRunResult
 from fixtures.compare_fixtures import PgCompare
 from fixtures.log_helper import log
-from contextlib import closing
 
 from performance.test_perf_pgbench import get_durations_matrix, utc_now_timestamp
 
@@ -83,6 +83,7 @@ def run_pgbench(env: PgCompare, prefix: str, cmdline, password: None):
     )
     env.zenbenchmark.record_pg_bench_result(prefix, res)
 
+
 def run_database_maintenance(env: PgCompare):
     with closing(env.pg.connect()) as conn:
         with conn.cursor() as cur:
@@ -94,17 +95,17 @@ def run_database_maintenance(env: PgCompare):
 
             # recover previously failed or canceled re-indexing
             cur.execute(
-                f"""
-                DO $$ 
-                DECLARE 
+                """
+                DO $$
+                DECLARE
                     invalid_index TEXT;
                 BEGIN
-                    FOR invalid_index IN 
+                    FOR invalid_index IN
                         SELECT c.relname
                         FROM pg_class c
                         JOIN pg_index i ON i.indexrelid = c.oid
                         JOIN pg_namespace n ON n.oid = c.relnamespace
-                        WHERE n.nspname = 'transaction' 
+                        WHERE n.nspname = 'transaction'
                         AND i.indisvalid = FALSE
                         AND c.relname LIKE '%_ccnew%'
                     LOOP
@@ -112,25 +113,25 @@ def run_database_maintenance(env: PgCompare):
                     END LOOP;
                 END $$;
                 """
-                )
+            )
             # also recover failed or canceled re-indexing on toast part of table
             cur.execute(
-                f"""
-                DO $$ 
-                DECLARE 
+                """
+                DO $$
+                DECLARE
                     invalid_index TEXT;
                 BEGIN
-                    FOR invalid_index IN 
+                    FOR invalid_index IN
                         SELECT c.relname
                         FROM pg_class c
                         JOIN pg_index i ON i.indexrelid = c.oid
                         JOIN pg_namespace n ON n.oid = c.relnamespace
-                        WHERE n.nspname = 'pg_toast' 
+                        WHERE n.nspname = 'pg_toast'
                         AND i.indisvalid = FALSE
                         AND c.relname LIKE '%_ccnew%'
                         AND i.indrelid = (
-                            SELECT reltoastrelid FROM pg_class 
-                            WHERE relname = 'transaction' 
+                            SELECT reltoastrelid FROM pg_class
+                            WHERE relname = 'transaction'
                             AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'transaction')
                         )
                     LOOP
@@ -138,24 +139,28 @@ def run_database_maintenance(env: PgCompare):
                     END LOOP;
                 END $$;
                 """
-                )
-            
+            )
+
             log.info("start REINDEX TABLE CONCURRENTLY transaction.transaction")
             with env.zenbenchmark.record_duration("reindex concurrently"):
                 cur.execute("REINDEX TABLE CONCURRENTLY transaction.transaction;")
             log.info("finished REINDEX TABLE CONCURRENTLY transaction.transaction")
-    
+
 
 @pytest.mark.parametrize("custom_scripts", get_custom_scripts())
 @pytest.mark.parametrize("duration", get_durations_matrix())
 @pytest.mark.remote_cluster
-def test_perf_oltp_large_tenant_pgbench(remote_compare: PgCompare, custom_scripts: str, duration: int):
+def test_perf_oltp_large_tenant_pgbench(
+    remote_compare: PgCompare, custom_scripts: str, duration: int
+):
     run_test_pgbench(remote_compare, custom_scripts, duration)
 
 
 @pytest.mark.parametrize("custom_scripts", get_custom_scripts())
 @pytest.mark.parametrize("duration", get_durations_matrix())
 @pytest.mark.remote_cluster
-def test_perf_oltp_large_tenant_maintenance(remote_compare: PgCompare, custom_scripts: str, duration: int):
+def test_perf_oltp_large_tenant_maintenance(
+    remote_compare: PgCompare, custom_scripts: str, duration: int
+):
     # run analyze, vacuum, re-index after the test and measure and report its duration
     run_database_maintenance(remote_compare)

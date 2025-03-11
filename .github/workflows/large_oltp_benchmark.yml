@@ -57,8 +57,8 @@ jobs:
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
-    # Increase timeout to 8h, default timeout is 6h
-    timeout-minutes: 480
+    # Increase timeout to 16h, default timeout is 6h
+    timeout-minutes: 960
 
     steps:
     - uses: actions/checkout@v4
@@ -157,6 +157,13 @@ jobs:
         project_id: ${{ vars.BENCHMARK_LARGE_OLTP_PROJECTID }}
         branch_id: ${{ steps.create-neon-branch-oltp-target.outputs.branch_id }}
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+
+    - name: Configure AWS credentials # again because prior steps could have exceeded 5 hours
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: eu-central-1
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 18000 # 5 hours
 
     - name: Create Allure report
       id: create-allure-report
