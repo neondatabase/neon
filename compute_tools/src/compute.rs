@@ -855,6 +855,23 @@ impl ComputeNode {
             info!("Storage auth token not set");
         }
 
+        let mut traceparams = HashMap::new();
+
+        use opentelemetry::propagation::TextMapPropagator;
+        use opentelemetry_sdk::propagation::TraceContextPropagator;
+        use opentelemetry::trace::TraceContextExt;
+        use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+        let cx: opentelemetry::Context = tracing::Span::current().context();
+        let span = cx.span();
+        let span_context = span.span_context();
+
+        info!("span cxt: is_valid: {} is_sampled: {} trace_id: {}",
+              span_context.is_valid(), span_context.is_sampled(), span_context.trace_id());
+        TraceContextPropagator::new().inject_context(&cx, &mut traceparams);
+        config.options(&serde_json::to_string(&traceparams).expect("failed to serialize otel trace params"));
+        info!("getting basebackup with config {:?}", config);
+
         // Connect to pageserver
         let mut client = config.connect(NoTls)?;
         let pageserver_connect_micros = start_time.elapsed().as_micros() as u64;

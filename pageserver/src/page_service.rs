@@ -2,6 +2,7 @@
 //! requests.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::os::fd::AsRawFd;
 use std::str::FromStr;
@@ -2629,6 +2630,26 @@ where
         if let FeStartupPacket::StartupMessage { params, .. } = sm {
             if let Some(app_name) = params.get("application_name") {
                 Span::current().record("application_name", field::display(app_name));
+            }
+
+            if let Some(options) = params.get("options") {
+                info!("got options: {options:?}");
+                match serde_json::from_str::<HashMap<String, String>>(&options) {
+                    Ok(traceoptions) => {
+                        if !traceoptions.is_empty() {
+                            use opentelemetry;
+                            use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+                            let parent_ctx =
+                                opentelemetry::global::get_text_map_propagator(|propagator| propagator.extract(&traceoptions));
+                            Span::current().set_parent(parent_ctx);
+                            info!("installed span parent");
+                        }
+                    }
+                    Err(_) => {
+                        error!("could not deserialize 'options', ignoring");
+                    }
+                }
             }
         };
 

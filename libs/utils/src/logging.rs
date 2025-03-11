@@ -167,6 +167,9 @@ pub fn init(
             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
     };
 
+    // Initialize OpenTelemetry
+    let otlp_layer =
+        tracing_utils::init_tracing_without_runtime("pageserver-x", tracing_utils::ExportConfig::default());
     // NB: the order of the with() calls does not matter.
     // See https://docs.rs/tracing-subscriber/0.3.16/tracing_subscriber/layer/index.html#per-layer-filtering
     use tracing_subscriber::prelude::*;
@@ -188,6 +191,7 @@ pub fn init(
         };
         log_layer.with_filter(rust_log_env_filter())
     });
+    let r = r.with(otlp_layer);
 
     let r = r.with(
         TracingEventCountLayer(&TRACING_EVENT_COUNT_METRIC).with_filter(rust_log_env_filter()),

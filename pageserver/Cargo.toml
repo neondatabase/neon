@@ -39,6 +39,7 @@ nix.workspace = true
 num_cpus.workspace = true
 num-traits.workspace = true
 once_cell.workspace = true
+opentelemetry.workspace = true
 pin-project-lite.workspace = true
 postgres_backend.workspace = true
 postgres-protocol.workspace = true
@@ -66,6 +67,7 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 toml_edit = { workspace = true, features = [ "serde" ] }
 tracing.workspace = true
+tracing-opentelemetry.workspace = true
 tracing-utils.workspace = true
 url.workspace = true
 walkdir.workspace = true
