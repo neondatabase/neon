@@ -1887,11 +1887,11 @@ pub(crate) struct TimelinePersistence {
     pub(crate) deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// This is separate from TimelinePersistence only because postgres allows NULLs
+/// This is separate from [TimelinePersistence] only because postgres allows NULLs
 /// in arrays and there is no way to forbid that at schema level. Hence diesel
-/// wants sk_set to be Vec<Option<i64>> instead of Vec<i64> for
+/// wants `sk_set` to be `Vec<Option<i64>>` instead of `Vec<i64>` for
 /// Queryable/Selectable. It does however allow insertions without redundant
-/// Option(s), so TimelinePersistence doesn't have them.
+/// Option(s), so [TimelinePersistence] doesn't have them.
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = crate::schema::timelines)]
 pub(crate) struct TimelineFromDb {
