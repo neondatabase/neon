@@ -39,7 +39,7 @@ AND attnum > 0
 ORDER BY attnum
 ";
 
-async fn prepare(
+async fn prepare_typecheck(
     client: &Arc<InnerClient>,
     name: &'static str,
     query: &str,
@@ -67,7 +67,7 @@ async fn prepare(
     let mut parameters = vec![];
     let mut it = parameter_description.parameters();
     while let Some(oid) = it.next().map_err(Error::parse)? {
-        let type_ = get_type(client, oid).await?;
+        let type_ = Type::from_oid(oid).ok_or_else(Error::unexpected_message)?;
         parameters.push(type_);
     }
 
@@ -75,22 +75,13 @@ async fn prepare(
     if let Some(row_description) = row_description {
         let mut it = row_description.fields();
         while let Some(field) = it.next().map_err(Error::parse)? {
-            let type_ = get_type(client, field.type_oid()).await?;
+            let type_ = Type::from_oid(field.type_oid()).ok_or_else(Error::unexpected_message)?;
             let column = Column::new(field.name().to_string(), type_, field);
             columns.push(column);
         }
     }
 
     Ok(Statement::new(client, name, parameters, columns))
-}
-
-fn prepare_rec<'a>(
-    client: &'a Arc<InnerClient>,
-    name: &'static str,
-    query: &'a str,
-    types: &'a [Type],
-) -> Pin<Box<dyn Future<Output = Result<Statement, Error>> + 'a + Send>> {
-    Box::pin(prepare(client, name, query, types))
 }
 
 fn encode(client: &InnerClient, name: &str, query: &str, types: &[Type]) -> Result<Bytes, Error> {
@@ -175,7 +166,7 @@ async fn typeinfo_statement(client: &Arc<InnerClient>) -> Result<Statement, Erro
     }
 
     let typeinfo = "neon_proxy_typeinfo";
-    let stmt = prepare_rec(client, typeinfo, TYPEINFO_QUERY, &[]).await?;
+    let stmt = prepare_typecheck(client, typeinfo, TYPEINFO_QUERY, &[]).await?;
 
     client.set_typeinfo(&stmt);
     Ok(stmt)
@@ -197,7 +188,7 @@ async fn typeinfo_enum_statement(client: &Arc<InnerClient>) -> Result<Statement,
     }
 
     let typeinfo = "neon_proxy_typeinfo_enum";
-    let stmt = prepare_rec(client, typeinfo, TYPEINFO_ENUM_QUERY, &[]).await?;
+    let stmt = prepare_typecheck(client, typeinfo, TYPEINFO_ENUM_QUERY, &[]).await?;
 
     client.set_typeinfo_enum(&stmt);
     Ok(stmt)
@@ -228,7 +219,7 @@ async fn typeinfo_composite_statement(client: &Arc<InnerClient>) -> Result<State
     }
 
     let typeinfo = "neon_proxy_typeinfo_composite";
-    let stmt = prepare_rec(client, typeinfo, TYPEINFO_COMPOSITE_QUERY, &[]).await?;
+    let stmt = prepare_typecheck(client, typeinfo, TYPEINFO_COMPOSITE_QUERY, &[]).await?;
 
     client.set_typeinfo_composite(&stmt);
     Ok(stmt)
