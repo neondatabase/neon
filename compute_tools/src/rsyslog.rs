@@ -120,7 +120,7 @@ impl<'a> PostgresLogsRsyslogConfig<'a> {
     /// Returns the default host for otel collector that receives Postgres logs
     pub fn default_host(project_id: &str) -> String {
         format!(
-            "config-{}-collector-monitoring.neon-telemetry.svc.cluster.local:54526",
+            "config-{}-collector.neon-telemetry.svc.cluster.local:10514",
             project_id
         )
     }
@@ -209,6 +209,7 @@ mod tests {
             assert!(res.is_ok());
             let conf_str = res.unwrap();
             assert!(conf_str.contains(r#"shy-breeze-123"#));
+            assert!(conf_str.contains(r#"port="10514""#));
         }
     }
 }
