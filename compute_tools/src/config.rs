@@ -140,13 +140,42 @@ pub fn write_postgres_conf(
         writeln!(file, "# Managed by compute_ctl: end")?;
     }
 
-    // If audit logging is enabled, configure pgaudit.
+    // If base audit logging is enabled, configure it.
+    // In this setup, the audit log will be written to the standard postgresql log.
+    if let ComputeAudit::Log = spec.audit_log_level {
+        writeln!(file, "pgaudit.log='ddl, role, misc'")?;
+        // Disable logging of catalog queries to reduce the noise
+        writeln!(file, "pgaudit.log_catalog=off")?;
+
+        if let Some(libs) = spec.cluster.settings.find("shared_preload_libraries") {
+            let mut extra_shared_preload_libraries = String::new();
+            if !libs.contains("pgaudit") {
+                extra_shared_preload_libraries.push_str(",pgaudit");
+            }
+            writeln!(
+                file,
+                "shared_preload_libraries='{}{}'",
+                libs, extra_shared_preload_libraries
+            )?;
+        } else {
+            // Typically, this should be unreacheable,
+            // because we always set at least some shared_preload_libraries in the spec
+            // but let's handle it explicitly anyway.
+            writeln!(file, "shared_preload_libraries='neon,pgaudit'")?;
+        }
+        writeln!(file, "# Managed by compute_ctl base audit settings: end")?;
+    }
+
+    // If compliance audit logging is enabled, configure pgaudit.
     //
     // Note, that this is called after the settings from spec are written.
     // This way we always override the settings from the spec
     // and don't allow the user or the control plane admin to change them.
     if let ComputeAudit::Hipaa = spec.audit_log_level {
-        writeln!(file, "# Managed by compute_ctl audit settings: begin")?;
+        writeln!(
+            file,
+            "# Managed by compute_ctl compliance audit settings: begin"
+        )?;
         // This log level is very verbose
         // but this is necessary for HIPAA compliance.
         writeln!(file, "pgaudit.log='all'")?;
@@ -185,7 +214,10 @@ pub fn write_postgres_conf(
                 "shared_preload_libraries='neon,pgaudit,pgauditlogtofile'"
             )?;
         }
-        writeln!(file, "# Managed by compute_ctl audit settings: end")?;
+        writeln!(
+            file,
+            "# Managed by compute_ctl compliance audit settings: end"
+        )?;
     }
 
     writeln!(file, "neon.extension_server_port={}", extension_server_port)?;
