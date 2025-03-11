@@ -338,11 +338,6 @@ static void prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_
 static bool prefetch_wait_for(uint64 ring_index);
 static void prefetch_cleanup_trailing_unused(void);
 static inline void prefetch_set_unused(uint64 ring_index);
-#if PG_MAJORVERSION_NUM < 17
-static void
-GetLastWrittenLSNv(NRelFileInfo relfilenode, ForkNumber forknum,
-				   BlockNumber blkno, int nblocks, XLogRecPtr *lsns);
-#endif
 
 static void
 neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum,
@@ -2216,19 +2211,6 @@ nm_adjust_lsn(XLogRecPtr lsn)
 
 
 /*
- * Since PG17 we use vetorized version,
- * so add compatibility function for older versions
- */
-#if PG_MAJORVERSION_NUM < 17
-static void
-GetLastWrittenLSNv(NRelFileInfo relfilenode, ForkNumber forknum,
-				   BlockNumber blkno, int nblocks, XLogRecPtr *lsns)
-{
-	lsns[0] = neon_get_lwlsn(relfilenode, forknum, blkno);
-}
-#endif
-
-/*
  * Return LSN for requesting pages and number of blocks from page server
  */
 static void
@@ -2239,11 +2221,7 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 
 	Assert(nblocks <= PG_IOV_MAX);
 
-	#if PG_MAJORVERSION_NUM < 17
-	GetLastWrittenLSNv(rinfo, forknum, blkno, (int) nblocks, last_written_lsns);
-	#else
 	neon_get_lwlsn_v(rinfo, forknum, blkno, (int) nblocks, last_written_lsns);
-	#endif
 
 	for (int i = 0; i < nblocks; i++)
 	{
