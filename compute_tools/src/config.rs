@@ -5,6 +5,7 @@ use std::io;
 use std::io::Write;
 use std::io::prelude::*;
 use std::path::Path;
+use url::Url;
 
 use compute_api::spec::{ComputeAudit, ComputeMode, ComputeSpec, GenericOption};
 
@@ -53,7 +54,32 @@ pub fn write_postgres_conf(
     // Add options for connecting to storage
     writeln!(file, "# Neon storage settings")?;
     if let Some(s) = &spec.pageserver_connstring {
-        writeln!(file, "neon.pageserver_connstring={}", escape_conf_value(s))?;
+        let connstr = if s.starts_with("postgres://") || s.starts_with("postgresql://") {
+            if let Ok(mut url) = Url::parse(s) {
+                let mode_desc = match spec.mode {
+                    ComputeMode::Primary => "primary",
+                    ComputeMode::Replica => "replica",
+                    ComputeMode::Static(_) => "static",
+                };
+                url.query_pairs_mut().append_pair("compute_type", mode_desc);
+                url.to_string()
+            } else {
+                tracing::warn!(
+                    "failed to add tracking info to pageserver_connstring {s}: cannot parse the URL"
+                );
+                s.clone()
+            }
+        } else {
+            tracing::warn!(
+                "failed to add tracking info to pageserver_connstring {s}: it doesn't start with postgres://"
+            );
+            s.clone()
+        };
+        writeln!(
+            file,
+            "neon.pageserver_connstring={}",
+            escape_conf_value(&connstr)
+        )?;
     }
     if let Some(stripe_size) = spec.shard_stripe_size {
         writeln!(file, "neon.stripe_size={stripe_size}")?;
