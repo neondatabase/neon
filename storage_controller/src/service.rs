@@ -1948,14 +1948,39 @@ impl Service {
         tracing::info!("Loaded {} LocationConfigs", configs.tenant_shards.len());
 
         let mut cleanup = Vec::new();
+        let mut mismatched_locations = 0;
         {
-            let locked = self.inner.read().unwrap();
+            let mut locked = self.inner.write().unwrap();
 
-            for (tenant_shard_id, _observed_loc) in configs.tenant_shards {
-                if !locked.tenants.contains_key(&tenant_shard_id) {
+            for (tenant_shard_id, reported) in configs.tenant_shards {
+                let Some(tenant_shard) = locked.tenants.get_mut(&tenant_shard_id) else {
                     cleanup.push(tenant_shard_id);
+                    continue;
+                };
+
+                let on_record = &mut tenant_shard
+                    .observed
+                    .locations
+                    .entry(node.get_id())
+                    .or_insert_with(|| ObservedStateLocation { conf: None })
+                    .conf;
+
+                // If the location reported by the node does not match our observed state,
+                // then we mark it as uncertain and let the background reconciliation loop
+                // deal with it.
+                //
+                // Note that this also covers net new locations reported by the node.
+                if *on_record != reported {
+                    mismatched_locations += 1;
+                    *on_record = None;
                 }
             }
+        }
+
+        if mismatched_locations > 0 {
+            tracing::info!(
+                "Set observed state to None for {mismatched_locations} mismatched locations"
+            );
         }
 
         for tenant_shard_id in cleanup {
