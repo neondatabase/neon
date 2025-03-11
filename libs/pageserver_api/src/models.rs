@@ -274,6 +274,31 @@ pub struct TimelineCreateRequest {
     pub mode: TimelineCreateRequestMode,
 }
 
+/// Storage controller specific extensions to [`TimelineInfo`].
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TimelineCreateResponseStorcon {
+    #[serde(flatten)]
+    pub timeline_info: TimelineInfo,
+
+    pub safekeepers: Option<SafekeepersInfo>,
+}
+
+/// Safekeepers as returned in timeline creation request to storcon or pushed to
+/// cplane in the post migration hook.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SafekeepersInfo {
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
+    pub generation: u32,
+    pub safekeepers: Vec<SafekeeperInfo>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SafekeeperInfo {
+    pub id: NodeId,
+    pub hostname: String,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum TimelineCreateRequestMode {

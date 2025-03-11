@@ -18,7 +18,7 @@ pub struct SafekeeperStatus {
     pub id: NodeId,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct TimelineCreateRequest {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
@@ -283,7 +283,7 @@ pub struct SafekeeperUtilization {
 }
 
 /// pull_timeline request body.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PullTimelineRequest {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,

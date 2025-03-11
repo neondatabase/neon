@@ -6621,6 +6621,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "clashmap",
  "control_plane",
  "cron",
  "diesel",

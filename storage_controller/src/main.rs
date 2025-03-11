@@ -144,6 +144,11 @@ struct Cli {
     /// Flag to use https for requests to pageserver API.
     #[arg(long, default_value = "false")]
     use_https_pageserver_api: bool,
+
+    // Whether to put timelines onto safekeepers
+    #[arg(long, default_value = "false")]
+    timelines_onto_safekeepers: bool,
+
     /// Flag to use https for requests to safekeeper API.
     #[arg(long, default_value = "false")]
     use_https_safekeeper_api: bool,
@@ -370,6 +375,7 @@ async fn async_main() -> anyhow::Result<()> {
         use_https_pageserver_api: args.use_https_pageserver_api,
         use_https_safekeeper_api: args.use_https_safekeeper_api,
         ssl_ca_cert,
+        timelines_onto_safekeepers: args.timelines_onto_safekeepers,
     };
 
     // Validate that we can connect to the database

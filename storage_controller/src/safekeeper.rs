@@ -21,6 +21,7 @@ pub struct Safekeeper {
     listen_https_port: Option<u16>,
     scheduling_policy: SkSchedulingPolicy,
     id: NodeId,
+    /// Heartbeating result.
     availability: SafekeeperState,
 
     // Flag from storcon's config to use https for safekeeper API.
@@ -84,6 +85,9 @@ impl Safekeeper {
     pub(crate) fn set_scheduling_policy(&mut self, scheduling_policy: SkSchedulingPolicy) {
         self.scheduling_policy = scheduling_policy;
         self.skp.scheduling_policy = scheduling_policy.into();
+    }
+    pub(crate) fn availability(&self) -> SafekeeperState {
+        self.availability.clone()
     }
     /// Perform an operation (which is given a [`SafekeeperClient`]) with retries
     #[allow(clippy::too_many_arguments)]
