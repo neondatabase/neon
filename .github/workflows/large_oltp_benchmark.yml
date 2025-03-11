@@ -89,25 +89,28 @@ jobs:
     - name: Set up Connection String
       id: set-up-connstr
       run: |
-          case "${{ matrix.target }}" in
-              new_branch)
-              CONNSTR=${{ steps.create-neon-branch-oltp-target.outputs.dsn }}
-              ;;
-              reuse_branch)
-              CONNSTR=${{ secrets.BENCHMARK_LARGE_OLTP_REUSE_CONNSTR }}
-              ;;
-              *)
-              echo >&2 "Unknown target=${{ matrix.target }}"
-              exit 1
-              ;;
-          esac
+        case "${{ matrix.target }}" in
+          new_branch)
+          CONNSTR=${{ steps.create-neon-branch-oltp-target.outputs.dsn }}
+          ;;
+          reuse_branch)
+          CONNSTR=${{ secrets.BENCHMARK_LARGE_OLTP_REUSE_CONNSTR }}
+          ;;
+          *)
+          echo >&2 "Unknown target=${{ matrix.target }}"
+          exit 1
+          ;;
+        esac
 
-          echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
+        CONNSTR_WITHOUT_POOLER=$(echo "${CONNSTR}" | sed 's/-pooler//')
+
+        echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
+        echo "connstr_without_pooler=${CONNSTR_WITHOUT_POOLER}" >> $GITHUB_OUTPUT
 
     - name: Delete rows from prior runs in reuse branch
       if: ${{ matrix.target == 'reuse_branch' }}
       env:
-          BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+          BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr_without_pooler }}
           PG_CONFIG: /tmp/neon/pg_install/v16/bin/pg_config
           PSQL: /tmp/neon/pg_install/v16/bin/psql
           PG_16_LIB_PATH: /tmp/neon/pg_install/v16/lib
@@ -117,18 +120,33 @@ jobs:
         ${PSQL} "${BENCHMARK_CONNSTR}" -c "SET statement_timeout = 0; DELETE FROM webhook.incoming_webhooks WHERE created_at > '2025-02-27 23:59:59+00';"
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Finished deleting rows in table webhook.incoming_webhooks from prior runs"
 
-    - name: Benchmark pgbench with custom-scripts
+    - name: Benchmark pgbench with custom-scripts 
       uses: ./.github/actions/run-python-test-set
       with:
         build_type: ${{ env.BUILD_TYPE }}
         test_selection: performance
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
-        extra_params: -m remote_cluster --timeout 21600 -k test_perf_oltp_large_tenant
+        extra_params: -m remote_cluster --timeout 21600 -k test_perf_oltp_large_tenant_pgbench
         pg_version: ${{ env.PG_VERSION }}
         aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+
+    - name: Benchmark database maintenance
+      uses: ./.github/actions/run-python-test-set
+      with:
+        build_type: ${{ env.BUILD_TYPE }}
+        test_selection: performance
+        run_in_parallel: false
+        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
+        extra_params: -m remote_cluster --timeout 21600 -k test_perf_oltp_large_tenant_maintenance
+        pg_version: ${{ env.PG_VERSION }}
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr_without_pooler }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
 
