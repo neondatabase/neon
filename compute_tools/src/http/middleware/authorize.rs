@@ -59,13 +59,6 @@ impl AsyncAuthorizeRequest<Body> for Authorize {
         Box::pin(async move {
             let request_id = request.extract_parts::<RequestId>().await.unwrap();
 
-            // TODO: Remove this check after a successful rollout
-            if jwks.keys.is_empty() {
-                warn!(%request_id, "Authorization has not been configured");
-
-                return Ok(request);
-            }
-
             let connect_info = request
                 .extract_parts::<ConnectInfo<SocketAddr>>()
                 .await
