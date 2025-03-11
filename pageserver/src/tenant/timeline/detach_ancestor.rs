@@ -245,8 +245,8 @@ pub(super) async fn prepare(
         // If the ancestor has an ancestor, we might be able to fast-path detach it if the current ancestor does not have any data written/used by the detaching timeline.
         while let Some(ancestor_of_ancestor) = ancestor.ancestor_timeline.clone() {
             if ancestor_lsn != ancestor.ancestor_lsn {
-                // non-technical requirement; we could flatten N ancestors just as easily but we chose
-                // not to, at least initially
+                // non-technical requirement; we could flatten still if ancestor LSN does not match but that needs
+                // us to copy and cut more layers.
                 return Err(TooManyAncestors);
             }
             // Use the ancestor of the ancestor as the new ancestor (only when the ancestor LSNs are the same)
@@ -255,6 +255,10 @@ pub(super) async fn prepare(
             // TODO: do we still need to check if we don't want to reparent?
             check_no_archived_children_of_ancestor(tenant, detached, &ancestor, ancestor_lsn)?;
         }
+    } else if ancestor.ancestor_timeline.is_some() {
+        // non-technical requirement; we could flatten N ancestors just as easily but we chose
+        // not to, at least initially
+        return Err(TooManyAncestors);
     }
 
     tracing::info!(
