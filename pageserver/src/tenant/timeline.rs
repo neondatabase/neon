@@ -67,7 +67,7 @@ use tracing::*;
 use utils::generation::Generation;
 use utils::guard_arc_swap::GuardArcSwap;
 use utils::id::TimelineId;
-use utils::logging::log_slow;
+use utils::logging::{LogSlowCallback, log_slow};
 use utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use utils::postgres_client::PostgresClientProtocol;
 use utils::rate_limit::RateLimit;
@@ -1484,8 +1484,20 @@ impl Timeline {
 
         let wait_for_timeout = self.last_record_lsn.wait_for_timeout(lsn, timeout);
         let wait_for_timeout = std::pin::pin!(wait_for_timeout);
+        let update_metric = |LogSlowCallback {
+                                 elapsed_since_last_callback,
+                             }| {
+            self.metrics
+                .wait_lsn_in_progress_micros
+                .inc_by(u64::try_from(elapsed_since_last_callback.as_micros()).unwrap());
+        };
         // 1s threshold would have resulted in at most 1 log msg/second in prod, in the 30d trailing from Mar 11, 2025
-        let wait_for_timeout = log_slow("wait_lsn", Duration::from_secs(1), wait_for_timeout);
+        let wait_for_timeout = log_slow(
+            "wait_lsn",
+            Duration::from_secs(1),
+            update_metric,
+            wait_for_timeout,
+        );
         match wait_for_timeout.await {
             Ok(()) => Ok(()),
             Err(e) => {

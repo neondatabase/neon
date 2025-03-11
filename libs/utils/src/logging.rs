@@ -326,45 +326,59 @@ impl std::fmt::Debug for SecretString {
 
 /// Logs a periodic message if a future is slow to complete.
 ///
+/// The callback is called at the same frequency.
+///
 /// This is performance-sensitive as it's used on the GetPage read path.
 ///
 /// TODO: consider upgrading this to a warning, but currently it fires too often.
 #[inline]
-pub async fn log_slow<F, O>(name: &str, threshold: Duration, mut f: std::pin::Pin<&mut F>) -> O
+pub async fn log_slow<F, O>(
+    name: &str,
+    threshold: Duration,
+    mut cb: impl FnMut(LogSlowCallback),
+    mut f: std::pin::Pin<&mut F>,
+) -> O
 where
     F: Future<Output = O>,
 {
-    // We only  reading overhead if the future yields.
-    use std::task::Poll;
-    match futures::poll!(&mut f) {
-        Poll::Pending => (),
-        Poll::Ready(output) => return output,
-    };
-
     let started = Instant::now();
     let mut attempt = 1;
-
+    let mut last_cb = started;
     loop {
         // NB: use timeout_at() instead of timeout() to avoid an extra clock reading in the common
         // case where the timeout doesn't fire.
         let deadline = started + attempt * threshold;
-        if let Ok(output) = tokio::time::timeout_at(deadline, &mut f).await {
+        // TODO: still call the callback if the future panics? Copy how we do it for the page_service flush_in_progress counter.
+        let res = tokio::time::timeout_at(deadline, &mut f).await;
+        let now = Instant::now();
+        cb(LogSlowCallback {
+            elapsed_since_last_callback: now - last_cb,
+        });
+        last_cb = now;
+        let elapsed = now - started;
+        if let Ok(output) = res {
             // NB: we check if we exceeded the threshold even if the timeout never fired, because
             // scheduling or execution delays may cause the future to succeed even if it exceeds the
             // timeout. This costs an extra unconditional clock reading, but seems worth it to avoid
             // false negatives.
-            let elapsed = started.elapsed();
             if elapsed >= threshold {
                 info!("slow {name} completed after {:.3}s", elapsed.as_secs_f64());
             }
             return output;
         }
-
-        let elapsed = started.elapsed().as_secs_f64();
-        info!("slow {name} still running after {elapsed:.3}s",);
+        info!(
+            "slow {name} still running after {:.3}s",
+            elapsed.as_secs_f64()
+        );
 
         attempt += 1;
     }
+}
+
+/// See [`log_slow`].
+pub struct LogSlowCallback {
+    /// The time elapsed since the last callback invocation.
+    pub elapsed_since_last_callback: Duration,
 }
 
 #[cfg(test)]

@@ -49,7 +49,14 @@ pub fn bench_log_slow(c: &mut Criterion) {
         // performance too. Use a simple noop future that yields once, to avoid any scheduler fast
         // paths for a ready future.
         if enabled {
-            b.iter(|| runtime.block_on(log_slow("ready", THRESHOLD, tokio::task::yield_now())));
+            b.iter(|| {
+                runtime.block_on(log_slow(
+                    "ready",
+                    THRESHOLD,
+                    |_| (),
+                    std::pin::pin!(tokio::task::yield_now()),
+                ))
+            });
         } else {
             b.iter(|| runtime.block_on(tokio::task::yield_now()));
         }

@@ -465,8 +465,25 @@ pub(crate) fn page_cache_errors_inc(error_kind: PageCacheErrorKind) {
 pub(crate) static WAIT_LSN_TIME: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_wait_lsn_seconds",
-        "Time spent waiting for WAL to arrive",
+        "Time spent waiting for WAL to arrive. Updated after ",
         CRITICAL_OP_BUCKETS.into(),
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static WAIT_LSN_IN_PROGRESS_MICROS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_wait_lsn_in_progress_micros",
+        "Time spent waiting for WAL to arrive, by timeline_id. Updated periodically while waiting.",
+        &["tenant_id", "shard_id", "timeline_id"],
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static WAIT_LSN_IN_PROGRESS_GLOBAL_MICROS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_wait_lsn_in_progress_micros_global",
+        "Time spent waiting for WAL to arrive, globally. Updated periodically while waiting."
     )
     .expect("failed to define a metric")
 });
@@ -2830,7 +2847,6 @@ impl StorageTimeMetrics {
     }
 }
 
-#[derive(Debug)]
 pub(crate) struct TimelineMetrics {
     tenant_id: String,
     shard_id: String,
@@ -2863,6 +2879,7 @@ pub(crate) struct TimelineMetrics {
     pub valid_lsn_lease_count_gauge: UIntGauge,
     pub wal_records_received: IntCounter,
     pub storage_io_size: StorageIoSizeMetrics,
+    pub wait_lsn_in_progress_micros: GlobalAndPerTenantIntCounter,
     shutdown: std::sync::atomic::AtomicBool,
 }
 
@@ -3000,6 +3017,13 @@ impl TimelineMetrics {
 
         let storage_io_size = StorageIoSizeMetrics::new(&tenant_id, &shard_id, &timeline_id);
 
+        let wait_lsn_in_progress_micros = GlobalAndPerTenantIntCounter {
+            global: WAIT_LSN_IN_PROGRESS_GLOBAL_MICROS.clone(),
+            per_tenant: WAIT_LSN_IN_PROGRESS_MICROS
+                .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+                .unwrap(),
+        };
+
         TimelineMetrics {
             tenant_id,
             shard_id,
@@ -3032,6 +3056,7 @@ impl TimelineMetrics {
             storage_io_size,
             valid_lsn_lease_count_gauge,
             wal_records_received,
+            wait_lsn_in_progress_micros,
             shutdown: std::sync::atomic::AtomicBool::default(),
         }
     }
@@ -3223,6 +3248,9 @@ impl TimelineMetrics {
         for op in StorageIoSizeOperation::VARIANTS {
             let _ = STORAGE_IO_SIZE.remove_label_values(&[op, tenant_id, shard_id, timeline_id]);
         }
+
+        let _ =
+            WAIT_LSN_IN_PROGRESS_MICROS.remove_label_values(&[tenant_id, shard_id, timeline_id]);
 
         let _ = SMGR_QUERY_STARTED_PER_TENANT_TIMELINE.remove_label_values(&[
             SmgrQueryType::GetPageAtLsn.into(),
@@ -3836,27 +3864,29 @@ pub mod tokio_epoll_uring {
     });
 }
 
+pub(crate) struct GlobalAndPerTenantIntCounter {
+    global: IntCounter,
+    per_tenant: IntCounter,
+}
+
+impl GlobalAndPerTenantIntCounter {
+    #[inline(always)]
+    pub(crate) fn inc(&self) {
+        self.inc_by(1)
+    }
+    #[inline(always)]
+    pub(crate) fn inc_by(&self, n: u64) {
+        self.global.inc_by(n);
+        self.per_tenant.inc_by(n);
+    }
+}
+
 pub(crate) mod tenant_throttling {
-    use metrics::{IntCounter, register_int_counter_vec};
+    use metrics::register_int_counter_vec;
     use once_cell::sync::Lazy;
     use utils::shard::TenantShardId;
 
-    pub(crate) struct GlobalAndPerTenantIntCounter {
-        global: IntCounter,
-        per_tenant: IntCounter,
-    }
-
-    impl GlobalAndPerTenantIntCounter {
-        #[inline(always)]
-        pub(crate) fn inc(&self) {
-            self.inc_by(1)
-        }
-        #[inline(always)]
-        pub(crate) fn inc_by(&self, n: u64) {
-            self.global.inc_by(n);
-            self.per_tenant.inc_by(n);
-        }
-    }
+    use super::GlobalAndPerTenantIntCounter;
 
     pub(crate) struct Metrics<const KIND: usize> {
         pub(super) count_accounted_start: GlobalAndPerTenantIntCounter,
@@ -4102,6 +4132,7 @@ pub fn preinitialize_metrics(conf: &'static PageServerConf) {
         &CIRCUIT_BREAKERS_BROKEN,
         &CIRCUIT_BREAKERS_UNBROKEN,
         &PAGE_SERVICE_SMGR_FLUSH_INPROGRESS_MICROS_GLOBAL,
+        &WAIT_LSN_IN_PROGRESS_GLOBAL_MICROS,
     ]
     .into_iter()
     .for_each(|c| {
