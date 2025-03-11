@@ -111,6 +111,18 @@ impl SafekeeperNode {
             .expect("non-Unicode path")
     }
 
+    /// Initializes a safekeeper node by creating all nesessary files,
+    /// e.g. SSL certificates.
+    pub fn initialize(&self) -> anyhow::Result<()> {
+        if self.env.generate_local_ssl_certs {
+            self.env.generate_ssl_cert(
+                &self.datadir_path().join("server.crt"),
+                &self.datadir_path().join("server.key"),
+            )?;
+        }
+        Ok(())
+    }
+
     pub async fn start(
         &self,
         extra_opts: &[String],
@@ -194,6 +206,16 @@ impl SafekeeperNode {
                 "--http-auth-public-key-path".to_owned(),
                 key_path_string.clone(),
             ]);
+        }
+
+        if let Some(https_port) = self.conf.https_port {
+            args.extend([
+                "--listen-https".to_owned(),
+                format!("{}:{}", self.listen_addr, https_port),
+            ]);
+        }
+        if let Some(ssl_ca_file) = self.env.ssl_ca_cert_path() {
+            args.push(format!("--ssl-ca-file={}", ssl_ca_file.to_str().unwrap()));
         }
 
         args.extend_from_slice(extra_opts);

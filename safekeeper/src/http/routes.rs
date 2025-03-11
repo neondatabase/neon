@@ -231,9 +231,14 @@ async fn timeline_pull_handler(mut request: Request<Body>) -> Result<Response<Bo
     let conf = get_conf(&request);
     let global_timelines = get_global_timelines(&request);
 
-    let resp = pull_timeline::handle_request(data, conf.sk_auth_token.clone(), global_timelines)
-        .await
-        .map_err(ApiError::InternalServerError)?;
+    let resp = pull_timeline::handle_request(
+        data,
+        conf.sk_auth_token.clone(),
+        conf.ssl_ca_cert.clone(),
+        global_timelines,
+    )
+    .await
+    .map_err(ApiError::InternalServerError)?;
     json_response(StatusCode::OK, resp)
 }
 

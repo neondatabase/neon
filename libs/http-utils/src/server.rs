@@ -43,6 +43,28 @@ impl Server {
         })
     }
 
+    // pub fn with_tls(
+    //     mut self,
+    //     key_filename: &Utf8Path,
+    //     cert_filename: &Utf8Path,
+    // ) -> anyhow::Result<Self> {
+    //     Ok(self)
+    // }
+
+    // pub fn new_http(
+    //     request_service: Arc<RequestServiceBuilder<Body, ApiError>>,
+    //     listener: std::net::TcpListener,
+    // ) -> anyhow::Result<Self> {
+    //     Self::new(request_service, listener, None)
+    // }
+
+    // pub fn new_https(
+    //     request_service: Arc<RequestServiceBuilder<Body, ApiError>>,
+    //     listener: std::net::TcpListener,
+    //     key_filename: &Utf8Path,
+    //     cert_filename: &Utf8Path,
+    // )
+
     pub async fn serve(self, cancel: CancellationToken) -> anyhow::Result<()> {
         fn suppress_io_error(err: &std::io::Error) -> bool {
             use std::io::ErrorKind::*;

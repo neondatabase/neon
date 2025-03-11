@@ -466,6 +466,9 @@ class NeonEnvBuilder:
         # Flag to enable https listener in pageserver, generate local ssl certs,
         # and force storage controller to use https for pageserver api.
         self.use_https_pageserver_api: bool = False
+        # Flag to enable https listener in safekeeper, generate local ssl certs,
+        # and force storage controller to use https for safekeeper api.
+        self.use_https_safekeeper_api: bool = False
 
         self.pageserver_virtual_file_io_engine: str | None = pageserver_virtual_file_io_engine
         self.pageserver_get_vectored_concurrent_io: str | None = (
@@ -1063,7 +1066,9 @@ class NeonEnv:
         self.initial_tenant = config.initial_tenant
         self.initial_timeline = config.initial_timeline
 
-        self.generate_local_ssl_certs = config.use_https_pageserver_api
+        self.generate_local_ssl_certs = (
+            config.use_https_pageserver_api or config.use_https_safekeeper_api
+        )
         self.ssl_ca_file = (
             self.repo_dir.joinpath("rootCA.crt") if self.generate_local_ssl_certs else None
         )
@@ -1145,6 +1150,10 @@ class NeonEnv:
         if config.use_https_pageserver_api:
             storage_controller_config = storage_controller_config or {}
             storage_controller_config["use_https_pageserver_api"] = True
+
+        if config.use_https_safekeeper_api:
+            storage_controller_config = storage_controller_config or {}
+            storage_controller_config["use_https_safekeeper_api"] = True
 
         if storage_controller_config is not None:
             cfg["storage_controller"] = storage_controller_config
@@ -1248,6 +1257,7 @@ class NeonEnv:
                 pg=self.port_distributor.get_port(),
                 pg_tenant_only=self.port_distributor.get_port(),
                 http=self.port_distributor.get_port(),
+                https=self.port_distributor.get_port() if config.use_https_safekeeper_api else None,
             )
             id = config.safekeepers_id_start + i  # assign ids sequentially
             sk_cfg: dict[str, Any] = {
@@ -1255,6 +1265,7 @@ class NeonEnv:
                 "pg_port": port.pg,
                 "pg_tenant_only_port": port.pg_tenant_only,
                 "http_port": port.http,
+                "https_port": port.https,
                 "sync": config.safekeepers_enable_fsync,
             }
             if config.auth_enabled:
@@ -4475,6 +4486,7 @@ class SafekeeperPort:
     pg: int
     pg_tenant_only: int
     http: int
+    https: int | None
 
 
 @dataclass
