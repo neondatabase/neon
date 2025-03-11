@@ -1,7 +1,6 @@
 #include "postgres.h"
 
 #include "neon_lwlc.h"
-#if PG_MAJORVERSION_NUM >= 15
 
 #include "miscadmin.h"
 #include "access/xlog.h"
@@ -84,9 +83,12 @@ static set_lwlsn_relation_hook_type prev_set_lwlsn_relation_hook = NULL;
 static set_lwlsn_db_hook_type prev_set_lwlsn_db_hook = NULL;
 
 static shmem_startup_hook_type prev_shmem_startup_hook;
-static shmem_request_hook_type prev_shmem_request_hook;
 
+#if PG_VERSION_NUM >= 150000
+static shmem_request_hook_type prev_shmem_request_hook;
 static void shmemrequest(void);
+#endif
+
 static void shmeminit(void);
 
 void
@@ -99,8 +101,11 @@ init_lwlc(void)
 
 	prev_shmem_startup_hook = shmem_startup_hook;
 	shmem_startup_hook = shmeminit;
+
+	#if PG_VERSION_NUM >= 150000
 	prev_shmem_request_hook = shmem_request_hook;
 	shmem_request_hook = shmemrequest;
+	#endif
 	
 	prev_get_lwlsn_hook = get_lwlsn_hook;
 	get_lwlsn_hook = neon_get_lwlsn;
@@ -118,18 +123,18 @@ init_lwlc(void)
 	set_lwlsn_db_hook = neon_set_lwlsn_db;
 }
 
+#if PG_VERSION_NUM >= 150000
 static void shmemrequest(void) {
 	Size requested_size = sizeof(LwLsnCacheCtl);
 
-	#if PG_VERSION_NUM >= 150000
-		if (prev_shmem_request_hook)
+	if (prev_shmem_request_hook)
 			prev_shmem_request_hook();
-	#endif
 
 		requested_size += hash_estimate_size(lwlsn_cache_size, sizeof(LastWrittenLsnCacheEntry));
 
 		RequestAddinShmemSpace(requested_size);
 }
+#endif
 
 static void shmeminit(void) {
 	static HASHCTL info;
@@ -492,7 +497,3 @@ neon_set_lwlsn_db(XLogRecPtr lsn)
 	NRelFileInfo dummyNode = {InvalidOid, InvalidOid, InvalidOid};
 	return neon_set_lwlsn_block(lsn, dummyNode, MAIN_FORKNUM, 0);
 }
-
-#else /* ! PG_MAJORVERSION_NUM == 17 */
-
-#endif

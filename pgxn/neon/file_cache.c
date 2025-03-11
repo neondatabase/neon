@@ -48,11 +48,8 @@
 #include "hll.h"
 #include "bitmap.h"
 #include "neon.h"
-#include "neon_perf_counters.h"
-
-#if PG_VERSION_NUM >= 150000
 #include "neon_lwlc.h"
-#endif
+#include "neon_perf_counters.h"
 
 #define CriticalAssert(cond) do if (!(cond)) elog(PANIC, "LFC: assertion %s failed at %s:%d: ", #cond, __FILE__, __LINE__); while (0)
 
@@ -1003,11 +1000,8 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 		LWLockRelease(lfc_lock);
 		return false;
 	}
-	#if PG_VERSION_NUM >= 150000
+	
 	lwlsn = neon_get_lwlsn(rinfo, forknum, blkno);
-	#else
-	lwlsn = GetLastWrittenLSN(rinfo, forknum, blkno);
-	#endif
 
 	if (lwlsn > lsn)
 	{

@@ -69,6 +69,7 @@
 
 #include "bitmap.h"
 #include "neon.h"
+#include "neon_lwlc.h"
 #include "neon_perf_counters.h"
 #include "pagestore_client.h"
 
@@ -76,9 +77,6 @@
 #include "access/xlogrecovery.h"
 #endif
 
-#if PG_VERSION_NUM >= 150000
-#include "neon_lwlc.h"
-#endif
 
 /*
  * If DEBUG_COMPARE_LOCAL is defined, we pass through all the SMGR API
@@ -2226,11 +2224,7 @@ static void
 GetLastWrittenLSNv(NRelFileInfo relfilenode, ForkNumber forknum,
 				   BlockNumber blkno, int nblocks, XLogRecPtr *lsns)
 {
-	#if PG_MAJORVERSION_NUM < 15
-	lsns[0] = GetLastWrittenLSN(relfilenode, forknum, blkno);
-	#else
 	lsns[0] = neon_get_lwlsn(relfilenode, forknum, blkno);
-	#endif
 }
 #endif
 
