@@ -2921,14 +2921,18 @@ impl Timeline {
             if cancel.is_cancelled() {
                 return Err(CompactionError::ShuttingDown);
             }
-            let should_yield = self
-                .l0_compaction_trigger
-                .notified()
-                .now_or_never()
-                .is_some();
-            if !no_yield && should_yield {
-                tracing::info!("preempt gc-compaction when downloading layers: too many L0 layers");
-                return Ok(CompactionOutcome::YieldForL0);
+            if !no_yield {
+                let should_yield = self
+                    .l0_compaction_trigger
+                    .notified()
+                    .now_or_never()
+                    .is_some();
+                if should_yield {
+                    tracing::info!(
+                        "preempt gc-compaction when downloading layers: too many L0 layers"
+                    );
+                    return Ok(CompactionOutcome::YieldForL0);
+                }
             }
             let resident_layer = layer
                 .download_and_keep_resident(ctx)
@@ -3061,16 +3065,21 @@ impl Timeline {
             if cancel.is_cancelled() {
                 return Err(CompactionError::ShuttingDown);
             }
-            keys_processed += 1;
-            if !no_yield && keys_processed % 1000 == 0 {
-                let should_yield = self
-                    .l0_compaction_trigger
-                    .notified()
-                    .now_or_never()
-                    .is_some();
-                if should_yield {
-                    tracing::info!("preempt gc-compaction in the main loop: too many L0 layers");
-                    return Ok(CompactionOutcome::YieldForL0);
+
+            if !no_yield {
+                keys_processed += 1;
+                if keys_processed % 1000 == 0 {
+                    let should_yield = self
+                        .l0_compaction_trigger
+                        .notified()
+                        .now_or_never()
+                        .is_some();
+                    if should_yield {
+                        tracing::info!(
+                            "preempt gc-compaction in the main loop: too many L0 layers"
+                        );
+                        return Ok(CompactionOutcome::YieldForL0);
+                    }
                 }
             }
             if self.shard_identity.is_key_disposable(&key) {
