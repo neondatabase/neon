@@ -330,10 +330,16 @@ impl std::fmt::Debug for SecretString {
 ///
 /// TODO: consider upgrading this to a warning, but currently it fires too often.
 #[inline]
-pub async fn log_slow<O>(name: &str, threshold: Duration, f: impl Future<Output = O>) -> O {
-    // TODO: we unfortunately have to pin the future on the heap, since GetPage futures are huge and
-    // won't fit on the stack.
-    let mut f = Box::pin(f);
+pub async fn log_slow<F, O>(name: &str, threshold: Duration, mut f: std::pin::Pin<&mut F>) -> O
+where
+    F: Future<Output = O>,
+{
+    // We only  reading overhead if the future yields.
+    use std::task::Poll;
+    match futures::poll!(&mut f) {
+        Poll::Pending => (),
+        Poll::Ready(output) => return output,
+    };
 
     let started = Instant::now();
     let mut attempt = 1;

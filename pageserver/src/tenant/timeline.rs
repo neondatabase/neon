@@ -67,6 +67,7 @@ use tracing::*;
 use utils::generation::Generation;
 use utils::guard_arc_swap::GuardArcSwap;
 use utils::id::TimelineId;
+use utils::logging::log_slow;
 use utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use utils::postgres_client::PostgresClientProtocol;
 use utils::rate_limit::RateLimit;
@@ -1481,7 +1482,11 @@ impl Timeline {
 
         let _timer = crate::metrics::WAIT_LSN_TIME.start_timer();
 
-        match self.last_record_lsn.wait_for_timeout(lsn, timeout).await {
+        let wait_for_timeout = self.last_record_lsn.wait_for_timeout(lsn, timeout);
+        let wait_for_timeout = std::pin::pin!(wait_for_timeout);
+        // 1s threshold would have resulted in at most 1 log msg/second in prod, in the 30d trailing from Mar 11, 2025
+        let wait_for_timeout = log_slow("wait_lsn", Duration::from_secs(1), wait_for_timeout);
+        match wait_for_timeout.await {
             Ok(()) => Ok(()),
             Err(e) => {
                 use utils::seqwait::SeqWaitError::*;
