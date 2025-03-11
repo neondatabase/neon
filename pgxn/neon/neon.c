@@ -40,7 +40,8 @@
 #if PG_MAJORVERSION_NUM >= 16
 #include "storage/ipc.h"
 #endif
-#if PG_MAJORVERSION_NUM >= 17
+
+#if PG_MAJORVERSION_NUM >= 15
 #include "neon_lwlc.h"
 #endif
 
@@ -440,7 +441,7 @@ _PG_init(void)
 
 	pg_init_libpagestore();
 	pg_init_walproposer();
-#if PG_VERSION_NUM >= 170000
+#if PG_MAJORVERSION_NUM >= 15
 	init_lwlc();
 #endif
 	pagestore_smgr_init();

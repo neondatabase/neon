@@ -76,7 +76,7 @@
 #include "access/xlogrecovery.h"
 #endif
 
-#if PG_VERSION_NUM >= 170000
+#if PG_VERSION_NUM >= 150000
 #include "neon_lwlc.h"
 #endif
 
@@ -2226,7 +2226,11 @@ static void
 GetLastWrittenLSNv(NRelFileInfo relfilenode, ForkNumber forknum,
 				   BlockNumber blkno, int nblocks, XLogRecPtr *lsns)
 {
+	#if PG_MAJORVERSION_NUM < 15
 	lsns[0] = GetLastWrittenLSN(relfilenode, forknum, blkno);
+	#else
+	lsns[0] = neon_get_lwlsn(relfilenode, forknum, blkno);
+	#endif
 }
 #endif
 

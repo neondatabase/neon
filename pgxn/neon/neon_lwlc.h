@@ -1,4 +1,4 @@
-#if PG_MAJORVERSION_NUM >= 17
+#if PG_MAJORVERSION_NUM >= 15
 
 #ifndef NEON_LWLC_H
 #define NEON_LWLC_H

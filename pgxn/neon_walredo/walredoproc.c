@@ -286,7 +286,7 @@ WalRedoMain(int argc, char *argv[])
 	max_wal_senders = 0;
 	InitializeMaxBackends();
 
-	#if PG_VERSION_NUM < 170000
+	#if PG_VERSION_NUM < 150000
 	/* Disable lastWrittenLsnCache */
 	lastWrittenLsnCacheSize = 0;
 	#endif

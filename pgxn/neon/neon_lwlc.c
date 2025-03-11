@@ -1,8 +1,9 @@
 #include "postgres.h"
 
 #include "neon_lwlc.h"
-#if PG_MAJORVERSION_NUM >= 17
+#if PG_MAJORVERSION_NUM >= 15
 
+#include "miscadmin.h"
 #include "access/xlog.h"
 #include "storage/ipc.h"
 #include "storage/shmem.h"
@@ -47,7 +48,7 @@ static HTAB *lastWrittenLsnCache;
 
 LwLsnCacheCtl* LwLsnCache;
 
-static int lwlsn_cache_size; 
+static int lwlsn_cache_size = (128 * 1024); 
 
 
 static void
@@ -176,14 +177,14 @@ neon_get_lwlsn(NRelFileInfo rlocator, ForkNumber forknum, BlockNumber blkno)
 	/* Maximal last written LSN among all non-cached pages */
 	lsn = LwLsnCache->maxLastWrittenLsn;
 
-	if (rlocator.relNumber != InvalidOid)
+	if (NInfoGetRelNumber(rlocator) != InvalidOid)
 	{
 		BufferTag key;
-		key.spcOid = rlocator.spcOid;
-		key.dbOid = rlocator.dbOid;
-		key.relNumber = rlocator.relNumber;
-		key.forkNum = forknum;
-		key.blockNum = blkno;
+		Oid spcOid = NInfoGetSpcOid(rlocator);
+		Oid dbOid = NInfoGetDbOid(rlocator);
+		Oid relNumber = NInfoGetRelNumber(rlocator);
+		BufTagInit(key,  relNumber, forknum, blkno, spcOid, dbOid);
+		
 		entry = hash_search(lastWrittenLsnCache, &key, HASH_FIND, NULL);
 		if (entry != NULL)
 			lsn = entry->lsn;
@@ -242,15 +243,14 @@ neon_get_lwlsn_v(NRelFileInfo relfilenode, ForkNumber forknum,
 
 	LWLockAcquire(LastWrittenLsnLock, LW_SHARED);
 
-	if (relfilenode.relNumber != InvalidOid)
+	if (NInfoGetRelNumber(relfilenode) != InvalidOid)
 	{
 		BufferTag key;
 		bool missed_keys = false;
-
-		key.spcOid = relfilenode.spcOid;
-		key.dbOid = relfilenode.dbOid;
-		key.relNumber = relfilenode.relNumber;
-		key.forkNum = forknum;
+		Oid spcOid = NInfoGetSpcOid(relfilenode);
+		Oid dbOid = NInfoGetDbOid(relfilenode);
+		Oid relNumber = NInfoGetRelNumber(relfilenode);
+		BufTagInit(key,  relNumber, forknum, blkno, spcOid, dbOid);
 
 		for (int i = 0; i < nblocks; i++)
 		{
@@ -320,7 +320,7 @@ SetLastWrittenLSNForBlockRangeInternal(XLogRecPtr lsn,
 									   BlockNumber from,
 									   BlockNumber n_blocks)
 {
-	if (rlocator.relNumber == InvalidOid)
+	if (NInfoGetRelNumber(rlocator) == InvalidOid)
 	{
 		if (lsn > LwLsnCache->maxLastWrittenLsn)
 		LwLsnCache->maxLastWrittenLsn = lsn;
@@ -334,10 +334,10 @@ SetLastWrittenLSNForBlockRangeInternal(XLogRecPtr lsn,
 		bool found;
 		BlockNumber i;
 
-		key.spcOid = rlocator.spcOid;
-		key.dbOid = rlocator.dbOid;
-		key.relNumber = rlocator.relNumber;
-		key.forkNum = forknum;
+		Oid spcOid = NInfoGetSpcOid(rlocator);
+		Oid dbOid = NInfoGetDbOid(rlocator);
+		Oid relNumber = NInfoGetRelNumber(rlocator);
+		BufTagInit(key,  relNumber, forknum, from, spcOid, dbOid);
 		for (i = 0; i < n_blocks; i++)
 		{
 			key.blockNum = from + i;
@@ -413,15 +413,16 @@ neon_set_lwlsn_block_v(const XLogRecPtr *lsns, NRelFileInfo relfilenode,
 	BufferTag	key;
 	bool		found;
 	XLogRecPtr	max = InvalidXLogRecPtr;
+	Oid spcOid = NInfoGetSpcOid(relfilenode);
+	Oid dbOid = NInfoGetDbOid(relfilenode);
+	Oid relNumber = NInfoGetRelNumber(relfilenode);
 
 	if (lsns == NULL || nblocks == 0 || LwLsnCache->lastWrittenLsnCacheSize == 0 ||
-		relfilenode.relNumber == InvalidOid)
+		NInfoGetRelNumber(relfilenode) == InvalidOid)
 		return InvalidXLogRecPtr;
 
-	key.relNumber = relfilenode.relNumber;
-	key.dbOid = relfilenode.dbOid;
-	key.spcOid = relfilenode.spcOid;
-	key.forkNum = forknum;
+	
+	BufTagInit(key,  relNumber, forknum, blockno, spcOid, dbOid);
 
 	LWLockAcquire(LastWrittenLsnLock, LW_EXCLUSIVE);
 
