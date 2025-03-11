@@ -631,10 +631,7 @@ impl ComputeHook {
                 format!("{control_plane_url}/notify-attach")
             })
         } else {
-            self.config
-                .compute_hook_url
-                .as_ref()
-                .map(|notify_url| notify_url.to_owned())
+            self.config.compute_hook_url.clone()
         };
         let result = if let Some(notify_url) = &compute_hook_url {
             self.do_notify(notify_url, &request, cancel).await
