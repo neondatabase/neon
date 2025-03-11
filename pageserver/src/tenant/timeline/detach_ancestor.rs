@@ -127,11 +127,21 @@ pub(crate) struct PreparedTimelineDetach {
     layers: Vec<Layer>,
 }
 
-/// TODO: this should be part of PageserverConf because we cannot easily modify cplane arguments.
+// TODO: this should be part of PageserverConf because we cannot easily modify cplane arguments.
 #[derive(Debug)]
 pub(crate) struct Options {
     pub(crate) rewrite_concurrency: std::num::NonZeroUsize,
     pub(crate) copy_concurrency: std::num::NonZeroUsize,
+}
+
+/// Controls the detach ancestor behavior.
+/// - When set to `NoAncestorAndReparent`, we will only detach a branch if it has only one level of ancestor. It will automatically reparent the children of the ancestor.
+/// - When set to `MultipleLevelAndNoReparent`, we will detach a branch from multiple levels of ancestors, and no reparenting will happen for the children of the ancestor.
+/// - Detach ancstor will always reparent the children of the detached branch.
+#[derive(Debug, Clone, Copy)]
+pub enum DetachBehavior {
+    NoAncestorAndReparent,
+    MultipleLevelAndNoReparent,
 }
 
 impl Default for Options {
@@ -168,6 +178,7 @@ impl Attempt {
 pub(super) async fn prepare(
     detached: &Arc<Timeline>,
     tenant: &Tenant,
+    behavior: DetachBehavior,
     options: Options,
     ctx: &RequestContext,
 ) -> Result<Progress, Error> {
@@ -230,23 +241,27 @@ pub(super) async fn prepare(
 
     check_no_archived_children_of_ancestor(tenant, detached, &ancestor, ancestor_lsn)?;
 
-    // If the ancestor has an ancestor, we might be able to fast-path detach it if the current ancestor does not have any data written/used by the detaching timeline.
-    while let Some(ancestor_of_ancestor) = ancestor.ancestor_timeline.clone() {
-        if ancestor_lsn != ancestor.ancestor_lsn {
-            // non-technical requirement; we could flatten N ancestors just as easily but we chose
-            // not to, at least initially
-            return Err(TooManyAncestors);
+    if let DetachBehavior::MultipleLevelAndNoReparent = behavior {
+        // If the ancestor has an ancestor, we might be able to fast-path detach it if the current ancestor does not have any data written/used by the detaching timeline.
+        while let Some(ancestor_of_ancestor) = ancestor.ancestor_timeline.clone() {
+            if ancestor_lsn != ancestor.ancestor_lsn {
+                // non-technical requirement; we could flatten N ancestors just as easily but we chose
+                // not to, at least initially
+                return Err(TooManyAncestors);
+            }
+            // Use the ancestor of the ancestor as the new ancestor (only when the ancestor LSNs are the same)
+            ancestor_lsn = ancestor.ancestor_lsn; // Get the LSN first before resetting the `ancestor` variable
+            ancestor = ancestor_of_ancestor;
+            // TODO: do we still need to check if we don't want to reparent?
+            check_no_archived_children_of_ancestor(tenant, detached, &ancestor, ancestor_lsn)?;
         }
-        // Use the ancestor of the ancestor as the new ancestor (only when the ancestor LSNs are the same)
-        ancestor_lsn = ancestor.ancestor_lsn; // Get the LSN first before resetting the `ancestor` variable
-        ancestor = ancestor_of_ancestor;
-        check_no_archived_children_of_ancestor(tenant, detached, &ancestor, ancestor_lsn)?;
     }
 
     tracing::info!(
-        "attempt to detach the timeline from the ancestor: {}@{}",
+        "attempt to detach the timeline from the ancestor: {}@{}, behavior={:?}",
         ancestor.timeline_id,
-        ancestor_lsn
+        ancestor_lsn,
+        behavior
     );
 
     let attempt = start_new_attempt(detached, tenant, ancestor.timeline_id, ancestor_lsn).await?;
@@ -833,6 +848,7 @@ pub(super) async fn detach_and_reparent(
     prepared: PreparedTimelineDetach,
     ancestor_timeline_id: TimelineId,
     ancestor_lsn: Lsn,
+    behavior: DetachBehavior,
     _ctx: &RequestContext,
 ) -> Result<DetachingAndReparenting, Error> {
     let PreparedTimelineDetach { layers } = prepared;
@@ -955,6 +971,11 @@ pub(super) async fn detach_and_reparent(
         }
         Ancestor::Detached(ancestor, ancestor_lsn) => (ancestor, ancestor_lsn, false),
     };
+
+    if let DetachBehavior::MultipleLevelAndNoReparent = behavior {
+        // Do not reparent if the user requests to behave so.
+        return Ok(DetachingAndReparenting::Reparented(HashSet::new()));
+    }
 
     let mut tasks = tokio::task::JoinSet::new();
 
@@ -1093,6 +1114,11 @@ pub(super) async fn complete(
 }
 
 /// Query against a locked `Tenant::timelines`.
+///
+/// A timeline is reparentable if:
+///
+/// - It is not the timeline being detached.
+/// - It has the same ancestor as the timeline being detached. Note that the ancestor might not be the direct ancestor.
 fn reparentable_timelines<'a, I>(
     timelines: I,
     detached: &'a Arc<Timeline>,

@@ -343,8 +343,10 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
     wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline)
 
 
-def test_ancestor_detach_two_level_ancestors(neon_env_builder: NeonEnvBuilder):
+def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder):
     """
+    Test the v2 behavior of ancestor detach.
+
     old main -------|---------X--------->
                     |         |         |
                     |         |         +-> after
@@ -352,18 +354,19 @@ def test_ancestor_detach_two_level_ancestors(neon_env_builder: NeonEnvBuilder):
                     |            |
                     |            +-> branch-to-detach
                     |
-                    +-> reparented
+                    +-> earlier
 
     Ends up as:
 
     old main -------|---------X--------->
-                                        |
-                                       +-> after
-                              
+                    |         |         |
+                    |         |         +-> after
+                    |         +--X empty snapshot branch
+                    |
+                    +-> earlier
 
-    new main -------|---------X----> branch-to-detach
-                    |         +----> empty snapshot branch
-                    +-> reparented
+
+    new main -------|---------|----> branch-to-detach
     """
 
     env = neon_env_builder.init_start()
@@ -388,8 +391,8 @@ def test_ancestor_detach_two_level_ancestors(neon_env_builder: NeonEnvBuilder):
         ep.safe_psql("INSERT INTO foo SELECT i::bigint FROM generate_series(8192, 16383) g(i);")
         wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
 
-    reparented = env.create_branch(
-        "reparented", ancestor_branch_name="main", ancestor_start_lsn=branchpoint_pipe
+    earlier = env.create_branch(
+        "earlier", ancestor_branch_name="main", ancestor_start_lsn=branchpoint_pipe
     )
 
     snapshot_branchpoint = env.create_branch(
@@ -404,8 +407,8 @@ def test_ancestor_detach_two_level_ancestors(neon_env_builder: NeonEnvBuilder):
 
     after = env.create_branch("after", ancestor_branch_name="main", ancestor_start_lsn=None)
 
-    all_reparented = client.detach_ancestor(env.initial_tenant, branch_to_detach)
-    assert set(all_reparented) == {reparented, snapshot_branchpoint}
+    all_reparented = client.detach_ancestor(env.initial_tenant, branch_to_detach, behavior_v2=True)
+    assert set(all_reparented) == set()
 
     env.pageserver.quiesce_tenants()
 
@@ -413,9 +416,9 @@ def test_ancestor_detach_two_level_ancestors(neon_env_builder: NeonEnvBuilder):
     expected_result = [
         ("main", env.initial_timeline, None, 16384, 1),
         ("after", after, env.initial_timeline, 16384, 1),
-        ("snapshot_branchpoint", snapshot_branchpoint, branch_to_detach, 8192, 1),
+        ("snapshot_branchpoint", snapshot_branchpoint, env.initial_timeline, 8192, 1),
         ("branch_to_detach", branch_to_detach, None, 8192, 1),
-        ("reparented", reparented, branch_to_detach, 0, 1),
+        ("earlier", earlier, env.initial_timeline, 0, 1),
     ]
 
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
@@ -463,12 +466,13 @@ def test_ancestor_detach_two_level_ancestors(neon_env_builder: NeonEnvBuilder):
             assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
             assert ep.safe_psql(f"SELECT count(*) FROM audit WHERE starts = {starts}")[0][0] == 1
 
-    # delete the timelines to confirm detach actually worked
+    # delete the new timeline to confirm it doesn't carry over the anything from the old timeline
+    client.timeline_delete(env.initial_tenant, branch_to_detach)
+    wait_timeline_detail_404(client, env.initial_tenant, branch_to_detach)
+
+    # delete the after timeline
     client.timeline_delete(env.initial_tenant, after)
     wait_timeline_detail_404(client, env.initial_tenant, after)
-
-    client.timeline_delete(env.initial_tenant, env.initial_timeline)
-    wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline)
 
 
 def test_detached_receives_flushes_while_being_detached(neon_env_builder: NeonEnvBuilder):

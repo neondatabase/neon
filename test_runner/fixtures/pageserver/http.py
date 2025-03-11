@@ -1070,13 +1070,15 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         tenant_id: TenantId | TenantShardId,
         timeline_id: TimelineId,
         batch_size: int | None = None,
+        behavior_v2: bool = False,
         **kwargs,
     ) -> set[TimelineId]:
         params = {}
         if batch_size is not None:
             params["batch_size"] = batch_size
+        endpoint = "detach_ancestor" if not behavior_v2 else "detach_ancestor_v2"
         res = self.put(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/detach_ancestor",
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/{endpoint}",
             params=params,
             **kwargs,
         )

@@ -1914,6 +1914,7 @@ impl TenantManager {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         prepared: PreparedTimelineDetach,
+        behavior: detach_ancestor::DetachBehavior,
         mut attempt: detach_ancestor::Attempt,
         ctx: &RequestContext,
     ) -> Result<HashSet<TimelineId>, detach_ancestor::Error> {
@@ -1962,6 +1963,7 @@ impl TenantManager {
                 prepared,
                 attempt.ancestor_timeline_id,
                 attempt.ancestor_lsn,
+                behavior,
                 ctx,
             )
             .await?;

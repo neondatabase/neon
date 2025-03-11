@@ -71,6 +71,7 @@ use crate::tenant::remote_timeline_client::{
 use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::{IoConcurrency, LayerAccessStatsReset, LayerName};
+use crate::tenant::timeline::detach_ancestor::DetachBehavior;
 use crate::tenant::timeline::offload::{OffloadError, offload_timeline};
 use crate::tenant::timeline::{
     CompactFlags, CompactOptions, CompactRequest, CompactionError, Timeline, WaitLsnTimeout,
@@ -2489,8 +2490,29 @@ async fn timeline_download_remote_layers_handler_get(
     json_response(StatusCode::OK, info)
 }
 
-async fn timeline_detach_ancestor_handler(
+async fn timeline_detach_ancestor_handler_v1(
     request: Request<Body>,
+    cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    timeline_detach_ancestor_handler_common(request, DetachBehavior::NoAncestorAndReparent, cancel)
+        .await
+}
+
+async fn timeline_detach_ancestor_handler_v2(
+    request: Request<Body>,
+    cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    timeline_detach_ancestor_handler_common(
+        request,
+        DetachBehavior::MultipleLevelAndNoReparent,
+        cancel,
+    )
+    .await
+}
+
+async fn timeline_detach_ancestor_handler_common(
+    request: Request<Body>,
+    behavior: DetachBehavior,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     use pageserver_api::models::detach_ancestor::AncestorDetached;
@@ -2548,7 +2570,7 @@ async fn timeline_detach_ancestor_handler(
         let timeline = tenant.get_timeline(timeline_id, true)?;
 
         let progress = timeline
-            .prepare_to_detach_from_ancestor(&tenant, options, ctx)
+            .prepare_to_detach_from_ancestor(&tenant, options, behavior, ctx)
             .await?;
 
         // uncomment to allow early as possible Tenant::drop
@@ -2563,6 +2585,7 @@ async fn timeline_detach_ancestor_handler(
                         tenant_shard_id,
                         timeline_id,
                         prepared,
+                        behavior,
                         attempt,
                         ctx,
                     )
@@ -3742,7 +3765,11 @@ pub fn make_router(
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/detach_ancestor",
-            |r| api_handler(r, timeline_detach_ancestor_handler),
+            |r| api_handler(r, timeline_detach_ancestor_handler_v1),
+        )
+        .put(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/detach_ancestor_v2",
+            |r| api_handler(r, timeline_detach_ancestor_handler_v2),
         )
         .delete("/v1/tenant/:tenant_shard_id/timeline/:timeline_id", |r| {
             api_handler(r, timeline_delete_handler)

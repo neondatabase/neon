@@ -5388,9 +5388,10 @@ impl Timeline {
         self: &Arc<Timeline>,
         tenant: &crate::tenant::Tenant,
         options: detach_ancestor::Options,
+        behavior: detach_ancestor::DetachBehavior,
         ctx: &RequestContext,
     ) -> Result<detach_ancestor::Progress, detach_ancestor::Error> {
-        detach_ancestor::prepare(self, tenant, options, ctx).await
+        detach_ancestor::prepare(self, tenant, behavior, options, ctx).await
     }
 
     /// Second step of detach from ancestor; detaches the `self` from it's current ancestor and
@@ -5408,6 +5409,7 @@ impl Timeline {
         prepared: detach_ancestor::PreparedTimelineDetach,
         ancestor_timeline_id: TimelineId,
         ancestor_lsn: Lsn,
+        behavior: detach_ancestor::DetachBehavior,
         ctx: &RequestContext,
     ) -> Result<detach_ancestor::DetachingAndReparenting, detach_ancestor::Error> {
         detach_ancestor::detach_and_reparent(
@@ -5416,6 +5418,7 @@ impl Timeline {
             prepared,
             ancestor_timeline_id,
             ancestor_lsn,
+            behavior,
             ctx,
         )
         .await
