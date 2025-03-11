@@ -156,8 +156,6 @@ def test_perf_oltp_large_tenant_pgbench(
     run_test_pgbench(remote_compare, custom_scripts, duration)
 
 
-@pytest.mark.parametrize("custom_scripts", get_custom_scripts())
-@pytest.mark.parametrize("duration", get_durations_matrix())
 @pytest.mark.remote_cluster
 def test_perf_oltp_large_tenant_maintenance(
     remote_compare: PgCompare, custom_scripts: str, duration: int
