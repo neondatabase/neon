@@ -626,11 +626,7 @@ impl ComputeNode {
         }
 
         // Configure and start rsyslog for Postgres logs export
-        if pspec
-            .spec
-            .features
-            .contains(&ComputeFeature::PostgresLogsExport)
-        {
+        if self.has_feature(ComputeFeature::PostgresLogsExport) {
             if let Some(ref project_id) = pspec.spec.cluster.cluster_id {
                 let host = PostgresLogsRsyslogConfig::default_host(project_id);
                 let conf = PostgresLogsRsyslogConfig::new(Some(&host));
