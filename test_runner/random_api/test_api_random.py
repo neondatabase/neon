@@ -13,12 +13,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from requests import HTTPError
-
 from fixtures.log_helper import log
 from fixtures.neon_api import NeonAPI
 from fixtures.neon_fixtures import PgBin
 from fixtures.pg_version import PgVersion
+from requests import HTTPError
 
 
 class NeonEndpoint:
@@ -116,32 +115,14 @@ class NeonBranch:
         self.project.terminate_benchmark(self.id)
 
     def restore_random_time(self) -> None:
-        start_time = datetime.now(UTC) - timedelta(seconds=1)
         min_time = self.updated_at + timedelta(seconds=1)
         max_time = datetime.now(UTC) - timedelta(seconds=1)
         target_time = (min_time + (max_time - min_time) * random.random()).replace(microsecond=0)
-        res = None
-        for _ in range(10):
-            try:
-                res = self.restore(
-                    self.id,
-                    source_timestamp=target_time.isoformat().replace("+00:00", "Z"),
-                    preserve_under_name=self.project.gen_restore_name(),
-                )
-            except HTTPError as he:
-                if he.response.status_code == 524:
-                    log.info("The request was timed out, trying to get operations")
-                    for op in self.neon_api.get_operations(self.project_id)["operations"]:
-                        if datetime.fromisoformat(op["created_at"]) >= start_time and op["action"] == "create_branch" and op["branch_id"] == self.id:
-                            res = self.neon_api.get_branch_details(self.project_id, self.id)
-                            break
-                    else:
-                        continue
-                    raise RuntimeError("The operation started")
-                else:
-                    raise HTTPError(he)
-            else:
-                break
+        res = self.restore(
+            self.id,
+            source_timestamp=target_time.isoformat().replace("+00:00", "Z"),
+            preserve_under_name=self.project.gen_restore_name(),
+        )
         # XXX debug only, remove before merge
         log.info("res: %s", res)
         self.updated_at: datetime = datetime.fromisoformat(res["branch"]["updated_at"])
@@ -161,18 +142,37 @@ class NeonBranch:
         source_timestamp: str | None = None,
         preserve_under_name: str | None = None,
     ) -> dict[str, Any]:
+        start_time = datetime.now(UTC) - timedelta(seconds=1)
         endpoints = [ep for ep in self.endpoints.values() if ep.type == "read_only"]
         for ep in endpoints:
             ep.terminate_benchmark()
         self.terminate_benchmark()
-        res = self.neon_api.restore_branch(
-            self.project_id,
-            self.id,
-            source_branch_id,
-            source_lsn,
-            source_timestamp,
-            preserve_under_name,
-        )
+        for _ in range(10):
+            try:
+                res = self.neon_api.restore_branch(
+                    self.project_id,
+                    self.id,
+                    source_branch_id,
+                    source_lsn,
+                    source_timestamp,
+                    preserve_under_name,
+                )
+            except HTTPError as he:
+                if he.response.status_code == 524:
+                    log.info("The request was timed out, trying to get operations")
+                    for op in self.neon_api.get_operations(self.project_id)["operations"]:
+                        if (
+                            datetime.fromisoformat(op["created_at"]) >= start_time
+                            and op["action"] == "create_branch"
+                            and op["branch_id"] == self.id
+                        ):
+                            raise RuntimeError("The operation started, please investigate") from he
+                    else:
+                        continue
+                else:
+                    raise HTTPError(he) from he
+            else:
+                break
         self.start_benchmark()
         for ep in endpoints:
             ep.start_benchmark()
@@ -216,11 +216,14 @@ class NeonProject:
         try:
             branch_def = self.neon_api.create_branch(self.id, parent_id=parent_id)
         except HTTPError as he:
-            if he.response.status_code == 422 and he.response.json()["code"] == "BRANCHES_LIMIT_EXCEEDED":
+            if (
+                he.response.status_code == 422
+                and he.response.json()["code"] == "BRANCHES_LIMIT_EXCEEDED"
+            ):
                 log.info("Branch limit exceeded, skipping")
                 return None
             else:
-                raise HTTPError(he)
+                raise HTTPError(he) from he
         new_branch = NeonBranch(self, branch_def)
         self.wait()
         return new_branch
