@@ -317,7 +317,9 @@ async fn async_main() -> anyhow::Result<()> {
                 "Insecure config!  One or more secrets is not set.  This is only permitted in `--dev` mode"
             );
         }
-        StrictMode::Strict if args.compute_hook_url.is_none() && args.control_plane_url.is_none() => {
+        StrictMode::Strict
+            if args.compute_hook_url.is_none() && args.control_plane_url.is_none() =>
+        {
             // Production systems should always have a control plane URL set, to prevent falling
             // back to trying to use neon_local.
             anyhow::bail!(
