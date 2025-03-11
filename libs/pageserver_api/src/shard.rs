@@ -78,6 +78,12 @@ impl Default for ShardStripeSize {
     }
 }
 
+impl std::fmt::Display for ShardStripeSize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// Layout version: for future upgrades where we might change how the key->shard mapping works
 #[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Hash, Debug)]
 pub struct ShardLayout(u8);
