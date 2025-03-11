@@ -1499,8 +1499,8 @@ pub struct TopTenantShardItem {
     pub max_logical_size: u64,
 
     /// The largest logical size of a timeline within this _tenant_ (not shard) divided by number of
-    /// shards. This is only tracked on shard 0, and is only a rough estimate as we divide it evenly
-    /// by shard count.
+    /// shards. This is only tracked on shard 0, and is only an estimate as we divide it evenly by
+    /// shard count, rounded up.
     pub max_logical_size_per_shard: u64,
 }
 

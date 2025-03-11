@@ -3844,8 +3844,9 @@ impl Tenant {
             );
         }
 
-        result.max_logical_size_per_shard =
-            result.max_logical_size / self.tenant_shard_id.shard_count.count() as u64;
+        result.max_logical_size_per_shard = result
+            .max_logical_size
+            .div_ceil(self.tenant_shard_id.shard_count.count() as u64);
 
         result
     }
