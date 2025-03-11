@@ -28,11 +28,12 @@ def test_safekeeper_https_api(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.use_https_safekeeper_api = True
     env = neon_env_builder.init_start()
 
+    sk = env.safekeepers[0]
+
     # 1. Make simple https request.
-    addr = f"https://localhost:{env.safekeepers[0].port.https}/v1/status"
+    addr = f"https://localhost:{sk.port.https}/v1/status"
     requests.get(addr, verify=str(env.ssl_ca_file)).raise_for_status()
 
-    sk = env.safekeepers[0]
     # Note: http_port is intentionally wrong.
     # Storcon should not use it if use_https is on.
     http_port = 0

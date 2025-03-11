@@ -19,5 +19,3 @@ pub fn load_private_key(filename: &Utf8Path) -> anyhow::Result<PrivateKeyDer<'st
         filename.as_str(),
     ))
 }
-
-// pub fn create_tls_acceptor(key_filename: &Utf8Path)

@@ -111,7 +111,7 @@ impl SafekeeperNode {
             .expect("non-Unicode path")
     }
 
-    /// Initializes a safekeeper node by creating all nesessary files,
+    /// Initializes a safekeeper node by creating all necessary files,
     /// e.g. SSL certificates.
     pub fn initialize(&self) -> anyhow::Result<()> {
         if self.env.generate_local_ssl_certs {
