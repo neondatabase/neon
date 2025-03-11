@@ -1091,7 +1091,7 @@ impl Timeline {
         let latest_gc_cutoff = self.get_applied_gc_cutoff_lsn();
 
         tracing::info!(
-            "latest_gc_cutoff: {}, pitr cutoff {}",
+            "starting shard ancestor compaction, latest_gc_cutoff: {}, pitr cutoff {}",
             *latest_gc_cutoff,
             self.gc_info.read().unwrap().cutoffs.time
         );
@@ -1120,6 +1120,7 @@ impl Timeline {
                     // Expensive, exhaustive check of keys in this layer: this guards against ShardedRange's calculations being
                     // wrong.  If ShardedRange claims the local page count is zero, then no keys in this layer
                     // should be !is_key_disposable()
+                    // TODO: exclude sparse keyspace from this check, otherwise it will infinitely loop.
                     let range = layer_desc.get_key_range();
                     let mut key = range.start;
                     while key < range.end {
