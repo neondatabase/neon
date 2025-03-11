@@ -71,6 +71,10 @@ struct Cli {
     #[arg(long)]
     compute_hook_url: Option<String>,
 
+    /// URL to control plane storage API prefix
+    #[arg(long)]
+    control_plane_url: Option<String>,
+
     /// URL to connect to postgres, like postgresql://localhost:1234/storage_controller
     #[arg(long)]
     database_url: Option<String>,
@@ -313,11 +317,11 @@ async fn async_main() -> anyhow::Result<()> {
                 "Insecure config!  One or more secrets is not set.  This is only permitted in `--dev` mode"
             );
         }
-        StrictMode::Strict if args.compute_hook_url.is_none() => {
-            // Production systems should always have a compute hook set, to prevent falling
+        StrictMode::Strict if args.compute_hook_url.is_none() && args.control_plane_url.is_none() => {
+            // Production systems should always have a control plane URL set, to prevent falling
             // back to trying to use neon_local.
             anyhow::bail!(
-                "`--compute-hook-url` is not set: this is only permitted in `--dev` mode"
+                "neither `--compute-hook-url` nor `--control-plane-url` are set: this is only permitted in `--dev` mode"
             );
         }
         StrictMode::Strict => {
@@ -343,6 +347,7 @@ async fn async_main() -> anyhow::Result<()> {
         control_plane_jwt_token: secrets.control_plane_jwt_token,
         peer_jwt_token: secrets.peer_jwt_token,
         compute_hook_url: args.compute_hook_url,
+        control_plane_url: args.control_plane_url,
         max_offline_interval: args
             .max_offline_interval
             .map(humantime::Duration::into)

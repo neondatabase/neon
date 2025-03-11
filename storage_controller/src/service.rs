@@ -363,6 +363,15 @@ pub struct Config {
     /// assume it is running in a test environment and try to update neon_local.
     pub compute_hook_url: Option<String>,
 
+    /// Prefix for storage API endpoints of the control plane. We use this prefix to compute
+    /// URLs that we use to send pageserver and safekeeper attachment locations.
+    /// If this is None, the compute hook will assume it is running in a test environment
+    /// and try to invoke neon_local instead.
+    ///
+    /// For now, there is also `compute_hook_url` which allows configuration of the pageserver
+    /// specific endpoint, but it is in the process of being phased out.
+    pub control_plane_url: Option<String>,
+
     /// Grace period within which a pageserver does not respond to heartbeats, but is still
     /// considered active. Once the grace period elapses, the next heartbeat failure will
     /// mark the pagseserver offline.
