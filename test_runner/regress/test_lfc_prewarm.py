@@ -5,9 +5,8 @@ from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import USE_LFC
 
 
+@pytest.mark.skipif(not USE_LFC)
 def test_lfc_prewarm(neon_simple_env: NeonEnv):
-    if not USE_LFC:
-        return
 
     env = neon_simple_env
     n_records = 1000000
