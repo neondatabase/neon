@@ -279,8 +279,7 @@ impl ClientInnerCommon<postgres_client::Client> {
             local_data.jti += 1;
             let token = resign_jwt(&local_data.key, payload, local_data.jti)?;
 
-            // discard all cannot run in a transaction. must be executed alone.
-            self.inner.batch_execute("discard all").await?;
+            self.inner.discard_all().await?;
 
             // initiates the auth session
             // this is safe from query injections as the jwt format free of any escape characters.
