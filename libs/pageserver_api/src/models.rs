@@ -392,7 +392,10 @@ pub struct ShardParameters {
 }
 
 impl ShardParameters {
-    pub const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
+    /// The default stripe size. A lower stripe size distributes ingest load better across shards,
+    /// but reduces IO amortization. 16 MB is a reasonable balance according to experiments (see
+    /// https://github.com/neondatabase/neon/pull/10510).
+    pub const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(16 * 1024 / 8);
 
     pub fn is_unsharded(&self) -> bool {
         self.count.is_unsharded()
