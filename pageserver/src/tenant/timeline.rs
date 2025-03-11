@@ -1485,7 +1485,7 @@ impl Timeline {
         let wait_for_timeout = self.last_record_lsn.wait_for_timeout(lsn, timeout);
         let wait_for_timeout = std::pin::pin!(wait_for_timeout);
         let update_metric = |LogSlowCallback {
-                                 incremental_time_spent_waiting: elapsed_since_last_callback,
+                                 elapsed_since_last_callback,
                              }| {
             self.metrics
                 .wait_lsn_in_progress_micros

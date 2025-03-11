@@ -29,7 +29,6 @@ use pq_proto::framed::ConnectionError;
 use strum::{EnumCount, IntoEnumIterator as _, VariantNames};
 use strum_macros::{IntoStaticStr, VariantNames};
 use utils::id::TimelineId;
-use utils::logging::{LogSlowCallback, LogSlowCallbackReason};
 
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext};
@@ -1536,26 +1535,27 @@ impl SmgrOpFlushInProgress {
     where
         Fut: std::future::Future<Output = O>,
     {
-        utils::logging::log_slow2(started_at, Duration::from_secs(10), fut, |cb| {
-            let LogSlowCallback {
-                reason,
-                now,
-                incremental_time_spent_waiting,
-            } = cb;
-            // Always increment the counter
-            {
-                let elapsed_since_last_observe = incremental_time_spent_waiting;
-                self.global_micros
-                    .inc_by(u64::try_from(elapsed_since_last_observe.as_micros()).unwrap());
-                self.per_timeline_micros
-                    .inc_by(u64::try_from(elapsed_since_last_observe.as_micros()).unwrap());
-                last_counter_increment_at = now;
-            }
+        let mut fut = std::pin::pin!(fut);
 
-            // Log something on every timeout, and on completion but only if we hit a timeout.
-            match reason {
-                LogSlowCallbackReason::Timeout
-                | LogSlowCallbackReason::CompletedAfterHittingTimeout => {
+        let mut logged = false;
+        let mut last_counter_increment_at = started_at;
+        let mut observe_guard = scopeguard::guard(
+            |is_timeout| {
+                let now = Instant::now();
+
+                // Increment counter
+                {
+                    let elapsed_since_last_observe = now - last_counter_increment_at;
+                    self.global_micros
+                        .inc_by(u64::try_from(elapsed_since_last_observe.as_micros()).unwrap());
+                    self.per_timeline_micros
+                        .inc_by(u64::try_from(elapsed_since_last_observe.as_micros()).unwrap());
+                    last_counter_increment_at = now;
+                }
+
+                // Log something on every timeout, and on completion but only if we hit a timeout.
+                if is_timeout || logged {
+                    logged = true;
                     let elapsed_total = now - started_at;
                     let msg = if is_timeout {
                         "slow flush ongoing"
@@ -1582,10 +1582,20 @@ impl SmgrOpFlushInProgress {
                     let elapsed_total_secs = format!("{:.6}", elapsed_total.as_secs_f64());
                     tracing::info!(elapsed_total_secs, inq, outq, msg);
                 }
-                LogSlowCallbackReason::CompletedBeforeTimeout => {}
+            },
+            |mut observe| {
+                observe(false);
+            },
+        );
+
+        loop {
+            match tokio::time::timeout(Duration::from_secs(10), &mut fut).await {
+                Ok(v) => return v,
+                Err(_timeout) => {
+                    (*observe_guard)(true);
+                }
             }
-        })
-        .await;
+        }
     }
 }
 
