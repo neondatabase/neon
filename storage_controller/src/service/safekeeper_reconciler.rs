@@ -1,6 +1,6 @@
 use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
 
-use dashmap::{DashMap, Entry};
+use clashmap::{ClashMap, Entry};
 use safekeeper_api::models::PullTimelineRequest;
 use safekeeper_client::mgmt_api;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -136,7 +136,7 @@ pub(crate) struct ScheduleRequest {
 
 struct ReconcilerHandle {
     tx: UnboundedSender<(ScheduleRequest, Arc<CancellationToken>)>,
-    ongoing_tokens: Arc<DashMap<(TenantId, TimelineId), Arc<CancellationToken>>>,
+    ongoing_tokens: Arc<ClashMap<(TenantId, TimelineId), Arc<CancellationToken>>>,
     cancel: CancellationToken,
 }
 
@@ -180,7 +180,7 @@ impl SafekeeperReconciler {
         };
         let handle = ReconcilerHandle {
             tx,
-            ongoing_tokens: Arc::new(DashMap::new()),
+            ongoing_tokens: Arc::new(ClashMap::new()),
             cancel,
         };
         tokio::spawn(async move { reconciler.run().await });
