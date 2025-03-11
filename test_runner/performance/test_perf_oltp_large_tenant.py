@@ -157,8 +157,6 @@ def test_perf_oltp_large_tenant_pgbench(
 
 
 @pytest.mark.remote_cluster
-def test_perf_oltp_large_tenant_maintenance(
-    remote_compare: PgCompare, custom_scripts: str, duration: int
-):
+def test_perf_oltp_large_tenant_maintenance(remote_compare: PgCompare):
     # run analyze, vacuum, re-index after the test and measure and report its duration
     run_database_maintenance(remote_compare)
