@@ -102,7 +102,7 @@ jobs:
           ;;
         esac
 
-        CONNSTR_WITHOUT_POOLER=$(echo "${CONNSTR}" | sed 's/-pooler//')
+        CONNSTR_WITHOUT_POOLER="${CONNSTR//-pooler/}"
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
         echo "connstr_without_pooler=${CONNSTR_WITHOUT_POOLER}" >> $GITHUB_OUTPUT
