@@ -446,6 +446,15 @@ async fn request_handler(
                 .map(Into::into),
         );
 
+        let testodrome_id = request
+            .headers()
+            .get("X-Neon-Query-ID")
+            .map(|value| value.to_str().unwrap_or_default().to_string());
+
+        if let Some(query_id) = testodrome_id {
+            ctx.set_testodrome_id(query_id);
+        }
+
         let span = ctx.span();
         info!(parent: &span, "performing websocket upgrade");
 
