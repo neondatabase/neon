@@ -1334,7 +1334,7 @@ impl DeltaLayerInner {
             block_reader,
         );
 
-        tree_reader.dump().await?;
+        tree_reader.dump(ctx).await?;
 
         let keys = self.index_entries(ctx).await?;
 
@@ -1972,6 +1972,7 @@ pub(crate) mod test {
             .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, ctx)
             .await
             .unwrap();
+        let ctx = &ctx.with_scope_timeline(&timeline);
 
         let initdb_layer = timeline
             .layers
