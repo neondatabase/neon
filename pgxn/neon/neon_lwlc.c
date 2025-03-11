@@ -86,9 +86,9 @@ static shmem_startup_hook_type prev_shmem_startup_hook;
 
 #if PG_VERSION_NUM >= 150000
 static shmem_request_hook_type prev_shmem_request_hook;
-static void shmemrequest(void);
 #endif
 
+static void shmemrequest(void);
 static void shmeminit(void);
 
 void
@@ -105,6 +105,8 @@ init_lwlc(void)
 	#if PG_VERSION_NUM >= 150000
 	prev_shmem_request_hook = shmem_request_hook;
 	shmem_request_hook = shmemrequest;
+	#else
+	shmemrequest();
 	#endif
 	
 	prev_get_lwlsn_hook = get_lwlsn_hook;
@@ -123,18 +125,19 @@ init_lwlc(void)
 	set_lwlsn_db_hook = neon_set_lwlsn_db;
 }
 
-#if PG_VERSION_NUM >= 150000
+
 static void shmemrequest(void) {
 	Size requested_size = sizeof(LwLsnCacheCtl);
 
+	#if PG_VERSION_NUM >= 150000
 	if (prev_shmem_request_hook)
 			prev_shmem_request_hook();
+	#endif
+	
+	requested_size += hash_estimate_size(lwlsn_cache_size, sizeof(LastWrittenLsnCacheEntry));
 
-		requested_size += hash_estimate_size(lwlsn_cache_size, sizeof(LastWrittenLsnCacheEntry));
-
-		RequestAddinShmemSpace(requested_size);
+	RequestAddinShmemSpace(requested_size);
 }
-#endif
 
 static void shmeminit(void) {
 	static HASHCTL info;
