@@ -352,33 +352,110 @@ where
         let res = tokio::time::timeout_at(deadline, &mut f).await;
         let now = Instant::now();
         cb(LogSlowCallback {
-            elapsed_since_last_callback: now - last_cb,
+            incremental_time_spent_waiting: now - last_cb,
         });
         last_cb = now;
-        let elapsed = now - started;
         if let Ok(output) = res {
-            // NB: we check if we exceeded the threshold even if the timeout never fired, because
-            // scheduling or execution delays may cause the future to succeed even if it exceeds the
-            // timeout. This costs an extra unconditional clock reading, but seems worth it to avoid
-            // false negatives.
             if elapsed >= threshold {
                 info!("slow {name} completed after {:.3}s", elapsed.as_secs_f64());
             }
             return output;
         }
-        info!(
-            "slow {name} still running after {:.3}s",
-            elapsed.as_secs_f64()
-        );
 
         attempt += 1;
     }
+    log_slow2(started, threshold, f, |arg| {
+        let LogSlowCallback {
+            reason,
+            now,
+            incremental_time_spent_waiting: _,
+        } = arg;
+        let elapsed = now - started;
+        match reason {
+            LogSlowCallbackReason::Timeout => {
+                info!(
+                    "slow {name} still running after {:.3}s",
+                    elapsed.as_secs_f64()
+                );
+            }
+            LogSlowCallbackReason::CompletedAfterHittingTimeout => {
+                info!("slow {name} completed after {:.3}s", elapsed.as_secs_f64());
+            }
+            LogSlowCallbackReason::CompletedWithoutHittingTimeout => {}
+        }
+    })
+    .await
 }
 
-/// See [`log_slow`].
+#[derive(Debug)]
+pub enum LogSlowCallbackReason {
+    Timeout,
+    CompletedAfterHittingTimeout,
+    CompletedWithoutHittingTimeout,
+}
+
 pub struct LogSlowCallback {
+    pub reason: LogSlowCallbackReason,
+    pub now: Instant,
     /// The time elapsed since the last callback invocation.
-    pub elapsed_since_last_callback: Duration,
+    pub incremental_time_spent_waiting: Duration,
+}
+
+pub async fn log_slow2<Fut, O>(
+    started_at: Instant,
+    period: Duration,
+    mut fut: Fut,
+    cb: impl FnMut(LogSlowCallback),
+) -> O
+where
+    Fut: std::future::Future<Output = O>,
+{
+    let mut fut = std::pin::pin!(fut);
+
+    let mut last_why = None;
+    let mut last_callback_at = started_at;
+    #[derive(Debug)]
+    enum Why {
+        HitTimeout,
+        Drop,
+    }
+    let mut observe_guard = scopeguard::guard(
+        |why| {
+            let now = Instant::now();
+            use Why::*;
+            let reason = match (last_why, why) {
+                (None, HitTimeout) | (Some(HitTimeout), HitTimeout) => {
+                    LogSlowCallbackReason::Timeout
+                }
+                (None, Drop) => LogSlowCallbackReason::CompletedWithoutHittingTimeout,
+                (Some(HitTimeout), Drop) => LogSlowCallbackReason::CompletedAfterHittingTimeout,
+                (Some(Drop), _) => {
+                    unreachable!("can only drop once: last_why={last_why:?}, why={why:?}");
+                }
+            };
+            last_why = Some(why);
+            let arg = LogSlowCallback {
+                reason,
+                now,
+                incremental_time_spent_waiting: elapsed_since_last_observe,
+            };
+            let elapsed_since_last_observe = now - last_callback_at;
+            cb(arg);
+            last_callback_at = now;
+        },
+        |mut observe| {
+            observe(Why::Drop);
+        },
+    );
+
+    loop {
+        match tokio::time::timeout(period, &mut fut).await {
+            Ok(v) => return v,
+            Err(_timeout) => {
+                (*observe_guard)(Why::HitTimeout);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
