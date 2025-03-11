@@ -39,7 +39,7 @@ AND attnum > 0
 ORDER BY attnum
 ";
 
-pub async fn prepare(
+async fn prepare(
     client: &Arc<InnerClient>,
     name: &'static str,
     query: &str,

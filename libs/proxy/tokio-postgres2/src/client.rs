@@ -19,10 +19,10 @@ use crate::config::{Host, SslMode};
 use crate::connection::{Request, RequestMessages};
 use crate::query::RowStream;
 use crate::simple_query::SimpleQueryStream;
-use crate::types::{Oid, ToSql, Type};
+use crate::types::{Oid, Type};
 use crate::{
-    CancelToken, Error, ReadyForQueryStatus, Row, SimpleQueryMessage, Statement, Transaction,
-    TransactionBuilder, query, simple_query, slice_iter,
+    CancelToken, Error, ReadyForQueryStatus, SimpleQueryMessage, Statement, Transaction,
+    TransactionBuilder, query, simple_query,
 };
 
 pub struct Responses {
@@ -187,55 +187,6 @@ impl Client {
 
     pub(crate) fn inner(&self) -> &Arc<InnerClient> {
         &self.inner
-    }
-
-    /// Executes a statement, returning a vector of the resulting rows.
-    ///
-    /// A statement may contain parameters, specified by `$n`, where `n` is the index of the parameter of the list
-    /// provided, 1-indexed.
-    ///
-    /// The `statement` argument can either be a `Statement`, or a raw query string. If the same statement will be
-    /// repeatedly executed (perhaps with different query parameters), consider preparing the statement up front
-    /// with the `prepare` method.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the number of parameters provided does not match the number expected.
-    pub async fn query(
-        &self,
-        statement: Statement,
-        params: &[&(dyn ToSql + Sync)],
-    ) -> Result<Vec<Row>, Error> {
-        self.query_raw(statement, slice_iter(params))
-            .await?
-            .try_collect()
-            .await
-    }
-
-    /// The maximally flexible version of [`query`].
-    ///
-    /// A statement may contain parameters, specified by `$n`, where `n` is the index of the parameter of the list
-    /// provided, 1-indexed.
-    ///
-    /// The `statement` argument can either be a `Statement`, or a raw query string. If the same statement will be
-    /// repeatedly executed (perhaps with different query parameters), consider preparing the statement up front
-    /// with the `prepare` method.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the number of parameters provided does not match the number expected.
-    ///
-    /// [`query`]: #method.query
-    pub async fn query_raw<'a, I>(
-        &self,
-        statement: Statement,
-        params: I,
-    ) -> Result<RowStream, Error>
-    where
-        I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
-        I::IntoIter: ExactSizeIterator,
-    {
-        query::query(&self.inner, statement, params).await
     }
 
     /// Pass text directly to the Postgres backend to allow it to sort out typing itself and
