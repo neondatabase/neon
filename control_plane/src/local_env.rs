@@ -165,8 +165,6 @@ pub struct NeonStorageControllerConf {
 
     #[serde(with = "humantime_serde")]
     pub long_reconcile_threshold: Option<Duration>,
-
-    pub load_safekeepers: bool,
 }
 
 impl NeonStorageControllerConf {
@@ -190,7 +188,6 @@ impl Default for NeonStorageControllerConf {
             max_secondary_lag_bytes: None,
             heartbeat_interval: Self::DEFAULT_HEARTBEAT_INTERVAL,
             long_reconcile_threshold: None,
-            load_safekeepers: true,
         }
     }
 }
