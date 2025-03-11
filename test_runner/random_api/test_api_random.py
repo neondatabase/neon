@@ -211,9 +211,17 @@ class NeonProject:
     def __get_branches_info(self) -> list[Any]:
         return self.neon_api.get_branches(self.id)["branches"]
 
-    def create_branch(self, parent_id: str | None = None) -> NeonBranch:
+    def create_branch(self, parent_id: str | None = None) -> NeonBranch | None:
         self.wait()
-        new_branch = NeonBranch(self, self.neon_api.create_branch(self.id, parent_id=parent_id))
+        try:
+            branch_def = self.neon_api.create_branch(self.id, parent_id=parent_id)
+        except HTTPError as he:
+            if he.response.status_code == 422 and he.response.json()["code"] == "BRANCHES_LIMIT_EXCEEDED":
+                log.info("Branch limit exceeded, skipping")
+                return None
+            else:
+                raise HTTPError(he)
+        new_branch = NeonBranch(self, branch_def)
         self.wait()
         return new_branch
 
