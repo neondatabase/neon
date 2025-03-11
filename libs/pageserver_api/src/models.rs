@@ -26,7 +26,7 @@ use utils::{completion, serde_system_time};
 use crate::config::Ratio;
 use crate::key::{CompactKey, Key};
 use crate::reltag::RelTag;
-use crate::shard::{ShardCount, ShardStripeSize, TenantShardId};
+use crate::shard::{DEFAULT_STRIPE_SIZE, ShardCount, ShardStripeSize, TenantShardId};
 
 /// The state of a tenant in this pageserver.
 ///
@@ -438,8 +438,6 @@ pub struct ShardParameters {
 }
 
 impl ShardParameters {
-    pub const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
-
     pub fn is_unsharded(&self) -> bool {
         self.count.is_unsharded()
     }
@@ -449,7 +447,7 @@ impl Default for ShardParameters {
     fn default() -> Self {
         Self {
             count: ShardCount::new(0),
-            stripe_size: Self::DEFAULT_STRIPE_SIZE,
+            stripe_size: DEFAULT_STRIPE_SIZE,
         }
     }
 }

@@ -41,7 +41,7 @@ use pageserver_api::controller_api::{
 use pageserver_api::models::{
     ShardParameters, TenantConfigRequest, TimelineCreateRequest, TimelineInfo,
 };
-use pageserver_api::shard::{ShardCount, ShardStripeSize, TenantShardId};
+use pageserver_api::shard::{DEFAULT_STRIPE_SIZE, ShardCount, ShardStripeSize, TenantShardId};
 use postgres_backend::AuthType;
 use postgres_connection::parse_host_port;
 use safekeeper_api::membership::SafekeeperGeneration;
@@ -1117,7 +1117,7 @@ async fn handle_tenant(subcmd: &TenantCmd, env: &mut local_env::LocalEnv) -> any
                         stripe_size: args
                             .shard_stripe_size
                             .map(ShardStripeSize)
-                            .unwrap_or(ShardParameters::DEFAULT_STRIPE_SIZE),
+                            .unwrap_or(DEFAULT_STRIPE_SIZE),
                     },
                     placement_policy: args.placement_policy.clone(),
                     config: tenant_conf,
@@ -1430,7 +1430,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                     vec![(parsed.0, parsed.1.unwrap_or(5432))],
                     // If caller is telling us what pageserver to use, this is not a tenant which is
                     // full managed by storage controller, therefore not sharded.
-                    ShardParameters::DEFAULT_STRIPE_SIZE,
+                    DEFAULT_STRIPE_SIZE,
                 )
             } else {
                 // Look up the currently attached location of the tenant, and its striping metadata,

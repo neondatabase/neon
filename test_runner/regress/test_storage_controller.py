@@ -677,7 +677,7 @@ def test_storage_controller_compute_hook(
     env.storage_controller.tenant_shard_split(env.initial_tenant, shard_count=2)
     expect = {
         "tenant_id": str(env.initial_tenant),
-        "stripe_size": 32768,
+        "stripe_size": 2048,
         "shards": [
             {"node_id": int(env.pageservers[1].id), "shard_number": 0},
             {"node_id": int(env.pageservers[1].id), "shard_number": 1},

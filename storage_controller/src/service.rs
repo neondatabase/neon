@@ -43,7 +43,7 @@ use pageserver_api::models::{
     TimelineInfo, TopTenantShardItem, TopTenantShardsRequest,
 };
 use pageserver_api::shard::{
-    ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId,
+    DEFAULT_STRIPE_SIZE, ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId,
 };
 use pageserver_api::upcall_api::{
     ReAttachRequest, ReAttachResponse, ReAttachResponseTenant, ValidateRequest, ValidateResponse,
@@ -2742,7 +2742,7 @@ impl Service {
                         count: tenant_shard_id.shard_count,
                         // We only import un-sharded or single-sharded tenants, so stripe
                         // size can be made up arbitrarily here.
-                        stripe_size: ShardParameters::DEFAULT_STRIPE_SIZE,
+                        stripe_size: DEFAULT_STRIPE_SIZE,
                     },
                     placement_policy: Some(placement_policy),
                     config: req.config.tenant_conf,
@@ -7841,7 +7841,7 @@ impl Service {
         // old, persisted stripe size.
         let new_stripe_size = match candidate.id.shard_count.count() {
             0 => panic!("invalid shard count 0"),
-            1 => Some(ShardParameters::DEFAULT_STRIPE_SIZE),
+            1 => Some(DEFAULT_STRIPE_SIZE),
             2.. => None,
         };
 
