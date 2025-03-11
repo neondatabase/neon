@@ -53,6 +53,7 @@
 /* GUCs */
 char	   *neon_timeline;
 char	   *neon_tenant;
+char	   *neon_compute_type;
 int32		max_cluster_size;
 char	   *page_server_connstring;
 char	   *neon_auth_token;
@@ -390,9 +391,9 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	{
 	case PS_Disconnected:
 	{
-		const char *keywords[4];
-		const char *values[4];
-		char pid_str[16];
+		const char *keywords[5];
+		const char *values[5];
+		char pid_str[24];
 		int			n_pgsql_params;
 		TimestampTz	now;
 		int64		us_since_last_attempt;
@@ -445,7 +446,11 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		 */
 		keywords[n_pgsql_params] = "application_name";
 		{
-			int ret = snprintf(pid_str, sizeof(pid_str), "%d", MyProcPid);
+			int ret;
+			if (neon_compute_type)
+				ret = snprintf(pid_str, sizeof(pid_str), "%d-%s", MyProcPid, neon_compute_type);
+			else
+				ret = snprintf(pid_str, sizeof(pid_str), "%d", MyProcPid);
 			if (ret < 0 || ret >= (int)(sizeof(pid_str)))
 				elog(FATAL, "stack-allocated buffer too small to hold pid");
 		}
@@ -1369,6 +1374,15 @@ pg_init_libpagestore(void)
 							PGC_SUSET,
 							GUC_UNIT_MS,
 							NULL, NULL, NULL);
+
+	DefineCustomStringVariable("neon.compute_type",
+							   "The compute node type",
+							   NULL,
+							   &neon_compute_type,
+							   "",
+							   PGC_POSTMASTER,
+							   0,	/* no flags required */
+							   NULL, NULL, NULL);
 
 	relsize_hash_init();
 
