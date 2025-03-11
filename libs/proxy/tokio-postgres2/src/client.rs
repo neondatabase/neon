@@ -54,26 +54,18 @@ impl Responses {
 /// A cache of type info and prepared statements for fetching type info
 /// (corresponding to the queries in the [crate::prepare] module).
 #[derive(Default)]
-struct CachedTypeInfo {
+pub(crate) struct CachedTypeInfo {
     /// A statement for basic information for a type from its
     /// OID. Corresponds to [TYPEINFO_QUERY](crate::prepare::TYPEINFO_QUERY) (or its
     /// fallback).
-    typeinfo: Option<Statement>,
-    /// A statement for getting information for a composite type from its OID.
-    /// Corresponds to [TYPEINFO_QUERY](crate::prepare::TYPEINFO_COMPOSITE_QUERY).
-    typeinfo_composite: Option<Statement>,
-    /// A statement for getting information for a composite type from its OID.
-    /// Corresponds to [TYPEINFO_QUERY](crate::prepare::TYPEINFO_COMPOSITE_QUERY) (or
-    /// its fallback).
-    typeinfo_enum: Option<Statement>,
+    pub(crate) typeinfo: Option<Statement>,
 
     /// Cache of types already looked up.
-    types: HashMap<Oid, Type>,
+    pub(crate) types: HashMap<Oid, Type>,
 }
 
 pub struct InnerClient {
     sender: mpsc::UnboundedSender<Request>,
-    cached_typeinfo: Mutex<CachedTypeInfo>,
 
     /// A buffer to use when writing out postgres commands.
     buffer: Mutex<BytesMut>,
@@ -89,22 +81,6 @@ impl InnerClient {
             receiver,
             cur: BackendMessages::empty(),
         })
-    }
-
-    pub fn typeinfo(&self) -> Option<Statement> {
-        self.cached_typeinfo.lock().typeinfo.clone()
-    }
-
-    pub fn set_typeinfo(&self, statement: &Statement) {
-        self.cached_typeinfo.lock().typeinfo = Some(statement.clone());
-    }
-
-    pub fn type_(&self, oid: Oid) -> Option<Type> {
-        self.cached_typeinfo.lock().types.get(&oid).cloned()
-    }
-
-    pub fn set_type(&self, oid: Oid, type_: &Type) {
-        self.cached_typeinfo.lock().types.insert(oid, type_.clone());
     }
 
     /// Call the given function with a buffer to be used when writing out
@@ -126,7 +102,6 @@ pub struct SocketConfig {
     pub host: Host,
     pub port: u16,
     pub connect_timeout: Option<Duration>,
-    // pub keepalive: Option<KeepaliveConfig>,
 }
 
 /// An asynchronous PostgreSQL client.
@@ -135,6 +110,7 @@ pub struct SocketConfig {
 /// through this client object.
 pub struct Client {
     inner: Arc<InnerClient>,
+    cached_typeinfo: CachedTypeInfo,
 
     socket_config: SocketConfig,
     ssl_mode: SslMode,
@@ -153,9 +129,9 @@ impl Client {
         Client {
             inner: Arc::new(InnerClient {
                 sender,
-                cached_typeinfo: Default::default(),
                 buffer: Default::default(),
             }),
+            cached_typeinfo: Default::default(),
 
             socket_config,
             ssl_mode,
@@ -219,14 +195,10 @@ impl Client {
         simple_query::batch_execute(self.inner(), query).await
     }
 
-    pub async fn discard_all(&self) -> Result<ReadyForQueryStatus, Error> {
+    pub async fn discard_all(&mut self) -> Result<ReadyForQueryStatus, Error> {
         // clear the prepared statements that are about to be nuked from the postgres session
-        {
-            let mut typeinfo = self.inner.cached_typeinfo.lock();
-            typeinfo.typeinfo = None;
-            typeinfo.typeinfo_composite = None;
-            typeinfo.typeinfo_enum = None;
-        }
+
+        self.cached_typeinfo.typeinfo = None;
 
         self.batch_execute("discard all").await
     }
@@ -294,8 +266,8 @@ impl Client {
     }
 
     /// Query for type information
-    pub async fn get_type(&self, oid: Oid) -> Result<Type, Error> {
-        crate::prepare::get_type(&self.inner, oid).await
+    pub(crate) async fn get_type_inner(&mut self, oid: Oid) -> Result<Type, Error> {
+        crate::prepare::get_type(&self.inner, &mut self.cached_typeinfo, oid).await
     }
 
     /// Determines if the connection to the server has already closed.
