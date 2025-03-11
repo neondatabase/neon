@@ -107,7 +107,7 @@ impl ControllerUpcallClient {
             },
             |_| false,
             3,
-            u32::MAX,
+            backoff::INFINITE_RETRIES,
             "calling control plane generation validation API",
             &self.cancel,
         )
