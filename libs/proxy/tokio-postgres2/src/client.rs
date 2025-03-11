@@ -99,22 +99,6 @@ impl InnerClient {
         self.cached_typeinfo.lock().typeinfo = Some(statement.clone());
     }
 
-    pub fn typeinfo_composite(&self) -> Option<Statement> {
-        self.cached_typeinfo.lock().typeinfo_composite.clone()
-    }
-
-    pub fn set_typeinfo_composite(&self, statement: &Statement) {
-        self.cached_typeinfo.lock().typeinfo_composite = Some(statement.clone());
-    }
-
-    pub fn typeinfo_enum(&self) -> Option<Statement> {
-        self.cached_typeinfo.lock().typeinfo_enum.clone()
-    }
-
-    pub fn set_typeinfo_enum(&self, statement: &Statement) {
-        self.cached_typeinfo.lock().typeinfo_enum = Some(statement.clone());
-    }
-
     pub fn type_(&self, oid: Oid) -> Option<Type> {
         self.cached_typeinfo.lock().types.get(&oid).cloned()
     }

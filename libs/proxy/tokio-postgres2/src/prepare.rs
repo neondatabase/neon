@@ -12,7 +12,7 @@ use postgres_protocol2::message::frontend;
 use crate::client::InnerClient;
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
-use crate::types::{Field, Kind, Oid, Type};
+use crate::types::{Kind, Oid, Type};
 use crate::{Column, Error, Statement, query, slice_iter};
 
 pub(crate) const TYPEINFO_QUERY: &str = "\
@@ -21,22 +21,6 @@ FROM pg_catalog.pg_type t
 LEFT OUTER JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid
 INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid
 WHERE t.oid = $1
-";
-
-const TYPEINFO_ENUM_QUERY: &str = "\
-SELECT enumlabel
-FROM pg_catalog.pg_enum
-WHERE enumtypid = $1
-ORDER BY enumsortorder
-";
-
-pub(crate) const TYPEINFO_COMPOSITE_QUERY: &str = "\
-SELECT attname, atttypid
-FROM pg_catalog.pg_attribute
-WHERE attrelid = $1
-AND NOT attisdropped
-AND attnum > 0
-ORDER BY attnum
 ";
 
 async fn prepare_typecheck(
@@ -127,19 +111,16 @@ pub async fn get_type(client: &Arc<InnerClient>, oid: Oid) -> Result<Type, Error
     let relid: Oid = row.try_get(6)?;
 
     let kind = if type_ == b'e' as i8 {
-        let variants = get_enum_variants(client, oid).await?;
-        Kind::Enum(variants)
+        Kind::Enum
     } else if type_ == b'p' as i8 {
         Kind::Pseudo
     } else if basetype != 0 {
-        let type_ = get_type_rec(client, basetype).await?;
-        Kind::Domain(type_)
+        Kind::Domain(basetype)
     } else if elem_oid != 0 {
         let type_ = get_type_rec(client, elem_oid).await?;
         Kind::Array(type_)
     } else if relid != 0 {
-        let fields = get_composite_fields(client, relid).await?;
-        Kind::Composite(fields)
+        Kind::Composite(relid)
     } else if let Some(rngsubtype) = rngsubtype {
         let type_ = get_type_rec(client, rngsubtype).await?;
         Kind::Range(type_)
@@ -169,58 +150,5 @@ async fn typeinfo_statement(client: &Arc<InnerClient>) -> Result<Statement, Erro
     let stmt = prepare_typecheck(client, typeinfo, TYPEINFO_QUERY, &[]).await?;
 
     client.set_typeinfo(&stmt);
-    Ok(stmt)
-}
-
-async fn get_enum_variants(client: &Arc<InnerClient>, oid: Oid) -> Result<Vec<String>, Error> {
-    let stmt = typeinfo_enum_statement(client).await?;
-
-    query::query(client, stmt, slice_iter(&[&oid]))
-        .await?
-        .and_then(|row| async move { row.try_get(0) })
-        .try_collect()
-        .await
-}
-
-async fn typeinfo_enum_statement(client: &Arc<InnerClient>) -> Result<Statement, Error> {
-    if let Some(stmt) = client.typeinfo_enum() {
-        return Ok(stmt);
-    }
-
-    let typeinfo = "neon_proxy_typeinfo_enum";
-    let stmt = prepare_typecheck(client, typeinfo, TYPEINFO_ENUM_QUERY, &[]).await?;
-
-    client.set_typeinfo_enum(&stmt);
-    Ok(stmt)
-}
-
-async fn get_composite_fields(client: &Arc<InnerClient>, oid: Oid) -> Result<Vec<Field>, Error> {
-    let stmt = typeinfo_composite_statement(client).await?;
-
-    let rows = query::query(client, stmt, slice_iter(&[&oid]))
-        .await?
-        .try_collect::<Vec<_>>()
-        .await?;
-
-    let mut fields = vec![];
-    for row in rows {
-        let name = row.try_get(0)?;
-        let oid = row.try_get(1)?;
-        let type_ = get_type_rec(client, oid).await?;
-        fields.push(Field::new(name, type_));
-    }
-
-    Ok(fields)
-}
-
-async fn typeinfo_composite_statement(client: &Arc<InnerClient>) -> Result<Statement, Error> {
-    if let Some(stmt) = client.typeinfo_composite() {
-        return Ok(stmt);
-    }
-
-    let typeinfo = "neon_proxy_typeinfo_composite";
-    let stmt = prepare_typecheck(client, typeinfo, TYPEINFO_COMPOSITE_QUERY, &[]).await?;
-
-    client.set_typeinfo_composite(&stmt);
     Ok(stmt)
 }
