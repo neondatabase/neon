@@ -29,7 +29,7 @@ pub(crate) enum Error {
     #[error("no ancestors")]
     NoAncestor,
 
-    #[error("the branch has more than 1 ancestor and cannot be fast-path detached")]
+    #[error("too many ancestors")]
     TooManyAncestors,
 
     #[error("shutting down, please retry later")]
