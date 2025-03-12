@@ -324,6 +324,20 @@ impl std::fmt::Debug for SecretString {
     }
 }
 
+/// Like [`log_slow_with`], but without the callback.
+#[inline]
+pub async fn log_slow<F, O>(
+    name: &str,
+    threshold: Duration,
+    mut cb: impl FnMut(LogSlowCallback),
+    mut f: std::pin::Pin<&mut F>,
+) -> O
+where
+    F: Future<Output = O>,
+{
+    log_slow_with(name, threshold, || (), f).await
+}
+
 /// Logs a periodic message if a future is slow to complete.
 ///
 /// The callback is called at the same frequency.
@@ -332,7 +346,7 @@ impl std::fmt::Debug for SecretString {
 ///
 /// TODO: consider upgrading this to a warning, but currently it fires too often.
 #[inline]
-pub async fn log_slow<F, O>(
+pub async fn log_slow_with<F, O>(
     name: &str,
     threshold: Duration,
     mut cb: impl FnMut(LogSlowCallback),

@@ -1115,7 +1115,6 @@ impl PageServerHandler {
             log_slow(
                 log_slow_name,
                 LOG_SLOW_GETPAGE_THRESHOLD,
-                |_| (),
                 boxpinned.as_mut(),
             )
             .await?

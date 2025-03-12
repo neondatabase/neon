@@ -1492,7 +1492,7 @@ impl Timeline {
                 .inc_by(u64::try_from(elapsed_since_last_callback.as_micros()).unwrap());
         };
         // 1s threshold would have resulted in at most 1 log msg/second in prod, in the 30d trailing from Mar 11, 2025
-        let wait_for_timeout = log_slow(
+        let wait_for_timeout = log_slow_with(
             "wait_lsn",
             Duration::from_secs(1),
             update_metric,

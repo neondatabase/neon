@@ -53,7 +53,6 @@ pub fn bench_log_slow(c: &mut Criterion) {
                 runtime.block_on(log_slow(
                     "ready",
                     THRESHOLD,
-                    |_| (),
                     std::pin::pin!(tokio::task::yield_now()),
                 ))
             });
