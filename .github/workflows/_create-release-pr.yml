@@ -87,5 +87,6 @@ jobs:
         TITLE: ${{ steps.vars.outputs.title }}
       run: |
         gh pr create --title "${TITLE}" \
+                     --body "" \
                      --head "${RC_BRANCH}" \
                      --base "${RELEASE_BRANCH}"
