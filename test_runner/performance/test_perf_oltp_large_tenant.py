@@ -90,6 +90,8 @@ def run_database_maintenance(env: PgCompare):
             log.info("start vacuum analyze transaction.transaction")
             with env.zenbenchmark.record_duration("vacuum_analyze"):
                 cur.execute("SET statement_timeout = 0;")
+                cur.execute("SET max_parallel_maintenance_workers = 7;")
+                cur.execute("SET maintenance_work_mem = '10GB';")
                 cur.execute("vacuum analyze transaction.transaction;")
             log.info("finished vacuum analyze transaction.transaction")
 
