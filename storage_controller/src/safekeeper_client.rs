@@ -1,5 +1,5 @@
 use safekeeper_api::models::{
-    PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization, TimelineCreateRequest,
+    self, PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization, TimelineCreateRequest,
     TimelineStatus,
 };
 use safekeeper_client::mgmt_api::{Client, Result};
@@ -73,7 +73,7 @@ impl SafekeeperClient {
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-    ) -> Result<TimelineStatus> {
+    ) -> Result<models::TimelineDeleteResult> {
         measured_request!(
             "delete_timeline",
             crate::metrics::Method::Delete,
