@@ -71,6 +71,10 @@ struct Cli {
     #[arg(long)]
     compute_hook_url: Option<String>,
 
+    /// URL to control plane storage API prefix
+    #[arg(long)]
+    control_plane_url: Option<String>,
+
     /// URL to connect to postgres, like postgresql://localhost:1234/storage_controller
     #[arg(long)]
     database_url: Option<String>,
@@ -144,6 +148,11 @@ struct Cli {
     /// Flag to use https for requests to pageserver API.
     #[arg(long, default_value = "false")]
     use_https_pageserver_api: bool,
+
+    // Whether to put timelines onto safekeepers
+    #[arg(long, default_value = "false")]
+    timelines_onto_safekeepers: bool,
+
     /// Flag to use https for requests to safekeeper API.
     #[arg(long, default_value = "false")]
     use_https_safekeeper_api: bool,
@@ -308,11 +317,13 @@ async fn async_main() -> anyhow::Result<()> {
                 "Insecure config!  One or more secrets is not set.  This is only permitted in `--dev` mode"
             );
         }
-        StrictMode::Strict if args.compute_hook_url.is_none() => {
-            // Production systems should always have a compute hook set, to prevent falling
+        StrictMode::Strict
+            if args.compute_hook_url.is_none() && args.control_plane_url.is_none() =>
+        {
+            // Production systems should always have a control plane URL set, to prevent falling
             // back to trying to use neon_local.
             anyhow::bail!(
-                "`--compute-hook-url` is not set: this is only permitted in `--dev` mode"
+                "neither `--compute-hook-url` nor `--control-plane-url` are set: this is only permitted in `--dev` mode"
             );
         }
         StrictMode::Strict => {
@@ -338,6 +349,7 @@ async fn async_main() -> anyhow::Result<()> {
         control_plane_jwt_token: secrets.control_plane_jwt_token,
         peer_jwt_token: secrets.peer_jwt_token,
         compute_hook_url: args.compute_hook_url,
+        control_plane_url: args.control_plane_url,
         max_offline_interval: args
             .max_offline_interval
             .map(humantime::Duration::into)
@@ -370,6 +382,7 @@ async fn async_main() -> anyhow::Result<()> {
         use_https_pageserver_api: args.use_https_pageserver_api,
         use_https_safekeeper_api: args.use_https_safekeeper_api,
         ssl_ca_cert,
+        timelines_onto_safekeepers: args.timelines_onto_safekeepers,
     };
 
     // Validate that we can connect to the database

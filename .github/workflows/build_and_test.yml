@@ -1175,7 +1175,7 @@ jobs:
               -f deployPgSniRouter=false \
               -f deployProxy=false \
               -f deployStorage=true \
-              -f deployStorageBroker=true \
+              -f deployStorageBroker=false \
               -f deployStorageController=true \
               -f branch=main \
               -f dockerTag=${{needs.meta.outputs.build-tag}} \
@@ -1183,7 +1183,7 @@ jobs:
 
             gh workflow --repo neondatabase/infra run deploy-prod.yml --ref main \
               -f deployStorage=true \
-              -f deployStorageBroker=true \
+              -f deployStorageBroker=false \
               -f deployStorageController=true \
               -f branch=main \
               -f dockerTag=${{needs.meta.outputs.build-tag}}

@@ -961,7 +961,8 @@ mod tests {
     }
 
     async fn round_trip_test_compressed(blobs: &[Vec<u8>], compression: bool) -> Result<(), Error> {
-        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let ctx =
+            RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
         let (_temp_dir, pathbuf, offsets) =
             write_maybe_compressed::<true>(blobs, compression, &ctx).await?;
 

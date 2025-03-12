@@ -1198,8 +1198,10 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				state = GET_STATE(entry, chunk_offs + i);
 				if (state == PENDING) {
 					SET_STATE(entry, chunk_offs + i, REQUESTED);
-				} else if (state != REQUESTED) {
+				} else if (state == UNAVAILABLE) {
 					SET_STATE(entry, chunk_offs + i, PENDING);
+					break;
+				} else if (state == AVAILABLE) {
 					break;
 				}
 				if (!sleeping)

@@ -165,6 +165,7 @@ pub fn init(
         };
         log_layer.with_filter(rust_log_env_filter())
     });
+
     let r = r.with(
         TracingEventCountLayer(&TRACING_EVENT_COUNT_METRIC).with_filter(rust_log_env_filter()),
     );

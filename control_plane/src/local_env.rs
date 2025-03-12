@@ -177,6 +177,8 @@ pub struct NeonStorageControllerConf {
 
     #[serde(default)]
     pub use_https_pageserver_api: bool,
+
+    pub timelines_onto_safekeepers: bool,
 }
 
 impl NeonStorageControllerConf {
@@ -201,6 +203,7 @@ impl Default for NeonStorageControllerConf {
             heartbeat_interval: Self::DEFAULT_HEARTBEAT_INTERVAL,
             long_reconcile_threshold: None,
             use_https_pageserver_api: false,
+            timelines_onto_safekeepers: false,
         }
     }
 }

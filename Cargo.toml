@@ -126,7 +126,9 @@ measured = { version = "0.0.22", features=["lasso"] }
 measured-process = { version = "0.0.22" }
 memoffset = "0.9"
 nix = { version = "0.27", features = ["dir", "fs", "process", "socket", "signal", "poll"] }
-notify = "8.0.0"
+# Do not update to >= 7.0.0, at least. The update will have a significant impact
+# on compute startup metrics (start_postgres_ms), >= 25% degradation.
+notify = "6.0.0"
 num_cpus = "1.15"
 num-traits = "0.2.15"
 once_cell = "1.13"
@@ -219,7 +221,7 @@ zerocopy = { version = "0.7", features = ["derive"] }
 json-structural-diff = { version = "0.2.0" }
 
 ## TODO replace this with tracing
-env_logger = "0.10"
+env_logger = "0.11"
 log = "0.4"
 
 ## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed
