@@ -31,6 +31,7 @@ jobs:
     - uses: actions/checkout@v4
       with:
         ref: ${{ inputs.source-branch }}
+        fetch-depth: 0
 
     - name: Set variables
       id: vars
@@ -69,7 +70,7 @@ jobs:
         # For details on why, look at
         # https://docs.neon.build/overview/repositories/neon.html#background-on-commit-history-of-release-prs
         current_tree=$(git rev-parse 'HEAD^{tree}')
-        release_head=$(git rev-parse "${RELEASE_BRANCH}")
+        release_head=$(git rev-parse "origin/${RELEASE_BRANCH}")
         current_head=$(git rev-parse HEAD)
         merge_commit=$(git commit-tree -p "${current_head}" -p "${release_head}" -m "${TITLE}" "${current_tree}")
 
