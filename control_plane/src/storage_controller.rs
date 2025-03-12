@@ -558,9 +558,9 @@ impl StorageController {
             args.push(format!("--public-key=\"{public_key}\""));
         }
 
-        if let Some(control_plane_compute_hook_api) = &self.env.control_plane_compute_hook_api {
+        if let Some(control_plane_hooks_api) = &self.env.control_plane_hooks_api {
             args.push(format!(
-                "--compute-hook-url={control_plane_compute_hook_api}"
+                "--control-plane-url={control_plane_hooks_api}"
             ));
         }
 

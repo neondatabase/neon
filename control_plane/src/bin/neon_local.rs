@@ -977,7 +977,7 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
             neon_distrib_dir: None,
             default_tenant_id: TenantId::from_array(std::array::from_fn(|_| 0)),
             storage_controller: None,
-            control_plane_compute_hook_api: None,
+            control_plane_hooks_api: None,
             generate_local_ssl_certs: false,
         }
     };
