@@ -1073,7 +1073,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         behavior_v2: bool = False,
         **kwargs,
     ) -> set[TimelineId]:
-        params = {}
+        params: dict[str, Any] = {}
         if batch_size is not None:
             params["batch_size"] = batch_size
         if behavior_v2:
