@@ -304,7 +304,7 @@ def test_timeline_offload_persist(neon_env_builder: NeonEnvBuilder, delete_timel
         neon_env_builder.pageserver_remote_storage,
         prefix=f"tenants/{str(tenant_id)}/",
     )
-    assert_prefix_empty(
+    assert_prefix_not_empty(
         neon_env_builder.pageserver_remote_storage,
         prefix=f"tenants/{str(tenant_id)}/tenant-manifest",
     )
@@ -910,7 +910,7 @@ def test_timeline_offload_generations(neon_env_builder: NeonEnvBuilder):
         neon_env_builder.pageserver_remote_storage,
         prefix=f"tenants/{str(tenant_id)}/",
     )
-    assert_prefix_empty(
+    assert_prefix_not_empty(
         neon_env_builder.pageserver_remote_storage,
         prefix=f"tenants/{str(tenant_id)}/tenant-manifest",
     )
