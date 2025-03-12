@@ -2874,6 +2874,9 @@ async fn tenant_scan_remote_handler(
 
         let (manifest, _, _) =
             download_tenant_manifest(&state.remote_storage, &tenant_shard_id, generation, &cancel)
+                .instrument(info_span!("download_tenant_manifest",
+                            tenant_id=%tenant_shard_id.tenant_id,
+                            shard_id=%tenant_shard_id.shard_slug()))
                 .await
                 .map_err(|e| ApiError::InternalServerError(anyhow!(e)))?;
 
