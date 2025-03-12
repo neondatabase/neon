@@ -7,11 +7,7 @@ use metrics::{IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
 use strum_macros::{EnumString, VariantNames};
 use tokio::time::Instant;
-use tracing::Dispatch;
 use tracing::info;
-use tracing::level_filters::LevelFilter;
-use tracing_subscriber::Layer;
-use tracing_subscriber::layer::SubscriberExt;
 
 /// Logs a critical error, similarly to `tracing::error!`. This will:
 ///
@@ -145,16 +141,6 @@ pub enum Output {
     Stderr,
 }
 
-pub struct OtelGuard {
-    pub dispatch: Dispatch,
-}
-
-impl Drop for OtelGuard {
-    fn drop(&mut self) {
-        tracing_utils::shutdown_tracing();
-    }
-}
-
 pub fn init(
     log_format: LogFormat,
     tracing_error_layer_enablement: TracingErrorLayerEnablement,
@@ -200,29 +186,6 @@ pub fn init(
     }
 
     Ok(())
-}
-
-pub fn init_otel_tracing(otel_enablement: OtelEnablement) -> anyhow::Result<Option<OtelGuard>> {
-    let otel_subscriber = match otel_enablement {
-        OtelEnablement::Disabled => None,
-        OtelEnablement::Enabled {
-            service_name,
-            export_config,
-            runtime,
-        } => {
-            let otel_layer = runtime
-                .block_on(tracing_utils::init_tracing(&service_name, export_config))
-                .with_filter(LevelFilter::INFO);
-            let otel_subscriber = tracing_subscriber::registry().with(otel_layer);
-            let otel_dispatch = Dispatch::new(otel_subscriber);
-
-            Some(otel_dispatch)
-        }
-    };
-
-    let otel_guard = otel_subscriber.map(|dispatch| OtelGuard { dispatch });
-
-    Ok(otel_guard)
 }
 
 /// Disable the default rust panic hook by using `set_hook`.

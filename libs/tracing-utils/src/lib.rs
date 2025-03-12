@@ -40,7 +40,9 @@ use opentelemetry::KeyValue;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
 pub use opentelemetry_otlp::{ExportConfig, Protocol};
-use tracing::Subscriber;
+use tracing::level_filters::LevelFilter;
+use tracing::{Dispatch, Subscriber};
+use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Layer;
 use tracing_subscriber::registry::LookupSpan;
 
@@ -167,4 +169,52 @@ where
 // pending traces before we exit.
 pub fn shutdown_tracing() {
     opentelemetry::global::shutdown_tracer_provider();
+}
+
+pub enum OtelEnablement {
+    Disabled,
+    Enabled {
+        service_name: String,
+        export_config: ExportConfig,
+        runtime: &'static tokio::runtime::Runtime,
+    },
+}
+
+pub struct OtelGuard {
+    pub dispatch: Dispatch,
+}
+
+impl Drop for OtelGuard {
+    fn drop(&mut self) {
+        shutdown_tracing();
+    }
+}
+
+/// Initializes OTEL infrastructure for performance tracing according to the provided configuration
+///
+/// Performance tracing is handled by a different [`tracing::Subscriber`]. This functions returns
+/// an [`OtelGuard`] containing a [`tracing::Dispatch`] associated with a newly created subscriber.
+/// Applications should use this dispatch for their performance traces.
+///
+/// The lifetime of the guard should match taht of the application. On drop, it tears down the
+/// OTEL infra.
+pub fn init_performance_tracing(otel_enablement: OtelEnablement) -> Option<OtelGuard> {
+    let otel_subscriber = match otel_enablement {
+        OtelEnablement::Disabled => None,
+        OtelEnablement::Enabled {
+            service_name,
+            export_config,
+            runtime,
+        } => {
+            let otel_layer = runtime
+                .block_on(init_tracing(&service_name, export_config))
+                .with_filter(LevelFilter::INFO);
+            let otel_subscriber = tracing_subscriber::registry().with(otel_layer);
+            let otel_dispatch = Dispatch::new(otel_subscriber);
+
+            Some(otel_dispatch)
+        }
+    };
+
+    otel_subscriber.map(|dispatch| OtelGuard { dispatch })
 }
