@@ -67,7 +67,7 @@ use tracing::*;
 use utils::generation::Generation;
 use utils::guard_arc_swap::GuardArcSwap;
 use utils::id::TimelineId;
-use utils::logging::{LogSlowCallback, monitor_slow_future};
+use utils::logging::{MonitorSlowFutureCallback, monitor_slow_future};
 use utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use utils::postgres_client::PostgresClientProtocol;
 use utils::rate_limit::RateLimit;
@@ -441,8 +441,7 @@ pub struct Timeline {
 
     pub(crate) rel_size_v2_status: ArcSwapOption<RelSizeMigration>,
 
-    /// See comment in the place where this field is used.
-    wait_lsn_log_slow_rate_limit: Mutex<utils::rate_limit::RateLimit>,
+    wait_lsn_log_slow: tokio::sync::Semaphore,
 }
 
 pub(crate) enum PreviousHeatmap {
@@ -1487,11 +1486,16 @@ impl Timeline {
 
         let wait_for_timeout = self.last_record_lsn.wait_for_timeout(lsn, timeout);
         let wait_for_timeout = std::pin::pin!(wait_for_timeout);
-        let log_slow_threshold = Duration::from_secs(10);
+        // Use threshold of 1 because even 1 second of wait for ingest is very much abnormal.
+        let log_slow_threshold = Duration::from_secs(1);
+        // Use period of 10 to avoid flooding logs during an outage that affects all timelines.
+        let log_slow_period = Duration::from_secs(10);
+        let mut logging_permit = None;
         let wait_for_timeout = monitor_slow_future(
             log_slow_threshold,
+            log_slow_period,
             wait_for_timeout,
-            |LogSlowCallback {
+            |MonitorSlowFutureCallback {
                  elapsed_since_last_callback,
                  ready,
                  elapsed_total,
@@ -1502,30 +1506,34 @@ impl Timeline {
                 if elapsed_total < log_slow_threshold {
                     return;
                 }
-                // The log_slow_threshold defines what is principally noteworthy.
-                // The rate limit prevents excessive per-timeline logging during an extended outage of broker / all safekeepers / network partition.
-                let mut rate_limit = self.wait_lsn_log_slow_rate_limit.lock().unwrap();
-                rate_limit.call2(|rate_limit_stats| {
-                    if ready {
-                        if elapsed_total >= log_slow_threshold {
-                            info!(
-                                %rate_limit_stats,
-                                "slow wait_lsn completed after {:.3}s",
-                                elapsed_total.as_secs_f64()
-                            );
-                        }
-                    } else if elapsed_total > log_slow_threshold {
+                // It's slow, see if we should log it.
+                // (We limit the logging to one per invocation per timeline to avoid excessive
+                // logging during an extended broker / networking outage that affects all timelines.)
+                if logging_permit.is_none() {
+                    logging_permit = self.wait_lsn_log_slow.try_acquire().ok();
+                }
+                if logging_permit.is_none() {
+                    return;
+                }
+                // We log it.
+                if ready {
+                    if elapsed_total >= log_slow_threshold {
                         info!(
-                           %rate_limit_stats,
-                           "slow wait_lsn still running for{:.3}s",
-                           elapsed_total.as_secs_f64()
+                            "slow wait_lsn completed after {:.3}s",
+                            elapsed_total.as_secs_f64()
                         );
                     }
-                });
+                } else if elapsed_total > log_slow_threshold {
+                    info!(
+                        "slow wait_lsn still running for{:.3}s",
+                        elapsed_total.as_secs_f64()
+                    );
+                }
             },
         );
         let res = wait_for_timeout.await;
         // don't count the time spent waiting for lock below, and also in walreceiver.status(), towards the wait_lsn_time_histo
+        drop(logging_permit);
         drop(timer);
         match res {
             Ok(()) => Ok(()),
@@ -2866,9 +2874,7 @@ impl Timeline {
 
                 rel_size_v2_status: ArcSwapOption::from_pointee(rel_size_v2_status),
 
-                wait_lsn_log_slow_rate_limit: Mutex::new(utils::rate_limit::RateLimit::new(
-                    Duration::from_secs(60),
-                )),
+                wait_lsn_log_slow: tokio::sync::Semaphore::new(1),
             };
 
             result.repartition_threshold =

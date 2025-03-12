@@ -336,8 +336,9 @@ where
 {
     monitor_slow_future(
         threshold,
+        threshold, // period = threshold
         f,
-        |LogSlowCallback {
+        |MonitorSlowFutureCallback {
              ready,
              elapsed_total,
              elapsed_since_last_callback: _,
@@ -367,9 +368,10 @@ where
 /// Poll future `fut` to completion, invoking callback `cb` at the given `period` and once after the future completes.
 #[inline]
 pub async fn monitor_slow_future<F, O>(
+    threshold: Duration,
     period: Duration,
     mut fut: std::pin::Pin<&mut F>,
-    mut cb: impl FnMut(LogSlowCallback),
+    mut cb: impl FnMut(MonitorSlowFutureCallback),
 ) -> O
 where
     F: Future<Output = O>,
@@ -380,11 +382,15 @@ where
     loop {
         // NB: use timeout_at() instead of timeout() to avoid an extra clock reading in the common
         // case where the timeout doesn't fire.
-        let deadline = started + attempt * period;
+        let deadline = if attempt == 1 {
+            started + threshold
+        } else {
+            started + threshold + attempt * period
+        };
         // TODO: still call the callback if the future panics? Copy how we do it for the page_service flush_in_progress counter.
         let res = tokio::time::timeout_at(deadline, &mut fut).await;
         let now = Instant::now();
-        cb(LogSlowCallback {
+        cb(MonitorSlowFutureCallback {
             ready: res.is_ok(),
             elapsed_total: now - started,
             elapsed_since_last_callback: now - last_cb,
@@ -397,11 +403,11 @@ where
     }
 }
 
-/// See [`log_slow_with`].
-pub struct LogSlowCallback {
+/// See [`monitor_slow_future`].
+pub struct MonitorSlowFutureCallback {
     /// Whether the future completed. If true, there will be no more callbacks.
     pub ready: bool,
-    /// The time elapsed since the [`log_slow_with`] was first polled.
+    /// The time elapsed since the [`monitor_slow_future`] was first polled.
     pub elapsed_total: Duration,
     /// The time elapsed since the last callback invocation.
     pub elapsed_since_last_callback: Duration,
