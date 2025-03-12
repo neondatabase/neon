@@ -54,10 +54,12 @@ pub struct OffloadedTimelineManifest {
 pub const LATEST_TENANT_MANIFEST_VERSION: usize = 2;
 
 impl TenantManifest {
-    pub(crate) fn empty(stripe_size: ShardStripeSize) -> Self {
+    pub(crate) fn empty() -> Self {
         Self {
             version: LATEST_TENANT_MANIFEST_VERSION,
-            stripe_size: Some(stripe_size),
+            // NB: set stripe_size to None, not DEFAULT_STRIPE_SIZE. This will trigger a manifest
+            // upload with the real stripe size during attach.
+            stripe_size: None,
             offloaded_timelines: vec![],
         }
     }

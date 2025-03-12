@@ -1535,10 +1535,9 @@ impl Tenant {
                     format!("{} offloaded", tenant_manifest.offloaded_timelines.len()),
                     tenant_manifest,
                 ),
-                Err(DownloadError::NotFound) => (
-                    "no manifest".to_string(),
-                    TenantManifest::empty(self.get_shard_stripe_size()),
-                ),
+                Err(DownloadError::NotFound) => {
+                    ("no manifest".to_string(), TenantManifest::empty())
+                }
                 Err(e) => Err(e)?,
             };
 
