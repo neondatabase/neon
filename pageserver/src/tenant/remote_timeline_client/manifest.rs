@@ -23,8 +23,6 @@ pub struct TenantManifest {
     /// Note: the timelines mentioned in this list might be deleted, i.e.
     /// we don't hold an invariant that the references aren't dangling.
     /// Existence of index-part.json is the actual indicator of timeline existence.
-    ///
-    /// TODO: skip serializing if empty once serde(default) has been deployed.
     #[serde(default)]
     pub offloaded_timelines: Vec<OffloadedTimelineManifest>,
 }
