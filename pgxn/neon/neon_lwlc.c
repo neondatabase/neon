@@ -70,17 +70,12 @@ static XLogRecPtr SetLastWrittenLSNForBlockRangeInternal(XLogRecPtr lsn,
 														 BlockNumber n_blocks);
 
 /* All the necessary hooks are defined here */
- // TODO: Need to see how to define this
-void lwlc_pre_recovery_start_hook(const ControlFileData* controlFile);
+
 
 // Note: these are the previous hooks
-static get_lwlsn_hook_type prev_get_lwlsn_hook = NULL;
-static get_lwlsn_v_hook_type prev_get_lwlsn_v_hook = NULL;
 static set_lwlsn_block_range_hook_type prev_set_lwlsn_block_range_hook = NULL;
 static set_lwlsn_block_v_hook_type prev_set_lwlsn_block_v_hook = NULL;
 static set_lwlsn_block_hook_type prev_set_lwlsn_block_hook = NULL;
-static set_lwlsn_relation_hook_type prev_set_lwlsn_relation_hook = NULL;
-static set_lwlsn_db_hook_type prev_set_lwlsn_db_hook = NULL;
 static update_max_lwlsn_hook_type prev_update_max_lwlsn_hook = NULL;
 
 static shmem_startup_hook_type prev_shmem_startup_hook;
@@ -111,20 +106,12 @@ init_lwlc(void)
 	shmemrequest();
 	#endif
 	
-	prev_get_lwlsn_hook = get_lwlsn_hook;
-	get_lwlsn_hook = neon_get_lwlsn;
-	prev_get_lwlsn_v_hook = get_lwlsn_v_hook;
-	get_lwlsn_v_hook = neon_get_lwlsn_v;
 	prev_set_lwlsn_block_range_hook = set_lwlsn_block_range_hook;
 	set_lwlsn_block_range_hook = neon_set_lwlsn_block_range;
 	prev_set_lwlsn_block_v_hook = set_lwlsn_block_v_hook;
 	set_lwlsn_block_v_hook = neon_set_lwlsn_block_v;
 	prev_set_lwlsn_block_hook = set_lwlsn_block_hook;
 	set_lwlsn_block_hook = neon_set_lwlsn_block;
-	prev_set_lwlsn_relation_hook = set_lwlsn_relation_hook;
-	set_lwlsn_relation_hook = neon_set_lwlsn_relation;
-	prev_set_lwlsn_db_hook = set_lwlsn_db_hook;
-	set_lwlsn_db_hook = neon_set_lwlsn_db;
 	prev_update_max_lwlsn_hook = update_max_lwlsn_hook;
 	update_max_lwlsn_hook = neon_update_max_lwlsn;
 }
