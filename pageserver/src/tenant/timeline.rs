@@ -2423,8 +2423,9 @@ impl Timeline {
     }
 
     fn get_l0_flush_delay_threshold(&self) -> Option<usize> {
-        // Disable L0 flushes by default. This and compaction needs further tuning.
-        const DEFAULT_L0_FLUSH_DELAY_FACTOR: usize = 0; // TODO: default to e.g. 3
+        // By default, stall at 3x the compaction threshold. The compaction threshold defaults to
+        // 10, and L0 compaction is generally able to keep L0 counts below 30.
+        const DEFAULT_L0_FLUSH_DELAY_FACTOR: usize = 3;
 
         // If compaction is disabled, don't delay.
         if self.get_compaction_period() == Duration::ZERO {
@@ -2452,8 +2453,9 @@ impl Timeline {
     }
 
     fn get_l0_flush_stall_threshold(&self) -> Option<usize> {
-        // Disable L0 stalls by default. In ingest benchmarks, we see image compaction take >10
-        // minutes, blocking L0 compaction, and we can't stall L0 flushes for that long.
+        // Disable L0 stalls by default. Stalling can cause unavailability if L0 compaction isn't
+        // responsive, and it can e.g. block on other compaction via the compaction semaphore or
+        // sibling timelines. We need more confidence before enabling this.
         const DEFAULT_L0_FLUSH_STALL_FACTOR: usize = 0; // TODO: default to e.g. 5
 
         // If compaction is disabled, don't stall.
