@@ -5754,7 +5754,7 @@ pub(crate) mod harness {
                 logging::TracingErrorLayerEnablement::EnableWithRustLogFilter,
                 logging::Output::Stdout,
             )
-            .expect("Failed to init test logging")
+            .expect("Failed to init test logging");
         });
     }
 
