@@ -2490,29 +2490,8 @@ async fn timeline_download_remote_layers_handler_get(
     json_response(StatusCode::OK, info)
 }
 
-async fn timeline_detach_ancestor_handler_v1(
+async fn timeline_detach_ancestor_handler(
     request: Request<Body>,
-    cancel: CancellationToken,
-) -> Result<Response<Body>, ApiError> {
-    timeline_detach_ancestor_handler_common(request, DetachBehavior::NoAncestorAndReparent, cancel)
-        .await
-}
-
-async fn timeline_detach_ancestor_handler_v2(
-    request: Request<Body>,
-    cancel: CancellationToken,
-) -> Result<Response<Body>, ApiError> {
-    timeline_detach_ancestor_handler_common(
-        request,
-        DetachBehavior::MultiLevelAndNoReparent,
-        cancel,
-    )
-    .await
-}
-
-async fn timeline_detach_ancestor_handler_common(
-    request: Request<Body>,
-    behavior: DetachBehavior,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     use pageserver_api::models::detach_ancestor::AncestorDetached;
@@ -2522,6 +2501,8 @@ async fn timeline_detach_ancestor_handler_common(
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let behavior: Option<DetachBehavior> = parse_query_param(&request, "detach_behavior")?;
+    let behavior = behavior.unwrap_or_default();
 
     let span = tracing::info_span!("detach_ancestor", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id);
 
@@ -3765,11 +3746,7 @@ pub fn make_router(
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/detach_ancestor",
-            |r| api_handler(r, timeline_detach_ancestor_handler_v1),
-        )
-        .put(
-            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/detach_ancestor_v2",
-            |r| api_handler(r, timeline_detach_ancestor_handler_v2),
+            |r| api_handler(r, timeline_detach_ancestor_handler),
         )
         .delete("/v1/tenant/:tenant_shard_id/timeline/:timeline_id", |r| {
             api_handler(r, timeline_delete_handler)
