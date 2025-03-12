@@ -125,15 +125,6 @@ pub enum TracingErrorLayerEnablement {
     EnableWithRustLogFilter,
 }
 
-pub enum OtelEnablement {
-    Disabled,
-    Enabled {
-        service_name: String,
-        export_config: tracing_utils::ExportConfig,
-        runtime: &'static tokio::runtime::Runtime,
-    },
-}
-
 /// Where the logging should output to.
 #[derive(Clone, Copy)]
 pub enum Output {

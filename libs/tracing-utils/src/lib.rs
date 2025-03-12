@@ -42,8 +42,8 @@ use opentelemetry_otlp::WithExportConfig;
 pub use opentelemetry_otlp::{ExportConfig, Protocol};
 use tracing::level_filters::LevelFilter;
 use tracing::{Dispatch, Subscriber};
-use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Layer;
+use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 
 /// Set up OpenTelemetry exporter, using configuration from environment variables.
