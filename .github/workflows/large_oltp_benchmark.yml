@@ -57,9 +57,9 @@ jobs:
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
-    # Increase timeout to 18h, default timeout is 6h 
-    # (1h pgbench, 3h vacuum analyze 3.5h re-index) x 2 = 15h, leave some buffer for regressions
-    timeout-minutes: 1080
+    # Increase timeout to 23.5h, default timeout is 6h - we want to run this daily
+    # (normally 1h pgbench, 3h vacuum analyze 3.5h re-index) x 2 = 15h, leave some buffer for regressions
+    timeout-minutes: 1410
 
     steps:
     - uses: actions/checkout@v4
@@ -128,7 +128,7 @@ jobs:
         test_selection: performance
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
-        extra_params: -m remote_cluster --timeout 21600 -k test_perf_oltp_large_tenant_pgbench
+        extra_params: -m remote_cluster --timeout 7200 -k test_perf_oltp_large_tenant_pgbench
         pg_version: ${{ env.PG_VERSION }}
         aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
@@ -143,7 +143,7 @@ jobs:
         test_selection: performance
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
-        extra_params: -m remote_cluster --timeout 21600 -k test_perf_oltp_large_tenant_maintenance
+        extra_params: -m remote_cluster --timeout 36000 -k test_perf_oltp_large_tenant_maintenance
         pg_version: ${{ env.PG_VERSION }}
         aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
