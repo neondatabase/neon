@@ -81,6 +81,7 @@ static set_lwlsn_block_v_hook_type prev_set_lwlsn_block_v_hook = NULL;
 static set_lwlsn_block_hook_type prev_set_lwlsn_block_hook = NULL;
 static set_lwlsn_relation_hook_type prev_set_lwlsn_relation_hook = NULL;
 static set_lwlsn_db_hook_type prev_set_lwlsn_db_hook = NULL;
+static update_max_lwlsn_hook_type prev_update_max_lwlsn_hook = NULL;
 
 static shmem_startup_hook_type prev_shmem_startup_hook;
 
@@ -90,6 +91,7 @@ static shmem_request_hook_type prev_shmem_request_hook;
 
 static void shmemrequest(void);
 static void shmeminit(void);
+static void neon_update_max_lwlsn(XLogRecPtr lsn);
 
 void
 init_lwlc(void)
@@ -123,6 +125,8 @@ init_lwlc(void)
 	set_lwlsn_relation_hook = neon_set_lwlsn_relation;
 	prev_set_lwlsn_db_hook = set_lwlsn_db_hook;
 	set_lwlsn_db_hook = neon_set_lwlsn_db;
+	prev_update_max_lwlsn_hook = update_max_lwlsn_hook;
+	update_max_lwlsn_hook = neon_update_max_lwlsn;
 }
 
 
@@ -228,6 +232,10 @@ neon_get_lwlsn(NRelFileInfo rlocator, ForkNumber forknum, BlockNumber blkno)
 	LWLockRelease(LastWrittenLsnLock);
 
 	return lsn;
+}
+
+static void neon_update_max_lwlsn(XLogRecPtr lsn) {
+	LwLsnCache->maxLastWrittenLsn = lsn;
 }
 
 /*
