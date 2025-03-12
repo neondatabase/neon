@@ -69,6 +69,23 @@ impl SafekeeperClient {
         )
     }
 
+    #[allow(unused)]
+    pub(crate) async fn exclude_timeline(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        req: &models::TimelineMembershipSwitchRequest,
+    ) -> Result<models::TimelineDeleteResult> {
+        measured_request!(
+            "exclude_timeline",
+            crate::metrics::Method::Post,
+            &self.node_id_label,
+            self.inner
+                .exclude_timeline(tenant_id, timeline_id, req)
+                .await
+        )
+    }
+
     pub(crate) async fn delete_timeline(
         &self,
         tenant_id: TenantId,
