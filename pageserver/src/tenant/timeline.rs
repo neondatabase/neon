@@ -1483,6 +1483,7 @@ impl Timeline {
         };
 
         let timer = crate::metrics::WAIT_LSN_TIME.start_timer();
+        let start_finish_counterpair_guard = self.metrics.wait_lsn_start_finish_counterpair.guard();
 
         let wait_for_timeout = self.last_record_lsn.wait_for_timeout(lsn, timeout);
         let wait_for_timeout = std::pin::pin!(wait_for_timeout);
@@ -1534,6 +1535,7 @@ impl Timeline {
         let res = wait_for_timeout.await;
         // don't count the time spent waiting for lock below, and also in walreceiver.status(), towards the wait_lsn_time_histo
         drop(logging_permit);
+        drop(start_finish_counterpair_guard);
         drop(timer);
         match res {
             Ok(()) => Ok(()),

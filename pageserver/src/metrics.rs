@@ -471,6 +471,17 @@ pub(crate) static WAIT_LSN_TIME: Lazy<Histogram> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub(crate) static WAIT_LSN_START_FINISH_COUNTERPAIR: Lazy<IntCounterPairVec> = Lazy::new(|| {
+    register_int_counter_pair_vec!(
+        "pageserver_wait_lsn_started_count",
+        "Number of wait_lsn operations started.",
+        "pageserver_wait_lsn_finished_count",
+        "Number of wait_lsn operations finished.",
+        &["tenant_id", "shard_id", "timeline_id"],
+    )
+    .expect("failed to define a metric")
+});
+
 pub(crate) static WAIT_LSN_IN_PROGRESS_MICROS: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "pageserver_wait_lsn_in_progress_micros",
@@ -2880,6 +2891,7 @@ pub(crate) struct TimelineMetrics {
     pub wal_records_received: IntCounter,
     pub storage_io_size: StorageIoSizeMetrics,
     pub wait_lsn_in_progress_micros: GlobalAndPerTenantIntCounter,
+    pub wait_lsn_start_finish_counterpair: IntCounterPair,
     shutdown: std::sync::atomic::AtomicBool,
 }
 
@@ -3024,6 +3036,10 @@ impl TimelineMetrics {
                 .unwrap(),
         };
 
+        let wait_lsn_start_finish_counterpair = WAIT_LSN_START_FINISH_COUNTERPAIR
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+            .unwrap();
+
         TimelineMetrics {
             tenant_id,
             shard_id,
@@ -3057,6 +3073,7 @@ impl TimelineMetrics {
             valid_lsn_lease_count_gauge,
             wal_records_received,
             wait_lsn_in_progress_micros,
+            wait_lsn_start_finish_counterpair,
             shutdown: std::sync::atomic::AtomicBool::default(),
         }
     }
@@ -3251,6 +3268,12 @@ impl TimelineMetrics {
 
         let _ =
             WAIT_LSN_IN_PROGRESS_MICROS.remove_label_values(&[tenant_id, shard_id, timeline_id]);
+
+        {
+            let mut res = [Ok(()), Ok(())];
+            WAIT_LSN_START_FINISH_COUNTERPAIR
+                .remove_label_values(&mut res, &[tenant_id, shard_id, timeline_id]);
+        }
 
         let _ = SMGR_QUERY_STARTED_PER_TENANT_TIMELINE.remove_label_values(&[
             SmgrQueryType::GetPageAtLsn.into(),
