@@ -8,7 +8,7 @@ use crate::http::headers::X_REQUEST_ID;
 /// neon Postgres extension on the other hand does not send one.
 pub async fn maybe_add_request_id_header(mut request: Request, next: Next) -> Response {
     let headers = request.headers_mut();
-    if headers.get(X_REQUEST_ID).is_none() {
+    if !headers.contains_key(X_REQUEST_ID) {
         headers.append(X_REQUEST_ID, Uuid::new_v4().to_string().parse().unwrap());
     }
 
