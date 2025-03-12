@@ -7,8 +7,8 @@ on:
         description: 'Component name'
         required: true
         type: string
-      release-branch:
-        description: 'Release branch'
+      source-branch:
+        description: 'Source branch'
         required: true
         type: string
     secrets:
@@ -30,17 +30,24 @@ jobs:
     steps:
     - uses: actions/checkout@v4
       with:
-        ref: main
+        ref: ${{ inputs.source-branch }}
 
     - name: Set variables
       id: vars
       env:
         COMPONENT_NAME: ${{ inputs.component-name }}
-        RELEASE_BRANCH: ${{ inputs.release-branch }}
+        RELEASE_BRANCH: >-
+          ${{
+            false
+            || inputs.component-name == 'Storage' && 'release'
+            || inputs.component-name == 'Proxy' && 'release-proxy'
+            || inputs.component-name == 'Compute' && 'release-compute'
+          }}
       run: |
         today=$(date +'%Y-%m-%d')
         echo "title=${COMPONENT_NAME} release ${today}" | tee -a ${GITHUB_OUTPUT}
         echo "rc-branch=rc/${RELEASE_BRANCH}/${today}"  | tee -a ${GITHUB_OUTPUT}
+        echo "release-branch=${RELEASE_BRANCH}"         | tee -a ${GITHUB_OUTPUT}
 
     - name: Configure git
       run: |
@@ -49,31 +56,35 @@ jobs:
 
     - name: Create RC branch
       env:
+        RELEASE_BRANCH: ${{ steps.vars.outputs.release-branch }}
         RC_BRANCH: ${{ steps.vars.outputs.rc-branch }}
         TITLE: ${{ steps.vars.outputs.title }}
       run: |
-        git checkout -b "${RC_BRANCH}"
+        git switch -c "${RC_BRANCH}"
 
-        # create an empty commit to distinguish workflow runs
-        # from other possible releases from the same commit
-        git commit --allow-empty -m "${TITLE}"
+        # Manually create a merge commit on the current branch, keeping the
+        # tree and setting the parents to the current HEAD and the HEAD of the
+        # release branch. This commit is what we'll fast-forward the release
+        # branch to when merging the release branch.
+        # For details on why, look at
+        # https://docs.neon.build/overview/repositories/neon.html#background-on-commit-history-of-release-prs
+        current_tree=$(git rev-parse 'HEAD^{tree}')
+        release_head=$(git rev-parse "${RELEASE_BRANCH}")
+        current_head=$(git rev-parse HEAD)
+        merge_commit=$(git commit-tree -p "${current_head}" -p "${release_head}" -m "${TITLE}" "${current_tree}")
+
+        # Fast-forward the current branch to the newly created merge_commit
+        git merge --ff-only ${merge_commit}
 
         git push origin "${RC_BRANCH}"
 
-    - name: Create a PR into ${{ inputs.release-branch }}
+    - name: Create a PR into ${{ steps.vars.outputs.release-branch }}
       env:
         GH_TOKEN: ${{ secrets.ci-access-token }}
         RC_BRANCH: ${{ steps.vars.outputs.rc-branch }}
-        RELEASE_BRANCH: ${{ inputs.release-branch }}
+        RELEASE_BRANCH: ${{ steps.vars.outputs.release-branch }}
         TITLE: ${{ steps.vars.outputs.title }}
       run: |
-        cat << EOF > body.md
-          ## ${TITLE}
-
-          **Please merge this Pull Request using 'Create a merge commit' button**
-        EOF
-
         gh pr create --title "${TITLE}" \
-                     --body-file "body.md" \
                      --head "${RC_BRANCH}" \
                      --base "${RELEASE_BRANCH}"
