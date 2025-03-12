@@ -93,7 +93,8 @@ impl Timeline {
             }
         }
 
-        let ctx = RequestContext::new(TaskKind::Eviction, DownloadBehavior::Warn);
+        let ctx = RequestContext::new(TaskKind::Eviction, DownloadBehavior::Warn)
+            .with_scope_timeline(&self);
         loop {
             let policy = self.get_eviction_policy();
             let cf = self

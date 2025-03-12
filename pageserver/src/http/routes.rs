@@ -55,6 +55,7 @@ use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
 use crate::config::PageServerConf;
+use crate::context;
 use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::pgdatadir_mapping::LsnForTimestamp;
@@ -953,12 +954,13 @@ async fn timeline_detail_handler(
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
         let timeline = tenant.get_timeline(timeline_id, false)?;
+        let ctx = &ctx.with_scope_timeline(&timeline);
 
         let timeline_info = build_timeline_info(
             &timeline,
             include_non_incremental_logical_size.unwrap_or(false),
             force_await_initial_logical_size.unwrap_or(false),
-            &ctx,
+            ctx,
         )
         .await
         .context("get local timeline info")
@@ -1002,7 +1004,8 @@ async fn get_lsn_by_timestamp_handler(
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download)
+        .with_scope_timeline(&timeline);
     let result = timeline
         .find_lsn_for_timestamp(timestamp_pg, &cancel, &ctx)
         .await?;
@@ -1074,7 +1077,8 @@ async fn get_timestamp_of_lsn_handler(
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download)
+        .with_scope_timeline(&timeline);
     let result = timeline.get_timestamp_for_lsn(lsn, &ctx).await?;
 
     match result {
@@ -1429,7 +1433,8 @@ async fn timeline_layer_scan_disposable_keys(
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
 
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download)
+        .with_scope_timeline(&timeline);
 
     let guard = timeline.layers.read().await;
     let Some(layer) = guard.try_get_from_key(&layer_name.clone().into()) else {
@@ -1515,7 +1520,8 @@ async fn timeline_download_heatmap_layers_handler(
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download)
+        .with_scope_timeline(&timeline);
 
     let max_concurrency = get_config(&request)
         .remote_storage_config
@@ -1563,7 +1569,8 @@ async fn layer_download_handler(
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download)
+        .with_scope_timeline(&timeline);
     let downloaded = timeline
         .download_layer(&layer_name, &ctx)
         .await
@@ -2299,8 +2306,8 @@ async fn timeline_compact_handler(
         .unwrap_or(false);
 
     async {
-        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
+        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download).with_scope_timeline(&timeline);
         if scheduled {
             let tenant = state
                 .tenant_manager
@@ -2407,8 +2414,8 @@ async fn timeline_checkpoint_handler(
         parse_query_param::<_, bool>(&request, "wait_until_uploaded")?.unwrap_or(false);
 
     async {
-        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
+        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download).with_scope_timeline(&timeline);
         if wait_until_flushed {
             timeline.freeze_and_flush().await
         } else {
@@ -2463,7 +2470,8 @@ async fn timeline_download_remote_layers_handler_post(
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download)
+        .with_scope_timeline(&timeline);
     match timeline.spawn_download_all_remote_layers(body, &ctx).await {
         Ok(st) => json_response(StatusCode::ACCEPTED, st),
         Err(st) => json_response(StatusCode::CONFLICT, st),
@@ -2546,6 +2554,7 @@ async fn timeline_detach_ancestor_handler(
         tracing::info!("all timeline upload queues are drained");
 
         let timeline = tenant.get_timeline(timeline_id, true)?;
+        let ctx = &ctx.with_scope_timeline(&timeline);
 
         let progress = timeline
             .prepare_to_detach_from_ancestor(&tenant, options, ctx)
@@ -2652,8 +2661,9 @@ async fn getpage_at_lsn_handler_inner(
     async {
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
         // Enable read path debugging
-        let ctx = RequestContextBuilder::extend(&ctx).read_path_debug(true).build();
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
+        let ctx = RequestContextBuilder::extend(&ctx).read_path_debug(true)
+        .scope(context::Scope::new_timeline(&timeline)).build();
 
         // Use last_record_lsn if no lsn is provided
         let lsn = lsn.unwrap_or_else(|| timeline.get_last_record_lsn());
@@ -2687,8 +2697,8 @@ async fn timeline_collect_keyspace(
     let at_lsn: Option<Lsn> = parse_query_param(&request, "at_lsn")?;
 
     async {
-        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
+        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download).with_scope_timeline(&timeline);
         let at_lsn = at_lsn.unwrap_or_else(|| timeline.get_last_record_lsn());
         let (dense_ks, sparse_ks) = timeline
             .collect_keyspace(at_lsn, &ctx)
@@ -3213,6 +3223,7 @@ async fn post_top_tenants(
         match order_by {
             TenantSorting::ResidentSize => sizes.resident_size,
             TenantSorting::MaxLogicalSize => sizes.max_logical_size,
+            TenantSorting::MaxLogicalSizePerShard => sizes.max_logical_size_per_shard,
         }
     }
 
@@ -3325,7 +3336,7 @@ async fn put_tenant_timeline_import_basebackup(
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
-        let timeline = tenant
+        let (timeline, timeline_ctx) = tenant
             .create_empty_timeline(timeline_id, base_lsn, pg_version, &ctx)
             .map_err(ApiError::InternalServerError)
             .await?;
@@ -3344,7 +3355,13 @@ async fn put_tenant_timeline_import_basebackup(
         info!("importing basebackup");
 
         timeline
-            .import_basebackup_from_tar(tenant.clone(), &mut body, base_lsn, broker_client, &ctx)
+            .import_basebackup_from_tar(
+                tenant.clone(),
+                &mut body,
+                base_lsn,
+                broker_client,
+                &timeline_ctx,
+            )
             .await
             .map_err(ApiError::InternalServerError)?;
 
@@ -3384,6 +3401,7 @@ async fn put_tenant_timeline_import_wal(
         let state = get_state(&request);
 
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, TenantShardId::unsharded(tenant_id), timeline_id).await?;
+        let ctx = RequestContextBuilder::extend(&ctx).scope(context::Scope::new_timeline(&timeline)).build();
 
         let mut body = StreamReader::new(request.into_body().map(|res| {
             res.map_err(|error| {

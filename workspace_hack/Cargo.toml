@@ -47,8 +47,7 @@ hyper-dff4ba8e3ae991db = { package = "hyper", version = "1", features = ["full"]
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "server", "service"] }
 indexmap-dff4ba8e3ae991db = { package = "indexmap", version = "1", default-features = false, features = ["std"] }
 indexmap-f595c2ba2a3f28df = { package = "indexmap", version = "2", features = ["serde"] }
-itertools-5ef9efb8ec2df382 = { package = "itertools", version = "0.12" }
-itertools-93f6ce9d446188ac = { package = "itertools", version = "0.10" }
+itertools = { version = "0.12" }
 lazy_static = { version = "1", default-features = false, features = ["spin_no_std"] }
 libc = { version = "0.2", features = ["extra_traits", "use_std"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
@@ -115,8 +114,7 @@ half = { version = "2", default-features = false, features = ["num-traits"] }
 hashbrown = { version = "0.14", features = ["raw"] }
 indexmap-dff4ba8e3ae991db = { package = "indexmap", version = "1", default-features = false, features = ["std"] }
 indexmap-f595c2ba2a3f28df = { package = "indexmap", version = "2", features = ["serde"] }
-itertools-5ef9efb8ec2df382 = { package = "itertools", version = "0.12" }
-itertools-93f6ce9d446188ac = { package = "itertools", version = "0.10" }
+itertools = { version = "0.12" }
 libc = { version = "0.2", features = ["extra_traits", "use_std"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 memchr = { version = "2" }

@@ -284,6 +284,18 @@ impl Client {
         simple_query::batch_execute(self.inner(), query).await
     }
 
+    pub async fn discard_all(&self) -> Result<ReadyForQueryStatus, Error> {
+        // clear the prepared statements that are about to be nuked from the postgres session
+        {
+            let mut typeinfo = self.inner.cached_typeinfo.lock();
+            typeinfo.typeinfo = None;
+            typeinfo.typeinfo_composite = None;
+            typeinfo.typeinfo_enum = None;
+        }
+
+        self.batch_execute("discard all").await
+    }
+
     /// Begins a new database transaction.
     ///
     /// The transaction will roll back by default - use the `commit` method to commit it.

@@ -393,6 +393,9 @@ impl GcCompactionQueue {
                 if job.dry_run {
                     flags |= CompactFlags::DryRun;
                 }
+                if options.flags.contains(CompactFlags::NoYield) {
+                    flags |= CompactFlags::NoYield;
+                }
                 let options = CompactOptions {
                     flags,
                     sub_compaction: false,
@@ -1091,7 +1094,7 @@ impl Timeline {
         let latest_gc_cutoff = self.get_applied_gc_cutoff_lsn();
 
         tracing::info!(
-            "latest_gc_cutoff: {}, pitr cutoff {}",
+            "starting shard ancestor compaction, latest_gc_cutoff: {}, pitr cutoff {}",
             *latest_gc_cutoff,
             self.gc_info.read().unwrap().cutoffs.time
         );
@@ -1120,6 +1123,7 @@ impl Timeline {
                     // Expensive, exhaustive check of keys in this layer: this guards against ShardedRange's calculations being
                     // wrong.  If ShardedRange claims the local page count is zero, then no keys in this layer
                     // should be !is_key_disposable()
+                    // TODO: exclude sparse keyspace from this check, otherwise it will infinitely loop.
                     let range = layer_desc.get_key_range();
                     let mut key = range.start;
                     while key < range.end {
@@ -2616,6 +2620,7 @@ impl Timeline {
     ) -> Result<CompactionOutcome, CompactionError> {
         let sub_compaction = options.sub_compaction;
         let job = GcCompactJob::from_compact_options(options.clone());
+        let no_yield = options.flags.contains(CompactFlags::NoYield);
         if sub_compaction {
             info!(
                 "running enhanced gc bottom-most compaction with sub-compaction, splitting compaction jobs"
@@ -2630,14 +2635,15 @@ impl Timeline {
                     idx + 1,
                     jobs_len
                 );
-                self.compact_with_gc_inner(cancel, job, ctx).await?;
+                self.compact_with_gc_inner(cancel, job, ctx, no_yield)
+                    .await?;
             }
             if jobs_len == 0 {
                 info!("no jobs to run, skipping gc bottom-most compaction");
             }
             return Ok(CompactionOutcome::Done);
         }
-        self.compact_with_gc_inner(cancel, job, ctx).await
+        self.compact_with_gc_inner(cancel, job, ctx, no_yield).await
     }
 
     async fn compact_with_gc_inner(
@@ -2645,6 +2651,7 @@ impl Timeline {
         cancel: &CancellationToken,
         job: GcCompactJob,
         ctx: &RequestContext,
+        no_yield: bool,
     ) -> Result<CompactionOutcome, CompactionError> {
         // Block other compaction/GC tasks from running for now. GC-compaction could run along
         // with legacy compaction tasks in the future. Always ensure the lock order is compaction -> gc.
@@ -2914,14 +2921,18 @@ impl Timeline {
             if cancel.is_cancelled() {
                 return Err(CompactionError::ShuttingDown);
             }
-            let should_yield = self
-                .l0_compaction_trigger
-                .notified()
-                .now_or_never()
-                .is_some();
-            if should_yield {
-                tracing::info!("preempt gc-compaction when downloading layers: too many L0 layers");
-                return Ok(CompactionOutcome::YieldForL0);
+            if !no_yield {
+                let should_yield = self
+                    .l0_compaction_trigger
+                    .notified()
+                    .now_or_never()
+                    .is_some();
+                if should_yield {
+                    tracing::info!(
+                        "preempt gc-compaction when downloading layers: too many L0 layers"
+                    );
+                    return Ok(CompactionOutcome::YieldForL0);
+                }
             }
             let resident_layer = layer
                 .download_and_keep_resident(ctx)
@@ -3054,16 +3065,21 @@ impl Timeline {
             if cancel.is_cancelled() {
                 return Err(CompactionError::ShuttingDown);
             }
-            keys_processed += 1;
-            if keys_processed % 1000 == 0 {
-                let should_yield = self
-                    .l0_compaction_trigger
-                    .notified()
-                    .now_or_never()
-                    .is_some();
-                if should_yield {
-                    tracing::info!("preempt gc-compaction in the main loop: too many L0 layers");
-                    return Ok(CompactionOutcome::YieldForL0);
+
+            if !no_yield {
+                keys_processed += 1;
+                if keys_processed % 1000 == 0 {
+                    let should_yield = self
+                        .l0_compaction_trigger
+                        .notified()
+                        .now_or_never()
+                        .is_some();
+                    if should_yield {
+                        tracing::info!(
+                            "preempt gc-compaction in the main loop: too many L0 layers"
+                        );
+                        return Ok(CompactionOutcome::YieldForL0);
+                    }
                 }
             }
             if self.shard_identity.is_key_disposable(&key) {

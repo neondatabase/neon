@@ -24,6 +24,10 @@ on:
 
 permissions: {}
 
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
 jobs:
   tags:
     runs-on: ubuntu-22.04
@@ -83,7 +87,11 @@ jobs:
             echo "tag=release-compute-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
             ;;
           pr|storage-rc-pr|compute-rc-pr|proxy-rc-pr)
-            BUILD_AND_TEST_RUN_ID=$(gh run list -b $CURRENT_BRANCH -c $CURRENT_SHA -w 'Build and Test' -L 1 --json databaseId --jq '.[].databaseId')
+            BUILD_AND_TEST_RUN_ID=$(gh api --paginate \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${CURRENT_SHA}&branch=${CURRENT_BRANCH}" \
+              | jq '[.workflow_runs[] | select(.name == "Build and Test")][0].id // ("Error: No matching workflow run found." | halt_error(1))')
             echo "tag=$BUILD_AND_TEST_RUN_ID" | tee -a $GITHUB_OUTPUT
             ;;
           workflow-dispatch)
