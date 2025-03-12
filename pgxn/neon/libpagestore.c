@@ -16,6 +16,8 @@
 
 #include <math.h>
 
+#include "libpq-int.h"
+
 #include "access/xlog.h"
 #include "common/hashfn.h"
 #include "fmgr.h"
@@ -815,9 +817,10 @@ retry:
 			get_socket_stats(PQsocket(pageserver_conn), &sndbuf, &recvbuf);
 
 			neon_shard_log(shard_no, LOG,
-						   "no response received from pageserver for %0.3f s, still waiting (sent " UINT64_FORMAT " requests, received " UINT64_FORMAT " responses) (socket sndbuf=%d recvbuf=%d)",
+						   "no response received from pageserver for %0.3f s, still waiting (sent " UINT64_FORMAT " requests, received " UINT64_FORMAT " responses) (socket sndbuf=%d recvbuf=%d) (conn start=%d end=%d)",
 						   INSTR_TIME_GET_DOUBLE(since_start),
-						   shard->nrequests_sent, shard->nresponses_received, sndbuf, recvbuf);
+						   shard->nrequests_sent, shard->nresponses_received, sndbuf, recvbuf,
+				           pageserver_conn->inStart, pageserver_conn->inEnd);
 			shard->receive_last_log_time = now;
 			shard->receive_logged = true;
 		}
@@ -1099,6 +1102,10 @@ pageserver_try_receive(shardno_t shard_no)
 		{
 			neon_shard_log(shard_no, LOG, "pageserver_receive: disconnect due to failure while parsing response");
 			pageserver_disconnect(shard_no);
+			/*
+			 * Malformed responses from PageServer are a reason to raise
+			 * errors and cancel transactions.
+			 */
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
@@ -1122,7 +1129,8 @@ pageserver_try_receive(shardno_t shard_no)
 		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
 
 		pageserver_disconnect(shard_no);
-		neon_shard_log(shard_no, ERROR, "pageserver_receive disconnect: could not read COPY data: %s", msg);
+		neon_shard_log(shard_no, LOG, "pageserver_receive disconnect: could not read COPY data: %s", msg);
+		resp = NULL;
 	}
 	else
 	{
@@ -1321,6 +1329,16 @@ pg_init_libpagestore(void)
 							PGC_USERSET,
 							0,	/* no flags required */
 							NULL, (GucIntAssignHook) &readahead_buffer_resize, NULL);
+	DefineCustomIntVariable("neon.readahead_getpage_pull_timeout",
+							"readahead response pull timeout",
+							"Time between active tries to pull data from the "
+							"PageStream connection when we have pages which "
+							"were read ahead but not yet received.",
+							&readahead_getpage_pull_timeout_ms,
+							0, 0, 5 * 60 * 1000,
+							PGC_USERSET,
+							GUC_UNIT_MS,
+							NULL, NULL, NULL);
 	DefineCustomIntVariable("neon.protocol_version",
 							"Version of compute<->page server protocol",
 							NULL,
@@ -1334,7 +1352,7 @@ pg_init_libpagestore(void)
 
 	DefineCustomIntVariable("neon.pageserver_response_log_timeout",
 							"pageserver response log timeout",
-							"If the pageserver doesn't respond to a request within this timeout,"
+							"If the pageserver doesn't respond to a request within this timeout, "
 							"a message is printed to the log.",
 							&pageserver_response_log_timeout,
 							10000, 100, INT_MAX,
@@ -1344,7 +1362,7 @@ pg_init_libpagestore(void)
 
 	DefineCustomIntVariable("neon.pageserver_response_disconnect_timeout",
 							"pageserver response diconnect timeout",
-							"If the pageserver doesn't respond to a request within this timeout,"
+							"If the pageserver doesn't respond to a request within this timeout, "
 							"disconnect and reconnect.",
 							&pageserver_response_disconnect_timeout,
 							120000, 100, INT_MAX,

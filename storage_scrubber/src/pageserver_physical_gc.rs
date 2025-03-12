@@ -152,10 +152,8 @@ impl TenantRefAccumulator {
             }
         }
 
-        if !ancestor_refs.is_empty() {
-            tracing::info!(%ttid, "Found {} ancestor refs", ancestor_refs.len());
-            self.ancestor_ref_shards.update(ttid, ancestor_refs);
-        }
+        tracing::info!(%ttid, "Found {} ancestor refs", ancestor_refs.len());
+        self.ancestor_ref_shards.update(ttid, ancestor_refs);
     }
 
     /// Consume Self and return a vector of ancestor tenant shards that should be GC'd, and map of referenced ancestor layers to preserve
@@ -779,7 +777,7 @@ pub async fn pageserver_physical_gc(
 
     let mut summary = GcSummary::default();
     {
-        let timelines = std::pin::pin!(timelines.try_buffered(CONCURRENCY));
+        let timelines = timelines.try_buffered(CONCURRENCY);
         let timelines = timelines.try_flatten();
 
         let timelines = timelines.map_ok(|(ttid, tenant_manifest_arc)| {
@@ -793,8 +791,8 @@ pub async fn pageserver_physical_gc(
                 tenant_manifest_arc,
             )
         });
-        let mut timelines = std::pin::pin!(timelines.try_buffered(CONCURRENCY));
-
+        let timelines = timelines.try_buffered(CONCURRENCY);
+        let mut timelines = std::pin::pin!(timelines);
         // Drain futures for per-shard GC, populating accumulator as a side effect
         while let Some(i) = timelines.next().await {
             summary.merge(i?);

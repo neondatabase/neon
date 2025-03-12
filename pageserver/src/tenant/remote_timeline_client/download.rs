@@ -18,7 +18,7 @@ use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{info_span, warn};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
 use utils::{backoff, pausable_failpoint};

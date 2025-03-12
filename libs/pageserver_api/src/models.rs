@@ -274,6 +274,31 @@ pub struct TimelineCreateRequest {
     pub mode: TimelineCreateRequestMode,
 }
 
+/// Storage controller specific extensions to [`TimelineInfo`].
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TimelineCreateResponseStorcon {
+    #[serde(flatten)]
+    pub timeline_info: TimelineInfo,
+
+    pub safekeepers: Option<SafekeepersInfo>,
+}
+
+/// Safekeepers as returned in timeline creation request to storcon or pushed to
+/// cplane in the post migration hook.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SafekeepersInfo {
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
+    pub generation: u32,
+    pub safekeepers: Vec<SafekeeperInfo>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SafekeeperInfo {
+    pub id: NodeId,
+    pub hostname: String,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum TimelineCreateRequestMode {
@@ -1146,6 +1171,15 @@ pub struct TimelineArchivalConfigRequest {
     pub state: TimelineArchivalState,
 }
 
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct TimelinePatchIndexPartRequest {
+    pub rel_size_migration: Option<RelSizeMigration>,
+    pub gc_compaction_last_completed_lsn: Option<Lsn>,
+    pub applied_gc_cutoff_lsn: Option<Lsn>,
+    #[serde(default)]
+    pub force_index_update: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TimelinesInfoAndOffloaded {
     pub timelines: Vec<TimelineInfo>,
@@ -1163,6 +1197,21 @@ pub struct OffloadedTimelineInfo {
     pub ancestor_retain_lsn: Option<Lsn>,
     /// The time point when the timeline was archived
     pub archived_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RelSizeMigration {
+    /// The tenant is using the old rel_size format.
+    /// Note that this enum is persisted as `Option<RelSizeMigration>` in the index part, so
+    /// `None` is the same as `Some(RelSizeMigration::Legacy)`.
+    Legacy,
+    /// The tenant is migrating to the new rel_size format. Both old and new rel_size format are
+    /// persisted in the index part. The read path will read both formats and merge them.
+    Migrating,
+    /// The tenant has migrated to the new rel_size format. Only the new rel_size format is persisted
+    /// in the index part, and the read path will not read the old format.
+    Migrated,
 }
 
 /// This represents the output of the "timeline_detail" and "timeline_list" API calls.
@@ -1243,7 +1292,11 @@ pub struct TimelineInfo {
     // Forward compatibility: a previous version of the pageserver will receive a JSON. serde::Deserialize does
     // not deny unknown fields by default so it's safe to set the field to some value, though it won't be
     // read.
+    /// Whether the timeline is archived.
     pub is_archived: Option<bool>,
+
+    /// The status of the rel_size migration.
+    pub rel_size_migration: Option<RelSizeMigration>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1423,8 +1476,14 @@ pub struct TenantScanRemoteStorageResponse {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum TenantSorting {
+    /// Total size of layers on local disk for all timelines in a shard.
     ResidentSize,
+    /// The logical size of the largest timeline within a _tenant_ (not shard). Only tracked on
+    /// shard 0, contains the sum across all shards.
     MaxLogicalSize,
+    /// The logical size of the largest timeline within a _tenant_ (not shard), divided by number of
+    /// shards. Only tracked on shard 0, and estimates the per-shard logical size.
+    MaxLogicalSizePerShard,
 }
 
 impl Default for TenantSorting {
@@ -1454,14 +1513,20 @@ pub struct TopTenantShardsRequest {
 pub struct TopTenantShardItem {
     pub id: TenantShardId,
 
-    /// Total size of layers on local disk for all timelines in this tenant
+    /// Total size of layers on local disk for all timelines in this shard.
     pub resident_size: u64,
 
-    /// Total size of layers in remote storage for all timelines in this tenant
+    /// Total size of layers in remote storage for all timelines in this shard.
     pub physical_size: u64,
 
-    /// The largest logical size of a timeline within this tenant
+    /// The largest logical size of a timeline within this _tenant_ (not shard). This is only
+    /// tracked on shard 0, and contains the sum of the logical size across all shards.
     pub max_logical_size: u64,
+
+    /// The largest logical size of a timeline within this _tenant_ (not shard) divided by number of
+    /// shards. This is only tracked on shard 0, and is only an estimate as we divide it evenly by
+    /// shard count, rounded up.
+    pub max_logical_size_per_shard: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]

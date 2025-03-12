@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -137,6 +138,7 @@ impl InnerClient {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SocketConfig {
+    pub host_addr: Option<IpAddr>,
     pub host: Host,
     pub port: u16,
     pub connect_timeout: Option<Duration>,
@@ -280,6 +282,18 @@ impl Client {
     /// them to this method!
     pub async fn batch_execute(&self, query: &str) -> Result<ReadyForQueryStatus, Error> {
         simple_query::batch_execute(self.inner(), query).await
+    }
+
+    pub async fn discard_all(&self) -> Result<ReadyForQueryStatus, Error> {
+        // clear the prepared statements that are about to be nuked from the postgres session
+        {
+            let mut typeinfo = self.inner.cached_typeinfo.lock();
+            typeinfo.typeinfo = None;
+            typeinfo.typeinfo_composite = None;
+            typeinfo.typeinfo_enum = None;
+        }
+
+        self.batch_execute("discard all").await
     }
 
     /// Begins a new database transaction.

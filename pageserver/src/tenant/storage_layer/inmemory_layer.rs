@@ -417,7 +417,7 @@ impl InMemoryLayer {
     pub(crate) async fn get_values_reconstruct_data(
         self: &Arc<InMemoryLayer>,
         keyspace: KeySpace,
-        end_lsn: Lsn,
+        lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
@@ -433,8 +433,6 @@ impl InMemoryLayer {
         }
         let mut reads: HashMap<Key, Vec<ValueRead>> = HashMap::new();
         let mut ios: HashMap<(Key, Lsn), OnDiskValueIo> = Default::default();
-
-        let lsn_range = self.start_lsn..end_lsn;
 
         for range in keyspace.ranges.iter() {
             for (key, vec_map) in inner

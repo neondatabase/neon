@@ -9,14 +9,14 @@ use tracing::trace;
 use utils::id::TimelineId;
 use utils::lsn::{AtomicLsn, Lsn};
 
-use super::TimelineWriterState;
+use super::{ReadableLayer, TimelineWriterState};
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::metrics::TimelineMetrics;
 use crate::tenant::layer_map::{BatchedUpdates, LayerMap};
 use crate::tenant::storage_layer::{
     AsLayerDesc, InMemoryLayer, Layer, LayerVisibilityHint, PersistentLayerDesc,
-    PersistentLayerKey, ResidentLayer,
+    PersistentLayerKey, ReadableLayerWeak, ResidentLayer,
 };
 
 /// Provides semantic APIs to manipulate the layer map.
@@ -38,6 +38,21 @@ impl Default for LayerManager {
 }
 
 impl LayerManager {
+    pub(crate) fn upgrade(&self, weak: ReadableLayerWeak) -> ReadableLayer {
+        match weak {
+            ReadableLayerWeak::PersistentLayer(desc) => {
+                ReadableLayer::PersistentLayer(self.get_from_desc(&desc))
+            }
+            ReadableLayerWeak::InMemoryLayer(desc) => {
+                let inmem = self
+                    .layer_map()
+                    .expect("no concurrent shutdown")
+                    .in_memory_layer(&desc);
+                ReadableLayer::InMemoryLayer(inmem)
+            }
+        }
+    }
+
     pub(crate) fn get_from_key(&self, key: &PersistentLayerKey) -> Layer {
         // The assumption for the `expect()` is that all code maintains the following invariant:
         // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.
@@ -479,6 +494,25 @@ impl OpenLayerManager {
         updates.remove_historic(desc);
         mapping.remove(layer);
         layer.delete_on_drop();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_insert_in_memory_layer(&mut self, layer: Arc<InMemoryLayer>) {
+        use pageserver_api::models::InMemoryLayerInfo;
+
+        match layer.info() {
+            InMemoryLayerInfo::Open { .. } => {
+                assert!(self.layer_map.open_layer.is_none());
+                self.layer_map.open_layer = Some(layer);
+            }
+            InMemoryLayerInfo::Frozen { lsn_start, .. } => {
+                if let Some(last) = self.layer_map.frozen_layers.back() {
+                    assert!(last.get_lsn_range().end <= lsn_start);
+                }
+
+                self.layer_map.frozen_layers.push_back(layer);
+            }
+        }
     }
 }
 

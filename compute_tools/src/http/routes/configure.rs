@@ -1,18 +1,16 @@
 use std::sync::Arc;
 
-use axum::{extract::State, response::Response};
-use compute_api::{
-    requests::ConfigurationRequest,
-    responses::{ComputeStatus, ComputeStatusResponse},
-};
+use axum::extract::State;
+use axum::response::Response;
+use compute_api::requests::ConfigurationRequest;
+use compute_api::responses::{ComputeStatus, ComputeStatusResponse};
 use http::StatusCode;
 use tokio::task;
 use tracing::info;
 
-use crate::{
-    compute::{ComputeNode, ParsedSpec},
-    http::{extract::Json, JsonResponse},
-};
+use crate::compute::{ComputeNode, ParsedSpec};
+use crate::http::JsonResponse;
+use crate::http::extract::Json;
 
 // Accept spec in JSON format and request compute configuration. If anything
 // goes wrong after we set the compute status to `ConfigurationPending` and
@@ -24,7 +22,7 @@ pub(in crate::http) async fn configure(
     State(compute): State<Arc<ComputeNode>>,
     request: Json<ConfigurationRequest>,
 ) -> Response {
-    if !compute.live_config_allowed {
+    if !compute.params.live_config_allowed {
         return JsonResponse::error(
             StatusCode::PRECONDITION_FAILED,
             "live configuration is not allowed for this compute node".to_string(),
@@ -47,13 +45,18 @@ pub(in crate::http) async fn configure(
             return JsonResponse::invalid_status(state.status);
         }
 
+        // Pass the tracing span to the main thread that performs the startup,
+        // so that the start_compute operation is considered a child of this
+        // configure request for tracing purposes.
+        state.startup_span = Some(tracing::Span::current());
+
         state.pspec = Some(pspec);
         state.set_status(ComputeStatus::ConfigurationPending, &compute.state_changed);
         drop(state);
     }
 
     // Spawn a blocking thread to wait for compute to become Running. This is
-    // needed to do not block the main pool of workers and be able to serve
+    // needed to not block the main pool of workers and to be able to serve
     // other requests while some particular request is waiting for compute to
     // finish configuration.
     let c = compute.clone();

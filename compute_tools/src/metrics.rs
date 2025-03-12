@@ -1,6 +1,6 @@
 use metrics::core::Collector;
 use metrics::proto::MetricFamily;
-use metrics::{register_int_counter_vec, register_uint_gauge_vec, IntCounterVec, UIntGaugeVec};
+use metrics::{IntCounterVec, UIntGaugeVec, register_int_counter_vec, register_uint_gauge_vec};
 use once_cell::sync::Lazy;
 
 pub(crate) static INSTALLED_EXTENSIONS: Lazy<UIntGaugeVec> = Lazy::new(|| {
@@ -54,9 +54,7 @@ pub(crate) static REMOTE_EXT_REQUESTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| 
     register_int_counter_vec!(
         "compute_ctl_remote_ext_requests_total",
         "Total number of requests made by compute_ctl to download extensions from S3 proxy by status",
-        // Do not use any labels like extension name yet.
-        // We can add them later if needed.
-        &["http_status"]
+        &["http_status", "filename"]
     )
     .expect("failed to define a metric")
 });

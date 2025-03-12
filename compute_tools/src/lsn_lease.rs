@@ -1,17 +1,15 @@
-use anyhow::bail;
-use anyhow::Result;
-use postgres::{NoTls, SimpleQueryMessage};
-use std::time::SystemTime;
-use std::{str::FromStr, sync::Arc, thread, time::Duration};
-use utils::id::TenantId;
-use utils::id::TimelineId;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, SystemTime};
 
+use anyhow::{Result, bail};
 use compute_api::spec::ComputeMode;
+use postgres::{NoTls, SimpleQueryMessage};
 use tracing::{info, warn};
-use utils::{
-    lsn::Lsn,
-    shard::{ShardCount, ShardNumber, TenantShardId},
-};
+use utils::id::{TenantId, TimelineId};
+use utils::lsn::Lsn;
+use utils::shard::{ShardCount, ShardNumber, TenantShardId};
 
 use crate::compute::ComputeNode;
 

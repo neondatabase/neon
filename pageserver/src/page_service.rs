@@ -56,6 +56,7 @@ use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::{
     self, COMPUTE_COMMANDS_COUNTERS, ComputeCommandKind, LIVE_CONNECTIONS, SmgrOpTimer,
+    TimelineMetrics,
 };
 use crate::pgdatadir_mapping::Version;
 use crate::span::{
@@ -392,10 +393,6 @@ impl TimelineHandles {
             .await
             .map_err(|e| match e {
                 timeline::handle::GetError::TenantManager(e) => e,
-                timeline::handle::GetError::TimelineGateClosed => {
-                    trace!("timeline gate closed");
-                    GetActiveTimelineError::Timeline(GetTimelineError::ShuttingDown)
-                }
                 timeline::handle::GetError::PerTimelineStateShutDown => {
                     trace!("per-timeline state shut down");
                     GetActiveTimelineError::Timeline(GetTimelineError::ShuttingDown)
@@ -422,24 +419,36 @@ pub(crate) struct TenantManagerTypes;
 impl timeline::handle::Types for TenantManagerTypes {
     type TenantManagerError = GetActiveTimelineError;
     type TenantManager = TenantManagerWrapper;
-    type Timeline = Arc<Timeline>;
+    type Timeline = TenantManagerCacheItem;
 }
 
-impl timeline::handle::ArcTimeline<TenantManagerTypes> for Arc<Timeline> {
-    fn gate(&self) -> &utils::sync::gate::Gate {
-        &self.gate
-    }
+pub(crate) struct TenantManagerCacheItem {
+    pub(crate) timeline: Arc<Timeline>,
+    // allow() for cheap propagation through RequestContext inside a task
+    #[allow(clippy::redundant_allocation)]
+    pub(crate) metrics: Arc<Arc<TimelineMetrics>>,
+    #[allow(dead_code)] // we store it to keep the gate open
+    pub(crate) gate_guard: GateGuard,
+}
 
+impl std::ops::Deref for TenantManagerCacheItem {
+    type Target = Arc<Timeline>;
+    fn deref(&self) -> &Self::Target {
+        &self.timeline
+    }
+}
+
+impl timeline::handle::Timeline<TenantManagerTypes> for TenantManagerCacheItem {
     fn shard_timeline_id(&self) -> timeline::handle::ShardTimelineId {
-        Timeline::shard_timeline_id(self)
+        Timeline::shard_timeline_id(&self.timeline)
     }
 
     fn per_timeline_state(&self) -> &timeline::handle::PerTimelineState<TenantManagerTypes> {
-        &self.handles
+        &self.timeline.handles
     }
 
     fn get_shard_identity(&self) -> &pageserver_api::shard::ShardIdentity {
-        Timeline::get_shard_identity(self)
+        Timeline::get_shard_identity(&self.timeline)
     }
 }
 
@@ -448,7 +457,7 @@ impl timeline::handle::TenantManager<TenantManagerTypes> for TenantManagerWrappe
         &self,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
-    ) -> Result<Arc<Timeline>, GetActiveTimelineError> {
+    ) -> Result<TenantManagerCacheItem, GetActiveTimelineError> {
         let tenant_id = self.tenant_id.get().expect("we set this in get()");
         let timeout = ACTIVE_TENANT_TIMEOUT;
         let wait_start = Instant::now();
@@ -491,7 +500,23 @@ impl timeline::handle::TenantManager<TenantManagerTypes> for TenantManagerWrappe
         let timeline = tenant_shard
             .get_timeline(timeline_id, true)
             .map_err(GetActiveTimelineError::Timeline)?;
-        Ok(timeline)
+
+        let gate_guard = match timeline.gate.enter() {
+            Ok(guard) => guard,
+            Err(_) => {
+                return Err(GetActiveTimelineError::Timeline(
+                    GetTimelineError::ShuttingDown,
+                ));
+            }
+        };
+
+        let metrics = Arc::new(Arc::clone(&timeline.metrics));
+
+        Ok(TenantManagerCacheItem {
+            timeline,
+            metrics,
+            gate_guard,
+        })
     }
 }
 
@@ -1220,6 +1245,14 @@ impl PageServerHandler {
         ),
         QueryError,
     > {
+        macro_rules! upgrade_handle_and_set_context {
+            ($shard:ident) => {{
+                let weak_handle = &$shard;
+                let handle = weak_handle.upgrade()?;
+                let ctx = ctx.with_scope_page_service_pagestream(&handle);
+                (handle, ctx)
+            }};
+        }
         Ok(match batch {
             BatchedFeMessage::Exists {
                 span,
@@ -1228,9 +1261,10 @@ impl PageServerHandler {
                 req,
             } => {
                 fail::fail_point!("ps::handle-pagerequest-message::exists");
+                let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
                     vec![
-                        self.handle_get_rel_exists_request(&*shard.upgrade()?, &req, ctx)
+                        self.handle_get_rel_exists_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
                             .map(|msg| (msg, timer))
@@ -1246,9 +1280,10 @@ impl PageServerHandler {
                 req,
             } => {
                 fail::fail_point!("ps::handle-pagerequest-message::nblocks");
+                let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
                     vec![
-                        self.handle_get_nblocks_request(&*shard.upgrade()?, &req, ctx)
+                        self.handle_get_nblocks_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
                             .map(|msg| (msg, timer))
@@ -1264,17 +1299,18 @@ impl PageServerHandler {
                 pages,
             } => {
                 fail::fail_point!("ps::handle-pagerequest-message::getpage");
+                let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
                     {
                         let npages = pages.len();
                         trace!(npages, "handling getpage request");
                         let res = self
                             .handle_get_page_at_lsn_request_batched(
-                                &*shard.upgrade()?,
+                                &shard,
                                 effective_request_lsn,
                                 pages,
                                 io_concurrency,
-                                ctx,
+                                &ctx,
                             )
                             .instrument(span.clone())
                             .await;
@@ -1291,9 +1327,10 @@ impl PageServerHandler {
                 req,
             } => {
                 fail::fail_point!("ps::handle-pagerequest-message::dbsize");
+                let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
                     vec![
-                        self.handle_db_size_request(&*shard.upgrade()?, &req, ctx)
+                        self.handle_db_size_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
                             .map(|msg| (msg, timer))
@@ -1309,9 +1346,10 @@ impl PageServerHandler {
                 req,
             } => {
                 fail::fail_point!("ps::handle-pagerequest-message::slrusegment");
+                let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
                     vec![
-                        self.handle_get_slru_segment_request(&*shard.upgrade()?, &req, ctx)
+                        self.handle_get_slru_segment_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
                             .map(|msg| (msg, timer))
@@ -1327,12 +1365,13 @@ impl PageServerHandler {
                 requests,
             } => {
                 fail::fail_point!("ps::handle-pagerequest-message::test");
+                let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
                     {
                         let npages = requests.len();
                         trace!(npages, "handling getpage request");
                         let res = self
-                            .handle_test_request_batch(&*shard.upgrade()?, requests, ctx)
+                            .handle_test_request_batch(&shard, requests, &ctx)
                             .instrument(span.clone())
                             .await;
                         assert_eq!(res.len(), npages);
@@ -2095,6 +2134,7 @@ impl PageServerHandler {
                 // TODO: passthrough the error site to the final error message?
                 BasebackupError::Client(e, _) => QueryError::Disconnected(ConnectionError::Io(e)),
                 BasebackupError::Server(e) => QueryError::Other(e),
+                BasebackupError::Shutdown => QueryError::Shutdown,
             }
         }
 
@@ -2107,6 +2147,7 @@ impl PageServerHandler {
             .get(tenant_id, timeline_id, ShardSelector::Zero)
             .await?;
         set_tracing_field_shard_id(&timeline);
+        let ctx = ctx.with_scope_timeline(&timeline);
 
         if timeline.is_archived() == Some(true) {
             tracing::info!(
@@ -2124,7 +2165,7 @@ impl PageServerHandler {
                     lsn,
                     crate::tenant::timeline::WaitLsnWaiter::PageService,
                     crate::tenant::timeline::WaitLsnTimeout::Default,
-                    ctx,
+                    &ctx,
                 )
                 .await?;
             timeline
@@ -2150,7 +2191,7 @@ impl PageServerHandler {
                 prev_lsn,
                 full_backup,
                 replica,
-                ctx,
+                &ctx,
             )
             .await
             .map_err(map_basebackup_error)?;
@@ -2173,7 +2214,7 @@ impl PageServerHandler {
                     prev_lsn,
                     full_backup,
                     replica,
-                    ctx,
+                    &ctx,
                 )
                 .await
                 .map_err(map_basebackup_error)?;
@@ -2190,7 +2231,7 @@ impl PageServerHandler {
                     prev_lsn,
                     full_backup,
                     replica,
-                    ctx,
+                    &ctx,
                 )
                 .await
                 .map_err(map_basebackup_error)?;

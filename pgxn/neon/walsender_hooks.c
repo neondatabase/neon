@@ -32,6 +32,8 @@ extern XLogRecPtr WalSndWaitForWal(XLogRecPtr loc);
 extern bool GetDonorShmem(XLogRecPtr *donor_lsn);
 extern XLogRecPtr GetXLogReplayRecPtr(TimeLineID *replayTLI);
 
+bool disable_wal_prev_lsn_checks = false;
+
 static XLogRecPtr
 NeonWALReadWaitForWAL(XLogRecPtr loc)
 {
@@ -81,6 +83,8 @@ NeonWALPageRead(
 
 	if (flushptr < targetPagePtr + reqLen)
 		return -1;
+
+	xlogreader->skip_lsn_checks = disable_wal_prev_lsn_checks;
 
 	/* Read at most XLOG_BLCKSZ bytes */
 	if (targetPagePtr + XLOG_BLCKSZ <= flushptr)

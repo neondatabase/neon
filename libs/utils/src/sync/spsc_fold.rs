@@ -1,4 +1,5 @@
-use core::{future::poll_fn, task::Poll};
+use core::future::poll_fn;
+use core::task::Poll;
 use std::sync::{Arc, Mutex};
 
 use diatomic_waker::DiatomicWaker;

@@ -14,6 +14,7 @@ use camino::Utf8Path;
 use clap::{Arg, ArgAction, Command};
 use metrics::launch_timestamp::{LaunchTimestamp, set_launch_timestamp_metric};
 use metrics::set_build_info_metric;
+use nix::sys::socket::{setsockopt, sockopt};
 use pageserver::config::{PageServerConf, PageserverIdentity};
 use pageserver::controller_upcall_client::ControllerUpcallClient;
 use pageserver::deletion_queue::DeletionQueue;
@@ -24,11 +25,12 @@ use pageserver::task_mgr::{
 };
 use pageserver::tenant::{TenantSharedResources, mgr, secondary};
 use pageserver::{
-    CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener, http, page_cache, page_service,
-    task_mgr, virtual_file,
+    CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener, HttpsEndpointListener, http,
+    page_cache, page_service, task_mgr, virtual_file,
 };
 use postgres_backend::AuthType;
 use remote_storage::GenericRemoteStorage;
+use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::signal::unix::SignalKind;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -342,10 +344,24 @@ fn start_pageserver(
     info!("Starting pageserver http handler on {http_addr}");
     let http_listener = tcp_listener::bind(http_addr)?;
 
-    let pg_addr = &conf.listen_pg_addr;
+    let https_listener = match conf.listen_https_addr.as_ref() {
+        Some(https_addr) => {
+            info!("Starting pageserver https handler on {https_addr}");
+            Some(tcp_listener::bind(https_addr)?)
+        }
+        None => None,
+    };
 
+    let pg_addr = &conf.listen_pg_addr;
     info!("Starting pageserver pg protocol handler on {pg_addr}");
     let pageserver_listener = tcp_listener::bind(pg_addr)?;
+
+    // Enable SO_KEEPALIVE on the socket, to detect dead connections faster.
+    // These are configured via net.ipv4.tcp_keepalive_* sysctls.
+    //
+    // TODO: also set this on the walreceiver socket, but tokio-postgres doesn't
+    // support enabling keepalives while using the default OS sysctls.
+    setsockopt(&pageserver_listener, sockopt::KeepAlive, &true)?;
 
     // Launch broker client
     // The storage_broker::connect call needs to happen inside a tokio runtime thread.
@@ -567,9 +583,8 @@ fn start_pageserver(
 
     // Start up the service to handle HTTP mgmt API request. We created the
     // listener earlier already.
-    let http_endpoint_listener = {
+    let (http_endpoint_listener, https_endpoint_listener) = {
         let _rt_guard = MGMT_REQUEST_RUNTIME.enter(); // for hyper
-        let cancel = CancellationToken::new();
 
         let router_state = Arc::new(
             http::routes::State::new(
@@ -584,22 +599,51 @@ fn start_pageserver(
             )
             .context("Failed to initialize router state")?,
         );
+
         let router = http::make_router(router_state, launch_ts, http_auth.clone())?
             .build()
             .map_err(|err| anyhow!(err))?;
-        let service = http_utils::RouterService::new(router).unwrap();
-        let server = hyper0::Server::from_tcp(http_listener)?
-            .serve(service)
-            .with_graceful_shutdown({
-                let cancel = cancel.clone();
-                async move { cancel.clone().cancelled().await }
-            });
 
-        let task = MGMT_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
-            "http endpoint listener",
-            server,
-        ));
-        HttpEndpointListener(CancellableTask { task, cancel })
+        let service =
+            Arc::new(http_utils::RequestServiceBuilder::new(router).map_err(|err| anyhow!(err))?);
+
+        let http_task = {
+            let server =
+                http_utils::server::Server::new(Arc::clone(&service), http_listener, None)?;
+            let cancel = CancellationToken::new();
+
+            let task = MGMT_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
+                "http endpoint listener",
+                server.serve(cancel.clone()),
+            ));
+            HttpEndpointListener(CancellableTask { task, cancel })
+        };
+
+        let https_task = match https_listener {
+            Some(https_listener) => {
+                let certs = load_certs(&conf.ssl_cert_file)?;
+                let key = load_private_key(&conf.ssl_key_file)?;
+
+                let server_config = rustls::ServerConfig::builder()
+                    .with_no_client_auth()
+                    .with_single_cert(certs, key)?;
+
+                let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+
+                let server =
+                    http_utils::server::Server::new(service, https_listener, Some(tls_acceptor))?;
+                let cancel = CancellationToken::new();
+
+                let task = MGMT_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
+                    "https endpoint listener",
+                    server.serve(cancel.clone()),
+                ));
+                Some(HttpsEndpointListener(CancellableTask { task, cancel }))
+            }
+            None => None,
+        };
+
+        (http_task, https_task)
     };
 
     let consumption_metrics_tasks = {
@@ -675,6 +719,7 @@ fn start_pageserver(
         shutdown_pageserver.cancel();
         pageserver::shutdown_pageserver(
             http_endpoint_listener,
+            https_endpoint_listener,
             page_service,
             consumption_metrics_tasks,
             disk_usage_eviction_task,
@@ -687,6 +732,25 @@ fn start_pageserver(
         .await;
         unreachable!();
     })
+}
+
+fn load_certs(filename: &Utf8Path) -> std::io::Result<Vec<CertificateDer<'static>>> {
+    let file = std::fs::File::open(filename)?;
+    let mut reader = std::io::BufReader::new(file);
+
+    rustls_pemfile::certs(&mut reader).collect()
+}
+
+fn load_private_key(filename: &Utf8Path) -> anyhow::Result<PrivateKeyDer<'static>> {
+    let file = std::fs::File::open(filename)?;
+    let mut reader = std::io::BufReader::new(file);
+
+    let key = rustls_pemfile::private_key(&mut reader)?;
+
+    key.ok_or(anyhow::anyhow!(
+        "no private key found in {}",
+        filename.as_str(),
+    ))
 }
 
 async fn create_remote_storage_client(

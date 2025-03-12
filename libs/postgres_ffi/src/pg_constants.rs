@@ -9,8 +9,7 @@
 //! comments on them.
 //!
 
-use crate::PageHeaderData;
-use crate::BLCKSZ;
+use crate::{BLCKSZ, PageHeaderData};
 
 //
 // From pg_tablespace_d.h

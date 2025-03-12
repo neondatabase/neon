@@ -438,6 +438,23 @@ async fn request_handler(
             &config.region,
         );
 
+        ctx.set_user_agent(
+            request
+                .headers()
+                .get(hyper::header::USER_AGENT)
+                .and_then(|h| h.to_str().ok())
+                .map(Into::into),
+        );
+
+        let testodrome_id = request
+            .headers()
+            .get("X-Neon-Query-ID")
+            .map(|value| value.to_str().unwrap_or_default().to_string());
+
+        if let Some(query_id) = testodrome_id {
+            ctx.set_testodrome_id(query_id);
+        }
+
         let span = ctx.span();
         info!(parent: &span, "performing websocket upgrade");
 

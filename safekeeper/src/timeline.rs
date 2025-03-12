@@ -415,6 +415,9 @@ impl From<TimelineError> for ApiError {
     }
 }
 
+/// We run remote deletion in a background task, this is how it sends its results back.
+type RemoteDeletionReceiver = tokio::sync::watch::Receiver<Option<anyhow::Result<()>>>;
+
 /// Timeline struct manages lifecycle (creation, deletion, restore) of a safekeeper timeline.
 /// It also holds SharedState and provides mutually exclusive access to it.
 pub struct Timeline {
@@ -445,6 +448,8 @@ pub struct Timeline {
     timeline_dir: Utf8PathBuf,
     manager_ctl: ManagerCtl,
     conf: Arc<SafeKeeperConf>,
+
+    remote_deletion: std::sync::Mutex<Option<RemoteDeletionReceiver>>,
 
     /// Hold this gate from code that depends on the Timeline's non-shut-down state.  While holding
     /// this gate, you must respect [`Timeline::cancel`]
@@ -494,6 +499,7 @@ impl Timeline {
             walreceivers,
             gate: Default::default(),
             cancel: CancellationToken::default(),
+            remote_deletion: std::sync::Mutex::new(None),
             manager_ctl: ManagerCtl::new(),
             conf,
             broker_active: AtomicBool::new(false),
@@ -558,11 +564,18 @@ impl Timeline {
         });
     }
 
-    /// Background timeline activities (which hold Timeline::gate) will no
-    /// longer run once this function completes.
-    pub async fn shutdown(&self) {
+    /// Cancel the timeline, requesting background activity to stop. Closing
+    /// the `self.gate` waits for that.
+    pub async fn cancel(&self) {
         info!("timeline {} shutting down", self.ttid);
         self.cancel.cancel();
+    }
+
+    /// Background timeline activities (which hold Timeline::gate) will no
+    /// longer run once this function completes. `Self::cancel` must have been
+    /// already called.
+    pub async fn close(&self) {
+        assert!(self.cancel.is_cancelled());
 
         // Wait for any concurrent tasks to stop using this timeline, to avoid e.g. attempts
         // to read deleted files.
@@ -574,13 +587,13 @@ impl Timeline {
     /// Also deletes WAL in s3. Might fail if e.g. s3 is unavailable, but
     /// deletion API endpoint is retriable.
     ///
-    /// Timeline must be in shut-down state (i.e. call [`Self::shutdown`] first)
+    /// Timeline must be in shut-down state (i.e. call [`Self::close`] first)
     pub async fn delete(
         &self,
         shared_state: &mut WriteGuardSharedState<'_>,
         only_local: bool,
     ) -> Result<bool> {
-        // Assert that [`Self::shutdown`] was already called
+        // Assert that [`Self::close`] was already called
         assert!(self.cancel.is_cancelled());
         assert!(self.gate.close_complete());
 
@@ -591,13 +604,93 @@ impl Timeline {
         shared_state.sk.close_wal_store();
 
         if !only_local && self.conf.is_wal_backup_enabled() {
-            // Note: we concurrently delete remote storage data from multiple
-            // safekeepers. That's ok, s3 replies 200 if object doesn't exist and we
-            // do some retries anyway.
-            wal_backup::delete_timeline(&self.ttid).await?;
+            self.remote_delete().await?;
         }
         let dir_existed = delete_dir(&self.timeline_dir).await?;
         Ok(dir_existed)
+    }
+
+    /// Delete timeline content from remote storage.  If the returned future is dropped,
+    /// deletion will continue in the background.
+    ///
+    /// This function ordinarily spawns a task and stashes a result receiver into [`Self::remote_deletion`].  If
+    /// deletion is already happening, it may simply wait for an existing task's result.
+    ///
+    /// Note: we concurrently delete remote storage data from multiple
+    /// safekeepers. That's ok, s3 replies 200 if object doesn't exist and we
+    /// do some retries anyway.
+    async fn remote_delete(&self) -> Result<()> {
+        // We will start a background task to do the deletion, so that it proceeds even if our
+        // API request is dropped.  Future requests will see the existing deletion task and wait
+        // for it to complete.
+        let mut result_rx = {
+            let mut remote_deletion_state = self.remote_deletion.lock().unwrap();
+            let result_rx = if let Some(result_rx) = remote_deletion_state.as_ref() {
+                if let Some(result) = result_rx.borrow().as_ref() {
+                    if let Err(e) = result {
+                        // A previous remote deletion failed: we will start a new one
+                        tracing::error!("remote deletion failed, will retry ({e})");
+                        None
+                    } else {
+                        // A previous remote deletion call already succeeded
+                        return Ok(());
+                    }
+                } else {
+                    // Remote deletion is still in flight
+                    Some(result_rx.clone())
+                }
+            } else {
+                // Remote deletion was not attempted yet, start it now.
+                None
+            };
+
+            match result_rx {
+                Some(result_rx) => result_rx,
+                None => self.start_remote_delete(&mut remote_deletion_state),
+            }
+        };
+
+        // Wait for a result
+        let Ok(result) = result_rx.wait_for(|v| v.is_some()).await else {
+            // Unexpected: sender should always send a result before dropping the channel, even if it has an error
+            return Err(anyhow::anyhow!(
+                "remote deletion task future was dropped without sending a result"
+            ));
+        };
+
+        result
+            .as_ref()
+            .expect("We did a wait_for on this being Some above")
+            .as_ref()
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!("remote deletion failed: {e}"))
+    }
+
+    /// Spawn background task to do remote deletion, return a receiver for its outcome
+    fn start_remote_delete(
+        &self,
+        guard: &mut std::sync::MutexGuard<Option<RemoteDeletionReceiver>>,
+    ) -> RemoteDeletionReceiver {
+        tracing::info!("starting remote deletion");
+        let (result_tx, result_rx) = tokio::sync::watch::channel(None);
+        let ttid = self.ttid;
+        tokio::task::spawn(
+            async move {
+                let r = wal_backup::delete_timeline(&ttid).await;
+                if let Err(e) = &r {
+                    // Log error here in case nobody ever listens for our result (e.g. dropped API request)
+                    tracing::error!("remote deletion failed: {e}");
+                }
+
+                // Ignore send results: it's legal for the Timeline to give up waiting for us.
+                let _ = result_tx.send(Some(r));
+            }
+            .instrument(info_span!("remote_delete", timeline = %self.ttid)),
+        );
+
+        **guard = Some(result_rx.clone());
+
+        result_rx
     }
 
     /// Returns if timeline is cancelled.
@@ -1106,7 +1199,7 @@ impl ManagerTimeline {
 }
 
 /// Deletes directory and it's contents. Returns false if directory does not exist.
-async fn delete_dir(path: &Utf8PathBuf) -> Result<bool> {
+pub async fn delete_dir(path: &Utf8PathBuf) -> Result<bool> {
     match fs::remove_dir_all(path).await {
         Ok(_) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),

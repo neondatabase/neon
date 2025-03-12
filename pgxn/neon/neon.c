@@ -437,6 +437,7 @@ _PG_init(void)
 
 	pg_init_libpagestore();
 	pg_init_walproposer();
+	pagestore_smgr_init();
 	Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 
 	InitUnstableExtensionsSupport();
@@ -452,6 +453,15 @@ _PG_init(void)
 							"Disables incomming logical replication",
 							NULL,
 							&disable_logical_replication_subscribers,
+							false,
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+	DefineCustomBoolVariable(
+							"neon.disable_wal_prevlink_checks",
+							"Disable validation of prev link in WAL records",
+							NULL,
+							&disable_wal_prev_lsn_checks,
 							false,
 							PGC_SIGHUP,
 							0,
