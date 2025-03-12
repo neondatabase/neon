@@ -1793,7 +1793,7 @@ impl Tenant {
             .context("resume_deletion")
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
         }
-        let needs_manifest_upload = 
+        let needs_manifest_upload =
             // Upload a new manifest if the stripe size changes. This typically happens when the
             // stripe size is None because there was no existing manifest, but can also happen
             // across shard splits.
