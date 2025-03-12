@@ -2423,8 +2423,8 @@ impl Timeline {
     }
 
     fn get_l0_flush_delay_threshold(&self) -> Option<usize> {
-        // By default, stall at 3x the compaction threshold. The compaction threshold defaults to
-        // 10, and L0 compaction is generally able to keep L0 counts below 30.
+        // By default, delay L0 flushes at 3x the compaction threshold. The compaction threshold
+        // defaults to 10, and L0 compaction is generally able to keep L0 counts below 30.
         const DEFAULT_L0_FLUSH_DELAY_FACTOR: usize = 3;
 
         // If compaction is disabled, don't delay.
