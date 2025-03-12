@@ -1595,11 +1595,6 @@ impl Service {
                 }
             }
             let new_tenant = TenantShard::from_persistent(tsp, intent)?;
-            tracing::info!(
-                "XXX loaded {:?} {:?}",
-                new_tenant.tenant_shard_id,
-                new_tenant.shard
-            );
 
             tenants.insert(tenant_shard_id, new_tenant);
         }
