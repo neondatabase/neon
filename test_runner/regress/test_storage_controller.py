@@ -3568,6 +3568,7 @@ def test_storage_controller_detached_stopped(
         tenant_id,
         shard_count=1,
     )
+    env.pageserver.quiesce_tenants()
 
     assert len(env.pageserver.http_client().tenant_list_locations()["tenant_shards"]) == 1
 
