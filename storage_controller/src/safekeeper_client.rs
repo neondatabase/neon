@@ -111,6 +111,23 @@ impl SafekeeperClient {
         )
     }
 
+    #[allow(unused)]
+    pub(crate) async fn bump_timeline_term(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        req: &models::TimelineTermBumpRequest,
+    ) -> Result<models::TimelineTermBumpResponse> {
+        measured_request!(
+            "term_bump",
+            crate::metrics::Method::Post,
+            &self.node_id_label,
+            self.inner
+                .bump_timeline_term(tenant_id, timeline_id, req)
+                .await
+        )
+    }
+
     pub(crate) async fn get_utilization(&self) -> Result<SafekeeperUtilization> {
         measured_request!(
             "utilization",
