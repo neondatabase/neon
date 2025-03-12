@@ -101,7 +101,7 @@ changes such as a pageserver node becoming unavailable, or the tenant's shard co
 postgres clients to handle such changes, the storage controller calls an API hook when a tenant's pageserver
 location changes.
 
-The hook is configured using the storage controller's `--compute-hook-url` CLI option. If the hook requires
+The hook is configured using the storage controller's `--control-plane-url` CLI option. If the hook requires
 JWT auth, the token may be provided with `--control-plane-jwt-token`. The hook will be invoked with a `PUT` request.
 
 In the Neon cloud service, this hook is implemented by Neon's internal cloud control plane. In `neon_local` systems
