@@ -140,9 +140,8 @@ pub(crate) struct Options {
 }
 
 /// Controls the detach ancestor behavior.
-/// - When set to `NoAncestorAndReparent`, we will only detach a branch if its ancestor is a root branch. It will automatically reparent the children of the ancestor.
-/// - When set to `MultiLevelAndNoReparent`, we will detach a branch from multiple levels of ancestors, and no reparenting will happen for the children of the ancestor.
-/// - Detach ancestor will always reparent the children of the detached branch.
+/// - When set to `NoAncestorAndReparent`, we will only detach a branch if its ancestor is a root branch. It will automatically reparent any children of the ancestor before and at the branch point.
+/// - When set to `MultiLevelAndNoReparent`, we will detach a branch from multiple levels of ancestors, and no reparenting will happen at all.
 #[derive(Debug, Clone, Copy)]
 pub enum DetachBehavior {
     NoAncestorAndReparent,
