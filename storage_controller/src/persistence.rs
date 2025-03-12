@@ -1636,12 +1636,12 @@ impl TenantShardPersistence {
 
     pub(crate) fn get_shard_identity(&self) -> Result<ShardIdentity, ShardConfigError> {
         if self.shard_count == 0 {
-            let mut shard_identity = ShardIdentity::unsharded();
             // NB: carry over the stripe size from the persisted record, to avoid consistency check
             // failures if the persisted value differs from the default stripe size. The stripe size
             // doesn't really matter for unsharded tenants anyway.
-            shard_identity.stripe_size = self.get_stripe_size()?;
-            Ok(shard_identity)
+            Ok(ShardIdentity::unsharded_with_stripe_size(
+                self.get_stripe_size()?,
+            ))
         } else {
             Ok(ShardIdentity::new(
                 self.get_shard_number()?,
