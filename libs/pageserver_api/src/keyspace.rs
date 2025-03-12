@@ -613,8 +613,7 @@ mod tests {
     use rand::{RngCore, SeedableRng};
 
     use super::*;
-    use crate::models::ShardParameters;
-    use crate::shard::{ShardCount, ShardNumber, ShardStripeSize};
+    use crate::shard::{DEFAULT_STRIPE_SIZE, ShardCount, ShardNumber, ShardStripeSize};
 
     // Helper function to create a key range.
     //
@@ -964,12 +963,8 @@ mod tests {
     }
     #[test]
     fn sharded_range_relation_gap() {
-        let shard_identity = ShardIdentity::new(
-            ShardNumber(0),
-            ShardCount::new(4),
-            ShardParameters::DEFAULT_STRIPE_SIZE,
-        )
-        .unwrap();
+        let shard_identity =
+            ShardIdentity::new(ShardNumber(0), ShardCount::new(4), DEFAULT_STRIPE_SIZE).unwrap();
 
         let range = ShardedRange::new(
             Range {
@@ -985,12 +980,8 @@ mod tests {
 
     #[test]
     fn shard_identity_keyspaces_single_key() {
-        let shard_identity = ShardIdentity::new(
-            ShardNumber(1),
-            ShardCount::new(4),
-            ShardParameters::DEFAULT_STRIPE_SIZE,
-        )
-        .unwrap();
+        let shard_identity =
+            ShardIdentity::new(ShardNumber(1), ShardCount::new(4), DEFAULT_STRIPE_SIZE).unwrap();
 
         let range = ShardedRange::new(
             Range {
@@ -1034,12 +1025,8 @@ mod tests {
 
     #[test]
     fn shard_identity_keyspaces_forkno_gap() {
-        let shard_identity = ShardIdentity::new(
-            ShardNumber(1),
-            ShardCount::new(4),
-            ShardParameters::DEFAULT_STRIPE_SIZE,
-        )
-        .unwrap();
+        let shard_identity =
+            ShardIdentity::new(ShardNumber(1), ShardCount::new(4), DEFAULT_STRIPE_SIZE).unwrap();
 
         let range = ShardedRange::new(
             Range {
@@ -1061,7 +1048,7 @@ mod tests {
             let shard_identity = ShardIdentity::new(
                 ShardNumber(shard_number),
                 ShardCount::new(4),
-                ShardParameters::DEFAULT_STRIPE_SIZE,
+                DEFAULT_STRIPE_SIZE,
             )
             .unwrap();
 
@@ -1145,7 +1132,7 @@ mod tests {
     #[test]
     fn sharded_range_fragment_simple() {
         const SHARD_COUNT: u8 = 4;
-        const STRIPE_SIZE: u32 = ShardParameters::DEFAULT_STRIPE_SIZE.0;
+        const STRIPE_SIZE: u32 = DEFAULT_STRIPE_SIZE.0;
 
         let shard_identity = ShardIdentity::new(
             ShardNumber(0),
@@ -1190,7 +1177,7 @@ mod tests {
     #[test]
     fn sharded_range_fragment_multi_stripe() {
         const SHARD_COUNT: u8 = 4;
-        const STRIPE_SIZE: u32 = ShardParameters::DEFAULT_STRIPE_SIZE.0;
+        const STRIPE_SIZE: u32 = DEFAULT_STRIPE_SIZE.0;
         const RANGE_SIZE: u32 = SHARD_COUNT as u32 * STRIPE_SIZE;
 
         let shard_identity = ShardIdentity::new(
@@ -1244,7 +1231,7 @@ mod tests {
     #[test]
     fn sharded_range_fragment_starting_from_logical_size() {
         const SHARD_COUNT: u8 = 4;
-        const STRIPE_SIZE: u32 = ShardParameters::DEFAULT_STRIPE_SIZE.0;
+        const STRIPE_SIZE: u32 = DEFAULT_STRIPE_SIZE.0;
         const RANGE_SIZE: u32 = SHARD_COUNT as u32 * STRIPE_SIZE;
 
         let input_start = Key::from_hex("000000067f00000001000000ae00ffffffff").unwrap();
@@ -1312,12 +1299,8 @@ mod tests {
         );
 
         // Same, but using a sharded identity
-        let shard_identity = ShardIdentity::new(
-            ShardNumber(0),
-            ShardCount::new(4),
-            ShardParameters::DEFAULT_STRIPE_SIZE,
-        )
-        .unwrap();
+        let shard_identity =
+            ShardIdentity::new(ShardNumber(0), ShardCount::new(4), DEFAULT_STRIPE_SIZE).unwrap();
         assert_eq!(
             do_fragment(input_start, input_end, &shard_identity, 0x8000),
             (u32::MAX, vec![(u32::MAX, input_start..input_end),])
@@ -1359,7 +1342,7 @@ mod tests {
                 ShardIdentity::new(
                     ShardNumber((prng.next_u32() % shard_count) as u8),
                     ShardCount::new(shard_count as u8),
-                    ShardParameters::DEFAULT_STRIPE_SIZE,
+                    DEFAULT_STRIPE_SIZE,
                 )
                 .unwrap()
             };

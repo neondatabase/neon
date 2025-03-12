@@ -18,7 +18,7 @@ use pageserver_api::models::{
     TenantConfig, TenantConfigPatchRequest, TenantConfigRequest, TenantShardSplitRequest,
     TenantShardSplitResponse,
 };
-use pageserver_api::shard::{ShardStripeSize, TenantShardId};
+use pageserver_api::shard::{DEFAULT_STRIPE_SIZE, ShardStripeSize, TenantShardId};
 use pageserver_client::mgmt_api::{self};
 use reqwest::{Method, StatusCode, Url};
 use storage_controller_client::control_api::Client;
@@ -906,7 +906,7 @@ async fn main() -> anyhow::Result<()> {
                         secondary_conf: Some(LocationConfigSecondary { warm: true }),
                         shard_number: 0,
                         shard_count: 0,
-                        shard_stripe_size: ShardParameters::DEFAULT_STRIPE_SIZE.0,
+                        shard_stripe_size: DEFAULT_STRIPE_SIZE.0,
                         tenant_conf: TenantConfig::default(),
                     },
                     None,

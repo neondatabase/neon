@@ -43,7 +43,7 @@ use pageserver_api::models::{
     TimelineInfo, TopTenantShardItem, TopTenantShardsRequest,
 };
 use pageserver_api::shard::{
-    ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId,
+    DEFAULT_STRIPE_SIZE, ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId,
 };
 use pageserver_api::upcall_api::{
     ReAttachRequest, ReAttachResponse, ReAttachResponseTenant, ValidateRequest, ValidateResponse,
@@ -1595,6 +1595,11 @@ impl Service {
                 }
             }
             let new_tenant = TenantShard::from_persistent(tsp, intent)?;
+            tracing::info!(
+                "XXX loaded {:?} {:?}",
+                new_tenant.tenant_shard_id,
+                new_tenant.shard
+            );
 
             tenants.insert(tenant_shard_id, new_tenant);
         }
@@ -2655,7 +2660,7 @@ impl Service {
                         count: tenant_shard_id.shard_count,
                         // We only import un-sharded or single-sharded tenants, so stripe
                         // size can be made up arbitrarily here.
-                        stripe_size: ShardParameters::DEFAULT_STRIPE_SIZE,
+                        stripe_size: DEFAULT_STRIPE_SIZE,
                     },
                     placement_policy: Some(placement_policy),
                     config: req.config.tenant_conf,
@@ -6180,7 +6185,7 @@ impl Service {
 
         // FIXME: we have no way to recover the shard stripe size from contents of remote storage: this will
         // only work if they were using the default stripe size.
-        let stripe_size = ShardParameters::DEFAULT_STRIPE_SIZE;
+        let stripe_size = DEFAULT_STRIPE_SIZE;
 
         let (response, waiters) = self
             .do_tenant_create(TenantCreateRequest {
@@ -7923,7 +7928,7 @@ impl Service {
                             // because our max shard count is relatively low anyway. This policy
                             // will be adjusted in future once we support higher shard count.
                             new_shard_count: MAX_SHARDS.literal(),
-                            new_stripe_size: Some(ShardParameters::DEFAULT_STRIPE_SIZE),
+                            new_stripe_size: Some(DEFAULT_STRIPE_SIZE),
                         },
                     )
                     .await

@@ -86,8 +86,12 @@ const LAYOUT_V1: ShardLayout = ShardLayout(1);
 /// ShardIdentity uses a magic layout value to indicate if it is unusable
 const LAYOUT_BROKEN: ShardLayout = ShardLayout(255);
 
-/// Default stripe size in pages: 256MiB divided by 8kiB page size.
-const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
+/// The default stripe size in pages. 16 MiB divided by 8 kiB page size.
+///
+/// A lower stripe size distributes ingest load better across shards, but reduces IO amortization.
+/// 16 MiB is a reasonable balance according to experiments, see
+/// <https://github.com/neondatabase/neon/pull/10510>.
+pub const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(16 * 1024 / 8);
 
 #[derive(thiserror::Error, Debug, PartialEq, Eq)]
 pub enum ShardConfigError {

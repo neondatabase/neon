@@ -1998,8 +1998,7 @@ pub(crate) mod tests {
     use std::rc::Rc;
 
     use pageserver_api::controller_api::NodeAvailability;
-    use pageserver_api::models::ShardParameters;
-    use pageserver_api::shard::{ShardCount, ShardNumber};
+    use pageserver_api::shard::{DEFAULT_STRIPE_SIZE, ShardCount, ShardNumber};
     use rand::SeedableRng;
     use rand::rngs::StdRng;
     use utils::id::TenantId;
@@ -2011,7 +2010,7 @@ pub(crate) mod tests {
         let tenant_id = TenantId::generate();
         let shard_number = ShardNumber(0);
         let shard_count = ShardCount::new(1);
-        let stripe_size = ShardParameters::DEFAULT_STRIPE_SIZE;
+        let stripe_size = DEFAULT_STRIPE_SIZE;
 
         let tenant_shard_id = TenantShardId {
             tenant_id,
@@ -2040,7 +2039,7 @@ pub(crate) mod tests {
         shard_count: ShardCount,
         preferred_az: Option<AvailabilityZone>,
     ) -> Vec<TenantShard> {
-        let stripe_size = ShardParameters::DEFAULT_STRIPE_SIZE;
+        let stripe_size = DEFAULT_STRIPE_SIZE;
         (0..shard_count.count())
             .map(|i| {
                 let shard_number = ShardNumber(i);

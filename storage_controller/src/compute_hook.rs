@@ -784,8 +784,7 @@ impl ComputeHook {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use pageserver_api::models::ShardParameters;
-    use pageserver_api::shard::{ShardCount, ShardNumber};
+    use pageserver_api::shard::{DEFAULT_STRIPE_SIZE, ShardCount, ShardNumber};
     use utils::id::TenantId;
 
     use super::*;
@@ -793,7 +792,7 @@ pub(crate) mod tests {
     #[test]
     fn tenant_updates() -> anyhow::Result<()> {
         let tenant_id = TenantId::generate();
-        let stripe_size = ShardParameters::DEFAULT_STRIPE_SIZE;
+        let stripe_size = DEFAULT_STRIPE_SIZE;
         let mut tenant_state = ComputeHookTenant::new(
             TenantShardId {
                 tenant_id,
