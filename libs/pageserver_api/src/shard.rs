@@ -531,7 +531,7 @@ mod tests {
             field6: 0x7d06,
         };
 
-        let shard = key_to_shard_number(ShardCount(10), DEFAULT_STRIPE_SIZE, &key);
+        let shard = key_to_shard_number(ShardCount(10), ShardStripeSize(32768), &key);
         assert_eq!(shard, ShardNumber(8));
     }
 
