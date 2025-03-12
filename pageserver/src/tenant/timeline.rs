@@ -84,8 +84,8 @@ use self::eviction_task::EvictionTaskTimelineState;
 use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
+use super::remote_timeline_client::RemoteTimelineClient;
 use super::remote_timeline_client::index::{GcCompactionState, IndexPart};
-use super::remote_timeline_client::{RemoteTimelineClient, WaitCompletionError};
 use super::secondary::heatmap::HeatMapLayer;
 use super::storage_layer::{LayerFringe, LayerVisibilityHint, ReadableLayer};
 use super::tasks::log_compaction_error;
@@ -2562,14 +2562,6 @@ impl Timeline {
         Some(max(l0_flush_stall_threshold, compaction_threshold))
     }
 
-    fn get_l0_flush_wait_upload(&self) -> bool {
-        let tenant_conf = self.tenant_conf.load();
-        tenant_conf
-            .tenant_conf
-            .l0_flush_wait_upload
-            .unwrap_or(self.conf.default_tenant_conf.l0_flush_wait_upload)
-    }
-
     fn get_image_creation_threshold(&self) -> usize {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -4590,27 +4582,6 @@ impl Timeline {
             }
             // release lock on 'layers'
         };
-
-        // Backpressure mechanism: wait with continuation of the flush loop until we have uploaded all layer files.
-        // This makes us refuse ingest until the new layers have been persisted to the remote
-        // TODO: remove this, and rely on l0_flush_{delay,stall}_threshold instead.
-        if self.get_l0_flush_wait_upload() {
-            let start = Instant::now();
-            self.remote_client
-                .wait_completion()
-                .await
-                .map_err(|e| match e {
-                    WaitCompletionError::UploadQueueShutDownOrStopped
-                    | WaitCompletionError::NotInitialized(
-                        NotInitialized::ShuttingDown | NotInitialized::Stopped,
-                    ) => FlushLayerError::Cancelled,
-                    WaitCompletionError::NotInitialized(NotInitialized::Uninitialized) => {
-                        FlushLayerError::Other(anyhow!(e).into())
-                    }
-                })?;
-            let duration = start.elapsed().as_secs_f64();
-            self.metrics.flush_wait_upload_time_gauge_add(duration);
-        }
 
         // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
         // a compaction can delete the file and then it won't be available for uploads any more.
