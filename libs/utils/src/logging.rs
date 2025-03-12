@@ -324,33 +324,52 @@ impl std::fmt::Debug for SecretString {
     }
 }
 
-/// Like [`log_slow_with`], but without the callback.
-#[inline]
-pub async fn log_slow<F, O>(
-    name: &str,
-    threshold: Duration,
-    mut cb: impl FnMut(LogSlowCallback),
-    mut f: std::pin::Pin<&mut F>,
-) -> O
-where
-    F: Future<Output = O>,
-{
-    log_slow_with(name, threshold, || (), f).await
-}
-
 /// Logs a periodic message if a future is slow to complete.
-///
-/// The callback is called at the same frequency.
 ///
 /// This is performance-sensitive as it's used on the GetPage read path.
 ///
 /// TODO: consider upgrading this to a warning, but currently it fires too often.
 #[inline]
-pub async fn log_slow_with<F, O>(
-    name: &str,
-    threshold: Duration,
+pub async fn log_slow<F, O>(name: &str, threshold: Duration, f: std::pin::Pin<&mut F>) -> O
+where
+    F: Future<Output = O>,
+{
+    monitor_slow_future(
+        threshold,
+        f,
+        |LogSlowCallback {
+             ready,
+             elapsed_total,
+             elapsed_since_last_callback: _,
+         }| {
+            if ready {
+                // NB: we check if we exceeded the threshold even if the timeout never fired, because
+                // scheduling or execution delays may cause the future to succeed even if it exceeds the
+                // timeout. This costs an extra unconditional clock reading, but seems worth it to avoid
+                // false negatives.
+                if elapsed_total >= threshold {
+                    info!(
+                        "slow {name} completed after {:.3}s",
+                        elapsed_total.as_secs_f64()
+                    );
+                }
+            } else if elapsed_total > threshold {
+                info!(
+                    "slow {name} still running after {:.3}s",
+                    elapsed_total.as_secs_f64()
+                );
+            }
+        },
+    )
+    .await
+}
+
+/// Poll future `fut` to completion, invoking callback `cb` at the given `period` and once after the future completes.
+#[inline]
+pub async fn monitor_slow_future<F, O>(
+    period: Duration,
+    mut fut: std::pin::Pin<&mut F>,
     mut cb: impl FnMut(LogSlowCallback),
-    mut f: std::pin::Pin<&mut F>,
 ) -> O
 where
     F: Future<Output = O>,
@@ -361,36 +380,29 @@ where
     loop {
         // NB: use timeout_at() instead of timeout() to avoid an extra clock reading in the common
         // case where the timeout doesn't fire.
-        let deadline = started + attempt * threshold;
+        let deadline = started + attempt * period;
         // TODO: still call the callback if the future panics? Copy how we do it for the page_service flush_in_progress counter.
-        let res = tokio::time::timeout_at(deadline, &mut f).await;
+        let res = tokio::time::timeout_at(deadline, &mut fut).await;
         let now = Instant::now();
         cb(LogSlowCallback {
+            ready: res.is_ok(),
+            elapsed_total: now - started,
             elapsed_since_last_callback: now - last_cb,
         });
         last_cb = now;
-        let elapsed = now - started;
         if let Ok(output) = res {
-            // NB: we check if we exceeded the threshold even if the timeout never fired, because
-            // scheduling or execution delays may cause the future to succeed even if it exceeds the
-            // timeout. This costs an extra unconditional clock reading, but seems worth it to avoid
-            // false negatives.
-            if elapsed >= threshold {
-                info!("slow {name} completed after {:.3}s", elapsed.as_secs_f64());
-            }
             return output;
         }
-        info!(
-            "slow {name} still running after {:.3}s",
-            elapsed.as_secs_f64()
-        );
-
         attempt += 1;
     }
 }
 
-/// See [`log_slow`].
+/// See [`log_slow_with`].
 pub struct LogSlowCallback {
+    /// Whether the future completed. If true, there will be no more callbacks.
+    pub ready: bool,
+    /// The time elapsed since the [`log_slow_with`] was first polled.
+    pub elapsed_total: Duration,
     /// The time elapsed since the last callback invocation.
     pub elapsed_since_last_callback: Duration,
 }

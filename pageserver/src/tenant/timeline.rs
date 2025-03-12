@@ -67,7 +67,7 @@ use tracing::*;
 use utils::generation::Generation;
 use utils::guard_arc_swap::GuardArcSwap;
 use utils::id::TimelineId;
-use utils::logging::{LogSlowCallback, log_slow};
+use utils::logging::{LogSlowCallback, monitor_slow_future};
 use utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use utils::postgres_client::PostgresClientProtocol;
 use utils::rate_limit::RateLimit;
@@ -440,6 +440,9 @@ pub struct Timeline {
     heatmap_layers_downloader: Mutex<Option<heatmap_layers_downloader::HeatmapLayersDownloader>>,
 
     pub(crate) rel_size_v2_status: ArcSwapOption<RelSizeMigration>,
+
+    /// See comment in the place where this field is used.
+    wait_lsn_log_slow_rate_limit: Mutex<utils::rate_limit::RateLimit>,
 }
 
 pub(crate) enum PreviousHeatmap {
@@ -1480,33 +1483,57 @@ impl Timeline {
             WaitLsnTimeout::Default => self.conf.wait_lsn_timeout,
         };
 
-        let _timer = crate::metrics::WAIT_LSN_TIME.start_timer();
+        let timer = crate::metrics::WAIT_LSN_TIME.start_timer();
 
         let wait_for_timeout = self.last_record_lsn.wait_for_timeout(lsn, timeout);
         let wait_for_timeout = std::pin::pin!(wait_for_timeout);
-        let update_metric = |LogSlowCallback {
-                                 elapsed_since_last_callback,
-                             }| {
-            self.metrics
-                .wait_lsn_in_progress_micros
-                .inc_by(u64::try_from(elapsed_since_last_callback.as_micros()).unwrap());
-        };
-        // 1s threshold would have resulted in at most 1 log msg/second in prod, in the 30d trailing from Mar 11, 2025
-        let wait_for_timeout = log_slow_with(
-            "wait_lsn",
-            Duration::from_secs(1),
-            update_metric,
+        let log_slow_threshold = Duration::from_secs(10);
+        let wait_for_timeout = monitor_slow_future(
+            log_slow_threshold,
             wait_for_timeout,
+            |LogSlowCallback {
+                 elapsed_since_last_callback,
+                 ready,
+                 elapsed_total,
+             }| {
+                self.metrics
+                    .wait_lsn_in_progress_micros
+                    .inc_by(u64::try_from(elapsed_since_last_callback.as_micros()).unwrap());
+                if elapsed_total < log_slow_threshold {
+                    return;
+                }
+                // The log_slow_threshold defines what is principally noteworthy.
+                // The rate limit prevents excessive per-timeline logging during an extended outage of broker / all safekeepers / network partition.
+                let mut rate_limit = self.wait_lsn_log_slow_rate_limit.lock().unwrap();
+                rate_limit.call2(|rate_limit_stats| {
+                    if ready {
+                        if elapsed_total >= log_slow_threshold {
+                            info!(
+                                %rate_limit_stats,
+                                "slow wait_lsn completed after {:.3}s",
+                                elapsed_total.as_secs_f64()
+                            );
+                        }
+                    } else if elapsed_total > log_slow_threshold {
+                        info!(
+                           %rate_limit_stats,
+                           "slow wait_lsn still running for{:.3}s",
+                           elapsed_total.as_secs_f64()
+                        );
+                    }
+                });
+            },
         );
-        match wait_for_timeout.await {
+        let res = wait_for_timeout.await;
+        // don't count the time spent waiting for lock below, and also in walreceiver.status(), towards the wait_lsn_time_histo
+        drop(timer);
+        match res {
             Ok(()) => Ok(()),
             Err(e) => {
                 use utils::seqwait::SeqWaitError::*;
                 match e {
                     Shutdown => Err(WaitLsnError::Shutdown),
                     Timeout => {
-                        // don't count the time spent waiting for lock below, and also in walreceiver.status(), towards the wait_lsn_time_histo
-                        drop(_timer);
                         let walreceiver_status = self.walreceiver_status();
                         Err(WaitLsnError::Timeout(format!(
                             "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}, WalReceiver status: {}",
@@ -2838,6 +2865,10 @@ impl Timeline {
                 heatmap_layers_downloader: Mutex::new(None),
 
                 rel_size_v2_status: ArcSwapOption::from_pointee(rel_size_v2_status),
+
+                wait_lsn_log_slow_rate_limit: Mutex::new(utils::rate_limit::RateLimit::new(
+                    Duration::from_secs(60),
+                )),
             };
 
             result.repartition_threshold =
