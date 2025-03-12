@@ -2872,18 +2872,22 @@ async fn tenant_scan_remote_handler(
             };
         }
 
-        let (manifest, _, _) =
+        let result =
             download_tenant_manifest(&state.remote_storage, &tenant_shard_id, generation, &cancel)
                 .instrument(info_span!("download_tenant_manifest",
                             tenant_id=%tenant_shard_id.tenant_id,
                             shard_id=%tenant_shard_id.shard_slug()))
-                .await
-                .map_err(|e| ApiError::InternalServerError(anyhow!(e)))?;
+                .await;
+        let stripe_size = match result {
+            Ok((manifest, _, _)) => manifest.stripe_size,
+            Err(DownloadError::NotFound) => None,
+            Err(err) => return Err(ApiError::InternalServerError(anyhow!(err))),
+        };
 
         response.shards.push(TenantScanRemoteStorageShard {
             tenant_shard_id,
             generation: generation.into(),
-            stripe_size: manifest.stripe_size,
+            stripe_size,
         });
     }
 
