@@ -3669,6 +3669,25 @@ impl Service {
         tenant_id: TenantId,
         timeline_id: TimelineId,
     ) -> Result<models::detach_ancestor::AncestorDetached, ApiError> {
+        self.tenant_timeline_detach_ancestor_inner(tenant_id, timeline_id, false)
+            .await
+    }
+
+    pub(crate) async fn tenant_timeline_detach_ancestor_v2(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Result<models::detach_ancestor::AncestorDetached, ApiError> {
+        self.tenant_timeline_detach_ancestor_inner(tenant_id, timeline_id, true)
+            .await
+    }
+
+    pub(crate) async fn tenant_timeline_detach_ancestor_inner(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        detach_v2_behavior: bool,
+    ) -> Result<models::detach_ancestor::AncestorDetached, ApiError> {
         tracing::info!("Detaching timeline {tenant_id}/{timeline_id}",);
 
         let _tenant_lock = trace_shared_lock(
@@ -3691,6 +3710,7 @@ impl Service {
                 node: Node,
                 jwt: Option<String>,
                 ssl_ca_cert: Option<Certificate>,
+                detach_v2_behavior: bool,
             ) -> Result<(ShardNumber, models::detach_ancestor::AncestorDetached), ApiError> {
                 tracing::info!(
                     "Detaching timeline on shard {tenant_shard_id}/{timeline_id}, attached to node {node}",
@@ -3699,10 +3719,17 @@ impl Service {
                 let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref(), ssl_ca_cert)
                     .map_err(|e| passthrough_api_error(&node, e))?;
 
-                client
-                    .timeline_detach_ancestor(tenant_shard_id, timeline_id)
-                    .await
-                    .map_err(|e| {
+                let res = if detach_v2_behavior {
+                        client
+                            .timeline_detach_ancestor_v2(tenant_shard_id, timeline_id)
+                            .await
+                    } else {
+                        client
+                            .timeline_detach_ancestor(tenant_shard_id, timeline_id)
+                            .await
+                    };
+
+                    res.map_err(|e| {
                         use mgmt_api::Error;
 
                         match e {
@@ -3738,6 +3765,7 @@ impl Service {
                         node,
                         self.config.pageserver_jwt_token.clone(),
                         self.config.ssl_ca_cert.clone(),
+                        detach_v2_behavior
                     ))
                 })
                 .await?;

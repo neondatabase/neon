@@ -543,6 +543,30 @@ async fn handle_tenant_timeline_detach_ancestor(
     json_response(StatusCode::OK, res)
 }
 
+async fn handle_tenant_timeline_detach_ancestor_v2(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+
+    check_permissions(&req, Scope::PageServerApi)?;
+    maybe_rate_limit(&req, tenant_id).await;
+
+    match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(_req) => {}
+    };
+
+    let res = service
+        .tenant_timeline_detach_ancestor_v2(tenant_id, timeline_id)
+        .await?;
+
+    json_response(StatusCode::OK, res)
+}
+
 async fn handle_tenant_timeline_block_unblock_gc(
     service: Arc<Service>,
     req: Request<Body>,
@@ -2159,6 +2183,16 @@ pub fn make_router(
                     r,
                     handle_tenant_timeline_detach_ancestor,
                     RequestName("v1_tenant_timeline_detach_ancestor"),
+                )
+            },
+        )
+        .put(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/detach_ancestor_v2",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_timeline_detach_ancestor_v2,
+                    RequestName("v1_tenant_timeline_detach_ancestor_v2"),
                 )
             },
         )

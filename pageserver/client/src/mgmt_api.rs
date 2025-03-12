@@ -471,6 +471,23 @@ impl Client {
             .map_err(Error::ReceiveBody)
     }
 
+    pub async fn timeline_detach_ancestor_v2(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+    ) -> Result<AncestorDetached> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/detach_ancestor_v2",
+            self.mgmt_api_endpoint
+        );
+
+        self.request(Method::PUT, &uri, ())
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
     pub async fn timeline_block_unblock_gc(
         &self,
         tenant_shard_id: TenantShardId,

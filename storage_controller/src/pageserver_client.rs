@@ -263,6 +263,21 @@ impl PageserverClient {
         )
     }
 
+    pub(crate) async fn timeline_detach_ancestor_v2(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+    ) -> Result<AncestorDetached> {
+        measured_request!(
+            "timeline_detach_ancestor_v2",
+            crate::metrics::Method::Put,
+            &self.node_id_label,
+            self.inner
+                .timeline_detach_ancestor_v2(tenant_shard_id, timeline_id)
+                .await
+        )
+    }
+
     pub(crate) async fn timeline_block_unblock_gc(
         &self,
         tenant_shard_id: TenantShardId,
