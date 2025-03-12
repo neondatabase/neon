@@ -384,6 +384,9 @@ def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
     env.pageserver.allowed_errors.append(".*Conflict: Tenant is already being modified.*")
     env.storage_controller.allowed_errors.append(".*Conflict: Tenant is already being modified.*")
 
+    # Tenant attach may get cancelled.
+    env.pageserver.allowed_errors.append(".*attach failed, setting tenant state to Broken: Cancelled.*")
+
     # Tenant creation requests which arrive out of order will generate complaints about
     # generation nubmers out of order.
     env.pageserver.allowed_errors.append(".*Generation .+ is less than existing .+")
