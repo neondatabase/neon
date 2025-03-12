@@ -1,0 +1,53 @@
+-- Load the extension
+CREATE EXTENSION IF NOT EXISTS pg_tiktoken;
+-- Test encoding function
+SELECT tiktoken_encode('cl100k_base', 'Hello world!');
+ tiktoken_encode 
+-----------------
+ {9906,1917,0}
+(1 row)
+
+-- Test token count function
+SELECT tiktoken_count('cl100k_base', 'Hello world!');
+ tiktoken_count 
+----------------
+              3
+(1 row)
+
+-- Test encoding function with a different model
+SELECT tiktoken_encode('r50k_base', 'PostgreSQL is amazing!');
+     tiktoken_encode     
+-------------------------
+ {6307,47701,318,4998,0}
+(1 row)
+
+-- Test token count function with the same model
+SELECT tiktoken_count('r50k_base', 'PostgreSQL is amazing!');
+ tiktoken_count 
+----------------
+              5
+(1 row)
+
+-- Edge cases: Empty string
+SELECT tiktoken_encode('cl100k_base', '');
+ tiktoken_encode 
+-----------------
+ {}
+(1 row)
+
+SELECT tiktoken_count('cl100k_base', '');
+ tiktoken_count 
+----------------
+              0
+(1 row)
+
+-- Edge cases: Long text
+SELECT tiktoken_count('cl100k_base', repeat('word ', 100));
+ tiktoken_count 
+----------------
+            101
+(1 row)
+
+-- Edge case: Invalid encoding
+SELECT tiktoken_encode('invalid_model', 'Test') AS should_fail;
+ERROR:  'invalid_model': unknown model or encoder
