@@ -7874,6 +7874,9 @@ impl Service {
     /// At most one tenant will be split per call: the one with the largest max logical size. It
     /// will split 1 → 8 shards.
     ///
+    /// An unsharded tenant will get DEFAULT_STRIPE_SIZE, regardless of what its ShardIdentity says.
+    /// A sharded tenant will retain its stripe size, as splits do not allow changing it.
+    ///
     /// TODO: consider splitting based on total logical size rather than max logical size.
     ///
     /// TODO: consider spawning multiple splits in parallel: this is only called once every 20
@@ -7919,6 +7922,15 @@ impl Service {
             "Auto-splitting tenant for size threshold {split_threshold}: current size {split_candidate:?}"
         );
 
+        // Retain the stripe size of sharded tenants, as splits don't allow changing it. Otherwise,
+        // use DEFAULT_STRIPE_SIZE for unsharded tenants -- their stripe size doesn't really matter,
+        // and if we change the default stripe size we want to use the new default rather than an
+        // old, persisted stripe size.
+        let new_stripe_size = match split_candidate.id.shard_count.count() {
+            0 | 1 => Some(ShardParameters::DEFAULT_STRIPE_SIZE),
+            2.. => None,
+        };
+
         let this = self.clone();
         tokio::spawn(
             async move {
@@ -7932,7 +7944,7 @@ impl Service {
                             // because our max shard count is relatively low anyway. This policy
                             // will be adjusted in future once we support higher shard count.
                             new_shard_count: MAX_SHARDS.literal(),
-                            new_stripe_size: Some(ShardParameters::DEFAULT_STRIPE_SIZE),
+                            new_stripe_size,
                         },
                     )
                     .await
