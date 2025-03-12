@@ -2504,7 +2504,7 @@ async fn timeline_detach_ancestor_handler_v2(
 ) -> Result<Response<Body>, ApiError> {
     timeline_detach_ancestor_handler_common(
         request,
-        DetachBehavior::MultipleLevelAndNoReparent,
+        DetachBehavior::MultiLevelAndNoReparent,
         cancel,
     )
     .await

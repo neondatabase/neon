@@ -32,6 +32,9 @@ pub(crate) enum Error {
     #[error("too many ancestors")]
     TooManyAncestors,
 
+    #[error("ancestor is not empty")]
+    AncestorNotEmpty,
+
     #[error("shutting down, please retry later")]
     ShuttingDown,
 
@@ -89,7 +92,9 @@ impl From<Error> for ApiError {
     fn from(value: Error) -> Self {
         match value {
             Error::NoAncestor => ApiError::Conflict(value.to_string()),
-            Error::TooManyAncestors => ApiError::BadRequest(anyhow::anyhow!("{value}")),
+            Error::TooManyAncestors | Error::AncestorNotEmpty => {
+                ApiError::BadRequest(anyhow::anyhow!("{value}"))
+            }
             Error::ShuttingDown => ApiError::ShuttingDown,
             Error::Archived(_) => ApiError::BadRequest(anyhow::anyhow!("{value}")),
             Error::OtherTimelineDetachOngoing(_) | Error::FailedToReparentAll => {
@@ -135,13 +140,13 @@ pub(crate) struct Options {
 }
 
 /// Controls the detach ancestor behavior.
-/// - When set to `NoAncestorAndReparent`, we will only detach a branch if it has only one level of ancestor. It will automatically reparent the children of the ancestor.
-/// - When set to `MultipleLevelAndNoReparent`, we will detach a branch from multiple levels of ancestors, and no reparenting will happen for the children of the ancestor.
-/// - Detach ancstor will always reparent the children of the detached branch.
+/// - When set to `NoAncestorAndReparent`, we will only detach a branch if its ancestor is a root branch. It will automatically reparent the children of the ancestor.
+/// - When set to `MultiLevelAndNoReparent`, we will detach a branch from multiple levels of ancestors, and no reparenting will happen for the children of the ancestor.
+/// - Detach ancestor will always reparent the children of the detached branch.
 #[derive(Debug, Clone, Copy)]
 pub enum DetachBehavior {
     NoAncestorAndReparent,
-    MultipleLevelAndNoReparent,
+    MultiLevelAndNoReparent,
 }
 
 impl Default for Options {
@@ -241,13 +246,13 @@ pub(super) async fn prepare(
 
     check_no_archived_children_of_ancestor(tenant, detached, &ancestor, ancestor_lsn)?;
 
-    if let DetachBehavior::MultipleLevelAndNoReparent = behavior {
+    if let DetachBehavior::MultiLevelAndNoReparent = behavior {
         // If the ancestor has an ancestor, we might be able to fast-path detach it if the current ancestor does not have any data written/used by the detaching timeline.
         while let Some(ancestor_of_ancestor) = ancestor.ancestor_timeline.clone() {
             if ancestor_lsn != ancestor.ancestor_lsn {
                 // non-technical requirement; we could flatten still if ancestor LSN does not match but that needs
                 // us to copy and cut more layers.
-                return Err(TooManyAncestors);
+                return Err(AncestorNotEmpty);
             }
             // Use the ancestor of the ancestor as the new ancestor (only when the ancestor LSNs are the same)
             ancestor_lsn = ancestor.ancestor_lsn; // Get the LSN first before resetting the `ancestor` variable
@@ -976,7 +981,7 @@ pub(super) async fn detach_and_reparent(
         Ancestor::Detached(ancestor, ancestor_lsn) => (ancestor, ancestor_lsn, false),
     };
 
-    if let DetachBehavior::MultipleLevelAndNoReparent = behavior {
+    if let DetachBehavior::MultiLevelAndNoReparent = behavior {
         // Do not reparent if the user requests to behave so.
         return Ok(DetachingAndReparenting::Reparented(HashSet::new()));
     }
