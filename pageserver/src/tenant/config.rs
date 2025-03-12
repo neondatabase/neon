@@ -219,7 +219,15 @@ impl LocationConf {
         };
 
         let shard = if conf.shard_count == 0 {
-            ShardIdentity::unsharded()
+            let mut shard_identity = ShardIdentity::unsharded();
+            // NB: carry over the persisted stripe size instead of using the default. This doesn't
+            // matter for most practical purposes, since unsharded tenants don't use the stripe
+            // size, but can cause inconsistencies between storcon and Pageserver and cause manual
+            // splits without `new_shard_stripe` to use an unintended stripe size.
+            if conf.shard_stripe_size > 0 {
+                shard_identity.stripe_size = ShardStripeSize(conf.shard_stripe_size);
+            }
+            shard_identity
         } else {
             ShardIdentity::new(
                 ShardNumber(conf.shard_number),
