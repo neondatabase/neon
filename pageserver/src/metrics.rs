@@ -465,7 +465,7 @@ pub(crate) fn page_cache_errors_inc(error_kind: PageCacheErrorKind) {
 pub(crate) static WAIT_LSN_TIME: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_wait_lsn_seconds",
-        "Time spent waiting for WAL to arrive. Updated after ",
+        "Time spent waiting for WAL to arrive. Updated on completion of the wait_lsn operation.",
         CRITICAL_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric")
