@@ -5,6 +5,7 @@ import random
 import threading
 import time
 
+from psycopg2 import OperationalError
 import pytest
 import requests
 from fixtures.common_types import TenantId, TenantShardId, TimelineArchivalState, TimelineId
@@ -869,7 +870,8 @@ def test_timeline_retain_lsn(
             error_regex = "(.*could not read .* from page server.*|.*relation .* does not exist)"
         else:
             error_regex = ".*failed to get basebackup.*"
-        with pytest.raises((RuntimeError, IoError, UndefinedTable), match=error_regex):
+        errors = (RuntimeError, IoError, OperationalError, UndefinedTable)
+        with pytest.raises(errors, match=error_regex):
             with env.endpoints.create_start(
                 "test_archived_branch", tenant_id=tenant_id, basebackup_request_tries=1
             ) as endpoint:
