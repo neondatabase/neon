@@ -1526,7 +1526,7 @@ impl Timeline {
                     }
                 } else if elapsed_total > log_slow_threshold {
                     info!(
-                        "slow wait_lsn still running for{:.3}s",
+                        "slow wait_lsn still running for {:.3}s",
                         elapsed_total.as_secs_f64()
                     );
                 }
