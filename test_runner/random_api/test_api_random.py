@@ -141,7 +141,7 @@ class NeonBranch:
         source_lsn: str | None = None,
         source_timestamp: str | None = None,
         preserve_under_name: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
         start_time = datetime.now(UTC) - timedelta(seconds=1)
         endpoints = [ep for ep in self.endpoints.values() if ep.type == "read_only"]
         for ep in endpoints:
@@ -169,6 +169,9 @@ class NeonBranch:
                             raise RuntimeError("The operation started, please investigate") from he
                     else:
                         continue
+                elif he.response.status_code == 422 and he.response.json()["code"] == "BRANCHES_LIMIT_EXCEEDED":
+                    log.info("Branches limit exceeded, skipping")
+                    return
                 else:
                     raise HTTPError(he) from he
             else:
