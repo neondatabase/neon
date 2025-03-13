@@ -46,8 +46,8 @@ jobs:
     container:
       image: ${{ inputs.build-tools-image }}
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       # Raise locked memory limit for tokio-epoll-uring.
       # On 5.10 LTS kernels < 5.10.162 (and generally mainline kernels < 5.12),
       # io_uring will account the memory of the CQ and SQ as locked.
@@ -322,8 +322,8 @@ jobs:
     container:
       image: ${{ inputs.build-tools-image }}
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       # for changed limits, see comments on `options:` earlier in this file
       options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     strategy:
