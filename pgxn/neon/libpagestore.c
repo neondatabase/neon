@@ -50,10 +50,25 @@
 #define MIN_RECONNECT_INTERVAL_USEC 1000
 #define MAX_RECONNECT_INTERVAL_USEC 1000000
 
+
+enum NeonEndpointType {
+	EP_TYPE_UNKNOWN,
+	EP_TYPE_PRIMARY,
+	EP_TYPE_REPLICA,
+	EP_TYPE_STATIC
+};
+
+static const struct config_enum_entry neon_endpoint_types[] = {
+	{"unknown", EP_TYPE_UNKNOWN, false},
+	{"primary", EP_TYPE_PRIMARY, false},
+	{"replica", EP_TYPE_REPLICA, false},
+	{"static", EP_TYPE_STATIC, false},
+	{NULL, 0, false}
+};
+
 /* GUCs */
 char	   *neon_timeline;
 char	   *neon_tenant;
-char	   *neon_compute_type;
 int32		max_cluster_size;
 char	   *page_server_connstring;
 char	   *neon_auth_token;
@@ -62,6 +77,8 @@ int			readahead_buffer_size = 128;
 int			flush_every_n_requests = 8;
 
 int         neon_protocol_version = 2;
+
+static int neon_endpoint_type = 0;
 
 static int	max_reconnect_attempts = 60;
 static int	stripe_size;
@@ -391,8 +408,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	{
 	case PS_Disconnected:
 	{
-		const char *keywords[5];
-		const char *values[5];
+		const char *keywords[4];
+		const char *values[4];
 		char pid_str[24];
 		int			n_pgsql_params;
 		TimestampTz	now;
@@ -447,10 +464,21 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		keywords[n_pgsql_params] = "application_name";
 		{
 			int ret;
-			if (neon_compute_type)
-				ret = snprintf(pid_str, sizeof(pid_str), "%d-%s", MyProcPid, neon_compute_type);
-			else
-				ret = snprintf(pid_str, sizeof(pid_str), "%d", MyProcPid);
+			switch (neon_endpoint_type)
+			{
+				case EP_TYPE_PRIMARY:
+					ret = snprintf(pid_str, sizeof(pid_str), "%d-%s", MyProcPid, "primary");
+					break;
+				case EP_TYPE_REPLICA:
+					ret = snprintf(pid_str, sizeof(pid_str), "%d-%s", MyProcPid, "replica");
+					break;
+				case EP_TYPE_STATIC:
+					ret = snprintf(pid_str, sizeof(pid_str), "%d-%s", MyProcPid, "static");
+					break;
+				default:
+					ret = snprintf(pid_str, sizeof(pid_str), "%d", MyProcPid);
+					break;
+			}
 			if (ret < 0 || ret >= (int)(sizeof(pid_str)))
 				elog(FATAL, "stack-allocated buffer too small to hold pid");
 		}
@@ -1375,14 +1403,16 @@ pg_init_libpagestore(void)
 							GUC_UNIT_MS,
 							NULL, NULL, NULL);
 
-	DefineCustomStringVariable("neon.compute_type",
-							   "The compute node type",
-							   NULL,
-							   &neon_compute_type,
-							   "",
-							   PGC_POSTMASTER,
-							   0,	/* no flags required */
-							   NULL, NULL, NULL);
+	DefineCustomEnumVariable(
+							"neon.endpoint_type",
+							"The compute endpoint node type",
+							NULL,
+							&neon_endpoint_type,
+							EP_TYPE_UNKNOWN,
+							neon_endpoint_types,
+							PGC_POSTMASTER,
+							0,
+							NULL, NULL, NULL);
 
 	relsize_hash_init();
 

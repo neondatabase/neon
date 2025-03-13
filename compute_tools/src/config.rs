@@ -99,18 +99,15 @@ pub fn write_postgres_conf(
         writeln!(file, "lc_numeric='C.UTF-8'")?;
     }
 
+    writeln!(file, "neon.endpoint_type={}", spec.mode.to_type_str())?;
     match spec.mode {
-        ComputeMode::Primary => {
-            writeln!(file, "neon.compute_type=primary")?;
-        }
+        ComputeMode::Primary => {}
         ComputeMode::Static(lsn) => {
-            writeln!(file, "neon.compute_type=static")?;
             // hot_standby is 'on' by default, but let's be explicit
             writeln!(file, "hot_standby=on")?;
             writeln!(file, "recovery_target_lsn='{lsn}'")?;
         }
         ComputeMode::Replica => {
-            writeln!(file, "neon.compute_type=replica")?;
             // hot_standby is 'on' by default, but let's be explicit
             writeln!(file, "hot_standby=on")?;
         }

@@ -356,8 +356,6 @@ struct PageServerHandler {
     pipelining_config: PageServicePipeliningConfig,
 
     gate_guard: GateGuard,
-
-    application_info: Option<(String, Option<String>)>,
 }
 
 struct TimelineHandles {
@@ -712,7 +710,6 @@ impl PageServerHandler {
             cancel,
             pipelining_config,
             gate_guard,
-            application_info: None,
         }
     }
 
@@ -2550,19 +2547,14 @@ where
 
         if let FeStartupPacket::StartupMessage { params, .. } = sm {
             if let Some(app_name) = params.get("application_name") {
-                if let Some((app_name, compute_type)) = app_name.split_once('-') {
-                    self.application_info =
-                        Some((app_name.to_string(), Some(compute_type.to_string())));
-                } else {
-                    self.application_info = Some((app_name.to_string(), None));
-                }
+                Span::current().record("application_name", field::display(app_name));
             }
         };
 
         Ok(())
     }
 
-    #[instrument(skip_all, fields(tenant_id, timeline_id, compute_type))]
+    #[instrument(skip_all, fields(tenant_id, timeline_id))]
     async fn process_query(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
@@ -2574,13 +2566,6 @@ where
         });
 
         fail::fail_point!("ps::connection-start::process-query");
-
-        if let Some((app_name, compute_type)) = &self.application_info {
-            tracing::Span::current().record("application", field::display(app_name));
-            if let Some(compute_type) = compute_type {
-                tracing::Span::current().record("compute_type", field::display(compute_type));
-            }
-        }
 
         let ctx = self.connection_ctx.attached_child();
         debug!("process query {query_string}");

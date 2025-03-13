@@ -856,17 +856,7 @@ impl ComputeNode {
         }
 
         if let Some(spec) = &compute_state.pspec {
-            match spec.spec.mode {
-                ComputeMode::Primary => {
-                    config.application_name("compute_ctl-primary");
-                }
-                ComputeMode::Replica => {
-                    config.application_name("compute_ctl-replica");
-                }
-                ComputeMode::Static(_) => {
-                    config.application_name("compute_ctl-static");
-                }
-            }
+            config.application_name(&format!("compute_ctl-{}", spec.spec.mode.to_type_str()));
         } else {
             config.application_name("compute_ctl");
         }
