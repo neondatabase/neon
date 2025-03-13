@@ -1,0 +1,16 @@
+-- Test ULID error handling
+CREATE EXTENSION pgx_ulid;
+
+-- Test invalid ULID string (too short)
+ERROR:  invalid input syntax for type ulid: "01GV5PA9EQG7D82Q3Y4PKBZSY": invalid length
+
+-- Test invalid ULID string (invalid character)
+ERROR:  invalid input syntax for type ulid: "01GV5PA9EQG7D82Q3Y4PKBZSYU": invalid character
+
+-- Test NULL handling
+                test_name                | result 
+---------------------------------------+--------
+ NULL to ulid conversion returns NULL  | t
+(1 row)
+
+DROP EXTENSION pgx_ulid;

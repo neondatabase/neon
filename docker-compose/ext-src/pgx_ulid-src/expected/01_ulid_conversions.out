@@ -1,0 +1,49 @@
+-- Test ULID type conversions
+CREATE EXTENSION pgx_ulid;
+
+-- Create a test ULID value
+CREATE TEMP TABLE
+
+-- Test conversion to text
+          test_name       | result 
+-----------------------+--------
+ ulid to text conversion | t
+(1 row)
+
+-- Test conversion to UUID
+          test_name       | result 
+-----------------------+--------
+ ulid to UUID conversion | t
+(1 row)
+
+-- Test conversion to bytea
+          test_name       | result 
+-----------------------+--------
+ ulid to bytea conversion | t
+(1 row)
+
+-- Test conversion to timestamp
+             test_name          | result 
+-----------------------------+--------
+ ulid to timestamp conversion | t
+(1 row)
+
+-- Test conversion from UUID
+           test_name        | result 
+-------------------------+--------
+ UUID to ulid conversion | t
+(1 row)
+
+-- Test conversion from timestamp
+              test_name           | result 
+-------------------------------+--------
+ timestamp to ulid conversion  | t
+(1 row)
+
+-- Test conversion from timestamptz
+               test_name            | result 
+---------------------------------+--------
+ timestamptz to ulid conversion  | t
+(1 row)
+
+DROP EXTENSION pgx_ulid;

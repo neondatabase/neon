@@ -1,0 +1,46 @@
+-- Test basic ULID generation
+CREATE EXTENSION pgx_ulid;
+
+-- Test gen_ulid() function
+               test_name              | result 
+-----------------------------------+--------
+ gen_ulid() returns a non-null value | t
+(1 row)
+
+-- Test that multiple calls to gen_ulid() return different values
+                  test_name                  | result 
+-------------------------------------------+--------
+ gen_ulid() returns unique values          | t
+(1 row)
+
+-- Test that gen_ulid() returns a value with the correct format
+                      test_name                      | result 
+----------------------------------------------------+--------
+ gen_ulid() returns correctly formatted value       | t
+(1 row)
+
+-- Test monotonic ULID generation
+                     test_name                     | result 
+--------------------------------------------------+--------
+ gen_monotonic_ulid() returns a non-null value    | t
+(1 row)
+
+-- Test that multiple calls to gen_monotonic_ulid() return different values
+                      test_name                      | result 
+----------------------------------------------------+--------
+ gen_monotonic_ulid() returns unique values        | t
+(1 row)
+
+-- Test that gen_monotonic_ulid() returns a value with the correct format
+                          test_name                          | result 
+------------------------------------------------------------+--------
+ gen_monotonic_ulid() returns correctly formatted value     | t
+(1 row)
+
+-- Test that monotonic ULIDs are ordered correctly
+                     test_name                     | result 
+--------------------------------------------------+--------
+ gen_monotonic_ulid() returns ordered values      | t
+(1 row)
+
+DROP EXTENSION pgx_ulid;
