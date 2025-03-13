@@ -42,14 +42,19 @@ pub trait OwnedAsyncWriter {
 // since we would avoid copying majority of the data into the internal buffer.
 pub struct BufferedWriter<B: Buffer, W> {
     writer: Arc<W>,
-    /// Immutable buffer for serving tail reads.
-    /// `None` if no flush request has been submitted.
+    /// Clone of the buffer that was last submitted to the flush loop.
+    /// `None` if no flush request has been submitted, Some forever after.
     pub(super) maybe_flushed: Option<FullSlice<B::IoBuf>>,
-    /// invariant: always remains Some(buf) except
-    /// - while IO is ongoing => goes back to Some() once the IO completed successfully
-    /// - after an IO error => stays `None` forever
-    ///
-    /// In these exceptional cases, it's `None`.
+    /// New writes are accumulated here.
+    /// `None` only during submission while we wait for flush loop to accept
+    /// the full dirty buffer in exchange for a clean buffer.
+    /// If that exchange fails with an [`FlushTaskError`], the write path
+    /// bails and leaves this as `None`.
+    /// Subsequent writes will panic if attempted.
+    /// The read path continues to work without error because [`Self::maybe_flushed`]
+    /// and [`Self::bytes_submitted`] are advanced before the flush loop exchange starts,
+    /// so, they will never try to read from [`Self::mutable`] anyway, because it's past
+    /// the [`Self::maybe_flushed`] point.
     mutable: Option<B>,
     /// A handle to the background flush task for writting data to disk.
     flush_handle: FlushHandle<B::IoBuf, W>,
