@@ -90,7 +90,7 @@ while [[ "${CURRENT_COMMIT}" != "${MERGE_BASE}" && "${CURRENT_COMMIT}" != "${EXP
   if [[ "${NEXT_COMMIT}" == "${MERGE_BASE}" ]]; then
     echo "✅ Reached merge base (${MERGE_BASE})"
     PR_BASE="${MERGE_BASE}"
-  if [[ "${NEXT_COMMIT}" == "${EXPECTED_RELEASE_HEAD}" ]]; then
+  elif [[ "${NEXT_COMMIT}" == "${EXPECTED_RELEASE_HEAD}" ]]; then
     echo "✅ Reached release branch (${EXPECTED_RELEASE_HEAD})"
     PR_BASE="${EXPECTED_RELEASE_HEAD}"
   elif [[ -z "${NEXT_COMMIT}" ]]; then
