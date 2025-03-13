@@ -383,11 +383,7 @@ where
     loop {
         // NB: use timeout_at() instead of timeout() to avoid an extra clock reading in the common
         // case where the timeout doesn't fire.
-        let deadline = if attempt == 1 {
-            started + threshold
-        } else {
-            started + threshold + attempt * period
-        };
+        let deadline = started + threshold + (attempt - 1) * period;
         // TODO: still call the callback if the future panics? Copy how we do it for the page_service flush_in_progress counter.
         let res = tokio::time::timeout_at(deadline, &mut fut).await;
         let now = Instant::now();
