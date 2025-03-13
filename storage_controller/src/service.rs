@@ -34,9 +34,9 @@ use pageserver_api::controller_api::{
     TenantShardMigrateResponse,
 };
 use pageserver_api::models::{
-    self, LocationConfig, LocationConfigListResponse, LocationConfigMode, PageserverUtilization,
-    SafekeeperInfo, SafekeepersInfo, SecondaryProgress, ShardParameters, TenantConfig,
-    TenantConfigPatchRequest, TenantConfigRequest, TenantLocationConfigRequest,
+    self, DetachBehavior, LocationConfig, LocationConfigListResponse, LocationConfigMode,
+    PageserverUtilization, SafekeeperInfo, SafekeepersInfo, SecondaryProgress, ShardParameters,
+    TenantConfig, TenantConfigPatchRequest, TenantConfigRequest, TenantLocationConfigRequest,
     TenantLocationConfigResponse, TenantShardLocation, TenantShardSplitRequest,
     TenantShardSplitResponse, TenantSorting, TenantTimeTravelRequest,
     TimelineArchivalConfigRequest, TimelineCreateRequest, TimelineCreateResponseStorcon,
@@ -4041,6 +4041,7 @@ impl Service {
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
+        behavior: Option<DetachBehavior>,
     ) -> Result<models::detach_ancestor::AncestorDetached, ApiError> {
         tracing::info!("Detaching timeline {tenant_id}/{timeline_id}",);
 
@@ -4064,6 +4065,7 @@ impl Service {
                 node: Node,
                 jwt: Option<String>,
                 ssl_ca_cert: Option<Certificate>,
+                behavior: Option<DetachBehavior>,
             ) -> Result<(ShardNumber, models::detach_ancestor::AncestorDetached), ApiError> {
                 tracing::info!(
                     "Detaching timeline on shard {tenant_shard_id}/{timeline_id}, attached to node {node}",
@@ -4073,7 +4075,7 @@ impl Service {
                     .map_err(|e| passthrough_api_error(&node, e))?;
 
                 client
-                    .timeline_detach_ancestor(tenant_shard_id, timeline_id)
+                    .timeline_detach_ancestor(tenant_shard_id, timeline_id, behavior)
                     .await
                     .map_err(|e| {
                         use mgmt_api::Error;
@@ -4111,6 +4113,7 @@ impl Service {
                         node,
                         self.config.pageserver_jwt_token.clone(),
                         self.config.ssl_ca_cert.clone(),
+                        behavior,
                     ))
                 })
                 .await?;

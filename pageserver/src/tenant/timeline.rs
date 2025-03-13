@@ -45,8 +45,9 @@ use pageserver_api::key::{
 use pageserver_api::keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning};
 use pageserver_api::models::{
     CompactKeyRange, CompactLsnRange, CompactionAlgorithm, CompactionAlgorithmSettings,
-    DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
-    InMemoryLayerInfo, LayerMapInfo, LsnLease, PageTraceEvent, RelSizeMigration, TimelineState,
+    DetachBehavior, DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
+    EvictionPolicy, InMemoryLayerInfo, LayerMapInfo, LsnLease, PageTraceEvent, RelSizeMigration,
+    TimelineState,
 };
 use pageserver_api::reltag::{BlockNumber, RelTag};
 use pageserver_api::shard::{ShardIdentity, ShardIndex, ShardNumber, TenantShardId};
@@ -5445,7 +5446,7 @@ impl Timeline {
         self: &Arc<Timeline>,
         tenant: &crate::tenant::Tenant,
         options: detach_ancestor::Options,
-        behavior: detach_ancestor::DetachBehavior,
+        behavior: DetachBehavior,
         ctx: &RequestContext,
     ) -> Result<detach_ancestor::Progress, detach_ancestor::Error> {
         detach_ancestor::prepare(self, tenant, behavior, options, ctx).await
@@ -5466,7 +5467,7 @@ impl Timeline {
         prepared: detach_ancestor::PreparedTimelineDetach,
         ancestor_timeline_id: TimelineId,
         ancestor_lsn: Lsn,
-        behavior: detach_ancestor::DetachBehavior,
+        behavior: DetachBehavior,
         ctx: &RequestContext,
     ) -> Result<detach_ancestor::DetachingAndReparenting, detach_ancestor::Error> {
         detach_ancestor::detach_and_reparent(

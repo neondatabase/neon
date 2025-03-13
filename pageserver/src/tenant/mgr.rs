@@ -14,7 +14,7 @@ use futures::StreamExt;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use pageserver_api::key::Key;
-use pageserver_api::models::LocationConfigMode;
+use pageserver_api::models::{DetachBehavior, LocationConfigMode};
 use pageserver_api::shard::{
     ShardCount, ShardIdentity, ShardIndex, ShardNumber, ShardStripeSize, TenantShardId,
 };
@@ -1914,7 +1914,7 @@ impl TenantManager {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         prepared: PreparedTimelineDetach,
-        behavior: detach_ancestor::DetachBehavior,
+        behavior: DetachBehavior,
         mut attempt: detach_ancestor::Attempt,
         ctx: &RequestContext,
     ) -> Result<HashSet<TimelineId>, detach_ancestor::Error> {

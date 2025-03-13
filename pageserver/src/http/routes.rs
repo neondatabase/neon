@@ -28,9 +28,9 @@ use hyper::{Body, Request, Response, StatusCode, Uri, header};
 use metrics::launch_timestamp::LaunchTimestamp;
 use pageserver_api::models::virtual_file::IoMode;
 use pageserver_api::models::{
-    DownloadRemoteLayersTaskSpawnRequest, IngestAuxFilesRequest, ListAuxFilesRequest,
-    LocationConfig, LocationConfigListResponse, LocationConfigMode, LsnLease, LsnLeaseRequest,
-    OffloadedTimelineInfo, PageTraceEvent, ShardParameters, StatusResponse,
+    DetachBehavior, DownloadRemoteLayersTaskSpawnRequest, IngestAuxFilesRequest,
+    ListAuxFilesRequest, LocationConfig, LocationConfigListResponse, LocationConfigMode, LsnLease,
+    LsnLeaseRequest, OffloadedTimelineInfo, PageTraceEvent, ShardParameters, StatusResponse,
     TenantConfigPatchRequest, TenantConfigRequest, TenantDetails, TenantInfo,
     TenantLocationConfigRequest, TenantLocationConfigResponse, TenantScanRemoteStorageResponse,
     TenantScanRemoteStorageShard, TenantShardLocation, TenantShardSplitRequest,
@@ -72,7 +72,6 @@ use crate::tenant::remote_timeline_client::{
 use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::{IoConcurrency, LayerAccessStatsReset, LayerName};
-use crate::tenant::timeline::detach_ancestor::DetachBehavior;
 use crate::tenant::timeline::offload::{OffloadError, offload_timeline};
 use crate::tenant::timeline::{
     CompactFlags, CompactOptions, CompactRequest, CompactionError, Timeline, WaitLsnTimeout,
@@ -2508,6 +2507,7 @@ async fn timeline_detach_ancestor_handler(
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let behavior: Option<DetachBehavior> = parse_query_param(&request, "detach_behavior")?;
+
     let behavior = behavior.unwrap_or_default();
 
     let span = tracing::info_span!("detach_ancestor", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id);
