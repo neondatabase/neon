@@ -36,7 +36,9 @@ use pageserver_api::config::{
 use pageserver_api::controller_api::{
     NodeAvailabilityWrapper, PlacementPolicy, TenantCreateRequest,
 };
-use pageserver_api::models::{ShardParameters, TimelineCreateRequest, TimelineInfo};
+use pageserver_api::models::{
+    ShardParameters, TenantConfigRequest, TimelineCreateRequest, TimelineInfo,
+};
 use pageserver_api::shard::{ShardCount, ShardStripeSize, TenantShardId};
 use postgres_backend::AuthType;
 use postgres_connection::parse_host_port;
@@ -963,6 +965,7 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
                         id: pageserver_id,
                         listen_pg_addr: format!("127.0.0.1:{pg_port}"),
                         listen_http_addr: format!("127.0.0.1:{http_port}"),
+                        listen_https_addr: None,
                         pg_auth_type: AuthType::Trust,
                         http_auth_type: AuthType::Trust,
                         other: Default::default(),
@@ -976,7 +979,8 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
             neon_distrib_dir: None,
             default_tenant_id: TenantId::from_array(std::array::from_fn(|_| 0)),
             storage_controller: None,
-            control_plane_compute_hook_api: None,
+            control_plane_hooks_api: None,
+            generate_local_ssl_certs: false,
         }
     };
 
@@ -1127,12 +1131,16 @@ async fn handle_tenant(subcmd: &TenantCmd, env: &mut local_env::LocalEnv) -> any
             let tenant_id = get_tenant_id(args.tenant_id, env)?;
             let tenant_conf: HashMap<_, _> =
                 args.config.iter().flat_map(|c| c.split_once(':')).collect();
+            let config = PageServerNode::parse_config(tenant_conf)?;
 
-            pageserver
-                .tenant_config(tenant_id, tenant_conf)
+            let req = TenantConfigRequest { tenant_id, config };
+
+            let storage_controller = StorageController::from_env(env);
+            storage_controller
+                .set_tenant_config(&req)
                 .await
                 .with_context(|| format!("Tenant config failed for tenant with id {tenant_id}"))?;
-            println!("tenant {tenant_id} successfully configured on the pageserver");
+            println!("tenant {tenant_id} successfully configured via storcon");
         }
     }
     Ok(())

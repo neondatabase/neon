@@ -375,6 +375,19 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/reset", params=params)
         self.verbose_error(res)
 
+    def timeline_patch_index_part(
+        self,
+        tenant_id: TenantId | TenantShardId,
+        timeline_id: TimelineId,
+        data: dict[str, Any],
+    ):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/patch_index_part",
+            json=data,
+        )
+        self.verbose_error(res)
+        return res.json()
+
     def tenant_location_conf(
         self,
         tenant_id: TenantId | TenantShardId,
@@ -1057,11 +1070,14 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         tenant_id: TenantId | TenantShardId,
         timeline_id: TimelineId,
         batch_size: int | None = None,
+        detach_behavior: str | None = None,
         **kwargs,
     ) -> set[TimelineId]:
-        params = {}
+        params: dict[str, Any] = {}
         if batch_size is not None:
             params["batch_size"] = batch_size
+        if detach_behavior:
+            params["detach_behavior"] = detach_behavior
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/detach_ancestor",
             params=params,

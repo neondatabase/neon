@@ -229,6 +229,7 @@ async fn download_object(
                     || IoBufferMut::with_capacity(super::BUFFER_SIZE),
                     gate.enter().map_err(|_| DownloadError::Cancelled)?,
                     ctx,
+                    tracing::info_span!(parent: None, "download_object_buffered_writer", %dst_path),
                 );
 
                 // TODO: use vectored write (writev) once supported by tokio-epoll-uring.

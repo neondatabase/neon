@@ -165,6 +165,7 @@ pub fn init(
         };
         log_layer.with_filter(rust_log_env_filter())
     });
+
     let r = r.with(
         TracingEventCountLayer(&TRACING_EVENT_COUNT_METRIC).with_filter(rust_log_env_filter()),
     );
@@ -330,35 +331,88 @@ impl std::fmt::Debug for SecretString {
 ///
 /// TODO: consider upgrading this to a warning, but currently it fires too often.
 #[inline]
-pub async fn log_slow<O>(name: &str, threshold: Duration, f: impl Future<Output = O>) -> O {
-    // TODO: we unfortunately have to pin the future on the heap, since GetPage futures are huge and
-    // won't fit on the stack.
-    let mut f = Box::pin(f);
+pub async fn log_slow<F, O>(name: &str, threshold: Duration, f: std::pin::Pin<&mut F>) -> O
+where
+    F: Future<Output = O>,
+{
+    monitor_slow_future(
+        threshold,
+        threshold, // period = threshold
+        f,
+        |MonitorSlowFutureCallback {
+             ready,
+             is_slow,
+             elapsed_total,
+             elapsed_since_last_callback: _,
+         }| {
+            if !is_slow {
+                return;
+            }
+            if ready {
+                info!(
+                    "slow {name} completed after {:.3}s",
+                    elapsed_total.as_secs_f64()
+                );
+            } else {
+                info!(
+                    "slow {name} still running after {:.3}s",
+                    elapsed_total.as_secs_f64()
+                );
+            }
+        },
+    )
+    .await
+}
 
+/// Poll future `fut` to completion, invoking callback `cb` at the given `threshold` and every
+/// `period` afterwards, and also unconditionally when the future completes.
+#[inline]
+pub async fn monitor_slow_future<F, O>(
+    threshold: Duration,
+    period: Duration,
+    mut fut: std::pin::Pin<&mut F>,
+    mut cb: impl FnMut(MonitorSlowFutureCallback),
+) -> O
+where
+    F: Future<Output = O>,
+{
     let started = Instant::now();
     let mut attempt = 1;
-
+    let mut last_cb = started;
     loop {
         // NB: use timeout_at() instead of timeout() to avoid an extra clock reading in the common
         // case where the timeout doesn't fire.
-        let deadline = started + attempt * threshold;
-        if let Ok(output) = tokio::time::timeout_at(deadline, &mut f).await {
-            // NB: we check if we exceeded the threshold even if the timeout never fired, because
-            // scheduling or execution delays may cause the future to succeed even if it exceeds the
-            // timeout. This costs an extra unconditional clock reading, but seems worth it to avoid
-            // false negatives.
-            let elapsed = started.elapsed();
-            if elapsed >= threshold {
-                info!("slow {name} completed after {:.3}s", elapsed.as_secs_f64());
-            }
+        let deadline = started + threshold + (attempt - 1) * period;
+        // TODO: still call the callback if the future panics? Copy how we do it for the page_service flush_in_progress counter.
+        let res = tokio::time::timeout_at(deadline, &mut fut).await;
+        let now = Instant::now();
+        let elapsed_total = now - started;
+        cb(MonitorSlowFutureCallback {
+            ready: res.is_ok(),
+            is_slow: elapsed_total >= threshold,
+            elapsed_total,
+            elapsed_since_last_callback: now - last_cb,
+        });
+        last_cb = now;
+        if let Ok(output) = res {
             return output;
         }
-
-        let elapsed = started.elapsed().as_secs_f64();
-        info!("slow {name} still running after {elapsed:.3}s",);
-
         attempt += 1;
     }
+}
+
+/// See [`monitor_slow_future`].
+pub struct MonitorSlowFutureCallback {
+    /// Whether the future completed. If true, there will be no more callbacks.
+    pub ready: bool,
+    /// Whether the future is taking `>=` the specififed threshold duration to complete.
+    /// Monotonic: if true in one callback invocation, true in all subsequent onces.
+    pub is_slow: bool,
+    /// The time elapsed since the [`monitor_slow_future`] was first polled.
+    pub elapsed_total: Duration,
+    /// The time elapsed since the last callback invocation.
+    /// For the initial callback invocation, the time elapsed since the [`monitor_slow_future`] was first polled.
+    pub elapsed_since_last_callback: Duration,
 }
 
 #[cfg(test)]

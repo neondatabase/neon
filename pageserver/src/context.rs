@@ -89,16 +89,112 @@
 //! [`RequestContext`] argument. Functions in the middle of the call chain
 //! only need to pass it on.
 
-use crate::task_mgr::TaskKind;
+use std::sync::Arc;
+
+use once_cell::sync::Lazy;
+use tracing::warn;
+use utils::{id::TimelineId, shard::TenantShardId};
+
+use crate::{
+    metrics::{StorageIoSizeMetrics, TimelineMetrics},
+    task_mgr::TaskKind,
+    tenant::Timeline,
+};
 
 // The main structure of this module, see module-level comment.
-#[derive(Debug)]
 pub struct RequestContext {
     task_kind: TaskKind,
     download_behavior: DownloadBehavior,
     access_stats_behavior: AccessStatsBehavior,
     page_content_kind: PageContentKind,
     read_path_debug: bool,
+    scope: Scope,
+}
+
+#[derive(Clone)]
+pub(crate) enum Scope {
+    Global {
+        io_size_metrics: &'static crate::metrics::StorageIoSizeMetrics,
+    },
+    SecondaryTenant {
+        io_size_metrics: &'static crate::metrics::StorageIoSizeMetrics,
+    },
+    SecondaryTimeline {
+        io_size_metrics: crate::metrics::StorageIoSizeMetrics,
+    },
+    Timeline {
+        // We wrap the `Arc<TimelineMetrics>`s inside another Arc to avoid child
+        // context creation contending for the ref counters of the Arc<TimelineMetrics>,
+        // which are shared among all tasks that operate on the timeline, especially
+        // concurrent page_service connections.
+        #[allow(clippy::redundant_allocation)]
+        arc_arc: Arc<Arc<TimelineMetrics>>,
+    },
+    #[cfg(test)]
+    UnitTest {
+        io_size_metrics: &'static crate::metrics::StorageIoSizeMetrics,
+    },
+}
+
+static GLOBAL_IO_SIZE_METRICS: Lazy<crate::metrics::StorageIoSizeMetrics> =
+    Lazy::new(|| crate::metrics::StorageIoSizeMetrics::new("*", "*", "*"));
+
+impl Scope {
+    pub(crate) fn new_global() -> Self {
+        Scope::Global {
+            io_size_metrics: &GLOBAL_IO_SIZE_METRICS,
+        }
+    }
+    /// NB: this allocates, so, use only at relatively long-lived roots, e.g., at start
+    /// of a compaction iteration.
+    pub(crate) fn new_timeline(timeline: &Timeline) -> Self {
+        Scope::Timeline {
+            arc_arc: Arc::new(Arc::clone(&timeline.metrics)),
+        }
+    }
+    pub(crate) fn new_page_service_pagestream(
+        timeline_handle: &crate::tenant::timeline::handle::Handle<
+            crate::page_service::TenantManagerTypes,
+        >,
+    ) -> Self {
+        Scope::Timeline {
+            arc_arc: Arc::clone(&timeline_handle.metrics),
+        }
+    }
+    pub(crate) fn new_secondary_timeline(
+        tenant_shard_id: &TenantShardId,
+        timeline_id: &TimelineId,
+    ) -> Self {
+        // TODO(https://github.com/neondatabase/neon/issues/11156): secondary timelines have no infrastructure for metrics lifecycle.
+
+        let tenant_id = tenant_shard_id.tenant_id.to_string();
+        let shard_id = tenant_shard_id.shard_slug().to_string();
+        let timeline_id = timeline_id.to_string();
+
+        let io_size_metrics =
+            crate::metrics::StorageIoSizeMetrics::new(&tenant_id, &shard_id, &timeline_id);
+        Scope::SecondaryTimeline { io_size_metrics }
+    }
+    pub(crate) fn new_secondary_tenant(_tenant_shard_id: &TenantShardId) -> Self {
+        // Before propagating metrics via RequestContext, the labels were inferred from file path.
+        // The only user of VirtualFile at tenant scope is the heatmap download & read.
+        // The inferred labels for the path of the heatmap file on local disk were that of the global metric (*,*,*).
+        // Thus, we do the same here, and extend that for anything secondary-tenant scoped.
+        //
+        // If we want to have (tenant_id, shard_id, '*') labels for secondary tenants in the future,
+        // we will need to think about the metric lifecycle, i.e., remove them during secondary tenant shutdown,
+        // like we do for attached timelines. (We don't have attached-tenant-scoped usage of VirtualFile
+        // at this point, so, we were able to completely side-step tenant-scoped stuff there).
+        Scope::SecondaryTenant {
+            io_size_metrics: &GLOBAL_IO_SIZE_METRICS,
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn new_unit_test() -> Self {
+        Scope::UnitTest {
+            io_size_metrics: &GLOBAL_IO_SIZE_METRICS,
+        }
+    }
 }
 
 /// The kind of access to the page cache.
@@ -157,6 +253,7 @@ impl RequestContextBuilder {
                 access_stats_behavior: AccessStatsBehavior::Update,
                 page_content_kind: PageContentKind::Unknown,
                 read_path_debug: false,
+                scope: Scope::new_global(),
             },
         }
     }
@@ -171,8 +268,14 @@ impl RequestContextBuilder {
                 access_stats_behavior: original.access_stats_behavior,
                 page_content_kind: original.page_content_kind,
                 read_path_debug: original.read_path_debug,
+                scope: original.scope.clone(),
             },
         }
+    }
+
+    pub fn task_kind(mut self, k: TaskKind) -> Self {
+        self.inner.task_kind = k;
+        self
     }
 
     /// Configure the DownloadBehavior of the context: whether to
@@ -196,6 +299,11 @@ impl RequestContextBuilder {
 
     pub(crate) fn read_path_debug(mut self, b: bool) -> Self {
         self.inner.read_path_debug = b;
+        self
+    }
+
+    pub(crate) fn scope(mut self, s: Scope) -> Self {
+        self.inner.scope = s;
         self
     }
 
@@ -281,7 +389,50 @@ impl RequestContext {
     }
 
     fn child_impl(&self, task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
-        Self::new(task_kind, download_behavior)
+        RequestContextBuilder::extend(self)
+            .task_kind(task_kind)
+            .download_behavior(download_behavior)
+            .build()
+    }
+
+    pub fn with_scope_timeline(&self, timeline: &Arc<Timeline>) -> Self {
+        RequestContextBuilder::extend(self)
+            .scope(Scope::new_timeline(timeline))
+            .build()
+    }
+
+    pub(crate) fn with_scope_page_service_pagestream(
+        &self,
+        timeline_handle: &crate::tenant::timeline::handle::Handle<
+            crate::page_service::TenantManagerTypes,
+        >,
+    ) -> Self {
+        RequestContextBuilder::extend(self)
+            .scope(Scope::new_page_service_pagestream(timeline_handle))
+            .build()
+    }
+
+    pub fn with_scope_secondary_timeline(
+        &self,
+        tenant_shard_id: &TenantShardId,
+        timeline_id: &TimelineId,
+    ) -> Self {
+        RequestContextBuilder::extend(self)
+            .scope(Scope::new_secondary_timeline(tenant_shard_id, timeline_id))
+            .build()
+    }
+
+    pub fn with_scope_secondary_tenant(&self, tenant_shard_id: &TenantShardId) -> Self {
+        RequestContextBuilder::extend(self)
+            .scope(Scope::new_secondary_tenant(tenant_shard_id))
+            .build()
+    }
+
+    #[cfg(test)]
+    pub fn with_scope_unit_test(&self) -> Self {
+        RequestContextBuilder::new(TaskKind::UnitTest)
+            .scope(Scope::new_unit_test())
+            .build()
     }
 
     pub fn task_kind(&self) -> TaskKind {
@@ -302,5 +453,39 @@ impl RequestContext {
 
     pub(crate) fn read_path_debug(&self) -> bool {
         self.read_path_debug
+    }
+
+    pub(crate) fn io_size_metrics(&self) -> &StorageIoSizeMetrics {
+        match &self.scope {
+            Scope::Global { io_size_metrics } => {
+                let is_unit_test = cfg!(test);
+                let is_regress_test_build = cfg!(feature = "testing");
+                if is_unit_test || is_regress_test_build {
+                    panic!("all VirtualFile instances are timeline-scoped");
+                } else {
+                    use once_cell::sync::Lazy;
+                    use std::sync::Mutex;
+                    use std::time::Duration;
+                    use utils::rate_limit::RateLimit;
+                    static LIMIT: Lazy<Mutex<RateLimit>> =
+                        Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(1))));
+                    let mut guard = LIMIT.lock().unwrap();
+                    guard.call2(|rate_limit_stats| {
+                        warn!(
+                            %rate_limit_stats,
+                            backtrace=%std::backtrace::Backtrace::force_capture(),
+                            "all VirtualFile instances are timeline-scoped",
+                        );
+                    });
+
+                    io_size_metrics
+                }
+            }
+            Scope::Timeline { arc_arc } => &arc_arc.storage_io_size,
+            Scope::SecondaryTimeline { io_size_metrics } => io_size_metrics,
+            Scope::SecondaryTenant { io_size_metrics } => io_size_metrics,
+            #[cfg(test)]
+            Scope::UnitTest { io_size_metrics } => io_size_metrics,
+        }
     }
 }

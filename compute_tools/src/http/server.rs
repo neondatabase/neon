@@ -5,20 +5,19 @@ use std::time::Duration;
 
 use anyhow::Result;
 use axum::Router;
-use axum::extract::Request;
-use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::middleware::{self};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
+use compute_api::responses::ComputeCtlConfig;
 use http::StatusCode;
-use jsonwebtoken::jwk::JwkSet;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::{
     auth::AsyncRequireAuthorizationLayer, request_id::PropagateRequestIdLayer, trace::TraceLayer,
 };
 use tracing::{Span, error, info};
-use uuid::Uuid;
 
+use super::middleware::request_id::maybe_add_request_id_header;
 use super::{
     headers::X_REQUEST_ID,
     middleware::authorize::Authorize,
@@ -42,7 +41,7 @@ pub enum Server {
     },
     External {
         port: u16,
-        jwks: JwkSet,
+        config: ComputeCtlConfig,
         compute_id: String,
     },
 }
@@ -80,7 +79,7 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                 router
             }
             Server::External {
-                jwks, compute_id, ..
+                config, compute_id, ..
             } => {
                 let unauthenticated_router =
                     Router::<Arc<ComputeNode>>::new().route("/metrics", get(metrics::get_metrics));
@@ -97,7 +96,7 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                     .route("/terminate", post(terminate::terminate))
                     .layer(AsyncRequireAuthorizationLayer::new(Authorize::new(
                         compute_id.clone(),
-                        jwks.clone(),
+                        config.jwks.clone(),
                     )));
 
                 router
@@ -219,16 +218,4 @@ impl Server {
 
         tokio::spawn(self.serve(state));
     }
-}
-
-/// This middleware function allows compute_ctl to generate its own request ID
-/// if one isn't supplied. The control plane will always send one as a UUID. The
-/// neon Postgres extension on the other hand does not send one.
-async fn maybe_add_request_id_header(mut request: Request, next: Next) -> Response {
-    let headers = request.headers_mut();
-    if headers.get(X_REQUEST_ID).is_none() {
-        headers.append(X_REQUEST_ID, Uuid::new_v4().to_string().parse().unwrap());
-    }
-
-    next.run(request).await
 }

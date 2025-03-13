@@ -56,6 +56,7 @@ use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::{
     self, COMPUTE_COMMANDS_COUNTERS, ComputeCommandKind, LIVE_CONNECTIONS, SmgrOpTimer,
+    TimelineMetrics,
 };
 use crate::pgdatadir_mapping::Version;
 use crate::span::{
@@ -423,6 +424,9 @@ impl timeline::handle::Types for TenantManagerTypes {
 
 pub(crate) struct TenantManagerCacheItem {
     pub(crate) timeline: Arc<Timeline>,
+    // allow() for cheap propagation through RequestContext inside a task
+    #[allow(clippy::redundant_allocation)]
+    pub(crate) metrics: Arc<Arc<TimelineMetrics>>,
     #[allow(dead_code)] // we store it to keep the gate open
     pub(crate) gate_guard: GateGuard,
 }
@@ -506,8 +510,11 @@ impl timeline::handle::TenantManager<TenantManagerTypes> for TenantManagerWrappe
             }
         };
 
+        let metrics = Arc::new(Arc::clone(&timeline.metrics));
+
         Ok(TenantManagerCacheItem {
             timeline,
+            metrics,
             gate_guard,
         })
     }
@@ -1099,12 +1106,19 @@ impl PageServerHandler {
         };
 
         // Dispatch the batch to the appropriate request handler.
-        let (mut handler_results, span) = log_slow(
-            batch.as_static_str(),
-            LOG_SLOW_GETPAGE_THRESHOLD,
-            self.pagestream_dispatch_batched_message(batch, io_concurrency, ctx),
-        )
-        .await?;
+        let log_slow_name = batch.as_static_str();
+        let (mut handler_results, span) = {
+            // TODO: we unfortunately have to pin the future on the heap, since GetPage futures are huge and
+            // won't fit on the stack.
+            let mut boxpinned =
+                Box::pin(self.pagestream_dispatch_batched_message(batch, io_concurrency, ctx));
+            log_slow(
+                log_slow_name,
+                LOG_SLOW_GETPAGE_THRESHOLD,
+                boxpinned.as_mut(),
+            )
+            .await?
+        };
 
         // We purposefully don't count flush time into the smgr operation timer.
         //
@@ -1238,6 +1252,14 @@ impl PageServerHandler {
         ),
         QueryError,
     > {
+        macro_rules! upgrade_handle_and_set_context {
+            ($shard:ident) => {{
+                let weak_handle = &$shard;
+                let handle = weak_handle.upgrade()?;
+                let ctx = ctx.with_scope_page_service_pagestream(&handle);
+                (handle, ctx)
+            }};
+        }
         Ok(match batch {
             BatchedFeMessage::Exists {
                 span,
@@ -1246,9 +1268,10 @@ impl PageServerHandler {
                 req,
             } => {
                 fail::fail_point!("ps::handle-pagerequest-message::exists");
+                let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
                     vec![
-                        self.handle_get_rel_exists_request(&*shard.upgrade()?, &req, ctx)
+                        self.handle_get_rel_exists_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
                             .map(|msg| (msg, timer))
@@ -1264,9 +1287,10 @@ impl PageServerHandler {
                 req,
             } => {
                 fail::fail_point!("ps::handle-pagerequest-message::nblocks");
+                let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
                     vec![
-                        self.handle_get_nblocks_request(&*shard.upgrade()?, &req, ctx)
+                        self.handle_get_nblocks_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
                             .map(|msg| (msg, timer))
@@ -1282,17 +1306,18 @@ impl PageServerHandler {
                 pages,
             } => {
                 fail::fail_point!("ps::handle-pagerequest-message::getpage");
+                let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
                     {
                         let npages = pages.len();
                         trace!(npages, "handling getpage request");
                         let res = self
                             .handle_get_page_at_lsn_request_batched(
-                                &*shard.upgrade()?,
+                                &shard,
                                 effective_request_lsn,
                                 pages,
                                 io_concurrency,
-                                ctx,
+                                &ctx,
                             )
                             .instrument(span.clone())
                             .await;
@@ -1309,9 +1334,10 @@ impl PageServerHandler {
                 req,
             } => {
                 fail::fail_point!("ps::handle-pagerequest-message::dbsize");
+                let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
                     vec![
-                        self.handle_db_size_request(&*shard.upgrade()?, &req, ctx)
+                        self.handle_db_size_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
                             .map(|msg| (msg, timer))
@@ -1327,9 +1353,10 @@ impl PageServerHandler {
                 req,
             } => {
                 fail::fail_point!("ps::handle-pagerequest-message::slrusegment");
+                let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
                     vec![
-                        self.handle_get_slru_segment_request(&*shard.upgrade()?, &req, ctx)
+                        self.handle_get_slru_segment_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
                             .map(|msg| (msg, timer))
@@ -1345,12 +1372,13 @@ impl PageServerHandler {
                 requests,
             } => {
                 fail::fail_point!("ps::handle-pagerequest-message::test");
+                let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
                     {
                         let npages = requests.len();
                         trace!(npages, "handling getpage request");
                         let res = self
-                            .handle_test_request_batch(&*shard.upgrade()?, requests, ctx)
+                            .handle_test_request_batch(&shard, requests, &ctx)
                             .instrument(span.clone())
                             .await;
                         assert_eq!(res.len(), npages);
@@ -2126,6 +2154,7 @@ impl PageServerHandler {
             .get(tenant_id, timeline_id, ShardSelector::Zero)
             .await?;
         set_tracing_field_shard_id(&timeline);
+        let ctx = ctx.with_scope_timeline(&timeline);
 
         if timeline.is_archived() == Some(true) {
             tracing::info!(
@@ -2143,7 +2172,7 @@ impl PageServerHandler {
                     lsn,
                     crate::tenant::timeline::WaitLsnWaiter::PageService,
                     crate::tenant::timeline::WaitLsnTimeout::Default,
-                    ctx,
+                    &ctx,
                 )
                 .await?;
             timeline
@@ -2169,7 +2198,7 @@ impl PageServerHandler {
                 prev_lsn,
                 full_backup,
                 replica,
-                ctx,
+                &ctx,
             )
             .await
             .map_err(map_basebackup_error)?;
@@ -2192,7 +2221,7 @@ impl PageServerHandler {
                     prev_lsn,
                     full_backup,
                     replica,
-                    ctx,
+                    &ctx,
                 )
                 .await
                 .map_err(map_basebackup_error)?;
@@ -2209,7 +2238,7 @@ impl PageServerHandler {
                     prev_lsn,
                     full_backup,
                     replica,
-                    ctx,
+                    &ctx,
                 )
                 .await
                 .map_err(map_basebackup_error)?;

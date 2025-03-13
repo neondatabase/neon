@@ -1079,7 +1079,6 @@ components:
         - last_record_lsn
         - disk_consistent_lsn
         - state
-        - latest_gc_cutoff_lsn
       properties:
         timeline_id:
           type: string
@@ -1121,9 +1120,6 @@ components:
         state:
           type: string
         min_readable_lsn:
-          type: string
-          format: hex
-        latest_gc_cutoff_lsn:
           type: string
           format: hex
         applied_gc_cutoff_lsn:

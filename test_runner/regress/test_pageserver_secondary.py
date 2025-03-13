@@ -87,8 +87,8 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
     neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=s3_storage(),
     )
-    neon_env_builder.control_plane_compute_hook_api = (
-        f"http://{make_httpserver.host}:{make_httpserver.port}/notify-attach"
+    neon_env_builder.control_plane_hooks_api = (
+        f"http://{make_httpserver.host}:{make_httpserver.port}/"
     )
 
     def ignore_notify(request: Request):
@@ -976,7 +976,7 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
     # We can't hydrate everything anyway because of the failpoints.
     # Implicitly, this also uploads a heatmap from the current attached location.
     config = StorageControllerMigrationConfig(
-        secondary_warmup_timeout="5s", secondary_download_request_timeout="2s"
+        secondary_warmup_timeout="5s", secondary_download_request_timeout="2s", prewarm=False
     )
     env.storage_controller.tenant_shard_migrate(
         TenantShardId(tenant_id, shard_number=0, shard_count=0), ps_secondary.id, config

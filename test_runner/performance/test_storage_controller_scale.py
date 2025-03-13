@@ -16,6 +16,7 @@ from fixtures.neon_fixtures import (
     NeonPageserver,
     PageserverAvailability,
     PageserverSchedulingPolicy,
+    StorageControllerMigrationConfig,
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pg_version import PgVersion
@@ -82,9 +83,7 @@ def test_storage_controller_many_tenants(
         "max_offline": "30s",
         "max_warming_up": "300s",
     }
-    neon_env_builder.control_plane_compute_hook_api = (
-        compute_reconfigure_listener.control_plane_compute_hook_api
-    )
+    neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
 
     AZS = ["alpha", "bravo", "charlie"]
 
@@ -362,7 +361,10 @@ def test_storage_controller_many_tenants(
                 dest_ps_id = desc["shards"][shard_number]["node_secondary"][0]
 
                 f = executor.submit(
-                    env.storage_controller.tenant_shard_migrate, tenant_shard_id, dest_ps_id
+                    env.storage_controller.tenant_shard_migrate,
+                    tenant_shard_id,
+                    dest_ps_id,
+                    StorageControllerMigrationConfig(prewarm=False, override_scheduler=True),
                 )
             elif op == Operation.TENANT_PASSTHROUGH:
                 # A passthrough read to shard zero
