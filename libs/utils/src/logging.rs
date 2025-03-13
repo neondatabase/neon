@@ -344,10 +344,6 @@ where
              elapsed_since_last_callback: _,
          }| {
             if ready {
-                // NB: we check if we exceeded the threshold even if the timeout never fired, because
-                // scheduling or execution delays may cause the future to succeed even if it exceeds the
-                // timeout. This costs an extra unconditional clock reading, but seems worth it to avoid
-                // false negatives.
                 if elapsed_total >= threshold {
                     info!(
                         "slow {name} completed after {:.3}s",
