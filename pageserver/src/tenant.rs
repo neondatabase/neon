@@ -51,7 +51,8 @@ use storage_broker::BrokerClientChannel;
 use timeline::compaction::{CompactionOutcome, GcCompactionQueue};
 use timeline::offload::{OffloadError, offload_timeline};
 use timeline::{
-    CompactFlags, CompactOptions, CompactionError, PreviousHeatmap, ShutdownMode, import_pgdata,
+    CompactFlags, CompactOptions, CompactionError, PreviousHeatmap, ShutdownMode,
+    TimelineCompactionError, import_pgdata,
 };
 use tokio::io::BufReader;
 use tokio::sync::{Notify, Semaphore, watch};
@@ -3001,7 +3002,7 @@ impl Tenant {
         self: &Arc<Self>,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> Result<CompactionOutcome, CompactionError> {
+    ) -> Result<CompactionOutcome, TimelineCompactionError> {
         // Don't compact inactive tenants.
         if !self.is_active() {
             return Ok(CompactionOutcome::Skipped);
@@ -3081,7 +3082,8 @@ impl Tenant {
                     .compact(cancel, CompactFlags::OnlyL0Compaction.into(), ctx)
                     .instrument(info_span!("compact_timeline", timeline_id = %timeline.timeline_id))
                     .await
-                    .inspect_err(|err| self.maybe_trip_compaction_breaker(err))?;
+                    .inspect_err(|err| self.maybe_trip_compaction_breaker(err))
+                    .map_err(|err| TimelineCompactionError(err, timeline.timeline_id))?;
                 match outcome {
                     CompactionOutcome::Done => {}
                     CompactionOutcome::Skipped => {}
@@ -3116,7 +3118,8 @@ impl Tenant {
                 .compact(cancel, EnumSet::default(), ctx)
                 .instrument(info_span!("compact_timeline", timeline_id = %timeline.timeline_id))
                 .await
-                .inspect_err(|err| self.maybe_trip_compaction_breaker(err))?;
+                .inspect_err(|err| self.maybe_trip_compaction_breaker(err))
+                .map_err(|err| TimelineCompactionError(err, timeline.timeline_id))?;
 
             // If we're done compacting, check the scheduled GC compaction queue for more work.
             if outcome == CompactionOutcome::Done {
@@ -3132,7 +3135,8 @@ impl Tenant {
                     .instrument(
                         info_span!("gc_compact_timeline", timeline_id = %timeline.timeline_id),
                     )
-                    .await?;
+                    .await
+                    .map_err(|err| TimelineCompactionError(err, timeline.timeline_id))?;
             }
 
             // If we're done compacting, offload the timeline if requested.
@@ -3144,7 +3148,7 @@ impl Tenant {
                     .or_else(|err| match err {
                         // Ignore this, we likely raced with unarchival.
                         OffloadError::NotArchived => Ok(()),
-                        err => Err(err),
+                        err => Err(TimelineCompactionError(err.into(), timeline.timeline_id)),
                     })?;
             }
 

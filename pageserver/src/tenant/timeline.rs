@@ -5531,6 +5531,10 @@ pub(crate) enum CompactionError {
     AlreadyRunning(&'static str),
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("{0} when compacting timeline {1}")]
+pub(crate) struct TimelineCompactionError(pub(crate) CompactionError, pub(crate) TimelineId);
+
 impl CompactionError {
     /// Errors that can be ignored, i.e., cancel and shutdown.
     pub fn is_cancel(&self) -> bool {
