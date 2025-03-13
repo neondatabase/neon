@@ -1106,12 +1106,19 @@ impl PageServerHandler {
         };
 
         // Dispatch the batch to the appropriate request handler.
-        let (mut handler_results, span) = log_slow(
-            batch.as_static_str(),
-            LOG_SLOW_GETPAGE_THRESHOLD,
-            self.pagestream_dispatch_batched_message(batch, io_concurrency, ctx),
-        )
-        .await?;
+        let log_slow_name = batch.as_static_str();
+        let (mut handler_results, span) = {
+            // TODO: we unfortunately have to pin the future on the heap, since GetPage futures are huge and
+            // won't fit on the stack.
+            let mut boxpinned =
+                Box::pin(self.pagestream_dispatch_batched_message(batch, io_concurrency, ctx));
+            log_slow(
+                log_slow_name,
+                LOG_SLOW_GETPAGE_THRESHOLD,
+                boxpinned.as_mut(),
+            )
+            .await?
+        };
 
         // We purposefully don't count flush time into the smgr operation timer.
         //
