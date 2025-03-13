@@ -5,11 +5,14 @@
 //! and connect it to the storage nodes.
 use std::collections::HashMap;
 
+use indexmap::IndexMap;
 use regex::Regex;
 use remote_storage::RemotePath;
 use serde::{Deserialize, Serialize};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
+
+use crate::responses::TlsConfig;
 
 /// String type alias representing Postgres identifier and
 /// intended to be used for DB / role names.
@@ -125,7 +128,7 @@ pub struct ComputeSpec {
     // information about available remote extensions
     pub remote_extensions: Option<RemoteExtSpec>,
 
-    pub pgbouncer_settings: Option<HashMap<String, String>>,
+    pub pgbouncer_settings: Option<IndexMap<String, String>>,
 
     // Stripe size for pageserver sharding, in pages
     #[serde(default)]
@@ -357,6 +360,9 @@ pub struct LocalProxySpec {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jwks: Option<Vec<JwksSettings>>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
