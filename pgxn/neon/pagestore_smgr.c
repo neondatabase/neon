@@ -2238,19 +2238,8 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 					  neon_request_lsns *output, BlockNumber nblocks)
 {
 	XLogRecPtr	last_written_lsns[PG_IOV_MAX];
-	XLogRecPtr	flush_lsn = InvalidXLogRecPtr;
 
 	Assert(nblocks <= PG_IOV_MAX);
-
-	if (!RecoveryInProgress())
-	{
-		/* It is critical to prevent stale reads to obtain LwLSN after flush LSN */
-#if PG_VERSION_NUM >= 150000
-		flush_lsn = GetFlushRecPtr(NULL);
-#else
-		flush_lsn = GetFlushRecPtr();
-#endif
-	}
 
 	GetLastWrittenLSNv(rinfo, forknum, blkno, (int) nblocks, last_written_lsns);
 
@@ -2364,11 +2353,17 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 	}
 	else
 	{
+		XLogRecPtr	flushlsn;
+#if PG_VERSION_NUM >= 150000
+		flushlsn = GetFlushRecPtr(NULL);
+#else
+		flushlsn = GetFlushRecPtr();
+#endif
+
 		for (int i = 0; i < nblocks; i++)
 		{
 			neon_request_lsns *result = &output[i];
 			XLogRecPtr	last_written_lsn = last_written_lsns[i];
-			XLogRecPtr effective_lsn = flush_lsn;
 
 			/*
 			 * Use the latest LSN that was evicted from the buffer cache as the
@@ -2387,13 +2382,12 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 			 * building, _bt_blwritepage logs the full page without flushing WAL
 			 * before smgrextend (files are fsynced before build ends).
 			 */
-			if (last_written_lsn > flush_lsn)
+			if (last_written_lsn > flushlsn)
 			{
 				neon_log(DEBUG5, "last-written LSN %X/%X is ahead of last flushed LSN %X/%X",
 						 LSN_FORMAT_ARGS(last_written_lsn),
-						 LSN_FORMAT_ARGS(flush_lsn));
+						 LSN_FORMAT_ARGS(flushlsn));
 				XLogFlush(last_written_lsn);
-				effective_lsn = last_written_lsn;
 			}
 
 			/*
@@ -2408,19 +2402,10 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 			 * primary, but for the primary we can avoid it by always
 			 * requesting the latest page, by setting request LSN to
 			 * UINT64_MAX.
-			 *
-			 * Remember the current LSN, however, so that we can later
-			 * correctly determine if the response to the request is still
-			 * valid. The most up-to-date LSN we could use for that purpose
-			 * would be the current insert LSN, but to avoid the overhead of
-			 * looking it up, use 'effetive_lsn' instead. This relies on the
-			 * assumption that if the page was modified since the last WAL
-			 * flush, it should still be in the buffer cache, and we
-			 * wouldn't be requesting it.
 			 */
 			result->request_lsn = UINT64_MAX;
 			result->not_modified_since = last_written_lsn;
-			result->effective_request_lsn = effective_lsn;
+			result->effective_request_lsn = last_written_lsn;
 		}
 	}
 }
