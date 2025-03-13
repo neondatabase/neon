@@ -614,11 +614,11 @@ impl ComputeNode {
             }
 
             let log_directory_path = Path::new(&self.params.pgdata).join("log");
-            let log_directory_path = log_directory_path.to_str().unwrap();
-            configure_audit_rsyslog(log_directory_path, "hipaa", &remote_endpoint)?;
+            let log_directory_path = log_directory_path.to_string_lossy().to_string();
+            configure_audit_rsyslog(log_directory_path.clone(), "hipaa", &remote_endpoint)?;
 
             // Launch a background task to clean up the audit logs
-            let _pgaudit_cleanup_handle = launch_pgaudit_gc(log_directory_path.to_owned());
+            launch_pgaudit_gc(log_directory_path);
         }
 
         // Launch remaining service threads

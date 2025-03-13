@@ -1,12 +1,11 @@
-use std::io;
+use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
-use std::{fs, thread};
 use std::{fs::OpenOptions, io::Write};
 
 use anyhow::{Context, Result};
-use tracing::{error, info, instrument};
+use tracing::{error, info, instrument, warn};
 
 fn get_rsyslog_pid() -> Option<String> {
     let output = Command::new("pgrep")
@@ -47,7 +46,7 @@ fn restart_rsyslog() -> Result<()> {
 }
 
 pub fn configure_audit_rsyslog(
-    log_directory: &str,
+    log_directory: String,
     tag: &str,
     remote_endpoint: &str,
 ) -> Result<()> {
@@ -81,7 +80,7 @@ pub fn configure_audit_rsyslog(
 }
 
 #[instrument(skip_all)]
-fn pgaudit_gc_main_loop(log_directory: String) {
+async fn pgaudit_gc_main_loop(log_directory: String) -> Result<()> {
     info!("running pgaudit GC main loop");
     loop {
         // Check log_directory for old pgaudit logs and delete them.
@@ -91,7 +90,7 @@ fn pgaudit_gc_main_loop(log_directory: String) {
         //
         // In case of a very high load, we might need to adjust this value and pgaudit.log_rotation_age.
         //
-        // TODO: add some smarted logic to delete the files that are fully streamed according to rsyslog
+        // TODO: add some smarter logic to delete the files that are fully streamed according to rsyslog
         // imfile-state files, but for now just do a simple GC to avoid filling up the disk.
         let _ = Command::new("find")
             .arg(&log_directory)
@@ -100,18 +99,16 @@ fn pgaudit_gc_main_loop(log_directory: String) {
             .arg("-mmin")
             .arg("+15")
             .arg("-delete")
-            .output()
-            .expect("Failed to execute find");
+            .output()?;
 
         // also collect the metric for the size of the log directory
-        fn get_log_files_size(path: &Path) -> io::Result<u64> {
+        async fn get_log_files_size(path: &Path) -> Result<u64> {
             let mut total_size = 0;
 
             for entry in fs::read_dir(path)? {
-                let entry = entry?; // unwrap entry
+                let entry = entry?;
                 let entry_path = entry.path();
 
-                // Check if the entry is a file and ends with "log"
                 if entry_path.is_file() && entry_path.to_string_lossy().ends_with("log") {
                     total_size += entry.metadata()?.len();
                 }
@@ -120,28 +117,22 @@ fn pgaudit_gc_main_loop(log_directory: String) {
             Ok(total_size)
         }
 
-        let log_directory_size =
-            get_log_files_size(Path::new(&log_directory)).unwrap_or_else(|e| {
-                error!("Failed to get log directory size: {}", e);
+        let log_directory_size = get_log_files_size(Path::new(&log_directory))
+            .await
+            .unwrap_or_else(|e| {
+                warn!("Failed to get log directory size: {}", e);
                 0
             });
         crate::metrics::AUDIT_LOG_DIR_SIZE.set(log_directory_size as f64);
-
-        std::thread::sleep(Duration::from_secs(60));
+        tokio::time::sleep(Duration::from_secs(60)).await;
     }
 }
 
 // launch pgaudit GC thread to clean up the old pgaudit logs stored in the log_directory
-// pgaudit can rotate files, but it doesn't delete the old files
-// so we need to clean up the old files periodically
-pub fn launch_pgaudit_gc(log_directory: String) -> thread::JoinHandle<()> {
-    let runtime = tokio::runtime::Handle::current();
-    thread::Builder::new()
-        .name("compute-pg-audit-gc".into())
-        .spawn(move || {
-            let _rt_guard = runtime.enter();
-            pgaudit_gc_main_loop(log_directory);
-            info!("pgaudit GC thread is exited");
-        })
-        .expect("cannot launch pgaudit GC thread")
+pub fn launch_pgaudit_gc(log_directory: String) {
+    tokio::spawn(async move {
+        if let Err(e) = pgaudit_gc_main_loop(log_directory).await {
+            error!("pgaudit GC main loop failed: {}", e);
+        }
+    });
 }
