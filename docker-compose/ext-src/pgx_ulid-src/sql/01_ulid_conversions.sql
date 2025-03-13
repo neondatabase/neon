@@ -1,6 +1,3 @@
--- Test ULID type conversions
-CREATE EXTENSION pgx_ulid;
-
 -- Create a test ULID value
 CREATE TEMP TABLE test_ulids AS
 SELECT '01GV5PA9EQG7D82Q3Y4PKBZSYV'::ulid as test_ulid;
@@ -36,5 +33,3 @@ SELECT 'timestamp to ulid conversion' as test_name,
 -- Test conversion from timestamptz
 SELECT 'timestamptz to ulid conversion' as test_name,
        '2023-03-10 12:00:49.111'::timestamptz::ulid::text = '01GV5PA9EQ0000000000000000' as result;
-
-DROP EXTENSION pgx_ulid;

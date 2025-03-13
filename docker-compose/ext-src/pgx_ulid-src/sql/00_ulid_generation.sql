@@ -31,5 +31,3 @@ SELECT 'gen_monotonic_ulid() returns ordered values' as test_name,
 FROM (
     SELECT gen_monotonic_ulid() as u1, gen_monotonic_ulid() as u2
 ) subq;
-
-DROP EXTENSION pgx_ulid;

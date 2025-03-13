@@ -1,5 +1,4 @@
 -- Test ULID error handling
-CREATE EXTENSION pgx_ulid;
 
 -- Test invalid ULID string (too short)
 SELECT '01GV5PA9EQG7D82Q3Y4PKBZSY'::ulid;
@@ -11,4 +10,3 @@ SELECT '01GV5PA9EQG7D82Q3Y4PKBZSYU'::ulid;
 SELECT 'NULL to ulid conversion returns NULL' as test_name,
        NULL::ulid IS NULL as result;
 
-DROP EXTENSION pgx_ulid;
