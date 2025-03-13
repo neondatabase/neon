@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::fs;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Seek};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Child;
@@ -335,10 +335,25 @@ pub fn wait_for_postgres(pg: &mut Child, pgdata: &Path) -> Result<()> {
         }
     };
 
-    watcher.watch(pgdata, RecursiveMode::NonRecursive)?;
+    // You cannot actually watch a file before it exists, so let's create the
+    // the postmaster.pid file for Postgres, so we can watch it even before
+    // Postgres actually starts. In the event that it already exists, just open
+    // the file for reading. Remember that we are racing Postgres here and that
+    // it doesn't matter who creates the postmaster.pid.
+    let mut file = match File::create(&pid_path) {
+        Ok(file) => file,
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(anyhow::anyhow!(e));
+            }
+
+            File::open(&pid_path)?
+        }
+    };
+
+    watcher.watch(&pid_path, RecursiveMode::NonRecursive)?;
 
     let started_at = Instant::now();
-    let mut postmaster_pid_seen = false;
     loop {
         if let Ok(Some(status)) = pg.try_wait() {
             // Postgres exited, that is not what we expected, bail out earlier.
@@ -355,31 +370,18 @@ pub fn wait_for_postgres(pg: &mut Child, pgdata: &Path) -> Result<()> {
             debug!("swallowing extra event: {res:?}");
         }
 
-        // Check that we can open pid file first.
-        if let Ok(file) = File::open(&pid_path) {
-            if !postmaster_pid_seen {
-                debug!("postmaster.pid appeared");
-                watcher
-                    .unwatch(pgdata)
-                    .expect("Failed to remove pgdata dir watch");
-                watcher
-                    .watch(&pid_path, RecursiveMode::NonRecursive)
-                    .expect("Failed to add postmaster.pid file watch");
-                postmaster_pid_seen = true;
-            }
+        file.seek(std::io::SeekFrom::Start(0)).unwrap();
+        let reader = BufReader::new(&file);
+        let last_line = reader.lines().last();
 
-            let file = BufReader::new(file);
-            let last_line = file.lines().last();
+        // Pid file could be there and we could read it, but it could be empty, for example.
+        if let Some(Ok(line)) = last_line {
+            let status = line.trim();
+            debug!("last line of postmaster.pid: {status:?}");
 
-            // Pid file could be there and we could read it, but it could be empty, for example.
-            if let Some(Ok(line)) = last_line {
-                let status = line.trim();
-                debug!("last line of postmaster.pid: {status:?}");
-
-                // Now Postgres is ready to accept connections
-                if status == "ready" {
-                    break;
-                }
+            // Now Postgres is ready to accept connections
+            if status == "ready" {
+                break;
             }
         }
 
