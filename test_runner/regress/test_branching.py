@@ -181,7 +181,6 @@ def test_cannot_create_endpoint_on_non_uploaded_timeline(neon_env_builder: NeonE
             env.endpoints.create_start(
                 initial_branch, tenant_id=env.initial_tenant, basebackup_request_tries=2
             )
-        ps_http.configure_failpoints(("before-upload-index-pausable", "off"))
     finally:
         env.pageserver.stop(immediate=True)
 
