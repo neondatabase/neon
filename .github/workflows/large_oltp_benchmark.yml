@@ -12,7 +12,7 @@ on:
     #          │ │  ┌───────────── day of the month (1 - 31)
     #          │ │  │ ┌───────────── month (1 - 12 or JAN-DEC)
     #          │ │  │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
-    - cron:   '0 15 * * *' # run once a day, timezone is utc, avoid conflict with other benchmarks
+    - cron:   '0 15 * * 0,2,4' # run on Sunday, Tuesday, Thursday at 3 PM UTC
   workflow_dispatch: # adds ability to run this manually
 
 defaults:
@@ -22,7 +22,7 @@ defaults:
 concurrency:
   # Allow only one workflow globally because we need dedicated resources which only exist once
   group: large-oltp-bench-workflow
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   oltp:
