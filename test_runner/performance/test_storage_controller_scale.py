@@ -83,9 +83,7 @@ def test_storage_controller_many_tenants(
         "max_offline": "30s",
         "max_warming_up": "300s",
     }
-    neon_env_builder.control_plane_api = (
-        compute_reconfigure_listener.control_plane_api
-    )
+    neon_env_builder.control_plane_api = compute_reconfigure_listener.control_plane_api
 
     AZS = ["alpha", "bravo", "charlie"]
 

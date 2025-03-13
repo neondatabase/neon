@@ -1395,9 +1395,7 @@ def test_storage_controller_tenant_deletion(
     """
     neon_env_builder.num_pageservers = 4
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
-    neon_env_builder.control_plane_hooks_api = (
-        compute_reconfigure_listener.control_plane_hooks_api
-    )
+    neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
 
     env = neon_env_builder.init_configs()
     env.start()

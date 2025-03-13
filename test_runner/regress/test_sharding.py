@@ -1312,9 +1312,7 @@ def test_sharding_split_failures(
     failure: Failure,
 ):
     neon_env_builder.num_pageservers = 4
-    neon_env_builder.control_plane_hooks_api = (
-        compute_reconfigure_listener.control_plane_hooks_api
-    )
+    neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
     initial_shard_count = 2
     split_shard_count = 4
 
