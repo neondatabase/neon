@@ -7927,7 +7927,8 @@ impl Service {
         // and if we change the default stripe size we want to use the new default rather than an
         // old, persisted stripe size.
         let new_stripe_size = match split_candidate.id.shard_count.count() {
-            0 | 1 => Some(ShardParameters::DEFAULT_STRIPE_SIZE),
+            0 => panic!("invalid shard count 0"),
+            1 => Some(ShardParameters::DEFAULT_STRIPE_SIZE),
             2.. => None,
         };
 
