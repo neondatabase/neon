@@ -584,9 +584,8 @@ pub mod tenant_conf_defaults {
     pub const DEFAULT_GC_PERIOD: &str = "1 hr";
     pub const DEFAULT_IMAGE_CREATION_THRESHOLD: usize = 3;
     // If there are more than threshold * compaction_threshold (that is 3 * 10 in the default config) L0 layers, image
-    // layer creation will end immediately. Set to 0 to disable. The target default will be 3 once we
-    // want to enable this feature.
-    pub const DEFAULT_IMAGE_CREATION_PREEMPT_THRESHOLD: usize = 0;
+    // layer creation will end immediately. Set to 0 to disable.
+    pub const DEFAULT_IMAGE_CREATION_PREEMPT_THRESHOLD: usize = 3;
     pub const DEFAULT_PITR_INTERVAL: &str = "7 days";
     pub const DEFAULT_WALRECEIVER_CONNECT_TIMEOUT: &str = "10 seconds";
     pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "10 seconds";
