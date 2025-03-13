@@ -3869,10 +3869,9 @@ checksum = "38bf9645c8b145698bb0b18a4637dcacbc421ea49bef2317e4fd8065a387cf21"
 [[package]]
 name = "notify"
 version = "6.1.1"
-source = "git+https://github.com/notify-rs/notify?rev=2a06e5f267ab8881d011d88310b927c5d6e55ea6#2a06e5f267ab8881d011d88310b927c5d6e55ea6"
+source = "git+https://github.com/notify-rs/notify?rev=13a49d60ca3f6bbee9d8ad42fd9aac14b92bd74b#13a49d60ca3f6bbee9d8ad42fd9aac14b92bd74b"
 dependencies = [
  "bitflags 2.8.0",
- "crossbeam-channel",
  "filetime",
  "fsevent-sys",
  "inotify",
@@ -3880,8 +3879,17 @@ dependencies = [
  "libc",
  "log",
  "mio 0.8.11",
+ "notify-types",
  "walkdir",
  "windows-sys 0.48.0",
+]
+
+[[package]]
+name = "notify-types"
+version = "1.0.0"
+source = "git+https://github.com/notify-rs/notify?rev=13a49d60ca3f6bbee9d8ad42fd9aac14b92bd74b#13a49d60ca3f6bbee9d8ad42fd9aac14b92bd74b"
+dependencies = [
+ "instant",
 ]
 
 [[package]]
