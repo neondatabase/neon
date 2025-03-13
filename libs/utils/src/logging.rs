@@ -407,6 +407,7 @@ pub struct MonitorSlowFutureCallback {
     /// The time elapsed since the [`monitor_slow_future`] was first polled.
     pub elapsed_total: Duration,
     /// The time elapsed since the last callback invocation.
+    /// For the initial callback invocation, the time elapsed since the [`monitor_slow_future`] was first polled.
     pub elapsed_since_last_callback: Duration,
 }
 
