@@ -334,14 +334,12 @@ def test_remote_storage_upload_queue_retries(
     # Exponential back-off in upload queue, so, gracious timeouts.
 
     wait_until(
-        lambda: assert_gt(get_queued_count(file_kind="layer", op_kind="upload"), 0), timeout=30
+        lambda: assert_ge(get_queued_count(file_kind="layer", op_kind="upload"), 1), timeout=30
     )
     wait_until(
         lambda: assert_ge(get_queued_count(file_kind="index", op_kind="upload"), 1), timeout=30
     )
-    wait_until(
-        lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0), timeout=30
-    )
+    # There may or may not be deletes queued up behind conflicting uploads; don't check.
 
     # unblock churn operations
     configure_storage_sync_failpoints("off")
