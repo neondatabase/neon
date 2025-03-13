@@ -2238,7 +2238,7 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 					  neon_request_lsns *output, BlockNumber nblocks)
 {
 	XLogRecPtr	last_written_lsns[PG_IOV_MAX];
-	XLogRecPtr	flush_lsn;
+	XLogRecPtr	flush_lsn = InvalidXLogRecPtr;
 
 	Assert(nblocks <= PG_IOV_MAX);
 
