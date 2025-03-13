@@ -3311,11 +3311,31 @@ impl Service {
         }
     }
 
-    pub(crate) async fn tenant_delete(&self, tenant_id: TenantId) -> Result<StatusCode, ApiError> {
+    pub(crate) async fn tenant_delete(
+        self: &Arc<Self>,
+        tenant_id: TenantId,
+    ) -> Result<StatusCode, ApiError> {
         let _tenant_lock =
             trace_exclusive_lock(&self.tenant_op_locks, tenant_id, TenantOperations::Delete).await;
 
         self.maybe_load_tenant(tenant_id, &_tenant_lock).await?;
+
+        // Issue deletions for all timelines on the safekeepers
+        let sk_timelines = self
+            .persistence
+            .list_timelines_for_tenant(tenant_id)
+            .await?;
+        for sk_timeline in sk_timelines {
+            let Ok(timeline_id) = TimelineId::from_str(&sk_timeline.timeline_id) else {
+                tracing::warn!(
+                    "ignoring timeline with invalid ID {} for deletion",
+                    sk_timeline.timeline_id
+                );
+                continue;
+            };
+            self.tenant_timeline_delete_safekeepers(tenant_id, timeline_id)
+                .await?;
+        }
 
         // Detach all shards. This also deletes local pageserver shard data.
         let (detach_waiters, node) = {
