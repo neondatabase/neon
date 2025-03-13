@@ -325,11 +325,13 @@ def setup_class(
     project.delete()
 
 
-def do_action(project, action):
+def do_action(project, action) -> None:
     if action == "new_branch":
         log.info("Trying to create a new branch")
         parent = random.choice(list(project.branches.values()))
         child = parent.create_child_branch()
+        if child is None:
+            return
         log.info("Created branch %s", child)
         child.start_benchmark()
     elif action == "delete_branch":
