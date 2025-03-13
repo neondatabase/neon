@@ -460,7 +460,7 @@ class NeonEnvBuilder:
         self.overlay_mounts_created_by_us: list[tuple[str, Path]] = []
         self.config_init_force: str | None = None
         self.top_output_dir = top_output_dir
-        self.control_plane_compute_hook_api: str | None = None
+        self.control_plane_hooks_api: str | None = None
         self.storage_controller_config: dict[Any, Any] | None = None
 
         # Flag to enable https listener in pageserver, generate local ssl certs,
@@ -1116,7 +1116,7 @@ class NeonEnv:
         self.control_plane_api: str = self.storage_controller.upcall_api_endpoint()
 
         # For testing this with a fake HTTP server, enable passing through a URL from config
-        self.control_plane_compute_hook_api = config.control_plane_compute_hook_api
+        self.control_plane_hooks_api = config.control_plane_hooks_api
 
         self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
         self.pageserver_virtual_file_io_mode = config.pageserver_virtual_file_io_mode
@@ -1137,8 +1137,8 @@ class NeonEnv:
         if self.control_plane_api is not None:
             cfg["control_plane_api"] = self.control_plane_api
 
-        if self.control_plane_compute_hook_api is not None:
-            cfg["control_plane_compute_hook_api"] = self.control_plane_compute_hook_api
+        if self.control_plane_hooks_api is not None:
+            cfg["control_plane_hooks_api"] = self.control_plane_hooks_api
 
         storage_controller_config = self.storage_controller_config
 

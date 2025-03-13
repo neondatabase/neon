@@ -72,9 +72,9 @@ pub struct LocalEnv {
     // be propagated into each pageserver's configuration.
     pub control_plane_api: Url,
 
-    // Control plane upcall API for storage controller.  If set, this will be propagated into the
+    // Control plane upcall APIs for storage controller.  If set, this will be propagated into the
     // storage controller's configuration.
-    pub control_plane_compute_hook_api: Option<Url>,
+    pub control_plane_hooks_api: Option<Url>,
 
     /// Keep human-readable aliases in memory (and persist them to config), to hide ZId hex strings from the user.
     // A `HashMap<String, HashMap<TenantId, TimelineId>>` would be more appropriate here,
@@ -104,6 +104,7 @@ pub struct OnDiskConfig {
     pub pageservers: Vec<PageServerConf>,
     pub safekeepers: Vec<SafekeeperConf>,
     pub control_plane_api: Option<Url>,
+    pub control_plane_hooks_api: Option<Url>,
     pub control_plane_compute_hook_api: Option<Url>,
     branch_name_mappings: HashMap<String, Vec<(TenantId, TimelineId)>>,
     // Note: skip serializing because in compat tests old storage controller fails
@@ -136,7 +137,7 @@ pub struct NeonLocalInitConf {
     pub pageservers: Vec<NeonLocalInitPageserverConf>,
     pub safekeepers: Vec<SafekeeperConf>,
     pub control_plane_api: Option<Url>,
-    pub control_plane_compute_hook_api: Option<Option<Url>>,
+    pub control_plane_hooks_api: Option<Url>,
     pub generate_local_ssl_certs: bool,
 }
 
@@ -573,7 +574,8 @@ impl LocalEnv {
                 pageservers,
                 safekeepers,
                 control_plane_api,
-                control_plane_compute_hook_api,
+                control_plane_hooks_api,
+                control_plane_compute_hook_api: _,
                 branch_name_mappings,
                 generate_local_ssl_certs,
             } = on_disk_config;
@@ -588,7 +590,7 @@ impl LocalEnv {
                 pageservers,
                 safekeepers,
                 control_plane_api: control_plane_api.unwrap(),
-                control_plane_compute_hook_api,
+                control_plane_hooks_api,
                 branch_name_mappings,
                 generate_local_ssl_certs,
             }
@@ -695,7 +697,8 @@ impl LocalEnv {
                 pageservers: vec![], // it's skip_serializing anyway
                 safekeepers: self.safekeepers.clone(),
                 control_plane_api: Some(self.control_plane_api.clone()),
-                control_plane_compute_hook_api: self.control_plane_compute_hook_api.clone(),
+                control_plane_hooks_api: self.control_plane_hooks_api.clone(),
+                control_plane_compute_hook_api: None,
                 branch_name_mappings: self.branch_name_mappings.clone(),
                 generate_local_ssl_certs: self.generate_local_ssl_certs,
             },
@@ -779,8 +782,8 @@ impl LocalEnv {
             pageservers,
             safekeepers,
             control_plane_api,
-            control_plane_compute_hook_api,
             generate_local_ssl_certs,
+            control_plane_hooks_api,
         } = conf;
 
         // Find postgres binaries.
@@ -827,7 +830,7 @@ impl LocalEnv {
             pageservers: pageservers.iter().map(Into::into).collect(),
             safekeepers,
             control_plane_api: control_plane_api.unwrap(),
-            control_plane_compute_hook_api: control_plane_compute_hook_api.unwrap_or_default(),
+            control_plane_hooks_api,
             branch_name_mappings: Default::default(),
             generate_local_ssl_certs,
         };
