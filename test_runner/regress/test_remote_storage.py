@@ -29,7 +29,6 @@ from fixtures.remote_storage import (
 from fixtures.utils import (
     assert_eq,
     assert_ge,
-    assert_gt,
     print_gc_result,
     query_scalar,
     wait_until,
