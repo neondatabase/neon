@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use http_utils::error::ApiError;
+use pageserver_api::models::DetachBehavior;
 use pageserver_api::models::detach_ancestor::AncestorDetached;
 use pageserver_api::shard::ShardIdentity;
 use tokio::sync::Semaphore;
@@ -137,30 +138,6 @@ pub(crate) struct PreparedTimelineDetach {
 pub(crate) struct Options {
     pub(crate) rewrite_concurrency: std::num::NonZeroUsize,
     pub(crate) copy_concurrency: std::num::NonZeroUsize,
-}
-
-/// Controls the detach ancestor behavior.
-/// - When set to `NoAncestorAndReparent`, we will only detach a branch if its ancestor is a root branch. It will automatically reparent any children of the ancestor before and at the branch point.
-/// - When set to `MultiLevelAndNoReparent`, we will detach a branch from multiple levels of ancestors, and no reparenting will happen at all.
-#[derive(Debug, Clone, Copy, Default)]
-pub enum DetachBehavior {
-    #[default]
-    NoAncestorAndReparent,
-    MultiLevelAndNoReparent,
-}
-
-impl std::str::FromStr for DetachBehavior {
-    type Err = &'static str;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "no_ancestor_and_reparent" => Ok(DetachBehavior::NoAncestorAndReparent),
-            "multi_level_and_no_reparent" => Ok(DetachBehavior::MultiLevelAndNoReparent),
-            "v1" => Ok(DetachBehavior::NoAncestorAndReparent),
-            "v2" => Ok(DetachBehavior::MultiLevelAndNoReparent),
-            _ => Err("cannot parse detach behavior"),
-        }
-    }
 }
 
 impl Default for Options {
