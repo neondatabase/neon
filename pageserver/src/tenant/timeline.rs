@@ -1497,14 +1497,15 @@ impl Timeline {
             log_slow_period,
             wait_for_timeout,
             |MonitorSlowFutureCallback {
-                 elapsed_since_last_callback,
                  ready,
+                 is_slow,
                  elapsed_total,
+                 elapsed_since_last_callback,
              }| {
                 self.metrics
                     .wait_lsn_in_progress_micros
                     .inc_by(u64::try_from(elapsed_since_last_callback.as_micros()).unwrap());
-                if elapsed_total < log_slow_threshold {
+                if !is_slow {
                     return;
                 }
                 // It's slow, see if we should log it.

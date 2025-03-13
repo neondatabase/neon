@@ -340,17 +340,19 @@ where
         f,
         |MonitorSlowFutureCallback {
              ready,
+             is_slow,
              elapsed_total,
              elapsed_since_last_callback: _,
          }| {
+            if !is_slow {
+                return;
+            }
             if ready {
-                if elapsed_total >= threshold {
-                    info!(
-                        "slow {name} completed after {:.3}s",
-                        elapsed_total.as_secs_f64()
-                    );
-                }
-            } else if elapsed_total > threshold {
+                info!(
+                    "slow {name} completed after {:.3}s",
+                    elapsed_total.as_secs_f64()
+                );
+            } else {
                 info!(
                     "slow {name} still running after {:.3}s",
                     elapsed_total.as_secs_f64()
@@ -383,9 +385,11 @@ where
         // TODO: still call the callback if the future panics? Copy how we do it for the page_service flush_in_progress counter.
         let res = tokio::time::timeout_at(deadline, &mut fut).await;
         let now = Instant::now();
+        let elapsed_total = now - started;
         cb(MonitorSlowFutureCallback {
             ready: res.is_ok(),
-            elapsed_total: now - started,
+            is_slow: elapsed_total >= threshold,
+            elapsed_total,
             elapsed_since_last_callback: now - last_cb,
         });
         last_cb = now;
@@ -400,6 +404,9 @@ where
 pub struct MonitorSlowFutureCallback {
     /// Whether the future completed. If true, there will be no more callbacks.
     pub ready: bool,
+    /// Whether the future is taking `>=` the specififed threshold duration to complete.
+    /// Monotonic: if true in one callback invocation, true in all subsequent onces.
+    pub is_slow: bool,
     /// The time elapsed since the [`monitor_slow_future`] was first polled.
     pub elapsed_total: Duration,
     /// The time elapsed since the last callback invocation.
