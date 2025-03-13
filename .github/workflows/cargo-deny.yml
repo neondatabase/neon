@@ -24,11 +24,14 @@ jobs:
 
     runs-on: [self-hosted, small]
 
+    permissions:
+      packages: read
+
     container:
-      image: ${{ inputs.build-tools-image || 'neondatabase/build-tools:pinned' }}
+      image: ${{ inputs.build-tools-image || 'ghcr.io/neondatabase/build-tools:pinned' }}
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       options: --init
 
     steps:
