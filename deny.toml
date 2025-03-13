@@ -31,6 +31,10 @@ reason = "the marvin attack only affects private key decryption, not public key 
 id = "RUSTSEC-2024-0436"
 reason = "The paste crate is a build-only dependency with no runtime components. It is unlikely to have any security impact."
 
+[[advisories.ignore]]
+id = "RUSTSEC-2025-0014"
+reason = "The humantime is widely used and is not easy to replace right now. It is unmaintained, but it has no known vulnerabilities to care about. #11179"
+
 # This section is considered when running `cargo deny check licenses`
 # More documentation for the licenses section can be found here:
 # https://embarkstudios.github.io/cargo-deny/checks/licenses/cfg.html

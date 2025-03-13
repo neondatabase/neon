@@ -1914,6 +1914,7 @@ impl TenantManager {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         prepared: PreparedTimelineDetach,
+        behavior: detach_ancestor::DetachBehavior,
         mut attempt: detach_ancestor::Attempt,
         ctx: &RequestContext,
     ) -> Result<HashSet<TimelineId>, detach_ancestor::Error> {
@@ -1957,7 +1958,14 @@ impl TenantManager {
             .map_err(Error::NotFound)?;
 
         let resp = timeline
-            .detach_from_ancestor_and_reparent(&tenant, prepared, ctx)
+            .detach_from_ancestor_and_reparent(
+                &tenant,
+                prepared,
+                attempt.ancestor_timeline_id,
+                attempt.ancestor_lsn,
+                behavior,
+                ctx,
+            )
             .await?;
 
         let mut slot_guard = slot_guard;

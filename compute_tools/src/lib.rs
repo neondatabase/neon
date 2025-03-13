@@ -26,3 +26,4 @@ pub mod spec;
 mod spec_apply;
 pub mod swap;
 pub mod sync_sk;
+pub mod tls;

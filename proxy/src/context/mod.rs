@@ -272,6 +272,13 @@ impl RequestContext {
             .set_user_agent(user_agent);
     }
 
+    pub(crate) fn set_testodrome_id(&self, query_id: String) {
+        self.0
+            .try_lock()
+            .expect("should not deadlock")
+            .set_testodrome_id(query_id);
+    }
+
     pub(crate) fn set_auth_method(&self, auth_method: AuthMethod) {
         let mut this = self.0.try_lock().expect("should not deadlock");
         this.auth_method = Some(auth_method);
@@ -371,13 +378,12 @@ impl RequestContext {
             .accumulated()
     }
 
-    pub(crate) fn get_testodrome_id(&self) -> String {
+    pub(crate) fn get_testodrome_id(&self) -> Option<String> {
         self.0
             .try_lock()
             .expect("should not deadlock")
             .testodrome_query_id
             .clone()
-            .unwrap_or_default()
     }
 
     pub(crate) fn success(&self) {

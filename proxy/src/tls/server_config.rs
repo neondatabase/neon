@@ -9,15 +9,12 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use super::{PG_ALPN_PROTOCOL, TlsServerEndPoint};
 
 pub struct TlsConfig {
-    pub config: Arc<rustls::ServerConfig>,
+    // unfortunate split since we cannot change the ALPN on demand.
+    // <https://github.com/rustls/rustls/issues/2260>
+    pub http_config: Arc<rustls::ServerConfig>,
+    pub pg_config: Arc<rustls::ServerConfig>,
     pub common_names: HashSet<String>,
     pub cert_resolver: Arc<CertResolver>,
-}
-
-impl TlsConfig {
-    pub fn to_server_config(&self) -> Arc<rustls::ServerConfig> {
-        self.config.clone()
-    }
 }
 
 /// Configure TLS for the main endpoint.
@@ -71,8 +68,15 @@ pub fn configure_tls(
         config.key_log = Arc::new(rustls::KeyLogFile::new());
     }
 
+    let mut http_config = config.clone();
+    let mut pg_config = config;
+
+    http_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    pg_config.alpn_protocols = vec![b"postgresql".to_vec()];
+
     Ok(TlsConfig {
-        config: Arc::new(config),
+        http_config: Arc::new(http_config),
+        pg_config: Arc::new(pg_config),
         common_names,
         cert_resolver,
     })

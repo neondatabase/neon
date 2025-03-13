@@ -114,7 +114,7 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
 
                         let mut read_buf = read_buf.reader();
                         let mut res = Ok(());
-                        let accept = tokio_rustls::TlsAcceptor::from(tls.to_server_config())
+                        let accept = tokio_rustls::TlsAcceptor::from(tls.pg_config.clone())
                             .accept_with(raw, |session| {
                                 // push the early data to the tls session
                                 while !read_buf.get_ref().is_empty() {

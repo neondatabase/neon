@@ -300,9 +300,8 @@ impl TimelineMetadata {
 
     /// Returns true if anything was changed
     pub fn detach_from_ancestor(&mut self, branchpoint: &(TimelineId, Lsn)) {
-        if let Some(ancestor) = self.body.ancestor_timeline {
-            assert_eq!(ancestor, branchpoint.0);
-        }
+        // Detaching from ancestor now doesn't always detach directly to the direct ancestor, but we
+        // ensure the LSN is the same. So we don't check the timeline ID.
         if self.body.ancestor_lsn != Lsn(0) {
             assert_eq!(self.body.ancestor_lsn, branchpoint.1);
         }

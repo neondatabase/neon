@@ -177,7 +177,8 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     let proto = ctx.protocol();
     let request_gauge = metrics.connection_requests.guard(proto);
 
-    let tls = config.tls_config.as_ref();
+    let tls = config.tls_config.load();
+    let tls = tls.as_deref();
 
     let record_handshake_error = !ctx.has_private_peer_addr();
     let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Client);

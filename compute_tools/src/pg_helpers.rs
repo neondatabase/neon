@@ -10,8 +10,10 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
+use compute_api::responses::TlsConfig;
 use compute_api::spec::{Database, GenericOption, GenericOptions, PgIdent, Role};
 use futures::StreamExt;
+use indexmap::IndexMap;
 use ini::Ini;
 use notify::{RecursiveMode, Watcher};
 use postgres::config::Config;
@@ -406,7 +408,7 @@ pub fn create_pgdata(pgdata: &str) -> Result<()> {
 
 /// Update pgbouncer.ini with provided options
 fn update_pgbouncer_ini(
-    pgbouncer_config: HashMap<String, String>,
+    pgbouncer_config: IndexMap<String, String>,
     pgbouncer_ini_path: &str,
 ) -> Result<()> {
     let mut conf = Ini::load_from_file(pgbouncer_ini_path)?;
@@ -427,7 +429,10 @@ fn update_pgbouncer_ini(
 /// Tune pgbouncer.
 /// 1. Apply new config using pgbouncer admin console
 /// 2. Add new values to pgbouncer.ini to preserve them after restart
-pub async fn tune_pgbouncer(pgbouncer_config: HashMap<String, String>) -> Result<()> {
+pub async fn tune_pgbouncer(
+    mut pgbouncer_config: IndexMap<String, String>,
+    tls_config: Option<TlsConfig>,
+) -> Result<()> {
     let pgbouncer_connstr = if std::env::var_os("AUTOSCALING").is_some() {
         // for VMs use pgbouncer specific way to connect to
         // pgbouncer admin console without password
@@ -473,19 +478,21 @@ pub async fn tune_pgbouncer(pgbouncer_config: HashMap<String, String>) -> Result
         }
     };
 
-    // Apply new config
-    for (option_name, value) in pgbouncer_config.iter() {
-        let query = format!("SET {}={}", option_name, value);
-        // keep this log line for debugging purposes
-        info!("Applying pgbouncer setting change: {}", query);
+    if let Some(tls_config) = tls_config {
+        // pgbouncer starts in a half-ok state if it cannot find these files.
+        // It will default to client_tls_sslmode=deny, which causes proxy to error.
+        // There is a small window at startup where these files don't yet exist in the VM.
+        // Best to wait until it exists.
+        loop {
+            if let Ok(true) = tokio::fs::try_exists(&tls_config.key_path).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await
+        }
 
-        if let Err(err) = client.simple_query(&query).await {
-            // Don't fail on error, just print it into log
-            error!(
-                "Failed to apply pgbouncer setting change: {},  {}",
-                query, err
-            );
-        };
+        pgbouncer_config.insert("client_tls_cert_file".to_string(), tls_config.cert_path);
+        pgbouncer_config.insert("client_tls_key_file".to_string(), tls_config.key_path);
+        pgbouncer_config.insert("client_tls_sslmode".to_string(), "allow".to_string());
     }
 
     // save values to pgbouncer.ini
@@ -500,6 +507,13 @@ pub async fn tune_pgbouncer(pgbouncer_config: HashMap<String, String>) -> Result
         "/var/db/postgres/pgbouncer/pgbouncer.ini".to_string()
     };
     update_pgbouncer_ini(pgbouncer_config, &pgbouncer_ini_path)?;
+
+    info!("Applying pgbouncer setting change");
+
+    if let Err(err) = client.simple_query("RELOAD").await {
+        // Don't fail on error, just print it into log
+        error!("Failed to apply pgbouncer setting change,  {err}",);
+    };
 
     Ok(())
 }

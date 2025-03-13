@@ -14,7 +14,7 @@ use pageserver_api::controller_api::{
     NodeConfigureRequest, NodeDescribeResponse, NodeRegisterRequest, TenantCreateRequest,
     TenantCreateResponse, TenantLocateResponse,
 };
-use pageserver_api::models::{TimelineCreateRequest, TimelineInfo};
+use pageserver_api::models::{TenantConfigRequest, TimelineCreateRequest, TimelineInfo};
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
@@ -877,5 +877,10 @@ impl StorageController {
             Some(req),
         )
         .await
+    }
+
+    pub async fn set_tenant_config(&self, req: &TenantConfigRequest) -> anyhow::Result<()> {
+        self.dispatch(Method::PUT, "v1/tenant/config".to_string(), Some(req))
+            .await
     }
 }

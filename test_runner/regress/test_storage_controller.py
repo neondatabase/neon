@@ -1749,18 +1749,23 @@ def test_storage_controller_re_attach(neon_env_builder: NeonEnvBuilder):
     # Restart the failed pageserver
     victim_ps.start()
 
+    env.storage_controller.reconcile_until_idle()
+
     # We expect that the re-attach call correctly tipped off the pageserver that its locations
     # are all secondaries now.
     locations = victim_ps.http_client().tenant_list_locations()["tenant_shards"]
     assert len(locations) == 2
     assert all(loc[1]["mode"] == "Secondary" for loc in locations)
 
-    # We expect that this situation resulted from the re_attach call, and not any explicit
-    # Reconciler runs: assert that the reconciliation count has not gone up since we restarted.
+    # We expect that this situation resulted from background reconciliations
+    # Reconciler runs: assert that the reconciliation count has gone up by exactly
+    # one for each shard
     reconciles_after_restart = env.storage_controller.get_metric_value(
         "storage_controller_reconcile_complete_total", filter={"status": "ok"}
     )
-    assert reconciles_after_restart == reconciles_before_restart
+
+    assert reconciles_before_restart is not None
+    assert reconciles_after_restart == reconciles_before_restart + 2
 
 
 def test_storage_controller_shard_scheduling_policy(neon_env_builder: NeonEnvBuilder):

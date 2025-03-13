@@ -290,7 +290,7 @@ impl ConnCfg {
             "connected to compute node at {host} ({socket_addr}) sslmode={:?}, latency={}, query_id={}",
             self.0.get_ssl_mode(),
             ctx.get_proxy_latency(),
-            ctx.get_testodrome_id(),
+            ctx.get_testodrome_id().unwrap_or_default(),
         );
 
         // NB: CancelToken is supposed to hold socket_addr, but we use connect_raw.

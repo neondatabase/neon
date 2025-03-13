@@ -12,7 +12,7 @@ pub(crate) fn setup_logging() {
             logging::TracingErrorLayerEnablement::EnableWithRustLogFilter,
             logging::Output::Stdout,
         )
-        .expect("Failed to init test logging")
+        .expect("Failed to init test logging");
     });
 }
 

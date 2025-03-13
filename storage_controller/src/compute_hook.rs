@@ -624,7 +624,16 @@ impl ComputeHook {
             MaybeSendResult::Transmit((request, lock)) => (request, lock),
         };
 
-        let result = if let Some(notify_url) = &self.config.compute_hook_url {
+        let compute_hook_url = if let Some(control_plane_url) = &self.config.control_plane_url {
+            Some(if control_plane_url.ends_with('/') {
+                format!("{control_plane_url}notify-attach")
+            } else {
+                format!("{control_plane_url}/notify-attach")
+            })
+        } else {
+            self.config.compute_hook_url.clone()
+        };
+        let result = if let Some(notify_url) = &compute_hook_url {
             self.do_notify(notify_url, &request, cancel).await
         } else {
             self.do_notify_local(&request).await.map_err(|e| {
