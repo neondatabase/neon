@@ -288,6 +288,8 @@ pub struct TenantConfigToml {
     /// If true, Level0 delta layer flushes will wait for S3 upload before flushing the next
     /// layer. This is a temporary backpressure mechanism which should be removed once
     /// l0_flush_{delay,stall}_threshold is fully enabled.
+    ///
+    /// TODO: this is no longer enabled, remove it when the config option is no longer set.
     pub l0_flush_wait_upload: bool,
     // Determines how much history is retained, to allow
     // branching and read replicas at an older point in time.
@@ -573,7 +575,7 @@ pub mod tenant_conf_defaults {
     pub const DEFAULT_COMPACTION_ALGORITHM: crate::models::CompactionAlgorithm =
         crate::models::CompactionAlgorithm::Legacy;
 
-    pub const DEFAULT_L0_FLUSH_WAIT_UPLOAD: bool = true;
+    pub const DEFAULT_L0_FLUSH_WAIT_UPLOAD: bool = false;
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
 
