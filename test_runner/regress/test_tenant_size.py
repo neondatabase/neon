@@ -436,7 +436,7 @@ def test_single_branch_get_tenant_size_grows(
         # when our tenant is configured with a tiny pitr interval, dropping a table should
         # cause synthetic size to go down immediately
         tenant_config["pitr_interval"] = "0s"
-        env.pageserver.http_client().set_tenant_config(tenant_id, tenant_config)
+        env.storage_controller.pageserver_api().set_tenant_config(tenant_id, tenant_config)
         (current_lsn, size) = get_current_consistent_size(
             env, endpoint, size_debug_file, http_client, tenant_id, timeline_id
         )

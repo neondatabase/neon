@@ -1225,9 +1225,10 @@ pub struct TimelineInfo {
     pub last_record_lsn: Lsn,
     pub prev_record_lsn: Option<Lsn>,
 
-    /// Legacy field for compat with control plane.  Synonym of `min_readable_lsn`.
-    /// TODO: remove once control plane no longer reads it.
-    pub latest_gc_cutoff_lsn: Lsn,
+    /// Legacy field, retained for one version to enable old storage controller to
+    /// decode (it was a mandatory field).
+    #[serde(default, rename = "latest_gc_cutoff_lsn")]
+    pub _unused: Lsn,
 
     /// The LSN up to which GC has advanced: older data may still exist but it is not available for clients.
     /// This LSN is not suitable for deciding where to create branches etc: use [`TimelineInfo::min_readable_lsn`] instead,

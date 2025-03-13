@@ -221,7 +221,7 @@ zerocopy = { version = "0.7", features = ["derive"] }
 json-structural-diff = { version = "0.2.0" }
 
 ## TODO replace this with tracing
-env_logger = "0.10"
+env_logger = "0.11"
 log = "0.4"
 
 ## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed
