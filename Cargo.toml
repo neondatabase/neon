@@ -128,7 +128,7 @@ memoffset = "0.9"
 nix = { version = "0.27", features = ["dir", "fs", "process", "socket", "signal", "poll"] }
 # Do not update to >= 7.0.0, at least. The update will have a significant impact
 # on compute startup metrics (start_postgres_ms), >= 25% degradation.
-notify = "6.0.0"
+notify = { git = "https://github.com/notify-rs/notify", rev = "2a06e5f267ab8881d011d88310b927c5d6e55ea6" }
 num_cpus = "1.15"
 num-traits = "0.2.15"
 once_cell = "1.13"
