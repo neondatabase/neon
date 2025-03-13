@@ -693,16 +693,16 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	{
 		struct iovec iov[PG_IOV_MAX];
 		int		chunk_offs = blkno & (BLOCKS_PER_CHUNK - 1);
-		int		blocks_in_chunk = Min(nblocks, BLOCKS_PER_CHUNK - (blkno % BLOCKS_PER_CHUNK));
+		int		blocks_in_chunk = Min(nblocks, BLOCKS_PER_CHUNK + 1 - (blkno % BLOCKS_PER_CHUNK));
 		int		iteration_hits = 0;
 		int		iteration_misses = 0;
 		uint64	io_time_us = 0;
-		int     n_blocks_to_read = 0;
+		int     n_blocks_to_read = 1;
 		ConditionVariable* cv;
 
 		Assert(blocks_in_chunk > 0);
 
-		for (int i = 0; i < blocks_in_chunk; i++)
+		for (int i = 0; i < blocks_in_chunk + 1; i++)
 		{
 			n_blocks_to_read += (BITMAP_ISSET(mask, buf_offset + i) != 0);
 			iov[i].iov_base = buffers[buf_offset + i];
@@ -719,7 +719,7 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 		tag.blockNum = blkno - chunk_offs;
 		hash = get_hash_value(lfc_hash, &tag);
-		cv = &lfc_ctl->cv[hash % N_COND_VARS];
+		cv = &lfc_ctl->cv[hash % N_COND_VARS + 1];
 
 		LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 
@@ -788,7 +788,7 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			}
 			if (state == AVAILABLE)
 			{
-				BITMAP_SET(mask, buf_offset + i);
+				BITMAP_SET(mask, buf_offset + i - 1);
 				iteration_hits++;
 			}
 			else
