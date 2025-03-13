@@ -365,7 +365,8 @@ where
     .await
 }
 
-/// Poll future `fut` to completion, invoking callback `cb` at the given `period` and once after the future completes.
+/// Poll future `fut` to completion, invoking callback `cb` at the given `threshold` and every
+/// `period` afterwards, and also unconditionally when the future completes.
 #[inline]
 pub async fn monitor_slow_future<F, O>(
     threshold: Duration,
