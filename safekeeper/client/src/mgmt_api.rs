@@ -106,7 +106,7 @@ impl Client {
             "{}/v1/tenant/{}/timeline/{}/exclude",
             self.mgmt_api_endpoint, tenant_id, timeline_id
         );
-        let resp = self.post(&uri, req).await?;
+        let resp = self.put(&uri, req).await?;
         resp.json().await.map_err(Error::ReceiveBody)
     }
 
@@ -175,6 +175,14 @@ impl Client {
         body: B,
     ) -> Result<reqwest::Response> {
         self.request(Method::POST, uri, body).await
+    }
+
+    async fn put<B: serde::Serialize, U: IntoUrl>(
+        &self,
+        uri: U,
+        body: B,
+    ) -> Result<reqwest::Response> {
+        self.request(Method::PUT, uri, body).await
     }
 
     async fn get<U: IntoUrl>(&self, uri: U) -> Result<reqwest::Response> {
