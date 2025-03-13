@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
-use compute_api::spec::ComputeMode;
+use compute_api::spec::{ComputeAudit, ComputeMode};
 use control_plane::endpoint::ComputeControlPlane;
 use control_plane::local_env::{
     InitForceMode, LocalEnv, NeonBroker, NeonLocalInitConf, NeonLocalInitPageserverConf,
@@ -1360,6 +1360,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 mode,
                 !args.update_catalog,
                 false,
+                ComputeAudit::Disabled,
             )?;
         }
         EndpointCmd::Start(args) => {

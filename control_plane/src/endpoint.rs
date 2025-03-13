@@ -78,6 +78,7 @@ pub struct EndpointConf {
     skip_pg_catalog_updates: bool,
     reconfigure_concurrency: usize,
     drop_subscriptions_before_start: bool,
+    audit_log_level: ComputeAudit,
     features: Vec<ComputeFeature>,
     cluster: Option<Cluster>,
 }
@@ -148,6 +149,7 @@ impl ComputeControlPlane {
         mode: ComputeMode,
         skip_pg_catalog_updates: bool,
         drop_subscriptions_before_start: bool,
+        audit_log_level: ComputeAudit,
     ) -> Result<Arc<Endpoint>> {
         let pg_port = pg_port.unwrap_or_else(|| self.get_port());
         let external_http_port = external_http_port.unwrap_or_else(|| self.get_port() + 1);
@@ -176,6 +178,7 @@ impl ComputeControlPlane {
             // we also skip catalog updates in the cloud.
             skip_pg_catalog_updates,
             drop_subscriptions_before_start,
+            audit_log_level: audit_log_level.clone(),
             reconfigure_concurrency: 1,
             features: vec![],
             cluster: None,
@@ -195,6 +198,7 @@ impl ComputeControlPlane {
                 pg_version,
                 skip_pg_catalog_updates,
                 drop_subscriptions_before_start,
+                audit_log_level,
                 reconfigure_concurrency: 1,
                 features: vec![],
                 cluster: None,
@@ -264,6 +268,8 @@ pub struct Endpoint {
     skip_pg_catalog_updates: bool,
 
     drop_subscriptions_before_start: bool,
+    audit_log_level: ComputeAudit,
+
     reconfigure_concurrency: usize,
     // Feature flags
     features: Vec<ComputeFeature>,
@@ -329,6 +335,7 @@ impl Endpoint {
             skip_pg_catalog_updates: conf.skip_pg_catalog_updates,
             reconfigure_concurrency: conf.reconfigure_concurrency,
             drop_subscriptions_before_start: conf.drop_subscriptions_before_start,
+            audit_log_level: conf.audit_log_level,
             features: conf.features,
             cluster: conf.cluster,
         })
@@ -669,7 +676,7 @@ impl Endpoint {
             local_proxy_config: None,
             reconfigure_concurrency: self.reconfigure_concurrency,
             drop_subscriptions_before_start: self.drop_subscriptions_before_start,
-            audit_log_level: ComputeAudit::Disabled,
+            audit_log_level: self.audit_log_level.clone(),
         };
 
         // this strange code is needed to support respec() in tests

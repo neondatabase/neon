@@ -287,7 +287,10 @@ impl ComputeNode {
                     phases.push(CreatePgauditlogtofileExtension);
                     phases.push(DisablePostgresDBPgAudit);
                 }
-                ComputeAudit::Log => { /* not implemented yet */ }
+                ComputeAudit::Log => {
+                    phases.push(CreatePgauditExtension);
+                    phases.push(DisablePostgresDBPgAudit);
+                }
                 ComputeAudit::Disabled => {}
             }
 
