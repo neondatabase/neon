@@ -275,7 +275,7 @@ class NeonProject:
             cmd,
             target_object.connect_env["PGHOST"],
         )
-        pgbench = self.pg_bin.run_nonblocking(cmd, env=target_object.connect_env)
+        pgbench = self.pg_bin.run_nonblocking(cmd, env=target_object.connect_env, stderr_pipe=subprocess.PIPE)
         self.benchmarks[target] = pgbench
         target_object.benchmark = pgbench
         time.sleep(2)
