@@ -277,10 +277,10 @@ pub struct TenantConfigToml {
     /// If true, use a separate semaphore (i.e. concurrency limit) for the L0 compaction pass. Only
     /// has an effect if `compaction_l0_first` is `true`.
     pub compaction_l0_semaphore: bool,
-    /// Level0 delta layer threshold at which to delay layer flushes for compaction backpressure,
-    /// such that they take 2x as long, and start waiting for layer flushes during ephemeral layer
-    /// rolls. This helps compaction keep up with WAL ingestion, and avoids read amplification
-    /// blowing up. Should be >compaction_threshold. 0 to disable. Disabled by default.
+    /// Level0 delta layer threshold at which to delay layer flushes such that they take 2x as long,
+    /// and block on layer flushes during ephemeral layer rolls, for compaction backpressure. This
+    /// helps compaction keep up with WAL ingestion, and avoids read amplification blowing up.
+    /// Should be >compaction_threshold. 0 to disable. Defaults to 3x compaction_threshold.
     pub l0_flush_delay_threshold: Option<usize>,
     /// Level0 delta layer threshold at which to stall layer flushes. Must be >compaction_threshold
     /// to avoid deadlock. 0 to disable. Disabled by default.
