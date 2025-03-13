@@ -288,6 +288,8 @@ class NeonProject:
     def check_benchmark(self, target):
         rc = self.benchmarks[target].poll()
         if rc is not None:
+            _, err = self.benchmarks[target].communicate()
+            log.error("STDOUT: %s", err)
             raise RuntimeError(f"The benchmark for {target} ended with code {rc}")
 
     def terminate_benchmark(self, target):
