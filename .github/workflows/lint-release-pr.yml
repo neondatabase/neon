@@ -15,6 +15,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0  # Fetch full history for git operations
+          ref: ${{ github.event.pull_request.head.ref }}
 
       - name: Run lint script
         env:
