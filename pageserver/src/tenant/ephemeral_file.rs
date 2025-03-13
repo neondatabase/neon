@@ -233,7 +233,6 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
         let (written_range, maybe_flushed_range) = {
             if maybe_flushed.is_some() {
                 // [       written       ][ maybe_flushed ][    mutable    ]
-                //                        <-   TAIL_SZ   -><-   TAIL_SZ   ->
                 //                                         ^
                 //                                 `submitted_offset`
                 // <++++++ on disk +++++++????????????????>
@@ -249,7 +248,6 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
                 )
             } else {
                 // [       written                        ][    mutable    ]
-                //                                         <-   TAIL_SZ   ->
                 //                                         ^
                 //                                 `submitted_offset`
                 // <++++++ on disk +++++++++++++++++++++++>
