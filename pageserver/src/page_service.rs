@@ -989,6 +989,10 @@ impl PageServerHandler {
                         }
                     }
                 };
+
+                // Now that we know the shard, set the scope accordingly.
+                let ctx = ctx.with_scope_page_service_pagestream(&shard);
+
                 let span = mkspan!(shard.tenant_shard_id.shard_slug());
 
                 ctx.perf_span_record(
