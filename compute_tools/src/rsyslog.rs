@@ -189,7 +189,7 @@ mod tests {
             let res = conf.build();
             assert!(res.is_ok());
             let conf_str = res.unwrap();
-            assert!(conf_str.contains("imuxsock"));
+            assert!(conf_str.contains("omfwd"));
             assert!(conf_str.contains(r#"target="collector.cvc.local""#));
             assert!(conf_str.contains(r#"port="514""#));
         }
