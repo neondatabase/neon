@@ -61,7 +61,7 @@ memchr = { version = "2" }
 nix = { version = "0.26" }
 nom = { version = "7" }
 num = { version = "0.4" }
-num-bigint = { version = "0.4" }
+num-bigint = { version = "0.4", default-features = false, features = ["std"] }
 num-complex = { version = "0.4", default-features = false, features = ["std"] }
 num-integer = { version = "0.1", features = ["i128"] }
 num-iter = { version = "0.1", default-features = false, features = ["i128", "std"] }
@@ -115,7 +115,6 @@ anyhow = { version = "1", features = ["backtrace"] }
 bytes = { version = "1", features = ["serde"] }
 cc = { version = "1", default-features = false, features = ["parallel"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "wasmbind"] }
-displaydoc = { version = "0.2" }
 either = { version = "1" }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
@@ -128,7 +127,7 @@ log = { version = "0.4", default-features = false, features = ["std"] }
 memchr = { version = "2" }
 nom = { version = "7" }
 num = { version = "0.4" }
-num-bigint = { version = "0.4" }
+num-bigint = { version = "0.4", default-features = false, features = ["std"] }
 num-complex = { version = "0.4", default-features = false, features = ["std"] }
 num-integer = { version = "0.1", features = ["i128"] }
 num-iter = { version = "0.1", default-features = false, features = ["i128", "std"] }
