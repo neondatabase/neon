@@ -175,12 +175,10 @@ pub struct NeonStorageControllerConf {
     #[serde(with = "humantime_serde")]
     pub long_reconcile_threshold: Option<Duration>,
 
-    #[serde(default)]
     pub use_https_pageserver_api: bool,
 
     pub timelines_onto_safekeepers: bool,
 
-    #[serde(default)]
     pub use_https_safekeeper_api: bool,
 }
 
