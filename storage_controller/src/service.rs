@@ -1227,7 +1227,7 @@ impl Service {
                     }
                 }
             }
-            if let Ok(Ok(deltas)) = res_sk {
+            if let Ok(deltas) = res_sk {
                 let mut locked = self.inner.write().unwrap();
                 let mut safekeepers = (*locked.safekeepers).clone();
                 for (id, state) in deltas.0 {
