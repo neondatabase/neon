@@ -287,7 +287,7 @@ class NeonProject:
         return pgbench
 
     def check_all_benchmarks(self) -> None:
-        for target in self.benchmarks.keys():
+        for target in tuple(self.benchmarks.keys()):
             self.check_benchmark(target)
 
     def check_benchmark(self, target) -> None:
