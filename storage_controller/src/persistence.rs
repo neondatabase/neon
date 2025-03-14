@@ -967,10 +967,26 @@ impl Persistence {
         &self,
         split_tenant_id: TenantId,
         old_shard_count: ShardCount,
+        new_shard_count: ShardCount,
     ) -> DatabaseResult<()> {
         use crate::schema::tenant_shards::dsl::*;
         self.with_measured_conn(DatabaseOperation::CompleteShardSplit, move |conn| {
             Box::pin(async move {
+                // Sanity: child shards must still exist, as we're deleting parent shards
+                let child_shards_query = tenant_shards
+                    .filter(tenant_id.eq(split_tenant_id.to_string()))
+                    .filter(shard_count.eq(new_shard_count.literal() as i32));
+                let child_shards = child_shards_query
+                    .load::<TenantShardPersistence>(conn)
+                    .await?;
+                if child_shards.len() != new_shard_count.count() as usize {
+                    return Err(DatabaseError::Logical(format!(
+                        "Unexpected child shard count {} while completing split to \
+                            count {new_shard_count:?} on tenant {split_tenant_id}",
+                        child_shards.len()
+                    )));
+                }
+
                 // Drop parent shards
                 diesel::delete(tenant_shards)
                     .filter(tenant_id.eq(split_tenant_id.to_string()))

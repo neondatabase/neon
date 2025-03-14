@@ -5713,7 +5713,7 @@ impl Service {
         //  it doesn't match, but that requires more retry logic on this side)
 
         self.persistence
-            .complete_shard_split(tenant_id, old_shard_count)
+            .complete_shard_split(tenant_id, old_shard_count, new_shard_count)
             .await?;
 
         fail::fail_point!("shard-split-post-complete", |_| Err(
