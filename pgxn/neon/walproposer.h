@@ -145,6 +145,7 @@ typedef uint64 NNodeId;
  * This and following structs pair ones in membership.rs.
  */
 typedef uint32 Generation;
+#define INVALID_GENERATION 0
 
 typedef struct SafekeeperId
 {

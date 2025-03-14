@@ -99,6 +99,9 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 	wp->config = config;
 	wp->api = api;
 	wp->state = WPS_COLLECTING_TERMS;
+	wp->mconf.generation = INVALID_GENERATION;
+	wp->mconf.members.len = 0;
+	wp->mconf.new_members.len = 0;
 
 	wp_log(LOG, "neon.safekeepers=%s", wp->config->safekeepers_list);
 
@@ -170,6 +173,8 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 
 	if (wp->config->proto_version != 2 && wp->config->proto_version != 3)
 		wp_log(FATAL, "unsupported safekeeper protocol version %d", wp->config->proto_version);
+	if (wp->safekeepers_generation > 0 && wp->config->proto_version < 3)
+		wp_log(FATAL, "enabling generations requires protocol version 3");
 	wp_log(LOG, "using safekeeper protocol version %d", wp->config->proto_version);
 
 	/* Fill the greeting package */
@@ -214,7 +219,7 @@ WalProposerFree(WalProposer *wp)
 static bool
 WalProposerGenerationsEnabled(WalProposer *wp)
 {
-	return wp->safekeepers_generation != 0;
+	return wp->safekeepers_generation != INVALID_GENERATION;
 }
 
 /*
@@ -729,7 +734,25 @@ SendProposerGreeting(Safekeeper *sk)
 static bool
 TermsCollected(WalProposer *wp)
 {
-	return wp->n_connected >= wp->quorum;
+	/* legacy: generations disabled */
+	if (!WalProposerGenerationsEnabled(wp) && wp->mconf.generation == INVALID_GENERATION)
+	{
+		bool enough = wp->n_connected >= wp->quorum;
+		if (enough)
+		{
+			wp->propTerm++;
+			wp_log(LOG, "walproposer connected to quorum (%d) safekeepers, propTerm=" INT64_FORMAT ", starting voting", wp->quorum, wp->propTerm);
+		}
+		return enough;
+	}
+	/*
+	 * With generations enabled, we start campaign only when 1) some mconf is
+	 * actually received 2) we have greetings from majority of members as well
+	 * as from majority of new_members if it exists.
+	 */
+	if (wp->mconf.generation == INVALID_GENERATION)
+		return false;
+	return false;
 }
 
 static void
@@ -753,11 +776,15 @@ RecvAcceptorGreeting(Safekeeper *sk)
 	pfree(mconf_toml);
 
 	/*
-	 * Adopt mconf of safekeepers if it is higher. TODO: mconf change should
-	 * restart wp if it started voting.
+	 * Adopt mconf of safekeepers if it is higher.
 	 */
 	if (sk->greetResponse.mconf.generation > wp->mconf.generation)
 	{
+		/* TODO: put mconf to shmem to immediately pick it up on start */
+		if (wp->state >= WPS_CAMPAIGN)
+		{
+			wp_log(FATAL, "restarting to adopt mconf generation %d", sk->greetResponse.mconf.generation);
+		}
 		MembershipConfigurationFree(&wp->mconf);
 		MembershipConfigurationCopy(&sk->greetResponse.mconf, &wp->mconf);
 		/* full conf was just logged above */
@@ -778,12 +805,9 @@ RecvAcceptorGreeting(Safekeeper *sk)
 		/* We're still collecting terms from the majority. */
 		wp->propTerm = Max(sk->greetResponse.term, wp->propTerm);
 
-		/* Quorum is acquried, prepare the vote request. */
+		/* Quorum is acquired, prepare the vote request. */
 		if (TermsCollected(wp))
 		{
-			wp->propTerm++;
-			wp_log(LOG, "proposer connected to quorum (%d) safekeepers, propTerm=" INT64_FORMAT, wp->quorum, wp->propTerm);
-
 			wp->state = WPS_CAMPAIGN;
 			wp->voteRequest.pam.tag = 'v';
 			wp->voteRequest.generation = wp->mconf.generation;
