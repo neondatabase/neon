@@ -17,7 +17,8 @@ use hyper::{Body, Request, Response, StatusCode};
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use safekeeper_api::models::{
     AcceptorStateStatus, PullTimelineRequest, SafekeeperStatus, SkTimelineInfo, TermSwitchApiEntry,
-    TimelineCopyRequest, TimelineCreateRequest, TimelineStatus, TimelineTermBumpRequest,
+    TimelineCopyRequest, TimelineCreateRequest, TimelineDeleteResult, TimelineStatus,
+    TimelineTermBumpRequest,
 };
 use safekeeper_api::{ServerInfo, membership, models};
 use storage_broker::proto::{SafekeeperTimelineInfo, TenantTimelineId as ProtoTenantTimelineId};
@@ -32,7 +33,7 @@ use utils::lsn::Lsn;
 
 use crate::debug_dump::TimelineDigestRequest;
 use crate::safekeeper::TermLsn;
-use crate::timelines_global_map::{DeleteOrExclude, TimelineDeleteResult};
+use crate::timelines_global_map::DeleteOrExclude;
 use crate::{
     GlobalTimelines, SafeKeeperConf, copy_timeline, debug_dump, patch_control_file, pull_timeline,
 };
@@ -231,9 +232,14 @@ async fn timeline_pull_handler(mut request: Request<Body>) -> Result<Response<Bo
     let conf = get_conf(&request);
     let global_timelines = get_global_timelines(&request);
 
-    let resp = pull_timeline::handle_request(data, conf.sk_auth_token.clone(), global_timelines)
-        .await
-        .map_err(ApiError::InternalServerError)?;
+    let resp = pull_timeline::handle_request(
+        data,
+        conf.sk_auth_token.clone(),
+        conf.ssl_ca_cert.clone(),
+        global_timelines,
+    )
+    .await
+    .map_err(ApiError::InternalServerError)?;
     json_response(StatusCode::OK, resp)
 }
 

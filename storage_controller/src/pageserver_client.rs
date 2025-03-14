@@ -1,14 +1,14 @@
 use pageserver_api::models::detach_ancestor::AncestorDetached;
 use pageserver_api::models::{
-    LocationConfig, LocationConfigListResponse, PageserverUtilization, SecondaryProgress,
-    TenantScanRemoteStorageResponse, TenantShardSplitRequest, TenantShardSplitResponse,
-    TenantWaitLsnRequest, TimelineArchivalConfigRequest, TimelineCreateRequest, TimelineInfo,
-    TopTenantShardsRequest, TopTenantShardsResponse,
+    DetachBehavior, LocationConfig, LocationConfigListResponse, PageserverUtilization,
+    SecondaryProgress, TenantScanRemoteStorageResponse, TenantShardSplitRequest,
+    TenantShardSplitResponse, TenantWaitLsnRequest, TimelineArchivalConfigRequest,
+    TimelineCreateRequest, TimelineInfo, TopTenantShardsRequest, TopTenantShardsResponse,
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::BlockUnblock;
 use pageserver_client::mgmt_api::{Client, Result};
-use reqwest::StatusCode;
+use reqwest::{Certificate, StatusCode};
 use utils::id::{NodeId, TenantId, TimelineId};
 
 /// Thin wrapper around [`pageserver_client::mgmt_api::Client`]. It allows the storage
@@ -46,11 +46,16 @@ macro_rules! measured_request {
 }
 
 impl PageserverClient {
-    pub(crate) fn new(node_id: NodeId, mgmt_api_endpoint: String, jwt: Option<&str>) -> Self {
-        Self {
-            inner: Client::from_client(reqwest::Client::new(), mgmt_api_endpoint, jwt),
+    pub(crate) fn new(
+        node_id: NodeId,
+        mgmt_api_endpoint: String,
+        jwt: Option<&str>,
+        ssl_ca_cert: Option<Certificate>,
+    ) -> Result<Self> {
+        Ok(Self {
+            inner: Client::new(mgmt_api_endpoint, jwt, ssl_ca_cert)?,
             node_id_label: node_id.0.to_string(),
-        }
+        })
     }
 
     pub(crate) fn from_client(
@@ -247,13 +252,14 @@ impl PageserverClient {
         &self,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
+        behavior: Option<DetachBehavior>,
     ) -> Result<AncestorDetached> {
         measured_request!(
             "timeline_detach_ancestor",
             crate::metrics::Method::Put,
             &self.node_id_label,
             self.inner
-                .timeline_detach_ancestor(tenant_shard_id, timeline_id)
+                .timeline_detach_ancestor(tenant_shard_id, timeline_id, behavior)
                 .await
         )
     }

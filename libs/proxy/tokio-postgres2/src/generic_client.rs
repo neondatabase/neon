@@ -22,7 +22,7 @@ pub trait GenericClient: private::Sealed {
         I::IntoIter: ExactSizeIterator + Sync + Send;
 
     /// Query for type information
-    async fn get_type(&self, oid: Oid) -> Result<Type, Error>;
+    async fn get_type(&mut self, oid: Oid) -> Result<Type, Error>;
 }
 
 impl private::Sealed for Client {}
@@ -38,8 +38,8 @@ impl GenericClient for Client {
     }
 
     /// Query for type information
-    async fn get_type(&self, oid: Oid) -> Result<Type, Error> {
-        crate::prepare::get_type(self.inner(), oid).await
+    async fn get_type(&mut self, oid: Oid) -> Result<Type, Error> {
+        self.get_type_inner(oid).await
     }
 }
 
@@ -56,7 +56,7 @@ impl GenericClient for Transaction<'_> {
     }
 
     /// Query for type information
-    async fn get_type(&self, oid: Oid) -> Result<Type, Error> {
-        self.client().get_type(oid).await
+    async fn get_type(&mut self, oid: Oid) -> Result<Type, Error> {
+        self.client_mut().get_type(oid).await
     }
 }

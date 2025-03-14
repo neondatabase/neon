@@ -1427,6 +1427,7 @@ class SafekeeperEnv:
             pg=self.port_distributor.get_port(),
             pg_tenant_only=self.port_distributor.get_port(),
             http=self.port_distributor.get_port(),
+            https=None,
         )
 
         safekeeper_dir = self.repo_dir / f"sk{i}"

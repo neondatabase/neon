@@ -571,6 +571,11 @@ impl ConnectMechanism for TokioMechanism {
             "compute_id",
             tracing::field::display(&node_info.aux.compute_id),
         );
+
+        if let Some(query_id) = ctx.get_testodrome_id() {
+            info!("latency={}, query_id={}", ctx.get_proxy_latency(), query_id);
+        }
+
         Ok(poll_client(
             self.pool.clone(),
             ctx,
@@ -627,6 +632,10 @@ impl ConnectMechanism for HyperMechanism {
             "compute_id",
             tracing::field::display(&node_info.aux.compute_id),
         );
+
+        if let Some(query_id) = ctx.get_testodrome_id() {
+            info!("latency={}, query_id={}", ctx.get_proxy_latency(), query_id);
+        }
 
         Ok(poll_http2_client(
             self.pool.clone(),

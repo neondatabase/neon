@@ -144,7 +144,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "compaction_l0_semaphore": False,
         "l0_flush_delay_threshold": 25,
         "l0_flush_stall_threshold": 42,
-        "l0_flush_wait_upload": False,
+        "l0_flush_wait_upload": True,
         "compaction_target_size": 1048576,
         "checkpoint_distance": 10000,
         "checkpoint_timeout": "13m",

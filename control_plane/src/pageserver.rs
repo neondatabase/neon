@@ -21,6 +21,7 @@ use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use postgres_backend::AuthType;
 use postgres_connection::{PgConnectionConfig, parse_host_port};
+use reqwest::Certificate;
 use utils::auth::{Claims, Scope};
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
@@ -49,12 +50,29 @@ impl PageServerNode {
         let (host, port) =
             parse_host_port(&conf.listen_pg_addr).expect("Unable to parse listen_pg_addr");
         let port = port.unwrap_or(5432);
+
+        let ssl_ca_cert = env.ssl_ca_cert_path().map(|ssl_ca_file| {
+            let buf = std::fs::read(ssl_ca_file).expect("SSL root CA file should exist");
+            Certificate::from_pem(&buf).expect("CA certificate should be valid")
+        });
+
+        let endpoint = if env.storage_controller.use_https_pageserver_api {
+            format!(
+                "https://{}",
+                conf.listen_https_addr.as_ref().expect(
+                    "listen https address should be specified if use_https_pageserver_api is on"
+                )
+            )
+        } else {
+            format!("http://{}", conf.listen_http_addr)
+        };
+
         Self {
             pg_connection_config: PgConnectionConfig::new_host_port(host, port),
             conf: conf.clone(),
             env: env.clone(),
             http_client: mgmt_api::Client::new(
-                format!("http://{}", conf.listen_http_addr),
+                endpoint,
                 {
                     match conf.http_auth_type {
                         AuthType::Trust => None,
@@ -65,7 +83,9 @@ impl PageServerNode {
                     }
                 }
                 .as_deref(),
-            ),
+                ssl_ca_cert,
+            )
+            .expect("Client constructs with no errors"),
         }
     }
 
@@ -220,6 +240,13 @@ impl PageServerNode {
             .context("write identity toml")?;
         drop(identity_toml);
 
+        if self.env.generate_local_ssl_certs {
+            self.env.generate_ssl_cert(
+                datadir.join("server.crt").as_path(),
+                datadir.join("server.key").as_path(),
+            )?;
+        }
+
         // TODO: invoke a TBD config-check command to validate that pageserver will start with the written config
 
         // Write metadata file, used by pageserver on startup to register itself with
@@ -229,6 +256,15 @@ impl PageServerNode {
         let (_http_host, http_port) =
             parse_host_port(&self.conf.listen_http_addr).expect("Unable to parse listen_http_addr");
         let http_port = http_port.unwrap_or(9898);
+
+        let https_port = match self.conf.listen_https_addr.as_ref() {
+            Some(https_addr) => {
+                let (_https_host, https_port) =
+                    parse_host_port(https_addr).expect("Unable to parse listen_https_addr");
+                Some(https_port.unwrap_or(9899))
+            }
+            None => None,
+        };
 
         // Intentionally hand-craft JSON: this acts as an implicit format compat test
         // in case the pageserver-side structure is edited, and reflects the real life
@@ -240,6 +276,7 @@ impl PageServerNode {
                 postgres_port: self.pg_connection_config.port(),
                 http_host: "localhost".to_string(),
                 http_port,
+                https_port,
                 other: HashMap::from([(
                     "availability_zone_id".to_string(),
                     serde_json::json!(az_id),

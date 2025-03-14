@@ -73,12 +73,12 @@ typedef enum
 	 * Moved externally by execution of SS_HANDSHAKE_RECV, when we received a
 	 * quorum of handshakes.
 	 */
-	SS_VOTING,
+	SS_WAIT_VOTING,
 
 	/*
 	 * Already sent voting information, waiting to receive confirmation from
-	 * the node. After receiving, moves to SS_IDLE, if the quorum isn't
-	 * reached yet.
+	 * the node. After receiving, moves to SS_WAIT_ELECTED, if the quorum
+	 * isn't reached yet.
 	 */
 	SS_WAIT_VERDICT,
 
@@ -91,7 +91,7 @@ typedef enum
 	 *
 	 * Moves to SS_ACTIVE only by call to StartStreaming.
 	 */
-	SS_IDLE,
+	SS_WAIT_ELECTED,
 
 	/*
 	 * Active phase, when we acquired quorum and have WAL to send or feedback
@@ -751,6 +751,15 @@ typedef struct WalProposerConfig
 #endif
 } WalProposerConfig;
 
+typedef enum
+{
+	/* collecting greetings to determine term to campaign for */
+	WPS_COLLECTING_TERMS,
+	/* campaing started, waiting for votes */
+	WPS_CAMPAIGN,
+	/* successfully elected */
+	WPS_ELECTED,
+} WalProposerState;
 
 /*
  * WAL proposer state.
@@ -758,6 +767,7 @@ typedef struct WalProposerConfig
 typedef struct WalProposer
 {
 	WalProposerConfig *config;
+	WalProposerState state;
 	/* Current walproposer membership configuration */
 	MembershipConfiguration mconf;
 
@@ -813,10 +823,10 @@ typedef struct WalProposer
 	TermHistory propTermHistory;
 
 	/* epoch start lsn of the proposer */
-	XLogRecPtr	propEpochStartLsn;
+	XLogRecPtr	propTermStartLsn;
 
 	/* Most advanced acceptor epoch */
-	term_t		donorEpoch;
+	term_t		donorLastLogTerm;
 
 	/* Most advanced acceptor */
 	int			donor;
