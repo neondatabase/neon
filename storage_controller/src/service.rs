@@ -8723,6 +8723,8 @@ impl Service {
     pub(crate) async fn safekeepers_for_new_timeline(
         &self,
     ) -> Result<Vec<SafekeeperInfo>, ApiError> {
+        // Number of safekeepers in different AZs we are looking for
+        let wanted_count = 3;
         let mut all_safekeepers = {
             let locked = self.inner.read().unwrap();
             locked
@@ -8768,15 +8770,17 @@ impl Service {
                 continue;
             }
             sks.push(sk_info.clone());
-            if sks.len() == 3 {
+            if sks.len() == wanted_count {
                 break;
             }
         }
-        if sks.len() == 3 {
+        if sks.len() == wanted_count {
             Ok(sks)
         } else {
             Err(ApiError::InternalServerError(anyhow::anyhow!(
-                "couldn't find three safekeepers in different AZs for new timeline"
+                "couldn't find {wanted_count} safekeepers in different AZs for new timeline (found: {}, total active: {})",
+                sks.len(),
+                all_safekeepers.len(),
             )))
         }
     }
