@@ -37,7 +37,7 @@ use crate::logger::startup_context_from_env;
 use crate::lsn_lease::launch_lsn_lease_bg_task_for_static;
 use crate::monitor::launch_monitor;
 use crate::pg_helpers::*;
-use crate::rsyslog::configure_audit_rsyslog;
+use crate::rsyslog::{configure_audit_rsyslog, launch_pgaudit_gc};
 use crate::spec::*;
 use crate::swap::resize_swap;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
@@ -625,13 +625,11 @@ impl ComputeNode {
             }
 
             let log_directory_path = Path::new(&self.params.pgdata).join("log");
-            // TODO: make this more robust
-            // now rsyslog starts once and there is no monitoring or restart if it fails
-            configure_audit_rsyslog(
-                log_directory_path.to_str().unwrap(),
-                "hipaa",
-                &remote_endpoint,
-            )?;
+            let log_directory_path = log_directory_path.to_string_lossy().to_string();
+            configure_audit_rsyslog(log_directory_path.clone(), "hipaa", &remote_endpoint)?;
+
+            // Launch a background task to clean up the audit logs
+            launch_pgaudit_gc(log_directory_path);
         }
 
         // Launch remaining service threads
