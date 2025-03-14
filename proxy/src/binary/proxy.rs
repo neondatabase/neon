@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::bail;
+use arc_swap::ArcSwapOption;
 use futures::future::Either;
 use remote_storage::RemoteStorageConfig;
 use tokio::net::TcpListener;
@@ -563,6 +564,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         (None, None) => None,
         _ => bail!("either both or neither tls-key and tls-cert must be specified"),
     };
+    let tls_config = ArcSwapOption::from(tls_config.map(Arc::new));
 
     let backup_metric_collection_config = config::MetricBackupCollectionConfig {
         remote_storage_config: args.metric_backup_collection_remote_storage.clone(),

@@ -38,7 +38,7 @@ jobs:
     uses: ./.github/workflows/_create-release-pr.yml
     with:
       component-name: 'Storage'
-      release-branch: 'release'
+      source-branch: ${{ github.ref_name }}
     secrets:
       ci-access-token: ${{ secrets.CI_ACCESS_TOKEN }}
 
@@ -51,7 +51,7 @@ jobs:
     uses: ./.github/workflows/_create-release-pr.yml
     with:
       component-name: 'Proxy'
-      release-branch: 'release-proxy'
+      source-branch: ${{ github.ref_name }}
     secrets:
       ci-access-token: ${{ secrets.CI_ACCESS_TOKEN }}
 
@@ -64,6 +64,6 @@ jobs:
     uses: ./.github/workflows/_create-release-pr.yml
     with:
       component-name: 'Compute'
-      release-branch: 'release-compute'
+      source-branch: ${{ github.ref_name }}
     secrets:
       ci-access-token: ${{ secrets.CI_ACCESS_TOKEN }}

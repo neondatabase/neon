@@ -14,7 +14,7 @@ use pageserver_api::controller_api::{
     NodeConfigureRequest, NodeDescribeResponse, NodeRegisterRequest, TenantCreateRequest,
     TenantCreateResponse, TenantLocateResponse,
 };
-use pageserver_api::models::{TimelineCreateRequest, TimelineInfo};
+use pageserver_api::models::{TenantConfigRequest, TimelineCreateRequest, TimelineInfo};
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
@@ -562,10 +562,8 @@ impl StorageController {
             args.push(format!("--public-key=\"{public_key}\""));
         }
 
-        if let Some(control_plane_compute_hook_api) = &self.env.control_plane_compute_hook_api {
-            args.push(format!(
-                "--compute-hook-url={control_plane_compute_hook_api}"
-            ));
+        if let Some(control_plane_hooks_api) = &self.env.control_plane_hooks_api {
+            args.push(format!("--control-plane-url={control_plane_hooks_api}"));
         }
 
         if let Some(split_threshold) = self.config.split_threshold.as_ref() {
@@ -881,5 +879,10 @@ impl StorageController {
             Some(req),
         )
         .await
+    }
+
+    pub async fn set_tenant_config(&self, req: &TenantConfigRequest) -> anyhow::Result<()> {
+        self.dispatch(Method::PUT, "v1/tenant/config".to_string(), Some(req))
+            .await
     }
 }

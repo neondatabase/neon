@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use http_utils::error::ApiError;
+use pageserver_api::models::DetachBehavior;
 use pageserver_api::models::detach_ancestor::AncestorDetached;
 use pageserver_api::shard::ShardIdentity;
 use tokio::sync::Semaphore;
@@ -31,6 +32,9 @@ pub(crate) enum Error {
 
     #[error("too many ancestors")]
     TooManyAncestors,
+
+    #[error("ancestor is not empty")]
+    AncestorNotEmpty,
 
     #[error("shutting down, please retry later")]
     ShuttingDown,
@@ -89,7 +93,9 @@ impl From<Error> for ApiError {
     fn from(value: Error) -> Self {
         match value {
             Error::NoAncestor => ApiError::Conflict(value.to_string()),
-            Error::TooManyAncestors => ApiError::BadRequest(anyhow::anyhow!("{value}")),
+            Error::TooManyAncestors | Error::AncestorNotEmpty => {
+                ApiError::BadRequest(anyhow::anyhow!("{value}"))
+            }
             Error::ShuttingDown => ApiError::ShuttingDown,
             Error::Archived(_) => ApiError::BadRequest(anyhow::anyhow!("{value}")),
             Error::OtherTimelineDetachOngoing(_) | Error::FailedToReparentAll => {
@@ -127,7 +133,7 @@ pub(crate) struct PreparedTimelineDetach {
     layers: Vec<Layer>,
 }
 
-/// TODO: this should be part of PageserverConf because we cannot easily modify cplane arguments.
+// TODO: this should be part of PageserverConf because we cannot easily modify cplane arguments.
 #[derive(Debug)]
 pub(crate) struct Options {
     pub(crate) rewrite_concurrency: std::num::NonZeroUsize,
@@ -147,7 +153,8 @@ impl Default for Options {
 #[derive(Debug)]
 pub(crate) struct Attempt {
     pub(crate) timeline_id: TimelineId,
-
+    pub(crate) ancestor_timeline_id: TimelineId,
+    pub(crate) ancestor_lsn: Lsn,
     _guard: completion::Completion,
     gate_entered: Option<utils::sync::gate::GateGuard>,
 }
@@ -167,25 +174,30 @@ impl Attempt {
 pub(super) async fn prepare(
     detached: &Arc<Timeline>,
     tenant: &Tenant,
+    behavior: DetachBehavior,
     options: Options,
     ctx: &RequestContext,
 ) -> Result<Progress, Error> {
     use Error::*;
 
-    let Some((ancestor, ancestor_lsn)) = detached
+    let Some((mut ancestor, mut ancestor_lsn)) = detached
         .ancestor_timeline
         .as_ref()
         .map(|tl| (tl.clone(), detached.ancestor_lsn))
     else {
+        let ancestor_id;
+        let ancestor_lsn;
         let still_in_progress = {
             let accessor = detached.remote_client.initialized_upload_queue()?;
 
             // we are safe to inspect the latest uploaded, because we can only witness this after
             // restart is complete and ancestor is no more.
             let latest = accessor.latest_uploaded_index_part();
-            if latest.lineage.detached_previous_ancestor().is_none() {
+            let Some((id, lsn)) = latest.lineage.detached_previous_ancestor() else {
                 return Err(NoAncestor);
             };
+            ancestor_id = id;
+            ancestor_lsn = lsn;
 
             latest
                 .gc_blocking
@@ -196,7 +208,8 @@ pub(super) async fn prepare(
         if still_in_progress {
             // gc is still blocked, we can still reparent and complete.
             // we are safe to reparent remaining, because they were locked in in the beginning.
-            let attempt = continue_with_blocked_gc(detached, tenant).await?;
+            let attempt =
+                continue_with_blocked_gc(detached, tenant, ancestor_id, ancestor_lsn).await?;
 
             // because the ancestor of detached is already set to none, we have published all
             // of the layers, so we are still "prepared."
@@ -224,13 +237,34 @@ pub(super) async fn prepare(
 
     check_no_archived_children_of_ancestor(tenant, detached, &ancestor, ancestor_lsn)?;
 
-    if ancestor.ancestor_timeline.is_some() {
+    if let DetachBehavior::MultiLevelAndNoReparent = behavior {
+        // If the ancestor has an ancestor, we might be able to fast-path detach it if the current ancestor does not have any data written/used by the detaching timeline.
+        while let Some(ancestor_of_ancestor) = ancestor.ancestor_timeline.clone() {
+            if ancestor_lsn != ancestor.ancestor_lsn {
+                // non-technical requirement; we could flatten still if ancestor LSN does not match but that needs
+                // us to copy and cut more layers.
+                return Err(AncestorNotEmpty);
+            }
+            // Use the ancestor of the ancestor as the new ancestor (only when the ancestor LSNs are the same)
+            ancestor_lsn = ancestor.ancestor_lsn; // Get the LSN first before resetting the `ancestor` variable
+            ancestor = ancestor_of_ancestor;
+            // TODO: do we still need to check if we don't want to reparent?
+            check_no_archived_children_of_ancestor(tenant, detached, &ancestor, ancestor_lsn)?;
+        }
+    } else if ancestor.ancestor_timeline.is_some() {
         // non-technical requirement; we could flatten N ancestors just as easily but we chose
         // not to, at least initially
         return Err(TooManyAncestors);
     }
 
-    let attempt = start_new_attempt(detached, tenant).await?;
+    tracing::info!(
+        "attempt to detach the timeline from the ancestor: {}@{}, behavior={:?}",
+        ancestor.timeline_id,
+        ancestor_lsn,
+        behavior
+    );
+
+    let attempt = start_new_attempt(detached, tenant, ancestor.timeline_id, ancestor_lsn).await?;
 
     utils::pausable_failpoint!("timeline-detach-ancestor::before_starting_after_locking-pausable");
 
@@ -450,8 +484,13 @@ pub(super) async fn prepare(
     Ok(Progress::Prepared(attempt, prepared))
 }
 
-async fn start_new_attempt(detached: &Timeline, tenant: &Tenant) -> Result<Attempt, Error> {
-    let attempt = obtain_exclusive_attempt(detached, tenant)?;
+async fn start_new_attempt(
+    detached: &Timeline,
+    tenant: &Tenant,
+    ancestor_timeline_id: TimelineId,
+    ancestor_lsn: Lsn,
+) -> Result<Attempt, Error> {
+    let attempt = obtain_exclusive_attempt(detached, tenant, ancestor_timeline_id, ancestor_lsn)?;
 
     // insert the block in the index_part.json, if not already there.
     let _dont_care = tenant
@@ -466,13 +505,23 @@ async fn start_new_attempt(detached: &Timeline, tenant: &Tenant) -> Result<Attem
     Ok(attempt)
 }
 
-async fn continue_with_blocked_gc(detached: &Timeline, tenant: &Tenant) -> Result<Attempt, Error> {
+async fn continue_with_blocked_gc(
+    detached: &Timeline,
+    tenant: &Tenant,
+    ancestor_timeline_id: TimelineId,
+    ancestor_lsn: Lsn,
+) -> Result<Attempt, Error> {
     // FIXME: it would be nice to confirm that there is an in-memory version, since we've just
     // verified there is a persistent one?
-    obtain_exclusive_attempt(detached, tenant)
+    obtain_exclusive_attempt(detached, tenant, ancestor_timeline_id, ancestor_lsn)
 }
 
-fn obtain_exclusive_attempt(detached: &Timeline, tenant: &Tenant) -> Result<Attempt, Error> {
+fn obtain_exclusive_attempt(
+    detached: &Timeline,
+    tenant: &Tenant,
+    ancestor_timeline_id: TimelineId,
+    ancestor_lsn: Lsn,
+) -> Result<Attempt, Error> {
     use Error::{OtherTimelineDetachOngoing, ShuttingDown};
 
     // ensure we are the only active attempt for this tenant
@@ -493,6 +542,8 @@ fn obtain_exclusive_attempt(detached: &Timeline, tenant: &Tenant) -> Result<Atte
 
     Ok(Attempt {
         timeline_id: detached.timeline_id,
+        ancestor_timeline_id,
+        ancestor_lsn,
         _guard: guard,
         gate_entered: Some(_gate_entered),
     })
@@ -795,6 +846,9 @@ pub(super) async fn detach_and_reparent(
     detached: &Arc<Timeline>,
     tenant: &Tenant,
     prepared: PreparedTimelineDetach,
+    ancestor_timeline_id: TimelineId,
+    ancestor_lsn: Lsn,
+    behavior: DetachBehavior,
     _ctx: &RequestContext,
 ) -> Result<DetachingAndReparenting, Error> {
     let PreparedTimelineDetach { layers } = prepared;
@@ -822,7 +876,30 @@ pub(super) async fn detach_and_reparent(
         "cannot (detach? reparent)? complete if the operation is not still ongoing"
     );
 
-    let ancestor = match (detached.ancestor_timeline.as_ref(), recorded_branchpoint) {
+    let ancestor_to_detach = match detached.ancestor_timeline.as_ref() {
+        Some(mut ancestor) => {
+            while ancestor.timeline_id != ancestor_timeline_id {
+                match ancestor.ancestor_timeline.as_ref() {
+                    Some(found) => {
+                        if ancestor_lsn != ancestor.ancestor_lsn {
+                            return Err(Error::DetachReparent(anyhow::anyhow!(
+                                "cannot find the ancestor timeline to detach from: wrong ancestor lsn"
+                            )));
+                        }
+                        ancestor = found;
+                    }
+                    None => {
+                        return Err(Error::DetachReparent(anyhow::anyhow!(
+                            "cannot find the ancestor timeline to detach from"
+                        )));
+                    }
+                }
+            }
+            Some(ancestor)
+        }
+        None => None,
+    };
+    let ancestor = match (ancestor_to_detach, recorded_branchpoint) {
         (Some(ancestor), None) => {
             assert!(
                 !layers.is_empty(),
@@ -894,6 +971,11 @@ pub(super) async fn detach_and_reparent(
         }
         Ancestor::Detached(ancestor, ancestor_lsn) => (ancestor, ancestor_lsn, false),
     };
+
+    if let DetachBehavior::MultiLevelAndNoReparent = behavior {
+        // Do not reparent if the user requests to behave so.
+        return Ok(DetachingAndReparenting::Reparented(HashSet::new()));
+    }
 
     let mut tasks = tokio::task::JoinSet::new();
 
@@ -1032,6 +1114,11 @@ pub(super) async fn complete(
 }
 
 /// Query against a locked `Tenant::timelines`.
+///
+/// A timeline is reparentable if:
+///
+/// - It is not the timeline being detached.
+/// - It has the same ancestor as the timeline being detached. Note that the ancestor might not be the direct ancestor.
 fn reparentable_timelines<'a, I>(
     timelines: I,
     detached: &'a Arc<Timeline>,

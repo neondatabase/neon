@@ -2898,6 +2898,11 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 						relpath(reln->smgr_rlocator, forkNum),
 						InvalidBlockNumber)));
 
+#ifdef DEBUG_COMPARE_LOCAL
+	if (IS_LOCAL_REL(reln))
+		mdzeroextend(reln, forkNum, blocknum, nblocks, skipFsync);
+#endif
+
 	/* Don't log any pages if we're not allowed to do so. */
 	if (!XLogInsertAllowed())
 		return;

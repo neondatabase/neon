@@ -112,7 +112,7 @@ hyper0 = { package = "hyper", version = "0.14" }
 hyper = "1.4"
 hyper-util = "0.1"
 tokio-tungstenite = "0.21.0"
-indexmap = "2"
+indexmap = { version = "2", features = ["serde"] }
 indoc = "2"
 ipnet = "2.10.0"
 itertools = "0.10"
@@ -221,7 +221,7 @@ zerocopy = { version = "0.7", features = ["derive"] }
 json-structural-diff = { version = "0.2.0" }
 
 ## TODO replace this with tracing
-env_logger = "0.10"
+env_logger = "0.11"
 log = "0.4"
 
 ## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed

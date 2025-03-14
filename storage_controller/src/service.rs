@@ -34,9 +34,9 @@ use pageserver_api::controller_api::{
     TenantShardMigrateResponse,
 };
 use pageserver_api::models::{
-    self, LocationConfig, LocationConfigListResponse, LocationConfigMode, PageserverUtilization,
-    SafekeeperInfo, SafekeepersInfo, SecondaryProgress, ShardParameters, TenantConfig,
-    TenantConfigPatchRequest, TenantConfigRequest, TenantLocationConfigRequest,
+    self, DetachBehavior, LocationConfig, LocationConfigListResponse, LocationConfigMode,
+    PageserverUtilization, SafekeeperInfo, SafekeepersInfo, SecondaryProgress, ShardParameters,
+    TenantConfig, TenantConfigPatchRequest, TenantConfigRequest, TenantLocationConfigRequest,
     TenantLocationConfigResponse, TenantShardLocation, TenantShardSplitRequest,
     TenantShardSplitResponse, TenantSorting, TenantTimeTravelRequest,
     TimelineArchivalConfigRequest, TimelineCreateRequest, TimelineCreateResponseStorcon,
@@ -2004,19 +2004,39 @@ impl Service {
         tracing::info!("Loaded {} LocationConfigs", configs.tenant_shards.len());
 
         let mut cleanup = Vec::new();
+        let mut mismatched_locations = 0;
         {
             let mut locked = self.inner.write().unwrap();
 
-            for (tenant_shard_id, observed_loc) in configs.tenant_shards {
+            for (tenant_shard_id, reported) in configs.tenant_shards {
                 let Some(tenant_shard) = locked.tenants.get_mut(&tenant_shard_id) else {
                     cleanup.push(tenant_shard_id);
                     continue;
                 };
-                tenant_shard
+
+                let on_record = &mut tenant_shard
                     .observed
                     .locations
-                    .insert(node.get_id(), ObservedStateLocation { conf: observed_loc });
+                    .entry(node.get_id())
+                    .or_insert_with(|| ObservedStateLocation { conf: None })
+                    .conf;
+
+                // If the location reported by the node does not match our observed state,
+                // then we mark it as uncertain and let the background reconciliation loop
+                // deal with it.
+                //
+                // Note that this also covers net new locations reported by the node.
+                if *on_record != reported {
+                    mismatched_locations += 1;
+                    *on_record = None;
+                }
             }
+        }
+
+        if mismatched_locations > 0 {
+            tracing::info!(
+                "Set observed state to None for {mismatched_locations} mismatched locations"
+            );
         }
 
         for tenant_shard_id in cleanup {
@@ -4021,6 +4041,7 @@ impl Service {
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
+        behavior: Option<DetachBehavior>,
     ) -> Result<models::detach_ancestor::AncestorDetached, ApiError> {
         tracing::info!("Detaching timeline {tenant_id}/{timeline_id}",);
 
@@ -4044,6 +4065,7 @@ impl Service {
                 node: Node,
                 jwt: Option<String>,
                 ssl_ca_cert: Option<Certificate>,
+                behavior: Option<DetachBehavior>,
             ) -> Result<(ShardNumber, models::detach_ancestor::AncestorDetached), ApiError> {
                 tracing::info!(
                     "Detaching timeline on shard {tenant_shard_id}/{timeline_id}, attached to node {node}",
@@ -4053,7 +4075,7 @@ impl Service {
                     .map_err(|e| passthrough_api_error(&node, e))?;
 
                 client
-                    .timeline_detach_ancestor(tenant_shard_id, timeline_id)
+                    .timeline_detach_ancestor(tenant_shard_id, timeline_id, behavior)
                     .await
                     .map_err(|e| {
                         use mgmt_api::Error;
@@ -4091,6 +4113,7 @@ impl Service {
                         node,
                         self.config.pageserver_jwt_token.clone(),
                         self.config.ssl_ca_cert.clone(),
+                        behavior,
                     ))
                 })
                 .await?;
@@ -7874,6 +7897,9 @@ impl Service {
     /// At most one tenant will be split per call: the one with the largest max logical size. It
     /// will split 1 → 8 shards.
     ///
+    /// An unsharded tenant will get DEFAULT_STRIPE_SIZE, regardless of what its ShardIdentity says.
+    /// A sharded tenant will retain its stripe size, as splits do not allow changing it.
+    ///
     /// TODO: consider splitting based on total logical size rather than max logical size.
     ///
     /// TODO: consider spawning multiple splits in parallel: this is only called once every 20
@@ -7919,6 +7945,16 @@ impl Service {
             "Auto-splitting tenant for size threshold {split_threshold}: current size {split_candidate:?}"
         );
 
+        // Retain the stripe size of sharded tenants, as splits don't allow changing it. Otherwise,
+        // use DEFAULT_STRIPE_SIZE for unsharded tenants -- their stripe size doesn't really matter,
+        // and if we change the default stripe size we want to use the new default rather than an
+        // old, persisted stripe size.
+        let new_stripe_size = match split_candidate.id.shard_count.count() {
+            0 => panic!("invalid shard count 0"),
+            1 => Some(ShardParameters::DEFAULT_STRIPE_SIZE),
+            2.. => None,
+        };
+
         let this = self.clone();
         tokio::spawn(
             async move {
@@ -7932,7 +7968,7 @@ impl Service {
                             // because our max shard count is relatively low anyway. This policy
                             // will be adjusted in future once we support higher shard count.
                             new_shard_count: MAX_SHARDS.literal(),
-                            new_stripe_size: Some(ShardParameters::DEFAULT_STRIPE_SIZE),
+                            new_stripe_size,
                         },
                     )
                     .await
