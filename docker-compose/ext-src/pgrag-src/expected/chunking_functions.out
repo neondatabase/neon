@@ -1,0 +1,31 @@
+-- Chunking function tests
+SELECT rag.chunks_by_character_count('the cat sat on the mat', 10, 5);
+       chunks_by_character_count       
+---------------------------------------
+ {"the cat","cat sat on","on the mat"}
+(1 row)
+
+SELECT rag.chunks_by_character_count('Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.', 20, 10);
+                                                                                     chunks_by_character_count                                                                                      
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"Lorem ipsum dolor","dolor sit amet,","amet, consectetur","adipiscing elit.","Sed do eiusmod","do eiusmod tempor","tempor incididunt ut","ut labore et dolore","et dolore magna","magna aliqua."}
+(1 row)
+
+SELECT (rag.chunks_by_character_count('the cat', 10, 0))[1];
+ chunks_by_character_count 
+---------------------------
+ the cat
+(1 row)
+
+SELECT rag.chunks_by_character_count('', 10, 5);
+ chunks_by_character_count 
+---------------------------
+ {}
+(1 row)
+
+SELECT rag.chunks_by_character_count('a b c d e f g h i j k l m n o p', 5, 2);
+                    chunks_by_character_count                    
+-----------------------------------------------------------------
+ {"a b c","c d e","e f g","g h i","i j k","k l m","m n o","o p"}
+(1 row)
+
