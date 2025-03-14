@@ -5,6 +5,7 @@ use anyhow::{Context, bail};
 use itertools::Itertools;
 use rustls::crypto::ring::{self, sign};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use x509_cert::der::{Reader, SliceReader};
 
 use super::{PG_ALPN_PROTOCOL, TlsServerEndPoint};
 
@@ -131,11 +132,13 @@ impl CertResolver {
 
         let first_cert = &cert_chain[0];
         let tls_server_end_point = TlsServerEndPoint::new(first_cert)?;
-        let pem = x509_parser::parse_x509_certificate(first_cert)
-            .context("Failed to parse PEM object from cerficiate")?
-            .1;
 
-        let common_name = pem.subject().to_string();
+        let certificate = SliceReader::new(first_cert)
+            .context("Failed to parse cerficiate")?
+            .decode::<x509_cert::Certificate>()
+            .context("Failed to parse cerficiate")?;
+
+        let common_name = certificate.tbs_certificate.subject.to_string();
 
         // We need to get the canonical name for this certificate so we can match them against any domain names
         // seen within the proxy codebase.
