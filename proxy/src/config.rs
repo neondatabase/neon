@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Ok, bail, ensure};
+use arc_swap::ArcSwapOption;
 use clap::ValueEnum;
 use remote_storage::RemoteStorageConfig;
 
@@ -17,7 +18,7 @@ pub use crate::tls::server_config::{TlsConfig, configure_tls};
 use crate::types::Host;
 
 pub struct ProxyConfig {
-    pub tls_config: Option<TlsConfig>,
+    pub tls_config: ArcSwapOption<TlsConfig>,
     pub metric_collection: Option<MetricCollectionConfig>,
     pub http_config: HttpConfig,
     pub authentication_config: AuthenticationConfig,

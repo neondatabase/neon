@@ -87,8 +87,8 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
     neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=s3_storage(),
     )
-    neon_env_builder.control_plane_compute_hook_api = (
-        f"http://{make_httpserver.host}:{make_httpserver.port}/notify-attach"
+    neon_env_builder.control_plane_hooks_api = (
+        f"http://{make_httpserver.host}:{make_httpserver.port}/"
     )
 
     def ignore_notify(request: Request):

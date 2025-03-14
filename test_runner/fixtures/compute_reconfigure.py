@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 class ComputeReconfigure:
     def __init__(self, server: HTTPServer):
         self.server = server
-        self.control_plane_compute_hook_api = f"http://{server.host}:{server.port}/notify-attach"
+        self.control_plane_hooks_api = f"http://{server.host}:{server.port}/"
         self.workloads: dict[TenantId, Any] = {}
         self.on_notify: Callable[[Any], None] | None = None
 

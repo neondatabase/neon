@@ -1309,6 +1309,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "indexmap 2.0.1",
  "jsonwebtoken",
  "regex",
  "remote_storage",
@@ -1339,6 +1340,7 @@ dependencies = [
  "flate2",
  "futures",
  "http 1.1.0",
+ "indexmap 2.0.1",
  "jsonwebtoken",
  "metrics",
  "nix 0.27.1",
@@ -1347,17 +1349,20 @@ dependencies = [
  "once_cell",
  "opentelemetry",
  "opentelemetry_sdk",
+ "p256 0.13.2",
  "postgres",
  "postgres_initdb",
  "regex",
  "remote_storage",
  "reqwest",
+ "ring",
  "rlimit",
  "rust-ini",
  "serde",
  "serde_json",
  "serde_with",
  "signal-hook",
+ "spki 0.7.3",
  "tar",
  "thiserror 1.0.69",
  "tokio",
@@ -1377,6 +1382,7 @@ dependencies = [
  "vm_monitor",
  "walkdir",
  "workspace_hack",
+ "x509-cert",
  "zstd",
 ]
 
@@ -1801,6 +1807,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fffa369a668c8af7dbf8b5e56c9f744fbd399949ed171606040001947de40b1c"
 dependencies = [
  "const-oid",
+ "der_derive",
+ "flagset",
  "pem-rfc7468",
  "zeroize",
 ]
@@ -1817,6 +1825,17 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "rusticata-macros",
+]
+
+[[package]]
+name = "der_derive"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8034092389675178f570469e6c3b0465d3d30b4505c294a6550db47f3c17ad18"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.90",
 ]
 
 [[package]]
@@ -2115,19 +2134,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "186e05a59d4c50738528153b83b0b0194d3a29507dfec16eccd4b342903397d0"
 dependencies = [
  "log",
-]
-
-[[package]]
-name = "env_logger"
-version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cd405aab171cb85d6735e5c8d9db038c17d3ca007a4d2c25f337935c3d90580"
-dependencies = [
- "humantime",
- "is-terminal",
- "log",
  "regex",
- "termcolor",
 ]
 
 [[package]]
@@ -2136,7 +2143,10 @@ version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c012a26a7f605efc424dd53697843a72be7dc86ad2d01f7814337794a12231d"
 dependencies = [
+ "anstream",
+ "anstyle",
  "env_filter",
+ "humantime",
  "log",
 ]
 
@@ -2290,6 +2300,12 @@ name = "fixedbitset"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ce7134b9999ecaf8bcd65542e436736ef32ddca1b3e06094cb6ec5755203b80"
+
+[[package]]
+name = "flagset"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3ea1ec5f8307826a5b71094dd91fc04d4ae75d5709b20ad351c7fb4815c86ec"
 
 [[package]]
 name = "flate2"
@@ -2888,9 +2904,9 @@ checksum = "c4a1e36c821dbe04574f602848a19f742f4fb3c98d40449f11bcad18d6b17421"
 
 [[package]]
 name = "humantime"
-version = "2.1.0"
+version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a3a5bfb195931eeb336b2a7b4d761daec841b97f947d34394601737a7bba5e4"
+checksum = "9b112acc8b3adf4b107a8ec20977da0273a8c386765a3ec0229bd500a1443f9f"
 
 [[package]]
 name = "humantime-serde"
@@ -3243,7 +3259,7 @@ dependencies = [
  "crossbeam-channel",
  "crossbeam-utils",
  "dashmap 6.1.0",
- "env_logger 0.11.2",
+ "env_logger",
  "indexmap 2.0.1",
  "itoa",
  "log",
@@ -4289,8 +4305,6 @@ dependencies = [
  "reqwest",
  "rpds",
  "rustls 0.23.18",
- "rustls-pemfile 2.1.1",
- "rustls-pki-types",
  "scopeguard",
  "send-future",
  "serde",
@@ -4798,7 +4812,7 @@ dependencies = [
  "bytes",
  "crc32c",
  "criterion",
- "env_logger 0.10.2",
+ "env_logger",
  "log",
  "memoffset 0.9.0",
  "once_cell",
@@ -5092,7 +5106,7 @@ dependencies = [
  "consumption_metrics",
  "ecdsa 0.16.9",
  "ed25519-dalek",
- "env_logger 0.10.2",
+ "env_logger",
  "fallible-iterator",
  "flate2",
  "framed-websockets",
@@ -5975,7 +5989,7 @@ dependencies = [
  "crc32c",
  "criterion",
  "desim",
- "env_logger 0.10.2",
+ "env_logger",
  "fail",
  "futures",
  "hex",
@@ -5997,6 +6011,7 @@ dependencies = [
  "regex",
  "remote_storage",
  "reqwest",
+ "rustls 0.23.18",
  "safekeeper_api",
  "safekeeper_client",
  "scopeguard",
@@ -6013,6 +6028,7 @@ dependencies = [
  "tokio",
  "tokio-io-timeout",
  "tokio-postgres",
+ "tokio-rustls 0.26.0",
  "tokio-stream",
  "tokio-tar",
  "tokio-util",
@@ -6927,15 +6943,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "termcolor"
-version = "1.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be55cf8942feac5c765c2c993422806843c9a9a45d4d5c407ad6dd2ea95eb9b6"
-dependencies = [
- "winapi-util",
-]
-
-[[package]]
 name = "test-context"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7123,6 +7130,27 @@ name = "tinyvec_macros"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
+
+[[package]]
+name = "tls_codec"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5e78c9c330f8c85b2bae7c8368f2739157db9991235123aa1b15ef9502bfb6a"
+dependencies = [
+ "tls_codec_derive",
+ "zeroize",
+]
+
+[[package]]
+name = "tls_codec_derive"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d9ef545650e79f30233c0003bcc2504d7efac6dad25fca40744de773fe2049c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.90",
+]
 
 [[package]]
 name = "tokio"
@@ -7919,7 +7947,7 @@ dependencies = [
  "anyhow",
  "camino-tempfile",
  "clap",
- "env_logger 0.10.2",
+ "env_logger",
  "log",
  "postgres",
  "postgres_ffi",
@@ -8365,6 +8393,7 @@ name = "workspace_hack"
 version = "0.1.0"
 dependencies = [
  "ahash",
+ "anstream",
  "anyhow",
  "base64 0.13.1",
  "base64 0.21.7",
@@ -8375,12 +8404,17 @@ dependencies = [
  "chrono",
  "clap",
  "clap_builder",
+ "const-oid",
  "crypto-bigint 0.5.5",
  "der 0.7.8",
  "deranged",
  "digest",
  "displaydoc",
+ "ecdsa 0.16.9",
  "either",
+ "elliptic-curve 0.13.8",
+ "env_filter",
+ "env_logger",
  "fail",
  "form_urlencoded",
  "futures-channel",
@@ -8413,6 +8447,7 @@ dependencies = [
  "num-rational",
  "num-traits",
  "once_cell",
+ "p256 0.13.2",
  "parquet",
  "prettyplease",
  "proc-macro2",
@@ -8425,6 +8460,7 @@ dependencies = [
  "reqwest",
  "rustls 0.23.18",
  "scopeguard",
+ "sec1 0.7.3",
  "serde",
  "serde_json",
  "sha2",
@@ -8469,6 +8505,18 @@ name = "writeable"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e9df38ee2d2c3c5948ea468a8406ff0db0b29ae1ffde1bcf20ef305bcc95c51"
+
+[[package]]
+name = "x509-cert"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1301e935010a701ae5f8655edc0ad17c44bad3ac5ce8c39185f75453b720ae94"
+dependencies = [
+ "const-oid",
+ "der 0.7.8",
+ "spki 0.7.3",
+ "tls_codec",
+]
 
 [[package]]
 name = "x509-certificate"

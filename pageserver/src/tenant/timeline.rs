@@ -45,8 +45,9 @@ use pageserver_api::key::{
 use pageserver_api::keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning};
 use pageserver_api::models::{
     CompactKeyRange, CompactLsnRange, CompactionAlgorithm, CompactionAlgorithmSettings,
-    DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
-    InMemoryLayerInfo, LayerMapInfo, LsnLease, PageTraceEvent, RelSizeMigration, TimelineState,
+    DetachBehavior, DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
+    EvictionPolicy, InMemoryLayerInfo, LayerMapInfo, LsnLease, PageTraceEvent, RelSizeMigration,
+    TimelineState,
 };
 use pageserver_api::reltag::{BlockNumber, RelTag};
 use pageserver_api::shard::{ShardIdentity, ShardIndex, ShardNumber, TenantShardId};
@@ -67,6 +68,7 @@ use tracing::*;
 use utils::generation::Generation;
 use utils::guard_arc_swap::GuardArcSwap;
 use utils::id::TimelineId;
+use utils::logging::{MonitorSlowFutureCallback, monitor_slow_future};
 use utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use utils::postgres_client::PostgresClientProtocol;
 use utils::rate_limit::RateLimit;
@@ -439,6 +441,8 @@ pub struct Timeline {
     heatmap_layers_downloader: Mutex<Option<heatmap_layers_downloader::HeatmapLayersDownloader>>,
 
     pub(crate) rel_size_v2_status: ArcSwapOption<RelSizeMigration>,
+
+    wait_lsn_log_slow: tokio::sync::Semaphore,
 }
 
 pub(crate) enum PreviousHeatmap {
@@ -1479,17 +1483,67 @@ impl Timeline {
             WaitLsnTimeout::Default => self.conf.wait_lsn_timeout,
         };
 
-        let _timer = crate::metrics::WAIT_LSN_TIME.start_timer();
+        let timer = crate::metrics::WAIT_LSN_TIME.start_timer();
+        let start_finish_counterpair_guard = self.metrics.wait_lsn_start_finish_counterpair.guard();
 
-        match self.last_record_lsn.wait_for_timeout(lsn, timeout).await {
+        let wait_for_timeout = self.last_record_lsn.wait_for_timeout(lsn, timeout);
+        let wait_for_timeout = std::pin::pin!(wait_for_timeout);
+        // Use threshold of 1 because even 1 second of wait for ingest is very much abnormal.
+        let log_slow_threshold = Duration::from_secs(1);
+        // Use period of 10 to avoid flooding logs during an outage that affects all timelines.
+        let log_slow_period = Duration::from_secs(10);
+        let mut logging_permit = None;
+        let wait_for_timeout = monitor_slow_future(
+            log_slow_threshold,
+            log_slow_period,
+            wait_for_timeout,
+            |MonitorSlowFutureCallback {
+                 ready,
+                 is_slow,
+                 elapsed_total,
+                 elapsed_since_last_callback,
+             }| {
+                self.metrics
+                    .wait_lsn_in_progress_micros
+                    .inc_by(u64::try_from(elapsed_since_last_callback.as_micros()).unwrap());
+                if !is_slow {
+                    return;
+                }
+                // It's slow, see if we should log it.
+                // (We limit the logging to one per invocation per timeline to avoid excessive
+                // logging during an extended broker / networking outage that affects all timelines.)
+                if logging_permit.is_none() {
+                    logging_permit = self.wait_lsn_log_slow.try_acquire().ok();
+                }
+                if logging_permit.is_none() {
+                    return;
+                }
+                // We log it.
+                if ready {
+                    info!(
+                        "slow wait_lsn completed after {:.3}s",
+                        elapsed_total.as_secs_f64()
+                    );
+                } else {
+                    info!(
+                        "slow wait_lsn still running for {:.3}s",
+                        elapsed_total.as_secs_f64()
+                    );
+                }
+            },
+        );
+        let res = wait_for_timeout.await;
+        // don't count the time spent waiting for lock below, and also in walreceiver.status(), towards the wait_lsn_time_histo
+        drop(logging_permit);
+        drop(start_finish_counterpair_guard);
+        drop(timer);
+        match res {
             Ok(()) => Ok(()),
             Err(e) => {
                 use utils::seqwait::SeqWaitError::*;
                 match e {
                     Shutdown => Err(WaitLsnError::Shutdown),
                     Timeout => {
-                        // don't count the time spent waiting for lock below, and also in walreceiver.status(), towards the wait_lsn_time_histo
-                        drop(_timer);
                         let walreceiver_status = self.walreceiver_status();
                         Err(WaitLsnError::Timeout(format!(
                             "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}, WalReceiver status: {}",
@@ -2423,8 +2477,9 @@ impl Timeline {
     }
 
     fn get_l0_flush_delay_threshold(&self) -> Option<usize> {
-        // Disable L0 flushes by default. This and compaction needs further tuning.
-        const DEFAULT_L0_FLUSH_DELAY_FACTOR: usize = 0; // TODO: default to e.g. 3
+        // By default, delay L0 flushes at 3x the compaction threshold. The compaction threshold
+        // defaults to 10, and L0 compaction is generally able to keep L0 counts below 30.
+        const DEFAULT_L0_FLUSH_DELAY_FACTOR: usize = 3;
 
         // If compaction is disabled, don't delay.
         if self.get_compaction_period() == Duration::ZERO {
@@ -2452,8 +2507,9 @@ impl Timeline {
     }
 
     fn get_l0_flush_stall_threshold(&self) -> Option<usize> {
-        // Disable L0 stalls by default. In ingest benchmarks, we see image compaction take >10
-        // minutes, blocking L0 compaction, and we can't stall L0 flushes for that long.
+        // Disable L0 stalls by default. Stalling can cause unavailability if L0 compaction isn't
+        // responsive, and it can e.g. block on other compaction via the compaction semaphore or
+        // sibling timelines. We need more confidence before enabling this.
         const DEFAULT_L0_FLUSH_STALL_FACTOR: usize = 0; // TODO: default to e.g. 5
 
         // If compaction is disabled, don't stall.
@@ -2821,6 +2877,8 @@ impl Timeline {
                 heatmap_layers_downloader: Mutex::new(None),
 
                 rel_size_v2_status: ArcSwapOption::from_pointee(rel_size_v2_status),
+
+                wait_lsn_log_slow: tokio::sync::Semaphore::new(1),
             };
 
             result.repartition_threshold =
@@ -5388,9 +5446,10 @@ impl Timeline {
         self: &Arc<Timeline>,
         tenant: &crate::tenant::Tenant,
         options: detach_ancestor::Options,
+        behavior: DetachBehavior,
         ctx: &RequestContext,
     ) -> Result<detach_ancestor::Progress, detach_ancestor::Error> {
-        detach_ancestor::prepare(self, tenant, options, ctx).await
+        detach_ancestor::prepare(self, tenant, behavior, options, ctx).await
     }
 
     /// Second step of detach from ancestor; detaches the `self` from it's current ancestor and
@@ -5406,9 +5465,21 @@ impl Timeline {
         self: &Arc<Timeline>,
         tenant: &crate::tenant::Tenant,
         prepared: detach_ancestor::PreparedTimelineDetach,
+        ancestor_timeline_id: TimelineId,
+        ancestor_lsn: Lsn,
+        behavior: DetachBehavior,
         ctx: &RequestContext,
     ) -> Result<detach_ancestor::DetachingAndReparenting, detach_ancestor::Error> {
-        detach_ancestor::detach_and_reparent(self, tenant, prepared, ctx).await
+        detach_ancestor::detach_and_reparent(
+            self,
+            tenant,
+            prepared,
+            ancestor_timeline_id,
+            ancestor_lsn,
+            behavior,
+            ctx,
+        )
+        .await
     }
 
     /// Final step which unblocks the GC.
