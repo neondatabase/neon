@@ -2388,7 +2388,6 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 						 LSN_FORMAT_ARGS(last_written_lsn),
 						 LSN_FORMAT_ARGS(flushlsn));
 				XLogFlush(last_written_lsn);
-				flushlsn = last_written_lsn;
 			}
 
 			/*
@@ -2403,19 +2402,10 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 			 * primary, but for the primary we can avoid it by always
 			 * requesting the latest page, by setting request LSN to
 			 * UINT64_MAX.
-			 *
-			 * Remember the current LSN, however, so that we can later
-			 * correctly determine if the response to the request is still
-			 * valid. The most up-to-date LSN we could use for that purpose
-			 * would be the current insert LSN, but to avoid the overhead of
-			 * looking it up, use 'flushlsn' instead. This relies on the
-			 * assumption that if the page was modified since the last WAL
-			 * flush, it should still be in the buffer cache, and we
-			 * wouldn't be requesting it.
 			 */
 			result->request_lsn = UINT64_MAX;
 			result->not_modified_since = last_written_lsn;
-			result->effective_request_lsn = flushlsn;
+			result->effective_request_lsn = last_written_lsn;
 		}
 	}
 }
