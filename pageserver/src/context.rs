@@ -108,7 +108,6 @@ use tracing_utils::perf_span::{PerfInstrument, PerfSpan};
 use tracing::{Dispatch, Span};
 
 // The main structure of this module, see module-level comment.
-#[derive(Clone)]
 pub struct RequestContext {
     task_kind: TaskKind,
     download_behavior: DownloadBehavior,
@@ -373,6 +372,23 @@ impl RequestContextBuilder {
 }
 
 impl RequestContext {
+    /// Private clone implementation
+    ///
+    /// Callers should use the [`RequestContextBuilder`] or child spaning APIs of
+    /// [`RequestContext`].
+    fn clone(&self) -> Self {
+        Self {
+            task_kind: self.task_kind,
+            download_behavior: self.download_behavior,
+            access_stats_behavior: self.access_stats_behavior,
+            page_content_kind: self.page_content_kind,
+            read_path_debug: self.read_path_debug,
+            scope: self.scope.clone(),
+            perf_span: self.perf_span.clone(),
+            perf_span_dispatch: self.perf_span_dispatch.clone(),
+        }
+    }
+
     /// Create a new RequestContext that has no parent.
     ///
     /// The function is called `new` because, once we add children
