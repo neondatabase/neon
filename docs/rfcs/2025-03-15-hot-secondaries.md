@@ -72,6 +72,10 @@ for L1 compaction on attached locations: once we build up a deep stack of L0s, t
 more tolerant of a deeper L0 stack because it is less often serving
 reads: for example it might make sense to trigger normal L1 compaction at 10 L0 layers, and trigger shallow compaction at 15 L0 layers, giving a good chance that by the time the hot secondary does compaction, the attached location has already written out some layer files for it to read.
 
+To avoid an availability gap while downloading data from S3, it is important that the hot
+secondary downloads new layer files before updating its layer map to de-reference replaced
+layers.
+
 ### Handling missing layers/timelines
 
 If an incoming request references a timeline that the hot secondary is
@@ -86,6 +90,56 @@ Hot secondaries may also experience 404s reading layers from remote storage, bec
 during compaction or GC.  If the hot secondary finds such a 404, it should
 trigger a re-download of the timeline index.
 
+### Transition from Hot Secondary to Attached
+
+While a hot secondary can serve writes independently for a short period of time (until
+too many L0s build up to efficiently serve reads), it needs to be promoted to be the attached
+location if the last attached location becomes unavailable (or if the storage controller
+determines that the tenant should be migrated).
+
+This can be done trivially by shutting down and starting up again in attached mode (on startup
+the layer map will be reset to the content of remote storage), but this can impose an availability gap, because:
+- After unexpected failure of an attached location, the hot secondary's local L0s may be
+  further ahead in WAL ingest than the contents of remote storage, so resetting to what's
+  in remote storage will make recent data unavailable until it is re-ingested.
+- Even if the remote data is up to date with latest WAL, it may take some time to download
+  layers. 
+
+To avoid an availability gap while re-ingesting WAL, it is necessary to stitch the local L0s with remote storage state.  We may do this at startup, by making an exception to our
+usual policy of only respecting remote storage state at startup.  This exception can
+be specific to L0 files, and perhaps also specific to when we can detect that these
+were written by a hot secondary (perhaps by marking these files with a suffix or magic 0xffff generation?)
+
+We should also only do this cutover once we're reasonably sure the old attached location
+isn't still uploading, so that on startup we do not see a whole new layer map with lots
+of layers that need downloading.
+
+We may still tolerate some availability gap in the <1s range while reloading the tenant
+in a different mode.  We should aim for this to be under 100ms under usual circumstances,
+as it should only require long enough to:
+- Flush ephemeral layer to L0 on shutdown (writing 128MB takes of the order 100ms)
+- Load remote index on startup (reading from S3 takes of the order 10ms)
+
+Doing many such cutovers concurrently may result in worse availability, so the controller
+should be tuned to understand that when cutting over multiple hot secondaries to attached,
+it is best not to rush it (as they are already in a readable state, it is less urgent
+than when activating warm secondaries).
+
+## Summary of a failover
+
+To summarize the order of operations when a pageserver instance fails while holding a tenant
+that has a hot secondary location:
+- after some short timeout (100s of ms), compute gives up on getpage requests to the primary and sends
+  them to the hot secondary.
+- after some much longer timeout (e.g. ~30s), controller decides that the hot secondary should
+  become attached, so that it can do its own compaction.
+- Hot secondary is instructed to do a compaction before shutting it down, so that during
+  its restart into attached mode it will not have to deal with any remote storage change.
+- Hot secondary shuts down, flushing ephemeral layer to L0.
+- Previously-secondary location starts up in attached mode with a new generation.  Downloads
+  index from remote storage, and identifies which L0 files to retain.  Adds these to LayerMap
+  and enqueues them for upload.
+- Now fully available for reads and able to proceed with compaction etc as normal.
 
 ## Optimisations/details
 
