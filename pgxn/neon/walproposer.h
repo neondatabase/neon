@@ -771,6 +771,15 @@ typedef struct WalProposer
 	WalProposerState state;
 	/* Current walproposer membership configuration */
 	MembershipConfiguration mconf;
+	/*
+	 * Parallels mconf.members with pointers to the member's slot in safekeepers
+	 * array of connections, or NULL if such member is not connected. Helps to
+	 * avoid looking slot per id through all .safekeepers[] when doing quorum
+	 * checks.
+	 */
+	Safekeeper* members_safekeepers[MAX_SAFEKEEPERS];
+	/* As above, but for new_members. */
+	Safekeeper* new_members_safekeepers[MAX_SAFEKEEPERS];
 
 	/* (n_safekeepers / 2) + 1 */
 	int			quorum;
