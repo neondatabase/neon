@@ -17,5 +17,5 @@ BEGIN
     INSERT INTO neon.drop_subscriptions_done VALUES (1, current_setting('neon.timeline_id'))
     ON CONFLICT (id) DO UPDATE
     SET timeline_id = current_setting('neon.timeline_id');
-END
-$$
+END;
+$$;
