@@ -40,7 +40,7 @@ use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 
 use super::tenant::{PageReconstructError, Timeline};
 use crate::aux_file;
-use crate::context::{RequestContext, RequestContextBuilder};
+use crate::context::{PerfInstrumentFutureExt, RequestContext, RequestContextBuilder};
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::metrics::{
     RELSIZE_CACHE_ENTRIES, RELSIZE_CACHE_HITS, RELSIZE_CACHE_MISSES, RELSIZE_CACHE_MISSES_OLD,
@@ -341,11 +341,9 @@ impl Timeline {
             false => ctx.attached_child(),
         };
 
-        let res = ctx
-            .maybe_instrument(
-                self.get_vectored(keyspace, effective_lsn, io_concurrency, &ctx),
-                |current_perf_span| current_perf_span.clone(),
-            )
+        let res = self
+            .get_vectored(keyspace, effective_lsn, io_concurrency, &ctx)
+            .maybe_instrument(&ctx, |current_perf_span| current_perf_span.clone())
             .await;
 
         match res {

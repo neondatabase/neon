@@ -55,7 +55,9 @@ use utils::sync::spsc_fold;
 use crate::auth::check_permission;
 use crate::basebackup::BasebackupError;
 use crate::config::PageServerConf;
-use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
+use crate::context::{
+    DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
+};
 use crate::metrics::{
     self, COMPUTE_COMMANDS_COUNTERS, ComputeCommandKind, LIVE_CONNECTIONS, SmgrOpTimer,
     TimelineMetrics,
@@ -945,21 +947,19 @@ impl PageServerHandler {
                     ctx.attached_child()
                 };
 
-                let res = ctx
-                    .maybe_instrument(
-                        timeline_handles.get(tenant_id, timeline_id, ShardSelector::Page(key)),
-                        |current_perf_span| {
-                            info_span!(
-                                target: PERF_TRACE_TARGET,
-                                parent: current_perf_span,
-                                "SHARD_SELECTION",
-                                tenant_id = %tenant_id,
-                                timeline_id = %timeline_id,
-                                lsn = %req.hdr.request_lsn,
-                                request_id = %req.hdr.reqid,
-                            )
-                        },
-                    )
+                let res = timeline_handles
+                    .get(tenant_id, timeline_id, ShardSelector::Page(key))
+                    .maybe_instrument(&ctx, |current_perf_span| {
+                        info_span!(
+                            target: PERF_TRACE_TARGET,
+                            parent: current_perf_span,
+                            "SHARD_SELECTION",
+                            tenant_id = %tenant_id,
+                            timeline_id = %timeline_id,
+                            lsn = %req.hdr.request_lsn,
+                            request_id = %req.hdr.reqid,
+                        )
+                    })
                     .await;
 
                 let shard = match res {
@@ -996,51 +996,45 @@ impl PageServerHandler {
                     tracing::field::display(shard.get_shard_identity().shard_slug()),
                 );
 
-                let timer = ctx
-                    .maybe_instrument(
-                        record_op_start_and_throttle(
-                            &shard,
-                            metrics::SmgrQueryType::GetPageAtLsn,
-                            received_at,
-                        ),
-                        |current_perf_span| {
-                            info_span!(
-                                target: PERF_TRACE_TARGET,
-                                parent: current_perf_span,
-                                "THROTTLE",
-                                tenant_id = %tenant_id,
-                                timeline_id = %timeline_id,
-                                lsn = %req.hdr.request_lsn,
-                                request_id = %req.hdr.reqid
-                            )
-                        },
+                let timer = record_op_start_and_throttle(
+                    &shard,
+                    metrics::SmgrQueryType::GetPageAtLsn,
+                    received_at,
+                )
+                .maybe_instrument(&ctx, |current_perf_span| {
+                    info_span!(
+                        target: PERF_TRACE_TARGET,
+                        parent: current_perf_span,
+                        "THROTTLE",
+                        tenant_id = %tenant_id,
+                        timeline_id = %timeline_id,
+                        lsn = %req.hdr.request_lsn,
+                        request_id = %req.hdr.reqid
                     )
-                    .await?;
+                })
+                .await?;
 
                 // We're holding the Handle
                 // TODO: if we actually need to wait for lsn here, it delays the entire batch which doesn't need to wait
-                let res = ctx
-                    .maybe_instrument(
-                        Self::wait_or_get_last_lsn(
-                            &shard,
-                            req.hdr.request_lsn,
-                            req.hdr.not_modified_since,
-                            &shard.get_applied_gc_cutoff_lsn(),
-                            &ctx,
-                        ),
-                        |current_perf_span| {
-                            info_span!(
-                                target: PERF_TRACE_TARGET,
-                                parent: current_perf_span,
-                                "WAIT_LSN",
-                                tenant_id = %tenant_id,
-                                timeline_id = %timeline_id,
-                                lsn = %req.hdr.request_lsn,
-                                request_id = %req.hdr.reqid
-                            )
-                        },
+                let res = Self::wait_or_get_last_lsn(
+                    &shard,
+                    req.hdr.request_lsn,
+                    req.hdr.not_modified_since,
+                    &shard.get_applied_gc_cutoff_lsn(),
+                    &ctx,
+                )
+                .maybe_instrument(&ctx, |current_perf_span| {
+                    info_span!(
+                        target: PERF_TRACE_TARGET,
+                        parent: current_perf_span,
+                        "WAIT_LSN",
+                        tenant_id = %tenant_id,
+                        timeline_id = %timeline_id,
+                        lsn = %req.hdr.request_lsn,
+                        request_id = %req.hdr.reqid
                     )
-                    .await;
+                })
+                .await;
 
                 let effective_request_lsn = match res {
                     Ok(lsn) => lsn,

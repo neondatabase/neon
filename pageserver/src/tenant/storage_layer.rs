@@ -43,7 +43,9 @@ use super::PageReconstructError;
 use super::layer_map::InMemoryLayerDesc;
 use super::timeline::{GetVectoredError, ReadPath};
 use crate::config::PageServerConf;
-use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
+use crate::context::{
+    AccessStatsBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
+};
 
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where
@@ -885,11 +887,10 @@ impl ReadableLayer {
                     })
                     .attached_child();
 
-                ctx.maybe_instrument(
-                    layer.get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, &ctx),
-                    |crnt_perf_span| crnt_perf_span.clone(),
-                )
-                .await
+                layer
+                    .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, &ctx)
+                    .maybe_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
+                    .await
             }
             ReadableLayer::InMemoryLayer(layer) => {
                 let ctx = RequestContextBuilder::from(ctx)
@@ -903,11 +904,10 @@ impl ReadableLayer {
                     })
                     .attached_child();
 
-                ctx.maybe_instrument(
-                    layer.get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, &ctx),
-                    |crnt_perf_span| crnt_perf_span.clone(),
-                )
-                .await
+                layer
+                    .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, &ctx)
+                    .maybe_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
+                    .await
             }
         }
     }

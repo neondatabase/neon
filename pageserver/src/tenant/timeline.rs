@@ -95,7 +95,9 @@ use super::{
 };
 use crate::aux_file::AuxFileSizeEstimator;
 use crate::config::PageServerConf;
-use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
+use crate::context::{
+    DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
+};
 use crate::disk_usage_eviction_task::{DiskUsageEvictionInfo, EvictionCandidate, finite_f32};
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::l0_flush::{self, L0FlushGlobalState};
@@ -1286,11 +1288,9 @@ impl Timeline {
                 })
                 .attached_child();
 
-            ctx.maybe_instrument(
-                self.get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, &ctx),
-                |crnt_perf_span| crnt_perf_span.clone(),
-            )
-            .await
+            self.get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, &ctx)
+                .maybe_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
+                .await
         };
 
         if let Err(err) = traversal_res {
@@ -1334,8 +1334,9 @@ impl Timeline {
                 async move {
                     assert_eq!(state.situation, ValueReconstructSituation::Complete);
 
-                    let res = ctx
-                        .maybe_instrument(state.collect_pending_ios(), |crnt_perf_span| {
+                    let res = state
+                        .collect_pending_ios()
+                        .maybe_instrument(&ctx, |crnt_perf_span| {
                             info_span!(
                                 target: PERF_TRACE_TARGET,
                                 parent: crnt_perf_span,
@@ -1362,18 +1363,16 @@ impl Timeline {
                     );
 
                     let walredo_deltas = converted.num_deltas();
-                    let walredo_res = ctx
-                        .maybe_instrument(
-                            walredo_self.reconstruct_value(key, lsn, converted),
-                            |crnt_perf_span| {
-                                info_span!(
-                                    target: PERF_TRACE_TARGET,
-                                    parent: crnt_perf_span,
-                                    "WALREDO",
-                                    deltas = %walredo_deltas,
-                                )
-                            },
-                        )
+                    let walredo_res = walredo_self
+                        .reconstruct_value(key, lsn, converted)
+                        .maybe_instrument(&ctx, |crnt_perf_span| {
+                            info_span!(
+                                target: PERF_TRACE_TARGET,
+                                parent: crnt_perf_span,
+                                "WALREDO",
+                                deltas = %walredo_deltas,
+                            )
+                        })
                         .await;
 
                     (key, walredo_res)
@@ -1381,11 +1380,9 @@ impl Timeline {
             });
         }
 
-        let results = ctx
-            .maybe_instrument(
-                futs.collect::<BTreeMap<Key, Result<Bytes, PageReconstructError>>>(),
-                |crnt_perf_span| crnt_perf_span.clone(),
-            )
+        let results = futs
+            .collect::<BTreeMap<Key, Result<Bytes, PageReconstructError>>>()
+            .maybe_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
             .await;
 
         // For aux file keys (v1 or v2) the vectored read path does not return an error
@@ -3879,17 +3876,15 @@ impl Timeline {
                     })
                     .attached_child();
 
-                ctx.maybe_instrument(
-                    Self::get_vectored_reconstruct_data_timeline(
-                        timeline,
-                        keyspace.clone(),
-                        cont_lsn,
-                        reconstruct_state,
-                        &self.cancel,
-                        &ctx,
-                    ),
-                    |crnt_perf_span| crnt_perf_span.clone(),
+                Self::get_vectored_reconstruct_data_timeline(
+                    timeline,
+                    keyspace.clone(),
+                    cont_lsn,
+                    reconstruct_state,
+                    &self.cancel,
+                    &ctx,
                 )
+                .maybe_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
                 .await?
             };
 
@@ -3950,11 +3945,9 @@ impl Timeline {
                 })
                 .attached_child();
 
-            timeline_owned = ctx
-                .maybe_instrument(
-                    timeline.get_ready_ancestor_timeline(ancestor_timeline, &ctx),
-                    |crnt_perf_span| crnt_perf_span.clone(),
-                )
+            timeline_owned = timeline
+                .get_ready_ancestor_timeline(ancestor_timeline, &ctx)
+                .maybe_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
                 .await?;
             timeline = &*timeline_owned;
         };

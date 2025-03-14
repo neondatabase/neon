@@ -552,30 +552,6 @@ impl RequestContext {
         }
     }
 
-    pub(crate) fn maybe_instrument<'a, Fut, Fn>(
-        &self,
-        future: Fut,
-        make_span: Fn,
-    ) -> BoxFuture<'a, Fut::Output>
-    where
-        Fut: Future + Send + 'a,
-        Fn: FnOnce(&Span) -> Span,
-    {
-        match &self.perf_span {
-            Some(perf_span) => {
-                assert!(self.perf_span_dispatch.is_some());
-                let dispatcher = self.perf_span_dispatch.as_ref().unwrap();
-
-                let new_span =
-                    tracing::dispatcher::with_default(dispatcher, || make_span(perf_span.inner()));
-
-                let new_perf_span = PerfSpan::new(new_span, dispatcher.clone());
-                future.instrument(new_perf_span).boxed()
-            }
-            None => future.boxed(),
-        }
-    }
-
     pub(crate) fn perf_span_record<
         Q: tracing::field::AsField + ?Sized,
         V: tracing::field::Value,
@@ -593,3 +569,37 @@ impl RequestContext {
         self.perf_span.is_some()
     }
 }
+
+/// [`Future`] extension trait that allow for creating performance
+/// spans on sampled requests
+pub(crate) trait PerfInstrumentFutureExt<'a>: Future + Send {
+    /// Instrument this future with a new performance span when the
+    /// provided request context indicates the originator request
+    /// was sampled. Otherwise, just box the future and return it as is.
+    fn maybe_instrument<Fn>(
+        self,
+        ctx: &RequestContext,
+        make_span: Fn,
+    ) -> BoxFuture<'a, Self::Output>
+    where
+        Self: Sized + 'a,
+        Fn: FnOnce(&Span) -> Span,
+    {
+        match &ctx.perf_span {
+            Some(perf_span) => {
+                assert!(ctx.perf_span_dispatch.is_some());
+                let dispatcher = ctx.perf_span_dispatch.as_ref().unwrap();
+
+                let new_span =
+                    tracing::dispatcher::with_default(dispatcher, || make_span(perf_span.inner()));
+
+                let new_perf_span = PerfSpan::new(new_span, dispatcher.clone());
+                self.instrument(new_perf_span).boxed()
+            }
+            None => self.boxed(),
+        }
+    }
+}
+
+// Implement the trait for all types that satisfy the trait bounds
+impl<'a, T: Future + Send + 'a> PerfInstrumentFutureExt<'a> for T {}
