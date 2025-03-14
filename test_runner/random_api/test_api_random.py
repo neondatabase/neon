@@ -290,11 +290,16 @@ class NeonProject:
         for target in self.benchmarks.keys():
             self.check_benchmark(target)
 
-    def check_benchmark(self, target):
+    def check_benchmark(self, target) -> None:
         rc = self.benchmarks[target].poll()
         if rc is not None:
             _, err = self.benchmarks[target].communicate()
-            log.error("STDOUT: %s", err)
+            log.error("STDERR: %s", err)
+            if "ERROR:  Couldn't connect to compute node" in err:
+                log.info("Restarting benchmark for %s", target)
+                self.benchmarks.pop(target)
+                self.start_benchmark(target)
+                return
             raise RuntimeError(f"The benchmark for {target} ended with code {rc}")
 
     def terminate_benchmark(self, target):
