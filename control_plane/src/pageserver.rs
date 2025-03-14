@@ -142,6 +142,10 @@ impl PageServerNode {
             overrides.push("auth_validation_public_key_path='../auth_public_key.pem'".to_owned());
         }
 
+        if let Some(ssl_ca_file) = self.env.ssl_ca_cert_path() {
+            overrides.push(format!("ssl_ca_file='{}'", ssl_ca_file.to_str().unwrap()));
+        }
+
         // Apply the user-provided overrides
         overrides.push({
             let mut doc =

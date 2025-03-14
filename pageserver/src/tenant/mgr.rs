@@ -344,7 +344,7 @@ async fn init_load_generations(
             "Emergency mode!  Tenants will be attached unsafely using their last known generation"
         );
         emergency_generations(tenant_confs)
-    } else if let Some(client) = ControllerUpcallClient::new(conf, cancel) {
+    } else if let Some(client) = ControllerUpcallClient::new(conf, cancel)? {
         info!("Calling {} API to re-attach tenants", client.base_url());
         // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
         match client.re_attach(conf).await {

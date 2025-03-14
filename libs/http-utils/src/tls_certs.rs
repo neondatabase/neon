@@ -1,15 +1,18 @@
+use anyhow::Context;
 use camino::Utf8Path;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 pub fn load_cert_chain(filename: &Utf8Path) -> anyhow::Result<Vec<CertificateDer<'static>>> {
-    let file = std::fs::File::open(filename)?;
+    let file = std::fs::File::open(filename)
+        .context(format!("Failed to open certificate file {filename:?}"))?;
     let mut reader = std::io::BufReader::new(file);
 
     Ok(rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>()?)
 }
 
 pub fn load_private_key(filename: &Utf8Path) -> anyhow::Result<PrivateKeyDer<'static>> {
-    let file = std::fs::File::open(filename)?;
+    let file = std::fs::File::open(filename)
+        .context(format!("Failed to open private key file {filename:?}"))?;
     let mut reader = std::io::BufReader::new(file);
 
     let key = rustls_pemfile::private_key(&mut reader)?;
