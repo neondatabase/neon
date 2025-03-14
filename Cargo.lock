@@ -8369,7 +8369,6 @@ dependencies = [
  "der 0.7.8",
  "deranged",
  "digest",
- "displaydoc",
  "ecdsa 0.16.9",
  "either",
  "elliptic-curve 0.13.8",
