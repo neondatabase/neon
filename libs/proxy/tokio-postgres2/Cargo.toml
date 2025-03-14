@@ -8,10 +8,9 @@ license = "MIT/Apache-2.0"
 bytes.workspace = true
 fallible-iterator.workspace = true
 futures-util = { workspace = true, features = ["sink"] }
-log = "0.4"
+tracing.workspace = true
 parking_lot.workspace = true
 pin-project-lite.workspace = true
-phf = "0.11"
 postgres-protocol2 = { path = "../postgres-protocol2" }
 postgres-types2 = { path = "../postgres-types2" }
 tokio = { workspace = true, features = ["io-util", "time", "net"] }

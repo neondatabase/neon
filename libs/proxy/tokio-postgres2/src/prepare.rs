@@ -5,9 +5,9 @@ use std::sync::Arc;
 use bytes::Bytes;
 use fallible_iterator::FallibleIterator;
 use futures_util::{TryStreamExt, pin_mut};
-use log::debug;
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
+use tracing::debug;
 
 use crate::client::{CachedTypeInfo, InnerClient};
 use crate::codec::FrontendMessage;
