@@ -818,7 +818,7 @@ lsm3_handler(PG_FUNCTION_ARGS)
 }
 
 /*
- * Access methods for B-Tree wrapper: actually we aonly want to disable inserts.
+ * Access methods for B-Tree wrapper: actually we only want to disable inserts.
  */
 
 /* We do not need to load data in top top index: just initialize index metadata */
@@ -827,9 +827,7 @@ lsm3_build_empty(Relation heap, Relation index, IndexInfo *indexInfo)
 {
 	PGIOAlignedBlock metapage;
 	XLogRecPtr lsn;
-
-	/* Construct metapage. */
-	_bt_initmetapage(metapage.data, BTREE_METAPAGE, 0, _bt_allequalimage(index, false));
+	Buffer buf;
 
 #if PG_VERSION_NUM>=150000
 	RelationGetSmgr(index);
@@ -837,7 +835,8 @@ lsm3_build_empty(Relation heap, Relation index, IndexInfo *indexInfo)
 	RelationOpenSmgr(index);
 #endif
 
-	smgr_start_unlogged_build(index->rd_smgr);
+	/* Construct metapage. */
+	_bt_initmetapage(metapage.data, BTREE_METAPAGE, 0, _bt_allequalimage(index, false));
 
 	/*
 	 * Write the page and log it.  It might seem that an immediate sync would
@@ -847,10 +846,9 @@ lsm3_build_empty(Relation heap, Relation index, IndexInfo *indexInfo)
 	 * this even when wal_level=minimal.
 	 */
 	PageSetChecksumInplace(metapage.data, BTREE_METAPAGE);
+	PageSetLSN((Page)metapage.data, GetXLogInsertRecPtr());
 	smgrextend(index->rd_smgr, MAIN_FORKNUM, BTREE_METAPAGE,
 			   (char *) metapage.data, true);
-
-	smgr_finish_unlogged_build_phase_1(index->rd_smgr);
 
 #if PG_VERSION_NUM>=160000
 	lsn = log_newpage(&index->rd_smgr->smgr_rlocator.locator, MAIN_FORKNUM,
@@ -864,13 +862,16 @@ lsm3_build_empty(Relation heap, Relation index, IndexInfo *indexInfo)
 	SetLastWrittenLSNForRelation(lsn, index->rd_smgr->smgr_rnode.node, MAIN_FORKNUM);
 #endif
 
+	buf = _bt_getbuf(index, BTREE_METAPAGE, BT_WRITE);
+	PageSetLSN(BufferGetPage(buf), lsn);
+	_bt_relbuf(index, buf);
+
 	/*
 	 * An immediate sync is required even if we xlog'd the page, because the
 	 * write did not go through shared_buffers and therefore a concurrent
 	 * checkpoint may have moved the redo pointer past our xlog record.
 	 */
 	smgrimmedsync(index->rd_smgr, MAIN_FORKNUM);
-	smgr_end_unlogged_build(index->rd_smgr);
 
 	RelationCloseSmgr(index);
 
