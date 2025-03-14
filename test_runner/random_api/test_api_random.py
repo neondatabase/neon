@@ -295,7 +295,7 @@ class NeonProject:
         if rc is not None:
             _, err = self.benchmarks[target].communicate()
             log.error("STDERR: %s", err)
-            if "ERROR:  Couldn't connect to compute node" in err:
+            if "ERROR:  Couldn't connect to compute node" in err or "ERROR:  Console request failed" in err:
                 log.info("Restarting benchmark for %s", target)
                 self.benchmarks.pop(target)
                 self.start_benchmark(target)
