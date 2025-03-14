@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
+use arc_swap::ArcSwapOption;
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::Parser;
 use compute_api::spec::LocalProxySpec;
@@ -27,6 +28,7 @@ use crate::config::{
 };
 use crate::control_plane::locks::ApiLocks;
 use crate::control_plane::messages::{EndpointJwksResponse, JwksSettings};
+use crate::ext::TaskExt;
 use crate::http::health_server::AppMetrics;
 use crate::intern::RoleNameInt;
 use crate::metrics::{Metrics, ThreadPoolMetrics};
@@ -190,7 +192,11 @@ pub async fn run() -> anyhow::Result<()> {
     // 2. The config file is written but the signal hook is not yet received
     // 3. local_proxy completes startup but has no config loaded, despite there being a registerd config.
     refresh_config_notify.notify_one();
-    tokio::spawn(refresh_config_loop(args.config_path, refresh_config_notify));
+    tokio::spawn(refresh_config_loop(
+        config,
+        args.config_path,
+        refresh_config_notify,
+    ));
 
     maintenance_tasks.spawn(crate::http::health_server::task_main(
         metrics_listener,
@@ -269,7 +275,7 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
     };
 
     Ok(Box::leak(Box::new(ProxyConfig {
-        tls_config: None,
+        tls_config: ArcSwapOption::from(None),
         metric_collection: None,
         http_config,
         authentication_config: AuthenticationConfig {
@@ -311,14 +317,16 @@ enum RefreshConfigError {
     Parse(#[from] serde_json::Error),
     #[error(transparent)]
     Validate(anyhow::Error),
+    #[error(transparent)]
+    Tls(anyhow::Error),
 }
 
-async fn refresh_config_loop(path: Utf8PathBuf, rx: Arc<Notify>) {
+async fn refresh_config_loop(config: &ProxyConfig, path: Utf8PathBuf, rx: Arc<Notify>) {
     let mut init = true;
     loop {
         rx.notified().await;
 
-        match refresh_config_inner(&path).await {
+        match refresh_config_inner(config, &path).await {
             Ok(()) => {}
             // don't log for file not found errors if this is the first time we are checking
             // for computes that don't use local_proxy, this is not an error.
@@ -326,6 +334,9 @@ async fn refresh_config_loop(path: Utf8PathBuf, rx: Arc<Notify>) {
                 if init && e.kind() == std::io::ErrorKind::NotFound =>
             {
                 debug!(error=?e, ?path, "could not read config file");
+            }
+            Err(RefreshConfigError::Tls(e)) => {
+                error!(error=?e, ?path, "could not read TLS certificates");
             }
             Err(e) => {
                 error!(error=?e, ?path, "could not read config file");
@@ -336,7 +347,10 @@ async fn refresh_config_loop(path: Utf8PathBuf, rx: Arc<Notify>) {
     }
 }
 
-async fn refresh_config_inner(path: &Utf8Path) -> Result<(), RefreshConfigError> {
+async fn refresh_config_inner(
+    config: &ProxyConfig,
+    path: &Utf8Path,
+) -> Result<(), RefreshConfigError> {
     let bytes = tokio::fs::read(&path).await?;
     let data: LocalProxySpec = serde_json::from_slice(&bytes)?;
 
@@ -405,6 +419,21 @@ async fn refresh_config_inner(path: &Utf8Path) -> Result<(), RefreshConfigError>
 
     info!("successfully loaded new config");
     JWKS_ROLE_MAP.store(Some(Arc::new(EndpointJwksResponse { jwks: jwks_set })));
+
+    if let Some(tls_config) = data.tls {
+        let tls_config = tokio::task::spawn_blocking(move || {
+            crate::tls::server_config::configure_tls(
+                &tls_config.key_path,
+                &tls_config.cert_path,
+                None,
+                false,
+            )
+        })
+        .await
+        .propagate_task_panic()
+        .map_err(RefreshConfigError::Tls)?;
+        config.tls_config.store(Some(Arc::new(tls_config)));
+    }
 
     Ok(())
 }

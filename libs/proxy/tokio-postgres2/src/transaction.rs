@@ -72,4 +72,9 @@ impl<'a> Transaction<'a> {
     pub fn client(&self) -> &Client {
         self.client
     }
+
+    /// Returns a reference to the underlying `Client`.
+    pub fn client_mut(&mut self) -> &mut Client {
+        self.client
+    }
 }

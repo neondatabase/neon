@@ -48,6 +48,9 @@ pprof.workspace = true
 rand.workspace = true
 range-set-blaze = { version = "0.1.16", features = ["alloc"] }
 regex.workspace = true
+rustls-pemfile.workspace = true
+rustls-pki-types.workspace = true
+rustls.workspace = true
 scopeguard.workspace = true
 send-future.workspace = true
 serde.workspace = true
@@ -62,10 +65,12 @@ tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util"
 tokio-epoll-uring.workspace = true
 tokio-io-timeout.workspace = true
 tokio-postgres.workspace = true
+tokio-rustls.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
 toml_edit = { workspace = true, features = [ "serde" ] }
 tracing.workspace = true
+tracing-utils.workspace = true
 url.workspace = true
 walkdir.workspace = true
 metrics.workspace = true
@@ -114,6 +119,10 @@ harness = false
 
 [[bench]]
 name = "upload_queue"
+harness = false
+
+[[bench]]
+name = "bench_metrics"
 harness = false
 
 [[bin]]

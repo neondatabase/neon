@@ -23,8 +23,8 @@ def test_change_pageserver(neon_env_builder: NeonEnvBuilder, make_httpserver):
     )
     env = neon_env_builder.init_start()
 
-    neon_env_builder.control_plane_compute_hook_api = (
-        f"http://{make_httpserver.host}:{make_httpserver.port}/notify-attach"
+    neon_env_builder.control_plane_hooks_api = (
+        f"http://{make_httpserver.host}:{make_httpserver.port}/"
     )
 
     def ignore_notify(request: Request):

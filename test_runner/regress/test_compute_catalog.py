@@ -323,10 +323,12 @@ def test_dropdb_with_subscription(neon_simple_env: NeonEnv):
         assert curr_db[0] == PUB_DB_NAME
 
 
-def test_compute_drop_role(neon_simple_env: NeonEnv):
+def test_drop_role_with_table_privileges_from_neon_superuser(neon_simple_env: NeonEnv):
     """
     Test that compute_ctl can drop a role even if it has some depending objects
-    like permissions in one of the databases.
+    like permissions in one of the databases that were granted by
+    neon_superuser.
+
     Reproduction test for https://github.com/neondatabase/cloud/issues/13582
     """
     env = neon_simple_env
@@ -440,5 +442,70 @@ def test_compute_drop_role(neon_simple_env: NeonEnv):
 
     with endpoint.cursor() as cursor:
         cursor.execute("SELECT rolname FROM pg_roles WHERE rolname = 'readonly2'")
+        role = cursor.fetchone()
+        assert role is None
+
+
+def test_drop_role_with_table_privileges_from_non_neon_superuser(neon_simple_env: NeonEnv):
+    """
+    Test that compute_ctl can drop a role if the role has previously been
+    granted table privileges by a role other than neon_superuser.
+    """
+    TEST_DB_NAME = "neondb"
+    TEST_GRANTOR = "; RAISE EXCEPTION 'SQL injection detected;"
+    TEST_GRANTEE = "'$$; RAISE EXCEPTION 'SQL injection detected;'"
+
+    env = neon_simple_env
+
+    endpoint = env.endpoints.create_start("main")
+    endpoint.respec_deep(
+        **{
+            "skip_pg_catalog_updates": False,
+            "cluster": {
+                "roles": [
+                    {
+                        # We need to create role via compute_ctl, because in this case it will receive
+                        # additional grants equivalent to our real environment, so we can repro some
+                        # issues.
+                        "name": TEST_GRANTOR,
+                        # Some autocomplete-suggested hash, no specific meaning.
+                        "encrypted_password": "SCRAM-SHA-256$4096:hBT22QjqpydQWqEulorfXA==$miBogcoj68JWYdsNB5PW1X6PjSLBEcNuctuhtGkb4PY=:hxk2gxkwxGo6P7GCtfpMlhA9zwHvPMsCz+NQf2HfvWk=",
+                        "options": [],
+                    },
+                ],
+                "databases": [
+                    {
+                        "name": TEST_DB_NAME,
+                        "owner": TEST_GRANTOR,
+                    },
+                ],
+            },
+        }
+    )
+
+    endpoint.reconfigure()
+
+    with endpoint.cursor(dbname=TEST_DB_NAME, user=TEST_GRANTOR) as cursor:
+        cursor.execute(f'CREATE USER "{TEST_GRANTEE}"')
+        cursor.execute("CREATE TABLE test_table(id bigint)")
+        cursor.execute(f'GRANT ALL ON TABLE test_table TO "{TEST_GRANTEE}"')
+
+    endpoint.respec_deep(
+        **{
+            "skip_pg_catalog_updates": False,
+            "delta_operations": [
+                {
+                    "action": "delete_role",
+                    "name": TEST_GRANTEE,
+                },
+            ],
+        }
+    )
+    endpoint.reconfigure()
+
+    with endpoint.cursor() as cursor:
+        cursor.execute(
+            "SELECT rolname FROM pg_roles WHERE rolname = %(role)s", {"role": TEST_GRANTEE}
+        )
         role = cursor.fetchone()
         assert role is None

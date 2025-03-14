@@ -181,7 +181,7 @@ impl ControlPlaneGenerationsApi for ControllerUpcallClient {
                         listen_pg_port: m.postgres_port,
                         listen_http_addr: m.http_host,
                         listen_http_port: m.http_port,
-                        listen_https_port: None, // TODO: Support https.
+                        listen_https_port: m.https_port,
                         availability_zone_id: az_id.expect("Checked above"),
                     })
                 }

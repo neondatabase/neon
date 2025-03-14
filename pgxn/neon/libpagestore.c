@@ -16,6 +16,8 @@
 
 #include <math.h>
 
+#include "libpq-int.h"
+
 #include "access/xlog.h"
 #include "common/hashfn.h"
 #include "fmgr.h"
@@ -815,9 +817,10 @@ retry:
 			get_socket_stats(PQsocket(pageserver_conn), &sndbuf, &recvbuf);
 
 			neon_shard_log(shard_no, LOG,
-						   "no response received from pageserver for %0.3f s, still waiting (sent " UINT64_FORMAT " requests, received " UINT64_FORMAT " responses) (socket sndbuf=%d recvbuf=%d)",
+						   "no response received from pageserver for %0.3f s, still waiting (sent " UINT64_FORMAT " requests, received " UINT64_FORMAT " responses) (socket sndbuf=%d recvbuf=%d) (conn start=%d end=%d)",
 						   INSTR_TIME_GET_DOUBLE(since_start),
-						   shard->nrequests_sent, shard->nresponses_received, sndbuf, recvbuf);
+						   shard->nrequests_sent, shard->nresponses_received, sndbuf, recvbuf,
+				           pageserver_conn->inStart, pageserver_conn->inEnd);
 			shard->receive_last_log_time = now;
 			shard->receive_logged = true;
 		}

@@ -9,7 +9,7 @@ use camino::Utf8PathBuf;
 use num_traits::Num;
 use pageserver_api::shard::TenantShardId;
 use tokio_epoll_uring::{BoundedBuf, Slice};
-use tracing::error;
+use tracing::{error, info_span};
 use utils::id::TimelineId;
 
 use crate::assert_u64_eq_usize::{U64IsUsize, UsizeIsU64};
@@ -76,6 +76,7 @@ impl EphemeralFile {
                 || IoBufferMut::with_capacity(TAIL_SZ),
                 gate.enter()?,
                 ctx,
+                info_span!(parent: None, "ephemeral_file_buffered_writer", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), timeline_id=%timeline_id, path = %filename),
             ),
             _gate_guard: gate.enter()?,
         })
@@ -351,7 +352,8 @@ mod tests {
         let timeline_id = TimelineId::from_str("22000000000000000000000000000000").unwrap();
         fs::create_dir_all(conf.timeline_path(&tenant_shard_id, &timeline_id))?;
 
-        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let ctx =
+            RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
 
         Ok((conf, tenant_shard_id, timeline_id, ctx))
     }

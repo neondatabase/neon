@@ -112,7 +112,7 @@ hyper0 = { package = "hyper", version = "0.14" }
 hyper = "1.4"
 hyper-util = "0.1"
 tokio-tungstenite = "0.21.0"
-indexmap = "2"
+indexmap = { version = "2", features = ["serde"] }
 indoc = "2"
 ipnet = "2.10.0"
 itertools = "0.10"
@@ -126,7 +126,9 @@ measured = { version = "0.0.22", features=["lasso"] }
 measured-process = { version = "0.0.22" }
 memoffset = "0.9"
 nix = { version = "0.27", features = ["dir", "fs", "process", "socket", "signal", "poll"] }
-notify = "8.0.0"
+# Do not update to >= 7.0.0, at least. The update will have a significant impact
+# on compute startup metrics (start_postgres_ms), >= 25% degradation.
+notify = "6.0.0"
 num_cpus = "1.15"
 num-traits = "0.2.15"
 once_cell = "1.13"
@@ -139,7 +141,7 @@ parquet = { version = "53", default-features = false, features = ["zstd"] }
 parquet_derive = "53"
 pbkdf2 = { version = "0.12.1", features = ["simple", "std"] }
 pin-project-lite = "0.2"
-pprof = { version = "0.14", features = ["criterion", "flamegraph", "frame-pointer", "protobuf", "protobuf-codec"] }
+pprof = { version = "0.14", features = ["criterion", "flamegraph", "frame-pointer", "prost-codec"] }
 procfs = "0.16"
 prometheus = {version = "0.13", default-features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.13"
@@ -155,6 +157,7 @@ rpds = "0.13"
 rustc-hash = "1.1.0"
 rustls = { version = "0.23.16", default-features = false }
 rustls-pemfile = "2"
+rustls-pki-types = "1.11"
 scopeguard = "1.1"
 sysinfo = "0.29.2"
 sd-notify = "0.4.1"
@@ -218,7 +221,7 @@ zerocopy = { version = "0.7", features = ["derive"] }
 json-structural-diff = { version = "0.2.0" }
 
 ## TODO replace this with tracing
-env_logger = "0.10"
+env_logger = "0.11"
 log = "0.4"
 
 ## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed

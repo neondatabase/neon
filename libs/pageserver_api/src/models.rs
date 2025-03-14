@@ -176,6 +176,39 @@ impl LsnLease {
     }
 }
 
+/// Controls the detach ancestor behavior.
+/// - When set to `NoAncestorAndReparent`, we will only detach a branch if its ancestor is a root branch. It will automatically reparent any children of the ancestor before and at the branch point.
+/// - When set to `MultiLevelAndNoReparent`, we will detach a branch from multiple levels of ancestors, and no reparenting will happen at all.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum DetachBehavior {
+    #[default]
+    NoAncestorAndReparent,
+    MultiLevelAndNoReparent,
+}
+
+impl std::str::FromStr for DetachBehavior {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "no_ancestor_and_reparent" => Ok(DetachBehavior::NoAncestorAndReparent),
+            "multi_level_and_no_reparent" => Ok(DetachBehavior::MultiLevelAndNoReparent),
+            "v1" => Ok(DetachBehavior::NoAncestorAndReparent),
+            "v2" => Ok(DetachBehavior::MultiLevelAndNoReparent),
+            _ => Err("cannot parse detach behavior"),
+        }
+    }
+}
+
+impl std::fmt::Display for DetachBehavior {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DetachBehavior::NoAncestorAndReparent => write!(f, "no_ancestor_and_reparent"),
+            DetachBehavior::MultiLevelAndNoReparent => write!(f, "multi_level_and_no_reparent"),
+        }
+    }
+}
+
 /// The only [`TenantState`] variants we could be `TenantState::Activating` from.
 ///
 /// XXX: We used to have more variants here, but now it's just one, which makes this rather
@@ -272,6 +305,31 @@ pub struct TimelineCreateRequest {
     pub new_timeline_id: TimelineId,
     #[serde(flatten)]
     pub mode: TimelineCreateRequestMode,
+}
+
+/// Storage controller specific extensions to [`TimelineInfo`].
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TimelineCreateResponseStorcon {
+    #[serde(flatten)]
+    pub timeline_info: TimelineInfo,
+
+    pub safekeepers: Option<SafekeepersInfo>,
+}
+
+/// Safekeepers as returned in timeline creation request to storcon or pushed to
+/// cplane in the post migration hook.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SafekeepersInfo {
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
+    pub generation: u32,
+    pub safekeepers: Vec<SafekeeperInfo>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SafekeeperInfo {
+    pub id: NodeId,
+    pub hostname: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1146,6 +1204,15 @@ pub struct TimelineArchivalConfigRequest {
     pub state: TimelineArchivalState,
 }
 
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct TimelinePatchIndexPartRequest {
+    pub rel_size_migration: Option<RelSizeMigration>,
+    pub gc_compaction_last_completed_lsn: Option<Lsn>,
+    pub applied_gc_cutoff_lsn: Option<Lsn>,
+    #[serde(default)]
+    pub force_index_update: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TimelinesInfoAndOffloaded {
     pub timelines: Vec<TimelineInfo>,
@@ -1191,9 +1258,10 @@ pub struct TimelineInfo {
     pub last_record_lsn: Lsn,
     pub prev_record_lsn: Option<Lsn>,
 
-    /// Legacy field for compat with control plane.  Synonym of `min_readable_lsn`.
-    /// TODO: remove once control plane no longer reads it.
-    pub latest_gc_cutoff_lsn: Lsn,
+    /// Legacy field, retained for one version to enable old storage controller to
+    /// decode (it was a mandatory field).
+    #[serde(default, rename = "latest_gc_cutoff_lsn")]
+    pub _unused: Lsn,
 
     /// The LSN up to which GC has advanced: older data may still exist but it is not available for clients.
     /// This LSN is not suitable for deciding where to create branches etc: use [`TimelineInfo::min_readable_lsn`] instead,
@@ -1442,8 +1510,14 @@ pub struct TenantScanRemoteStorageResponse {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum TenantSorting {
+    /// Total size of layers on local disk for all timelines in a shard.
     ResidentSize,
+    /// The logical size of the largest timeline within a _tenant_ (not shard). Only tracked on
+    /// shard 0, contains the sum across all shards.
     MaxLogicalSize,
+    /// The logical size of the largest timeline within a _tenant_ (not shard), divided by number of
+    /// shards. Only tracked on shard 0, and estimates the per-shard logical size.
+    MaxLogicalSizePerShard,
 }
 
 impl Default for TenantSorting {
@@ -1473,14 +1547,20 @@ pub struct TopTenantShardsRequest {
 pub struct TopTenantShardItem {
     pub id: TenantShardId,
 
-    /// Total size of layers on local disk for all timelines in this tenant
+    /// Total size of layers on local disk for all timelines in this shard.
     pub resident_size: u64,
 
-    /// Total size of layers in remote storage for all timelines in this tenant
+    /// Total size of layers in remote storage for all timelines in this shard.
     pub physical_size: u64,
 
-    /// The largest logical size of a timeline within this tenant
+    /// The largest logical size of a timeline within this _tenant_ (not shard). This is only
+    /// tracked on shard 0, and contains the sum of the logical size across all shards.
     pub max_logical_size: u64,
+
+    /// The largest logical size of a timeline within this _tenant_ (not shard) divided by number of
+    /// shards. This is only tracked on shard 0, and is only an estimate as we divide it evenly by
+    /// shard count, rounded up.
+    pub max_logical_size_per_shard: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]

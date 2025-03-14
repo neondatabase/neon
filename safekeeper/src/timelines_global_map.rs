@@ -11,9 +11,8 @@ use anyhow::{Context, Result, bail};
 use camino::Utf8PathBuf;
 use camino_tempfile::Utf8TempDir;
 use safekeeper_api::membership::Configuration;
-use safekeeper_api::models::SafekeeperUtilization;
+use safekeeper_api::models::{SafekeeperUtilization, TimelineDeleteResult};
 use safekeeper_api::{ServerInfo, membership};
-use serde::Serialize;
 use tokio::fs;
 use tracing::*;
 use utils::crashsafe::{durable_rename, fsync_async_opt};
@@ -577,11 +576,6 @@ impl GlobalTimelines {
             .tombstones
             .retain(|_, v| now.duration_since(*v) < *tombstone_ttl);
     }
-}
-
-#[derive(Clone, Copy, Serialize)]
-pub struct TimelineDeleteResult {
-    pub dir_existed: bool,
 }
 
 /// Action for delete_or_exclude.

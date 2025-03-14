@@ -131,6 +131,14 @@ impl Configuration {
         }
     }
 
+    pub fn new(members: MemberSet) -> Self {
+        Configuration {
+            generation: INITIAL_GENERATION,
+            members,
+            new_members: None,
+        }
+    }
+
     /// Is `sk_id` member of the configuration?
     pub fn contains(&self, sk_id: NodeId) -> bool {
         self.members.contains(sk_id) || self.new_members.as_ref().is_some_and(|m| m.contains(sk_id))
