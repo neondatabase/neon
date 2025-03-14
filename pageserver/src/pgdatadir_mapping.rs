@@ -279,9 +279,17 @@ impl Timeline {
                 continue;
             }
 
-            // TODO: create a perf span here
             let nblocks = match self
                 .get_rel_size(*tag, Version::Lsn(effective_lsn), &ctx)
+                .maybe_perf_instrument(&ctx, |crnt_perf_span| {
+                    info_span!(
+                        target: PERF_TRACE_TARGET,
+                        parent: crnt_perf_span,
+                        "GET_REL_SIZE",
+                        reltag=%tag,
+                        lsn=%effective_lsn,
+                    )
+                })
                 .await
             {
                 Ok(nblocks) => nblocks,
