@@ -79,7 +79,12 @@ from fixtures.remote_storage import (
     default_remote_storage,
     remote_storage_to_toml_dict,
 )
-from fixtures.safekeeper.http import SafekeeperHttpClient
+from fixtures.safekeeper.http import (
+    MembershipConfiguration,
+    SafekeeperHttpClient,
+    SafekeeperId,
+    TimelineCreateRequest,
+)
 from fixtures.safekeeper.utils import wait_walreceivers_absent
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
@@ -4761,6 +4766,52 @@ class Safekeeper(LogUtils):
             self.assert_log_contains(msg)
 
         wait_until(paused)
+
+    @staticmethod
+    def sks_to_safekeeper_ids(sks: list[Safekeeper]) -> list[SafekeeperId]:
+        return [SafekeeperId(sk.id, "localhost", sk.port.pg_tenant_only) for sk in sks]
+
+    @staticmethod
+    def mconf_sks(env: NeonEnv, mconf: MembershipConfiguration) -> list[Safekeeper]:
+        """
+        List of Safekeepers which are members in `mconf`.
+        """
+        members_ids = [m.id for m in mconf.members]
+        new_members_ids = [m.id for m in mconf.new_members] if mconf.new_members is not None else []
+        return [sk for sk in env.safekeepers if sk.id in members_ids or sk.id in new_members_ids]
+
+    @staticmethod
+    def create_timeline(
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        ps: NeonPageserver,
+        mconf: MembershipConfiguration,
+        sks: list[Safekeeper],
+    ):
+        """
+        Manually create timeline on safekeepers with given (presumably inital)
+        mconf: figure out LSN from pageserver, bake request and execute it on
+        given safekeepers.
+
+        Normally done by storcon, but some tests want to do it manually so far.
+        """
+        ps_http_cli = ps.http_client()
+        # figure out initial LSN.
+        ps_timeline_detail = ps_http_cli.timeline_detail(tenant_id, timeline_id)
+        init_lsn = ps_timeline_detail["last_record_lsn"]
+        log.info(f"initial LSN: {init_lsn}")
+        # sk timeline creation request expects minor version
+        pg_version = ps_timeline_detail["pg_version"] * 10000
+        # create inital mconf
+        sk_ids = [SafekeeperId(sk.id, "localhost", sk.port.pg_tenant_only) for sk in sks]
+        mconf = MembershipConfiguration(generation=1, members=sk_ids, new_members=None)
+        create_r = TimelineCreateRequest(
+            tenant_id, timeline_id, mconf, pg_version, Lsn(init_lsn), commit_lsn=None
+        )
+        log.info(f"sending timeline create: {create_r.to_json()}")
+
+        for sk in sks:
+            sk.http_client().timeline_create(create_r)
 
 
 class NeonBroker(LogUtils):
