@@ -949,7 +949,7 @@ impl PageServerHandler {
 
                 let res = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Page(key))
-                    .maybe_instrument(&ctx, |current_perf_span| {
+                    .maybe_perf_instrument(&ctx, |current_perf_span| {
                         info_span!(
                             target: PERF_TRACE_TARGET,
                             parent: current_perf_span,
@@ -1001,7 +1001,7 @@ impl PageServerHandler {
                     metrics::SmgrQueryType::GetPageAtLsn,
                     received_at,
                 )
-                .maybe_instrument(&ctx, |current_perf_span| {
+                .maybe_perf_instrument(&ctx, |current_perf_span| {
                     info_span!(
                         target: PERF_TRACE_TARGET,
                         parent: current_perf_span,
@@ -1023,7 +1023,7 @@ impl PageServerHandler {
                     &shard.get_applied_gc_cutoff_lsn(),
                     &ctx,
                 )
-                .maybe_instrument(&ctx, |current_perf_span| {
+                .maybe_perf_instrument(&ctx, |current_perf_span| {
                     info_span!(
                         target: PERF_TRACE_TARGET,
                         parent: current_perf_span,

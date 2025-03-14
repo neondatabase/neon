@@ -576,7 +576,7 @@ pub(crate) trait PerfInstrumentFutureExt<'a>: Future + Send {
     /// Instrument this future with a new performance span when the
     /// provided request context indicates the originator request
     /// was sampled. Otherwise, just box the future and return it as is.
-    fn maybe_instrument<Fn>(
+    fn maybe_perf_instrument<Fn>(
         self,
         ctx: &RequestContext,
         make_span: Fn,

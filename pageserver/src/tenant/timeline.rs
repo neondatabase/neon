@@ -1289,7 +1289,7 @@ impl Timeline {
                 .attached_child();
 
             self.get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, &ctx)
-                .maybe_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
+                .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
                 .await
         };
 
@@ -1336,7 +1336,7 @@ impl Timeline {
 
                     let res = state
                         .collect_pending_ios()
-                        .maybe_instrument(&ctx, |crnt_perf_span| {
+                        .maybe_perf_instrument(&ctx, |crnt_perf_span| {
                             info_span!(
                                 target: PERF_TRACE_TARGET,
                                 parent: crnt_perf_span,
@@ -1365,7 +1365,7 @@ impl Timeline {
                     let walredo_deltas = converted.num_deltas();
                     let walredo_res = walredo_self
                         .reconstruct_value(key, lsn, converted)
-                        .maybe_instrument(&ctx, |crnt_perf_span| {
+                        .maybe_perf_instrument(&ctx, |crnt_perf_span| {
                             info_span!(
                                 target: PERF_TRACE_TARGET,
                                 parent: crnt_perf_span,
@@ -1382,7 +1382,7 @@ impl Timeline {
 
         let results = futs
             .collect::<BTreeMap<Key, Result<Bytes, PageReconstructError>>>()
-            .maybe_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
+            .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
             .await;
 
         // For aux file keys (v1 or v2) the vectored read path does not return an error
@@ -3884,7 +3884,7 @@ impl Timeline {
                     &self.cancel,
                     &ctx,
                 )
-                .maybe_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
+                .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
                 .await?
             };
 
@@ -3947,7 +3947,7 @@ impl Timeline {
 
             timeline_owned = timeline
                 .get_ready_ancestor_timeline(ancestor_timeline, &ctx)
-                .maybe_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
+                .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
                 .await?;
             timeline = &*timeline_owned;
         };

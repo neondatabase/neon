@@ -343,7 +343,7 @@ impl Timeline {
 
         let res = self
             .get_vectored(keyspace, effective_lsn, io_concurrency, &ctx)
-            .maybe_instrument(&ctx, |current_perf_span| current_perf_span.clone())
+            .maybe_perf_instrument(&ctx, |current_perf_span| current_perf_span.clone())
             .await;
 
         match res {

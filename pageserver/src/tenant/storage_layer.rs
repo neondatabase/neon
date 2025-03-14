@@ -889,7 +889,7 @@ impl ReadableLayer {
 
                 layer
                     .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, &ctx)
-                    .maybe_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
+                    .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
                     .await
             }
             ReadableLayer::InMemoryLayer(layer) => {
@@ -906,7 +906,7 @@ impl ReadableLayer {
 
                 layer
                     .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, &ctx)
-                    .maybe_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
+                    .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
                     .await
             }
         }

@@ -338,7 +338,7 @@ impl Layer {
 
             self.0
                 .get_or_maybe_download(true, &ctx)
-                .maybe_instrument(&ctx, |crnt_perf_context| crnt_perf_context.clone())
+                .maybe_perf_instrument(&ctx, |crnt_perf_context| crnt_perf_context.clone())
                 .await
                 .map_err(|err| match err {
                     DownloadError::TimelineShutdown | DownloadError::DownloadCancelled => {
@@ -368,7 +368,7 @@ impl Layer {
         downloaded
             .get_values_reconstruct_data(this, keyspace, lsn_range, reconstruct_data, &ctx)
             .instrument(tracing::debug_span!("get_values_reconstruct_data", layer=%self))
-            .maybe_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
+            .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
             .await
             .map_err(|err| match err {
                 GetVectoredError::Other(err) => GetVectoredError::Other(
@@ -1095,7 +1095,7 @@ impl LayerInner {
             let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
             let res = self
                 .download_init_and_wait(timeline, permit, ctx.attached_child())
-                .maybe_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
+                .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
                 .await?;
 
             scopeguard::ScopeGuard::into_inner(init_cancelled);
