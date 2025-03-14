@@ -1993,7 +1993,7 @@ neon_wallog_pagev(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 
 		if (batch_size >= BLOCK_BATCH_SIZE)
 		{
-			SetLastWrittenLSNForBlockv(lsns, InfoFromSMgrRel(reln), forknum,
+			neon_set_lwlsn_block_v(lsns, InfoFromSMgrRel(reln), forknum,
 									   batch_blockno,
 									   batch_size);
 			batch_blockno += batch_size;
@@ -2003,7 +2003,7 @@ neon_wallog_pagev(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 
 	if (batch_size != 0)
 	{
-		SetLastWrittenLSNForBlockv(lsns, InfoFromSMgrRel(reln), forknum,
+		neon_set_lwlsn_block_v(lsns, InfoFromSMgrRel(reln), forknum,
 								   batch_blockno,
 								   batch_size);
 	}
@@ -2130,7 +2130,7 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 	 * Remember the LSN on this page. When we read the page again, we must
 	 * read the same or newer version of it.
 	 */
-	SetLastWrittenLSNForBlock(lsn, InfoFromSMgrRel(reln), forknum, blocknum);
+	neon_set_lwlsn_block(lsn, InfoFromSMgrRel(reln), forknum, blocknum);
 }
 
 /*
@@ -2824,9 +2824,9 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 	if (lsn == InvalidXLogRecPtr)
 	{
 		lsn = GetXLogInsertRecPtr();
-		SetLastWrittenLSNForBlock(lsn, InfoFromSMgrRel(reln), forkNum, blkno);
+		neon_set_lwlsn_block(lsn, InfoFromSMgrRel(reln), forkNum, blkno);
 	}
-	SetLastWrittenLSNForRelation(lsn, InfoFromSMgrRel(reln), forkNum);
+	neon_set_lwlsn_relation(lsn, InfoFromSMgrRel(reln), forkNum);
 }
 
 #if PG_MAJORVERSION_NUM >= 16
@@ -2908,7 +2908,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 		for (int i = 0; i < count; i++)
 		{
 			lfc_write(InfoFromSMgrRel(reln), forkNum, blocknum + i, buffer.data);
-			SetLastWrittenLSNForBlock(lsn, InfoFromSMgrRel(reln), forkNum,
+			neon_set_lwlsn_block(lsn, InfoFromSMgrRel(reln), forkNum,
 									  blocknum + i);
 		}
 
@@ -2918,7 +2918,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 
 	Assert(lsn != 0);
 
-	SetLastWrittenLSNForRelation(lsn, InfoFromSMgrRel(reln), forkNum);
+	neon_set_lwlsn_relation(lsn, InfoFromSMgrRel(reln), forkNum);
 	set_cached_relsize(InfoFromSMgrRel(reln), forkNum, blocknum);
 }
 #endif
@@ -4013,7 +4013,7 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber old_blocks, Blo
 	 * for the extended pages, so there's no harm in leaving behind obsolete
 	 * entries for the truncated chunks.
 	 */
-	SetLastWrittenLSNForRelation(lsn, InfoFromSMgrRel(reln), forknum);
+	neon_set_lwlsn_relation(lsn, InfoFromSMgrRel(reln), forknum);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -4467,7 +4467,7 @@ neon_extend_rel_size(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno, 
 		if (relsize < blkno + 1)
 		{
 			update_cached_relsize(rinfo, forknum, blkno + 1);
-			SetLastWrittenLSNForRelation(end_recptr, rinfo, forknum);
+			neon_set_lwlsn_relation(end_recptr, rinfo, forknum);
 		}
 	}
 	else
@@ -4500,7 +4500,7 @@ neon_extend_rel_size(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno, 
 		relsize = Max(nbresponse->n_blocks, blkno + 1);
 
 		set_cached_relsize(rinfo, forknum, relsize);
-		SetLastWrittenLSNForRelation(end_recptr, rinfo, forknum);
+		neon_set_lwlsn_relation(end_recptr, rinfo, forknum);
 
 		neon_log(SmgrTrace, "Set length to %d", relsize);
 	}
@@ -4631,7 +4631,7 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	 */
 	if (no_redo_needed)
 	{
-		SetLastWrittenLSNForBlock(end_recptr, rinfo, forknum, blkno);
+		neon_set_lwlsn_block(end_recptr, rinfo, forknum, blkno);
 		/*
 		 * Redo changes if page exists in LFC.
 		 * We should perform this check after assigning LwLSN to prevent
