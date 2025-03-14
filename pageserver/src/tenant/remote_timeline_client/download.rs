@@ -205,8 +205,8 @@ async fn download_object(
         }
         #[cfg(target_os = "linux")]
         crate::virtual_file::io_engine::IoEngine::TokioEpollUring => {
-            use std::sync::Arc;
             use crate::virtual_file::owned_buffers_io::write::FlushTaskError;
+            use std::sync::Arc;
 
             use crate::virtual_file::{IoBufferMut, owned_buffers_io};
             async {
