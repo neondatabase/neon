@@ -205,19 +205,6 @@ impl Scope {
     }
 }
 
-impl std::fmt::Debug for RequestContext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RequestContext")
-            .field("task_kind", &self.task_kind)
-            .field("download_behavior", &self.download_behavior)
-            .field("access_stats_behavior", &self.access_stats_behavior)
-            .field("page_content_kind", &self.page_content_kind)
-            .field("read_path_debug", &self.read_path_debug)
-            // scope, perf_span and perf_span_dispatch are omitted on purpose
-            .finish()
-    }
-}
-
 /// The kind of access to the page cache.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, enum_map::Enum, strum_macros::IntoStaticStr)]
 pub enum PageContentKind {
