@@ -1275,27 +1275,23 @@ impl Timeline {
         };
         reconstruct_state.read_path = read_path;
 
-        let plan_context = RequestContextBuilder::from(ctx)
-            .perf_span(|crnt_perf_span| {
-                info_span!(
-                    target: PERF_TRACE_TARGET,
-                    parent: crnt_perf_span,
-                    "PLAN_IO",
-                )
-            })
-            .attached_child();
+        let traversal_res: Result<(), _> = {
+            let ctx = RequestContextBuilder::from(ctx)
+                .perf_span(|crnt_perf_span| {
+                    info_span!(
+                        target: PERF_TRACE_TARGET,
+                        parent: crnt_perf_span,
+                        "PLAN_IO",
+                    )
+                })
+                .attached_child();
 
-        let traversal_res: Result<(), _> = plan_context
-            .maybe_instrument(
-                self.get_vectored_reconstruct_data(
-                    keyspace.clone(),
-                    lsn,
-                    reconstruct_state,
-                    &plan_context,
-                ),
+            ctx.maybe_instrument(
+                self.get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, &ctx),
                 |crnt_perf_span| crnt_perf_span.clone(),
             )
-            .await;
+            .await
+        };
 
         if let Err(err) = traversal_res {
             // Wait for all the spawned IOs to complete.
@@ -1310,7 +1306,7 @@ impl Timeline {
 
         let layers_visited = reconstruct_state.get_layers_visited();
 
-        let execute_context = RequestContextBuilder::from(ctx)
+        let ctx = RequestContextBuilder::from(ctx)
             .perf_span(|crnt_perf_span| {
                 info_span!(
                     target: PERF_TRACE_TARGET,
@@ -1324,7 +1320,7 @@ impl Timeline {
         for (key, state) in std::mem::take(&mut reconstruct_state.keys) {
             futs.push({
                 let walredo_self = self.myself.upgrade().expect("&self method holds the arc");
-                let execute_key_context = RequestContextBuilder::from(&execute_context)
+                let ctx = RequestContextBuilder::from(&ctx)
                     .perf_span(|crnt_perf_span| {
                         info_span!(
                             target: PERF_TRACE_TARGET,
@@ -1338,7 +1334,7 @@ impl Timeline {
                 async move {
                     assert_eq!(state.situation, ValueReconstructSituation::Complete);
 
-                    let res = execute_key_context
+                    let res = ctx
                         .maybe_instrument(state.collect_pending_ios(), |crnt_perf_span| {
                             info_span!(
                                 target: PERF_TRACE_TARGET,
@@ -1366,7 +1362,7 @@ impl Timeline {
                     );
 
                     let walredo_deltas = converted.num_deltas();
-                    let walredo_res = execute_key_context
+                    let walredo_res = ctx
                         .maybe_instrument(
                             walredo_self.reconstruct_value(key, lsn, converted),
                             |crnt_perf_span| {
@@ -1385,7 +1381,7 @@ impl Timeline {
             });
         }
 
-        let results = execute_context
+        let results = ctx
             .maybe_instrument(
                 futs.collect::<BTreeMap<Key, Result<Bytes, PageReconstructError>>>(),
                 |crnt_perf_span| crnt_perf_span.clone(),
@@ -3867,34 +3863,35 @@ impl Timeline {
                 return Err(GetVectoredError::Cancelled);
             }
 
-            let plan_context = RequestContextBuilder::from(ctx)
-                .perf_span(|crnt_perf_span| {
-                    info_span!(
-                        target: PERF_TRACE_TARGET,
-                        parent: crnt_perf_span,
-                        "PLAN_IO_TIMELINE",
-                        timeline = %timeline.timeline_id,
-                        lsn = %cont_lsn,
-                    )
-                })
-                .attached_child();
-
             let TimelineVisitOutcome {
                 completed_keyspace: completed,
                 image_covered_keyspace,
-            } = plan_context
-                .maybe_instrument(
+            } = {
+                let ctx = RequestContextBuilder::from(ctx)
+                    .perf_span(|crnt_perf_span| {
+                        info_span!(
+                            target: PERF_TRACE_TARGET,
+                            parent: crnt_perf_span,
+                            "PLAN_IO_TIMELINE",
+                            timeline = %timeline.timeline_id,
+                            lsn = %cont_lsn,
+                        )
+                    })
+                    .attached_child();
+
+                ctx.maybe_instrument(
                     Self::get_vectored_reconstruct_data_timeline(
                         timeline,
                         keyspace.clone(),
                         cont_lsn,
                         reconstruct_state,
                         &self.cancel,
-                        &plan_context,
+                        &ctx,
                     ),
                     |crnt_perf_span| crnt_perf_span.clone(),
                 )
-                .await?;
+                .await?
+            };
 
             keyspace.remove_overlapping_with(&completed);
 
@@ -3939,7 +3936,7 @@ impl Timeline {
             // Take the min to avoid reconstructing a page with data newer than request Lsn.
             cont_lsn = std::cmp::min(Lsn(request_lsn.0 + 1), Lsn(timeline.ancestor_lsn.0 + 1));
 
-            let get_ancestor_context = RequestContextBuilder::from(ctx)
+            let ctx = RequestContextBuilder::from(ctx)
                 .perf_span(|crnt_perf_span| {
                     info_span!(
                         target: PERF_TRACE_TARGET,
@@ -3953,9 +3950,9 @@ impl Timeline {
                 })
                 .attached_child();
 
-            timeline_owned = get_ancestor_context
+            timeline_owned = ctx
                 .maybe_instrument(
-                    timeline.get_ready_ancestor_timeline(ancestor_timeline, &get_ancestor_context),
+                    timeline.get_ready_ancestor_timeline(ancestor_timeline, &ctx),
                     |crnt_perf_span| crnt_perf_span.clone(),
                 )
                 .await?;

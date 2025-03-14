@@ -874,7 +874,7 @@ impl ReadableLayer {
     ) -> Result<(), GetVectoredError> {
         match self {
             ReadableLayer::PersistentLayer(layer) => {
-                let persistent_context = RequestContextBuilder::from(ctx)
+                let ctx = RequestContextBuilder::from(ctx)
                     .perf_span(|crnt_perf_span| {
                         info_span!(
                             target: PERF_TRACE_TARGET,
@@ -885,20 +885,14 @@ impl ReadableLayer {
                     })
                     .attached_child();
 
-                persistent_context
-                    .maybe_instrument(
-                        layer.get_values_reconstruct_data(
-                            keyspace,
-                            lsn_range,
-                            reconstruct_state,
-                            &persistent_context,
-                        ),
-                        |crnt_perf_span| crnt_perf_span.clone(),
-                    )
-                    .await
+                ctx.maybe_instrument(
+                    layer.get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, &ctx),
+                    |crnt_perf_span| crnt_perf_span.clone(),
+                )
+                .await
             }
             ReadableLayer::InMemoryLayer(layer) => {
-                let in_mem_context = RequestContextBuilder::from(ctx)
+                let ctx = RequestContextBuilder::from(ctx)
                     .perf_span(|crnt_perf_span| {
                         info_span!(
                             target: PERF_TRACE_TARGET,
@@ -909,17 +903,11 @@ impl ReadableLayer {
                     })
                     .attached_child();
 
-                in_mem_context
-                    .maybe_instrument(
-                        layer.get_values_reconstruct_data(
-                            keyspace,
-                            lsn_range,
-                            reconstruct_state,
-                            &in_mem_context,
-                        ),
-                        |crnt_perf_span| crnt_perf_span.clone(),
-                    )
-                    .await
+                ctx.maybe_instrument(
+                    layer.get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, &ctx),
+                    |crnt_perf_span| crnt_perf_span.clone(),
+                )
+                .await
             }
         }
     }

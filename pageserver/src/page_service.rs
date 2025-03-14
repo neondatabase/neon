@@ -927,7 +927,7 @@ impl PageServerHandler {
                     None => false,
                 };
 
-                let get_page_context = if sampled {
+                let ctx = if sampled {
                     RequestContextBuilder::from(ctx)
                         .root_perf_span(|| {
                             info_span!(
@@ -945,7 +945,7 @@ impl PageServerHandler {
                     ctx.attached_child()
                 };
 
-                let res = get_page_context
+                let res = ctx
                     .maybe_instrument(
                         timeline_handles.get(tenant_id, timeline_id, ShardSelector::Page(key)),
                         |current_perf_span| {
@@ -991,12 +991,12 @@ impl PageServerHandler {
                 };
                 let span = mkspan!(shard.tenant_shard_id.shard_slug());
 
-                get_page_context.perf_span_record(
+                ctx.perf_span_record(
                     "shard",
                     tracing::field::display(shard.get_shard_identity().shard_slug()),
                 );
 
-                let timer = get_page_context
+                let timer = ctx
                     .maybe_instrument(
                         record_op_start_and_throttle(
                             &shard,
@@ -1019,14 +1019,14 @@ impl PageServerHandler {
 
                 // We're holding the Handle
                 // TODO: if we actually need to wait for lsn here, it delays the entire batch which doesn't need to wait
-                let res = get_page_context
+                let res = ctx
                     .maybe_instrument(
                         Self::wait_or_get_last_lsn(
                             &shard,
                             req.hdr.request_lsn,
                             req.hdr.not_modified_since,
                             &shard.get_applied_gc_cutoff_lsn(),
-                            ctx,
+                            &ctx,
                         ),
                         |current_perf_span| {
                             info_span!(
@@ -1052,11 +1052,7 @@ impl PageServerHandler {
                     span,
                     shard: shard.downgrade(),
                     effective_request_lsn,
-                    pages: smallvec::smallvec![BatchedGetPageRequest {
-                        req,
-                        timer,
-                        ctx: get_page_context
-                    }],
+                    pages: smallvec::smallvec![BatchedGetPageRequest { req, timer, ctx }],
                 }
             }
             #[cfg(feature = "testing")]

@@ -325,19 +325,19 @@ impl Layer {
         reconstruct_data: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
-        let get_layer_context = RequestContextBuilder::from(ctx)
-            .perf_span(|crnt_perf_span| {
-                info_span!(
-                    target: PERF_TRACE_TARGET,
-                    parent: crnt_perf_span,
-                    "GET_LAYER",
-                )
-            })
-            .attached_child();
+        let downloaded = {
+            let ctx = RequestContextBuilder::from(ctx)
+                .perf_span(|crnt_perf_span| {
+                    info_span!(
+                        target: PERF_TRACE_TARGET,
+                        parent: crnt_perf_span,
+                        "GET_LAYER",
+                    )
+                })
+                .attached_child();
 
-        let downloaded = get_layer_context
-            .maybe_instrument(
-                self.0.get_or_maybe_download(true, &get_layer_context),
+            ctx.maybe_instrument(
+                self.0.get_or_maybe_download(true, &ctx),
                 |crnt_perf_context| crnt_perf_context.clone(),
             )
             .await
@@ -346,7 +346,8 @@ impl Layer {
                     GetVectoredError::Cancelled
                 }
                 other => GetVectoredError::Other(anyhow::anyhow!(other)),
-            })?;
+            })?
+        };
 
         let this = ResidentLayer {
             downloaded: downloaded.clone(),
@@ -355,7 +356,7 @@ impl Layer {
 
         self.record_access(ctx);
 
-        let visit_layer_context = RequestContextBuilder::from(ctx)
+        let ctx = RequestContextBuilder::from(ctx)
             .perf_span(|crnt_perf_span| {
                 info_span!(
                     target: PERF_TRACE_TARGET,
@@ -365,26 +366,19 @@ impl Layer {
             })
             .attached_child();
 
-        visit_layer_context
-            .maybe_instrument(
-                downloaded
-                    .get_values_reconstruct_data(
-                        this,
-                        keyspace,
-                        lsn_range,
-                        reconstruct_data,
-                        &visit_layer_context,
-                    )
-                    .instrument(tracing::debug_span!("get_values_reconstruct_data", layer=%self)),
-                |crnt_perf_span| crnt_perf_span.clone(),
-            )
-            .await
-            .map_err(|err| match err {
-                GetVectoredError::Other(err) => GetVectoredError::Other(
-                    err.context(format!("get_values_reconstruct_data for layer {self}")),
-                ),
-                err => err,
-            })
+        ctx.maybe_instrument(
+            downloaded
+                .get_values_reconstruct_data(this, keyspace, lsn_range, reconstruct_data, &ctx)
+                .instrument(tracing::debug_span!("get_values_reconstruct_data", layer=%self)),
+            |crnt_perf_span| crnt_perf_span.clone(),
+        )
+        .await
+        .map_err(|err| match err {
+            GetVectoredError::Other(err) => GetVectoredError::Other(
+                err.context(format!("get_values_reconstruct_data for layer {self}")),
+            ),
+            err => err,
+        })
     }
 
     /// Download the layer if evicted.
@@ -1079,7 +1073,7 @@ impl LayerInner {
             return Err(DownloadError::DownloadRequired);
         }
 
-        let download_ctx = if ctx.has_perf_span() {
+        let ctx = if ctx.has_perf_span() {
             let dl_ctx = RequestContextBuilder::from(ctx)
                 .task_kind(TaskKind::LayerDownload)
                 .download_behavior(DownloadBehavior::Download)
@@ -1102,9 +1096,9 @@ impl LayerInner {
             tracing::info!(%reason, "downloading on-demand");
 
             let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
-            let res = download_ctx
+            let res = ctx
                 .maybe_instrument(
-                    self.download_init_and_wait(timeline, permit, download_ctx.attached_child()),
+                    self.download_init_and_wait(timeline, permit, ctx.attached_child()),
                     |crnt_perf_span| crnt_perf_span.clone(),
                 )
                 .await?;

@@ -269,7 +269,7 @@ impl Timeline {
             BTreeMap::default();
 
         let mut perf_instrument = false;
-        for (response_slot_idx, (tag, blknum, req_ctx)) in pages.enumerate() {
+        for (response_slot_idx, (tag, blknum, ctx)) in pages.enumerate() {
             if tag.relnode == 0 {
                 result_slots[response_slot_idx].write(Err(PageReconstructError::Other(
                     RelationError::InvalidRelnode.into(),
@@ -279,9 +279,9 @@ impl Timeline {
                 continue;
             }
 
-            // TODO: perf span
+            // TODO: create a perf span here
             let nblocks = match self
-                .get_rel_size(*tag, Version::Lsn(effective_lsn), ctx)
+                .get_rel_size(*tag, Version::Lsn(effective_lsn), &ctx)
                 .await
             {
                 Ok(nblocks) => nblocks,
@@ -304,12 +304,12 @@ impl Timeline {
 
             let key = rel_block_to_key(*tag, *blknum);
 
-            if req_ctx.has_perf_span() {
+            if ctx.has_perf_span() {
                 perf_instrument = true;
             }
 
             let key_slots = keys_slots.entry(key).or_default();
-            key_slots.push((response_slot_idx, req_ctx));
+            key_slots.push((response_slot_idx, ctx));
         }
 
         let keyspace = {
@@ -325,7 +325,7 @@ impl Timeline {
             acc.to_keyspace()
         };
 
-        let get_vectored_ctx = match perf_instrument {
+        let ctx = match perf_instrument {
             true => RequestContextBuilder::from(ctx)
                 .root_perf_span(|| {
                     info_span!(
@@ -341,9 +341,9 @@ impl Timeline {
             false => ctx.attached_child(),
         };
 
-        let res = get_vectored_ctx
+        let res = ctx
             .maybe_instrument(
-                self.get_vectored(keyspace, effective_lsn, io_concurrency, &get_vectored_ctx),
+                self.get_vectored(keyspace, effective_lsn, io_concurrency, &ctx),
                 |current_perf_span| current_perf_span.clone(),
             )
             .await;
@@ -372,12 +372,14 @@ impl Timeline {
                         };
 
                         result_slots[slot].write(clone);
-                        req_ctx.perf_follows_from(&get_vectored_ctx);
+                        // Link the individual requsest context with the batched execution context
+                        // with a follows_from relation.
+                        req_ctx.perf_follows_from(&ctx);
                         slots_filled += 1;
                     }
 
                     result_slots[first_slot].write(res);
-                    first_req_ctx.perf_follows_from(&get_vectored_ctx);
+                    first_req_ctx.perf_follows_from(&ctx);
                     slots_filled += 1;
                 }
             }
@@ -416,7 +418,7 @@ impl Timeline {
                         }
                     };
 
-                    req_ctx.perf_follows_from(&get_vectored_ctx);
+                    req_ctx.perf_follows_from(&ctx);
                     result_slots[*slot].write(err);
                 }
 
