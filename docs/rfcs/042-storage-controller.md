@@ -3,6 +3,11 @@
 
 This is a retrospective RFC to document the design of the `storage-controller` service.
 
+This service manages the physical mapping of Tenants and Timelines to Pageservers and Safekeepers.  It
+acts as the API for "storage" as an abstract concept: enabling other parts of the system to reason
+about things like creating/deleting tenants and timelines without having to understand exactly which
+pageserver and safekeeper to communicate, or any subtle rules about how to orchestrate these things.
+
 The storage controller was implemented in the first half of 2024 as an essential part
 of storage sharding, especially [shard splitting](032-shard-splitting.md).
 
@@ -127,7 +132,7 @@ necessary, and there is also a background loop which checks every shard
 for the need to reconcile -- this background loop ensures eventual progress
 if some earlier reconciliations failed for some reason.
 
-The reconciler has a general purpose code path which will attach/detach from pageservers as necessary, and a special case path for live migrations.  The live migration case is more common in practice, and is taken whenever the current observed state indicates that we have a healthy attached location to migrate from.  This implements live migration as described in the earlier live migration RFC.
+The reconciler has a general purpose code path which will attach/detach from pageservers as necessary, and a special case path for live migrations.  The live migration case is more common in practice, and is taken whenever the current observed state indicates that we have a healthy attached location to migrate from.  This implements live migration as described in the earlier [live migration RFC](028-pageserver-migration.md).
 
 ### Scheduling optimisation
 
