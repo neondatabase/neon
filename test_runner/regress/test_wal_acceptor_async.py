@@ -18,6 +18,7 @@ from fixtures.neon_fixtures import (
     Safekeeper,
 )
 from fixtures.remote_storage import RemoteStorageKind
+from fixtures.safekeeper.http import MembershipConfiguration
 from fixtures.utils import skip_in_debug_build
 
 if TYPE_CHECKING:
@@ -452,20 +453,24 @@ def test_concurrent_computes(neon_env_builder: NeonEnvBuilder):
     asyncio.run(run_concurrent_computes(env))
 
 
+async def assert_query_hangs(endpoint: Endpoint, query: str):
+    """
+    Start on endpoint query which is expected to hang and check that it does.
+    """
+    conn = await endpoint.connect_async()
+    bg_query = asyncio.create_task(conn.execute(query))
+    await asyncio.sleep(2)
+    assert not bg_query.done()
+    return bg_query
+
+
 # Stop safekeeper and check that query cannot be executed while safekeeper is down.
 # Query will insert a single row into a table.
-async def check_unavailability(
-    sk: Safekeeper, conn: asyncpg.Connection, key: int, start_delay_sec: int = 2
-):
+async def check_unavailability(sk: Safekeeper, ep: Endpoint, key: int, start_delay_sec: int = 2):
     # shutdown one of two acceptors, that is, majority
     sk.stop()
 
-    bg_query = asyncio.create_task(conn.execute(f"INSERT INTO t values ({key}, 'payload')"))
-
-    await asyncio.sleep(start_delay_sec)
-    # ensure that the query has not been executed yet
-    assert not bg_query.done()
-
+    bg_query = await assert_query_hangs(ep, f"INSERT INTO t values ({key}, 'payload')")
     # start safekeeper and await the query
     sk.start()
     await bg_query
@@ -480,10 +485,10 @@ async def run_unavailability(env: NeonEnv, endpoint: Endpoint):
     await conn.execute("INSERT INTO t values (1, 'payload')")
 
     # stop safekeeper and check that query cannot be executed while safekeeper is down
-    await check_unavailability(env.safekeepers[0], conn, 2)
+    await check_unavailability(env.safekeepers[0], endpoint, 2)
 
     # for the world's balance, do the same with second safekeeper
-    await check_unavailability(env.safekeepers[1], conn, 3)
+    await check_unavailability(env.safekeepers[1], endpoint, 3)
 
     # check that we can execute queries after restart
     await conn.execute("INSERT INTO t values (4, 'payload')")
@@ -514,15 +519,7 @@ async def run_recovery_uncommitted(env: NeonEnv):
     # insert with only one safekeeper up to create tail of flushed but not committed WAL
     sk1.stop()
     sk2.stop()
-    conn = await ep.connect_async()
-    # query should hang, so execute in separate task
-    bg_query = asyncio.create_task(
-        conn.execute("insert into t select generate_series(1, 2000), 'payload'")
-    )
-    sleep_sec = 2
-    await asyncio.sleep(sleep_sec)
-    # it must still be not finished
-    assert not bg_query.done()
+    await assert_query_hangs(ep, "insert into t select generate_series(1, 2000), 'payload'")
     # note: destoy will kill compute_ctl, preventing it waiting for hanging sync-safekeepers.
     ep.stop_and_destroy()
 
@@ -559,15 +556,7 @@ async def run_wal_truncation(env: NeonEnv, safekeeper_proto_version: int):
     # insert with only one sk3 up to create tail of flushed but not committed WAL on it
     sk1.stop()
     sk2.stop()
-    conn = await ep.connect_async()
-    # query should hang, so execute in separate task
-    bg_query = asyncio.create_task(
-        conn.execute("insert into t select generate_series(1, 180000), 'Papaya'")
-    )
-    sleep_sec = 2
-    await asyncio.sleep(sleep_sec)
-    # it must still be not finished
-    assert not bg_query.done()
+    await assert_query_hangs(ep, "insert into t select generate_series(1, 180000), 'Papaya'")
     # note: destoy will kill compute_ctl, preventing it waiting for hanging sync-safekeepers.
     ep.stop_and_destroy()
 
@@ -605,6 +594,74 @@ def test_wal_truncation(neon_env_builder: NeonEnvBuilder, safekeeper_proto_versi
     env = neon_env_builder.init_start()
 
     asyncio.run(run_wal_truncation(env, safekeeper_proto_version))
+
+
+# todo: add should_start when all up; check and exit early if not
+async def quorum_sanity_single(
+    env: NeonEnv,
+    compute_sks: list[Safekeeper],
+    mconf: MembershipConfiguration,
+    sks_to_stop: list[Safekeeper],
+    should_work_when_stopped: bool,
+):
+    members_sks = Safekeeper.mconf_sks(env, mconf)
+    log.info(f"members_sks: {members_sks}")
+
+    tenant_id = env.initial_tenant
+    compute_sks_ids = [sk.id for sk in compute_sks]
+    compute_sks_ids_str = [str(sk_id) for sk_id in compute_sks_ids]
+    members_sks_ids_str = [str(sk.id) for sk in mconf.members]
+    new_members_sks_ids_str = (
+        [str(sk.id) for sk in mconf.new_members] if mconf.new_members is not None else []
+    )
+    sks_to_stop_ids_str = [str(sk.id) for sk in sks_to_stop]
+    branch_name = f"test_quorum_single_c{'-'.join(compute_sks_ids_str)}_m{'-'.join(members_sks_ids_str)}_{'-'.join(new_members_sks_ids_str)}_s{'-'.join(sks_to_stop_ids_str)}"
+    timeline_id = env.create_branch(branch_name)
+
+    # create timeline on `members_sks`
+    Safekeeper.create_timeline(tenant_id, timeline_id, env.pageservers[0], mconf, members_sks)
+
+    config_lines = [
+        "neon.safekeeper_proto_version = 3",
+    ]
+    ep = env.endpoints.create(branch_name, config_lines=config_lines)
+    ep.start(safekeeper_generation=1, safekeepers=compute_sks_ids)
+    ep.safe_psql("create table t(key int, value text)")
+
+    # stop specified sks and check whether writes work
+    for sk in sks_to_stop:
+        sk.stop()
+    if should_work_when_stopped:
+        ep.safe_psql("insert into t select generate_series(1, 100), 'Papaya'")
+        bg_query = None
+    else:
+        bg_query = assert_query_hangs(ep, "insert into t select generate_series(1, 100), 'Papaya'")
+        pass
+    # start again; now they should work
+    for sk in sks_to_stop:
+        sk.start()
+    if bg_query:
+        log.info("awaiting query")
+        await bg_query
+
+
+async def run_quorum_sanity(env: NeonEnv):
+    sks = env.safekeepers  # shorter typing
+    mconf = MembershipConfiguration(
+        generation=1, members=Safekeeper.sks_to_safekeeper_ids(sks), new_members=None
+    )
+    await quorum_sanity_single(env, sks, mconf, [], True)
+
+
+# Test various combinations of membership configurations / neon.safekeepers
+# (list of safekeepers endpoint connects to) values / up & down safekeepers and
+# check that endpont can start and write data when we have quorum and can't when
+# we don't.
+def test_quorum_sanity(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 4
+    env = neon_env_builder.init_start()
+
+    asyncio.run(run_quorum_sanity(env))
 
 
 async def run_segment_init_failure(env: NeonEnv):

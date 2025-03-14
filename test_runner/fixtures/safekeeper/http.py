@@ -25,7 +25,7 @@ class Walreceiver:
 
 @dataclass
 class SafekeeperTimelineStatus:
-    mconf: Configuration | None
+    mconf: MembershipConfiguration | None
     term: int
     last_log_term: int
     pg_version: int  # Not exactly a PgVersion, safekeeper returns version as int, for example 150002 for 15.2
@@ -78,17 +78,17 @@ class SafekeeperId:
 
 
 @dataclass
-class Configuration:
+class MembershipConfiguration:
     generation: int
     members: list[SafekeeperId]
     new_members: list[SafekeeperId] | None
 
     @classmethod
-    def from_json(cls, d: dict[str, Any]) -> Configuration:
+    def from_json(cls, d: dict[str, Any]) -> MembershipConfiguration:
         generation = d["generation"]
         members = d["members"]
         new_members = d.get("new_members")
-        return Configuration(generation, members, new_members)
+        return MembershipConfiguration(generation, members, new_members)
 
     def to_json(self) -> str:
         return json.dumps(self, cls=EnhancedJSONEncoder)
@@ -98,7 +98,7 @@ class Configuration:
 class TimelineCreateRequest:
     tenant_id: TenantId
     timeline_id: TimelineId
-    mconf: Configuration
+    mconf: MembershipConfiguration
     # not exactly PgVersion, for example 150002 for 15.2
     pg_version: int
     start_lsn: Lsn
@@ -110,13 +110,13 @@ class TimelineCreateRequest:
 
 @dataclass
 class TimelineMembershipSwitchResponse:
-    previous_conf: Configuration
-    current_conf: Configuration
+    previous_conf: MembershipConfiguration
+    current_conf: MembershipConfiguration
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> TimelineMembershipSwitchResponse:
-        previous_conf = Configuration.from_json(d["previous_conf"])
-        current_conf = Configuration.from_json(d["current_conf"])
+        previous_conf = MembershipConfiguration.from_json(d["previous_conf"])
+        current_conf = MembershipConfiguration.from_json(d["current_conf"])
         return TimelineMembershipSwitchResponse(previous_conf, current_conf)
 
 
@@ -194,7 +194,7 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
         resj = res.json()
         walreceivers = [Walreceiver(wr["conn_id"], wr["status"]) for wr in resj["walreceivers"]]
         # It is always normally not None, it is allowed only to make forward compat tests happy.
-        mconf = Configuration.from_json(resj["mconf"]) if "mconf" in resj else None
+        mconf = MembershipConfiguration.from_json(resj["mconf"]) if "mconf" in resj else None
         return SafekeeperTimelineStatus(
             mconf=mconf,
             term=resj["acceptor_state"]["term"],
@@ -223,7 +223,9 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
         return self.timeline_status(tenant_id, timeline_id).commit_lsn
 
     # Get timeline membership configuration.
-    def get_membership(self, tenant_id: TenantId, timeline_id: TimelineId) -> Configuration:
+    def get_membership(
+        self, tenant_id: TenantId, timeline_id: TimelineId
+    ) -> MembershipConfiguration:
         # make mypy happy
         return self.timeline_status(tenant_id, timeline_id).mconf  # type: ignore
 
@@ -275,7 +277,7 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
         return res_json
 
     def timeline_exclude(
-        self, tenant_id: TenantId, timeline_id: TimelineId, to: Configuration
+        self, tenant_id: TenantId, timeline_id: TimelineId, to: MembershipConfiguration
     ) -> dict[str, Any]:
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/exclude",
@@ -287,7 +289,7 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
         return res_json
 
     def membership_switch(
-        self, tenant_id: TenantId, timeline_id: TimelineId, to: Configuration
+        self, tenant_id: TenantId, timeline_id: TimelineId, to: MembershipConfiguration
     ) -> TimelineMembershipSwitchResponse:
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/membership",
