@@ -286,9 +286,6 @@ WalRedoMain(int argc, char *argv[])
 	max_wal_senders = 0;
 	InitializeMaxBackends();
 
-	/* Disable lastWrittenLsnCache */
-	lastWrittenLsnCacheSize = 0;
-
 #if PG_VERSION_NUM >= 150000
 	process_shmem_requests();
 	InitializeShmemGUCs();
