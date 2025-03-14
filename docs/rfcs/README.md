@@ -66,7 +66,7 @@ RFC lifecycle:
 Use template with `YYYY-MM-DD-copy-me.md` as a starting point. Timestamp prefix helps to avoid awkward 'id' collisions.
 
 ```sh
-cp docs/rfcs/YYYY-MM-DD-copy-me.md docs/rfcs/YYYY-MM-DD-<name>.md
+cp docs/rfcs/YYYY-MM-DD-copy-me.md docs/rfcs/$(date +"%Y-%m-%d")-<name>.md
 ```
 
 Note, a lot of the sections are marked as ‘if relevant’. They are included into the template as a reminder and to help inspiration.
