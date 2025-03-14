@@ -33,7 +33,7 @@
 
 #include "extension_server.h"
 #include "neon.h"
-#include "control_plane_connector.h"
+#include "neon_ddl_handler.h"
 #include "logical_replication_monitor.h"
 #include "unstable_extensions.h"
 #include "walsender_hooks.h"
@@ -442,7 +442,7 @@ _PG_init(void)
 
 	InitUnstableExtensionsSupport();
 	InitLogicalReplicationMonitor();
-	InitControlPlaneConnector();
+	InitDDLHandler();
 
 	pg_init_extension_server();
 
