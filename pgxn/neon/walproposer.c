@@ -728,6 +728,89 @@ SendProposerGreeting(Safekeeper *sk)
 	BlockingWrite(sk, sk->outbuf.data, sk->outbuf.len, SS_HANDSHAKE_RECV);
 }
 
+/* 
+ * Assuming `sk` sent its node id, find such member(s) in wp->mconf and set ptr in
+ * members_safekeepers & new_members_safekeepers to sk.
+ */
+static void
+UpdateMemberSafekeeperPtr(WalProposer *wp, Safekeeper *sk)
+{
+	/* members_safekeepers etc are fixed size, sanity check mconf */
+	if (wp->mconf.members.len > MAX_SAFEKEEPERS)
+		wp_log(FATAL, "too many members %d in mconf", wp->mconf.members.len);
+	if (wp->mconf.new_members.len > MAX_SAFEKEEPERS)
+		wp_log(FATAL, "too many new_members %d in mconf", wp->mconf.new_members.len);
+
+	/* node id is not known until greeting is received */
+	if (sk->state < SS_WAIT_VOTING)
+		return;
+	
+	/* 0 is assumed to be invalid node id, should never happen */
+	if (sk->greetResponse.nodeId == 0)
+	{
+		wp_log(WARNING, "safekeeper %s:%s sent zero node id", sk->host, sk->port);
+		return;
+	}
+
+	for (uint32 i = 0; i < wp->mconf.members.len; i++)
+	{
+		SafekeeperId *sk_id = &wp->mconf.members.m[i];
+
+		if (wp->mconf.members.m[i].node_id == sk->greetResponse.nodeId)
+		{
+			/*
+			 * If mconf or list of safekeepers to connect to changed (the latter
+			 * always currently goes through restart though),
+			 * ResetMemberSafekeeperPtrs is expected to be called before
+			 * UpdateMemberSafekeeperPtr. So, other value suggests that we are
+			 * connected to the same sk under different host name, complain
+			 * about that.
+			 */
+			if (wp->members_safekeepers[i] != NULL && wp->members_safekeepers[i] != sk)
+			{
+				wp_log(WARNING, "safekeeper {id = %lu, ep = %s:%u } in members[%u] is already mapped to connection slot %lu",
+					   sk_id->node_id, sk_id->host, sk_id->port, i, wp->members_safekeepers[i] - wp->safekeeper);
+			}
+			wp_log(LOG, "safekeeper {id = %lu, ep = %s:%u } in members[%u] mapped to connection slot %lu",
+				   sk_id->node_id, sk_id->host, sk_id->port, i, sk - wp->safekeeper);
+			wp->members_safekeepers[i] = sk;
+		}
+	}
+	/* repeat for new_members */
+	for (uint32 i = 0; i < wp->mconf.new_members.len; i++)
+	{
+		SafekeeperId *sk_id = &wp->mconf.new_members.m[i];
+
+		if (wp->mconf.new_members.m[i].node_id == sk->greetResponse.nodeId)
+		{
+			if (wp->new_members_safekeepers[i] != NULL && wp->new_members_safekeepers[i] != sk)
+			{
+				wp_log(WARNING, "safekeeper {id = %lu, ep = %s:%u } in new_members[%u] is already mapped to connection slot %lu",
+					   sk_id->node_id, sk_id->host, sk_id->port, i, wp->new_members_safekeepers[i] - wp->safekeeper);
+			}
+			wp_log(LOG, "safekeeper {id = %lu, ep = %s:%u } in new_members[%u] mapped to connection slot %lu",
+				   sk_id->node_id, sk_id->host, sk_id->port, i, sk - wp->safekeeper);
+			wp->new_members_safekeepers[i] = sk;
+		}
+	}	
+}
+
+/* 
+ * Reset wp->members_safekeepers & new_members_safekeepers and refill them.
+ * Called after wp changes mconf.
+ */
+static void
+ResetMemberSafekeeperPtrs(WalProposer *wp)
+{
+	memset(&wp->members_safekeepers, 0, sizeof(Safekeeper *) * MAX_SAFEKEEPERS);
+	memset(&wp->new_members_safekeepers, 0, sizeof(Safekeeper *) * MAX_SAFEKEEPERS);
+	for (int i = 0; i < wp->n_safekeepers; i++)
+	{
+		if (wp->safekeeper[i].state >= SS_WAIT_VOTING)
+			UpdateMemberSafekeeperPtr(wp, &wp->safekeeper[i]);
+	}
+}
+
 /*
  * Have we received greeting from enough (quorum) safekeepers to start voting?
  */
@@ -780,6 +863,11 @@ RecvAcceptorGreeting(Safekeeper *sk)
 	 */
 	if (sk->greetResponse.mconf.generation > wp->mconf.generation)
 	{
+		/* sanity check before adopting, should never happen */
+		if (sk->greetResponse.mconf.members.len == 0)
+		{
+			wp_log(FATAL, "mconf %u has zero members", sk->greetResponse.mconf.generation);
+		}
 		/* TODO: put mconf to shmem to immediately pick it up on start */
 		if (wp->state >= WPS_CAMPAIGN)
 		{
@@ -787,12 +875,16 @@ RecvAcceptorGreeting(Safekeeper *sk)
 		}
 		MembershipConfigurationFree(&wp->mconf);
 		MembershipConfigurationCopy(&sk->greetResponse.mconf, &wp->mconf);
+		ResetMemberSafekeeperPtrs(wp);
 		/* full conf was just logged above */
 		wp_log(LOG, "changed mconf to generation %u", wp->mconf.generation);
 	}
 
 	/* Protocol is all good, move to voting. */
 	sk->state = SS_WAIT_VOTING;
+
+	/* In greeting safekeeper sent its id; update mappings accordingly. */
+	UpdateMemberSafekeeperPtr(wp, sk);
 
 	/*
 	 * Note: it would be better to track the counter on per safekeeper basis,
