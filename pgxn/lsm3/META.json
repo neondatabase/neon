@@ -1,0 +1,34 @@
+{
+	"name": "lsm3",
+	"abstract": "LSM tree implemented using standard Postgres B-Tree indexes",
+	"description": "LSM3 provides fast inserts because of background index updates and improving index access locality.",
+	"version": "0.1.3",
+	"maintainer": ["Konstantin Kninzhik <knizhnik@garret.ru>"],
+	"license": {
+		"PostgreSQL": "http://www.postgresql.org/about/licence"
+	},
+	"provides": {
+		"lsm3": {
+			"file": "lsm3--1.0.sql",
+			"docfile": "README.md",
+			"version": "0.1.3",
+			"abstract": "LSM tree implemented using standard Postgres B-Tree indexes"
+		}
+	},
+	"tags": ["LSM", "Log-structured merge-tree"],
+	"resources":  {
+        "repository": {
+            "url": "https://github.com/postgrespro/lsm3.git",
+            "web": "https://github.com/postgrespro/lsm3",
+            "type": "git"
+        },
+        "bugtracker": {
+            "web": "https://github.com/postgrespro/lsm3/issues"
+        }
+	},
+	"generated_by": "Konstantin Knizhnik",
+	"meta-spec": {
+		"version": "1.0.0",
+		"url": "http://pgxn.org/meta/spec.txt"
+	}
+}
