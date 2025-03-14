@@ -235,6 +235,7 @@ fn initialize_config(
             .context("build toml deserializer")?,
     )
     .context("deserialize config toml")?;
+
     let conf = PageServerConf::parse_and_validate(identity.id, config_toml, workdir)
         .context("runtime-validation of config toml")?;
 
@@ -428,7 +429,7 @@ fn start_pageserver(
     // Set up deletion queue
     let (deletion_queue, deletion_workers) = DeletionQueue::new(
         remote_storage.clone(),
-        ControllerUpcallClient::new(conf, &shutdown_pageserver),
+        ControllerUpcallClient::new(conf, &shutdown_pageserver)?,
         conf,
     );
     deletion_workers.spawn_with(BACKGROUND_RUNTIME.handle());

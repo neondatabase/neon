@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 bytes.workspace = true
+camino.workspace = true
 fail.workspace = true
 futures.workspace = true
 hyper0.workspace = true
@@ -16,6 +17,7 @@ once_cell.workspace = true
 pprof.workspace = true
 regex.workspace = true
 routerify.workspace = true
+rustls-pemfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_path_to_error.workspace = true

@@ -2847,6 +2847,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "camino",
  "fail",
  "futures",
  "hyper 0.14.30",
@@ -2857,6 +2858,7 @@ dependencies = [
  "pprof",
  "regex",
  "routerify",
+ "rustls-pemfile 2.1.1",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -6625,6 +6627,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "camino",
  "chrono",
  "clap",
  "clashmap",
@@ -6668,6 +6671,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",
+ "tokio-rustls 0.26.0",
  "tokio-util",
  "tracing",
  "utils",
