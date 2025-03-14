@@ -198,6 +198,7 @@ typedef struct
 {
 	/*
 	 * Send this request to the PageServer associated with this shard.
+	 * This function assigns request_id to the request which can be extracted by caller from request struct.
 	 */
 	bool		(*send) (shardno_t  shard_no, NeonRequest * request);
 	/*
@@ -325,5 +326,12 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 {
 	return lfc_writev(rinfo, forkNum, blkno, &buffer, 1);
 }
+
+extern uint64
+prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frlsns,
+						  BlockNumber nblocks, const bits8 *mask,
+						  bool is_prefetch);
+extern bool
+prefetch_receive(BufferTag tag);
 
 #endif
