@@ -1,0 +1,13 @@
+-- Text processing function tests
+SELECT rag.markdown_from_html('<p>Hello <i>world</i></p>');
+ markdown_from_html 
+--------------------
+ Hello _world_
+(1 row)
+
+SELECT rag.chunks_by_character_count('the cat sat on the mat', 10, 5);
+       chunks_by_character_count       
+---------------------------------------
+ {"the cat","cat sat on","on the mat"}
+(1 row)
+
