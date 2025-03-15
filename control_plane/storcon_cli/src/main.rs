@@ -865,6 +865,7 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?;
         }
+
         Command::TenantDrop { tenant_id, unclean } => {
             if !unclean {
                 anyhow::bail!(
