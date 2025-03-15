@@ -13,13 +13,13 @@ pub mod merge_iterator;
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
 use std::collections::{BinaryHeap, HashMap};
-use std::future::Future;
 use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::PERF_TRACE_TARGET;
 pub use batch_split_writer::{BatchLayerWriter, SplitDeltaLayerWriter, SplitImageLayerWriter};
 use bytes::Bytes;
 pub use delta_layer::{DeltaLayer, DeltaLayerWriter, ValueRef};
@@ -34,7 +34,7 @@ use pageserver_api::key::Key;
 use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::value::Value;
-use tracing::{Instrument, trace};
+use tracing::{Instrument, info_span, trace};
 use utils::lsn::Lsn;
 use utils::sync::gate::GateGuard;
 
@@ -43,7 +43,9 @@ use super::PageReconstructError;
 use super::layer_map::InMemoryLayerDesc;
 use super::timeline::{GetVectoredError, ReadPath};
 use crate::config::PageServerConf;
-use crate::context::{AccessStatsBehavior, RequestContext};
+use crate::context::{
+    AccessStatsBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
+};
 
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where
@@ -874,13 +876,37 @@ impl ReadableLayer {
     ) -> Result<(), GetVectoredError> {
         match self {
             ReadableLayer::PersistentLayer(layer) => {
+                let ctx = RequestContextBuilder::from(ctx)
+                    .perf_span(|crnt_perf_span| {
+                        info_span!(
+                            target: PERF_TRACE_TARGET,
+                            parent: crnt_perf_span,
+                            "PLAN_LAYER",
+                            layer = %layer
+                        )
+                    })
+                    .attached_child();
+
                 layer
-                    .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, ctx)
+                    .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, &ctx)
+                    .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
                     .await
             }
             ReadableLayer::InMemoryLayer(layer) => {
+                let ctx = RequestContextBuilder::from(ctx)
+                    .perf_span(|crnt_perf_span| {
+                        info_span!(
+                            target: PERF_TRACE_TARGET,
+                            parent: crnt_perf_span,
+                            "PLAN_LAYER",
+                            layer = %layer
+                        )
+                    })
+                    .attached_child();
+
                 layer
-                    .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, ctx)
+                    .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, &ctx)
+                    .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
                     .await
             }
         }

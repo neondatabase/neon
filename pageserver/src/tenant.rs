@@ -4193,9 +4193,9 @@ impl Tenant {
             self.cancel.child_token(),
         );
 
-        let timeline_ctx = RequestContextBuilder::extend(ctx)
+        let timeline_ctx = RequestContextBuilder::from(ctx)
             .scope(context::Scope::new_timeline(&timeline))
-            .build();
+            .detached_child();
 
         Ok((timeline, timeline_ctx))
     }
