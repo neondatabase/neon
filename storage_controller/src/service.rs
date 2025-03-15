@@ -3804,7 +3804,7 @@ impl Service {
         create_mode: models::TimelineCreateRequestMode,
     ) -> Result<SafekeepersInfo, ApiError> {
         let timeline_id = timeline_info.timeline_id;
-        let pg_version = timeline_info.pg_version;
+        let pg_version = timeline_info.pg_version * 10000;
         // Initially start_lsn is determined by last_record_lsn in pageserver
         // response as it does initdb. However, later we persist it and in sk
         // creation calls replace with the value from the timeline row if it

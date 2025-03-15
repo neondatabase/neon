@@ -81,13 +81,10 @@ impl Client {
         }
     }
 
-    pub async fn create_timeline(&self, req: &TimelineCreateRequest) -> Result<TimelineStatus> {
-        let uri = format!(
-            "{}/v1/tenant/{}/timeline/{}",
-            self.mgmt_api_endpoint, req.tenant_id, req.timeline_id
-        );
+    pub async fn create_timeline(&self, req: &TimelineCreateRequest) -> Result<reqwest::Response> {
+        let uri = format!("{}/v1/tenant/timeline", self.mgmt_api_endpoint);
         let resp = self.post(&uri, req).await?;
-        resp.json().await.map_err(Error::ReceiveBody)
+        Ok(resp)
     }
 
     pub async fn pull_timeline(&self, req: &PullTimelineRequest) -> Result<PullTimelineResponse> {
