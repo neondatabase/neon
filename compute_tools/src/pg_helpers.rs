@@ -208,8 +208,8 @@ impl Escaping for PgIdent {
     /// Here we somewhat mimic the logic of Postgres' `pg_get_functiondef()`,
     /// <https://github.com/postgres/postgres/blob/8b49392b270b4ac0b9f5c210e2a503546841e832/src/backend/utils/adt/ruleutils.c#L2924>
     fn pg_quote_dollar(&self) -> (String, String) {
-        let mut tag: String = "".to_string();
-        let mut outer_tag = "x".to_string();
+        let mut tag: String = "x".to_string();
+        let mut outer_tag = "xx".to_string();
 
         // Find the first suitable tag that is not present in the string.
         // Postgres' max role/DB name length is 63 bytes, so even in the
