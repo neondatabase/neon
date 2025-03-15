@@ -26,6 +26,8 @@ use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::compaction::CompactionOutcome;
 use crate::tenant::{Tenant, TenantState};
 
+use super::timeline::TimelineCompactionError;
+
 /// Semaphore limiting concurrent background tasks (across all tenants).
 ///
 /// We use 3/4 Tokio threads, to avoid blocking all threads in case we do any CPU-heavy work.
@@ -282,7 +284,7 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
 }
 
 fn log_compaction_error(
-    err: &CompactionError,
+    err: &TimelineCompactionError,
     error_count: u32,
     sleep_duration: Duration,
     task_cancelled: bool,
@@ -292,7 +294,7 @@ fn log_compaction_error(
     use crate::tenant::PageReconstructError;
     use crate::tenant::upload_queue::NotInitialized;
 
-    let level = match err {
+    let level = match &err.0 {
         e if e.is_cancel() => return,
         ShuttingDown => return,
         Offload(_) => Level::ERROR,
