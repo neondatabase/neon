@@ -77,6 +77,7 @@
 # build_and_test.yml github workflow for how that's done.
 
 ARG PG_VERSION
+ARG REGISTRY=ghcr.io
 ARG REPOSITORY=neondatabase
 ARG IMAGE=build-tools
 ARG TAG=pinned
@@ -1699,7 +1700,7 @@ FROM extensions-${EXTENSIONS} AS neon-pg-ext-build
 # Compile the Neon-specific `compute_ctl`, `fast_import`, and `local_proxy` binaries
 #
 #########################################################################################
-FROM $REPOSITORY/$IMAGE:$TAG AS compute-tools
+FROM $REGISTRY/$REPOSITORY/$IMAGE:$TAG AS compute-tools
 ARG BUILD_TAG
 ENV BUILD_TAG=$BUILD_TAG
 
@@ -1803,7 +1804,7 @@ RUN rm /usr/local/pgsql/lib/lib*.a
 # Preprocess the sql_exporter configuration files
 #
 #########################################################################################
-FROM $REPOSITORY/$IMAGE:$TAG AS sql_exporter_preprocessor
+FROM $REGISTRY/$REPOSITORY/$IMAGE:$TAG AS sql_exporter_preprocessor
 ARG PG_VERSION
 
 USER nonroot

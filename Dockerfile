@@ -2,6 +2,7 @@
 ### The image itself is mainly used as a container for the binaries and for starting e2e tests with custom parameters.
 ### By default, the binaries inside the image have some mock parameters and can start, but are not intended to be used
 ### inside this image in the real deployments.
+ARG REGISTRY=ghcr.io
 ARG REPOSITORY=neondatabase
 ARG IMAGE=build-tools
 ARG TAG=pinned
@@ -33,7 +34,7 @@ ARG BASE_IMAGE_SHA=${BASE_IMAGE_SHA/debian:bookworm-slim/debian@$BOOKWORM_SLIM_S
 ARG BASE_IMAGE_SHA=${BASE_IMAGE_SHA/debian:bullseye-slim/debian@$BULLSEYE_SLIM_SHA}
 
 # Build Postgres
-FROM $REPOSITORY/$IMAGE:$TAG AS pg-build
+FROM $REGISTRY/$REPOSITORY/$IMAGE:$TAG AS pg-build
 WORKDIR /home/nonroot
 
 COPY --chown=nonroot vendor/postgres-v14 vendor/postgres-v14
@@ -51,7 +52,7 @@ RUN set -e \
     && tar -C pg_install -czf /home/nonroot/postgres_install.tar.gz .
 
 # Prepare cargo-chef recipe
-FROM $REPOSITORY/$IMAGE:$TAG AS plan
+FROM $REGISTRY/$REPOSITORY/$IMAGE:$TAG AS plan
 WORKDIR /home/nonroot
 
 COPY --chown=nonroot . .
@@ -59,7 +60,7 @@ COPY --chown=nonroot . .
 RUN cargo chef prepare --recipe-path recipe.json
 
 # Build neon binaries
-FROM $REPOSITORY/$IMAGE:$TAG AS build
+FROM $REGISTRY/$REPOSITORY/$IMAGE:$TAG AS build
 WORKDIR /home/nonroot
 ARG GIT_VERSION=local
 ARG BUILD_TAG
