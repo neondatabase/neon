@@ -523,8 +523,6 @@ pub struct TenantConfigPatch {
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub l0_flush_stall_threshold: FieldPatch<usize>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
-    pub l0_flush_wait_upload: FieldPatch<bool>,
-    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_horizon: FieldPatch<u64>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_period: FieldPatch<String>,
@@ -592,7 +590,6 @@ pub struct TenantConfig {
     pub compaction_l0_semaphore: Option<bool>,
     pub l0_flush_delay_threshold: Option<usize>,
     pub l0_flush_stall_threshold: Option<usize>,
-    pub l0_flush_wait_upload: Option<bool>,
     pub gc_horizon: Option<u64>,
     #[serde(default)]
     #[serde(with = "humantime_serde")]
@@ -651,7 +648,6 @@ impl TenantConfig {
             mut compaction_l0_semaphore,
             mut l0_flush_delay_threshold,
             mut l0_flush_stall_threshold,
-            mut l0_flush_wait_upload,
             mut gc_horizon,
             mut gc_period,
             mut image_creation_threshold,
@@ -704,7 +700,6 @@ impl TenantConfig {
         patch
             .l0_flush_stall_threshold
             .apply(&mut l0_flush_stall_threshold);
-        patch.l0_flush_wait_upload.apply(&mut l0_flush_wait_upload);
         patch.gc_horizon.apply(&mut gc_horizon);
         patch
             .gc_period
@@ -783,7 +778,6 @@ impl TenantConfig {
             compaction_l0_semaphore,
             l0_flush_delay_threshold,
             l0_flush_stall_threshold,
-            l0_flush_wait_upload,
             gc_horizon,
             gc_period,
             image_creation_threshold,
