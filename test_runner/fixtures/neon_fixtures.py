@@ -1321,6 +1321,28 @@ class NeonEnv:
         for f in futs:
             f.result()
 
+        # Last step: register safekeepers at the storage controller
+        if (
+            self.storage_controller_config is not None
+            and self.storage_controller_config.get("timelines_onto_safekeepers") is True
+        ):
+            for sk_id, sk in enumerate(self.safekeepers):
+                body = {
+                    "id": sk_id,
+                    "created_at": "2023-10-25T09:11:25Z",
+                    "updated_at": "2024-08-28T11:32:43Z",
+                    "region_id": "aws-us-east-2",
+                    "host": "127.0.0.1",
+                    "port": sk.port.pg,
+                    "http_port": sk.port.http,
+                    "https_port": None,
+                    "version": 5957,
+                    "availability_zone_id": f"us-east-2b-{sk_id}",
+                }
+
+                self.storage_controller.on_safekeeper_deploy(sk_id, body)
+                self.storage_controller.safekeeper_scheduling_policy(sk_id, "Active")
+
     def stop(self, immediate=False, ps_assert_metric_no_errors=False, fail_on_endpoint_errors=True):
         """
         After this method returns, there should be no child processes running.

@@ -1,6 +1,5 @@
 use safekeeper_api::models::{
     self, PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization, TimelineCreateRequest,
-    TimelineStatus,
 };
 use safekeeper_client::mgmt_api::{Client, Result};
 use utils::id::{NodeId, TenantId, TimelineId};
@@ -60,7 +59,7 @@ impl SafekeeperClient {
     pub(crate) async fn create_timeline(
         &self,
         req: &TimelineCreateRequest,
-    ) -> Result<TimelineStatus> {
+    ) -> Result<reqwest::Response> {
         measured_request!(
             "create_timeline",
             crate::metrics::Method::Post,
