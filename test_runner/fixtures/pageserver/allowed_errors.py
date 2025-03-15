@@ -115,6 +115,7 @@ DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS = [
     ".*Call to node.*management API.*failed.*receive body.*",
     ".*Call to node.*management API.*failed.*ReceiveBody.*",
     ".*Failed to update node .+ after heartbeat round.*error sending request for url.*",
+    ".*background_reconcile: failed to fetch top tenants:.*client error \\(Connect\\).*",
     # Many tests will start up with a node offline
     ".*startup_reconcile: Could not scan node.*",
     # Tests run in dev mode
