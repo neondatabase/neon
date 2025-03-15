@@ -2051,14 +2051,6 @@ def test_explicit_timeline_creation_storcon(neon_env_builder: NeonEnvBuilder):
     }
     env = neon_env_builder.init_start()
 
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
-
-    ps = env.pageservers[0]
-    ps_http_cli = ps.http_client()
-
-    http_clis = [sk.http_client() for sk in env.safekeepers]
-
     config_lines = [
         "neon.safekeeper_proto_version = 3",
     ]
