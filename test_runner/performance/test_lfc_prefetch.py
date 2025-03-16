@@ -14,7 +14,7 @@ from fixtures.utils import USE_LFC
 @pytest.mark.parametrize("n_readers", [1, 2, 4, 8])
 @pytest.mark.parametrize("n_writers", [0, 1, 2, 4, 8])
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
-def test_lfc_prefetch(neon_simple_env: NeonEnv: n_readers: int, n_writers: int):
+def test_lfc_prefetch(neon_simple_env: NeonEnv, n_readers: int, n_writers: int):
     """
     Test resizing the Local File Cache
     """
