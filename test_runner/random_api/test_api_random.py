@@ -25,6 +25,7 @@ class NeonEndpoint:
     Neon Endpoint
     Gets the output of the API call of an endpoint creation
     """
+
     def __init__(self, project: NeonProject, endpoint: dict[str, Any]):
         self.project: NeonProject = project
         self.id: str = endpoint["id"]
@@ -61,6 +62,7 @@ class NeonBranch:
     Gets the output of the API call of the Neon Public API call of a branch creation as a first parameter
     is_reset defines if the branch is a reset one i.e. created as a result of the reset API Call
     """
+
     def __init__(self, project, branch: dict[str, Any], is_reset=False):
         self.id: str = branch["branch"]["id"]
         self.desc = branch
@@ -219,6 +221,7 @@ class NeonProject:
     The project object
     Calls the Public API to create a Neon Project
     """
+
     def __init__(self, neon_api: NeonAPI, pg_bin: PgBin, pg_version: PgVersion):
         self.neon_api = neon_api
         self.pg_bin = pg_bin
@@ -389,7 +392,9 @@ def do_action(project: NeonProject, action: str) -> None:
     log.info("Action: %s", action)
     if action == "new_branch":
         log.info("Trying to create a new branch")
-        parent = project.branches[random.choice(list(set(project.branches.keys()) - project.reset_branches))]
+        parent = project.branches[
+            random.choice(list(set(project.branches.keys()) - project.reset_branches))
+        ]
         child = parent.create_child_branch()
         if child is None:
             return
@@ -452,14 +457,16 @@ def test_api_random(
         ("new_ro_endpoint", 1.4),
         ("delete_ro_endpoint", 0.8),
         ("delete_branch", 1.0),
-        ("restore_random_time", 1.2)
+        ("restore_random_time", 1.2),
     )
     ACTIONS_LIMIT = 250
     pg_bin.run_capture(
         ["pgbench", "-i", "-I", "dtGvp", "-s100"], env=project.main_branch.connect_env
     )
     for _ in range(ACTIONS_LIMIT):
-        log.info("Starting action #%s", _+1)
-        do_action(project, random.choices([a[0] for a in ACTIONS], weights=[w[1] for w in ACTIONS])[0])
+        log.info("Starting action #%s", _ + 1)
+        do_action(
+            project, random.choices([a[0] for a in ACTIONS], weights=[w[1] for w in ACTIONS])[0]
+        )
         project.check_all_benchmarks()
     assert True
