@@ -238,7 +238,7 @@ class NeonProject:
         parent = self.branches[branch_id].parent
         if branch_id == self.main_branch.id:
             raise RuntimeError("Cannot delete the main branch")
-        if branch_id not in self.leaf_branches:
+        if branch_id not in self.leaf_branches and branch_id not in self.reset_branches:
             raise RuntimeError(f"The branch {branch_id}, probably, has ancestors")
         if branch_id not in self.branches:
             raise RuntimeError(f"The branch with id {branch_id} is not found")
@@ -341,6 +341,7 @@ def setup_class(
 
 
 def do_action(project: NeonProject, action: str) -> None:
+    log.info("Action: %s", action)
     if action == "new_branch":
         log.info("Trying to create a new branch")
         parent = random.choice(list(project.branches.values()))
