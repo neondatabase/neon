@@ -341,7 +341,6 @@ def setup_class(
 
 
 def do_action(project: NeonProject, action: str) -> None:
-    log.info("Action: %s", action)
     if action == "new_branch":
         log.info("Trying to create a new branch")
         parent = random.choice(list(project.branches.values()))
@@ -411,6 +410,6 @@ def test_api_random(
     )
     for _ in range(ACTIONS_LIMIT):
         log.info("Starting action #%s", _+1)
-        do_action(project, random.choices([a[0] for a in ACTIONS], weights=[w[1] for w in ACTIONS]))
+        do_action(project, random.choices([a[0] for a in ACTIONS], weights=[w[1] for w in ACTIONS])[0])
         project.check_all_benchmarks()
     assert True
