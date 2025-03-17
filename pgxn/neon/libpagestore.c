@@ -50,6 +50,20 @@
 #define MIN_RECONNECT_INTERVAL_USEC 1000
 #define MAX_RECONNECT_INTERVAL_USEC 1000000
 
+
+enum NeonEndpointType {
+	EP_TYPE_PRIMARY = 0,
+	EP_TYPE_REPLICA,
+	EP_TYPE_STATIC
+};
+
+static const struct config_enum_entry neon_endpoint_types[] = {
+	{"primary", EP_TYPE_PRIMARY, false},
+	{"replica", EP_TYPE_REPLICA, false},
+	{"static", EP_TYPE_STATIC, false},
+	{NULL, 0, false}
+};
+
 /* GUCs */
 char	   *neon_timeline;
 char	   *neon_tenant;
@@ -62,6 +76,7 @@ int			flush_every_n_requests = 8;
 
 int         neon_protocol_version = 2;
 
+static int	neon_endpoint_type = 0;
 static int	max_reconnect_attempts = 60;
 static int	stripe_size;
 
@@ -390,9 +405,10 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	{
 	case PS_Disconnected:
 	{
-		const char *keywords[4];
-		const char *values[4];
+		const char *keywords[5];
+		const char *values[5];
 		char pid_str[16];
+		char endpoint_str[36];
 		int			n_pgsql_params;
 		TimestampTz	now;
 		int64		us_since_last_attempt;
@@ -462,6 +478,34 @@ pageserver_connect(shardno_t shard_no, int elevel)
 			keywords[n_pgsql_params] = "password";
 			values[n_pgsql_params] = neon_auth_token;
 			n_pgsql_params++;
+		}
+
+		{
+			int ret = 0;
+			bool param_set = false;
+			switch (neon_endpoint_type)
+			{
+				case EP_TYPE_PRIMARY:
+					ret = snprintf(endpoint_str, sizeof(endpoint_str), "-c neon.endpoint_type=primary");
+					param_set = true;
+					break;
+				case EP_TYPE_REPLICA:
+					ret = snprintf(endpoint_str, sizeof(endpoint_str), "-c neon.endpoint_type=replica");
+					param_set = true;
+					break;
+				case EP_TYPE_STATIC:
+					ret = snprintf(endpoint_str, sizeof(endpoint_str), "-c neon.endpoint_type=static");
+					param_set = true;
+					break;
+			}
+			if (ret < 0 || ret >= (int)(sizeof(endpoint_str)))
+				elog(FATAL, "stack-allocated buffer too small to hold endpoint type");
+			if (param_set)
+			{
+				keywords[n_pgsql_params] = "options";
+				values[n_pgsql_params] = endpoint_str;
+				n_pgsql_params++;
+			}
 		}
 
 		keywords[n_pgsql_params] = NULL;
@@ -1368,6 +1412,17 @@ pg_init_libpagestore(void)
 							120000, 100, INT_MAX,
 							PGC_SUSET,
 							GUC_UNIT_MS,
+							NULL, NULL, NULL);
+
+	DefineCustomEnumVariable(
+							"neon.endpoint_type",
+							"The compute endpoint node type",
+							NULL,
+							&neon_endpoint_type,
+							EP_TYPE_PRIMARY,
+							neon_endpoint_types,
+							PGC_POSTMASTER,
+							0,
 							NULL, NULL, NULL);
 
 	relsize_hash_init();

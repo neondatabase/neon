@@ -99,6 +99,7 @@ pub fn write_postgres_conf(
         writeln!(file, "lc_numeric='C.UTF-8'")?;
     }
 
+    writeln!(file, "neon.endpoint_type={}", spec.mode.to_type_str())?;
     match spec.mode {
         ComputeMode::Primary => {}
         ComputeMode::Static(lsn) => {

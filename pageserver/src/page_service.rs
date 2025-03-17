@@ -237,7 +237,7 @@ pub async fn libpq_listener_main(
 
 type ConnectionHandlerResult = anyhow::Result<()>;
 
-#[instrument(skip_all, fields(peer_addr, application_name))]
+#[instrument(skip_all, fields(peer_addr, application_name, endpoint_type))]
 #[allow(clippy::too_many_arguments)]
 async fn page_service_conn_main(
     conf: &'static PageServerConf,
@@ -2549,6 +2549,40 @@ where
             if let Some(app_name) = params.get("application_name") {
                 Span::current().record("application_name", field::display(app_name));
             }
+            if let Some(options) = params.get("options") {
+                let mut parsing_config = false;
+                for item in options.split_whitespace() {
+                    if item == "-c" {
+                        if !parsing_config {
+                            parsing_config = true;
+                        } else {
+                            // "-c" followed with another "-c"
+                            tracing::warn!("failed to parse the startup options: {options}");
+                            break;
+                        }
+                    } else if parsing_config {
+                        let Some((key, value)) = item.split_once('=') else {
+                            // "-c" followed with an invalid option
+                            tracing::warn!("failed to parse the startup options: {options}");
+                            break;
+                        };
+                        if key == "neon.endpoint_type" {
+                            Span::current().record("endpoint_type", field::display(value));
+                        } else {
+                            tracing::warn!("failed to parse the startup options: {options}");
+                            break;
+                        }
+                        parsing_config = false;
+                    } else {
+                        tracing::warn!("failed to parse the startup options: {options}");
+                        break;
+                    }
+                }
+                if parsing_config {
+                    // "-c" without the option
+                    tracing::warn!("failed to parse the startup options: {options}");
+                }
+            }
         };
 
         Ok(())
@@ -2662,6 +2696,7 @@ where
             PageServiceCmd::Set => {
                 // important because psycopg2 executes "SET datestyle TO 'ISO'"
                 // on connect
+                // TODO: allow setting options, i.e., application_name/endpoint_type via SET commands
                 pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
             }
             PageServiceCmd::LeaseLsn(LeaseLsnCmd {
