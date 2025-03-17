@@ -8,13 +8,12 @@ use compute_api::responses::{
 use compute_api::spec::ComputeSpec;
 use reqwest::StatusCode;
 use tokio_postgres::Client;
-use tracing::{error, info, instrument, warn};
+use tracing::{error, info, instrument};
 
 use crate::config;
 use crate::metrics::{CPLANE_REQUESTS_TOTAL, CPlaneRequestRPC, UNKNOWN_HTTP_STATUS};
 use crate::migration::MigrationRunner;
 use crate::params::PG_HBA_ALL_MD5;
-use crate::pg_helpers::*;
 
 // Do control plane request and return response if any. In case of error it
 // returns a bool flag indicating whether it makes sense to retry the request
