@@ -96,7 +96,7 @@ enum Message {
 
 impl Message {
     /// Convert proto message to internal message.
-    #[expect(clippy::result_large_err, reason = "TODO")]
+    #[allow(clippy::result_large_err, reason = "TODO")]
     pub fn from(proto_msg: TypedMessage) -> Result<Self, Status> {
         match proto_msg.r#type() {
             MessageType::SafekeeperTimelineInfo => Ok(Message::SafekeeperTimelineInfo(
@@ -128,7 +128,7 @@ impl Message {
     }
 
     /// Get the tenant_timeline_id from the message.
-    #[expect(clippy::result_large_err, reason = "TODO")]
+    #[allow(clippy::result_large_err, reason = "TODO")]
     pub fn tenant_timeline_id(&self) -> Result<Option<TenantTimelineId>, Status> {
         match self {
             Message::SafekeeperTimelineInfo(msg) => Ok(msg
@@ -187,7 +187,7 @@ enum SubscriptionKey {
 
 impl SubscriptionKey {
     /// Parse protobuf subkey (protobuf doesn't have fixed size bytes, we get vectors).
-    #[expect(clippy::result_large_err, reason = "TODO")]
+    #[allow(clippy::result_large_err, reason = "TODO")]
     pub fn from_proto_subscription_key(key: ProtoSubscriptionKey) -> Result<Self, Status> {
         match key {
             ProtoSubscriptionKey::All(_) => Ok(SubscriptionKey::All),
@@ -198,7 +198,7 @@ impl SubscriptionKey {
     }
 
     /// Parse from FilterTenantTimelineId
-    #[expect(clippy::result_large_err, reason = "TODO")]
+    #[allow(clippy::result_large_err, reason = "TODO")]
     pub fn from_proto_filter_tenant_timeline_id(
         opt: Option<&FilterTenantTimelineId>,
     ) -> Result<Self, Status> {
@@ -389,7 +389,7 @@ impl Registry {
     }
 
     /// Send msg to relevant subscribers.
-    #[expect(clippy::result_large_err, reason = "TODO")]
+    #[allow(clippy::result_large_err, reason = "TODO")]
     pub fn send_msg(&self, msg: &Message) -> Result<(), Status> {
         PROCESSED_MESSAGES_TOTAL.inc();
 
@@ -441,7 +441,7 @@ struct Publisher {
 
 impl Publisher {
     /// Send msg to relevant subscribers.
-    #[expect(clippy::result_large_err, reason = "TODO")]
+    #[allow(clippy::result_large_err, reason = "TODO")]
     pub fn send_msg(&mut self, msg: &Message) -> Result<(), Status> {
         self.registry.send_msg(msg)
     }

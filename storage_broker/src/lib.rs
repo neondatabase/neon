@@ -79,7 +79,7 @@ impl BrokerClientChannel {
 }
 
 // parse variable length bytes from protobuf
-#[expect(clippy::result_large_err, reason = "TODO")]
+#[allow(clippy::result_large_err, reason = "TODO")]
 pub fn parse_proto_ttid(proto_ttid: &ProtoTenantTimelineId) -> Result<TenantTimelineId, Status> {
     let tenant_id = TenantId::from_slice(&proto_ttid.tenant_id)
         .map_err(|e| Status::new(Code::InvalidArgument, format!("malformed tenant_id: {}", e)))?;
