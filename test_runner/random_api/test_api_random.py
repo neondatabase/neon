@@ -354,8 +354,6 @@ def do_action(project: NeonProject, action: str) -> None:
         log.info("Created branch %s", child)
         child.start_benchmark()
     elif action == "delete_branch":
-        # XXX: remove before merge
-        log.info("leafs: %s", project.leaf_branches.keys())
         if project.leaf_branches:
             target = random.choice(list(project.leaf_branches.values()))
             log.info("Trying to delete branch %s", target)
@@ -400,8 +398,6 @@ def test_api_random(
     else:
         seed = int(time.time())
     log.info("Using random seed: %s", seed)
-    # XXX Debug only, remove before merge
-    seed = 1742214393
     random.seed(seed)
     pg_bin, project = setup_class
     # Here we can assign weights by repeating actions
