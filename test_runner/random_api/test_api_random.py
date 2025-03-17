@@ -1,5 +1,5 @@
 """
-Run the regression tests on the cloud instance of Neon
+Run the random API tests on the cloud instance of Neon
 """
 
 from __future__ import annotations
