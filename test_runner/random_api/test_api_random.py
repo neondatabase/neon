@@ -62,7 +62,7 @@ class NeonBranch:
         )
         if is_reset:
             self.project.reset_branches.add(self.id)
-        else:
+        elif self.parent:
             self.project.leaf_branches[self.id] = self
         if self.parent is not None and self.parent.id in self.project.leaf_branches:
             self.project.leaf_branches.pop(self.parent.id)
@@ -350,6 +350,7 @@ def do_action(project: NeonProject, action: str) -> None:
         log.info("Created branch %s", child)
         child.start_benchmark()
     elif action == "delete_branch":
+        # XXX: remove before merge
         log.info("leafs: %s", project.leaf_branches.keys())
         if project.leaf_branches:
             target = random.choice(list(project.leaf_branches.values()))
