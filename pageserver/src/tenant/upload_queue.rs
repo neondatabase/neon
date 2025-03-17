@@ -302,6 +302,7 @@ pub struct UploadQueueStoppedDeletable {
     pub(super) deleted_at: SetDeletedFlagProgress,
 }
 
+#[expect(clippy::large_enum_variant, reason = "TODO")]
 pub enum UploadQueueStopped {
     Deletable(UploadQueueStoppedDeletable),
     Uninitialized,

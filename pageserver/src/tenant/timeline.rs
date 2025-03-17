@@ -1025,6 +1025,7 @@ pub(crate) enum ShutdownMode {
     Hard,
 }
 
+#[expect(clippy::large_enum_variant, reason = "TODO")]
 enum ImageLayerCreationOutcome {
     /// We generated an image layer
     Generated {

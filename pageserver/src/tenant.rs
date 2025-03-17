@@ -915,6 +915,7 @@ enum StartCreatingTimelineResult {
     Idempotent(Arc<Timeline>),
 }
 
+#[expect(clippy::large_enum_variant, reason = "TODO")]
 enum TimelineInitAndSyncResult {
     ReadyToActivate(Arc<Timeline>),
     NeedsSpawnImportPgdata(TimelineInitAndSyncNeedsSpawnImportPgdata),
@@ -1001,6 +1002,7 @@ enum CreateTimelineCause {
     Delete,
 }
 
+#[expect(clippy::large_enum_variant, reason = "TODO")]
 enum LoadTimelineCause {
     Attach,
     Unoffload,

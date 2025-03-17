@@ -15,7 +15,7 @@
 //! len >= 128: 1CCCXXXX XXXXXXXX XXXXXXXX XXXXXXXX
 //!
 use std::cmp::min;
-use std::io::{Error, ErrorKind};
+use std::io::Error;
 
 use async_compression::Level;
 use bytes::{BufMut, BytesMut};
@@ -331,10 +331,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                     return (
                         (
                             io_buf.slice_len(),
-                            Err(Error::new(
-                                ErrorKind::Other,
-                                format!("blob too large ({len} bytes)"),
-                            )),
+                            Err(Error::other(format!("blob too large ({len} bytes)"))),
                         ),
                         srcbuf,
                     );

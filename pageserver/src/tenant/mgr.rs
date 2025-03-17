@@ -58,7 +58,7 @@ use crate::{InitializationOrder, TEMP_FILE_SUFFIX};
 
 /// For a tenant that appears in TenantsMap, it may either be
 /// - `Attached`: has a full Tenant object, is elegible to service
-///    reads and ingest WAL.
+///   reads and ingest WAL.
 /// - `Secondary`: is only keeping a local cache warm.
 ///
 /// Secondary is a totally distinct state rather than being a mode of a `Tenant`, because

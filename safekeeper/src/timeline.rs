@@ -137,6 +137,7 @@ impl Drop for WriteGuardSharedState<'_> {
 /// Usually it holds SafeKeeper, but it also supports offloaded timeline state. In this
 /// case, SafeKeeper is not available (because WAL is not present on disk) and all
 /// operations can be done only with control file.
+#[expect(clippy::large_enum_variant, reason = "TODO")]
 pub enum StateSK {
     Loaded(SafeKeeper<control_file::FileStorage, wal_storage::PhysicalStorage>),
     Offloaded(Box<TimelineState<control_file::FileStorage>>),
