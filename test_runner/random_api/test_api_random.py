@@ -394,6 +394,8 @@ def test_api_random(
     else:
         seed = int(time.time())
     log.info("Using random seed: %s", seed)
+    # XXX Debug only, remove before merge
+    seed = 1742214393
     random.seed(seed)
     pg_bin, project = setup_class
     # Here we can assign weights by repeating actions
