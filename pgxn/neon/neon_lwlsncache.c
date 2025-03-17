@@ -76,7 +76,7 @@ static XLogRecPtr SetLastWrittenLSNForBlockRangeInternal(XLogRecPtr lsn,
 static set_lwlsn_block_range_hook_type prev_set_lwlsn_block_range_hook = NULL;
 static set_lwlsn_block_v_hook_type prev_set_lwlsn_block_v_hook = NULL;
 static set_lwlsn_block_hook_type prev_set_lwlsn_block_hook = NULL;
-static update_max_lwlsn_hook_type prev_update_max_lwlsn_hook = NULL;
+static set_max_lwlsn_hook_type prev_set_max_lwlsn_hook = NULL;
 static set_lwlsn_relation_hook_type prev_set_lwlsn_relation_hook = NULL;
 static set_lwlsn_db_hook_type prev_set_lwlsn_db_hook = NULL;
 
@@ -88,7 +88,7 @@ static shmem_request_hook_type prev_shmem_request_hook;
 
 static void shmemrequest(void);
 static void shmeminit(void);
-static void neon_update_max_lwlsn(XLogRecPtr lsn);
+static void neon_set_max_lwlsn(XLogRecPtr lsn);
 
 void
 init_lwlsncache(void)
@@ -114,8 +114,8 @@ init_lwlsncache(void)
 	set_lwlsn_block_v_hook = neon_set_lwlsn_block_v;
 	prev_set_lwlsn_block_hook = set_lwlsn_block_hook;
 	set_lwlsn_block_hook = neon_set_lwlsn_block;
-	prev_update_max_lwlsn_hook = update_max_lwlsn_hook;
-	update_max_lwlsn_hook = neon_update_max_lwlsn;
+	prev_set_max_lwlsn_hook = set_max_lwlsn_hook;
+	set_max_lwlsn_hook = neon_set_max_lwlsn;
 	prev_set_lwlsn_relation_hook = set_lwlsn_relation_hook;
 	set_lwlsn_relation_hook = neon_set_lwlsn_relation;
 	prev_set_lwlsn_db_hook = set_lwlsn_db_hook;
@@ -227,7 +227,7 @@ neon_get_lwlsn(NRelFileInfo rlocator, ForkNumber forknum, BlockNumber blkno)
 	return lsn;
 }
 
-static void neon_update_max_lwlsn(XLogRecPtr lsn) {
+static void neon_set_max_lwlsn(XLogRecPtr lsn) {
 	LWLockAcquire(LastWrittenLsnLock, LW_EXCLUSIVE);
 	LwLsnCache->maxLastWrittenLsn = lsn;
 	LWLockRelease(LastWrittenLsnLock);
