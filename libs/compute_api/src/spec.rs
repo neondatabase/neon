@@ -179,9 +179,6 @@ pub enum ComputeFeature {
     /// track short-lived connections as user activity.
     ActivityMonitorExperimental,
 
-    /// Pre-install and initialize anon extension for every database in the cluster
-    AnonExtension,
-
     /// Allow to configure rsyslog for Postgres logs export
     PostgresLogsExport,
 
