@@ -444,7 +444,7 @@ def test_api_random(
     log.info("Using random seed: %s", seed)
     random.seed(seed)
     pg_bin, project = setup_class
-    # Here we can assign weights by repeating actions
+    # Here we can assign weights
     ACTIONS = (
         ("new_branch", 1.5),
         ("new_ro_endpoint", 1.4),
