@@ -10,11 +10,11 @@ use std::time::{Duration, Instant};
 use enum_map::{Enum as _, EnumMap};
 use futures::Future;
 use metrics::{
+    Counter, CounterVec, Gauge, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPair,
+    IntCounterPairVec, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
     register_int_counter, register_int_counter_pair_vec, register_int_counter_vec,
     register_int_gauge, register_int_gauge_vec, register_uint_gauge, register_uint_gauge_vec,
-    Counter, CounterVec, Gauge, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPair,
-    IntCounterPairVec, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
 use pageserver_api::config::{
@@ -24,9 +24,8 @@ use pageserver_api::config::{
 use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
 use pin_project_lite::pin_project;
-use postgres_backend::{is_expected_io_error, QueryError};
+use postgres_backend::{QueryError, is_expected_io_error};
 use pq_proto::framed::ConnectionError;
-
 use strum::{EnumCount, IntoEnumIterator as _, VariantNames};
 use strum_macros::{IntoStaticStr, VariantNames};
 use utils::id::TimelineId;
@@ -35,12 +34,12 @@ use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext};
 use crate::pgdatadir_mapping::DatadirModificationStats;
 use crate::task_mgr::TaskKind;
+use crate::tenant::Timeline;
 use crate::tenant::layer_map::LayerMap;
 use crate::tenant::mgr::TenantSlot;
 use crate::tenant::storage_layer::{InMemoryLayer, PersistentLayerDesc};
 use crate::tenant::tasks::BackgroundLoopKind;
 use crate::tenant::throttle::ThrottleResult;
-use crate::tenant::Timeline;
 
 /// Prometheus histogram buckets (in seconds) for operations in the critical
 /// path. In other words, operations that directly affect that latency of user
@@ -140,6 +139,29 @@ pub(crate) static LAYERS_PER_READ_GLOBAL: Lazy<Histogram> = Lazy::new(|| {
         "pageserver_layers_per_read_global",
         "Layers visited to serve a single read (read amplification). In a batch, all visited layers count towards every read.",
         vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static LAYERS_PER_READ_BATCH_GLOBAL: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_layers_per_read_batch_global",
+        "Layers visited to serve a single read batch (read amplification), regardless of number of reads.",
+        vec![
+            1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0
+        ],
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static LAYERS_PER_READ_AMORTIZED_GLOBAL: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_layers_per_read_amortized_global",
+        "Layers visited to serve a single read (read amplification). Amortized across a batch: \
+            all visited layers are divided by number of reads.",
+        vec![
+            1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0
+        ],
     )
     .expect("failed to define a metric")
 });
@@ -363,7 +385,7 @@ pub(crate) static PAGE_CACHE_SIZE: Lazy<PageCacheSizeMetrics> =
 pub(crate) mod page_cache_eviction_metrics {
     use std::num::NonZeroUsize;
 
-    use metrics::{register_int_counter_vec, IntCounter, IntCounterVec};
+    use metrics::{IntCounter, IntCounterVec, register_int_counter_vec};
     use once_cell::sync::Lazy;
 
     #[derive(Clone, Copy)]
@@ -443,8 +465,36 @@ pub(crate) fn page_cache_errors_inc(error_kind: PageCacheErrorKind) {
 pub(crate) static WAIT_LSN_TIME: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_wait_lsn_seconds",
-        "Time spent waiting for WAL to arrive",
+        "Time spent waiting for WAL to arrive. Updated on completion of the wait_lsn operation.",
         CRITICAL_OP_BUCKETS.into(),
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static WAIT_LSN_START_FINISH_COUNTERPAIR: Lazy<IntCounterPairVec> = Lazy::new(|| {
+    register_int_counter_pair_vec!(
+        "pageserver_wait_lsn_started_count",
+        "Number of wait_lsn operations started.",
+        "pageserver_wait_lsn_finished_count",
+        "Number of wait_lsn operations finished.",
+        &["tenant_id", "shard_id", "timeline_id"],
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static WAIT_LSN_IN_PROGRESS_MICROS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_wait_lsn_in_progress_micros",
+        "Time spent waiting for WAL to arrive, by timeline_id. Updated periodically while waiting.",
+        &["tenant_id", "shard_id", "timeline_id"],
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static WAIT_LSN_IN_PROGRESS_GLOBAL_MICROS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_wait_lsn_in_progress_micros_global",
+        "Time spent waiting for WAL to arrive, globally. Updated periodically while waiting."
     )
     .expect("failed to define a metric")
 });
@@ -722,7 +772,7 @@ pub(crate) static RELSIZE_CACHE_MISSES_OLD: Lazy<IntCounter> = Lazy::new(|| {
 });
 
 pub(crate) mod initial_logical_size {
-    use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
+    use metrics::{IntCounter, IntCounterVec, register_int_counter, register_int_counter_vec};
     use once_cell::sync::Lazy;
 
     pub(crate) struct StartCalculation(IntCounterVec);
@@ -1105,12 +1155,17 @@ impl EvictionsWithLowResidenceDuration {
                 // - future "drop panick => abort"
                 //
                 // so just nag: (the error has the labels)
-                tracing::warn!("failed to remove EvictionsWithLowResidenceDuration, it was already removed? {e:#?}");
+                tracing::warn!(
+                    "failed to remove EvictionsWithLowResidenceDuration, it was already removed? {e:#?}"
+                );
             }
             Ok(()) => {
                 // to help identify cases where we double-remove the same values, let's log all
                 // deletions?
-                tracing::info!("removed EvictionsWithLowResidenceDuration with {tenant_id}, {timeline_id}, {}, {threshold}", self.data_source);
+                tracing::info!(
+                    "removed EvictionsWithLowResidenceDuration with {tenant_id}, {timeline_id}, {}, {threshold}",
+                    self.data_source
+                );
             }
         }
     }
@@ -1200,17 +1255,58 @@ impl StorageIoTime {
 
 pub(crate) static STORAGE_IO_TIME_METRIC: Lazy<StorageIoTime> = Lazy::new(StorageIoTime::new);
 
-const STORAGE_IO_SIZE_OPERATIONS: &[&str] = &["read", "write"];
+#[derive(Clone, Copy)]
+#[repr(usize)]
+enum StorageIoSizeOperation {
+    Read,
+    Write,
+}
+
+impl StorageIoSizeOperation {
+    const VARIANTS: &'static [&'static str] = &["read", "write"];
+
+    fn as_str(&self) -> &'static str {
+        Self::VARIANTS[*self as usize]
+    }
+}
 
 // Needed for the https://neonprod.grafana.net/d/5uK9tHL4k/picking-tenant-for-relocation?orgId=1
-pub(crate) static STORAGE_IO_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
-    register_int_gauge_vec!(
+static STORAGE_IO_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
         "pageserver_io_operations_bytes_total",
         "Total amount of bytes read/written in IO operations",
         &["operation", "tenant_id", "shard_id", "timeline_id"]
     )
     .expect("failed to define a metric")
 });
+
+#[derive(Clone, Debug)]
+pub(crate) struct StorageIoSizeMetrics {
+    pub read: UIntGauge,
+    pub write: UIntGauge,
+}
+
+impl StorageIoSizeMetrics {
+    pub(crate) fn new(tenant_id: &str, shard_id: &str, timeline_id: &str) -> Self {
+        let read = STORAGE_IO_SIZE
+            .get_metric_with_label_values(&[
+                StorageIoSizeOperation::Read.as_str(),
+                tenant_id,
+                shard_id,
+                timeline_id,
+            ])
+            .unwrap();
+        let write = STORAGE_IO_SIZE
+            .get_metric_with_label_values(&[
+                StorageIoSizeOperation::Write.as_str(),
+                tenant_id,
+                shard_id,
+                timeline_id,
+            ])
+            .unwrap();
+        Self { read, write }
+    }
+}
 
 #[cfg(not(test))]
 pub(crate) mod virtual_file_descriptor_cache {
@@ -2762,7 +2858,6 @@ impl StorageTimeMetrics {
     }
 }
 
-#[derive(Debug)]
 pub(crate) struct TimelineMetrics {
     tenant_id: String,
     shard_id: String,
@@ -2794,6 +2889,9 @@ pub(crate) struct TimelineMetrics {
     /// Number of valid LSN leases.
     pub valid_lsn_lease_count_gauge: UIntGauge,
     pub wal_records_received: IntCounter,
+    pub storage_io_size: StorageIoSizeMetrics,
+    pub wait_lsn_in_progress_micros: GlobalAndPerTenantIntCounter,
+    pub wait_lsn_start_finish_counterpair: IntCounterPair,
     shutdown: std::sync::atomic::AtomicBool,
 }
 
@@ -2929,6 +3027,19 @@ impl TimelineMetrics {
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
 
+        let storage_io_size = StorageIoSizeMetrics::new(&tenant_id, &shard_id, &timeline_id);
+
+        let wait_lsn_in_progress_micros = GlobalAndPerTenantIntCounter {
+            global: WAIT_LSN_IN_PROGRESS_GLOBAL_MICROS.clone(),
+            per_tenant: WAIT_LSN_IN_PROGRESS_MICROS
+                .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+                .unwrap(),
+        };
+
+        let wait_lsn_start_finish_counterpair = WAIT_LSN_START_FINISH_COUNTERPAIR
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+            .unwrap();
+
         TimelineMetrics {
             tenant_id,
             shard_id,
@@ -2958,8 +3069,11 @@ impl TimelineMetrics {
             evictions_with_low_residence_duration: std::sync::RwLock::new(
                 evictions_with_low_residence_duration,
             ),
+            storage_io_size,
             valid_lsn_lease_count_gauge,
             wal_records_received,
+            wait_lsn_in_progress_micros,
+            wait_lsn_start_finish_counterpair,
             shutdown: std::sync::atomic::AtomicBool::default(),
         }
     }
@@ -3148,8 +3262,17 @@ impl TimelineMetrics {
             ]);
         }
 
-        for op in STORAGE_IO_SIZE_OPERATIONS {
+        for op in StorageIoSizeOperation::VARIANTS {
             let _ = STORAGE_IO_SIZE.remove_label_values(&[op, tenant_id, shard_id, timeline_id]);
+        }
+
+        let _ =
+            WAIT_LSN_IN_PROGRESS_MICROS.remove_label_values(&[tenant_id, shard_id, timeline_id]);
+
+        {
+            let mut res = [Ok(()), Ok(())];
+            WAIT_LSN_START_FINISH_COUNTERPAIR
+                .remove_label_values(&mut res, &[tenant_id, shard_id, timeline_id]);
         }
 
         let _ = SMGR_QUERY_STARTED_PER_TENANT_TIMELINE.remove_label_values(&[
@@ -3574,12 +3697,10 @@ impl<F: Future<Output = Result<O, E>>, O, E> Future for MeasuredRemoteOp<F> {
 }
 
 pub mod tokio_epoll_uring {
-    use std::{
-        collections::HashMap,
-        sync::{Arc, Mutex},
-    };
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
-    use metrics::{register_histogram, register_int_counter, Histogram, LocalHistogram, UIntGauge};
+    use metrics::{Histogram, LocalHistogram, UIntGauge, register_histogram, register_int_counter};
     use once_cell::sync::Lazy;
 
     /// Shared storage for tokio-epoll-uring thread local metrics.
@@ -3588,7 +3709,9 @@ pub mod tokio_epoll_uring {
             let slots_submission_queue_depth = register_histogram!(
                 "pageserver_tokio_epoll_uring_slots_submission_queue_depth",
                 "The slots waiters queue depth of each tokio_epoll_uring system",
-                vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
+                vec![
+                    1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0
+                ],
             )
             .expect("failed to define a metric");
             ThreadLocalMetricsStorage {
@@ -3764,27 +3887,29 @@ pub mod tokio_epoll_uring {
     });
 }
 
+pub(crate) struct GlobalAndPerTenantIntCounter {
+    global: IntCounter,
+    per_tenant: IntCounter,
+}
+
+impl GlobalAndPerTenantIntCounter {
+    #[inline(always)]
+    pub(crate) fn inc(&self) {
+        self.inc_by(1)
+    }
+    #[inline(always)]
+    pub(crate) fn inc_by(&self, n: u64) {
+        self.global.inc_by(n);
+        self.per_tenant.inc_by(n);
+    }
+}
+
 pub(crate) mod tenant_throttling {
-    use metrics::{register_int_counter_vec, IntCounter};
+    use metrics::register_int_counter_vec;
     use once_cell::sync::Lazy;
     use utils::shard::TenantShardId;
 
-    pub(crate) struct GlobalAndPerTenantIntCounter {
-        global: IntCounter,
-        per_tenant: IntCounter,
-    }
-
-    impl GlobalAndPerTenantIntCounter {
-        #[inline(always)]
-        pub(crate) fn inc(&self) {
-            self.inc_by(1)
-        }
-        #[inline(always)]
-        pub(crate) fn inc_by(&self, n: u64) {
-            self.global.inc_by(n);
-            self.per_tenant.inc_by(n);
-        }
-    }
+    use super::GlobalAndPerTenantIntCounter;
 
     pub(crate) struct Metrics<const KIND: usize> {
         pub(super) count_accounted_start: GlobalAndPerTenantIntCounter,
@@ -4030,6 +4155,7 @@ pub fn preinitialize_metrics(conf: &'static PageServerConf) {
         &CIRCUIT_BREAKERS_BROKEN,
         &CIRCUIT_BREAKERS_UNBROKEN,
         &PAGE_SERVICE_SMGR_FLUSH_INPROGRESS_MICROS_GLOBAL,
+        &WAIT_LSN_IN_PROGRESS_GLOBAL_MICROS,
     ]
     .into_iter()
     .for_each(|c| {
@@ -4070,6 +4196,8 @@ pub fn preinitialize_metrics(conf: &'static PageServerConf) {
     // histograms
     [
         &LAYERS_PER_READ_GLOBAL,
+        &LAYERS_PER_READ_BATCH_GLOBAL,
+        &LAYERS_PER_READ_AMORTIZED_GLOBAL,
         &DELTAS_PER_READ_GLOBAL,
         &WAIT_LSN_TIME,
         &WAL_REDO_TIME,

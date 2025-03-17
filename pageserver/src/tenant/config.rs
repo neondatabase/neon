@@ -8,16 +8,17 @@
 //! We cannot use global or default config instead, because wrong settings
 //! may lead to a data loss.
 //!
+use std::num::NonZeroU64;
+use std::time::Duration;
+
 pub(crate) use pageserver_api::config::TenantConfigToml as TenantConf;
-use pageserver_api::models::CompactionAlgorithmSettings;
-use pageserver_api::models::EvictionPolicy;
-use pageserver_api::models::{self, TenantConfigPatch};
+use pageserver_api::models::{
+    self, CompactionAlgorithmSettings, EvictionPolicy, TenantConfigPatch,
+};
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
 use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::num::NonZeroU64;
-use std::time::Duration;
 use utils::generation::Generation;
 use utils::postgres_client::PostgresClientProtocol;
 
@@ -218,7 +219,11 @@ impl LocationConf {
         };
 
         let shard = if conf.shard_count == 0 {
-            ShardIdentity::unsharded()
+            // NB: carry over the persisted stripe size instead of using the default. This doesn't
+            // matter for most practical purposes, since unsharded tenants don't use the stripe
+            // size, but can cause inconsistencies between storcon and Pageserver and cause manual
+            // splits without `new_stripe_size` to use an unintended stripe size.
+            ShardIdentity::unsharded_with_stripe_size(ShardStripeSize(conf.shard_stripe_size))
         } else {
             ShardIdentity::new(
                 ShardNumber(conf.shard_number),
@@ -693,16 +698,15 @@ impl TryFrom<&'_ models::TenantConfig> for TenantConfOpt {
 /// This is a conversion from our internal tenant config object to the one used
 /// in external APIs.
 impl From<TenantConfOpt> for models::TenantConfig {
+    // TODO(vlad): These are now the same, but they have different serialization logic.
+    // Can we merge them?
     fn from(value: TenantConfOpt) -> Self {
-        fn humantime(d: Duration) -> String {
-            format!("{}s", d.as_secs())
-        }
         Self {
             checkpoint_distance: value.checkpoint_distance,
-            checkpoint_timeout: value.checkpoint_timeout.map(humantime),
+            checkpoint_timeout: value.checkpoint_timeout,
             compaction_algorithm: value.compaction_algorithm,
             compaction_target_size: value.compaction_target_size,
-            compaction_period: value.compaction_period.map(humantime),
+            compaction_period: value.compaction_period,
             compaction_threshold: value.compaction_threshold,
             compaction_upper_limit: value.compaction_upper_limit,
             compaction_l0_first: value.compaction_l0_first,
@@ -711,24 +715,23 @@ impl From<TenantConfOpt> for models::TenantConfig {
             l0_flush_stall_threshold: value.l0_flush_stall_threshold,
             l0_flush_wait_upload: value.l0_flush_wait_upload,
             gc_horizon: value.gc_horizon,
-            gc_period: value.gc_period.map(humantime),
+            gc_period: value.gc_period,
             image_creation_threshold: value.image_creation_threshold,
-            pitr_interval: value.pitr_interval.map(humantime),
-            walreceiver_connect_timeout: value.walreceiver_connect_timeout.map(humantime),
-            lagging_wal_timeout: value.lagging_wal_timeout.map(humantime),
+            pitr_interval: value.pitr_interval,
+            walreceiver_connect_timeout: value.walreceiver_connect_timeout,
+            lagging_wal_timeout: value.lagging_wal_timeout,
             max_lsn_wal_lag: value.max_lsn_wal_lag,
             eviction_policy: value.eviction_policy,
             min_resident_size_override: value.min_resident_size_override,
             evictions_low_residence_duration_metric_threshold: value
-                .evictions_low_residence_duration_metric_threshold
-                .map(humantime),
-            heatmap_period: value.heatmap_period.map(humantime),
+                .evictions_low_residence_duration_metric_threshold,
+            heatmap_period: value.heatmap_period,
             lazy_slru_download: value.lazy_slru_download,
             timeline_get_throttle: value.timeline_get_throttle,
             image_layer_creation_check_threshold: value.image_layer_creation_check_threshold,
             image_creation_preempt_threshold: value.image_creation_preempt_threshold,
-            lsn_lease_length: value.lsn_lease_length.map(humantime),
-            lsn_lease_length_for_ts: value.lsn_lease_length_for_ts.map(humantime),
+            lsn_lease_length: value.lsn_lease_length,
+            lsn_lease_length_for_ts: value.lsn_lease_length_for_ts,
             timeline_offloading: value.timeline_offloading,
             wal_receiver_protocol_override: value.wal_receiver_protocol_override,
             rel_size_v2_enabled: value.rel_size_v2_enabled,
@@ -741,8 +744,9 @@ impl From<TenantConfOpt> for models::TenantConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use models::TenantConfig;
+
+    use super::*;
 
     #[test]
     fn de_serializing_pageserver_config_omits_empty_values() {
@@ -761,28 +765,9 @@ mod tests {
     }
 
     #[test]
-    fn test_try_from_models_tenant_config_err() {
-        let tenant_config = models::TenantConfig {
-            lagging_wal_timeout: Some("5a".to_string()),
-            ..TenantConfig::default()
-        };
-
-        let tenant_conf_opt = TenantConfOpt::try_from(&tenant_config);
-
-        assert!(
-            tenant_conf_opt.is_err(),
-            "Suceeded to convert TenantConfig to TenantConfOpt"
-        );
-
-        let expected_error_str =
-            "lagging_wal_timeout: invalid value: string \"5a\", expected a duration";
-        assert_eq!(tenant_conf_opt.unwrap_err().to_string(), expected_error_str);
-    }
-
-    #[test]
     fn test_try_from_models_tenant_config_success() {
         let tenant_config = models::TenantConfig {
-            lagging_wal_timeout: Some("5s".to_string()),
+            lagging_wal_timeout: Some(Duration::from_secs(5)),
             ..TenantConfig::default()
         };
 

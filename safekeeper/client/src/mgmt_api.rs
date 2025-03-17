@@ -3,17 +3,16 @@
 //! Partially copied from pageserver client; some parts might be better to be
 //! united.
 
+use std::error::Error as _;
+
 use http_utils::error::HttpErrorBody;
 use reqwest::{IntoUrl, Method, StatusCode};
 use safekeeper_api::models::{
-    PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization, TimelineCreateRequest,
+    self, PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization, TimelineCreateRequest,
     TimelineStatus,
 };
-use std::error::Error as _;
-use utils::{
-    id::{NodeId, TenantId, TimelineId},
-    logging::SecretString,
-};
+use utils::id::{NodeId, TenantId, TimelineId};
+use utils::logging::SecretString;
 
 #[derive(Debug, Clone)]
 pub struct Client {
@@ -38,6 +37,10 @@ pub enum Error {
 
     #[error("Cancelled")]
     Cancelled,
+
+    /// Failed to create client.
+    #[error("create client: {0}{}", .0.source().map(|e| format!(": {e}")).unwrap_or_default())]
+    CreateClient(reqwest::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -65,11 +68,7 @@ impl ResponseErrorMessageExt for reqwest::Response {
 }
 
 impl Client {
-    pub fn new(mgmt_api_endpoint: String, jwt: Option<SecretString>) -> Self {
-        Self::from_client(reqwest::Client::new(), mgmt_api_endpoint, jwt)
-    }
-
-    pub fn from_client(
+    pub fn new(
         client: reqwest::Client,
         mgmt_api_endpoint: String,
         jwt: Option<SecretString>,
@@ -97,16 +96,44 @@ impl Client {
         resp.json().await.map_err(Error::ReceiveBody)
     }
 
+    pub async fn exclude_timeline(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        req: &models::TimelineMembershipSwitchRequest,
+    ) -> Result<models::TimelineDeleteResult> {
+        let uri = format!(
+            "{}/v1/tenant/{}/timeline/{}/exclude",
+            self.mgmt_api_endpoint, tenant_id, timeline_id
+        );
+        let resp = self.put(&uri, req).await?;
+        resp.json().await.map_err(Error::ReceiveBody)
+    }
+
     pub async fn delete_timeline(
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-    ) -> Result<TimelineStatus> {
+    ) -> Result<models::TimelineDeleteResult> {
         let uri = format!(
             "{}/v1/tenant/{}/timeline/{}",
             self.mgmt_api_endpoint, tenant_id, timeline_id
         );
         let resp = self.request(Method::DELETE, &uri, ()).await?;
+        resp.json().await.map_err(Error::ReceiveBody)
+    }
+
+    pub async fn bump_timeline_term(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        req: &models::TimelineTermBumpRequest,
+    ) -> Result<models::TimelineTermBumpResponse> {
+        let uri = format!(
+            "{}/v1/tenant/{}/timeline/{}/term_bump",
+            self.mgmt_api_endpoint, tenant_id, timeline_id
+        );
+        let resp = self.post(&uri, req).await?;
         resp.json().await.map_err(Error::ReceiveBody)
     }
 
@@ -150,6 +177,14 @@ impl Client {
         self.request(Method::POST, uri, body).await
     }
 
+    async fn put<B: serde::Serialize, U: IntoUrl>(
+        &self,
+        uri: U,
+        body: B,
+    ) -> Result<reqwest::Response> {
+        self.request(Method::PUT, uri, body).await
+    }
+
     async fn get<U: IntoUrl>(&self, uri: U) -> Result<reqwest::Response> {
         self.request(Method::GET, uri, ()).await
     }
@@ -173,12 +208,10 @@ impl Client {
         uri: U,
         body: B,
     ) -> Result<reqwest::Response> {
-        let req = self.client.request(method, uri);
-        let req = if let Some(value) = &self.authorization_header {
-            req.header(reqwest::header::AUTHORIZATION, value.get_contents())
-        } else {
-            req
-        };
+        let mut req = self.client.request(method, uri);
+        if let Some(value) = &self.authorization_header {
+            req = req.header(reqwest::header::AUTHORIZATION, value.get_contents())
+        }
         req.json(&body).send().await.map_err(Error::ReceiveBody)
     }
 }

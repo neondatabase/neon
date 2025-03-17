@@ -2,38 +2,30 @@ pub mod detach_ancestor;
 pub mod partitioning;
 pub mod utilization;
 
-#[cfg(feature = "testing")]
-use camino::Utf8PathBuf;
-pub use utilization::PageserverUtilization;
-
 use core::ops::Range;
-use std::{
-    collections::HashMap,
-    fmt::Display,
-    io::{BufRead, Read},
-    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
-    str::FromStr,
-    time::{Duration, SystemTime},
-};
+use std::collections::HashMap;
+use std::fmt::Display;
+use std::io::{BufRead, Read};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+use std::str::FromStr;
+use std::time::{Duration, SystemTime};
 
 use byteorder::{BigEndian, ReadBytesExt};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+#[cfg(feature = "testing")]
+use camino::Utf8PathBuf;
 use postgres_ffi::BLCKSZ;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::serde_as;
-use utils::{
-    completion,
-    id::{NodeId, TenantId, TimelineId},
-    lsn::Lsn,
-    postgres_client::PostgresClientProtocol,
-    serde_system_time,
-};
+pub use utilization::PageserverUtilization;
+use utils::id::{NodeId, TenantId, TimelineId};
+use utils::lsn::Lsn;
+use utils::postgres_client::PostgresClientProtocol;
+use utils::{completion, serde_system_time};
 
-use crate::{
-    key::{CompactKey, Key},
-    reltag::RelTag,
-    shard::{ShardCount, ShardStripeSize, TenantShardId},
-};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use crate::key::{CompactKey, Key};
+use crate::reltag::RelTag;
+use crate::shard::{ShardCount, ShardStripeSize, TenantShardId};
 
 /// The state of a tenant in this pageserver.
 ///
@@ -184,6 +176,39 @@ impl LsnLease {
     }
 }
 
+/// Controls the detach ancestor behavior.
+/// - When set to `NoAncestorAndReparent`, we will only detach a branch if its ancestor is a root branch. It will automatically reparent any children of the ancestor before and at the branch point.
+/// - When set to `MultiLevelAndNoReparent`, we will detach a branch from multiple levels of ancestors, and no reparenting will happen at all.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum DetachBehavior {
+    #[default]
+    NoAncestorAndReparent,
+    MultiLevelAndNoReparent,
+}
+
+impl std::str::FromStr for DetachBehavior {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "no_ancestor_and_reparent" => Ok(DetachBehavior::NoAncestorAndReparent),
+            "multi_level_and_no_reparent" => Ok(DetachBehavior::MultiLevelAndNoReparent),
+            "v1" => Ok(DetachBehavior::NoAncestorAndReparent),
+            "v2" => Ok(DetachBehavior::MultiLevelAndNoReparent),
+            _ => Err("cannot parse detach behavior"),
+        }
+    }
+}
+
+impl std::fmt::Display for DetachBehavior {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DetachBehavior::NoAncestorAndReparent => write!(f, "no_ancestor_and_reparent"),
+            DetachBehavior::MultiLevelAndNoReparent => write!(f, "multi_level_and_no_reparent"),
+        }
+    }
+}
+
 /// The only [`TenantState`] variants we could be `TenantState::Activating` from.
 ///
 /// XXX: We used to have more variants here, but now it's just one, which makes this rather
@@ -282,6 +307,31 @@ pub struct TimelineCreateRequest {
     pub mode: TimelineCreateRequestMode,
 }
 
+/// Storage controller specific extensions to [`TimelineInfo`].
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TimelineCreateResponseStorcon {
+    #[serde(flatten)]
+    pub timeline_info: TimelineInfo,
+
+    pub safekeepers: Option<SafekeepersInfo>,
+}
+
+/// Safekeepers as returned in timeline creation request to storcon or pushed to
+/// cplane in the post migration hook.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SafekeepersInfo {
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
+    pub generation: u32,
+    pub safekeepers: Vec<SafekeeperInfo>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SafekeeperInfo {
+    pub id: NodeId,
+    pub hostname: String,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum TimelineCreateRequestMode {
@@ -332,7 +382,8 @@ pub struct ImportPgdataIdempotencyKey(pub String);
 
 impl ImportPgdataIdempotencyKey {
     pub fn random() -> Self {
-        use rand::{distributions::Alphanumeric, Rng};
+        use rand::Rng;
+        use rand::distributions::Alphanumeric;
         Self(
             rand::thread_rng()
                 .sample_iter(&Alphanumeric)
@@ -526,9 +577,13 @@ pub struct TenantConfigPatch {
 #[derive(Serialize, Deserialize, Debug, Default, Clone, Eq, PartialEq)]
 pub struct TenantConfig {
     pub checkpoint_distance: Option<u64>,
-    pub checkpoint_timeout: Option<String>,
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub checkpoint_timeout: Option<Duration>,
     pub compaction_target_size: Option<u64>,
-    pub compaction_period: Option<String>,
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub compaction_period: Option<Duration>,
     pub compaction_threshold: Option<usize>,
     pub compaction_upper_limit: Option<usize>,
     // defer parsing compaction_algorithm, like eviction_policy
@@ -539,22 +594,38 @@ pub struct TenantConfig {
     pub l0_flush_stall_threshold: Option<usize>,
     pub l0_flush_wait_upload: Option<bool>,
     pub gc_horizon: Option<u64>,
-    pub gc_period: Option<String>,
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub gc_period: Option<Duration>,
     pub image_creation_threshold: Option<usize>,
-    pub pitr_interval: Option<String>,
-    pub walreceiver_connect_timeout: Option<String>,
-    pub lagging_wal_timeout: Option<String>,
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub pitr_interval: Option<Duration>,
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub walreceiver_connect_timeout: Option<Duration>,
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub lagging_wal_timeout: Option<Duration>,
     pub max_lsn_wal_lag: Option<NonZeroU64>,
     pub eviction_policy: Option<EvictionPolicy>,
     pub min_resident_size_override: Option<u64>,
-    pub evictions_low_residence_duration_metric_threshold: Option<String>,
-    pub heatmap_period: Option<String>,
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub evictions_low_residence_duration_metric_threshold: Option<Duration>,
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub heatmap_period: Option<Duration>,
     pub lazy_slru_download: Option<bool>,
     pub timeline_get_throttle: Option<ThrottleConfig>,
     pub image_layer_creation_check_threshold: Option<u8>,
     pub image_creation_preempt_threshold: Option<usize>,
-    pub lsn_lease_length: Option<String>,
-    pub lsn_lease_length_for_ts: Option<String>,
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub lsn_lease_length: Option<Duration>,
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub lsn_lease_length_for_ts: Option<Duration>,
     pub timeline_offloading: Option<bool>,
     pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
     pub rel_size_v2_enabled: Option<bool>,
@@ -564,7 +635,10 @@ pub struct TenantConfig {
 }
 
 impl TenantConfig {
-    pub fn apply_patch(self, patch: TenantConfigPatch) -> TenantConfig {
+    pub fn apply_patch(
+        self,
+        patch: TenantConfigPatch,
+    ) -> Result<TenantConfig, humantime::DurationError> {
         let Self {
             mut checkpoint_distance,
             mut checkpoint_timeout,
@@ -604,11 +678,17 @@ impl TenantConfig {
         } = self;
 
         patch.checkpoint_distance.apply(&mut checkpoint_distance);
-        patch.checkpoint_timeout.apply(&mut checkpoint_timeout);
+        patch
+            .checkpoint_timeout
+            .map(|v| humantime::parse_duration(&v))?
+            .apply(&mut checkpoint_timeout);
         patch
             .compaction_target_size
             .apply(&mut compaction_target_size);
-        patch.compaction_period.apply(&mut compaction_period);
+        patch
+            .compaction_period
+            .map(|v| humantime::parse_duration(&v))?
+            .apply(&mut compaction_period);
         patch.compaction_threshold.apply(&mut compaction_threshold);
         patch
             .compaction_upper_limit
@@ -626,15 +706,25 @@ impl TenantConfig {
             .apply(&mut l0_flush_stall_threshold);
         patch.l0_flush_wait_upload.apply(&mut l0_flush_wait_upload);
         patch.gc_horizon.apply(&mut gc_horizon);
-        patch.gc_period.apply(&mut gc_period);
+        patch
+            .gc_period
+            .map(|v| humantime::parse_duration(&v))?
+            .apply(&mut gc_period);
         patch
             .image_creation_threshold
             .apply(&mut image_creation_threshold);
-        patch.pitr_interval.apply(&mut pitr_interval);
+        patch
+            .pitr_interval
+            .map(|v| humantime::parse_duration(&v))?
+            .apply(&mut pitr_interval);
         patch
             .walreceiver_connect_timeout
+            .map(|v| humantime::parse_duration(&v))?
             .apply(&mut walreceiver_connect_timeout);
-        patch.lagging_wal_timeout.apply(&mut lagging_wal_timeout);
+        patch
+            .lagging_wal_timeout
+            .map(|v| humantime::parse_duration(&v))?
+            .apply(&mut lagging_wal_timeout);
         patch.max_lsn_wal_lag.apply(&mut max_lsn_wal_lag);
         patch.eviction_policy.apply(&mut eviction_policy);
         patch
@@ -642,8 +732,12 @@ impl TenantConfig {
             .apply(&mut min_resident_size_override);
         patch
             .evictions_low_residence_duration_metric_threshold
+            .map(|v| humantime::parse_duration(&v))?
             .apply(&mut evictions_low_residence_duration_metric_threshold);
-        patch.heatmap_period.apply(&mut heatmap_period);
+        patch
+            .heatmap_period
+            .map(|v| humantime::parse_duration(&v))?
+            .apply(&mut heatmap_period);
         patch.lazy_slru_download.apply(&mut lazy_slru_download);
         patch
             .timeline_get_throttle
@@ -654,9 +748,13 @@ impl TenantConfig {
         patch
             .image_creation_preempt_threshold
             .apply(&mut image_creation_preempt_threshold);
-        patch.lsn_lease_length.apply(&mut lsn_lease_length);
+        patch
+            .lsn_lease_length
+            .map(|v| humantime::parse_duration(&v))?
+            .apply(&mut lsn_lease_length);
         patch
             .lsn_lease_length_for_ts
+            .map(|v| humantime::parse_duration(&v))?
             .apply(&mut lsn_lease_length_for_ts);
         patch.timeline_offloading.apply(&mut timeline_offloading);
         patch
@@ -673,7 +771,7 @@ impl TenantConfig {
             .gc_compaction_ratio_percent
             .apply(&mut gc_compaction_ratio_percent);
 
-        Self {
+        Ok(Self {
             checkpoint_distance,
             checkpoint_timeout,
             compaction_target_size,
@@ -709,7 +807,7 @@ impl TenantConfig {
             gc_compaction_enabled,
             gc_compaction_initial_threshold_kb,
             gc_compaction_ratio_percent,
-        }
+        })
     }
 }
 
@@ -1106,6 +1204,15 @@ pub struct TimelineArchivalConfigRequest {
     pub state: TimelineArchivalState,
 }
 
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct TimelinePatchIndexPartRequest {
+    pub rel_size_migration: Option<RelSizeMigration>,
+    pub gc_compaction_last_completed_lsn: Option<Lsn>,
+    pub applied_gc_cutoff_lsn: Option<Lsn>,
+    #[serde(default)]
+    pub force_index_update: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TimelinesInfoAndOffloaded {
     pub timelines: Vec<TimelineInfo>,
@@ -1125,6 +1232,21 @@ pub struct OffloadedTimelineInfo {
     pub archived_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RelSizeMigration {
+    /// The tenant is using the old rel_size format.
+    /// Note that this enum is persisted as `Option<RelSizeMigration>` in the index part, so
+    /// `None` is the same as `Some(RelSizeMigration::Legacy)`.
+    Legacy,
+    /// The tenant is migrating to the new rel_size format. Both old and new rel_size format are
+    /// persisted in the index part. The read path will read both formats and merge them.
+    Migrating,
+    /// The tenant has migrated to the new rel_size format. Only the new rel_size format is persisted
+    /// in the index part, and the read path will not read the old format.
+    Migrated,
+}
+
 /// This represents the output of the "timeline_detail" and "timeline_list" API calls.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TimelineInfo {
@@ -1136,9 +1258,10 @@ pub struct TimelineInfo {
     pub last_record_lsn: Lsn,
     pub prev_record_lsn: Option<Lsn>,
 
-    /// Legacy field for compat with control plane.  Synonym of `min_readable_lsn`.
-    /// TODO: remove once control plane no longer reads it.
-    pub latest_gc_cutoff_lsn: Lsn,
+    /// Legacy field, retained for one version to enable old storage controller to
+    /// decode (it was a mandatory field).
+    #[serde(default, rename = "latest_gc_cutoff_lsn")]
+    pub _unused: Lsn,
 
     /// The LSN up to which GC has advanced: older data may still exist but it is not available for clients.
     /// This LSN is not suitable for deciding where to create branches etc: use [`TimelineInfo::min_readable_lsn`] instead,
@@ -1203,7 +1326,11 @@ pub struct TimelineInfo {
     // Forward compatibility: a previous version of the pageserver will receive a JSON. serde::Deserialize does
     // not deny unknown fields by default so it's safe to set the field to some value, though it won't be
     // read.
+    /// Whether the timeline is archived.
     pub is_archived: Option<bool>,
+
+    /// The status of the rel_size migration.
+    pub rel_size_migration: Option<RelSizeMigration>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1383,8 +1510,14 @@ pub struct TenantScanRemoteStorageResponse {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum TenantSorting {
+    /// Total size of layers on local disk for all timelines in a shard.
     ResidentSize,
+    /// The logical size of the largest timeline within a _tenant_ (not shard). Only tracked on
+    /// shard 0, contains the sum across all shards.
     MaxLogicalSize,
+    /// The logical size of the largest timeline within a _tenant_ (not shard), divided by number of
+    /// shards. Only tracked on shard 0, and estimates the per-shard logical size.
+    MaxLogicalSizePerShard,
 }
 
 impl Default for TenantSorting {
@@ -1414,14 +1547,20 @@ pub struct TopTenantShardsRequest {
 pub struct TopTenantShardItem {
     pub id: TenantShardId,
 
-    /// Total size of layers on local disk for all timelines in this tenant
+    /// Total size of layers on local disk for all timelines in this shard.
     pub resident_size: u64,
 
-    /// Total size of layers in remote storage for all timelines in this tenant
+    /// Total size of layers in remote storage for all timelines in this shard.
     pub physical_size: u64,
 
-    /// The largest logical size of a timeline within this tenant
+    /// The largest logical size of a timeline within this _tenant_ (not shard). This is only
+    /// tracked on shard 0, and contains the sum of the logical size across all shards.
     pub max_logical_size: u64,
+
+    /// The largest logical size of a timeline within this _tenant_ (not shard) divided by number of
+    /// shards. This is only tracked on shard 0, and is only an estimate as we divide it evenly by
+    /// shard count, rounded up.
+    pub max_logical_size_per_shard: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -2241,8 +2380,9 @@ impl Default for PageTraceEvent {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use std::str::FromStr;
+
+    use serde_json::json;
 
     use super::*;
 
@@ -2503,7 +2643,7 @@ mod tests {
             ..base.clone()
         };
 
-        let patched = base.apply_patch(decoded.config);
+        let patched = base.apply_patch(decoded.config).unwrap();
 
         assert_eq!(patched, expected);
     }

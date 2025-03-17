@@ -2,22 +2,16 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::checks::{
-    list_tenant_manifests, list_timeline_blobs, BlobDataParseResult, ListTenantManifestResult,
-    RemoteTenantManifestInfo,
-};
-use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
-use crate::{init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId, MAX_RETRIES};
 use async_stream::try_stream;
 use futures::future::Either;
 use futures_util::{StreamExt, TryStreamExt};
+use pageserver::tenant::IndexPart;
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver::tenant::remote_timeline_client::manifest::OffloadedTimelineManifest;
 use pageserver::tenant::remote_timeline_client::{
     parse_remote_index_path, parse_remote_tenant_manifest_path, remote_layer_path,
 };
 use pageserver::tenant::storage_layer::LayerName;
-use pageserver::tenant::IndexPart;
 use pageserver_api::controller_api::TenantDescribeResponse;
 use pageserver_api::shard::{ShardIndex, TenantShardId};
 use remote_storage::{GenericRemoteStorage, ListingObject, RemotePath};
@@ -25,10 +19,17 @@ use reqwest::Method;
 use serde::Serialize;
 use storage_controller_client::control_api;
 use tokio_util::sync::CancellationToken;
-use tracing::{info_span, Instrument};
+use tracing::{Instrument, info_span};
 use utils::backoff;
 use utils::generation::Generation;
 use utils::id::{TenantId, TenantTimelineId};
+
+use crate::checks::{
+    BlobDataParseResult, ListTenantManifestResult, RemoteTenantManifestInfo, list_tenant_manifests,
+    list_timeline_blobs,
+};
+use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
+use crate::{BucketConfig, MAX_RETRIES, NodeKind, RootTarget, TenantShardTimelineId, init_remote};
 
 #[derive(Serialize, Default)]
 pub struct GcSummary {
@@ -151,10 +152,8 @@ impl TenantRefAccumulator {
             }
         }
 
-        if !ancestor_refs.is_empty() {
-            tracing::info!(%ttid, "Found {} ancestor refs", ancestor_refs.len());
-            self.ancestor_ref_shards.update(ttid, ancestor_refs);
-        }
+        tracing::info!(%ttid, "Found {} ancestor refs", ancestor_refs.len());
+        self.ancestor_ref_shards.update(ttid, ancestor_refs);
     }
 
     /// Consume Self and return a vector of ancestor tenant shards that should be GC'd, and map of referenced ancestor layers to preserve
@@ -778,7 +777,7 @@ pub async fn pageserver_physical_gc(
 
     let mut summary = GcSummary::default();
     {
-        let timelines = std::pin::pin!(timelines.try_buffered(CONCURRENCY));
+        let timelines = timelines.try_buffered(CONCURRENCY);
         let timelines = timelines.try_flatten();
 
         let timelines = timelines.map_ok(|(ttid, tenant_manifest_arc)| {
@@ -792,8 +791,8 @@ pub async fn pageserver_physical_gc(
                 tenant_manifest_arc,
             )
         });
-        let mut timelines = std::pin::pin!(timelines.try_buffered(CONCURRENCY));
-
+        let timelines = timelines.try_buffered(CONCURRENCY);
+        let mut timelines = std::pin::pin!(timelines);
         // Drain futures for per-shard GC, populating accumulator as a side effect
         while let Some(i) = timelines.next().await {
             summary.merge(i?);

@@ -1,21 +1,23 @@
-use crate::client::{InnerClient, Responses};
-use crate::codec::FrontendMessage;
-use crate::connection::RequestMessages;
-use crate::types::IsNull;
-use crate::{Column, Error, ReadyForQueryStatus, Row, Statement};
-use bytes::{BufMut, Bytes, BytesMut};
-use fallible_iterator::FallibleIterator;
-use futures_util::{ready, Stream};
-use log::{debug, log_enabled, Level};
-use pin_project_lite::pin_project;
-use postgres_protocol2::message::backend::Message;
-use postgres_protocol2::message::frontend;
-use postgres_types2::{Format, ToSql, Type};
 use std::fmt;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+
+use bytes::{BufMut, Bytes, BytesMut};
+use fallible_iterator::FallibleIterator;
+use futures_util::{Stream, ready};
+use log::{Level, debug, log_enabled};
+use pin_project_lite::pin_project;
+use postgres_protocol2::message::backend::Message;
+use postgres_protocol2::message::frontend;
+use postgres_types2::{Format, ToSql, Type};
+
+use crate::client::{InnerClient, Responses};
+use crate::codec::FrontendMessage;
+use crate::connection::RequestMessages;
+use crate::types::IsNull;
+use crate::{Column, Error, ReadyForQueryStatus, Row, Statement};
 
 struct BorrowToSqlParamsDebug<'a>(&'a [&'a (dyn ToSql + Sync)]);
 
@@ -257,7 +259,7 @@ impl Stream for RowStream {
                         this.statement.clone(),
                         body,
                         *this.output_format,
-                    )?)))
+                    )?)));
                 }
                 Message::EmptyQueryResponse | Message::PortalSuspended => {}
                 Message::CommandComplete(body) => {

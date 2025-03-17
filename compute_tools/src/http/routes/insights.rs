@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
-use axum::{extract::State, response::Response};
+use axum::extract::State;
+use axum::response::Response;
 use compute_api::responses::ComputeStatus;
 use http::StatusCode;
 
-use crate::{compute::ComputeNode, http::JsonResponse};
+use crate::compute::ComputeNode;
+use crate::http::JsonResponse;
 
 /// Collect current Postgres usage insights.
 pub(in crate::http) async fn get_insights(State(compute): State<Arc<ComputeNode>>) -> Response {

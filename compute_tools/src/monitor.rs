@@ -1,13 +1,14 @@
 use std::sync::Arc;
-use std::{thread, time::Duration};
+use std::thread;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use compute_api::responses::ComputeStatus;
+use compute_api::spec::ComputeFeature;
 use postgres::{Client, NoTls};
 use tracing::{debug, error, info, warn};
 
 use crate::compute::ComputeNode;
-use compute_api::responses::ComputeStatus;
-use compute_api::spec::ComputeFeature;
 
 const MONITOR_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -17,7 +18,7 @@ const MONITOR_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 // should be handled gracefully.
 fn watch_compute_activity(compute: &ComputeNode) {
     // Suppose that `connstr` doesn't change
-    let connstr = compute.connstr.clone();
+    let connstr = compute.params.connstr.clone();
     let conf = compute.get_conn_conf(Some("compute_ctl:activity_monitor"));
 
     // During startup and configuration we connect to every Postgres database,

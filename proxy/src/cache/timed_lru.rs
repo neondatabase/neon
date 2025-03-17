@@ -11,11 +11,11 @@ use std::time::{Duration, Instant};
 //   This severely hinders its usage both in terms of creating wrappers and supported key types.
 //
 // On the other hand, `hashlink` has good download stats and appears to be maintained.
-use hashlink::{linked_hash_map::RawEntryMut, LruCache};
+use hashlink::{LruCache, linked_hash_map::RawEntryMut};
 use tracing::debug;
 
 use super::common::Cached;
-use super::{timed_lru, Cache};
+use super::{Cache, timed_lru};
 
 /// An implementation of timed LRU cache with fixed capacity.
 /// Key properties:

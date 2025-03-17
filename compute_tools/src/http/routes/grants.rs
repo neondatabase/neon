@@ -1,16 +1,14 @@
 use std::sync::Arc;
 
-use axum::{extract::State, response::Response};
-use compute_api::{
-    requests::SetRoleGrantsRequest,
-    responses::{ComputeStatus, SetRoleGrantsResponse},
-};
+use axum::extract::State;
+use axum::response::Response;
+use compute_api::requests::SetRoleGrantsRequest;
+use compute_api::responses::{ComputeStatus, SetRoleGrantsResponse};
 use http::StatusCode;
 
-use crate::{
-    compute::ComputeNode,
-    http::{extract::Json, JsonResponse},
-};
+use crate::compute::ComputeNode;
+use crate::http::JsonResponse;
+use crate::http::extract::Json;
 
 /// Add grants for a role.
 pub(in crate::http) async fn add_grant(

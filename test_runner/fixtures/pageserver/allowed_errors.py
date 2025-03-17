@@ -94,7 +94,9 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*Flushed oversized open layer with size.*",
     # During teardown, we stop the storage controller before the pageservers, so pageservers
     # can experience connection errors doing background deletion queue work.
-    ".*WARN deletion backend: calling control plane generation validation API failed.*error sending request.*",
+    ".*WARN deletion backend:.* storage controller upcall failed, will retry.*error sending request.*",
+    # Can happen when the pageserver starts faster than the storage controller
+    ".*WARN init_tenant_mgr:.* storage controller upcall failed, will retry.*error sending request.*",
     # Can happen when the test shuts down the storage controller while it is calling the utilization API
     ".*WARN.*path=/v1/utilization .*request was dropped before completing",
     # Can happen during shutdown
@@ -122,6 +124,8 @@ DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS = [
     # controller's attempts to notify the endpoint).
     ".*reconciler.*neon_local notification hook failed.*",
     ".*reconciler.*neon_local error.*",
+    # Tenant rate limits may fire in tests that submit lots of API requests.
+    ".*tenant \\S+ is rate limited.*",
 ]
 
 

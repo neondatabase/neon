@@ -3,12 +3,13 @@ from __future__ import annotations
 import enum
 import os
 import shutil
-import sys
 from enum import StrEnum
 from logging import debug
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+# Docs are available at https://jsonnet.org/ref/bindings.html#python_api
+import _jsonnet
 import pytest
 import requests
 import yaml
@@ -92,10 +93,6 @@ def jsonnet_evaluate_file(
     ext_vars: str | dict[str, str] | None = None,
     tla_vars: str | dict[str, str] | None = None,
 ) -> str:
-    # Jsonnet doesn't support Python 3.13 yet
-    # Docs are available at https://jsonnet.org/ref/bindings.html#python_api
-    import _jsonnet
-
     return cast(
         "str",
         _jsonnet.evaluate_file(
@@ -130,7 +127,6 @@ class SqlExporterProcess(StrEnum):
     AUTOSCALING = "autoscaling"
 
 
-@pytest.mark.xfail(sys.version_info >= (3, 13), reason="Jsonnet doesn't support Python 3.13 yet")
 @pytest.mark.parametrize(
     "collector_name",
     ["neon_collector", "neon_collector_autoscaling"],
@@ -359,7 +355,6 @@ else:
             self.__proc.wait()
 
 
-@pytest.mark.xfail(sys.version_info >= (3, 13), reason="Jsonnet doesn't support Python 3.13 yet")
 @pytest.mark.parametrize(
     "exporter",
     [SqlExporterProcess.COMPUTE, SqlExporterProcess.AUTOSCALING],
@@ -501,19 +496,31 @@ def test_compute_installed_extensions_metric(neon_simple_env: NeonEnv):
     """
     Test that the compute_installed_extensions properly reports accurate
     results. Important to note that currently this metric is only gathered on
-    compute start.
+    compute start. We install the neon extension into a database other than
+    postgres because compute_ctl will run `ALTER EXTENSION neon UPDATE` during
+    Postgres startup in the postgres database, creating a race condition.
     """
+    DB_NAME = "test"
+
     env = neon_simple_env
 
     endpoint = env.endpoints.create_start("main")
+    endpoint.safe_psql(f"CREATE DATABASE {DB_NAME}")
+
+    # The metric is only gathered on compute start, so restart to check that
+    # plpgsql is now in 3 databases, instead of its regular 2, template1 and
+    # postgres.
+    endpoint.stop()
+    endpoint.start()
 
     client = endpoint.http_client()
 
     def __has_plpgsql(samples: list[Sample]) -> bool:
         """
-        Check that plpgsql is installed in the template1 and postgres databases
+        Check that plpgsql is installed in the template1, postgres, and test
+        databases
         """
-        return len(samples) == 1 and samples[0].value == 2
+        return len(samples) == 1 and samples[0].value == 3
 
     wait_until(
         collect_metric(
@@ -525,8 +532,8 @@ def test_compute_installed_extensions_metric(neon_simple_env: NeonEnv):
         name="compute_installed_extensions",
     )
 
-    # Install the neon extension, so we can check for it on the restart
-    endpoint.safe_psql("CREATE EXTENSION neon VERSION '1.0'")
+    # Install the neon extension, so we can check for it on the restart.
+    endpoint.safe_psql("CREATE EXTENSION neon VERSION '1.0'", dbname=DB_NAME)
 
     # The metric is only gathered on compute start, so restart to check if the
     # neon extension will now be there.

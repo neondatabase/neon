@@ -2,13 +2,10 @@ use std::sync::Arc;
 
 use rand::Rng;
 
+use super::chan::Chan;
+use super::network::TCP;
+use super::world::{Node, NodeId, World};
 use crate::proto::NodeEvent;
-
-use super::{
-    chan::Chan,
-    network::TCP,
-    world::{Node, NodeId, World},
-};
 
 /// Abstraction with all functions (aka syscalls) available to the node.
 #[derive(Clone)]

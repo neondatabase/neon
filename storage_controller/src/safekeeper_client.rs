@@ -1,13 +1,12 @@
-use crate::metrics::PageserverRequestLabelGroup;
 use safekeeper_api::models::{
-    PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization, TimelineCreateRequest,
+    self, PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization, TimelineCreateRequest,
     TimelineStatus,
 };
 use safekeeper_client::mgmt_api::{Client, Result};
-use utils::{
-    id::{NodeId, TenantId, TimelineId},
-    logging::SecretString,
-};
+use utils::id::{NodeId, TenantId, TimelineId};
+use utils::logging::SecretString;
+
+use crate::metrics::PageserverRequestLabelGroup;
 
 /// Thin wrapper around [`safekeeper_client::mgmt_api::Client`]. It allows the storage
 /// controller to collect metrics in a non-intrusive manner.
@@ -46,31 +45,18 @@ macro_rules! measured_request {
 }
 
 impl SafekeeperClient {
-    #[allow(dead_code)]
     pub(crate) fn new(
-        node_id: NodeId,
-        mgmt_api_endpoint: String,
-        jwt: Option<SecretString>,
-    ) -> Self {
-        Self {
-            inner: Client::from_client(reqwest::Client::new(), mgmt_api_endpoint, jwt),
-            node_id_label: node_id.0.to_string(),
-        }
-    }
-
-    pub(crate) fn from_client(
         node_id: NodeId,
         raw_client: reqwest::Client,
         mgmt_api_endpoint: String,
         jwt: Option<SecretString>,
     ) -> Self {
         Self {
-            inner: Client::from_client(raw_client, mgmt_api_endpoint, jwt),
+            inner: Client::new(raw_client, mgmt_api_endpoint, jwt),
             node_id_label: node_id.0.to_string(),
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn create_timeline(
         &self,
         req: &TimelineCreateRequest,
@@ -83,12 +69,28 @@ impl SafekeeperClient {
         )
     }
 
-    #[allow(dead_code)]
+    #[allow(unused)]
+    pub(crate) async fn exclude_timeline(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        req: &models::TimelineMembershipSwitchRequest,
+    ) -> Result<models::TimelineDeleteResult> {
+        measured_request!(
+            "exclude_timeline",
+            crate::metrics::Method::Post,
+            &self.node_id_label,
+            self.inner
+                .exclude_timeline(tenant_id, timeline_id, req)
+                .await
+        )
+    }
+
     pub(crate) async fn delete_timeline(
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-    ) -> Result<TimelineStatus> {
+    ) -> Result<models::TimelineDeleteResult> {
         measured_request!(
             "delete_timeline",
             crate::metrics::Method::Delete,
@@ -97,7 +99,6 @@ impl SafekeeperClient {
         )
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn pull_timeline(
         &self,
         req: &PullTimelineRequest,
@@ -107,6 +108,23 @@ impl SafekeeperClient {
             crate::metrics::Method::Post,
             &self.node_id_label,
             self.inner.pull_timeline(req).await
+        )
+    }
+
+    #[allow(unused)]
+    pub(crate) async fn bump_timeline_term(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        req: &models::TimelineTermBumpRequest,
+    ) -> Result<models::TimelineTermBumpResponse> {
+        measured_request!(
+            "term_bump",
+            crate::metrics::Method::Post,
+            &self.node_id_label,
+            self.inner
+                .bump_timeline_term(tenant_id, timeline_id, req)
+                .await
         )
     }
 

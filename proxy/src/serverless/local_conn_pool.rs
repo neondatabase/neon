@@ -11,30 +11,31 @@
 
 use std::collections::HashMap;
 use std::pin::pin;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
-use std::task::{ready, Poll};
+use std::sync::atomic::AtomicUsize;
+use std::task::{Poll, ready};
 use std::time::Duration;
 
 use ed25519_dalek::{Signature, Signer, SigningKey};
-use futures::future::poll_fn;
 use futures::Future;
+use futures::future::poll_fn;
 use indexmap::IndexMap;
 use jose_jwk::jose_b64::base64ct::{Base64UrlUnpadded, Encoding};
 use parking_lot::RwLock;
-use postgres_client::tls::NoTlsStream;
 use postgres_client::AsyncMessage;
+use postgres_client::tls::NoTlsStream;
 use serde_json::value::RawValue;
 use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, info_span, warn, Instrument};
+use tracing::{Instrument, debug, error, info, info_span, warn};
 
 use super::backend::HttpConnError;
 use super::conn_pool_lib::{
     Client, ClientDataEnum, ClientInnerCommon, ClientInnerExt, ConnInfo, DbUserConn,
     EndpointConnPool,
 };
+use super::sql_over_http::SqlOverHttpError;
 use crate::context::RequestContext;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::Metrics;
@@ -274,18 +275,23 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
 }
 
 impl ClientInnerCommon<postgres_client::Client> {
-    pub(crate) async fn set_jwt_session(&mut self, payload: &[u8]) -> Result<(), HttpConnError> {
+    pub(crate) async fn set_jwt_session(&mut self, payload: &[u8]) -> Result<(), SqlOverHttpError> {
         if let ClientDataEnum::Local(local_data) = &mut self.data {
             local_data.jti += 1;
             let token = resign_jwt(&local_data.key, payload, local_data.jti)?;
 
-            // discard all cannot run in a transaction. must be executed alone.
-            self.inner.batch_execute("discard all").await?;
+            self.inner
+                .discard_all()
+                .await
+                .map_err(SqlOverHttpError::InternalPostgres)?;
 
             // initiates the auth session
             // this is safe from query injections as the jwt format free of any escape characters.
             let query = format!("select auth.jwt_session_init('{token}')");
-            self.inner.batch_execute(&query).await?;
+            self.inner
+                .batch_execute(&query)
+                .await
+                .map_err(SqlOverHttpError::InternalPostgres)?;
 
             let pid = self.inner.get_process_id();
             info!(pid, jti = local_data.jti, "user session state init");
@@ -389,6 +395,9 @@ mod tests {
         // });
         // println!("{}", serde_json::to_string(&jwk).unwrap());
 
-        assert_eq!(jwt, "eyJhbGciOiJFZERTQSJ9.eyJmb28iOiJiYXIiLCJqdGkiOjIsIm5lc3RlZCI6eyJqdGkiOiJ0cmlja3kgbmVzdGluZyJ9fQ.Cvyc2By33KI0f0obystwdy8PN111L3Sc9_Mr2CU3XshtSqSdxuRxNEZGbb_RvyJf2IzheC_s7aBZ-jLeQ9N0Bg");
+        assert_eq!(
+            jwt,
+            "eyJhbGciOiJFZERTQSJ9.eyJmb28iOiJiYXIiLCJqdGkiOjIsIm5lc3RlZCI6eyJqdGkiOiJ0cmlja3kgbmVzdGluZyJ9fQ.Cvyc2By33KI0f0obystwdy8PN111L3Sc9_Mr2CU3XshtSqSdxuRxNEZGbb_RvyJf2IzheC_s7aBZ-jLeQ9N0Bg"
+        );
     }
 }

@@ -3,8 +3,6 @@
 
 use std::collections::HashMap;
 
-use crate::models::*;
-use crate::serialized_batch::SerializedValueBatch;
 use bytes::{Buf, Bytes};
 use pageserver_api::key::rel_block_to_key;
 use pageserver_api::reltag::{RelTag, SlruKind};
@@ -13,6 +11,9 @@ use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::VISIBILITYMAP_FORKNUM;
 use postgres_ffi::walrecord::*;
 use utils::lsn::Lsn;
+
+use crate::models::*;
+use crate::serialized_batch::SerializedValueBatch;
 
 impl InterpretedWalRecord {
     /// Decode and interpreted raw bytes which represent one Postgres WAL record.

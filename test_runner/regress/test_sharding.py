@@ -794,7 +794,7 @@ def test_sharding_split_stripe_size(
     Check that modifying stripe size inline with a shard split works as expected
     """
     (host, port) = httpserver_listen_address
-    neon_env_builder.control_plane_compute_hook_api = f"http://{host}:{port}/notify"
+    neon_env_builder.control_plane_hooks_api = f"http://{host}:{port}"
     neon_env_builder.num_pageservers = 1
 
     # Set up fake HTTP notify endpoint: we will use this to validate that we receive
@@ -806,7 +806,7 @@ def test_sharding_split_stripe_size(
         notifications.append(request.json)
         return Response(status=200)
 
-    httpserver.expect_request("/notify", method="PUT").respond_with_handler(handler)
+    httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(handler)
 
     env = neon_env_builder.init_start(
         initial_tenant_shard_count=1, initial_tenant_shard_stripe_size=initial_stripe_size
@@ -1312,9 +1312,7 @@ def test_sharding_split_failures(
     failure: Failure,
 ):
     neon_env_builder.num_pageservers = 4
-    neon_env_builder.control_plane_compute_hook_api = (
-        compute_reconfigure_listener.control_plane_compute_hook_api
-    )
+    neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
     initial_shard_count = 2
     split_shard_count = 4
 
@@ -1814,14 +1812,3 @@ def test_sharding_gc(
         shard_gc_cutoff_lsn = Lsn(shard_index["metadata_bytes"]["latest_gc_cutoff_lsn"])
         log.info(f"Shard {shard_number} cutoff LSN: {shard_gc_cutoff_lsn}")
         assert shard_gc_cutoff_lsn == shard_0_gc_cutoff_lsn
-
-    for ps in env.pageservers:
-        # This is not okay, but it's not a scrubber bug: it's a pageserver issue that is exposed by
-        # the specific pattern of aggressive checkpointing+image layer generation + GC that this test does.
-        # TODO: remove when https://github.com/neondatabase/neon/issues/10720 is fixed
-        ps.allowed_errors.extend(
-            [
-                ".*could not find data for key.*",
-                ".*could not ingest record.*",
-            ]
-        )

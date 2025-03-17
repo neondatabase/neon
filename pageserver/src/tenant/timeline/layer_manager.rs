@@ -1,27 +1,22 @@
-use anyhow::{bail, ensure, Context};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use anyhow::{Context, bail, ensure};
 use itertools::Itertools;
 use pageserver_api::shard::TenantShardId;
-use std::{collections::HashMap, sync::Arc};
 use tracing::trace;
-use utils::{
-    id::TimelineId,
-    lsn::{AtomicLsn, Lsn},
-};
+use utils::id::TimelineId;
+use utils::lsn::{AtomicLsn, Lsn};
 
-use crate::{
-    config::PageServerConf,
-    context::RequestContext,
-    metrics::TimelineMetrics,
-    tenant::{
-        layer_map::{BatchedUpdates, LayerMap},
-        storage_layer::{
-            AsLayerDesc, InMemoryLayer, Layer, PersistentLayerDesc, PersistentLayerKey,
-            ResidentLayer,
-        },
-    },
+use super::{ReadableLayer, TimelineWriterState};
+use crate::config::PageServerConf;
+use crate::context::RequestContext;
+use crate::metrics::TimelineMetrics;
+use crate::tenant::layer_map::{BatchedUpdates, LayerMap};
+use crate::tenant::storage_layer::{
+    AsLayerDesc, InMemoryLayer, Layer, LayerVisibilityHint, PersistentLayerDesc,
+    PersistentLayerKey, ReadableLayerWeak, ResidentLayer,
 };
-
-use super::TimelineWriterState;
 
 /// Provides semantic APIs to manipulate the layer map.
 pub(crate) enum LayerManager {
@@ -42,6 +37,21 @@ impl Default for LayerManager {
 }
 
 impl LayerManager {
+    pub(crate) fn upgrade(&self, weak: ReadableLayerWeak) -> ReadableLayer {
+        match weak {
+            ReadableLayerWeak::PersistentLayer(desc) => {
+                ReadableLayer::PersistentLayer(self.get_from_desc(&desc))
+            }
+            ReadableLayerWeak::InMemoryLayer(desc) => {
+                let inmem = self
+                    .layer_map()
+                    .expect("no concurrent shutdown")
+                    .in_memory_layer(&desc);
+                ReadableLayer::InMemoryLayer(inmem)
+            }
+        }
+    }
+
     pub(crate) fn get_from_key(&self, key: &PersistentLayerKey) -> Layer {
         // The assumption for the `expect()` is that all code maintains the following invariant:
         // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.
@@ -116,6 +126,12 @@ impl LayerManager {
 
     pub(crate) fn likely_resident_layers(&self) -> impl Iterator<Item = &'_ Layer> + '_ {
         self.layers().values().filter(|l| l.is_likely_resident())
+    }
+
+    pub(crate) fn visible_layers(&self) -> impl Iterator<Item = &'_ Layer> + '_ {
+        self.layers()
+            .values()
+            .filter(|l| l.visibility() == LayerVisibilityHint::Visible)
     }
 
     pub(crate) fn contains(&self, layer: &Layer) -> bool {
@@ -208,9 +224,7 @@ impl OpenLayerManager {
 
             trace!(
                 "creating in-memory layer at {}/{} for record at {}",
-                timeline_id,
-                start_lsn,
-                lsn
+                timeline_id, start_lsn, lsn
             );
 
             let new_layer =
@@ -470,6 +484,25 @@ impl OpenLayerManager {
         updates.remove_historic(desc);
         mapping.remove(layer);
         layer.delete_on_drop();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_insert_in_memory_layer(&mut self, layer: Arc<InMemoryLayer>) {
+        use pageserver_api::models::InMemoryLayerInfo;
+
+        match layer.info() {
+            InMemoryLayerInfo::Open { .. } => {
+                assert!(self.layer_map.open_layer.is_none());
+                self.layer_map.open_layer = Some(layer);
+            }
+            InMemoryLayerInfo::Frozen { lsn_start, .. } => {
+                if let Some(last) = self.layer_map.frozen_layers.back() {
+                    assert!(last.get_lsn_range().end <= lsn_start);
+                }
+
+                self.layer_map.frozen_layers.push_back(layer);
+            }
+        }
     }
 }
 

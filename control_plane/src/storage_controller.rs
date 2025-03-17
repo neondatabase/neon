@@ -1,43 +1,35 @@
-use crate::{
-    background_process,
-    local_env::{LocalEnv, NeonStorageControllerConf},
-};
+use std::ffi::OsStr;
+use std::fs;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::process::ExitStatus;
+use std::str::FromStr;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
 use camino::{Utf8Path, Utf8PathBuf};
 use hyper0::Uri;
 use nix::unistd::Pid;
-use pageserver_api::{
-    controller_api::{
-        NodeConfigureRequest, NodeDescribeResponse, NodeRegisterRequest, TenantCreateRequest,
-        TenantCreateResponse, TenantLocateResponse, TenantShardMigrateRequest,
-        TenantShardMigrateResponse,
-    },
-    models::{
-        TenantShardSplitRequest, TenantShardSplitResponse, TimelineCreateRequest, TimelineInfo,
-    },
-    shard::{ShardStripeSize, TenantShardId},
+use pageserver_api::controller_api::{
+    NodeConfigureRequest, NodeDescribeResponse, NodeRegisterRequest, TenantCreateRequest,
+    TenantCreateResponse, TenantLocateResponse,
 };
+use pageserver_api::models::{TenantConfigRequest, TimelineCreateRequest, TimelineInfo};
+use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
 use reqwest::Method;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{
-    ffi::OsStr,
-    fs,
-    net::SocketAddr,
-    path::PathBuf,
-    process::ExitStatus,
-    str::FromStr,
-    sync::OnceLock,
-    time::{Duration, Instant},
-};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::instrument;
 use url::Url;
-use utils::{
-    auth::{encode_from_key_file, Claims, Scope},
-    id::{NodeId, TenantId},
-};
+use utils::auth::{Claims, Scope, encode_from_key_file};
+use utils::id::{NodeId, TenantId};
 use whoami::username;
+
+use crate::background_process;
+use crate::local_env::{LocalEnv, NeonStorageControllerConf};
 
 pub struct StorageController {
     env: LocalEnv,
@@ -96,7 +88,8 @@ pub struct AttachHookRequest {
 
 #[derive(Serialize, Deserialize)]
 pub struct AttachHookResponse {
-    pub gen: Option<u32>,
+    #[serde(rename = "gen")]
+    pub generation: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -541,6 +534,18 @@ impl StorageController {
             args.push("--start-as-candidate".to_string());
         }
 
+        if self.config.use_https_pageserver_api {
+            args.push("--use-https-pageserver-api".to_string());
+        }
+
+        if self.config.use_https_safekeeper_api {
+            args.push("--use-https-safekeeper-api".to_string());
+        }
+
+        if let Some(ssl_ca_file) = self.env.ssl_ca_cert_path() {
+            args.push(format!("--ssl-ca-file={}", ssl_ca_file.to_str().unwrap()));
+        }
+
         if let Some(private_key) = &self.private_key {
             let claims = Claims::new(None, Scope::PageServerApi);
             let jwt_token =
@@ -557,10 +562,8 @@ impl StorageController {
             args.push(format!("--public-key=\"{public_key}\""));
         }
 
-        if let Some(control_plane_compute_hook_api) = &self.env.control_plane_compute_hook_api {
-            args.push(format!(
-                "--compute-hook-url={control_plane_compute_hook_api}"
-            ));
+        if let Some(control_plane_hooks_api) = &self.env.control_plane_hooks_api {
+            args.push(format!("--control-plane-url={control_plane_hooks_api}"));
         }
 
         if let Some(split_threshold) = self.config.split_threshold.as_ref() {
@@ -582,6 +585,10 @@ impl StorageController {
             "--neon-local-repo-dir={}",
             self.env.base_data_dir.display()
         ));
+
+        if self.config.timelines_onto_safekeepers {
+            args.push("--timelines-onto-safekeepers".to_string());
+        }
 
         background_process::start_process(
             COMMAND,
@@ -779,7 +786,7 @@ impl StorageController {
             )
             .await?;
 
-        Ok(response.gen)
+        Ok(response.generation)
     }
 
     #[instrument(skip(self))]
@@ -829,41 +836,6 @@ impl StorageController {
         .await
     }
 
-    #[instrument(skip(self))]
-    pub async fn tenant_migrate(
-        &self,
-        tenant_shard_id: TenantShardId,
-        node_id: NodeId,
-    ) -> anyhow::Result<TenantShardMigrateResponse> {
-        self.dispatch(
-            Method::PUT,
-            format!("control/v1/tenant/{tenant_shard_id}/migrate"),
-            Some(TenantShardMigrateRequest {
-                node_id,
-                migration_config: None,
-            }),
-        )
-        .await
-    }
-
-    #[instrument(skip(self), fields(%tenant_id, %new_shard_count))]
-    pub async fn tenant_split(
-        &self,
-        tenant_id: TenantId,
-        new_shard_count: u8,
-        new_stripe_size: Option<ShardStripeSize>,
-    ) -> anyhow::Result<TenantShardSplitResponse> {
-        self.dispatch(
-            Method::PUT,
-            format!("control/v1/tenant/{tenant_id}/shard_split"),
-            Some(TenantShardSplitRequest {
-                new_shard_count,
-                new_stripe_size,
-            }),
-        )
-        .await
-    }
-
     #[instrument(skip_all, fields(node_id=%req.node_id))]
     pub async fn node_register(&self, req: NodeRegisterRequest) -> anyhow::Result<()> {
         self.dispatch::<_, ()>(Method::POST, "control/v1/node".to_string(), Some(req))
@@ -907,5 +879,10 @@ impl StorageController {
             Some(req),
         )
         .await
+    }
+
+    pub async fn set_tenant_config(&self, req: &TenantConfigRequest) -> anyhow::Result<()> {
+        self.dispatch(Method::PUT, "v1/tenant/config".to_string(), Some(req))
+            .await
     }
 }

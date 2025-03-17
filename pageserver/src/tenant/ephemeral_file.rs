@@ -1,6 +1,17 @@
 //! Implementation of append-only file data structure
 //! used to keep in-memory layers spilled on disk.
 
+use std::io;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+
+use camino::Utf8PathBuf;
+use num_traits::Num;
+use pageserver_api::shard::TenantShardId;
+use tokio_epoll_uring::{BoundedBuf, Slice};
+use tracing::{error, info_span};
+use utils::id::TimelineId;
+
 use crate::assert_u64_eq_usize::{U64IsUsize, UsizeIsU64};
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
@@ -9,17 +20,7 @@ use crate::tenant::storage_layer::inmemory_layer::vectored_dio_read::File;
 use crate::virtual_file::owned_buffers_io::io_buf_aligned::IoBufAlignedMut;
 use crate::virtual_file::owned_buffers_io::slice::SliceMutExt;
 use crate::virtual_file::owned_buffers_io::write::Buffer;
-use crate::virtual_file::{self, owned_buffers_io, IoBufferMut, VirtualFile};
-use camino::Utf8PathBuf;
-use num_traits::Num;
-use pageserver_api::shard::TenantShardId;
-use tokio_epoll_uring::{BoundedBuf, Slice};
-use tracing::error;
-
-use std::io;
-use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
-use utils::id::TimelineId;
+use crate::virtual_file::{self, IoBufferMut, VirtualFile, owned_buffers_io};
 
 pub struct EphemeralFile {
     _tenant_shard_id: TenantShardId,
@@ -75,6 +76,7 @@ impl EphemeralFile {
                 || IoBufferMut::with_capacity(TAIL_SZ),
                 gate.enter()?,
                 ctx,
+                info_span!(parent: None, "ephemeral_file_buffered_writer", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), timeline_id=%timeline_id, path = %filename),
             ),
             _gate_guard: gate.enter()?,
         })
@@ -319,13 +321,14 @@ pub fn is_ephemeral_file(filename: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::str::FromStr;
+
     use rand::Rng;
 
     use super::*;
     use crate::context::DownloadBehavior;
     use crate::task_mgr::TaskKind;
-    use std::fs;
-    use std::str::FromStr;
 
     fn harness(
         test_name: &str,
@@ -349,7 +352,8 @@ mod tests {
         let timeline_id = TimelineId::from_str("22000000000000000000000000000000").unwrap();
         fs::create_dir_all(conf.timeline_path(&tenant_shard_id, &timeline_id))?;
 
-        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let ctx =
+            RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
 
         Ok((conf, tenant_shard_id, timeline_id, ctx))
     }

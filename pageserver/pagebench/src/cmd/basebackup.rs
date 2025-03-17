@@ -1,22 +1,20 @@
-use anyhow::Context;
-use pageserver_api::shard::TenantShardId;
-use pageserver_client::mgmt_api::ForceAwaitLogicalSize;
-use pageserver_client::page_service::BasebackupRequest;
-
-use utils::id::TenantTimelineId;
-use utils::lsn::Lsn;
-
-use rand::prelude::*;
-use tokio::sync::Barrier;
-use tokio::task::JoinSet;
-use tracing::{info, instrument};
-
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+use anyhow::Context;
+use pageserver_api::shard::TenantShardId;
+use pageserver_client::mgmt_api::ForceAwaitLogicalSize;
+use pageserver_client::page_service::BasebackupRequest;
+use rand::prelude::*;
+use tokio::sync::Barrier;
+use tokio::task::JoinSet;
+use tracing::{info, instrument};
+use utils::id::TenantTimelineId;
+use utils::lsn::Lsn;
 
 use crate::util::tokio_thread_local_stats::AllThreadLocalStats;
 use crate::util::{request_stats, tokio_thread_local_stats};
@@ -79,7 +77,8 @@ async fn main_impl(
     let mgmt_api_client = Arc::new(pageserver_client::mgmt_api::Client::new(
         args.mgmt_api_endpoint.clone(),
         args.pageserver_jwt.as_deref(),
-    ));
+        None, // TODO: support ssl_ca_file for https APIs in pagebench.
+    )?);
 
     // discover targets
     let timelines: Vec<TenantTimelineId> = crate::util::cli::targets::discover(

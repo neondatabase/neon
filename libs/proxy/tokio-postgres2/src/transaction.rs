@@ -1,8 +1,9 @@
+use postgres_protocol2::message::frontend;
+
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
 use crate::query::RowStream;
 use crate::{CancelToken, Client, Error, ReadyForQueryStatus};
-use postgres_protocol2::message::frontend;
 
 /// A representation of a PostgreSQL database transaction.
 ///
@@ -69,6 +70,11 @@ impl<'a> Transaction<'a> {
 
     /// Returns a reference to the underlying `Client`.
     pub fn client(&self) -> &Client {
+        self.client
+    }
+
+    /// Returns a reference to the underlying `Client`.
+    pub fn client_mut(&mut self) -> &mut Client {
         self.client
     }
 }

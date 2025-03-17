@@ -1,22 +1,15 @@
 use std::time::UNIX_EPOCH;
 
-use pageserver_api::key::{Key, CONTROLFILE_KEY};
+use pageserver_api::key::{CONTROLFILE_KEY, Key};
 use tokio::task::JoinSet;
-use utils::{
-    completion::{self, Completion},
-    id::TimelineId,
-};
+use utils::completion::{self, Completion};
+use utils::id::TimelineId;
 
 use super::failpoints::{Failpoint, FailpointKind};
 use super::*;
-use crate::{
-    context::DownloadBehavior,
-    tenant::{
-        harness::test_img,
-        storage_layer::{IoConcurrency, LayerVisibilityHint},
-    },
-};
-use crate::{task_mgr::TaskKind, tenant::harness::TenantHarness};
+use crate::context::DownloadBehavior;
+use crate::tenant::harness::{TenantHarness, test_img};
+use crate::tenant::storage_layer::{IoConcurrency, LayerVisibilityHint};
 
 /// Used in tests to advance a future to wanted await point, and not futher.
 const ADVANCE: std::time::Duration = std::time::Duration::from_secs(3600);
@@ -33,10 +26,8 @@ async fn smoke_test() {
     let h = TenantHarness::create("smoke_test").await.unwrap();
     let span = h.span();
     let download_span = span.in_scope(|| tracing::info_span!("downloading", timeline_id = 1));
-    let (tenant, _) = h.load().await;
+    let (tenant, ctx) = h.load().await;
     let io_concurrency = IoConcurrency::spawn_for_test();
-
-    let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Download);
 
     let image_layers = vec![(
         Lsn(0x40),
@@ -55,12 +46,14 @@ async fn smoke_test() {
             Lsn(0x10),
             14,
             &ctx,
+            Default::default(), // in-memory layers
             Default::default(),
             image_layers,
             Lsn(0x100),
         )
         .await
         .unwrap();
+    let ctx = &ctx.with_scope_timeline(&timeline);
 
     // Grab one of the timeline's layers to exercise in the test, and the other layer that is just
     // there to avoid the timeline being illegally empty
@@ -99,7 +92,7 @@ async fn smoke_test() {
                 controlfile_keyspace.clone(),
                 Lsn(0x10)..Lsn(0x11),
                 &mut data,
-                &ctx,
+                ctx,
             )
             .await
             .unwrap();
@@ -134,7 +127,7 @@ async fn smoke_test() {
                 controlfile_keyspace.clone(),
                 Lsn(0x10)..Lsn(0x11),
                 &mut data,
-                &ctx,
+                ctx,
             )
             .instrument(download_span.clone())
             .await
@@ -184,7 +177,7 @@ async fn smoke_test() {
 
     // plain downloading is rarely needed
     layer
-        .download_and_keep_resident()
+        .download_and_keep_resident(ctx)
         .instrument(download_span)
         .await
         .unwrap();
@@ -346,6 +339,7 @@ fn read_wins_pending_eviction() {
             .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
             .await
             .unwrap();
+        let ctx = ctx.with_scope_timeline(&timeline);
 
         let layer = {
             let mut layers = {
@@ -385,7 +379,7 @@ fn read_wins_pending_eviction() {
         // because no actual eviction happened, we get to just reinitialize the DownloadedLayer
         layer
             .0
-            .get_or_maybe_download(false, None)
+            .get_or_maybe_download(false, &ctx)
             .instrument(download_span)
             .await
             .expect("should had reinitialized without downloading");
@@ -478,6 +472,7 @@ fn multiple_pending_evictions_scenario(name: &'static str, in_order: bool) {
             .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
             .await
             .unwrap();
+        let ctx = ctx.with_scope_timeline(&timeline);
 
         let layer = {
             let mut layers = {
@@ -520,7 +515,7 @@ fn multiple_pending_evictions_scenario(name: &'static str, in_order: bool) {
         // because no actual eviction happened, we get to just reinitialize the DownloadedLayer
         layer
             .0
-            .get_or_maybe_download(false, None)
+            .get_or_maybe_download(false, &ctx)
             .instrument(download_span)
             .await
             .expect("should had reinitialized without downloading");
@@ -647,7 +642,12 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
         .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
         .await
         .unwrap();
+    let ctx = ctx.with_scope_timeline(&timeline);
 
+    // This test does downloads
+    let ctx = RequestContextBuilder::extend(&ctx)
+        .download_behavior(DownloadBehavior::Download)
+        .build();
     let layer = {
         let mut layers = {
             let layers = timeline.layers.read().await;
@@ -680,7 +680,7 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
     // simulate a cancelled read which is cancelled before it gets to re-initialize
     let e = layer
         .0
-        .get_or_maybe_download(false, None)
+        .get_or_maybe_download(false, &ctx)
         .await
         .unwrap_err();
     assert!(
@@ -704,7 +704,7 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
     // failpoint is still enabled, but it is not hit
     let e = layer
         .0
-        .get_or_maybe_download(false, None)
+        .get_or_maybe_download(false, &ctx)
         .await
         .unwrap_err();
     assert!(matches!(e, DownloadError::DownloadRequired), "{e:?}");
@@ -727,6 +727,12 @@ async fn evict_and_wait_does_not_wait_for_download() {
         .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
         .await
         .unwrap();
+    let ctx = ctx.with_scope_timeline(&timeline);
+
+    // This test does downloads
+    let ctx = RequestContextBuilder::extend(&ctx)
+        .download_behavior(DownloadBehavior::Download)
+        .build();
 
     let layer = {
         let mut layers = {
@@ -771,10 +777,12 @@ async fn evict_and_wait_does_not_wait_for_download() {
     let (arrival, _download_arrived) = utils::completion::channel();
     layer.enable_failpoint(Failpoint::WaitBeforeDownloading(Some(arrival), barrier));
 
-    let mut download = std::pin::pin!(layer
-        .0
-        .get_or_maybe_download(true, None)
-        .instrument(download_span));
+    let mut download = std::pin::pin!(
+        layer
+            .0
+            .get_or_maybe_download(true, &ctx)
+            .instrument(download_span)
+    );
 
     assert!(
         !layer.is_likely_resident(),

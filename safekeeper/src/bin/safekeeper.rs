@@ -1,52 +1,43 @@
 //
 // Main entry point for the safekeeper executable
 //
-use anyhow::{bail, Context, Result};
-use camino::{Utf8Path, Utf8PathBuf};
-use clap::{ArgAction, Parser};
-use futures::future::BoxFuture;
-use futures::stream::FuturesUnordered;
-use futures::{FutureExt, StreamExt};
-use remote_storage::RemoteStorageConfig;
-use sd_notify::NotifyState;
-use tokio::runtime::Handle;
-use tokio::signal::unix::{signal, SignalKind};
-use tokio::task::JoinError;
-use utils::logging::SecretString;
-
-use std::env::{var, VarError};
+use std::env::{VarError, var};
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use storage_broker::Uri;
 
-use tracing::*;
-use utils::pid_file;
-
+use anyhow::{Context, Result, bail};
+use camino::{Utf8Path, Utf8PathBuf};
+use clap::{ArgAction, Parser};
+use futures::future::BoxFuture;
+use futures::stream::FuturesUnordered;
+use futures::{FutureExt, StreamExt};
 use metrics::set_build_info_metric;
+use remote_storage::RemoteStorageConfig;
+use reqwest::Certificate;
 use safekeeper::defaults::{
     DEFAULT_CONTROL_FILE_SAVE_INTERVAL, DEFAULT_EVICTION_MIN_RESIDENT, DEFAULT_HEARTBEAT_TIMEOUT,
     DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_MAX_OFFLOADER_LAG_BYTES, DEFAULT_PARTIAL_BACKUP_CONCURRENCY,
-    DEFAULT_PARTIAL_BACKUP_TIMEOUT, DEFAULT_PG_LISTEN_ADDR,
+    DEFAULT_PARTIAL_BACKUP_TIMEOUT, DEFAULT_PG_LISTEN_ADDR, DEFAULT_SSL_CERT_FILE,
+    DEFAULT_SSL_KEY_FILE,
 };
-use safekeeper::http;
-use safekeeper::wal_service;
-use safekeeper::GlobalTimelines;
-use safekeeper::SafeKeeperConf;
-use safekeeper::{broker, WAL_SERVICE_RUNTIME};
-use safekeeper::{control_file, BROKER_RUNTIME};
-use safekeeper::{wal_backup, HTTP_RUNTIME};
-use storage_broker::DEFAULT_ENDPOINT;
+use safekeeper::{
+    BROKER_RUNTIME, GlobalTimelines, HTTP_RUNTIME, SafeKeeperConf, WAL_SERVICE_RUNTIME, broker,
+    control_file, http, wal_backup, wal_service,
+};
+use sd_notify::NotifyState;
+use storage_broker::{DEFAULT_ENDPOINT, Uri};
+use tokio::runtime::Handle;
+use tokio::signal::unix::{SignalKind, signal};
+use tokio::task::JoinError;
+use tracing::*;
 use utils::auth::{JwtAuth, Scope, SwappableJwtAuth};
-use utils::{
-    id::NodeId,
-    logging::{self, LogFormat},
-    project_build_tag, project_git_version,
-    sentry_init::init_sentry,
-    tcp_listener,
-};
+use utils::id::NodeId;
+use utils::logging::{self, LogFormat, SecretString};
+use utils::sentry_init::init_sentry;
+use utils::{pid_file, project_build_tag, project_git_version, tcp_listener};
 
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -55,7 +46,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 /// This adds roughly 3% overhead for allocations on average, which is acceptable considering
 /// performance-sensitive code will avoid allocations as far as possible anyway.
 #[allow(non_upper_case_globals)]
-#[export_name = "malloc_conf"]
+#[unsafe(export_name = "malloc_conf")]
 pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:21\0";
 
 const PID_FILE_NAME: &str = "safekeeper.pid";
@@ -105,6 +96,9 @@ struct Args {
     /// Listen http endpoint for management and metrics in the form host:port.
     #[arg(long, default_value = DEFAULT_HTTP_LISTEN_ADDR)]
     listen_http: String,
+    /// Listen https endpoint for management and metrics in the form host:port.
+    #[arg(long, default_value = None)]
+    listen_https: Option<String>,
     /// Advertised endpoint for receiving/sending WAL in the form host:port. If not
     /// specified, listen_pg is used to advertise instead.
     #[arg(long, default_value = None)]
@@ -214,6 +208,15 @@ struct Args {
     /// and the current position of the reader is smaller than this value.
     #[arg(long)]
     max_delta_for_fanout: Option<u64>,
+    /// Path to a file with certificate's private key for https API.
+    #[arg(long, default_value = DEFAULT_SSL_KEY_FILE)]
+    ssl_key_file: Utf8PathBuf,
+    /// Path to a file with a X509 certificate for https API.
+    #[arg(long, default_value = DEFAULT_SSL_CERT_FILE)]
+    ssl_cert_file: Utf8PathBuf,
+    /// Trusted root CA certificate to use in https APIs.
+    #[arg(long)]
+    ssl_ca_file: Option<Utf8PathBuf>,
 }
 
 // Like PathBufValueParser, but allows empty string.
@@ -347,12 +350,22 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    let ssl_ca_cert = match args.ssl_ca_file.as_ref() {
+        Some(ssl_ca_file) => {
+            tracing::info!("Using ssl root CA file: {ssl_ca_file:?}");
+            let buf = tokio::fs::read(ssl_ca_file).await?;
+            Some(Certificate::from_pem(&buf)?)
+        }
+        None => None,
+    };
+
     let conf = Arc::new(SafeKeeperConf {
         workdir,
         my_id: id,
         listen_pg_addr: args.listen_pg,
         listen_pg_addr_tenant_only: args.listen_pg_tenant_only,
         listen_http_addr: args.listen_http,
+        listen_https_addr: args.listen_https,
         advertise_pg_addr: args.advertise_pg,
         availability_zone: args.availability_zone,
         no_sync: args.no_sync,
@@ -379,6 +392,9 @@ async fn main() -> anyhow::Result<()> {
         eviction_min_resident: args.eviction_min_resident,
         wal_reader_fanout: args.wal_reader_fanout,
         max_delta_for_fanout: args.max_delta_for_fanout,
+        ssl_key_file: args.ssl_key_file,
+        ssl_cert_file: args.ssl_cert_file,
+        ssl_ca_cert,
     });
 
     // initialize sentry if SENTRY_DSN is provided
@@ -438,6 +454,17 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
         error!("failed to bind to address {}: {}", conf.listen_http_addr, e);
         e
     })?;
+
+    let https_listener = match conf.listen_https_addr.as_ref() {
+        Some(listen_https_addr) => {
+            info!("starting safekeeper HTTPS service on {}", listen_https_addr);
+            Some(tcp_listener::bind(listen_https_addr).map_err(|e| {
+                error!("failed to bind to address {}: {}", listen_https_addr, e);
+                e
+            })?)
+        }
+        None => None,
+    };
 
     let global_timelines = Arc::new(GlobalTimelines::new(conf.clone()));
 
@@ -512,13 +539,26 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
     let http_handle = current_thread_rt
         .as_ref()
         .unwrap_or_else(|| HTTP_RUNTIME.handle())
-        .spawn(http::task_main(
+        .spawn(http::task_main_http(
             conf.clone(),
             http_listener,
             global_timelines.clone(),
         ))
         .map(|res| ("HTTP service main".to_owned(), res));
     tasks_handles.push(Box::pin(http_handle));
+
+    if let Some(https_listener) = https_listener {
+        let https_handle = current_thread_rt
+            .as_ref()
+            .unwrap_or_else(|| HTTP_RUNTIME.handle())
+            .spawn(http::task_main_https(
+                conf.clone(),
+                https_listener,
+                global_timelines.clone(),
+            ))
+            .map(|res| ("HTTPS service main".to_owned(), res));
+        tasks_handles.push(Box::pin(https_handle));
+    }
 
     let broker_task_handle = current_thread_rt
         .as_ref()

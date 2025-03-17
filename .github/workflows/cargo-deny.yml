@@ -7,7 +7,7 @@ on:
         required: false
         type: string
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '0 10 * * *'
 
 jobs:
   cargo-deny:
@@ -50,8 +50,9 @@ jobs:
           method: chat.postMessage
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
-            channel: ${{ vars.SLACK_CICD_CHANNEL_ID }}
+            channel: ${{ vars.SLACK_ON_CALL_DEVPROD_STREAM }}
             text: |
               Periodic cargo-deny on ${{ matrix.ref }}: ${{ job.status }}
               <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
-              Pinging @oncall-devprod.
+              Fixing the problem should be fairly straight forward from the logs. If not, <#${{ vars.SLACK_RUST_CHANNEL_ID }}> is there to help.
+              Pinging <!subteam^S0838JPSH32|@oncall-devprod>.

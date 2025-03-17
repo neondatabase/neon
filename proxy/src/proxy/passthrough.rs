@@ -1,3 +1,4 @@
+use smol_str::SmolStr;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::debug;
 use utils::measured_stream::MeasuredStream;
@@ -17,10 +18,13 @@ pub(crate) async fn proxy_pass(
     client: impl AsyncRead + AsyncWrite + Unpin,
     compute: impl AsyncRead + AsyncWrite + Unpin,
     aux: MetricsAuxInfo,
+    private_link_id: Option<SmolStr>,
 ) -> Result<(), ErrorSource> {
-    let usage = USAGE_METRICS.register(Ids {
+    // we will report ingress at a later date
+    let usage_tx = USAGE_METRICS.register(Ids {
         endpoint_id: aux.endpoint_id,
         branch_id: aux.branch_id,
+        private_link_id,
     });
 
     let metrics = &Metrics::get().proxy.io_bytes;
@@ -31,7 +35,7 @@ pub(crate) async fn proxy_pass(
         |cnt| {
             // Number of bytes we sent to the client (outbound).
             metrics.get_metric(m_sent).inc_by(cnt as u64);
-            usage.record_egress(cnt as u64);
+            usage_tx.record_egress(cnt as u64);
         },
     );
 
@@ -42,6 +46,7 @@ pub(crate) async fn proxy_pass(
         |cnt| {
             // Number of bytes the client sent to the compute node (inbound).
             metrics.get_metric(m_recv).inc_by(cnt as u64);
+            usage_tx.record_ingress(cnt as u64);
         },
     );
 
@@ -61,6 +66,7 @@ pub(crate) struct ProxyPassthrough<S> {
     pub(crate) compute: PostgresConnection,
     pub(crate) aux: MetricsAuxInfo,
     pub(crate) session_id: uuid::Uuid,
+    pub(crate) private_link_id: Option<SmolStr>,
     pub(crate) cancel: cancellation::Session,
 
     pub(crate) _req: NumConnectionRequestsGuard<'static>,
@@ -72,7 +78,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
         self,
         compute_config: &ComputeConfig,
     ) -> Result<(), ErrorSource> {
-        let res = proxy_pass(self.client, self.compute.stream, self.aux).await;
+        let res = proxy_pass(
+            self.client,
+            self.compute.stream,
+            self.aux,
+            self.private_link_id,
+        )
+        .await;
         if let Err(err) = self
             .compute
             .cancel_closure

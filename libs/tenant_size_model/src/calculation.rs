@@ -130,11 +130,7 @@ impl StorageModel {
                     break;
                 }
             }
-            if possible {
-                Some(snapshot_later)
-            } else {
-                None
-            }
+            if possible { Some(snapshot_later) } else { None }
         } else {
             None
         };

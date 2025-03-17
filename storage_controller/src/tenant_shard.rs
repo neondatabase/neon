@@ -1,50 +1,39 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-    time::Duration,
-};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
 
-use crate::{
-    metrics::{
-        self, ReconcileCompleteLabelGroup, ReconcileLongRunningLabelGroup, ReconcileOutcome,
-    },
-    persistence::TenantShardPersistence,
-    reconciler::{ReconcileUnits, ReconcilerConfig},
-    scheduler::{
-        AffinityScore, AttachedShardTag, NodeSchedulingScore, NodeSecondarySchedulingScore,
-        RefCountUpdate, ScheduleContext, SecondaryShardTag, ShardTag,
-    },
-    service::ReconcileResultRequest,
-};
 use futures::future::{self, Either};
 use itertools::Itertools;
 use pageserver_api::controller_api::{AvailabilityZone, PlacementPolicy, ShardSchedulingPolicy};
-use pageserver_api::{
-    models::{LocationConfig, LocationConfigMode, TenantConfig},
-    shard::{ShardIdentity, TenantShardId},
-};
+use pageserver_api::models::{LocationConfig, LocationConfigMode, TenantConfig};
+use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{instrument, Instrument};
-use utils::{
-    generation::Generation,
-    id::NodeId,
-    seqwait::{SeqWait, SeqWaitError},
-    shard::ShardCount,
-    sync::gate::GateGuard,
-};
+use tracing::{Instrument, instrument};
+use utils::generation::Generation;
+use utils::id::NodeId;
+use utils::seqwait::{SeqWait, SeqWaitError};
+use utils::shard::ShardCount;
+use utils::sync::gate::GateGuard;
 
-use crate::{
-    compute_hook::ComputeHook,
-    node::Node,
-    persistence::{split_state::SplitState, Persistence},
-    reconciler::{
-        attached_location_conf, secondary_location_conf, ReconcileError, Reconciler, TargetState,
-    },
-    scheduler::{ScheduleError, Scheduler},
-    service, Sequence,
+use crate::compute_hook::ComputeHook;
+use crate::metrics::{
+    self, ReconcileCompleteLabelGroup, ReconcileLongRunningLabelGroup, ReconcileOutcome,
 };
+use crate::node::Node;
+use crate::persistence::split_state::SplitState;
+use crate::persistence::{Persistence, TenantShardPersistence};
+use crate::reconciler::{
+    ReconcileError, ReconcileUnits, Reconciler, ReconcilerConfig, TargetState,
+    attached_location_conf, secondary_location_conf,
+};
+use crate::scheduler::{
+    AffinityScore, AttachedShardTag, NodeSchedulingScore, NodeSecondarySchedulingScore,
+    RefCountUpdate, ScheduleContext, ScheduleError, Scheduler, SecondaryShardTag, ShardTag,
+};
+use crate::service::ReconcileResultRequest;
+use crate::{Sequence, service};
 
 /// Serialization helper
 fn read_last_error<S, T>(v: &std::sync::Mutex<Option<T>>, serializer: S) -> Result<S::Ok, S::Error>
@@ -142,6 +131,10 @@ pub(crate) struct TenantShard {
     /// and trigger a Reconciler run.  This is the mechanism by which compute notifications are included in the scope
     /// of state that we publish externally in an eventually consistent way.
     pub(crate) pending_compute_notification: bool,
+
+    /// To do a graceful migration, set this field to the destination pageserver, and optimization
+    /// functions will consider this node the best location and react appropriately.
+    preferred_node: Option<NodeId>,
 
     // Support/debug tool: if something is going wrong or flapping with scheduling, this may
     // be set to a non-active state to avoid making changes while the issue is fixed.
@@ -335,6 +328,37 @@ impl IntentState {
             false
         }
     }
+
+    pub(crate) fn set_preferred_az(
+        &mut self,
+        scheduler: &mut Scheduler,
+        preferred_az: Option<AvailabilityZone>,
+    ) {
+        let new_az = preferred_az.as_ref();
+        let old_az = self.preferred_az_id.as_ref();
+
+        if old_az != new_az {
+            if let Some(node_id) = self.attached {
+                scheduler.update_node_ref_counts(
+                    node_id,
+                    new_az,
+                    RefCountUpdate::ChangePreferredAzFrom(old_az),
+                );
+            }
+            for node_id in &self.secondary {
+                scheduler.update_node_ref_counts(
+                    *node_id,
+                    new_az,
+                    RefCountUpdate::ChangePreferredAzFrom(old_az),
+                );
+            }
+            self.preferred_az_id = preferred_az;
+        }
+    }
+
+    pub(crate) fn get_preferred_az(&self) -> Option<&AvailabilityZone> {
+        self.preferred_az_id.as_ref()
+    }
 }
 
 impl Drop for IntentState {
@@ -481,7 +505,14 @@ pub(crate) enum ReconcileNeeded {
     /// spawned: wait for the existing reconciler rather than spawning a new one.
     WaitExisting(ReconcilerWaiter),
     /// shard needs reconciliation: call into [`TenantShard::spawn_reconciler`]
-    Yes,
+    Yes(ReconcileReason),
+}
+
+#[derive(Debug)]
+pub(crate) enum ReconcileReason {
+    ActiveNodesDirty,
+    UnknownLocation,
+    PendingComputeNotification,
 }
 
 /// Pending modification to the observed state of a tenant shard.
@@ -559,6 +590,7 @@ impl TenantShard {
             last_error: Arc::default(),
             pending_compute_notification: false,
             scheduling_policy: ShardSchedulingPolicy::default(),
+            preferred_node: None,
         }
     }
 
@@ -813,6 +845,15 @@ impl TenantShard {
             return None;
         };
 
+        // If the candidate is our preferred node, then it is better than the current location, as long
+        // as it is online -- the online check is part of the score calculation we did above, so it's
+        // important that this check comes after that one.
+        if let Some(preferred) = self.preferred_node.as_ref() {
+            if preferred == &candidate {
+                return Some(true);
+            }
+        }
+
         match scheduler.compute_node_score::<T::Score>(
             current,
             &self.intent.preferred_az_id,
@@ -828,7 +869,9 @@ impl TenantShard {
                 let current_score = current_score.for_optimization();
 
                 if candidate_score < current_score {
-                    tracing::info!("Found a lower scoring location! {candidate} is better than {current} ({candidate_score:?} is better than {current_score:?})");
+                    tracing::info!(
+                        "Found a lower scoring location! {candidate} is better than {current} ({candidate_score:?} is better than {current_score:?})"
+                    );
                     Some(true)
                 } else {
                     // The candidate node is no better than our current location, so don't migrate
@@ -849,13 +892,22 @@ impl TenantShard {
         }
     }
 
-    fn find_better_location<T: ShardTag>(
+    pub(crate) fn find_better_location<T: ShardTag>(
         &self,
         scheduler: &mut Scheduler,
         schedule_context: &ScheduleContext,
         current: NodeId,
         hard_exclude: &[NodeId],
     ) -> Option<NodeId> {
+        // If we have a migration hint, then that is our better location
+        if let Some(hint) = self.preferred_node.as_ref() {
+            if hint == &current {
+                return None;
+            }
+
+            return Some(*hint);
+        }
+
         // Look for a lower-scoring location to attach to
         let Ok(candidate_node) = scheduler.schedule_shard::<T>(
             hard_exclude,
@@ -889,6 +941,13 @@ impl TenantShard {
         scheduler: &mut Scheduler,
         schedule_context: &ScheduleContext,
     ) -> bool {
+        // Tenant with preferred node: check if it is not already at the preferred node
+        if let Some(preferred) = self.preferred_node.as_ref() {
+            if Some(preferred) != self.intent.get_attached().as_ref() {
+                return true;
+            }
+        }
+
         // Sharded tenant: check if any locations have a nonzero affinity score
         if self.shard.count >= ShardCount(1) {
             let schedule_context = schedule_context.project_detach(self);
@@ -929,6 +988,9 @@ impl TenantShard {
     /// Optimize attachments: if a shard has a secondary location that is preferable to
     /// its primary location based on soft constraints, switch that secondary location
     /// to be attached.
+    ///
+    /// `schedule_context` should have been populated with all shards in the tenant, including
+    /// the one we're trying to optimize (this function will subtract its own contribution before making scoring decisions)
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
     pub(crate) fn optimize_attachment(
         &self,
@@ -998,7 +1060,7 @@ impl TenantShard {
                 // most cases, even if some nodes are offline or have scheduling=pause set.
 
                 debug_assert!(self.intent.attached.is_some()); // We should not make it here unless attached -- this
-                                                               // logic presumes we are in a mode where we want secondaries to be in non-home AZ
+                // logic presumes we are in a mode where we want secondaries to be in non-home AZ
                 if let Some(retain_secondary) = self.intent.get_secondary().iter().find(|n| {
                     let in_home_az = scheduler.get_node_az(n) == self.intent.preferred_az_id;
                     let is_available = secondary_scores
@@ -1022,7 +1084,8 @@ impl TenantShard {
                 }
 
                 // Fall through: we didn't identify one to remove.  This ought to be rare.
-                tracing::warn!("Keeping extra secondaries: can't determine which of {:?} to remove (some nodes offline?)",
+                tracing::warn!(
+                    "Keeping extra secondaries: can't determine which of {:?} to remove (some nodes offline?)",
                     self.intent.get_secondary()
                 );
             } else {
@@ -1056,7 +1119,8 @@ impl TenantShard {
             //
             // This should be a transient state, there should always be capacity eventually in our preferred AZ (even if nodes
             // there are too overloaded for scheduler to suggest them, more should be provisioned eventually).
-            if self.intent.preferred_az_id.is_some()
+            if self.preferred_node.is_none()
+                && self.intent.preferred_az_id.is_some()
                 && scheduler.get_node_az(&replacement) != self.intent.preferred_az_id
             {
                 tracing::debug!(
@@ -1162,6 +1226,27 @@ impl TenantShard {
         None
     }
 
+    /// Start or abort a graceful migration of this shard to another pageserver. This works on top of the
+    /// other optimisation functions, to bias them to move to the destination node.
+    pub(crate) fn set_preferred_node(&mut self, node: Option<NodeId>) {
+        if let Some(hint) = self.preferred_node.as_ref() {
+            if Some(hint) != node.as_ref() {
+                // This is legal but a bit surprising: we expect that administrators wouldn't usually
+                // change their mind about where to migrate something.
+                tracing::warn!(
+                    "Changing migration destination from {hint} to {node:?} (current intent {:?})",
+                    self.intent
+                );
+            }
+        }
+
+        self.preferred_node = node;
+    }
+
+    pub(crate) fn get_preferred_node(&self) -> Option<NodeId> {
+        self.preferred_node
+    }
+
     /// Return true if the optimization was really applied: it will not be applied if the optimization's
     /// sequence is behind this tenant shard's
     pub(crate) fn apply_optimization(
@@ -1186,6 +1271,14 @@ impl TenantShard {
                 self.intent.demote_attached(scheduler, old_attached_node_id);
                 self.intent
                     .promote_attached(scheduler, new_attached_node_id);
+
+                if let Some(hint) = self.preferred_node.as_ref() {
+                    if hint == &new_attached_node_id {
+                        // The migration target is not a long term pin: once we are done with the migration, clear it.
+                        tracing::info!("Graceful migration to {hint} complete");
+                        self.preferred_node = None;
+                    }
+                }
             }
             ScheduleOptimizationAction::ReplaceSecondary(ReplaceSecondary {
                 old_node_id,
@@ -1341,12 +1434,18 @@ impl TenantShard {
 
         let active_nodes_dirty = self.dirty(pageservers);
 
-        // Even if there is no pageserver work to be done, if we have a pending notification to computes,
-        // wake up a reconciler to send it.
-        let do_reconcile =
-            active_nodes_dirty || dirty_observed || self.pending_compute_notification;
+        let reconcile_needed = match (
+            active_nodes_dirty,
+            dirty_observed,
+            self.pending_compute_notification,
+        ) {
+            (true, _, _) => ReconcileNeeded::Yes(ReconcileReason::ActiveNodesDirty),
+            (_, true, _) => ReconcileNeeded::Yes(ReconcileReason::UnknownLocation),
+            (_, _, true) => ReconcileNeeded::Yes(ReconcileReason::PendingComputeNotification),
+            _ => ReconcileNeeded::No,
+        };
 
-        if !do_reconcile {
+        if matches!(reconcile_needed, ReconcileNeeded::No) {
             tracing::debug!("Not dirty, no reconciliation needed.");
             return ReconcileNeeded::No;
         }
@@ -1389,7 +1488,7 @@ impl TenantShard {
             }
         }
 
-        ReconcileNeeded::Yes
+        reconcile_needed
     }
 
     /// Ensure the sequence number is set to a value where waiting for this value will make us wait
@@ -1479,6 +1578,7 @@ impl TenantShard {
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
     pub(crate) fn spawn_reconciler(
         &mut self,
+        reason: ReconcileReason,
         result_tx: &tokio::sync::mpsc::UnboundedSender<ReconcileResultRequest>,
         pageservers: &Arc<HashMap<NodeId, Node>>,
         compute_hook: &Arc<ComputeHook>,
@@ -1538,7 +1638,7 @@ impl TenantShard {
         let reconcile_seq = self.sequence;
         let long_reconcile_threshold = service_config.long_reconcile_threshold;
 
-        tracing::info!(seq=%reconcile_seq, "Spawning Reconciler for sequence {}", self.sequence);
+        tracing::info!(seq=%reconcile_seq, "Spawning Reconciler ({reason:?})");
         let must_notify = self.pending_compute_notification;
         let reconciler_span = tracing::info_span!(parent: None, "reconciler", seq=%reconcile_seq,
                                                         tenant_id=%reconciler.tenant_shard_id.tenant_id,
@@ -1697,6 +1797,10 @@ impl TenantShard {
 
         debug_assert!(!self.intent.all_pageservers().contains(&node_id));
 
+        if self.preferred_node == Some(node_id) {
+            self.preferred_node = None;
+        }
+
         intent_modified
     }
 
@@ -1704,8 +1808,8 @@ impl TenantShard {
         self.scheduling_policy = p;
     }
 
-    pub(crate) fn get_scheduling_policy(&self) -> &ShardSchedulingPolicy {
-        &self.scheduling_policy
+    pub(crate) fn get_scheduling_policy(&self) -> ShardSchedulingPolicy {
+        self.scheduling_policy
     }
 
     pub(crate) fn set_last_error(&mut self, sequence: Sequence, error: ReconcileError) {
@@ -1744,6 +1848,7 @@ impl TenantShard {
             pending_compute_notification: false,
             delayed_reconcile: false,
             scheduling_policy: serde_json::from_str(&tsp.scheduling_policy).unwrap(),
+            preferred_node: None,
         })
     }
 
@@ -1764,11 +1869,15 @@ impl TenantShard {
     }
 
     pub(crate) fn preferred_az(&self) -> Option<&AvailabilityZone> {
-        self.intent.preferred_az_id.as_ref()
+        self.intent.get_preferred_az()
     }
 
-    pub(crate) fn set_preferred_az(&mut self, preferred_az_id: Option<AvailabilityZone>) {
-        self.intent.preferred_az_id = preferred_az_id;
+    pub(crate) fn set_preferred_az(
+        &mut self,
+        scheduler: &mut Scheduler,
+        preferred_az_id: Option<AvailabilityZone>,
+    ) {
+        self.intent.set_preferred_az(scheduler, preferred_az_id);
     }
 
     /// Returns all the nodes to which this tenant shard is attached according to the
@@ -1784,8 +1893,8 @@ impl TenantShard {
                 let conf = observed.conf.as_ref()?;
 
                 match (conf.generation, conf.mode) {
-                    (Some(gen), AttachedMulti | AttachedSingle | AttachedStale) => {
-                        Some((*node_id, gen))
+                    (Some(gen_), AttachedMulti | AttachedSingle | AttachedStale) => {
+                        Some((*node_id, gen_))
                     }
                     _ => None,
                 }
@@ -1793,7 +1902,7 @@ impl TenantShard {
             .sorted_by(|(_lhs_node_id, lhs_gen), (_rhs_node_id, rhs_gen)| {
                 lhs_gen.cmp(rhs_gen).reverse()
             })
-            .map(|(node_id, gen)| (node_id, Generation::new(gen)))
+            .map(|(node_id, gen_)| (node_id, Generation::new(gen_)))
             .collect()
     }
 
@@ -1825,7 +1934,10 @@ impl TenantShard {
                         (Some(crnt), Some(new)) if crnt_gen > new_gen => {
                             tracing::warn!(
                                 "Skipping observed state update {}: {:?} and using None due to stale generation ({} > {})",
-                                node_id, loc, crnt, new
+                                node_id,
+                                loc,
+                                crnt,
+                                new
                             );
 
                             self.observed
@@ -1882,18 +1994,17 @@ impl Drop for TenantShard {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::{cell::RefCell, rc::Rc};
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
-    use pageserver_api::{
-        controller_api::NodeAvailability,
-        shard::{ShardCount, ShardNumber},
-    };
-    use rand::{rngs::StdRng, SeedableRng};
+    use pageserver_api::controller_api::NodeAvailability;
+    use pageserver_api::shard::{ShardCount, ShardNumber};
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
     use utils::id::TenantId;
 
-    use crate::scheduler::test_utils::make_test_nodes;
-
     use super::*;
+    use crate::scheduler::test_utils::make_test_nodes;
 
     fn make_test_tenant_shard(policy: PlacementPolicy) -> TenantShard {
         let tenant_id = TenantId::generate();
@@ -2071,16 +2182,20 @@ pub(crate) mod tests {
 
         // In pause mode, schedule() shouldn't do anything
         tenant_shard.scheduling_policy = ShardSchedulingPolicy::Pause;
-        assert!(tenant_shard
-            .schedule(&mut scheduler, &mut ScheduleContext::default())
-            .is_ok());
+        assert!(
+            tenant_shard
+                .schedule(&mut scheduler, &mut ScheduleContext::default())
+                .is_ok()
+        );
         assert!(tenant_shard.intent.all_pageservers().is_empty());
 
         // In active mode, schedule() works
         tenant_shard.scheduling_policy = ShardSchedulingPolicy::Active;
-        assert!(tenant_shard
-            .schedule(&mut scheduler, &mut ScheduleContext::default())
-            .is_ok());
+        assert!(
+            tenant_shard
+                .schedule(&mut scheduler, &mut ScheduleContext::default())
+                .is_ok()
+        );
         assert!(!tenant_shard.intent.all_pageservers().is_empty());
 
         tenant_shard.intent.clear(&mut scheduler);
@@ -2254,6 +2369,85 @@ pub(crate) mod tests {
 
         shard_a.intent.clear(&mut scheduler);
         shard_b.intent.clear(&mut scheduler);
+
+        Ok(())
+    }
+
+    #[test]
+    /// How the optimisation code handles a shard with a preferred node set; this is an example
+    /// of the multi-step migration, but driven by a different input.
+    fn optimize_attachment_multi_preferred_node() -> anyhow::Result<()> {
+        let nodes = make_test_nodes(
+            4,
+            &[
+                AvailabilityZone("az-a".to_string()),
+                AvailabilityZone("az-a".to_string()),
+                AvailabilityZone("az-b".to_string()),
+                AvailabilityZone("az-b".to_string()),
+            ],
+        );
+        let mut scheduler = Scheduler::new(nodes.values());
+
+        // Two shards of a tenant that wants to be in AZ A
+        let mut shard_a = make_test_tenant_shard(PlacementPolicy::Attached(1));
+        shard_a.intent.preferred_az_id = Some(AvailabilityZone("az-a".to_string()));
+
+        // Initially attached in a stable location
+        shard_a.intent.set_attached(&mut scheduler, Some(NodeId(1)));
+        shard_a.intent.push_secondary(&mut scheduler, NodeId(3));
+
+        // Set the preferred node to node 2, an equally high scoring node to its current location
+        shard_a.preferred_node = Some(NodeId(2));
+
+        fn make_schedule_context(shard_a: &TenantShard) -> ScheduleContext {
+            let mut schedule_context = ScheduleContext::default();
+            schedule_context.avoid(&shard_a.intent.all_pageservers());
+            schedule_context
+        }
+
+        let schedule_context = make_schedule_context(&shard_a);
+        let optimization_a_prepare = shard_a.optimize_attachment(&mut scheduler, &schedule_context);
+        assert_eq!(
+            optimization_a_prepare,
+            Some(ScheduleOptimization {
+                sequence: shard_a.sequence,
+                action: ScheduleOptimizationAction::CreateSecondary(NodeId(2))
+            })
+        );
+        shard_a.apply_optimization(&mut scheduler, optimization_a_prepare.unwrap());
+
+        // The first step of the optimisation should not have cleared the preferred node
+        assert_eq!(shard_a.preferred_node, Some(NodeId(2)));
+
+        let schedule_context = make_schedule_context(&shard_a);
+        let optimization_a_migrate = shard_a.optimize_attachment(&mut scheduler, &schedule_context);
+        assert_eq!(
+            optimization_a_migrate,
+            Some(ScheduleOptimization {
+                sequence: shard_a.sequence,
+                action: ScheduleOptimizationAction::MigrateAttachment(MigrateAttachment {
+                    old_attached_node_id: NodeId(1),
+                    new_attached_node_id: NodeId(2)
+                })
+            })
+        );
+        shard_a.apply_optimization(&mut scheduler, optimization_a_migrate.unwrap());
+
+        // The cutover step of the optimisation should have cleared the preferred node
+        assert_eq!(shard_a.preferred_node, None);
+
+        let schedule_context = make_schedule_context(&shard_a);
+        let optimization_a_cleanup = shard_a.optimize_attachment(&mut scheduler, &schedule_context);
+        assert_eq!(
+            optimization_a_cleanup,
+            Some(ScheduleOptimization {
+                sequence: shard_a.sequence,
+                action: ScheduleOptimizationAction::RemoveSecondary(NodeId(1))
+            })
+        );
+        shard_a.apply_optimization(&mut scheduler, optimization_a_cleanup.unwrap());
+
+        shard_a.intent.clear(&mut scheduler);
 
         Ok(())
     }
@@ -2607,9 +2801,11 @@ pub(crate) mod tests {
         );
         let mut schedule_context = ScheduleContext::default();
         for shard in &mut shards {
-            assert!(shard
-                .schedule(&mut scheduler, &mut schedule_context)
-                .is_ok());
+            assert!(
+                shard
+                    .schedule(&mut scheduler, &mut schedule_context)
+                    .is_ok()
+            );
         }
 
         // Initial: attached locations land in the tenant's home AZ.

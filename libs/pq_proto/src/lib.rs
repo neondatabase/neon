@@ -5,14 +5,15 @@
 
 pub mod framed;
 
+use std::borrow::Cow;
+use std::{fmt, io, str};
+
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use itertools::Itertools;
-use serde::{Deserialize, Serialize};
-use std::{borrow::Cow, fmt, io, str};
-
 // re-export for use in utils pageserver_feedback.rs
 pub use postgres_protocol::PG_EPOCH;
+use serde::{Deserialize, Serialize};
 
 pub type Oid = u32;
 pub type SystemId = u64;
@@ -206,8 +207,8 @@ use rand::distributions::{Distribution, Standard};
 impl Distribution<CancelKeyData> for Standard {
     fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> CancelKeyData {
         CancelKeyData {
-            backend_pid: rng.gen(),
-            cancel_key: rng.gen(),
+            backend_pid: rng.r#gen(),
+            cancel_key: rng.r#gen(),
         }
     }
 }
@@ -1035,7 +1036,7 @@ impl BeMessage<'_> {
                 buf.put_u8(b'd');
                 write_body(buf, |buf| {
                     buf.put_u8(b'0'); // matches INTERPRETED_WAL_RECORD_TAG in postgres-protocol
-                                      // dependency
+                    // dependency
                     buf.put_u64(rec.streaming_lsn);
                     buf.put_u64(rec.commit_lsn);
                     buf.put_slice(rec.data);

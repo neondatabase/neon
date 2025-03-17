@@ -1,24 +1,19 @@
 //! Code to deal with safekeeper control file upgrades
 use std::vec;
 
-use crate::{
-    safekeeper::{AcceptorState, PgUuid, TermHistory, TermLsn},
-    state::{EvictionState, TimelinePersistentState},
-    wal_backup_partial,
-};
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use pq_proto::SystemId;
-use safekeeper_api::{
-    membership::{Configuration, INVALID_GENERATION},
-    ServerInfo, Term,
-};
+use safekeeper_api::membership::{Configuration, INVALID_GENERATION};
+use safekeeper_api::{ServerInfo, Term};
 use serde::{Deserialize, Serialize};
 use tracing::*;
-use utils::{
-    bin_ser::LeSer,
-    id::{NodeId, TenantId, TimelineId},
-    lsn::Lsn,
-};
+use utils::bin_ser::LeSer;
+use utils::id::{NodeId, TenantId, TimelineId};
+use utils::lsn::Lsn;
+
+use crate::safekeeper::{AcceptorState, PgUuid, TermHistory, TermLsn};
+use crate::state::{EvictionState, TimelinePersistentState};
+use crate::wal_backup_partial;
 
 /// Persistent consensus state of the acceptor.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -552,11 +547,11 @@ pub fn downgrade_v10_to_v9(state: &TimelinePersistentState) -> TimelinePersisten
 mod tests {
     use std::str::FromStr;
 
-    use utils::{id::NodeId, Hex};
-
-    use crate::control_file_upgrade::PersistedPeerInfo;
+    use utils::Hex;
+    use utils::id::NodeId;
 
     use super::*;
+    use crate::control_file_upgrade::PersistedPeerInfo;
 
     #[test]
     fn roundtrip_v1() {

@@ -9,19 +9,18 @@ pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN
 pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 9898;
 pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
 
+use std::collections::HashMap;
+use std::num::{NonZeroU64, NonZeroUsize};
+use std::str::FromStr;
+use std::time::Duration;
+
 use postgres_backend::AuthType;
 use remote_storage::RemoteStorageConfig;
 use serde_with::serde_as;
-use std::{
-    collections::HashMap,
-    num::{NonZeroU64, NonZeroUsize},
-    str::FromStr,
-    time::Duration,
-};
-use utils::{logging::LogFormat, postgres_client::PostgresClientProtocol};
+use utils::logging::LogFormat;
+use utils::postgres_client::PostgresClientProtocol;
 
-use crate::models::ImageCompressionAlgorithm;
-use crate::models::LsnLease;
+use crate::models::{ImageCompressionAlgorithm, LsnLease};
 
 // Certain metadata (e.g. externally-addressable name, AZ) is delivered
 // as a separate structure.  This information is not neeed by the pageserver
@@ -36,6 +35,7 @@ pub struct NodeMetadata {
     pub postgres_port: u16,
     pub http_host: String,
     pub http_port: u16,
+    pub https_port: Option<u16>,
 
     // Deployment tools may write fields to the metadata file beyond what we
     // use in this type: this type intentionally only names fields that require.
@@ -58,6 +58,9 @@ pub struct ConfigToml {
     // types mapped 1:1 into the runtime PageServerConfig type
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
+    pub listen_https_addr: Option<String>,
+    pub ssl_key_file: Utf8PathBuf,
+    pub ssl_cert_file: Utf8PathBuf,
     pub availability_zone: Option<String>,
     #[serde(with = "humantime_serde")]
     pub wait_lsn_timeout: Duration,
@@ -124,6 +127,10 @@ pub struct ConfigToml {
     pub enable_read_path_debugging: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validate_wal_contiguity: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load_previous_heatmap: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generate_unarchival_heatmap: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -265,15 +272,16 @@ pub struct TenantConfigToml {
     /// size exceeds `compaction_upper_limit * checkpoint_distance`.
     pub compaction_upper_limit: usize,
     pub compaction_algorithm: crate::models::CompactionAlgorithmSettings,
-    /// If true, compact down L0 across all tenant timelines before doing regular compaction.
+    /// If true, compact down L0 across all tenant timelines before doing regular compaction. L0
+    /// compaction must be responsive to avoid read amp during heavy ingestion. Defaults to true.
     pub compaction_l0_first: bool,
     /// If true, use a separate semaphore (i.e. concurrency limit) for the L0 compaction pass. Only
-    /// has an effect if `compaction_l0_first` is `true`.
+    /// has an effect if `compaction_l0_first` is true. Defaults to true.
     pub compaction_l0_semaphore: bool,
-    /// Level0 delta layer threshold at which to delay layer flushes for compaction backpressure,
-    /// such that they take 2x as long, and start waiting for layer flushes during ephemeral layer
-    /// rolls. This helps compaction keep up with WAL ingestion, and avoids read amplification
-    /// blowing up. Should be >compaction_threshold. 0 to disable. Disabled by default.
+    /// Level0 delta layer threshold at which to delay layer flushes such that they take 2x as long,
+    /// and block on layer flushes during ephemeral layer rolls, for compaction backpressure. This
+    /// helps compaction keep up with WAL ingestion, and avoids read amplification blowing up.
+    /// Should be >compaction_threshold. 0 to disable. Defaults to 3x compaction_threshold.
     pub l0_flush_delay_threshold: Option<usize>,
     /// Level0 delta layer threshold at which to stall layer flushes. Must be >compaction_threshold
     /// to avoid deadlock. 0 to disable. Disabled by default.
@@ -281,6 +289,8 @@ pub struct TenantConfigToml {
     /// If true, Level0 delta layer flushes will wait for S3 upload before flushing the next
     /// layer. This is a temporary backpressure mechanism which should be removed once
     /// l0_flush_{delay,stall}_threshold is fully enabled.
+    ///
+    /// TODO: this is no longer enabled, remove it when the config option is no longer set.
     pub l0_flush_wait_upload: bool,
     // Determines how much history is retained, to allow
     // branching and read replicas at an older point in time.
@@ -367,9 +377,9 @@ pub struct TenantConfigToml {
 }
 
 pub mod defaults {
-    use crate::models::ImageCompressionAlgorithm;
-
     pub use storage_broker::DEFAULT_ENDPOINT as BROKER_DEFAULT_ENDPOINT;
+
+    use crate::models::ImageCompressionAlgorithm;
 
     pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "300 s";
     pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
@@ -418,6 +428,9 @@ pub mod defaults {
 
     pub const DEFAULT_WAL_RECEIVER_PROTOCOL: utils::postgres_client::PostgresClientProtocol =
         utils::postgres_client::PostgresClientProtocol::Vanilla;
+
+    pub const DEFAULT_SSL_KEY_FILE: &str = "server.key";
+    pub const DEFAULT_SSL_CERT_FILE: &str = "server.crt";
 }
 
 impl Default for ConfigToml {
@@ -427,6 +440,9 @@ impl Default for ConfigToml {
         Self {
             listen_pg_addr: (DEFAULT_PG_LISTEN_ADDR.to_string()),
             listen_http_addr: (DEFAULT_HTTP_LISTEN_ADDR.to_string()),
+            listen_https_addr: (None),
+            ssl_key_file: Utf8PathBuf::from(DEFAULT_SSL_KEY_FILE),
+            ssl_cert_file: Utf8PathBuf::from(DEFAULT_SSL_CERT_FILE),
             availability_zone: (None),
             wait_lsn_timeout: (humantime::parse_duration(DEFAULT_WAIT_LSN_TIMEOUT)
                 .expect("cannot parse default wait lsn timeout")),
@@ -524,6 +540,8 @@ impl Default for ConfigToml {
                 None
             },
             validate_wal_contiguity: None,
+            load_previous_heatmap: None,
+            generate_unarchival_heatmap: None,
         }
     }
 }
@@ -552,13 +570,15 @@ pub mod tenant_conf_defaults {
     // be reduced later by optimizing L0 hole calculation to avoid loading all keys into memory). So
     // with this config, we can get a maximum peak compaction usage of 9 GB.
     pub const DEFAULT_COMPACTION_UPPER_LIMIT: usize = 20;
-    pub const DEFAULT_COMPACTION_L0_FIRST: bool = false;
+    // Enable L0 compaction pass and semaphore by default. L0 compaction must be responsive to avoid
+    // read amp.
+    pub const DEFAULT_COMPACTION_L0_FIRST: bool = true;
     pub const DEFAULT_COMPACTION_L0_SEMAPHORE: bool = true;
 
     pub const DEFAULT_COMPACTION_ALGORITHM: crate::models::CompactionAlgorithm =
         crate::models::CompactionAlgorithm::Legacy;
 
-    pub const DEFAULT_L0_FLUSH_WAIT_UPLOAD: bool = true;
+    pub const DEFAULT_L0_FLUSH_WAIT_UPLOAD: bool = false;
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
 
@@ -569,9 +589,8 @@ pub mod tenant_conf_defaults {
     pub const DEFAULT_GC_PERIOD: &str = "1 hr";
     pub const DEFAULT_IMAGE_CREATION_THRESHOLD: usize = 3;
     // If there are more than threshold * compaction_threshold (that is 3 * 10 in the default config) L0 layers, image
-    // layer creation will end immediately. Set to 0 to disable. The target default will be 3 once we
-    // want to enable this feature.
-    pub const DEFAULT_IMAGE_CREATION_PREEMPT_THRESHOLD: usize = 0;
+    // layer creation will end immediately. Set to 0 to disable.
+    pub const DEFAULT_IMAGE_CREATION_PREEMPT_THRESHOLD: usize = 3;
     pub const DEFAULT_PITR_INTERVAL: &str = "7 days";
     pub const DEFAULT_WALRECEIVER_CONNECT_TIMEOUT: &str = "10 seconds";
     pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "10 seconds";
@@ -584,7 +603,7 @@ pub mod tenant_conf_defaults {
     // image layers should be created.
     pub const DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD: u8 = 2;
     pub const DEFAULT_GC_COMPACTION_ENABLED: bool = false;
-    pub const DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB: u64 = 10240000;
+    pub const DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB: u64 = 5 * 1024 * 1024; // 5GB
     pub const DEFAULT_GC_COMPACTION_RATIO_PERCENT: u64 = 100;
 }
 

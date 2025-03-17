@@ -1,47 +1,8 @@
-use std::{
-    collections::{HashMap, HashSet},
-    pin::Pin,
-    str::FromStr,
-    sync::Arc,
-    time::{Duration, Instant, SystemTime},
-};
-
-use crate::{
-    config::PageServerConf,
-    context::RequestContext,
-    disk_usage_eviction_task::{
-        finite_f32, DiskUsageEvictionInfo, EvictionCandidate, EvictionLayer, EvictionSecondaryLayer,
-    },
-    metrics::SECONDARY_MODE,
-    tenant::{
-        config::SecondaryLocationConfig,
-        debug_assert_current_span_has_tenant_and_timeline_id,
-        ephemeral_file::is_ephemeral_file,
-        remote_timeline_client::{
-            index::LayerFileMetadata, is_temp_download_file, FAILED_DOWNLOAD_WARN_THRESHOLD,
-            FAILED_REMOTE_OP_RETRIES,
-        },
-        span::debug_assert_current_span_has_tenant_id,
-        storage_layer::{layer::local_layer_path, LayerName, LayerVisibilityHint},
-        tasks::{warn_when_period_overrun, BackgroundLoopKind},
-    },
-    virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile},
-    TEMP_FILE_SUFFIX,
-};
-
-use super::{
-    heatmap::HeatMapLayer,
-    scheduler::{
-        self, period_jitter, period_warmup, Completion, JobGenerator, SchedulingResult,
-        TenantBackgroundJobs,
-    },
-    GetTenantError, SecondaryTenant, SecondaryTenantError,
-};
-
-use crate::tenant::{
-    mgr::TenantManager,
-    remote_timeline_client::{download::download_layer_file, remote_heatmap_path},
-};
+use std::collections::{HashMap, HashSet};
+use std::pin::Pin;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 
 use camino::Utf8PathBuf;
 use chrono::format::{DelayedFormat, StrftimeItems};
@@ -50,18 +11,43 @@ use metrics::UIntGauge;
 use pageserver_api::models::SecondaryProgress;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::{DownloadError, DownloadKind, DownloadOpts, Etag, GenericRemoteStorage};
-
 use tokio_util::sync::CancellationToken;
-use tracing::{info_span, instrument, warn, Instrument};
-use utils::{
-    backoff, completion::Barrier, crashsafe::path_with_suffix_extension, failpoint_support, fs_ext,
-    id::TimelineId, pausable_failpoint, serde_system_time,
-};
+use tracing::{Instrument, info_span, instrument, warn};
+use utils::completion::Barrier;
+use utils::crashsafe::path_with_suffix_extension;
+use utils::id::TimelineId;
+use utils::{backoff, failpoint_support, fs_ext, pausable_failpoint, serde_system_time};
 
-use super::{
-    heatmap::{HeatMapTenant, HeatMapTimeline},
-    CommandRequest, DownloadCommand,
+use super::heatmap::{HeatMapLayer, HeatMapTenant, HeatMapTimeline};
+use super::scheduler::{
+    self, Completion, JobGenerator, SchedulingResult, TenantBackgroundJobs, period_jitter,
+    period_warmup,
 };
+use super::{
+    CommandRequest, DownloadCommand, GetTenantError, SecondaryTenant, SecondaryTenantError,
+};
+use crate::TEMP_FILE_SUFFIX;
+use crate::config::PageServerConf;
+use crate::context::RequestContext;
+use crate::disk_usage_eviction_task::{
+    DiskUsageEvictionInfo, EvictionCandidate, EvictionLayer, EvictionSecondaryLayer, finite_f32,
+};
+use crate::metrics::SECONDARY_MODE;
+use crate::tenant::config::SecondaryLocationConfig;
+use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
+use crate::tenant::ephemeral_file::is_ephemeral_file;
+use crate::tenant::mgr::TenantManager;
+use crate::tenant::remote_timeline_client::download::download_layer_file;
+use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
+use crate::tenant::remote_timeline_client::{
+    FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES, is_temp_download_file,
+    remote_heatmap_path,
+};
+use crate::tenant::span::debug_assert_current_span_has_tenant_id;
+use crate::tenant::storage_layer::layer::local_layer_path;
+use crate::tenant::storage_layer::{LayerName, LayerVisibilityHint};
+use crate::tenant::tasks::{BackgroundLoopKind, warn_when_period_overrun};
+use crate::virtual_file::{MaybeFatalIo, VirtualFile, on_fatal_io_error};
 
 /// For each tenant, default period for how long must have passed since the last download_tenant call before
 /// calling it again.  This default is replaced with the value of [`HeatMapTenant::upload_period_ms`] after first
@@ -505,7 +491,10 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
         let remote_storage = self.remote_storage.clone();
         let conf = self.tenant_manager.get_conf();
         let tenant_shard_id = *secondary_state.get_tenant_shard_id();
-        let download_ctx = self.root_ctx.attached_child();
+        let download_ctx = self
+            .root_ctx
+            .attached_child()
+            .with_scope_secondary_tenant(&tenant_shard_id);
         (RunningDownload { barrier }, Box::pin(async move {
             let _completion = completion;
 
@@ -785,6 +774,7 @@ impl<'a> TenantDownloader<'a> {
 
         // Download the layers in the heatmap
         for timeline in heatmap.timelines {
+            let ctx = &ctx.with_scope_secondary_timeline(tenant_shard_id, &timeline.timeline_id);
             let timeline_state = timeline_states
                 .remove(&timeline.timeline_id)
                 .expect("Just populated above");
@@ -883,8 +873,7 @@ impl<'a> TenantDownloader<'a> {
                 let heatmap_timeline = heatmap.timelines.get(heatmap_timeline_index).unwrap();
 
                 let layers_in_heatmap = heatmap_timeline
-                    .layers
-                    .iter()
+                    .hot_layers()
                     .map(|l| (&l.name, l.metadata.generation))
                     .collect::<HashSet<_>>();
                 let layers_on_disk = timeline_state
@@ -1029,7 +1018,8 @@ impl<'a> TenantDownloader<'a> {
         // Accumulate updates to the state
         let mut touched = Vec::new();
 
-        for layer in timeline.layers {
+        let timeline_id = timeline.timeline_id;
+        for layer in timeline.into_hot_layers() {
             if self.secondary_state.cancel.is_cancelled() {
                 tracing::debug!("Cancelled -- dropping out of layer loop");
                 return (Err(UpdateError::Cancelled), touched);
@@ -1054,7 +1044,7 @@ impl<'a> TenantDownloader<'a> {
             }
 
             match self
-                .download_layer(tenant_shard_id, &timeline.timeline_id, layer, ctx)
+                .download_layer(tenant_shard_id, &timeline_id, layer, ctx)
                 .await
             {
                 Ok(Some(layer)) => touched.push(layer),
@@ -1162,7 +1152,7 @@ impl<'a> TenantDownloader<'a> {
         let tenant_shard_id = self.secondary_state.get_tenant_shard_id();
         let timeline_id = timeline.timeline_id;
 
-        tracing::debug!(timeline_id=%timeline_id, "Downloading layers, {} in heatmap", timeline.layers.len());
+        tracing::debug!(timeline_id=%timeline_id, "Downloading layers, {} in heatmap", timeline.hot_layers().count());
 
         let (result, touched) = self
             .download_timeline_layers(tenant_shard_id, timeline, timeline_state, deadline, ctx)
@@ -1330,11 +1320,11 @@ async fn init_timeline_state(
     // As we iterate through layers found on disk, we will look up their metadata from this map.
     // Layers not present in metadata will be discarded.
     let heatmap_metadata: HashMap<&LayerName, &HeatMapLayer> =
-        heatmap.layers.iter().map(|l| (&l.name, l)).collect();
+        heatmap.hot_layers().map(|l| (&l.name, l)).collect();
 
     let last_heatmap_metadata: HashMap<&LayerName, &HeatMapLayer> =
         if let Some(last_heatmap) = last_heatmap {
-            last_heatmap.layers.iter().map(|l| (&l.name, l)).collect()
+            last_heatmap.hot_layers().map(|l| (&l.name, l)).collect()
         } else {
             HashMap::new()
         };

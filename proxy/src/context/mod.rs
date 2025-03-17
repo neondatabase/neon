@@ -8,7 +8,7 @@ use pq_proto::StartupMessageParams;
 use smol_str::SmolStr;
 use tokio::sync::mpsc;
 use tracing::field::display;
-use tracing::{debug, error, info_span, Span};
+use tracing::{Span, debug, error, info_span};
 use try_lock::TryLock;
 use uuid::Uuid;
 
@@ -17,7 +17,8 @@ use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::error::ErrorKind;
 use crate::intern::{BranchIdInt, ProjectIdInt};
 use crate::metrics::{
-    ConnectOutcome, InvalidEndpointsGroup, LatencyTimer, Metrics, Protocol, Waiting,
+    ConnectOutcome, InvalidEndpointsGroup, LatencyAccumulated, LatencyTimer, Metrics, Protocol,
+    Waiting,
 };
 use crate::protocol2::{ConnectionInfo, ConnectionInfoExtra};
 use crate::types::{DbName, EndpointId, RoleName};
@@ -55,12 +56,14 @@ struct RequestContextInner {
     dbname: Option<DbName>,
     user: Option<RoleName>,
     application: Option<SmolStr>,
+    user_agent: Option<SmolStr>,
     error_kind: Option<ErrorKind>,
     pub(crate) auth_method: Option<AuthMethod>,
     jwt_issuer: Option<String>,
     success: bool,
     pub(crate) cold_start_info: ColdStartInfo,
     pg_options: Option<StartupMessageParams>,
+    testodrome_query_id: Option<String>,
 
     // extra
     // This sender is here to keep the request monitoring channel open while requests are taking place.
@@ -100,6 +103,7 @@ impl Clone for RequestContext {
             dbname: inner.dbname.clone(),
             user: inner.user.clone(),
             application: inner.application.clone(),
+            user_agent: inner.user_agent.clone(),
             error_kind: inner.error_kind,
             auth_method: inner.auth_method.clone(),
             jwt_issuer: inner.jwt_issuer.clone(),
@@ -107,6 +111,7 @@ impl Clone for RequestContext {
             rejected: inner.rejected,
             cold_start_info: inner.cold_start_info,
             pg_options: inner.pg_options.clone(),
+            testodrome_query_id: inner.testodrome_query_id.clone(),
 
             sender: None,
             disconnect_sender: None,
@@ -149,6 +154,7 @@ impl RequestContext {
             dbname: None,
             user: None,
             application: None,
+            user_agent: None,
             error_kind: None,
             auth_method: None,
             jwt_issuer: None,
@@ -156,6 +162,7 @@ impl RequestContext {
             rejected: None,
             cold_start_info: ColdStartInfo::Unknown,
             pg_options: None,
+            testodrome_query_id: None,
 
             sender: LOG_CHAN.get().and_then(|tx| tx.upgrade()),
             disconnect_sender: LOG_CHAN_DISCONNECT.get().and_then(|tx| tx.upgrade()),
@@ -206,6 +213,19 @@ impl RequestContext {
             this.set_dbname(dbname.into());
         }
 
+        // Try to get testodrome_query_id directly from parameters
+        if let Some(options_str) = options.get("options") {
+            // If not found directly, try to extract it from the options string
+            for option in options_str.split_whitespace() {
+                if option.starts_with("neon_query_id:") {
+                    if let Some(value) = option.strip_prefix("neon_query_id:") {
+                        this.set_testodrome_id(value.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+
         this.pg_options = Some(options);
     }
 
@@ -243,6 +263,20 @@ impl RequestContext {
             .try_lock()
             .expect("should not deadlock")
             .set_user(user);
+    }
+
+    pub(crate) fn set_user_agent(&self, user_agent: Option<SmolStr>) {
+        self.0
+            .try_lock()
+            .expect("should not deadlock")
+            .set_user_agent(user_agent);
+    }
+
+    pub(crate) fn set_testodrome_id(&self, query_id: String) {
+        self.0
+            .try_lock()
+            .expect("should not deadlock")
+            .set_testodrome_id(query_id);
     }
 
     pub(crate) fn set_auth_method(&self, auth_method: AuthMethod) {
@@ -336,6 +370,22 @@ impl RequestContext {
         }
     }
 
+    pub(crate) fn get_proxy_latency(&self) -> LatencyAccumulated {
+        self.0
+            .try_lock()
+            .expect("should not deadlock")
+            .latency_timer
+            .accumulated()
+    }
+
+    pub(crate) fn get_testodrome_id(&self) -> Option<String> {
+        self.0
+            .try_lock()
+            .expect("should not deadlock")
+            .testodrome_query_id
+            .clone()
+    }
+
     pub(crate) fn success(&self) {
         self.0
             .try_lock()
@@ -384,6 +434,10 @@ impl RequestContextInner {
         }
     }
 
+    fn set_user_agent(&mut self, user_agent: Option<SmolStr>) {
+        self.user_agent = user_agent;
+    }
+
     fn set_dbname(&mut self, dbname: DbName) {
         self.dbname = Some(dbname);
     }
@@ -391,6 +445,10 @@ impl RequestContextInner {
     fn set_user(&mut self, user: RoleName) {
         self.span.record("role", display(&user));
         self.user = Some(user);
+    }
+
+    fn set_testodrome_id(&mut self, query_id: String) {
+        self.testodrome_query_id = Some(query_id);
     }
 
     fn has_private_peer_addr(&self) -> bool {

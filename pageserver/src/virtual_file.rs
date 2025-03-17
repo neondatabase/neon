@@ -11,11 +11,13 @@
 //! This is similar to PostgreSQL's virtual file descriptor facility in
 //! src/backend/storage/file/fd.c
 //!
-use crate::context::RequestContext;
-use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC};
+use std::fs::File;
+use std::io::{Error, ErrorKind, Seek, SeekFrom};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::OpenOptionsExt;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
-use crate::page_cache::{PageWriteGuard, PAGE_SZ};
-use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
 use owned_buffers_io::aligned_buffer::buffer::AlignedBuffer;
@@ -23,30 +25,28 @@ use owned_buffers_io::aligned_buffer::{AlignedBufferMut, AlignedSlice, ConstAlig
 use owned_buffers_io::io_buf_aligned::{IoBufAligned, IoBufAlignedMut};
 use owned_buffers_io::io_buf_ext::FullSlice;
 use pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
-use pageserver_api::shard::TenantShardId;
-use std::fs::File;
-use std::io::{Error, ErrorKind, Seek, SeekFrom};
-#[cfg(target_os = "linux")]
-use std::os::unix::fs::OpenOptionsExt;
-use tokio_epoll_uring::{BoundedBuf, IoBuf, IoBufMut, Slice};
-
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+pub use pageserver_api::models::virtual_file as api;
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::time::Instant;
+use tokio_epoll_uring::{BoundedBuf, IoBuf, IoBufMut, Slice};
 
-pub use pageserver_api::models::virtual_file as api;
+use crate::assert_u64_eq_usize::UsizeIsU64;
+use crate::context::RequestContext;
+use crate::metrics::{STORAGE_IO_TIME_METRIC, StorageIoOperation};
+use crate::page_cache::{PAGE_SZ, PageWriteGuard};
 pub(crate) mod io_engine;
-pub use io_engine::feature_test as io_engine_feature_test;
-pub use io_engine::io_engine_for_bench;
-pub use io_engine::FeatureTestResult as IoEngineFeatureTestResult;
+pub use io_engine::{
+    FeatureTestResult as IoEngineFeatureTestResult, feature_test as io_engine_feature_test,
+    io_engine_for_bench,
+};
 mod metadata;
 mod open_options;
-use self::owned_buffers_io::write::OwnedAsyncWriter;
 pub(crate) use api::IoMode;
 pub(crate) use io_engine::IoEngineKind;
 pub(crate) use metadata::Metadata;
 pub(crate) use open_options::*;
+
+use self::owned_buffers_io::write::OwnedAsyncWriter;
 
 pub(crate) mod owned_buffers_io {
     //! Abstractions for IO with owned buffers.
@@ -120,7 +120,7 @@ impl VirtualFile {
     pub async fn open_with_options<P: AsRef<Utf8Path>>(
         path: P,
         open_options: &OpenOptions,
-        ctx: &RequestContext, /* TODO: carry a pointer to the metrics in the RequestContext instead of the parsing https://github.com/neondatabase/neon/issues/6107 */
+        ctx: &RequestContext,
     ) -> Result<Self, std::io::Error> {
         let inner = VirtualFileInner::open_with_options(path, open_options, ctx).await?;
         Ok(VirtualFile {
@@ -132,7 +132,7 @@ impl VirtualFile {
     pub async fn open_with_options_v2<P: AsRef<Utf8Path>>(
         path: P,
         open_options: &OpenOptions,
-        ctx: &RequestContext, /* TODO: carry a pointer to the metrics in the RequestContext instead of the parsing https://github.com/neondatabase/neon/issues/6107 */
+        ctx: &RequestContext,
     ) -> Result<Self, std::io::Error> {
         let file = match get_io_mode() {
             IoMode::Buffered => {
@@ -303,13 +303,6 @@ pub struct VirtualFileInner {
     /// storing it here.
     pub path: Utf8PathBuf,
     open_options: OpenOptions,
-
-    // These are strings becase we only use them for metrics, and those expect strings.
-    // It makes no sense for us to constantly turn the `TimelineId` and `TenantId` into
-    // strings.
-    tenant_id: String,
-    shard_id: String,
-    timeline_id: String,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -591,36 +584,16 @@ impl VirtualFileInner {
     pub async fn open_with_options<P: AsRef<Utf8Path>>(
         path: P,
         open_options: &OpenOptions,
-        _ctx: &RequestContext, /* TODO: carry a pointer to the metrics in the RequestContext instead of the parsing https://github.com/neondatabase/neon/issues/6107 */
+        _ctx: &RequestContext,
     ) -> Result<VirtualFileInner, std::io::Error> {
-        let path_ref = path.as_ref();
-        let path_str = path_ref.to_string();
-        let parts = path_str.split('/').collect::<Vec<&str>>();
-        let (tenant_id, shard_id, timeline_id) =
-            if parts.len() > 5 && parts[parts.len() - 5] == TENANTS_SEGMENT_NAME {
-                let tenant_shard_part = parts[parts.len() - 4];
-                let (tenant_id, shard_id) = match tenant_shard_part.parse::<TenantShardId>() {
-                    Ok(tenant_shard_id) => (
-                        tenant_shard_id.tenant_id.to_string(),
-                        format!("{}", tenant_shard_id.shard_slug()),
-                    ),
-                    Err(_) => {
-                        // Malformed path: this ID is just for observability, so tolerate it
-                        // and pass through
-                        (tenant_shard_part.to_string(), "*".to_string())
-                    }
-                };
-                (tenant_id, shard_id, parts[parts.len() - 2].to_string())
-            } else {
-                ("*".to_string(), "*".to_string(), "*".to_string())
-            };
+        let path = path.as_ref();
         let (handle, mut slot_guard) = get_open_files().find_victim_slot().await;
 
         // NB: there is also StorageIoOperation::OpenAfterReplace which is for the case
         // where our caller doesn't get to use the returned VirtualFile before its
         // slot gets re-used by someone else.
         let file = observe_duration!(StorageIoOperation::Open, {
-            open_options.open(path_ref.as_std_path()).await?
+            open_options.open(path.as_std_path()).await?
         });
 
         // Strip all options other than read and write.
@@ -636,11 +609,8 @@ impl VirtualFileInner {
         let vfile = VirtualFileInner {
             handle: RwLock::new(handle),
             pos: 0,
-            path: path_ref.to_path_buf(),
+            path: path.to_owned(),
             open_options: reopen_options,
-            tenant_id,
-            shard_id,
-            timeline_id,
         };
 
         // TODO: Under pressure, it's likely the slot will get re-used and
@@ -943,7 +913,7 @@ impl VirtualFileInner {
         &self,
         buf: tokio_epoll_uring::Slice<Buf>,
         offset: u64,
-        _ctx: &RequestContext, /* TODO: use for metrics: https://github.com/neondatabase/neon/issues/6107 */
+        ctx: &RequestContext,
     ) -> (tokio_epoll_uring::Slice<Buf>, Result<usize, Error>)
     where
         Buf: tokio_epoll_uring::IoBufMut + Send,
@@ -961,14 +931,7 @@ impl VirtualFileInner {
             let ((_file_guard, buf), res) = io_engine::get().read_at(file_guard, offset, buf).await;
             let res = res.maybe_fatal_err("io_engine read_at inside VirtualFileInner::read_at");
             if let Ok(size) = res {
-                STORAGE_IO_SIZE
-                    .with_label_values(&[
-                        "read",
-                        &self.tenant_id,
-                        &self.shard_id,
-                        &self.timeline_id,
-                    ])
-                    .add(size as i64);
+                ctx.io_size_metrics().read.add(size.into_u64());
             }
             (buf, res)
         })
@@ -979,9 +942,9 @@ impl VirtualFileInner {
         &self,
         buf: FullSlice<B>,
         offset: u64,
-        _ctx: &RequestContext, /* TODO: use for metrics: https://github.com/neondatabase/neon/issues/6107 */
+        ctx: &RequestContext,
     ) -> (FullSlice<B>, Result<usize, Error>) {
-        let (slice, result) = self.write_at_inner(buf, offset, _ctx).await;
+        let (slice, result) = self.write_at_inner(buf, offset, ctx).await;
         let result = result.maybe_fatal_err("write_at");
         (slice, result)
     }
@@ -990,7 +953,7 @@ impl VirtualFileInner {
         &self,
         buf: FullSlice<B>,
         offset: u64,
-        _ctx: &RequestContext, /* TODO: use for metrics: https://github.com/neondatabase/neon/issues/6107 */
+        ctx: &RequestContext,
     ) -> (FullSlice<B>, Result<usize, Error>) {
         let file_guard = match self.lock_file().await {
             Ok(file_guard) => file_guard,
@@ -1000,14 +963,7 @@ impl VirtualFileInner {
             let ((_file_guard, buf), result) =
                 io_engine::get().write_at(file_guard, offset, buf).await;
             if let Ok(size) = result {
-                STORAGE_IO_SIZE
-                    .with_label_values(&[
-                        "write",
-                        &self.tenant_id,
-                        &self.shard_id,
-                        &self.timeline_id,
-                    ])
-                    .add(size as i64);
+                ctx.io_size_metrics().write.add(size.into_u64());
             }
             (buf, result)
         })
@@ -1078,7 +1034,8 @@ where
 #[cfg(test)]
 mod test_read_exact_at_impl {
 
-    use std::{collections::VecDeque, sync::Arc};
+    use std::collections::VecDeque;
+    use std::sync::Arc;
 
     use tokio_epoll_uring::{BoundedBuf, BoundedBufMut};
 
@@ -1342,9 +1299,8 @@ impl OwnedAsyncWriter for VirtualFile {
         buf: FullSlice<Buf>,
         offset: u64,
         ctx: &RequestContext,
-    ) -> std::io::Result<FullSlice<Buf>> {
-        let (buf, res) = VirtualFile::write_all_at(self, buf, offset, ctx).await;
-        res.map(|_| buf)
+    ) -> (FullSlice<Buf>, std::io::Result<()>) {
+        VirtualFile::write_all_at(self, buf, offset, ctx).await
     }
 }
 
@@ -1424,18 +1380,18 @@ static SYNC_MODE: AtomicU8 = AtomicU8::new(SyncMode::Sync as u8);
 
 #[cfg(test)]
 mod tests {
-    use crate::context::DownloadBehavior;
-    use crate::task_mgr::TaskKind;
-
-    use super::*;
-    use owned_buffers_io::io_buf_ext::IoBufExt;
-    use owned_buffers_io::slice::SliceMutExt;
-    use rand::seq::SliceRandom;
-    use rand::thread_rng;
-    use rand::Rng;
     use std::io::Write;
     use std::os::unix::fs::FileExt;
     use std::sync::Arc;
+
+    use owned_buffers_io::io_buf_ext::IoBufExt;
+    use owned_buffers_io::slice::SliceMutExt;
+    use rand::seq::SliceRandom;
+    use rand::{Rng, thread_rng};
+
+    use super::*;
+    use crate::context::DownloadBehavior;
+    use crate::task_mgr::TaskKind;
 
     enum MaybeVirtualFile {
         VirtualFile(VirtualFile),
@@ -1591,7 +1547,8 @@ mod tests {
     where
         A: Adapter,
     {
-        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let ctx =
+            RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
         let testdir = crate::config::PageServerConf::test_repo_dir(testname);
         std::fs::create_dir_all(&testdir)?;
 
@@ -1718,7 +1675,8 @@ mod tests {
         const THREADS: usize = 100;
         const SAMPLE: [u8; SIZE] = [0xADu8; SIZE];
 
-        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let ctx =
+            RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
         let testdir = crate::config::PageServerConf::test_repo_dir("vfile_concurrency");
         std::fs::create_dir_all(&testdir)?;
 
@@ -1777,7 +1735,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_atomic_overwrite_basic() {
-        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let ctx =
+            RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
         let testdir = crate::config::PageServerConf::test_repo_dir("test_atomic_overwrite_basic");
         std::fs::create_dir_all(&testdir).unwrap();
 
@@ -1805,7 +1764,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_atomic_overwrite_preexisting_tmp() {
-        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let ctx =
+            RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
         let testdir =
             crate::config::PageServerConf::test_repo_dir("test_atomic_overwrite_preexisting_tmp");
         std::fs::create_dir_all(&testdir).unwrap();

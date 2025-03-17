@@ -1,6 +1,8 @@
-use metrics::core::Collector;
+use metrics::core::{AtomicF64, Collector, GenericGauge};
 use metrics::proto::MetricFamily;
-use metrics::{register_int_counter_vec, register_uint_gauge_vec, IntCounterVec, UIntGaugeVec};
+use metrics::{
+    IntCounterVec, UIntGaugeVec, register_gauge, register_int_counter_vec, register_uint_gauge_vec,
+};
 use once_cell::sync::Lazy;
 
 pub(crate) static INSTALLED_EXTENSIONS: Lazy<UIntGaugeVec> = Lazy::new(|| {
@@ -54,9 +56,16 @@ pub(crate) static REMOTE_EXT_REQUESTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| 
     register_int_counter_vec!(
         "compute_ctl_remote_ext_requests_total",
         "Total number of requests made by compute_ctl to download extensions from S3 proxy by status",
-        // Do not use any labels like extension name yet.
-        // We can add them later if needed.
-        &["http_status"]
+        &["http_status", "filename"]
+    )
+    .expect("failed to define a metric")
+});
+
+// Size of audit log directory in bytes
+pub(crate) static AUDIT_LOG_DIR_SIZE: Lazy<GenericGauge<AtomicF64>> = Lazy::new(|| {
+    register_gauge!(
+        "compute_audit_log_dir_size",
+        "Size of audit log directory in bytes",
     )
     .expect("failed to define a metric")
 });
@@ -66,5 +75,6 @@ pub fn collect() -> Vec<MetricFamily> {
     metrics.extend(CPLANE_REQUESTS_TOTAL.collect());
     metrics.extend(REMOTE_EXT_REQUESTS_TOTAL.collect());
     metrics.extend(DB_MIGRATION_FAILED.collect());
+    metrics.extend(AUDIT_LOG_DIR_SIZE.collect());
     metrics
 }

@@ -5,12 +5,14 @@
 //! and connect it to the storage nodes.
 use std::collections::HashMap;
 
+use indexmap::IndexMap;
+use regex::Regex;
+use remote_storage::RemotePath;
 use serde::{Deserialize, Serialize};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
-use regex::Regex;
-use remote_storage::RemotePath;
+use crate::responses::TlsConfig;
 
 /// String type alias representing Postgres identifier and
 /// intended to be used for DB / role names.
@@ -102,6 +104,17 @@ pub struct ComputeSpec {
     pub timeline_id: Option<TimelineId>,
     pub pageserver_connstring: Option<String>,
 
+    /// Safekeeper membership config generation. It is put in
+    /// neon.safekeepers GUC and serves two purposes:
+    /// 1) Non zero value forces walproposer to use membership configurations.
+    /// 2) If walproposer wants to update list of safekeepers to connect to
+    ///    taking them from some safekeeper mconf, it should check what value
+    ///    is newer by comparing the generation.
+    ///
+    /// Note: it could be SafekeeperGeneration, but this needs linking
+    /// compute_ctl with postgres_ffi.
+    #[serde(default)]
+    pub safekeepers_generation: Option<u32>,
     #[serde(default)]
     pub safekeeper_connstrings: Vec<String>,
 
@@ -115,7 +128,7 @@ pub struct ComputeSpec {
     // information about available remote extensions
     pub remote_extensions: Option<RemoteExtSpec>,
 
-    pub pgbouncer_settings: Option<HashMap<String, String>>,
+    pub pgbouncer_settings: Option<IndexMap<String, String>>,
 
     // Stripe size for pageserver sharding, in pages
     #[serde(default)]
@@ -145,6 +158,16 @@ pub struct ComputeSpec {
     /// over the same replication content from publisher.
     #[serde(default)] // Default false
     pub drop_subscriptions_before_start: bool,
+
+    /// Log level for audit logging:
+    ///
+    /// Disabled - no audit logging. This is the default.
+    /// log - log masked statements to the postgres log using pgaudit extension
+    /// hipaa - log unmasked statements to the file using pgaudit and pgauditlogtofile extension
+    ///
+    /// Extensions should be present in shared_preload_libraries
+    #[serde(default)]
+    pub audit_log_level: ComputeAudit,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
@@ -158,6 +181,9 @@ pub enum ComputeFeature {
 
     /// Pre-install and initialize anon extension for every database in the cluster
     AnonExtension,
+
+    /// Allow to configure rsyslog for Postgres logs export
+    PostgresLogsExport,
 
     /// This is a special feature flag that is used to represent unknown feature flags.
     /// Basically all unknown to enum flags are represented as this one. See unit test
@@ -252,6 +278,17 @@ pub enum ComputeMode {
     Replica,
 }
 
+/// Log level for audit logging
+/// Disabled, log, hipaa
+/// Default is Disabled
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+pub enum ComputeAudit {
+    #[default]
+    Disabled,
+    Log,
+    Hipaa,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Cluster {
     pub cluster_id: Option<String>,
@@ -326,6 +363,9 @@ pub struct LocalProxySpec {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jwks: Option<Vec<JwksSettings>>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -339,8 +379,9 @@ pub struct JwksSettings {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs::File;
+
+    use super::*;
 
     #[test]
     fn allow_installing_remote_extensions() {
