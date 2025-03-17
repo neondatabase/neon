@@ -1,5 +1,5 @@
 use safekeeper_api::models::{
-    PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization, TimelineCreateRequest,
+    self, PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization, TimelineCreateRequest,
     TimelineStatus,
 };
 use safekeeper_client::mgmt_api::{Client, Result};
@@ -69,11 +69,28 @@ impl SafekeeperClient {
         )
     }
 
+    #[allow(unused)]
+    pub(crate) async fn exclude_timeline(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        req: &models::TimelineMembershipSwitchRequest,
+    ) -> Result<models::TimelineDeleteResult> {
+        measured_request!(
+            "exclude_timeline",
+            crate::metrics::Method::Post,
+            &self.node_id_label,
+            self.inner
+                .exclude_timeline(tenant_id, timeline_id, req)
+                .await
+        )
+    }
+
     pub(crate) async fn delete_timeline(
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-    ) -> Result<TimelineStatus> {
+    ) -> Result<models::TimelineDeleteResult> {
         measured_request!(
             "delete_timeline",
             crate::metrics::Method::Delete,
@@ -91,6 +108,23 @@ impl SafekeeperClient {
             crate::metrics::Method::Post,
             &self.node_id_label,
             self.inner.pull_timeline(req).await
+        )
+    }
+
+    #[allow(unused)]
+    pub(crate) async fn bump_timeline_term(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        req: &models::TimelineTermBumpRequest,
+    ) -> Result<models::TimelineTermBumpResponse> {
+        measured_request!(
+            "term_bump",
+            crate::metrics::Method::Post,
+            &self.node_id_label,
+            self.inner
+                .bump_timeline_term(tenant_id, timeline_id, req)
+                .await
         )
     }
 

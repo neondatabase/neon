@@ -167,7 +167,8 @@ pub fn write_postgres_conf(
         writeln!(file, "# Managed by compute_ctl audit settings: begin")?;
         // This log level is very verbose
         // but this is necessary for HIPAA compliance.
-        writeln!(file, "pgaudit.log='all'")?;
+        // Exclude 'misc' category, because it doesn't contain anythig relevant.
+        writeln!(file, "pgaudit.log='all, -misc'")?;
         writeln!(file, "pgaudit.log_parameter=on")?;
         // Disable logging of catalog queries
         // The catalog doesn't contain sensitive data, so we don't need to audit it.

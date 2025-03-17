@@ -407,7 +407,9 @@ def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder):
 
     after = env.create_branch("after", ancestor_branch_name="main", ancestor_start_lsn=None)
 
-    all_reparented = client.detach_ancestor(env.initial_tenant, branch_to_detach, behavior_v2=True)
+    all_reparented = client.detach_ancestor(
+        env.initial_tenant, branch_to_detach, detach_behavior="v2"
+    )
     assert set(all_reparented) == set()
 
     env.pageserver.quiesce_tenants()
@@ -1350,8 +1352,10 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
         )
 
 
+@pytest.mark.parametrize("detach_behavior", ["default", "v1", "v2"])
 def test_retryable_500_hit_through_storcon_during_timeline_detach_ancestor(
     neon_env_builder: NeonEnvBuilder,
+    detach_behavior: str,
 ):
     shard_count = 2
     neon_env_builder.num_pageservers = shard_count
@@ -1390,7 +1394,11 @@ def test_retryable_500_hit_through_storcon_during_timeline_detach_ancestor(
     victim_http.configure_failpoints([(pausepoint, "pause"), (failpoint, "return")])
 
     def detach_timeline():
-        http.detach_ancestor(env.initial_tenant, detached_branch)
+        http.detach_ancestor(
+            env.initial_tenant,
+            detached_branch,
+            detach_behavior=detach_behavior if detach_behavior != "default" else None,
+        )
 
     def paused_at_failpoint():
         stuck.assert_log_contains(f"at failpoint {pausepoint}")

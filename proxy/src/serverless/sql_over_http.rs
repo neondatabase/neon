@@ -42,7 +42,7 @@ use crate::metrics::{HttpDirection, Metrics};
 use crate::proxy::{NeonOptions, run_until_cancelled};
 use crate::serverless::backend::HttpConnError;
 use crate::types::{DbName, RoleName};
-use crate::usage_metrics::{MetricCounter, MetricCounterRecorder, TrafficDirection};
+use crate::usage_metrics::{MetricCounter, MetricCounterRecorder};
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -663,6 +663,7 @@ async fn handle_db_inner(
 
     let parsed_headers = HttpHeaders::try_parse(headers)?;
 
+    let mut request_len = 0;
     let fetch_and_process_request = Box::pin(
         async {
             let body = read_body_with_limit(
@@ -670,6 +671,8 @@ async fn handle_db_inner(
                 config.http_config.max_request_size_bytes,
             )
             .await?;
+
+            request_len = body.len();
 
             Metrics::get()
                 .proxy
@@ -765,7 +768,7 @@ async fn handle_db_inner(
         }
     };
 
-    let metrics = client.metrics(TrafficDirection::Egress, ctx);
+    let metrics = client.metrics(ctx);
 
     let len = json_output.len();
     let response = response
@@ -781,6 +784,8 @@ async fn handle_db_inner(
     // count the egress bytes - we miss the TLS and header overhead but oh well...
     // moving this later in the stack is going to be a lot of effort and ehhhh
     metrics.record_egress(len as u64);
+    metrics.record_ingress(request_len as u64);
+
     Metrics::get()
         .proxy
         .http_conn_content_length_bytes
@@ -838,7 +843,7 @@ async fn handle_auth_broker_inner(
         .expect("all headers and params received via hyper should be valid for request");
 
     // todo: map body to count egress
-    let _metrics = client.metrics(TrafficDirection::Egress, ctx);
+    let _metrics = client.metrics(ctx);
 
     Ok(client
         .inner
@@ -1168,10 +1173,10 @@ enum Discard<'a> {
 }
 
 impl Client {
-    fn metrics(&self, direction: TrafficDirection, ctx: &RequestContext) -> Arc<MetricCounter> {
+    fn metrics(&self, ctx: &RequestContext) -> Arc<MetricCounter> {
         match self {
-            Client::Remote(client) => client.metrics(direction, ctx),
-            Client::Local(local_client) => local_client.metrics(direction, ctx),
+            Client::Remote(client) => client.metrics(ctx),
+            Client::Local(local_client) => local_client.metrics(ctx),
         }
     }
 

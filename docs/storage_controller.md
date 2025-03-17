@@ -101,15 +101,25 @@ changes such as a pageserver node becoming unavailable, or the tenant's shard co
 postgres clients to handle such changes, the storage controller calls an API hook when a tenant's pageserver
 location changes.
 
-The hook is configured using the storage controller's `--control-plane-url` CLI option. If the hook requires
-JWT auth, the token may be provided with `--control-plane-jwt-token`. The hook will be invoked with a `PUT` request.
+The hook is configured using the storage controller's `--control-plane-url` CLI option, from which the hook URL is computed.
 
-In the Neon cloud service, this hook is implemented by Neon's internal cloud control plane. In `neon_local` systems
+Currently, there is two hooks, each computed by appending the name to the provided control plane URL prefix:
+
+- `notify-attach`, called whenever attachment for pageservers changes
+- `notify-safekeepers`, called whenever attachment for safekeepers changes
+
+If the hooks require JWT auth, the token may be provided with `--control-plane-jwt-token`.
+The hooks will be invoked with a `PUT` request.
+
+In the Neon cloud service, these hooks are implemented by Neon's internal cloud control plane. In `neon_local` systems,
 the storage controller integrates directly with neon_local to reconfigure local postgres processes instead of calling
 the compute hook.
 
-When implementing an on-premise Neon deployment, you must implement a service that handles the compute hook. This is not complicated:
-the request body has format of the `ComputeHookNotifyRequest` structure, provided below for convenience.
+When implementing an on-premise Neon deployment, you must implement a service that handles the compute hooks. This is not complicated.
+
+### `notify-attach` body
+
+The `notify-attach` request body follows the format of the `ComputeHookNotifyRequest` structure, provided below for convenience.
 
 ```
 struct ComputeHookNotifyRequestShard {
@@ -128,15 +138,15 @@ When a notification is received:
 
 1. Modify postgres configuration for this tenant:
 
-   - set `neon.pageserver_connstr` to a comma-separated list of postgres connection strings to pageservers according to the `shards` list. The
+   - set `neon.pageserver_connstring` to a comma-separated list of postgres connection strings to pageservers according to the `shards` list. The
      shards identified by `NodeId` must be converted to the address+port of the node.
-   - if stripe_size is not None, set `neon.stripe_size` to this value
+   - if stripe_size is not None, set `neon.shard_stripe_size` to this value
 
 2. Send SIGHUP to postgres to reload configuration
 3. Respond with 200 to the notification request. Do not return success if postgres was not updated: if an error is returned, the controller
    will retry the notification until it succeeds..
 
-### Example notification body
+Example body:
 
 ```
 {
@@ -148,3 +158,34 @@ When a notification is received:
   ],
 }
 ```
+
+### `notify-safekeepers` body
+
+The `notify-safekeepers` request body forllows the format of the `SafekeepersNotifyRequest` structure, provided below for convenience.
+
+```
+pub struct SafekeeperInfo {
+    pub id: NodeId,
+    pub hostname: String,
+}
+
+pub struct SafekeepersNotifyRequest {
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
+    pub generation: u32,
+    pub safekeepers: Vec<SafekeeperInfo>,
+}
+```
+
+When a notification is received:
+
+1. Modify postgres configuration for this tenant:
+
+   - set `neon.safekeeper_connstrings` to an array of postgres connection strings to safekeepers according to the `safekeepers` list. The
+     safekeepers identified by `NodeId` must be converted to the address+port of the respective safekeeper.
+     The hostname is provided for debugging purposes, so we reserve changes to how we pass it.
+   - set `neon.safekeepers_generation` to the provided `generation` value.
+
+2. Send SIGHUP to postgres to reload configuration
+3. Respond with 200 to the notification request. Do not return success if postgres was not updated: if an error is returned, the controller
+   will retry the notification until it succeeds..

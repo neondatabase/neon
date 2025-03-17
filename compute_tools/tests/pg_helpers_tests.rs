@@ -64,7 +64,8 @@ test.escaping = 'here''s a backslash \\ and a quote '' and a double-quote " hoor
     #[test]
     fn ident_pg_quote_dollar() {
         let test_cases = vec![
-            ("name", ("$$name$$", "x")),
+            ("name", ("$x$name$x$", "xx")),
+            ("name$", ("$x$name$$x$", "xx")),
             ("name$$", ("$x$name$$$x$", "xx")),
             ("name$$$", ("$x$name$$$$x$", "xx")),
             ("name$$$$", ("$x$name$$$$$x$", "xx")),

@@ -221,6 +221,11 @@ pub struct TimelineMembershipSwitchResponse {
     pub current_conf: Configuration,
 }
 
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct TimelineDeleteResult {
+    pub dir_existed: bool,
+}
+
 fn lsn_invalid() -> Lsn {
     Lsn::INVALID
 }

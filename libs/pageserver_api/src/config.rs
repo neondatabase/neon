@@ -278,10 +278,10 @@ pub struct TenantConfigToml {
     /// If true, use a separate semaphore (i.e. concurrency limit) for the L0 compaction pass. Only
     /// has an effect if `compaction_l0_first` is true. Defaults to true.
     pub compaction_l0_semaphore: bool,
-    /// Level0 delta layer threshold at which to delay layer flushes for compaction backpressure,
-    /// such that they take 2x as long, and start waiting for layer flushes during ephemeral layer
-    /// rolls. This helps compaction keep up with WAL ingestion, and avoids read amplification
-    /// blowing up. Should be >compaction_threshold. 0 to disable. Disabled by default.
+    /// Level0 delta layer threshold at which to delay layer flushes such that they take 2x as long,
+    /// and block on layer flushes during ephemeral layer rolls, for compaction backpressure. This
+    /// helps compaction keep up with WAL ingestion, and avoids read amplification blowing up.
+    /// Should be >compaction_threshold. 0 to disable. Defaults to 3x compaction_threshold.
     pub l0_flush_delay_threshold: Option<usize>,
     /// Level0 delta layer threshold at which to stall layer flushes. Must be >compaction_threshold
     /// to avoid deadlock. 0 to disable. Disabled by default.
@@ -289,6 +289,8 @@ pub struct TenantConfigToml {
     /// If true, Level0 delta layer flushes will wait for S3 upload before flushing the next
     /// layer. This is a temporary backpressure mechanism which should be removed once
     /// l0_flush_{delay,stall}_threshold is fully enabled.
+    ///
+    /// TODO: this is no longer enabled, remove it when the config option is no longer set.
     pub l0_flush_wait_upload: bool,
     // Determines how much history is retained, to allow
     // branching and read replicas at an older point in time.
@@ -576,7 +578,7 @@ pub mod tenant_conf_defaults {
     pub const DEFAULT_COMPACTION_ALGORITHM: crate::models::CompactionAlgorithm =
         crate::models::CompactionAlgorithm::Legacy;
 
-    pub const DEFAULT_L0_FLUSH_WAIT_UPLOAD: bool = true;
+    pub const DEFAULT_L0_FLUSH_WAIT_UPLOAD: bool = false;
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
 

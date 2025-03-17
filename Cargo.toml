@@ -106,7 +106,7 @@ hostname = "0.4"
 http = {version = "1.1.0", features = ["std"]}
 http-types = { version = "2", default-features = false }
 http-body-util = "0.1.2"
-humantime = "2.1"
+humantime = "2.2"
 humantime-serde = "1.1.1"
 hyper0 = { package = "hyper", version = "0.14" }
 hyper = "1.4"

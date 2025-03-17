@@ -978,16 +978,55 @@ jobs:
       acr-registry-name: ${{ vars.AZURE_PROD_REGISTRY_NAME }}
     secrets: inherit
 
-  # This is a bit of a special case so we're not using a generated image map.
-  add-latest-tag-to-neon-extensions-test-image:
-    if: github.ref_name == 'main'
+  push-neon-test-extensions-image-ghcr:
+    if: ${{ contains(fromJSON('["push-main", "pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     needs: [ meta, compute-node-image ]
     uses: ./.github/workflows/_push-to-container-registry.yml
     with:
       image-map: |
         {
-          "docker.io/neondatabase/neon-test-extensions-v16:${{ needs.meta.outputs.build-tag }}": ["docker.io/neondatabase/neon-test-extensions-v16:latest"],
-          "docker.io/neondatabase/neon-test-extensions-v17:${{ needs.meta.outputs.build-tag }}": ["docker.io/neondatabase/neon-test-extensions-v17:latest"]
+          "docker.io/neondatabase/neon-test-extensions-v16:${{ needs.meta.outputs.build-tag }}": [
+            "ghcr.io/neondatabase/neon-test-extensions-v16:${{ needs.meta.outputs.build-tag }}"
+          ],
+          "docker.io/neondatabase/neon-test-extensions-v17:${{ needs.meta.outputs.build-tag }}": [
+            "ghcr.io/neondatabase/neon-test-extensions-v17:${{ needs.meta.outputs.build-tag }}"
+          ]
+        }
+    secrets: inherit
+
+  add-latest-tag-to-neon-test-extensions-image:
+    if: ${{ needs.meta.outputs.run-kind == 'push-main' }}
+    needs: [ meta, compute-node-image ]
+    uses: ./.github/workflows/_push-to-container-registry.yml
+    with:
+      image-map: |
+        {
+          "docker.io/neondatabase/neon-test-extensions-v16:${{ needs.meta.outputs.build-tag }}": [
+            "docker.io/neondatabase/neon-test-extensions-v16:latest",
+            "ghcr.io/neondatabase/neon-test-extensions-v16:latest"
+          ],
+          "docker.io/neondatabase/neon-test-extensions-v17:${{ needs.meta.outputs.build-tag }}": [
+            "docker.io/neondatabase/neon-test-extensions-v17:latest",
+            "ghcr.io/neondatabase/neon-test-extensions-v17:latest"
+          ]
+        }
+    secrets: inherit
+
+  add-release-tag-to-neon-test-extensions-image:
+    if: ${{ needs.meta.outputs.run-kind == 'compute-release' }}
+    needs: [ meta, compute-node-image ]
+    uses: ./.github/workflows/_push-to-container-registry.yml
+    with:
+      image-map: |
+        {
+          "docker.io/neondatabase/neon-test-extensions-v16:${{ needs.meta.outputs.release-pr-run-id }}": [
+            "docker.io/neondatabase/neon-test-extensions-v16:${{ needs.meta.outputs.build-tag }}",
+            "ghcr.io/neondatabase/neon-test-extensions-v16:${{ needs.meta.outputs.build-tag }}"
+          ],
+          "docker.io/neondatabase/neon-test-extensions-v17:${{ needs.meta.outputs.release-pr-run-id }}": [
+            "docker.io/neondatabase/neon-test-extensions-v17:${{ needs.meta.outputs.build-tag }}",
+            "ghcr.io/neondatabase/neon-test-extensions-v17:${{ needs.meta.outputs.build-tag }}"
+          ]
         }
     secrets: inherit
 

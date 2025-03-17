@@ -605,7 +605,7 @@ def test_storage_controller_compute_hook(
     # when migrating.
     neon_env_builder.num_pageservers = 2
     (host, port) = httpserver_listen_address
-    neon_env_builder.control_plane_compute_hook_api = f"http://{host}:{port}/notify"
+    neon_env_builder.control_plane_hooks_api = f"http://{host}:{port}"
 
     # Set up fake HTTP notify endpoint
     notifications = []
@@ -618,7 +618,7 @@ def test_storage_controller_compute_hook(
         notifications.append(request.json)
         return Response(status=status)
 
-    httpserver.expect_request("/notify", method="PUT").respond_with_handler(handler)
+    httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(handler)
 
     # Start running
     env = neon_env_builder.init_start(initial_tenant_conf={"lsn_lease_length": "0s"})
@@ -724,7 +724,7 @@ def test_storage_controller_stuck_compute_hook(
 
     neon_env_builder.num_pageservers = 2
     (host, port) = httpserver_listen_address
-    neon_env_builder.control_plane_compute_hook_api = f"http://{host}:{port}/notify"
+    neon_env_builder.control_plane_hooks_api = f"http://{host}:{port}"
 
     handle_params = {"status": 200}
 
@@ -736,7 +736,7 @@ def test_storage_controller_stuck_compute_hook(
         notifications.append(request.json)
         return Response(status=status)
 
-    httpserver.expect_request("/notify", method="PUT").respond_with_handler(handler)
+    httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(handler)
 
     # Start running
     env = neon_env_builder.init_start(initial_tenant_conf={"lsn_lease_length": "0s"})
@@ -871,7 +871,7 @@ def test_storage_controller_compute_hook_retry(
 
     neon_env_builder.num_pageservers = 2
     (host, port) = httpserver_listen_address
-    neon_env_builder.control_plane_compute_hook_api = f"http://{host}:{port}/notify"
+    neon_env_builder.control_plane_hooks_api = f"http://{host}:{port}"
 
     handle_params = {"status": 200}
 
@@ -883,7 +883,7 @@ def test_storage_controller_compute_hook_retry(
         notifications.append(request.json)
         return Response(status=status)
 
-    httpserver.expect_request("/notify", method="PUT").respond_with_handler(handler)
+    httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(handler)
 
     # Start running
     env = neon_env_builder.init_configs()
@@ -993,7 +993,7 @@ def test_storage_controller_compute_hook_revert(
     # when migrating.
     neon_env_builder.num_pageservers = 2
     (host, port) = httpserver_listen_address
-    neon_env_builder.control_plane_compute_hook_api = f"http://{host}:{port}/notify"
+    neon_env_builder.control_plane_hooks_api = f"http://{host}:{port}"
 
     # Set up fake HTTP notify endpoint
     notifications = []
@@ -1006,7 +1006,7 @@ def test_storage_controller_compute_hook_revert(
         notifications.append(request.json)
         return Response(status=status)
 
-    httpserver.expect_request("/notify", method="PUT").respond_with_handler(handler)
+    httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(handler)
 
     # Start running
     env = neon_env_builder.init_start(initial_tenant_conf={"lsn_lease_length": "0s"})
@@ -1395,9 +1395,7 @@ def test_storage_controller_tenant_deletion(
     """
     neon_env_builder.num_pageservers = 4
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
-    neon_env_builder.control_plane_compute_hook_api = (
-        compute_reconfigure_listener.control_plane_compute_hook_api
-    )
+    neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
 
     env = neon_env_builder.init_configs()
     env.start()

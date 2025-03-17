@@ -10,7 +10,7 @@ use crate::config::ComputeConfig;
 use crate::control_plane::messages::MetricsAuxInfo;
 use crate::metrics::{Direction, Metrics, NumClientConnectionsGuard, NumConnectionRequestsGuard};
 use crate::stream::Stream;
-use crate::usage_metrics::{Ids, MetricCounterRecorder, TrafficDirection, USAGE_METRICS};
+use crate::usage_metrics::{Ids, MetricCounterRecorder, USAGE_METRICS};
 
 /// Forward bytes in both directions (client <-> compute).
 #[tracing::instrument(skip_all)]
@@ -24,7 +24,6 @@ pub(crate) async fn proxy_pass(
     let usage_tx = USAGE_METRICS.register(Ids {
         endpoint_id: aux.endpoint_id,
         branch_id: aux.branch_id,
-        direction: TrafficDirection::Egress,
         private_link_id,
     });
 
@@ -47,6 +46,7 @@ pub(crate) async fn proxy_pass(
         |cnt| {
             // Number of bytes the client sent to the compute node (inbound).
             metrics.get_metric(m_recv).inc_by(cnt as u64);
+            usage_tx.record_ingress(cnt as u64);
         },
     );
 
