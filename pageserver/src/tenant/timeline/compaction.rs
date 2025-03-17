@@ -3189,7 +3189,11 @@ impl Timeline {
         }
 
         // TODO: move the below part to the loop body
-        let last_key = last_key.expect("no keys produced during compaction");
+        let Some(last_key) = last_key else {
+            return Err(CompactionError::Other(anyhow!(
+                "no keys produced during compaction"
+            )));
+        };
         stat.on_unique_key_visited();
 
         let retention = self

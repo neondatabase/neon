@@ -139,6 +139,7 @@ pub struct ComputeCtlConfig {
     /// Set of JSON web keys that the compute can use to authenticate
     /// communication from the control plane.
     pub jwks: JwkSet,
+    pub tls: Option<TlsConfig>,
 }
 
 impl Default for ComputeCtlConfig {
@@ -147,8 +148,15 @@ impl Default for ComputeCtlConfig {
             jwks: JwkSet {
                 keys: Vec::default(),
             },
+            tls: None,
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct TlsConfig {
+    pub key_path: String,
+    pub cert_path: String,
 }
 
 /// Response of the `/computes/{compute_id}/spec` control-plane API.

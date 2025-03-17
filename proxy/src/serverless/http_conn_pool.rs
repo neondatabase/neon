@@ -19,7 +19,7 @@ use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
 use crate::protocol2::ConnectionInfoExtra;
 use crate::types::EndpointCacheKey;
-use crate::usage_metrics::{Ids, MetricCounter, TrafficDirection, USAGE_METRICS};
+use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
 
 pub(crate) type Send = http2::SendRequest<hyper::body::Incoming>;
 pub(crate) type Connect = http2::Connection<TokioIo<AsyncRW>, hyper::body::Incoming, TokioExecutor>;
@@ -265,11 +265,7 @@ impl<C: ClientInnerExt + Clone> Client<C> {
         Self { inner }
     }
 
-    pub(crate) fn metrics(
-        &self,
-        direction: TrafficDirection,
-        ctx: &RequestContext,
-    ) -> Arc<MetricCounter> {
+    pub(crate) fn metrics(&self, ctx: &RequestContext) -> Arc<MetricCounter> {
         let aux = &self.inner.aux;
 
         let private_link_id = match ctx.extra() {
@@ -281,7 +277,6 @@ impl<C: ClientInnerExt + Clone> Client<C> {
         USAGE_METRICS.register(Ids {
             endpoint_id: aux.endpoint_id,
             branch_id: aux.branch_id,
-            direction,
             private_link_id,
         })
     }

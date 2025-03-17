@@ -8,8 +8,8 @@ use axum::Router;
 use axum::middleware::{self};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
+use compute_api::responses::ComputeCtlConfig;
 use http::StatusCode;
-use jsonwebtoken::jwk::JwkSet;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::{
@@ -41,7 +41,7 @@ pub enum Server {
     },
     External {
         port: u16,
-        jwks: JwkSet,
+        config: ComputeCtlConfig,
         compute_id: String,
     },
 }
@@ -79,7 +79,7 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                 router
             }
             Server::External {
-                jwks, compute_id, ..
+                config, compute_id, ..
             } => {
                 let unauthenticated_router =
                     Router::<Arc<ComputeNode>>::new().route("/metrics", get(metrics::get_metrics));
@@ -87,6 +87,7 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                 let authenticated_router = Router::<Arc<ComputeNode>>::new()
                     .route("/check_writability", post(check_writability::is_writable))
                     .route("/configure", post(configure::configure))
+                    .route("/configure_telemetry", post(configure::configure_telemetry))
                     .route("/database_schema", get(database_schema::get_schema_dump))
                     .route("/dbs_and_roles", get(dbs_and_roles::get_catalog_objects))
                     .route("/insights", get(insights::get_insights))
@@ -95,7 +96,7 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                     .route("/terminate", post(terminate::terminate))
                     .layer(AsyncRequireAuthorizationLayer::new(Authorize::new(
                         compute_id.clone(),
-                        jwks.clone(),
+                        config.jwks.clone(),
                     )));
 
                 router

@@ -2881,6 +2881,11 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 						relpath(reln->smgr_rlocator, forkNum),
 						InvalidBlockNumber)));
 
+#ifdef DEBUG_COMPARE_LOCAL
+	if (IS_LOCAL_REL(reln))
+		mdzeroextend(reln, forkNum, blocknum, nblocks, skipFsync);
+#endif
+
 	/* Don't log any pages if we're not allowed to do so. */
 	if (!XLogInsertAllowed())
 		return;
@@ -4154,8 +4159,10 @@ neon_start_unlogged_build(SMgrRelation reln)
 	 * FIXME: should we pass isRedo true to create the tablespace dir if it
 	 * doesn't exist? Is it needed?
 	 */
-	if (!IsParallelWorker())
+#ifndef DEBUG_COMPARE_LOCAL
+ 	if (!IsParallelWorker())
 		mdcreate(reln, MAIN_FORKNUM, false);
+#endif
 }
 
 /*
@@ -4230,8 +4237,10 @@ neon_end_unlogged_build(SMgrRelation reln)
 
 			forget_cached_relsize(InfoFromNInfoB(rinfob), forknum);
 			mdclose(reln, forknum);
+#ifndef DEBUG_COMPARE_LOCAL
 			/* use isRedo == true, so that we drop it immediately */
 			mdunlink(rinfob, forknum, true);
+#endif
 		}
 	}
 

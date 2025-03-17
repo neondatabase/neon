@@ -1427,6 +1427,7 @@ class SafekeeperEnv:
             pg=self.port_distributor.get_port(),
             pg_tenant_only=self.port_distributor.get_port(),
             http=self.port_distributor.get_port(),
+            https=None,
         )
 
         safekeeper_dir = self.repo_dir / f"sk{i}"
@@ -2034,6 +2035,29 @@ def test_explicit_timeline_creation(neon_env_builder: NeonEnvBuilder):
     for sk_http_cli in http_clis:
         sk_http_cli.timeline_create(create_r)
     # Once timeline created endpoint should start.
+    ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
+    ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
+
+
+def test_explicit_timeline_creation_storcon(neon_env_builder: NeonEnvBuilder):
+    """
+    Test that having neon.safekeepers starting with g#n: with non zero n enables
+    generations, which as a side effect disables automatic timeline creation.
+    Like test_explicit_timeline_creation, but asks the storcon to
+    create membership conf & timeline.
+    """
+    neon_env_builder.num_safekeepers = 3
+    neon_env_builder.storage_controller_config = {
+        "timelines_onto_safekeepers": True,
+    }
+    env = neon_env_builder.init_start()
+
+    config_lines = [
+        "neon.safekeeper_proto_version = 3",
+    ]
+    ep = env.endpoints.create("main", config_lines=config_lines)
+
+    # endpoint should start.
     ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
     ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
 

@@ -135,8 +135,8 @@ impl Type {
 pub enum Kind {
     /// A simple type like `VARCHAR` or `INTEGER`.
     Simple,
-    /// An enumerated type along with its variants.
-    Enum(Vec<String>),
+    /// An enumerated type.
+    Enum,
     /// A pseudo-type.
     Pseudo,
     /// An array type along with the type of its elements.
@@ -146,9 +146,9 @@ pub enum Kind {
     /// A multirange type along with the type of its elements.
     Multirange(Type),
     /// A domain type along with its underlying type.
-    Domain(Type),
-    /// A composite type along with information about its fields.
-    Composite(Vec<Field>),
+    Domain(Oid),
+    /// A composite type.
+    Composite(Oid),
 }
 
 /// Information about a field of a composite type.

@@ -1,3 +1,7 @@
+# Neon RFCs
+
+## Overview
+
 This directory contains Request for Comments documents, or RFCs, for
 features or concepts that have been proposed. Alternative names:
 technical design doc, ERD, one-pager
@@ -59,37 +63,10 @@ RFC lifecycle:
 
 ### RFC template
 
+Use template with `YYYY-MM-DD-copy-me.md` as a starting point. Timestamp prefix helps to avoid awkward 'id' collisions.
+
+```sh
+cp docs/rfcs/YYYY-MM-DD-copy-me.md docs/rfcs/$(date +"%Y-%m-%d")-<name>.md
+```
+
 Note, a lot of the sections are marked as ‘if relevant’. They are included into the template as a reminder and to help inspiration.
-
-```
-# Name
-Created on ..
-Implemented on ..
-
-## Summary
-
-## Motivation
-
-## Non Goals (if relevant)
-
-## Impacted components (e.g. pageserver, safekeeper, console, etc)
-
-## Proposed implementation
-
-### Reliability, failure modes and corner cases (if relevant)
-
-### Interaction/Sequence diagram (if relevant)
-
-### Scalability (if relevant)
-
-### Security implications (if relevant)
-
-### Unresolved questions (if relevant)
-
-## Alternative implementation (if relevant)
-
-## Pros/cons of proposed approaches (if relevant)
-
-## Definition of Done (if relevant)
-
-```
