@@ -14,4 +14,4 @@ XLogRecPtr neon_set_lwlsn_block(XLogRecPtr lsn, NRelFileInfo rlocator, ForkNumbe
 XLogRecPtr neon_set_lwlsn_relation(XLogRecPtr lsn, NRelFileInfo rlocator, ForkNumber forknum);
 XLogRecPtr neon_set_lwlsn_db(XLogRecPtr lsn);
 
-#endif /* NEON_LWLSNCACHE */
+#endif /* NEON_LWLSNCACHE_H */
