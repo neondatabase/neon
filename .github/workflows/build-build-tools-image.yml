@@ -79,10 +79,10 @@ jobs:
         env:
           IMAGE_TAG: ${{ steps.set-variables.outputs.image-tag }}
           EVERYTHING: |
-            ${{ contains(fromJson(steps.set-variables.outputs.archs), 'x64') &&
-                contains(fromJson(steps.set-variables.outputs.archs), 'arm64') &&
-                contains(fromJson(steps.set-variables.outputs.debians), 'bullseye') &&
-                contains(fromJson(steps.set-variables.outputs.debians), 'bookworm') }}
+            ${{ contains(fromJSON(steps.set-variables.outputs.archs), 'x64') &&
+                contains(fromJSON(steps.set-variables.outputs.archs), 'arm64') &&
+                contains(fromJSON(steps.set-variables.outputs.debians), 'bullseye') &&
+                contains(fromJSON(steps.set-variables.outputs.debians), 'bookworm') }}
         run: |
           if docker manifest inspect ghcr.io/neondatabase/build-tools:${IMAGE_TAG}; then
             found=true
@@ -99,13 +99,13 @@ jobs:
 
     strategy:
       matrix:
-        arch: ${{ fromJson(needs.check-image.outputs.archs) }}
-        debian: ${{ fromJson(needs.check-image.outputs.debians) }}
+        arch: ${{ fromJSON(needs.check-image.outputs.archs) }}
+        debian: ${{ fromJSON(needs.check-image.outputs.debians) }}
 
     permissions:
       packages: write
 
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
+    runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -168,8 +168,8 @@ jobs:
       - name: Create multi-arch image
         env:
           DEFAULT_DEBIAN_VERSION: bookworm
-          ARCHS: ${{ join(fromJson(needs.check-image.outputs.archs), ' ') }}
-          DEBIANS: ${{ join(fromJson(needs.check-image.outputs.debians), ' ') }}
+          ARCHS: ${{ join(fromJSON(needs.check-image.outputs.archs), ' ') }}
+          DEBIANS: ${{ join(fromJSON(needs.check-image.outputs.debians), ' ') }}
           EVERYTHING: ${{ needs.check-image.outputs.everything }}
           IMAGE_TAG: ${{ needs.check-image.outputs.tag }}
         run: |

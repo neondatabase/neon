@@ -159,7 +159,7 @@ jobs:
           ${{
             always()
             && github.event_name == 'merge_group'
-            && contains(fromJson('["release", "release-proxy", "release-compute"]'), needs.meta.outputs.branch)
+            && contains(fromJSON('["release", "release-proxy", "release-compute"]'), needs.meta.outputs.branch)
           }}
         env:
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
