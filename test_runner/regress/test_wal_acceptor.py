@@ -2043,7 +2043,8 @@ def test_explicit_timeline_creation_storcon(neon_env_builder: NeonEnvBuilder):
     """
     Test that having neon.safekeepers starting with g#n: with non zero n enables
     generations, which as a side effect disables automatic timeline creation.
-    This test asks the storcon to create membership conf & timeline.
+    Like test_explicit_timeline_creation, but asks the storcon to
+    create membership conf & timeline.
     """
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.storage_controller_config = {
