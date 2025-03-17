@@ -866,12 +866,13 @@ impl QueryData {
         let (inner, mut discard) = client.inner();
         let cancel_token = inner.cancel_token();
 
+        let mut size = 0;
         let res = match select(
             pin!(query_to_json(
                 config,
                 &mut *inner,
                 self,
-                &mut 0,
+                &mut size,
                 parsed_headers
             )),
             pin!(cancel.cancelled()),
