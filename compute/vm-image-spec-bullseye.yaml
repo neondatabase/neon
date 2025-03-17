@@ -150,7 +150,7 @@ merge: |
 
   COPY compute_rsyslog.conf /etc/compute_rsyslog.conf
   RUN chmod 0666 /etc/compute_rsyslog.conf
-  RUN chmod 0666 /var/log/
+  RUN mkdir /var/log/rsyslog && chown -R postgres /var/log/rsyslog
 
 
   COPY --from=libcgroup-builder /libcgroup-install/bin/*  /usr/bin/

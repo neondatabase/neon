@@ -149,7 +149,7 @@ pub struct NeonBroker {
     pub listen_addr: SocketAddr,
 }
 
-/// Broker config for cluster internal communication.
+/// A part of storage controller's config the neon_local knows about.
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 #[serde(default)]
 pub struct NeonStorageControllerConf {
@@ -176,10 +176,11 @@ pub struct NeonStorageControllerConf {
     #[serde(with = "humantime_serde")]
     pub long_reconcile_threshold: Option<Duration>,
 
-    #[serde(default)]
     pub use_https_pageserver_api: bool,
 
     pub timelines_onto_safekeepers: bool,
+
+    pub use_https_safekeeper_api: bool,
 }
 
 impl NeonStorageControllerConf {
@@ -205,6 +206,7 @@ impl Default for NeonStorageControllerConf {
             long_reconcile_threshold: None,
             use_https_pageserver_api: false,
             timelines_onto_safekeepers: false,
+            use_https_safekeeper_api: false,
         }
     }
 }
@@ -302,6 +304,7 @@ pub struct SafekeeperConf {
     pub pg_port: u16,
     pub pg_tenant_only_port: Option<u16>,
     pub http_port: u16,
+    pub https_port: Option<u16>,
     pub sync: bool,
     pub remote_storage: Option<String>,
     pub backup_threads: Option<u32>,
@@ -316,6 +319,7 @@ impl Default for SafekeeperConf {
             pg_port: 0,
             pg_tenant_only_port: None,
             http_port: 0,
+            https_port: None,
             sync: true,
             remote_storage: None,
             backup_threads: None,
@@ -845,6 +849,9 @@ impl LocalEnv {
         // create safekeeper dirs
         for safekeeper in &env.safekeepers {
             fs::create_dir_all(SafekeeperNode::datadir_path_by_id(&env, safekeeper.id))?;
+            SafekeeperNode::from_env(&env, safekeeper)
+                .initialize()
+                .context("safekeeper init failed")?;
         }
 
         // initialize pageserver state

@@ -2863,6 +2863,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "camino",
  "fail",
  "futures",
  "hyper 0.14.30",
@@ -2873,6 +2874,7 @@ dependencies = [
  "pprof",
  "regex",
  "routerify",
+ "rustls-pemfile 2.1.1",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -2902,9 +2904,9 @@ checksum = "c4a1e36c821dbe04574f602848a19f742f4fb3c98d40449f11bcad18d6b17421"
 
 [[package]]
 name = "humantime"
-version = "2.1.0"
+version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a3a5bfb195931eeb336b2a7b4d761daec841b97f947d34394601737a7bba5e4"
+checksum = "9b112acc8b3adf4b107a8ec20977da0273a8c386765a3ec0229bd500a1443f9f"
 
 [[package]]
 name = "humantime-serde"
@@ -4327,8 +4329,6 @@ dependencies = [
  "reqwest",
  "rpds",
  "rustls 0.23.18",
- "rustls-pemfile 2.1.1",
- "rustls-pki-types",
  "scopeguard",
  "send-future",
  "serde",
@@ -6044,6 +6044,7 @@ dependencies = [
  "regex",
  "remote_storage",
  "reqwest",
+ "rustls 0.23.18",
  "safekeeper_api",
  "safekeeper_client",
  "scopeguard",
@@ -6060,6 +6061,7 @@ dependencies = [
  "tokio",
  "tokio-io-timeout",
  "tokio-postgres",
+ "tokio-rustls 0.26.0",
  "tokio-stream",
  "tokio-tar",
  "tokio-util",

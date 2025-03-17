@@ -538,6 +538,10 @@ impl StorageController {
             args.push("--use-https-pageserver-api".to_string());
         }
 
+        if self.config.use_https_safekeeper_api {
+            args.push("--use-https-safekeeper-api".to_string());
+        }
+
         if let Some(ssl_ca_file) = self.env.ssl_ca_cert_path() {
             args.push(format!("--ssl-ca-file={}", ssl_ca_file.to_str().unwrap()));
         }

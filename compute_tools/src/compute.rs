@@ -39,6 +39,7 @@ use crate::monitor::launch_monitor;
 use crate::pg_helpers::*;
 use crate::rsyslog::{
     PostgresLogsRsyslogConfig, configure_audit_rsyslog, configure_postgres_logs_export,
+    launch_pgaudit_gc,
 };
 use crate::spec::*;
 use crate::swap::resize_swap;
@@ -627,13 +628,11 @@ impl ComputeNode {
             }
 
             let log_directory_path = Path::new(&self.params.pgdata).join("log");
-            // TODO: make this more robust
-            // now rsyslog starts once and there is no monitoring or restart if it fails
-            configure_audit_rsyslog(
-                log_directory_path.to_str().unwrap(),
-                "hipaa",
-                &remote_endpoint,
-            )?;
+            let log_directory_path = log_directory_path.to_string_lossy().to_string();
+            configure_audit_rsyslog(log_directory_path.clone(), "hipaa", &remote_endpoint)?;
+
+            // Launch a background task to clean up the audit logs
+            launch_pgaudit_gc(log_directory_path);
         }
 
         // Configure and start rsyslog for Postgres logs export
