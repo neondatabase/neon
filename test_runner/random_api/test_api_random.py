@@ -350,6 +350,7 @@ def do_action(project: NeonProject, action: str) -> None:
         log.info("Created branch %s", child)
         child.start_benchmark()
     elif action == "delete_branch":
+        log.info("leafs: %s", project.leaf_branches.keys())
         if project.leaf_branches:
             target = random.choice(list(project.leaf_branches.values()))
             log.info("Trying to delete branch %s", target)
