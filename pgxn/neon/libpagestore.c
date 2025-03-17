@@ -52,14 +52,12 @@
 
 
 enum NeonEndpointType {
-	EP_TYPE_UNKNOWN,
-	EP_TYPE_PRIMARY,
+	EP_TYPE_PRIMARY = 1,
 	EP_TYPE_REPLICA,
 	EP_TYPE_STATIC
 };
 
 static const struct config_enum_entry neon_endpoint_types[] = {
-	{"unknown", EP_TYPE_UNKNOWN, false},
 	{"primary", EP_TYPE_PRIMARY, false},
 	{"replica", EP_TYPE_REPLICA, false},
 	{"static", EP_TYPE_STATIC, false},
@@ -1408,7 +1406,7 @@ pg_init_libpagestore(void)
 							"The compute endpoint node type",
 							NULL,
 							&neon_endpoint_type,
-							EP_TYPE_UNKNOWN,
+							EP_TYPE_PRIMARY,
 							neon_endpoint_types,
 							PGC_POSTMASTER,
 							0,
