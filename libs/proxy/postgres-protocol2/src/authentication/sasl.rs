@@ -301,10 +301,7 @@ impl ScramSha256 {
 
         let verifier = match parsed {
             ServerFinalMessage::Error(e) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("SCRAM error: {}", e),
-                ));
+                return Err(io::Error::other(format!("SCRAM error: {}", e)));
             }
             ServerFinalMessage::Verifier(verifier) => verifier,
         };
