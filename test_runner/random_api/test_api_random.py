@@ -398,26 +398,17 @@ def test_api_random(
     pg_bin, project = setup_class
     # Here we can assign weights by repeating actions
     ACTIONS = (
-        "new_branch",
-        "new_branch",
-        "new_branch",
-        "new_branch",
-        "new_ro_endpoint",
-        "new_ro_endpoint",
-        "new_ro_endpoint",
-        "delete_ro_endpoint",
-        "delete_ro_endpoint",
-        "delete_branch",
-        "delete branch",
-        "restore_random_time",
-        "restore_random_time",
-        "restore_random_time",
+        ("new_branch", 1.5),
+        ("new_ro_endpoint", 1.4),
+        ("delete_ro_endpoint", 0.8),
+        ("delete_branch", 1.0),
+        ("restore_random_time", 1.2)
     )
     ACTIONS_LIMIT = 250
     pg_bin.run_capture(
         ["pgbench", "-i", "-I", "dtGvp", "-s100"], env=project.main_branch.connect_env
     )
     for _ in range(ACTIONS_LIMIT):
-        do_action(project, random.choice(ACTIONS))
+        do_action(project, random.choices([a[0] for a in ACTIONS], weights=[w[1] for w in ACTIONS]))
         project.check_all_benchmarks()
     assert True
