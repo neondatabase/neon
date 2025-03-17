@@ -1,6 +1,6 @@
 #include "postgres.h"
 
-#include "neon_lwlc.h"
+#include "neon_lwlsncache.h"
 
 #include "miscadmin.h"
 #include "access/xlog.h"
@@ -72,7 +72,7 @@ static XLogRecPtr SetLastWrittenLSNForBlockRangeInternal(XLogRecPtr lsn,
 /* All the necessary hooks are defined here */
 
 
-// Note: these are the previous hooks
+/* These hold the set_lwlsn_* hooks which were installed before ours, if any */
 static set_lwlsn_block_range_hook_type prev_set_lwlsn_block_range_hook = NULL;
 static set_lwlsn_block_v_hook_type prev_set_lwlsn_block_v_hook = NULL;
 static set_lwlsn_block_hook_type prev_set_lwlsn_block_hook = NULL;
@@ -91,10 +91,10 @@ static void shmeminit(void);
 static void neon_update_max_lwlsn(XLogRecPtr lsn);
 
 void
-init_lwlc(void)
+init_lwlsncache(void)
 {
 	if (!process_shared_preload_libraries_in_progress)
-		return;
+		ereport(ERROR, errcode(ERRCODE_INTERNAL_ERROR), errmsg("Loading of shared preload libraries is not in progress. Exiting"));
 	
 	lwlc_register_gucs();
 
@@ -125,23 +125,20 @@ init_lwlc(void)
 
 static void shmemrequest(void) {
 	Size requested_size = sizeof(LwLsnCacheCtl);
+	
+	requested_size += hash_estimate_size(lwlsn_cache_size, sizeof(LastWrittenLsnCacheEntry));
+
+	RequestAddinShmemSpace(requested_size);
 
 	#if PG_VERSION_NUM >= 150000
 	if (prev_shmem_request_hook)
 			prev_shmem_request_hook();
 	#endif
-	
-	requested_size += hash_estimate_size(lwlsn_cache_size, sizeof(LastWrittenLsnCacheEntry));
-
-	RequestAddinShmemSpace(requested_size);
 }
 
 static void shmeminit(void) {
 	static HASHCTL info;
 	bool found;
-	if (prev_shmem_startup_hook) {
-		prev_shmem_startup_hook();
-	}
 	if (lwlsn_cache_size > 0)
 	{
 		info.keysize = sizeof(BufferTag);
@@ -159,6 +156,9 @@ static void shmeminit(void) {
 	}
 	dlist_init(&LwLsnCache->lastWrittenLsnLRU);
     LwLsnCache->maxLastWrittenLsn = GetRedoRecPtr();
+	if (prev_shmem_startup_hook) {
+		prev_shmem_startup_hook();
+	}
 }
 
 /*
@@ -228,7 +228,9 @@ neon_get_lwlsn(NRelFileInfo rlocator, ForkNumber forknum, BlockNumber blkno)
 }
 
 static void neon_update_max_lwlsn(XLogRecPtr lsn) {
+	LWLockAcquire(LastWrittenLsnLock, LW_EXCLUSIVE);
 	LwLsnCache->maxLastWrittenLsn = lsn;
+	LWLockRelease(LastWrittenLsnLock);
 }
 
 /*
@@ -459,7 +461,7 @@ neon_set_lwlsn_block_v(const XLogRecPtr *lsns, NRelFileInfo relfilenode,
 				LastWrittenLsnCacheEntry* victim = dlist_container(LastWrittenLsnCacheEntry, lru_node, dlist_pop_head_node(&LwLsnCache->lastWrittenLsnLRU));
 				/* Adjust max LSN for not cached relations/chunks if needed */
 				if (victim->lsn > LwLsnCache->maxLastWrittenLsn)
-				LwLsnCache->maxLastWrittenLsn = victim->lsn;
+					LwLsnCache->maxLastWrittenLsn = victim->lsn;
 
 				hash_search(lastWrittenLsnCache, victim, HASH_REMOVE, NULL);
 			}

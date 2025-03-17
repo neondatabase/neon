@@ -3,7 +3,7 @@
 
 #include "neon_pgversioncompat.h"
 
-void init_lwlc(void);
+void init_lwlsncache(void);
 
 /* Hooks */
 XLogRecPtr neon_get_lwlsn(NRelFileInfo rlocator, ForkNumber forknum, BlockNumber blkno);

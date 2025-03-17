@@ -1,16 +1,16 @@
 [submodule "vendor/postgres-v14"]
 	path = vendor/postgres-v14
 	url = https://github.com/neondatabase/postgres.git
-	branch = thesuhas/move_lwlsn_neon_ext_v14
+	branch = REL_14_STABLE_neon
 [submodule "vendor/postgres-v15"]
 	path = vendor/postgres-v15
 	url = https://github.com/neondatabase/postgres.git
-	branch = thesuhas/move_lwlsn_neon_ext_v15
+	branch = REL_15_STABLE_neon
 [submodule "vendor/postgres-v16"]
 	path = vendor/postgres-v16
 	url = https://github.com/neondatabase/postgres.git
-	branch = thesuhas/move_lwlsn_neon_ext_v16
+	branch = REL_16_STABLE_neon
 [submodule "vendor/postgres-v17"]
 	path = vendor/postgres-v17
 	url = https://github.com/neondatabase/postgres.git
-	branch = move_lwlsn_neon_ext
+	branch = REL_17_STABLE_neon

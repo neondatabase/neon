@@ -69,7 +69,7 @@
 
 #include "bitmap.h"
 #include "neon.h"
-#include "neon_lwlc.h"
+#include "neon_lwlsncache.h"
 #include "neon_perf_counters.h"
 #include "pagestore_client.h"
 
