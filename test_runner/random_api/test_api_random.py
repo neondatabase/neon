@@ -123,8 +123,6 @@ class NeonBranch:
             source_timestamp=target_time.isoformat().replace("+00:00", "Z"),
             preserve_under_name=self.project.gen_restore_name(),
         )
-        # XXX debug only, remove before merge
-        log.info("res: %s", res)
         if res is None:
             return
         self.updated_at: datetime = datetime.fromisoformat(res["branch"]["updated_at"])
@@ -171,7 +169,10 @@ class NeonBranch:
                             raise RuntimeError("The operation started, please investigate") from he
                     else:
                         continue
-                elif he.response.status_code == 422 and he.response.json()["code"] == "BRANCHES_LIMIT_EXCEEDED":
+                elif (
+                    he.response.status_code == 422
+                    and he.response.json()["code"] == "BRANCHES_LIMIT_EXCEEDED"
+                ):
                     log.info("Branches limit exceeded, skipping")
                     return
                 else:
@@ -280,7 +281,9 @@ class NeonProject:
             cmd,
             target_object.connect_env["PGHOST"],
         )
-        pgbench = self.pg_bin.run_nonblocking(cmd, env=target_object.connect_env, stderr_pipe=subprocess.PIPE)
+        pgbench = self.pg_bin.run_nonblocking(
+            cmd, env=target_object.connect_env, stderr_pipe=subprocess.PIPE
+        )
         self.benchmarks[target] = pgbench
         target_object.benchmark = pgbench
         time.sleep(2)
@@ -295,7 +298,10 @@ class NeonProject:
         if rc is not None:
             _, err = self.benchmarks[target].communicate()
             log.error("STDERR: %s", err)
-            if "ERROR:  Couldn't connect to compute node" in err or "ERROR:  Console request failed" in err:
+            if (
+                "ERROR:  Couldn't connect to compute node" in err
+                or "ERROR:  Console request failed" in err
+            ):
                 log.info("Restarting benchmark for %s", target)
                 self.benchmarks.pop(target)
                 self.start_benchmark(target)
@@ -303,7 +309,6 @@ class NeonProject:
             raise RuntimeError(f"The benchmark for {target} ended with code {rc}")
 
     def terminate_benchmark(self, target):
-        # XXX for debug only, remove before merging
         log.info("Terminating the benchmark %s", target)
         target_endpoint = target.startswith("ep")
         self.check_benchmark(target)
@@ -388,8 +393,6 @@ def test_api_random(
         seed = int(seed_env)
     else:
         seed = int(time.time())
-    # XXX: for debug only, please remove
-    seed = 1741191401
     log.info("Using random seed: %s", seed)
     random.seed(seed)
     pg_bin, project = setup_class

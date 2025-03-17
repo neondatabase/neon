@@ -34,9 +34,14 @@ class NeonAPI:
 
         resp = requests.request(method, f"{self.__neon_api_base_url}{endpoint}", **kwargs)
         log.debug("%s %s returned a %d: %s", method, endpoint, resp.status_code, resp.text)
-        # XXX for debug only remove before merge
         if resp.status_code >= 400:
-            log.error("%s %s returned a %d: %s", method, endpoint, resp.status_code, resp.text if resp.status_code != 524 else "CloudFlare error page")
+            log.error(
+                "%s %s returned a %d: %s",
+                method,
+                endpoint,
+                resp.status_code,
+                resp.text if resp.status_code != 524 else "CloudFlare error page",
+            )
         resp.raise_for_status()
 
         return resp
