@@ -99,11 +99,11 @@ pub async fn get_database_schema(
         .spawn()?;
 
     let stdout = cmd.stdout.take().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::Other, "Failed to capture stdout.")
+        std::io::Error::other("Failed to capture stdout.")
     })?;
 
     let stderr = cmd.stderr.take().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::Other, "Failed to capture stderr.")
+        std::io::Error::other("Failed to capture stderr.")
     })?;
 
     let mut stdout_reader = FramedRead::new(stdout, BytesCodec::new());
@@ -128,8 +128,7 @@ pub async fn get_database_schema(
                 }
             });
 
-            return Err(SchemaDumpError::IO(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(SchemaDumpError::IO(std::io::Error::other(
                 "failed to start pg_dump",
             )));
         }
