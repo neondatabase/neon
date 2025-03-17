@@ -2226,7 +2226,7 @@ impl Timeline {
                         .await
                         .expect("holding a reference to self");
                 }
-                TimelineState::Active { .. } => {
+                TimelineState::Active => {
                     return Ok(());
                 }
                 TimelineState::Broken { .. } | TimelineState::Stopping => {

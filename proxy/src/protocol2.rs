@@ -178,21 +178,20 @@ fn process_proxy_payload(
         TCP_OVER_IPV4 | UDP_OVER_IPV4 => {
             let addr = payload
                 .try_get::<ProxyProtocolV2HeaderV4>()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::Other, size_err))?;
+                .ok_or_else(|| io::Error::other(size_err))?;
 
             SocketAddr::from((addr.src_addr.get(), addr.src_port.get()))
         }
         TCP_OVER_IPV6 | UDP_OVER_IPV6 => {
             let addr = payload
                 .try_get::<ProxyProtocolV2HeaderV6>()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::Other, size_err))?;
+                .ok_or_else(|| io::Error::other(size_err))?;
 
             SocketAddr::from((addr.src_addr.get(), addr.src_port.get()))
         }
         // unspecified or unix stream. ignore the addresses
         _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 "invalid proxy protocol address family/transport protocol.",
             ));
         }

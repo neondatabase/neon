@@ -3678,7 +3678,7 @@ impl Tenant {
                         }
                     }
                 }
-                TenantState::Active { .. } => {
+                TenantState::Active => {
                     return Ok(());
                 }
                 TenantState::Broken { reason, .. } => {
@@ -4383,10 +4383,7 @@ impl Tenant {
         .to_string();
 
         fail::fail_point!("tenant-config-before-write", |_| {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "tenant-config-before-write",
-            ))
+            Err(std::io::Error::other("tenant-config-before-write"))
         });
 
         // Convert the config to a toml file.

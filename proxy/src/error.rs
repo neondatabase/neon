@@ -7,7 +7,7 @@ use tokio::task::JoinError;
 
 /// Upcast (almost) any error into an opaque [`io::Error`].
 pub(crate) fn io_error(e: impl Into<Box<dyn StdError + Send + Sync>>) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, e)
+    io::Error::other(e)
 }
 
 /// Marks errors that may be safely shown to a client.
