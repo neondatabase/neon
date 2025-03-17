@@ -414,6 +414,9 @@ neon_set_lwlsn_block_range(XLogRecPtr lsn, NRelFileInfo rlocator, ForkNumber for
  * policy. Keeping last written LSN for each page allows to use old LSN when
  * requesting pages of unchanged or appended relations. Also it is critical for
  * efficient work of prefetch in case massive update operations (like vacuum or remove).
+ *
+ * Note: This is different from SetLastWrittenLSNForBlockRange[Internal], in that this
+ * specifies per-block LSNs, rather than only a single LSN.
  */
 XLogRecPtr
 neon_set_lwlsn_block_v(const XLogRecPtr *lsns, NRelFileInfo relfilenode,
