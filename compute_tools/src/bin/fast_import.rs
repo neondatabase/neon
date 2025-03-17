@@ -31,6 +31,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use clap::{Parser, Subcommand};
 use compute_tools::extension_server::{PostgresMajorVersion, get_pg_version};
 use nix::unistd::Pid;
+use std::ops::Not;
 use tracing::{Instrument, error, info, info_span, warn};
 use utils::fs_ext::is_directory_empty;
 
@@ -437,7 +438,7 @@ async fn run_dump_restore(
 
 #[allow(clippy::too_many_arguments)]
 async fn cmd_pgdata(
-    s3_client: Option<aws_sdk_s3::Client>,
+    s3_client: Option<&aws_sdk_s3::Client>,
     kms_client: Option<aws_sdk_kms::Client>,
     maybe_s3_prefix: Option<s3_uri::S3Uri>,
     maybe_spec: Option<Spec>,
@@ -506,14 +507,14 @@ async fn cmd_pgdata(
     if let Some(s3_prefix) = maybe_s3_prefix {
         info!("upload pgdata");
         aws_s3_sync::upload_dir_recursive(
-            s3_client.as_ref().unwrap(),
+            s3_client.unwrap(),
             Utf8Path::new(&pgdata_dir),
             &s3_prefix.append("/pgdata/"),
         )
         .await
         .context("sync dump directory to destination")?;
 
-        info!("write status");
+        info!("write pgdata status to s3");
         {
             let status_dir = workdir.join("status");
             std::fs::create_dir(&status_dir).context("create status directory")?;
@@ -644,7 +645,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         Err(e) => return Err(anyhow::Error::new(e).context("create working directory")),
     }
 
-    match args.command {
+    let res = match args.command {
         Command::Pgdata {
             source_connection_string,
             interactive,
@@ -653,20 +654,20 @@ pub(crate) async fn main() -> anyhow::Result<()> {
             memory_mb,
         } => {
             cmd_pgdata(
-                s3_client,
+                s3_client.as_ref(),
                 kms_client,
-                args.s3_prefix,
+                args.s3_prefix.clone(),
                 spec,
                 source_connection_string,
                 interactive,
                 pg_port,
-                args.working_directory,
+                args.working_directory.clone(),
                 args.pg_bin_dir,
                 args.pg_lib_dir,
                 num_cpus,
                 memory_mb,
             )
-            .await?;
+            .await
         }
         Command::DumpRestore {
             source_connection_string,
@@ -677,11 +678,35 @@ pub(crate) async fn main() -> anyhow::Result<()> {
                 spec,
                 source_connection_string,
                 destination_connection_string,
-                args.working_directory,
+                args.working_directory.clone(),
                 args.pg_bin_dir,
                 args.pg_lib_dir,
             )
-            .await?;
+            .await
+        }
+    };
+
+    if let Some(s3_prefix) = args.s3_prefix {
+        info!("write job status to s3");
+        {
+            let status_dir = args.working_directory.join("status");
+            if std::fs::exists(&status_dir)?.not() {
+                std::fs::create_dir(&status_dir).context("create status directory")?;
+            }
+            let status_file = status_dir.join("fast_import");
+            let res_obj = if res.is_ok() {
+                serde_json::json!({"done": true})
+            } else {
+                serde_json::json!({"done": false, "error": res.unwrap_err().to_string()})
+            };
+            std::fs::write(&status_file, res_obj.to_string()).context("write status file")?;
+            aws_s3_sync::upload_dir_recursive(
+                s3_client.as_ref().unwrap(),
+                &status_dir,
+                &s3_prefix.append("/status/"),
+            )
+            .await
+            .context("sync status directory to destination")?;
         }
     }
 
