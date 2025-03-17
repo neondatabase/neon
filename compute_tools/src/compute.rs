@@ -37,7 +37,10 @@ use crate::logger::startup_context_from_env;
 use crate::lsn_lease::launch_lsn_lease_bg_task_for_static;
 use crate::monitor::launch_monitor;
 use crate::pg_helpers::*;
-use crate::rsyslog::{configure_audit_rsyslog, launch_pgaudit_gc};
+use crate::rsyslog::{
+    PostgresLogsRsyslogConfig, configure_audit_rsyslog, configure_postgres_logs_export,
+    launch_pgaudit_gc,
+};
 use crate::spec::*;
 use crate::swap::resize_swap;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
@@ -617,7 +620,7 @@ impl ComputeNode {
             });
         }
 
-        // Configure and start rsyslog if necessary
+        // Configure and start rsyslog for HIPAA if necessary
         if let ComputeAudit::Hipaa = pspec.spec.audit_log_level {
             let remote_endpoint = std::env::var("AUDIT_LOGGING_ENDPOINT").unwrap_or("".to_string());
             if remote_endpoint.is_empty() {
@@ -630,6 +633,17 @@ impl ComputeNode {
 
             // Launch a background task to clean up the audit logs
             launch_pgaudit_gc(log_directory_path);
+        }
+
+        // Configure and start rsyslog for Postgres logs export
+        if self.has_feature(ComputeFeature::PostgresLogsExport) {
+            if let Some(ref project_id) = pspec.spec.cluster.cluster_id {
+                let host = PostgresLogsRsyslogConfig::default_host(project_id);
+                let conf = PostgresLogsRsyslogConfig::new(Some(&host));
+                configure_postgres_logs_export(conf)?;
+            } else {
+                warn!("not configuring rsyslog for Postgres logs export: project ID is missing")
+            }
         }
 
         // Launch remaining service threads
