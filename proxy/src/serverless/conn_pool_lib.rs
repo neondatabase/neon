@@ -22,7 +22,7 @@ use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
 use crate::protocol2::ConnectionInfoExtra;
 use crate::types::{DbName, EndpointCacheKey, RoleName};
-use crate::usage_metrics::{Ids, MetricCounter, TrafficDirection, USAGE_METRICS};
+use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ConnInfo {
@@ -639,11 +639,7 @@ impl<C: ClientInnerExt> Client<C> {
         (&mut inner.inner, Discard { conn_info, pool })
     }
 
-    pub(crate) fn metrics(
-        &self,
-        direction: TrafficDirection,
-        ctx: &RequestContext,
-    ) -> Arc<MetricCounter> {
+    pub(crate) fn metrics(&self, ctx: &RequestContext) -> Arc<MetricCounter> {
         let aux = &self
             .inner
             .as_ref()
@@ -659,7 +655,6 @@ impl<C: ClientInnerExt> Client<C> {
         USAGE_METRICS.register(Ids {
             endpoint_id: aux.endpoint_id,
             branch_id: aux.branch_id,
-            direction,
             private_link_id,
         })
     }

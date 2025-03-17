@@ -34,9 +34,9 @@ use pageserver_api::controller_api::{
     TenantShardMigrateResponse,
 };
 use pageserver_api::models::{
-    self, LocationConfig, LocationConfigListResponse, LocationConfigMode, PageserverUtilization,
-    SafekeeperInfo, SafekeepersInfo, SecondaryProgress, ShardParameters, TenantConfig,
-    TenantConfigPatchRequest, TenantConfigRequest, TenantLocationConfigRequest,
+    self, DetachBehavior, LocationConfig, LocationConfigListResponse, LocationConfigMode,
+    PageserverUtilization, SafekeeperInfo, SafekeepersInfo, SecondaryProgress, ShardParameters,
+    TenantConfig, TenantConfigPatchRequest, TenantConfigRequest, TenantLocationConfigRequest,
     TenantLocationConfigResponse, TenantShardLocation, TenantShardSplitRequest,
     TenantShardSplitResponse, TenantSorting, TenantTimeTravelRequest,
     TimelineArchivalConfigRequest, TimelineCreateRequest, TimelineCreateResponseStorcon,
@@ -3804,7 +3804,7 @@ impl Service {
         create_mode: models::TimelineCreateRequestMode,
     ) -> Result<SafekeepersInfo, ApiError> {
         let timeline_id = timeline_info.timeline_id;
-        let pg_version = timeline_info.pg_version;
+        let pg_version = timeline_info.pg_version * 10000;
         // Initially start_lsn is determined by last_record_lsn in pageserver
         // response as it does initdb. However, later we persist it and in sk
         // creation calls replace with the value from the timeline row if it
@@ -4041,6 +4041,7 @@ impl Service {
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
+        behavior: Option<DetachBehavior>,
     ) -> Result<models::detach_ancestor::AncestorDetached, ApiError> {
         tracing::info!("Detaching timeline {tenant_id}/{timeline_id}",);
 
@@ -4064,6 +4065,7 @@ impl Service {
                 node: Node,
                 jwt: Option<String>,
                 ssl_ca_cert: Option<Certificate>,
+                behavior: Option<DetachBehavior>,
             ) -> Result<(ShardNumber, models::detach_ancestor::AncestorDetached), ApiError> {
                 tracing::info!(
                     "Detaching timeline on shard {tenant_shard_id}/{timeline_id}, attached to node {node}",
@@ -4073,7 +4075,7 @@ impl Service {
                     .map_err(|e| passthrough_api_error(&node, e))?;
 
                 client
-                    .timeline_detach_ancestor(tenant_shard_id, timeline_id)
+                    .timeline_detach_ancestor(tenant_shard_id, timeline_id, behavior)
                     .await
                     .map_err(|e| {
                         use mgmt_api::Error;
@@ -4111,6 +4113,7 @@ impl Service {
                         node,
                         self.config.pageserver_jwt_token.clone(),
                         self.config.ssl_ca_cert.clone(),
+                        behavior,
                     ))
                 })
                 .await?;
@@ -4265,7 +4268,8 @@ impl Service {
 
     /// Helper for concurrently calling a pageserver API on a number of shards, such as timeline creation.
     ///
-    /// On success, the returned vector contains exactly the same number of elements as the input `locations`.
+    /// On success, the returned vector contains exactly the same number of elements as the input `locations`
+    /// and returned element at index `i` is the result for `req_fn(op(locations[i])`.
     async fn tenant_for_shards<F, R>(
         &self,
         locations: Vec<(TenantShardId, Node)>,
@@ -4281,18 +4285,23 @@ impl Service {
         let mut futs = FuturesUnordered::new();
         let mut results = Vec::with_capacity(locations.len());
 
-        for (tenant_shard_id, node) in locations {
-            futs.push(req_fn(tenant_shard_id, node));
+        for (idx, (tenant_shard_id, node)) in locations.into_iter().enumerate() {
+            let fut = req_fn(tenant_shard_id, node);
+            futs.push(async move { (idx, fut.await) });
         }
 
-        while let Some(r) = futs.next().await {
-            results.push(r?);
+        while let Some((idx, r)) = futs.next().await {
+            results.push((idx, r?));
         }
 
-        Ok(results)
+        results.sort_by_key(|(idx, _)| *idx);
+        Ok(results.into_iter().map(|(_, r)| r).collect())
     }
 
-    /// Concurrently invoke a pageserver API call on many shards at once
+    /// Concurrently invoke a pageserver API call on many shards at once.
+    ///
+    /// The returned Vec has the same length as the `locations` Vec,
+    /// and returned element at index `i` is the result for `op(locations[i])`.
     pub(crate) async fn tenant_for_shards_api<T, O, F>(
         &self,
         locations: Vec<(TenantShardId, Node)>,
@@ -4309,27 +4318,29 @@ impl Service {
         let mut futs = FuturesUnordered::new();
         let mut results = Vec::with_capacity(locations.len());
 
-        for (tenant_shard_id, node) in locations {
+        for (idx, (tenant_shard_id, node)) in locations.into_iter().enumerate() {
             futs.push(async move {
-                node.with_client_retries(
-                    |client| op(tenant_shard_id, client),
-                    &self.config.pageserver_jwt_token,
-                    &self.config.ssl_ca_cert,
-                    warn_threshold,
-                    max_retries,
-                    timeout,
-                    cancel,
-                )
-                .await
+                let r = node
+                    .with_client_retries(
+                        |client| op(tenant_shard_id, client),
+                        &self.config.pageserver_jwt_token,
+                        &self.config.ssl_ca_cert,
+                        warn_threshold,
+                        max_retries,
+                        timeout,
+                        cancel,
+                    )
+                    .await;
+                (idx, r)
             });
         }
 
-        while let Some(r) = futs.next().await {
-            let r = r.unwrap_or(Err(mgmt_api::Error::Cancelled));
-            results.push(r);
+        while let Some((idx, r)) = futs.next().await {
+            results.push((idx, r.unwrap_or(Err(mgmt_api::Error::Cancelled))));
         }
 
-        results
+        results.sort_by_key(|(idx, _)| *idx);
+        results.into_iter().map(|(_, r)| r).collect()
     }
 
     /// Helper for safely working with the shards in a tenant remotely on pageservers, for example
@@ -5742,7 +5753,7 @@ impl Service {
         //  it doesn't match, but that requires more retry logic on this side)
 
         self.persistence
-            .complete_shard_split(tenant_id, old_shard_count)
+            .complete_shard_split(tenant_id, old_shard_count, new_shard_count)
             .await?;
 
         fail::fail_point!("shard-split-post-complete", |_| Err(
@@ -7894,6 +7905,9 @@ impl Service {
     /// At most one tenant will be split per call: the one with the largest max logical size. It
     /// will split 1 → 8 shards.
     ///
+    /// An unsharded tenant will get DEFAULT_STRIPE_SIZE, regardless of what its ShardIdentity says.
+    /// A sharded tenant will retain its stripe size, as splits do not allow changing it.
+    ///
     /// TODO: consider splitting based on total logical size rather than max logical size.
     ///
     /// TODO: consider spawning multiple splits in parallel: this is only called once every 20
@@ -7939,6 +7953,16 @@ impl Service {
             "Auto-splitting tenant for size threshold {split_threshold}: current size {split_candidate:?}"
         );
 
+        // Retain the stripe size of sharded tenants, as splits don't allow changing it. Otherwise,
+        // use DEFAULT_STRIPE_SIZE for unsharded tenants -- their stripe size doesn't really matter,
+        // and if we change the default stripe size we want to use the new default rather than an
+        // old, persisted stripe size.
+        let new_stripe_size = match split_candidate.id.shard_count.count() {
+            0 => panic!("invalid shard count 0"),
+            1 => Some(ShardParameters::DEFAULT_STRIPE_SIZE),
+            2.. => None,
+        };
+
         let this = self.clone();
         tokio::spawn(
             async move {
@@ -7952,7 +7976,7 @@ impl Service {
                             // because our max shard count is relatively low anyway. This policy
                             // will be adjusted in future once we support higher shard count.
                             new_shard_count: MAX_SHARDS.literal(),
-                            new_stripe_size: Some(ShardParameters::DEFAULT_STRIPE_SIZE),
+                            new_stripe_size,
                         },
                     )
                     .await
@@ -8699,6 +8723,8 @@ impl Service {
     pub(crate) async fn safekeepers_for_new_timeline(
         &self,
     ) -> Result<Vec<SafekeeperInfo>, ApiError> {
+        // Number of safekeepers in different AZs we are looking for
+        let wanted_count = 3;
         let mut all_safekeepers = {
             let locked = self.inner.read().unwrap();
             locked
@@ -8744,15 +8770,17 @@ impl Service {
                 continue;
             }
             sks.push(sk_info.clone());
-            if sks.len() == 3 {
+            if sks.len() == wanted_count {
                 break;
             }
         }
-        if sks.len() == 3 {
+        if sks.len() == wanted_count {
             Ok(sks)
         } else {
             Err(ApiError::InternalServerError(anyhow::anyhow!(
-                "couldn't find three safekeepers in different AZs for new timeline"
+                "couldn't find {wanted_count} safekeepers in different AZs for new timeline (found: {}, total active: {})",
+                sks.len(),
+                all_safekeepers.len(),
             )))
         }
     }

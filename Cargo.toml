@@ -106,13 +106,13 @@ hostname = "0.4"
 http = {version = "1.1.0", features = ["std"]}
 http-types = { version = "2", default-features = false }
 http-body-util = "0.1.2"
-humantime = "2.1"
+humantime = "2.2"
 humantime-serde = "1.1.1"
 hyper0 = { package = "hyper", version = "0.14" }
 hyper = "1.4"
 hyper-util = "0.1"
 tokio-tungstenite = "0.21.0"
-indexmap = "2"
+indexmap = { version = "2", features = ["serde"] }
 indoc = "2"
 ipnet = "2.10.0"
 itertools = "0.10"

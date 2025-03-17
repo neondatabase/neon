@@ -6,11 +6,13 @@ use std::io::Write;
 use std::io::prelude::*;
 use std::path::Path;
 
-use compute_api::spec::{ComputeAudit, ComputeMode, ComputeSpec, GenericOption};
+use compute_api::responses::TlsConfig;
+use compute_api::spec::{ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, GenericOption};
 
 use crate::pg_helpers::{
     GenericOptionExt, GenericOptionsSearch, PgOptionsSerialize, escape_conf_value,
 };
+use crate::tls::{self, SERVER_CRT, SERVER_KEY};
 
 /// Check that `line` is inside a text file and put it there if it is not.
 /// Create file if it doesn't exist.
@@ -38,10 +40,12 @@ pub fn line_in_file(path: &Path, line: &str) -> Result<bool> {
 
 /// Create or completely rewrite configuration file specified by `path`
 pub fn write_postgres_conf(
-    path: &Path,
+    pgdata_path: &Path,
     spec: &ComputeSpec,
     extension_server_port: u16,
+    tls_config: &Option<TlsConfig>,
 ) -> Result<()> {
+    let path = pgdata_path.join("postgresql.conf");
     // File::create() destroys the file content if it exists.
     let mut file = File::create(path)?;
 
@@ -84,6 +88,20 @@ pub fn write_postgres_conf(
             "neon.timeline_id={}",
             escape_conf_value(&s.to_string())
         )?;
+    }
+
+    // tls
+    if let Some(tls_config) = tls_config {
+        writeln!(file, "ssl = on")?;
+
+        // postgres requires the keyfile to be in a secure file,
+        // currently too complicated to ensure that at the VM level,
+        // so we just copy them to another file instead. :shrug:
+        tls::update_key_path_blocking(pgdata_path, tls_config);
+
+        // these are the default, but good to be explicit.
+        writeln!(file, "ssl_cert_file = '{}'", SERVER_CRT)?;
+        writeln!(file, "ssl_key_file = '{}'", SERVER_KEY)?;
     }
 
     // Locales
@@ -149,7 +167,8 @@ pub fn write_postgres_conf(
         writeln!(file, "# Managed by compute_ctl audit settings: begin")?;
         // This log level is very verbose
         // but this is necessary for HIPAA compliance.
-        writeln!(file, "pgaudit.log='all'")?;
+        // Exclude 'misc' category, because it doesn't contain anythig relevant.
+        writeln!(file, "pgaudit.log='all, -misc'")?;
         writeln!(file, "pgaudit.log_parameter=on")?;
         // Disable logging of catalog queries
         // The catalog doesn't contain sensitive data, so we don't need to audit it.
@@ -195,6 +214,12 @@ pub fn write_postgres_conf(
     } else {
         // be explicit about the default value
         writeln!(file, "neon.disable_logical_replication_subscribers=false")?;
+    }
+
+    // We need Postgres to send logs to rsyslog so that we can forward them
+    // further to customers' log aggregation systems.
+    if spec.features.contains(&ComputeFeature::PostgresLogsExport) {
+        writeln!(file, "log_destination='stderr,syslog'")?;
     }
 
     // This is essential to keep this line at the end of the file,
