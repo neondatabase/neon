@@ -347,7 +347,7 @@ def do_action(project: NeonProject, action: str) -> None:
     log.info("Action: %s", action)
     if action == "new_branch":
         log.info("Trying to create a new branch")
-        parent = random.choice(list(project.branches.values()))
+        parent = project.branches[random.choice(list(set(project.branches.keys()) - project.reset_branches))]
         child = parent.create_child_branch()
         if child is None:
             return
