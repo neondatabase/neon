@@ -440,6 +440,8 @@ def test_api_random(
     if seed_env := os.getenv("RANDOM_SEED"):
         seed = int(seed_env)
     else:
+        seed = 0
+    if seed == 0:
         seed = int(time.time())
     log.info("Using random seed: %s", seed)
     random.seed(seed)
