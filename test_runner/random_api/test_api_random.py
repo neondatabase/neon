@@ -253,7 +253,10 @@ class NeonProject:
         if len(parent.children) == 1 and parent.id != self.main_branch.id:
             self.leaf_branches[parent.id] = parent
         parent.children.pop(branch_id)
-        self.leaf_branches.pop(branch_id)
+        if branch_id in self.leaf_branches:
+            self.leaf_branches.pop(branch_id)
+        else:
+            self.reset_branches.remove(branch_id)
         self.branches.pop(branch_id)
         self.wait()
         if parent.id in self.reset_branches:
