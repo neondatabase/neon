@@ -285,10 +285,8 @@ impl Secrets {
     fn load_secret(cli: &Option<String>, env_name: &str) -> Option<String> {
         if let Some(v) = cli {
             Some(v.clone())
-        } else if let Ok(v) = std::env::var(env_name) {
-            Some(v)
         } else {
-            None
+            std::env::var(env_name).ok()
         }
     }
 }
