@@ -21,16 +21,23 @@ from requests import HTTPError
 
 
 class NeonEndpoint:
+    """
+    Neon Endpoint
+    Gets the output of the API call of an endpoint creation
+    """
     def __init__(self, project: NeonProject, endpoint: dict[str, Any]):
         self.project: NeonProject = project
         self.id: str = endpoint["id"]
+        # The branch endpoint belongs to
         self.branch: NeonBranch = project.branches[endpoint["branch_id"]]
         self.type: str = endpoint["type"]
+        # add itself to the list of endpoints of the branch
         self.branch.endpoints[self.id] = self
         self.project.endpoints[self.id] = self
         self.host: str = endpoint["host"]
         self.benchmark: subprocess.Popen | None = None
         self.connect_env: dict[str, str] | None = None
+        # The connection environment is used when running benchmark
         if self.branch.connect_env:
             self.connect_env = self.branch.connect_env.copy()
             self.connect_env["PGHOST"] = self.host
@@ -49,6 +56,11 @@ class NeonEndpoint:
 
 
 class NeonBranch:
+    """
+    Neon Branch
+    Gets the output of the API call of the Neon Public API call of a branch creation as a first parameter
+    is_reset defines if the branch is a reset one i.e. created as a result of the reset API Call
+    """
     def __init__(self, project, branch: dict[str, Any], is_reset=False):
         self.id: str = branch["branch"]["id"]
         self.desc = branch
@@ -91,6 +103,10 @@ class NeonBranch:
         )
 
     def __str__(self):
+        """
+        Prints the branch's name with all the predecessors
+        (r) means the branch is a reset one
+        """
         return f"{self.id}{'(r)' if self.id in self.project.reset_branches else ''}, parent: {self.parent}"
 
     def create_child_branch(self) -> NeonBranch:
@@ -115,6 +131,9 @@ class NeonBranch:
         self.project.terminate_benchmark(self.id)
 
     def restore_random_time(self) -> None:
+        """
+        Does PITR, i.e. calls the reset API call on the same branch to the random time in the past
+        """
         min_time = self.updated_at + timedelta(seconds=1)
         max_time = datetime.now(UTC) - timedelta(seconds=1)
         target_time = (min_time + (max_time - min_time) * random.random()).replace(microsecond=0)
@@ -127,6 +146,8 @@ class NeonBranch:
             return
         self.updated_at: datetime = datetime.fromisoformat(res["branch"]["updated_at"])
         parent_id: str = res["branch"]["parent_id"]
+        # Creates an object for the parent branch
+        # After the reset operation a new parent branch is created
         parent = NeonBranch(
             self.project, self.neon_api.get_branch_details(self.project_id, parent_id), True
         )
@@ -144,10 +165,12 @@ class NeonBranch:
     ) -> dict[str, Any] | None:
         start_time = datetime.now(UTC) - timedelta(seconds=1)
         endpoints = [ep for ep in self.endpoints.values() if ep.type == "read_only"]
+        # Terminate all the benchmarks running to prevent errors. Errors in benchmark during pgbench are expected
         for ep in endpoints:
             ep.terminate_benchmark()
         self.terminate_benchmark()
         for _ in range(10):
+            # Try 10 attempts
             try:
                 res = self.neon_api.restore_branch(
                     self.project_id,
@@ -158,8 +181,12 @@ class NeonBranch:
                     preserve_under_name,
                 )
             except HTTPError as he:
+                # We are getting 524 error on CPlane timeout.
+                # Retry.
                 if he.response.status_code == 524:
                     log.info("The request was timed out, trying to get operations")
+                    # Check if the operation was started.
+                    # Fail if yes.
                     for op in self.neon_api.get_operations(self.project_id)["operations"]:
                         if (
                             datetime.fromisoformat(op["created_at"]) >= start_time
@@ -169,6 +196,7 @@ class NeonBranch:
                             raise RuntimeError("The operation started, please investigate") from he
                     else:
                         continue
+                # Skip restore if we cannot create more branches due to limit
                 elif (
                     he.response.status_code == 422
                     and he.response.json()["code"] == "BRANCHES_LIMIT_EXCEEDED"
@@ -179,6 +207,7 @@ class NeonBranch:
                     raise HTTPError(he) from he
             else:
                 break
+        # Start a benchmark, instead of the terminated one
         self.start_benchmark()
         for ep in endpoints:
             ep.start_benchmark()
@@ -186,6 +215,10 @@ class NeonBranch:
 
 
 class NeonProject:
+    """
+    The project object
+    Calls the Public API to create a Neon Project
+    """
     def __init__(self, neon_api: NeonAPI, pg_bin: PgBin, pg_version: PgVersion):
         self.neon_api = neon_api
         self.pg_bin = pg_bin
@@ -199,6 +232,7 @@ class NeonProject:
             "connection_parameters"
         ]
         self.pg_version: PgVersion = pg_version
+        # Leaf branches are the branches, which do not have children
         self.leaf_branches: dict[str, NeonBranch] = {}
         self.branches: dict[str, NeonBranch] = {}
         self.reset_branches: set[str] = set()
@@ -301,6 +335,8 @@ class NeonProject:
         if rc is not None:
             _, err = self.benchmarks[target].communicate()
             log.error("STDERR: %s", err)
+            # if the benchmark failed due to irresponsible Control plane,
+            # just restart it
             if (
                 "ERROR:  Couldn't connect to compute node" in err
                 or "ERROR:  Console request failed" in err
@@ -323,6 +359,9 @@ class NeonProject:
             self.branches[target].benchmark = None
 
     def wait(self):
+        """
+        Wait for all the operations to be finished
+        """
         return self.neon_api.wait_for_operation_to_finish(self.id)
 
     def gen_restore_name(self):
@@ -344,6 +383,9 @@ def setup_class(
 
 
 def do_action(project: NeonProject, action: str) -> None:
+    """
+    Runs the action
+    """
     log.info("Action: %s", action)
     if action == "new_branch":
         log.info("Trying to create a new branch")
@@ -381,6 +423,8 @@ def do_action(project: NeonProject, action: str) -> None:
             br.restore_random_time()
         else:
             log.info("No leaf branches found")
+    else:
+        raise ValueError(f"The action {action} is unknown")
 
 
 @pytest.mark.timeout(7200)
