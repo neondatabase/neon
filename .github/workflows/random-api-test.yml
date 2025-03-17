@@ -1,4 +1,5 @@
-name: Random API test
+name: Random API Test
+
 on:
   schedule:
     # * is a special character in YAML so you have to quote this string
@@ -7,43 +8,49 @@ on:
     #          │ │ ┌───────────── day of the month (1 - 31)
     #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
     #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
-    - cron:  '10 2 * * *' # run once a day, timezone is utc
-  workflow_dispatch: # adds ability to run this manually
+    - cron:  '23 02 * * *' # run once a day, timezone is utc
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
 
 defaults:
   run:
     shell: bash -euxo pipefail {0}
 
-concurrency:
-  # Allow only one workflow
-  group: ${{ github.workflow }}
-  cancel-in-progress: true
-
 permissions:
   id-token: write # aws-actions/configure-aws-credentials
-  statuses: write
-  contents: write
+  statuses: write # require for posting a status update
+
+env:
+  DEFAULT_PG_VERSION: 16
+  PLATFORM: neon-captest-new
+  AWS_DEFAULT_REGION: eu-central-1
 
 jobs:
-  regress:
-    env:
-      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-      TEST_OUTPUT: /tmp/test_output
-      BUILD_TYPE: remote
-    strategy:
-      fail-fast: false
-      matrix:
-        pg-version: [16, 17]
+  check-permissions:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
+    uses: ./.github/workflows/check-permissions.yml
+    with:
+      github-event-name: ${{ github.event_name }}
 
-    runs-on: small
+  build-build-tools-image:
+    needs: [ check-permissions ]
+    uses: ./.github/workflows/build-build-tools-image.yml
+    secrets: inherit
+
+  run-random-rests:
+    needs: [ build-build-tools-image ]
+    runs-on: ubuntu-22.04
+
     container:
-      image: neondatabase/build-tools:pinned-bookworm
-      options: --init
-
+      image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+      options: --init --user root
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: false
 
       - name: Download Neon artifact
         uses: ./.github/actions/download
@@ -53,47 +60,24 @@ jobs:
           prefix: latest
           aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
-      - name: Create a new project
-        id: create-project
-        uses: ./.github/actions/neon-project-create
-        with:
-          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-          postgres_version: ${{ matrix.pg_version }}
-
-      - name: Run the regression tests
+      - name: Run tests
         uses: ./.github/actions/run-python-test-set
         with:
-          build_type: ${{ env.BUILD_TYPE }}
-          test_selection: test_api_random
-          pg_version: ${{matrix.pg-version}}
+          build_type: remote
+          test_selection: random_api
+          run_in_parallel: false
           extra_params: -m remote_cluster
+          pg_version: ${{ env.DEFAULT_PG_VERSION }}
           aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
         env:
-          PROJECT_ID: ${{ steps.outputs.create-project.project_id }}
-
-      - name: Delete project
-        if: always()
-        uses: ./.github/actions/neon-project-delete
-        with:
-          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-          project_id: ${{ steps.outputs.create-project.project_id }}
+          NEON_API_KEY: ${{ secrets.NEON_STAGING_API_KEY }}
 
       - name: Create Allure report
-        id: create-allure-report
         if: ${{ !cancelled() }}
+        id: create-allure-report
         uses: ./.github/actions/allure-report-generate
         with:
+          store-test-results-into-db: true
           aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
-
-      - name: Post to a Slack channel
-        if: ${{ github.event.schedule && failure() }}
-        uses: slackapi/slack-github-action@v1
-        with:
-          channel-id: ${{ vars.SLACK_ON_CALL_QA_STAGING_STREAM }}
-          slack-message: |
-            Periodic pg_regress on staging: ${{ job.status }}
-            <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
-            <${{ steps.create-allure-report.outputs.report-url }}|Allure report>
         env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-
+          REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
