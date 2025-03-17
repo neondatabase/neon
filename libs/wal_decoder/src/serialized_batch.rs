@@ -8,19 +8,17 @@
 use std::collections::{BTreeSet, HashMap};
 
 use bytes::{Bytes, BytesMut};
-use pageserver_api::key::rel_block_to_key;
+use pageserver_api::key::{CompactKey, Key, rel_block_to_key};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::RelTag;
 use pageserver_api::shard::ShardIdentity;
-use pageserver_api::{key::CompactKey, value::Value};
+use pageserver_api::value::Value;
 use postgres_ffi::walrecord::{DecodedBkpBlock, DecodedWALRecord};
-use postgres_ffi::{page_is_new, page_set_lsn, pg_constants, BLCKSZ};
+use postgres_ffi::{BLCKSZ, page_is_new, page_set_lsn, pg_constants};
 use serde::{Deserialize, Serialize};
 use utils::bin_ser::BeSer;
 use utils::lsn::Lsn;
-
-use pageserver_api::key::Key;
 
 use crate::models::InterpretedWalRecord;
 
@@ -515,10 +513,11 @@ impl SerializedValueBatch {
         let empty = self.raw.is_empty();
 
         if cfg!(debug_assertions) && empty {
-            assert!(self
-                .metadata
-                .iter()
-                .all(|meta| matches!(meta, ValueMeta::Observed(_))));
+            assert!(
+                self.metadata
+                    .iter()
+                    .all(|meta| matches!(meta, ValueMeta::Observed(_)))
+            );
         }
 
         !empty

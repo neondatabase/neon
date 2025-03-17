@@ -9,8 +9,11 @@ use std::process::Child;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
+use compute_api::responses::TlsConfig;
+use compute_api::spec::{Database, GenericOption, GenericOptions, PgIdent, Role};
 use futures::StreamExt;
+use indexmap::IndexMap;
 use ini::Ini;
 use notify::{RecursiveMode, Watcher};
 use postgres::config::Config;
@@ -20,8 +23,6 @@ use tokio::time::timeout;
 use tokio_postgres;
 use tokio_postgres::NoTls;
 use tracing::{debug, error, info, instrument};
-
-use compute_api::spec::{Database, GenericOption, GenericOptions, PgIdent, Role};
 
 const POSTGRES_WAIT_TIMEOUT: Duration = Duration::from_millis(60 * 1000); // milliseconds
 
@@ -187,15 +188,40 @@ impl DatabaseExt for Database {
 /// Postgres SQL queries and DATABASE_URL.
 pub trait Escaping {
     fn pg_quote(&self) -> String;
+    fn pg_quote_dollar(&self) -> (String, String);
 }
 
 impl Escaping for PgIdent {
     /// This is intended to mimic Postgres quote_ident(), but for simplicity it
     /// always quotes provided string with `""` and escapes every `"`.
     /// **Not idempotent**, i.e. if string is already escaped it will be escaped again.
+    /// N.B. it's not useful for escaping identifiers that are used inside WHERE
+    /// clause, use `escape_literal()` instead.
     fn pg_quote(&self) -> String {
-        let result = format!("\"{}\"", self.replace('"', "\"\""));
-        result
+        format!("\"{}\"", self.replace('"', "\"\""))
+    }
+
+    /// This helper is intended to be used for dollar-escaping strings for usage
+    /// inside PL/pgSQL procedures. In addition to dollar-escaping the string,
+    /// it also returns a tag that is intended to be used inside the outer
+    /// PL/pgSQL procedure. If you do not need an outer tag, just discard it.
+    /// Here we somewhat mimic the logic of Postgres' `pg_get_functiondef()`,
+    /// <https://github.com/postgres/postgres/blob/8b49392b270b4ac0b9f5c210e2a503546841e832/src/backend/utils/adt/ruleutils.c#L2924>
+    fn pg_quote_dollar(&self) -> (String, String) {
+        let mut tag: String = "x".to_string();
+        let mut outer_tag = "xx".to_string();
+
+        // Find the first suitable tag that is not present in the string.
+        // Postgres' max role/DB name length is 63 bytes, so even in the
+        // worst case it won't take long.
+        while self.contains(&format!("${tag}$")) || self.contains(&format!("${outer_tag}$")) {
+            tag += "x";
+            outer_tag = tag.clone() + "x";
+        }
+
+        let escaped = format!("${tag}${self}${tag}$");
+
+        (escaped, outer_tag)
     }
 }
 
@@ -227,10 +253,13 @@ pub async fn get_existing_dbs_async(
     // invalid state. See:
     //   https://github.com/postgres/postgres/commit/a4b4cc1d60f7e8ccfcc8ff8cb80c28ee411ad9a9
     let rowstream = client
+        // We use a subquery instead of a fancy `datdba::regrole::text AS owner`,
+        // because the latter automatically wraps the result in double quotes,
+        // if the role name contains special characters.
         .query_raw::<str, &String, &[String; 0]>(
             "SELECT
                 datname AS name,
-                datdba::regrole::text AS owner,
+                (SELECT rolname FROM pg_roles WHERE oid = datdba) AS owner,
                 NOT datallowconn AS restrict_conn,
                 datconnlimit = - 2 AS invalid
             FROM
@@ -379,7 +408,7 @@ pub fn create_pgdata(pgdata: &str) -> Result<()> {
 
 /// Update pgbouncer.ini with provided options
 fn update_pgbouncer_ini(
-    pgbouncer_config: HashMap<String, String>,
+    pgbouncer_config: IndexMap<String, String>,
     pgbouncer_ini_path: &str,
 ) -> Result<()> {
     let mut conf = Ini::load_from_file(pgbouncer_ini_path)?;
@@ -400,7 +429,10 @@ fn update_pgbouncer_ini(
 /// Tune pgbouncer.
 /// 1. Apply new config using pgbouncer admin console
 /// 2. Add new values to pgbouncer.ini to preserve them after restart
-pub async fn tune_pgbouncer(pgbouncer_config: HashMap<String, String>) -> Result<()> {
+pub async fn tune_pgbouncer(
+    mut pgbouncer_config: IndexMap<String, String>,
+    tls_config: Option<TlsConfig>,
+) -> Result<()> {
     let pgbouncer_connstr = if std::env::var_os("AUTOSCALING").is_some() {
         // for VMs use pgbouncer specific way to connect to
         // pgbouncer admin console without password
@@ -446,19 +478,21 @@ pub async fn tune_pgbouncer(pgbouncer_config: HashMap<String, String>) -> Result
         }
     };
 
-    // Apply new config
-    for (option_name, value) in pgbouncer_config.iter() {
-        let query = format!("SET {}={}", option_name, value);
-        // keep this log line for debugging purposes
-        info!("Applying pgbouncer setting change: {}", query);
+    if let Some(tls_config) = tls_config {
+        // pgbouncer starts in a half-ok state if it cannot find these files.
+        // It will default to client_tls_sslmode=deny, which causes proxy to error.
+        // There is a small window at startup where these files don't yet exist in the VM.
+        // Best to wait until it exists.
+        loop {
+            if let Ok(true) = tokio::fs::try_exists(&tls_config.key_path).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await
+        }
 
-        if let Err(err) = client.simple_query(&query).await {
-            // Don't fail on error, just print it into log
-            error!(
-                "Failed to apply pgbouncer setting change: {},  {}",
-                query, err
-            );
-        };
+        pgbouncer_config.insert("client_tls_cert_file".to_string(), tls_config.cert_path);
+        pgbouncer_config.insert("client_tls_key_file".to_string(), tls_config.key_path);
+        pgbouncer_config.insert("client_tls_sslmode".to_string(), "allow".to_string());
     }
 
     // save values to pgbouncer.ini
@@ -473,6 +507,13 @@ pub async fn tune_pgbouncer(pgbouncer_config: HashMap<String, String>) -> Result
         "/var/db/postgres/pgbouncer/pgbouncer.ini".to_string()
     };
     update_pgbouncer_ini(pgbouncer_config, &pgbouncer_ini_path)?;
+
+    info!("Applying pgbouncer setting change");
+
+    if let Err(err) = client.simple_query("RELOAD").await {
+        // Don't fail on error, just print it into log
+        error!("Failed to apply pgbouncer setting change,  {err}",);
+    };
 
     Ok(())
 }

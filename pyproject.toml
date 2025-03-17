@@ -13,7 +13,7 @@ requests = "^2.32.3"
 pytest-xdist = "^3.3.1"
 asyncpg = "^0.30.0"
 aiopg = "^1.4.0"
-Jinja2 = "^3.1.5"
+Jinja2 = "^3.1.6"
 types-requests = "^2.31.0.0"
 types-psycopg2 = "^2.9.21.20241019"
 boto3 = "^1.34.11"
@@ -48,8 +48,8 @@ types-jwcrypto = "^1.5.0.20240925"
 pyyaml = "^6.0.2"
 types-pyyaml = "^6.0.12.20240917"
 testcontainers = "^4.9.0"
-# Jsonnet doesn't support Python 3.13 yet
-jsonnet = { version = "^0.20.0", markers = "python_version < '3.13'" }
+# Install a release candidate of `jsonnet`, as it supports Python 3.13
+jsonnet = "^0.21.0-rc2"
 
 [tool.poetry.group.dev.dependencies]
 mypy = "==1.13.0"

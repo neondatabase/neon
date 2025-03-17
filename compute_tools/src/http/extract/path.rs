@@ -1,8 +1,10 @@
 use std::ops::{Deref, DerefMut};
 
-use axum::extract::{rejection::PathRejection, FromRequestParts};
+use axum::extract::FromRequestParts;
+use axum::extract::rejection::PathRejection;
 use compute_api::responses::GenericAPIError;
-use http::{request::Parts, StatusCode};
+use http::StatusCode;
+use http::request::Parts;
 
 /// Custom `Path` extractor, so that we can format errors into
 /// `JsonResponse<GenericAPIError>`.

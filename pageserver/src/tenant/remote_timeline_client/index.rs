@@ -7,16 +7,17 @@ use std::collections::HashMap;
 
 use chrono::NaiveDateTime;
 use pageserver_api::models::AuxFilePolicy;
+use pageserver_api::models::RelSizeMigration;
+use pageserver_api::shard::ShardIndex;
 use serde::{Deserialize, Serialize};
+use utils::id::TimelineId;
+use utils::lsn::Lsn;
 
 use super::is_same_remote_layer_path;
+use crate::tenant::Generation;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::storage_layer::LayerName;
 use crate::tenant::timeline::import_pgdata;
-use crate::tenant::Generation;
-use pageserver_api::shard::ShardIndex;
-use utils::id::TimelineId;
-use utils::lsn::Lsn;
 
 /// In-memory representation of an `index_part.json` file
 ///
@@ -85,24 +86,36 @@ pub struct IndexPart {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) rel_size_migration: Option<RelSizeMigration>,
 
-    /// The LSN of gc-compaction horizon. Once gc-compaction is finished for all layer files below an LSN, this LSN will be updated.
+    /// Not used anymore -- kept here for backwards compatibility. Merged into the `gc_compaction` field.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub(crate) l2_lsn: Option<Lsn>,
+    l2_lsn: Option<Lsn>,
+
+    /// State for the garbage-collecting compaction pass.
+    ///
+    /// Garbage-collecting compaction (gc-compaction) prunes `Value`s that are outside
+    /// the PITR window and not needed by child timelines.
+    ///
+    /// A commonly used synonym for this compaction pass is
+    /// "bottommost-compaction"  because the affected LSN range
+    /// is the "bottom" of the (key,lsn) map.
+    ///
+    /// Gc-compaction is a quite expensive operation; that's why we use
+    /// trigger condition.
+    /// This field here holds the state pertaining to that trigger condition
+    /// and (in future) to the progress of the gc-compaction, so that it's
+    /// resumable across restarts & migrations.
+    ///
+    /// Note that the underlying algorithm is _also_ called `gc-compaction`
+    /// in most places & design docs; but in fact it is more flexible than
+    /// just the specific use case here; it needs a new name.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) gc_compaction: Option<GcCompactionState>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum RelSizeMigration {
-    /// The tenant is using the old rel_size format.
-    /// Note that this enum is persisted as `Option<RelSizeMigration>` in the index part, so
-    /// `None` is the same as `Some(RelSizeMigration::Legacy)`.
-    Legacy,
-    /// The tenant is migrating to the new rel_size format. Both old and new rel_size format are
-    /// persisted in the index part. The read path will read both formats and merge them.
-    Migrating,
-    /// The tenant has migrated to the new rel_size format. Only the new rel_size format is persisted
-    /// in the index part, and the read path will not read the old format.
-    Migrated,
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct GcCompactionState {
+    /// The upper bound of the last completed garbage-collecting compaction, aka. L2 LSN.
+    pub(crate) last_completed_lsn: Lsn,
 }
 
 impl IndexPart {
@@ -123,10 +136,11 @@ impl IndexPart {
     /// - 10: +import_pgdata
     /// - 11: +rel_size_migration
     /// - 12: +l2_lsn
-    const LATEST_VERSION: usize = 12;
+    /// - 13: +gc_compaction
+    const LATEST_VERSION: usize = 13;
 
     // Versions we may see when reading from a bucket.
-    pub const KNOWN_VERSIONS: &'static [usize] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    pub const KNOWN_VERSIONS: &'static [usize] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
 
     pub const FILE_NAME: &'static str = "index_part.json";
 
@@ -144,6 +158,7 @@ impl IndexPart {
             import_pgdata: None,
             rel_size_migration: None,
             l2_lsn: None,
+            gc_compaction: None,
         }
     }
 
@@ -406,9 +421,11 @@ impl GcBlocking {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::str::FromStr;
+
     use utils::id::TimelineId;
+
+    use super::*;
 
     #[test]
     fn v1_indexpart_is_parsed() {
@@ -450,6 +467,7 @@ mod tests {
             import_pgdata: None,
             rel_size_migration: None,
             l2_lsn: None,
+            gc_compaction: None,
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -497,6 +515,7 @@ mod tests {
             import_pgdata: None,
             rel_size_migration: None,
             l2_lsn: None,
+            gc_compaction: None,
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -545,6 +564,7 @@ mod tests {
             import_pgdata: None,
             rel_size_migration: None,
             l2_lsn: None,
+            gc_compaction: None,
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -596,6 +616,7 @@ mod tests {
             import_pgdata: None,
             rel_size_migration: None,
             l2_lsn: None,
+            gc_compaction: None,
         };
 
         let empty_layers_parsed = IndexPart::from_json_bytes(empty_layers_json.as_bytes()).unwrap();
@@ -642,6 +663,7 @@ mod tests {
             import_pgdata: None,
             rel_size_migration: None,
             l2_lsn: None,
+            gc_compaction: None,
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -691,6 +713,7 @@ mod tests {
             import_pgdata: None,
             rel_size_migration: None,
             l2_lsn: None,
+            gc_compaction: None,
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -745,6 +768,7 @@ mod tests {
             import_pgdata: None,
             rel_size_migration: None,
             l2_lsn: None,
+            gc_compaction: None,
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -804,6 +828,7 @@ mod tests {
             import_pgdata: None,
             rel_size_migration: None,
             l2_lsn: None,
+            gc_compaction: None,
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -864,6 +889,7 @@ mod tests {
             import_pgdata: None,
             rel_size_migration: None,
             l2_lsn: None,
+            gc_compaction: None,
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -929,6 +955,7 @@ mod tests {
             import_pgdata: None,
             rel_size_migration: None,
             l2_lsn: None,
+            gc_compaction: None,
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -1007,6 +1034,7 @@ mod tests {
             }))),
             rel_size_migration: None,
             l2_lsn: None,
+            gc_compaction: None,
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -1086,6 +1114,7 @@ mod tests {
             }))),
             rel_size_migration: Some(RelSizeMigration::Legacy),
             l2_lsn: None,
+            gc_compaction: None,
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -1093,7 +1122,7 @@ mod tests {
     }
 
     #[test]
-    fn v12_l2_lsn_is_parsed() {
+    fn v12_v13_l2_gc_ompaction_is_parsed() {
         let example = r#"{
             "version": 12,
             "layer_metadata":{
@@ -1124,7 +1153,10 @@ mod tests {
                 }
             },
             "rel_size_migration": "legacy",
-            "l2_lsn": "0/16960E8"
+            "l2_lsn": "0/16960E8",
+            "gc_compaction": {
+                "last_completed_lsn": "0/16960E8"
+            }
         }"#;
 
         let expected = IndexPart {
@@ -1166,6 +1198,9 @@ mod tests {
             }))),
             rel_size_migration: Some(RelSizeMigration::Legacy),
             l2_lsn: Some("0/16960E8".parse::<Lsn>().unwrap()),
+            gc_compaction: Some(GcCompactionState {
+                last_completed_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
+            }),
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();

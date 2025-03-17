@@ -1414,14 +1414,14 @@ files = [
 
 [[package]]
 name = "jinja2"
-version = "3.1.5"
+version = "3.1.6"
 description = "A very fast and expressive template engine."
 optional = false
 python-versions = ">=3.7"
 groups = ["main"]
 files = [
-    {file = "jinja2-3.1.5-py3-none-any.whl", hash = "sha256:aba0f4dc9ed8013c424088f68a5c226f7d6097ed89b246d7749c2ec4175c6adb"},
-    {file = "jinja2-3.1.5.tar.gz", hash = "sha256:8fefff8dc3034e27bb80d67c671eb8a9bc424c0ef4c0826edbff304cceff43bb"},
+    {file = "jinja2-3.1.6-py3-none-any.whl", hash = "sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67"},
+    {file = "jinja2-3.1.6.tar.gz", hash = "sha256:0137fb05990d35f1275a587e9aee6d56da821fc83491a0fb838183be43f66d6d"},
 ]
 
 [package.dependencies]
@@ -1491,14 +1491,38 @@ files = [
 
 [[package]]
 name = "jsonnet"
-version = "0.20.0"
-description = "Python bindings for Jsonnet - The data templating language"
+version = "0.21.0rc2"
+description = "Python bindings for Jsonnet - The data templating language "
 optional = false
 python-versions = "*"
 groups = ["main"]
-markers = "python_version < \"3.13\""
 files = [
-    {file = "jsonnet-0.20.0.tar.gz", hash = "sha256:7e770c7bf3a366b97b650a39430450f77612e74406731eb75c5bd59f3f104d4f"},
+    {file = "jsonnet-0.21.0rc2-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:8779ac6820fee44ef736df2baedc3ae93e8cd5d672ee105015c2a47fe627a727"},
+    {file = "jsonnet-0.21.0rc2-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:99affe8c71e2551465064a8039bb3d1cba27a0b73b2b9ff1b652e06f17d4ea8b"},
+    {file = "jsonnet-0.21.0rc2-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:4a9dffb9aa01013d100ddfb7230d1eeb80f2a8eef712b1825a60cad57106d8bd"},
+    {file = "jsonnet-0.21.0rc2-cp310-cp310-musllinux_1_2_x86_64.whl", hash = "sha256:cca6c95f2879dcab52650b7aa09a4e82a139b084931b1f6f8c840f834fecc08a"},
+    {file = "jsonnet-0.21.0rc2-cp310-cp310-win_amd64.whl", hash = "sha256:016d6afdb302a6d00bf3bce6a0c3d9c093b992e33f9bc67c64a868035892258e"},
+    {file = "jsonnet-0.21.0rc2-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:e893ab2c9bf10d8ec9e9b0cee8961879c88d0619cc6d8f75ea284a78e06ae32b"},
+    {file = "jsonnet-0.21.0rc2-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:c06b353cd3daa2781e6cd308e05f2f116396376994bcb5f59aaadbc6a752c7f2"},
+    {file = "jsonnet-0.21.0rc2-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:9eb2bc8e62b73101329072da322f7e2a1bdb3ac530b94669128d1b480e311e55"},
+    {file = "jsonnet-0.21.0rc2-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:113766fd0c25620807bcf04d4c739f461c971a4f0e4aece9ba62b4e762de9598"},
+    {file = "jsonnet-0.21.0rc2-cp311-cp311-win_amd64.whl", hash = "sha256:8dab208c2c2760be60f87d1ceb8b28c86b51ed0e31129a7d90cd5fe890b41225"},
+    {file = "jsonnet-0.21.0rc2-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:95f5b9dd26a41d6f258d1baa8d22e557051beeed8c52a6202584f1becca9dcb5"},
+    {file = "jsonnet-0.21.0rc2-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:cecc6d76e2b377260fae0a060097c113e6ac361b8f739903ea7f3f5f64cdebdf"},
+    {file = "jsonnet-0.21.0rc2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:aaa2d18224af7e63872ef4a101e93962505456cf5f5439c3cfc25dad6845f8b1"},
+    {file = "jsonnet-0.21.0rc2-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:2a9063f811554487ed552445e964aeec969cafb266b965029c8d6b091ce47950"},
+    {file = "jsonnet-0.21.0rc2-cp312-cp312-win_amd64.whl", hash = "sha256:80d171182c169761f744ba50068a4ad35d48e52b91d25bf4c7bb9a72f0a04f71"},
+    {file = "jsonnet-0.21.0rc2-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:f3657938f87cb6bc6da20ca631d437b5faf469ca060a7c7def9c8fd2f25a5e06"},
+    {file = "jsonnet-0.21.0rc2-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:3dcebc30cb991b58bc416ee05e9387004d04716d5c0b89714ff042bd069af5c8"},
+    {file = "jsonnet-0.21.0rc2-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:3ac52c95482df3ed93c908468ca2f40d4825b6baba284b395ddc47bd663b8c3a"},
+    {file = "jsonnet-0.21.0rc2-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:8b34450823a7a1861de892fef9f29de1b4c19e1a79e27d81ffe7e57646cc89d6"},
+    {file = "jsonnet-0.21.0rc2-cp313-cp313-win_amd64.whl", hash = "sha256:573fd2580e46f4875ec505f1732f9e804b7063cba790342ed6fdafe9a6b30556"},
+    {file = "jsonnet-0.21.0rc2-cp39-cp39-macosx_10_9_x86_64.whl", hash = "sha256:871ca1411de3626499bda60b330d37f85a592918f99ba4809089bbb8d4f5bfe4"},
+    {file = "jsonnet-0.21.0rc2-cp39-cp39-macosx_11_0_arm64.whl", hash = "sha256:5d33b25a9c5bf9099100b9b16cb385a2876d891fbe639ee9d476fc75c861903a"},
+    {file = "jsonnet-0.21.0rc2-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:b2bac374565c7f89a4675f19fd2b624ed1376519267f4e444f49b6fc0368f6e5"},
+    {file = "jsonnet-0.21.0rc2-cp39-cp39-musllinux_1_2_x86_64.whl", hash = "sha256:fab7bbd88f9159f88a7350701a97bda24de9e3b9eef14c2501ba8b9224160d60"},
+    {file = "jsonnet-0.21.0rc2-cp39-cp39-win_amd64.whl", hash = "sha256:ed71ffba0fd233a1bca7b0f7be79730792c5383e562a9dc7da152478d9ee1612"},
+    {file = "jsonnet-0.21.0rc2.tar.gz", hash = "sha256:2b83ec4b5a771c3732e0972be23a71f042ad2940db6918d3a52aade69bc394fb"},
 ]
 
 [[package]]
@@ -3820,4 +3844,4 @@ cffi = ["cffi (>=1.11)"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.11"
-content-hash = "9711c5479c867fa614ce3d352f1bbc63dba1cb2376d347f96fbeda6f512ee308"
+content-hash = "715fc8c896dcfa1b15054deeddcdec557ef93af91b26e1c8e4688fe4dbef5296"

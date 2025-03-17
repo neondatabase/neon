@@ -1,29 +1,27 @@
-use crate::error::{api_error_handler, route_error_handler, ApiError};
-use crate::pprof;
-use crate::request::{get_query_param, parse_query_param};
-use ::pprof::protos::Message as _;
-use ::pprof::ProfilerGuardBuilder;
-use anyhow::{anyhow, Context};
-use bytes::{Bytes, BytesMut};
-use hyper::header::{HeaderName, AUTHORIZATION, CONTENT_DISPOSITION};
-use hyper::http::HeaderValue;
-use hyper::Method;
-use hyper::{header::CONTENT_TYPE, Body, Request, Response};
-use metrics::{register_int_counter, Encoder, IntCounter, TextEncoder};
-use once_cell::sync::Lazy;
-use regex::Regex;
-use routerify::ext::RequestExt;
-use routerify::{Middleware, RequestInfo, Router, RouterBuilder};
-use tokio::sync::{mpsc, Mutex, Notify};
-use tokio_stream::wrappers::ReceiverStream;
-use tokio_util::io::ReaderStream;
-use tracing::{debug, info, info_span, warn, Instrument};
-use utils::auth::{AuthError, Claims, SwappableJwtAuth};
-
 use std::future::Future;
 use std::io::Write as _;
 use std::str::FromStr;
 use std::time::Duration;
+
+use anyhow::{Context, anyhow};
+use bytes::{Bytes, BytesMut};
+use hyper::header::{AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_TYPE, HeaderName};
+use hyper::http::HeaderValue;
+use hyper::{Body, Method, Request, Response};
+use metrics::{Encoder, IntCounter, TextEncoder, register_int_counter};
+use once_cell::sync::Lazy;
+use pprof::ProfilerGuardBuilder;
+use pprof::protos::Message as _;
+use routerify::ext::RequestExt;
+use routerify::{Middleware, RequestInfo, Router, RouterBuilder};
+use tokio::sync::{Mutex, Notify, mpsc};
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::io::ReaderStream;
+use tracing::{Instrument, debug, info, info_span, warn};
+use utils::auth::{AuthError, Claims, SwappableJwtAuth};
+
+use crate::error::{ApiError, api_error_handler, route_error_handler};
+use crate::request::{get_query_param, parse_query_param};
 
 static SERVE_METRICS_COUNT: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
@@ -375,7 +373,7 @@ pub async fn profile_cpu_handler(req: Request<Body>) -> Result<Response<Body>, A
                 Err(_) => {
                     return Err(ApiError::Conflict(
                         "profiler already running (use ?force=true to cancel it)".into(),
-                    ))
+                    ));
                 }
             }
             tokio::time::sleep(Duration::from_millis(1)).await; // don't busy-wait
@@ -401,12 +399,10 @@ pub async fn profile_cpu_handler(req: Request<Body>) -> Result<Response<Body>, A
     // Return the report in the requested format.
     match format {
         Format::Pprof => {
-            let mut body = Vec::new();
-            report
+            let body = report
                 .pprof()
                 .map_err(|err| ApiError::InternalServerError(err.into()))?
-                .write_to_vec(&mut body)
-                .map_err(|err| ApiError::InternalServerError(err.into()))?;
+                .encode_to_vec();
 
             Response::builder()
                 .status(200)
@@ -449,20 +445,6 @@ pub async fn profile_heap_handler(req: Request<Body>) -> Result<Response<Body>, 
         Some(format) => return Err(ApiError::BadRequest(anyhow!("invalid format {format}"))),
     };
 
-    // Functions and mappings to strip when symbolizing pprof profiles. If true,
-    // also remove child frames.
-    static STRIP_FUNCTIONS: Lazy<Vec<(Regex, bool)>> = Lazy::new(|| {
-        vec![
-            (Regex::new("^__rust").unwrap(), false),
-            (Regex::new("^_start$").unwrap(), false),
-            (Regex::new("^irallocx_prof").unwrap(), true),
-            (Regex::new("^prof_alloc_prep").unwrap(), true),
-            (Regex::new("^std::rt::lang_start").unwrap(), false),
-            (Regex::new("^std::sys::backtrace::__rust").unwrap(), false),
-        ]
-    });
-    const STRIP_MAPPINGS: &[&str] = &["libc", "libgcc", "pthread", "vdso"];
-
     // Obtain profiler handle.
     let mut prof_ctl = jemalloc_pprof::PROF_CTL
         .as_ref()
@@ -495,52 +477,34 @@ pub async fn profile_heap_handler(req: Request<Body>) -> Result<Response<Body>, 
         }
 
         Format::Pprof => {
-            let data = tokio::task::spawn_blocking(move || {
-                let bytes = prof_ctl.dump_pprof()?;
-                // Symbolize the profile.
-                // TODO: consider moving this upstream to jemalloc_pprof and avoiding the
-                // serialization roundtrip.
-                let profile = pprof::decode(&bytes)?;
-                let profile = pprof::symbolize(profile)?;
-                let profile = pprof::strip_locations(profile, STRIP_MAPPINGS, &STRIP_FUNCTIONS);
-                pprof::encode(&profile)
-            })
-            .await
-            .map_err(|join_err| ApiError::InternalServerError(join_err.into()))?
-            .map_err(ApiError::InternalServerError)?;
+            let data = tokio::task::spawn_blocking(move || prof_ctl.dump_pprof())
+                .await
+                .map_err(|join_err| ApiError::InternalServerError(join_err.into()))?
+                .map_err(ApiError::InternalServerError)?;
             Response::builder()
                 .status(200)
                 .header(CONTENT_TYPE, "application/octet-stream")
-                .header(CONTENT_DISPOSITION, "attachment; filename=\"heap.pb\"")
+                .header(CONTENT_DISPOSITION, "attachment; filename=\"heap.pb.gz\"")
                 .body(Body::from(data))
                 .map_err(|err| ApiError::InternalServerError(err.into()))
         }
 
         Format::Svg => {
-            let body = tokio::task::spawn_blocking(move || {
-                let bytes = prof_ctl.dump_pprof()?;
-                let profile = pprof::decode(&bytes)?;
-                let profile = pprof::symbolize(profile)?;
-                let profile = pprof::strip_locations(profile, STRIP_MAPPINGS, &STRIP_FUNCTIONS);
-                let mut opts = inferno::flamegraph::Options::default();
-                opts.title = "Heap inuse".to_string();
-                opts.count_name = "bytes".to_string();
-                pprof::flamegraph(profile, &mut opts)
-            })
-            .await
-            .map_err(|join_err| ApiError::InternalServerError(join_err.into()))?
-            .map_err(ApiError::InternalServerError)?;
+            let svg = tokio::task::spawn_blocking(move || prof_ctl.dump_flamegraph())
+                .await
+                .map_err(|join_err| ApiError::InternalServerError(join_err.into()))?
+                .map_err(ApiError::InternalServerError)?;
             Response::builder()
                 .status(200)
                 .header(CONTENT_TYPE, "image/svg+xml")
-                .body(Body::from(body))
+                .body(Body::from(svg))
                 .map_err(|err| ApiError::InternalServerError(err.into()))
         }
     }
 }
 
-pub fn add_request_id_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
-) -> Middleware<B, ApiError> {
+pub fn add_request_id_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>()
+-> Middleware<B, ApiError> {
     Middleware::pre(move |req| async move {
         let request_id = match req.headers().get(&X_REQUEST_ID_HEADER) {
             Some(request_id) => request_id
@@ -664,7 +628,7 @@ pub fn auth_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
                 None => {
                     return Err(ApiError::Unauthorized(
                         "missing authorization header".to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -717,11 +681,13 @@ pub fn check_permission_with(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use hyper::service::Service;
-    use routerify::RequestServiceBuilder;
     use std::future::poll_fn;
     use std::net::{IpAddr, SocketAddr};
+
+    use hyper::service::Service;
+    use routerify::RequestServiceBuilder;
+
+    use super::*;
 
     #[tokio::test]
     async fn test_request_id_returned() {

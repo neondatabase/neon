@@ -1,15 +1,14 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use pageserver_api::controller_api::{NodeSchedulingPolicy, ShardSchedulingPolicy};
-use utils::{id::NodeId, shard::TenantShardId};
+use utils::id::NodeId;
+use utils::shard::TenantShardId;
 
-use crate::{
-    background_node_operations::OperationError, node::Node, scheduler::Scheduler,
-    tenant_shard::TenantShard,
-};
+use crate::background_node_operations::OperationError;
+use crate::node::Node;
+use crate::scheduler::Scheduler;
+use crate::tenant_shard::TenantShard;
 
 pub(crate) struct TenantShardIterator<F> {
     tenants_accessor: F,
@@ -188,10 +187,8 @@ impl TenantShardDrain {
 mod tests {
     use std::sync::Arc;
 
-    use utils::{
-        id::TenantId,
-        shard::{ShardCount, ShardNumber, TenantShardId},
-    };
+    use utils::id::TenantId;
+    use utils::shard::{ShardCount, ShardNumber, TenantShardId};
 
     use super::TenantShardIterator;
 

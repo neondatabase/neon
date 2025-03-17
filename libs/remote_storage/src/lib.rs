@@ -18,39 +18,34 @@ mod s3_bucket;
 mod simulate_failures;
 mod support;
 
-use std::{
-    collections::HashMap,
-    fmt::Debug,
-    num::NonZeroU32,
-    ops::Bound,
-    pin::{pin, Pin},
-    sync::Arc,
-    time::SystemTime,
-};
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::num::NonZeroU32;
+use std::ops::Bound;
+use std::pin::{Pin, pin};
+use std::sync::Arc;
+use std::time::SystemTime;
 
 use anyhow::Context;
-use camino::{Utf8Path, Utf8PathBuf};
-
+/// Azure SDK's ETag type is a simple String wrapper: we use this internally instead of repeating it here.
+pub use azure_core::Etag;
 use bytes::Bytes;
-use futures::{stream::Stream, StreamExt};
+use camino::{Utf8Path, Utf8PathBuf};
+pub use error::{DownloadError, TimeTravelError, TimeoutOrCancel};
+use futures::StreamExt;
+use futures::stream::Stream;
 use itertools::Itertools as _;
+use s3_bucket::RequestKind;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-pub use self::{
-    azure_blob::AzureBlobStorage, local_fs::LocalFs, s3_bucket::S3Bucket,
-    simulate_failures::UnreliableWrapper,
-};
-use s3_bucket::RequestKind;
-
+pub use self::azure_blob::AzureBlobStorage;
+pub use self::local_fs::LocalFs;
+pub use self::s3_bucket::S3Bucket;
+pub use self::simulate_failures::UnreliableWrapper;
 pub use crate::config::{AzureConfig, RemoteStorageConfig, RemoteStorageKind, S3Config};
-
-/// Azure SDK's ETag type is a simple String wrapper: we use this internally instead of repeating it here.
-pub use azure_core::Etag;
-
-pub use error::{DownloadError, TimeTravelError, TimeoutOrCancel};
 
 /// Default concurrency limit for S3 operations
 ///
@@ -640,8 +635,13 @@ impl GenericRemoteStorage {
                 let profile = std::env::var("AWS_PROFILE").unwrap_or_else(|_| "<none>".into());
                 let access_key_id =
                     std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_else(|_| "<none>".into());
-                info!("Using s3 bucket '{}' in region '{}' as a remote storage, prefix in bucket: '{:?}', bucket endpoint: '{:?}', profile: {profile}, access_key_id: {access_key_id}",
-                      s3_config.bucket_name, s3_config.bucket_region, s3_config.prefix_in_bucket, s3_config.endpoint);
+                info!(
+                    "Using s3 bucket '{}' in region '{}' as a remote storage, prefix in bucket: '{:?}', bucket endpoint: '{:?}', profile: {profile}, access_key_id: {access_key_id}",
+                    s3_config.bucket_name,
+                    s3_config.bucket_region,
+                    s3_config.prefix_in_bucket,
+                    s3_config.endpoint
+                );
                 Self::AwsS3(Arc::new(S3Bucket::new(s3_config, timeout).await?))
             }
             RemoteStorageKind::AzureContainer(azure_config) => {
@@ -649,8 +649,12 @@ impl GenericRemoteStorage {
                     .storage_account
                     .as_deref()
                     .unwrap_or("<AZURE_STORAGE_ACCOUNT>");
-                info!("Using azure container '{}' in account '{storage_account}' in region '{}' as a remote storage, prefix in container: '{:?}'",
-                      azure_config.container_name, azure_config.container_region, azure_config.prefix_in_container);
+                info!(
+                    "Using azure container '{}' in account '{storage_account}' in region '{}' as a remote storage, prefix in container: '{:?}'",
+                    azure_config.container_name,
+                    azure_config.container_region,
+                    azure_config.prefix_in_container
+                );
                 Self::AzureBlob(Arc::new(AzureBlobStorage::new(
                     azure_config,
                     timeout,

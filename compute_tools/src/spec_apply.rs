@@ -1,18 +1,429 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Formatter};
 use std::future::Future;
-use std::iter::empty;
-use std::iter::once;
+use std::iter::{empty, once};
 use std::sync::Arc;
 
-use crate::compute::construct_superuser_query;
-use crate::pg_helpers::{escape_literal, DatabaseExt, Escaping, GenericOptionsSearch, RoleExt};
-use anyhow::Result;
-use compute_api::spec::{ComputeSpec, Database, PgIdent, Role};
+use anyhow::{Context, Result};
+use compute_api::responses::ComputeStatus;
+use compute_api::spec::{ComputeAudit, ComputeFeature, ComputeSpec, Database, PgIdent, Role};
 use futures::future::join_all;
 use tokio::sync::RwLock;
 use tokio_postgres::Client;
-use tracing::{debug, info_span, warn, Instrument};
+use tokio_postgres::error::SqlState;
+use tracing::{Instrument, debug, error, info, info_span, instrument, warn};
+
+use crate::compute::{ComputeNode, ComputeState};
+use crate::pg_helpers::{
+    DatabaseExt, Escaping, GenericOptionsSearch, RoleExt, get_existing_dbs_async,
+    get_existing_roles_async,
+};
+use crate::spec_apply::ApplySpecPhase::{
+    CreateAndAlterDatabases, CreateAndAlterRoles, CreateAvailabilityCheck, CreateNeonSuperuser,
+    CreatePgauditExtension, CreatePgauditlogtofileExtension, CreateSchemaNeon,
+    DisablePostgresDBPgAudit, DropInvalidDatabases, DropRoles, FinalizeDropLogicalSubscriptions,
+    HandleNeonExtension, HandleOtherExtensions, RenameAndDeleteDatabases, RenameRoles,
+    RunInEachDatabase,
+};
+use crate::spec_apply::PerDatabasePhase::{
+    ChangeSchemaPerms, DeleteDBRoleReferences, DropLogicalSubscriptions,
+};
+
+impl ComputeNode {
+    /// Apply the spec to the running PostgreSQL instance.
+    /// The caller can decide to run with multiple clients in parallel, or
+    /// single mode.  Either way, the commands executed will be the same, and
+    /// only commands run in different databases are parallelized.
+    #[instrument(skip_all)]
+    pub fn apply_spec_sql(
+        &self,
+        spec: Arc<ComputeSpec>,
+        conf: Arc<tokio_postgres::Config>,
+        concurrency: usize,
+    ) -> Result<()> {
+        info!("Applying config with max {} concurrency", concurrency);
+        debug!("Config: {:?}", spec);
+
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(async {
+            // Proceed with post-startup configuration. Note, that order of operations is important.
+            let client = Self::get_maintenance_client(&conf).await?;
+            let spec = spec.clone();
+
+            let databases = get_existing_dbs_async(&client).await?;
+            let roles = get_existing_roles_async(&client)
+                .await?
+                .into_iter()
+                .map(|role| (role.name.clone(), role))
+                .collect::<HashMap<String, Role>>();
+
+            // Check if we need to drop subscriptions before starting the endpoint.
+            //
+            // It is important to do this operation exactly once when endpoint starts on a new branch.
+            // Otherwise, we may drop not inherited, but newly created subscriptions.
+            //
+            // We cannot rely only on spec.drop_subscriptions_before_start flag,
+            // because if for some reason compute restarts inside VM,
+            // it will start again with the same spec and flag value.
+            //
+            // To handle this, we save the fact of the operation in the database
+            // in the neon.drop_subscriptions_done table.
+            // If the table does not exist, we assume that the operation was never performed, so we must do it.
+            // If table exists, we check if the operation was performed on the current timelilne.
+            //
+            let mut drop_subscriptions_done = false;
+
+            if spec.drop_subscriptions_before_start {
+                let timeline_id = self.get_timeline_id().context("timeline_id must be set")?;
+                let query = format!("select 1 from neon.drop_subscriptions_done where timeline_id = '{}'", timeline_id);
+
+                info!("Checking if drop subscription operation was already performed for timeline_id: {}", timeline_id);
+
+                drop_subscriptions_done =  match
+                    client.simple_query(&query).await {
+                    Ok(result) => {
+                        matches!(&result[0], postgres::SimpleQueryMessage::Row(_))
+                    },
+                    Err(e) =>
+                    {
+                        match e.code() {
+                            Some(&SqlState::UNDEFINED_TABLE) => false,
+                            _ => {
+                                // We don't expect any other error here, except for the schema/table not existing
+                                error!("Error checking if drop subscription operation was already performed: {}", e);
+                                return Err(e.into());
+                            }
+                        }
+                    }
+                }
+            };
+
+
+            let jwks_roles = Arc::new(
+                spec.as_ref()
+                    .local_proxy_config
+                    .iter()
+                    .flat_map(|it| &it.jwks)
+                    .flatten()
+                    .flat_map(|setting| &setting.role_names)
+                    .cloned()
+                    .collect::<HashSet<_>>(),
+            );
+
+            let ctx = Arc::new(tokio::sync::RwLock::new(MutableApplyContext {
+                roles,
+                dbs: databases,
+            }));
+
+            // Apply special pre drop database phase.
+            // NOTE: we use the code of RunInEachDatabase phase for parallelism
+            // and connection management, but we don't really run it in *each* database,
+            // only in databases, we're about to drop.
+            info!("Applying PerDatabase (pre-dropdb) phase");
+            let concurrency_token = Arc::new(tokio::sync::Semaphore::new(concurrency));
+
+            // Run the phase for each database that we're about to drop.
+            let db_processes = spec
+                .delta_operations
+                .iter()
+                .flatten()
+                .filter_map(move |op| {
+                    if op.action.as_str() == "delete_db" {
+                        Some(op.name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .map(|dbname| {
+                    let spec = spec.clone();
+                    let ctx = ctx.clone();
+                    let jwks_roles = jwks_roles.clone();
+                    let mut conf = conf.as_ref().clone();
+                    let concurrency_token = concurrency_token.clone();
+                    // We only need dbname field for this phase, so set other fields to dummy values
+                    let db = DB::UserDB(Database {
+                        name: dbname.clone(),
+                        owner: "cloud_admin".to_string(),
+                        options: None,
+                        restrict_conn: false,
+                        invalid: false,
+                    });
+
+                    debug!("Applying per-database phases for Database {:?}", &db);
+
+                    match &db {
+                        DB::SystemDB => {}
+                        DB::UserDB(db) => {
+                            conf.dbname(db.name.as_str());
+                        }
+                    }
+
+                    let conf = Arc::new(conf);
+                    let fut = Self::apply_spec_sql_db(
+                        spec.clone(),
+                        conf,
+                        ctx.clone(),
+                        jwks_roles.clone(),
+                        concurrency_token.clone(),
+                        db,
+                        [DropLogicalSubscriptions].to_vec(),
+                    );
+
+                    Ok(tokio::spawn(fut))
+                })
+                .collect::<Vec<Result<_, anyhow::Error>>>();
+
+            for process in db_processes.into_iter() {
+                let handle = process?;
+                if let Err(e) = handle.await? {
+                    // Handle the error case where the database does not exist
+                    // We do not check whether the DB exists or not in the deletion phase,
+                    // so we shouldn't be strict about it in pre-deletion cleanup as well.
+                    if e.to_string().contains("does not exist") {
+                        warn!("Error dropping subscription: {}", e);
+                    } else {
+                        return Err(e);
+                    }
+                };
+            }
+
+            for phase in [
+                CreateNeonSuperuser,
+                DropInvalidDatabases,
+                RenameRoles,
+                CreateAndAlterRoles,
+                RenameAndDeleteDatabases,
+                CreateAndAlterDatabases,
+                CreateSchemaNeon,
+            ] {
+                info!("Applying phase {:?}", &phase);
+                apply_operations(
+                    spec.clone(),
+                    ctx.clone(),
+                    jwks_roles.clone(),
+                    phase,
+                    || async { Ok(&client) },
+                )
+                .await?;
+            }
+
+            info!("Applying RunInEachDatabase2 phase");
+            let concurrency_token = Arc::new(tokio::sync::Semaphore::new(concurrency));
+
+            let db_processes = spec
+                .cluster
+                .databases
+                .iter()
+                .map(|db| DB::new(db.clone()))
+                // include
+                .chain(once(DB::SystemDB))
+                .map(|db| {
+                    let spec = spec.clone();
+                    let ctx = ctx.clone();
+                    let jwks_roles = jwks_roles.clone();
+                    let mut conf = conf.as_ref().clone();
+                    let concurrency_token = concurrency_token.clone();
+                    let db = db.clone();
+
+                    debug!("Applying per-database phases for Database {:?}", &db);
+
+                    match &db {
+                        DB::SystemDB => {}
+                        DB::UserDB(db) => {
+                            conf.dbname(db.name.as_str());
+                        }
+                    }
+
+                    let conf = Arc::new(conf);
+                    let mut phases = vec![
+                        DeleteDBRoleReferences,
+                        ChangeSchemaPerms,
+                    ];
+
+                    if spec.drop_subscriptions_before_start && !drop_subscriptions_done {
+                        info!("Adding DropLogicalSubscriptions phase because drop_subscriptions_before_start is set");
+                        phases.push(DropLogicalSubscriptions);
+                    }
+
+                    let fut = Self::apply_spec_sql_db(
+                        spec.clone(),
+                        conf,
+                        ctx.clone(),
+                        jwks_roles.clone(),
+                        concurrency_token.clone(),
+                        db,
+                        phases,
+                    );
+
+                    Ok(tokio::spawn(fut))
+                })
+                .collect::<Vec<Result<_, anyhow::Error>>>();
+
+            for process in db_processes.into_iter() {
+                let handle = process?;
+                handle.await??;
+            }
+
+            let mut phases = vec![
+                HandleOtherExtensions,
+                HandleNeonExtension, // This step depends on CreateSchemaNeon
+                CreateAvailabilityCheck,
+                DropRoles,
+            ];
+
+            // This step depends on CreateSchemaNeon
+            if spec.drop_subscriptions_before_start && !drop_subscriptions_done {
+                info!("Adding FinalizeDropLogicalSubscriptions phase because drop_subscriptions_before_start is set");
+                phases.push(FinalizeDropLogicalSubscriptions);
+            }
+
+            // Keep DisablePostgresDBPgAudit phase at the end,
+            // so that all config operations are audit logged.
+            match spec.audit_log_level
+            {
+                ComputeAudit::Hipaa => {
+                    phases.push(CreatePgauditExtension);
+                    phases.push(CreatePgauditlogtofileExtension);
+                    phases.push(DisablePostgresDBPgAudit);
+                }
+                ComputeAudit::Log => { /* not implemented yet */ }
+                ComputeAudit::Disabled => {}
+            }
+
+            for phase in phases {
+                debug!("Applying phase {:?}", &phase);
+                apply_operations(
+                    spec.clone(),
+                    ctx.clone(),
+                    jwks_roles.clone(),
+                    phase,
+                    || async { Ok(&client) },
+                )
+                .await?;
+            }
+
+            Ok::<(), anyhow::Error>(())
+        })?;
+
+        Ok(())
+    }
+
+    /// Apply SQL migrations of the RunInEachDatabase phase.
+    ///
+    /// May opt to not connect to databases that don't have any scheduled
+    /// operations.  The function is concurrency-controlled with the provided
+    /// semaphore.  The caller has to make sure the semaphore isn't exhausted.
+    async fn apply_spec_sql_db(
+        spec: Arc<ComputeSpec>,
+        conf: Arc<tokio_postgres::Config>,
+        ctx: Arc<tokio::sync::RwLock<MutableApplyContext>>,
+        jwks_roles: Arc<HashSet<String>>,
+        concurrency_token: Arc<tokio::sync::Semaphore>,
+        db: DB,
+        subphases: Vec<PerDatabasePhase>,
+    ) -> Result<()> {
+        let _permit = concurrency_token.acquire().await?;
+
+        let mut client_conn = None;
+
+        for subphase in subphases {
+            apply_operations(
+                spec.clone(),
+                ctx.clone(),
+                jwks_roles.clone(),
+                RunInEachDatabase {
+                    db: db.clone(),
+                    subphase,
+                },
+                // Only connect if apply_operation actually wants a connection.
+                // It's quite possible this database doesn't need any queries,
+                // so by not connecting we save time and effort connecting to
+                // that database.
+                || async {
+                    if client_conn.is_none() {
+                        let db_client = Self::get_maintenance_client(&conf).await?;
+                        client_conn.replace(db_client);
+                    }
+                    let client = client_conn.as_ref().unwrap();
+                    Ok(client)
+                },
+            )
+            .await?;
+        }
+
+        drop(client_conn);
+
+        Ok::<(), anyhow::Error>(())
+    }
+
+    /// Choose how many concurrent connections to use for applying the spec changes.
+    pub fn max_service_connections(
+        &self,
+        compute_state: &ComputeState,
+        spec: &ComputeSpec,
+    ) -> usize {
+        // If the cluster is in Init state we don't have to deal with user connections,
+        // and can thus use all `max_connections` connection slots. However, that's generally not
+        // very efficient, so we generally still limit it to a smaller number.
+        if compute_state.status == ComputeStatus::Init {
+            // If the settings contain 'max_connections', use that as template
+            if let Some(config) = spec.cluster.settings.find("max_connections") {
+                config.parse::<usize>().ok()
+            } else {
+                // Otherwise, try to find the setting in the postgresql_conf string
+                spec.cluster
+                    .postgresql_conf
+                    .iter()
+                    .flat_map(|conf| conf.split("\n"))
+                    .filter_map(|line| {
+                        if !line.contains("max_connections") {
+                            return None;
+                        }
+
+                        let (key, value) = line.split_once("=")?;
+                        let key = key
+                            .trim_start_matches(char::is_whitespace)
+                            .trim_end_matches(char::is_whitespace);
+
+                        let value = value
+                            .trim_start_matches(char::is_whitespace)
+                            .trim_end_matches(char::is_whitespace);
+
+                        if key != "max_connections" {
+                            return None;
+                        }
+
+                        value.parse::<usize>().ok()
+                    })
+                    .next()
+            }
+            // If max_connections is present, use at most 1/3rd of that.
+            // When max_connections is lower than 30, try to use at least 10 connections, but
+            // never more than max_connections.
+            .map(|limit| match limit {
+                0..10 => limit,
+                10..30 => 10,
+                30.. => limit / 3,
+            })
+            // If we didn't find max_connections, default to 10 concurrent connections.
+            .unwrap_or(10)
+        } else {
+            // state == Running
+            // Because the cluster is already in the Running state, we should assume users are
+            // already connected to the cluster, and high concurrency could negatively
+            // impact user connectivity. Therefore, we can limit concurrency to the number of
+            // reserved superuser connections, which users wouldn't be able to use anyway.
+            spec.cluster
+                .settings
+                .find("superuser_reserved_connections")
+                .iter()
+                .filter_map(|val| val.parse::<usize>().ok())
+                .map(|val| if val > 1 { val - 1 } else { 1 })
+                .last()
+                .unwrap_or(3)
+        }
+    }
+}
 
 #[derive(Clone)]
 pub enum DB {
@@ -56,7 +467,7 @@ pub enum PerDatabasePhase {
 
 #[derive(Clone, Debug)]
 pub enum ApplySpecPhase {
-    CreateSuperUser,
+    CreateNeonSuperuser,
     DropInvalidDatabases,
     RenameRoles,
     CreateAndAlterRoles,
@@ -64,6 +475,9 @@ pub enum ApplySpecPhase {
     CreateAndAlterDatabases,
     CreateSchemaNeon,
     RunInEachDatabase { db: DB, subphase: PerDatabasePhase },
+    CreatePgauditExtension,
+    CreatePgauditlogtofileExtension,
+    DisablePostgresDBPgAudit,
     HandleOtherExtensions,
     HandleNeonExtension,
     CreateAvailabilityCheck,
@@ -180,14 +594,10 @@ async fn get_operations<'a>(
     apply_spec_phase: &'a ApplySpecPhase,
 ) -> Result<Box<dyn Iterator<Item = Operation> + 'a + Send>> {
     match apply_spec_phase {
-        ApplySpecPhase::CreateSuperUser => {
-            let query = construct_superuser_query(spec);
-
-            Ok(Box::new(once(Operation {
-                query,
-                comment: None,
-            })))
-        }
+        ApplySpecPhase::CreateNeonSuperuser => Ok(Box::new(once(Operation {
+            query: include_str!("sql/create_neon_superuser.sql").to_string(),
+            comment: None,
+        }))),
         ApplySpecPhase::DropInvalidDatabases => {
             let mut ctx = ctx.write().await;
             let databases = &mut ctx.dbs;
@@ -321,14 +731,15 @@ async fn get_operations<'a>(
                         // We do not check whether the DB exists or not,
                         // Postgres will take care of it for us
                         "delete_db" => {
+                            let (db_name, outer_tag) = op.name.pg_quote_dollar();
                             // In Postgres we can't drop a database if it is a template.
                             // So we need to unset the template flag first, but it could
                             // be a retry, so we could've already dropped the database.
                             // Check that database exists first to make it idempotent.
                             let unset_template_query: String = format!(
                                 include_str!("sql/unset_template_for_drop_dbs.sql"),
-                                datname_str = escape_literal(&op.name),
-                                datname = &op.name.pg_quote()
+                                datname = db_name,
+                                outer_tag = outer_tag,
                             );
 
                             // Use FORCE to drop database even if there are active connections.
@@ -435,6 +846,8 @@ async fn get_operations<'a>(
                                 comment: None,
                             },
                             Operation {
+                                // ALL PRIVILEGES grants CREATE, CONNECT, and TEMPORARY on the database
+                                // (see https://www.postgresql.org/docs/current/ddl-priv.html)
                                 query: format!(
                                     "GRANT ALL PRIVILEGES ON DATABASE {} TO neon_superuser",
                                     db.name.pg_quote()
@@ -473,7 +886,10 @@ async fn get_operations<'a>(
                 let edb = match databases.get(&db.name) {
                     Some(edb) => edb,
                     None => {
-                        warn!("skipping RunInEachDatabase phase {:?}, database {} doesn't exist in PostgreSQL", subphase, db.name);
+                        warn!(
+                            "skipping RunInEachDatabase phase {:?}, database {} doesn't exist in PostgreSQL",
+                            subphase, db.name
+                        );
                         return Ok(Box::new(empty()));
                     }
                 };
@@ -491,9 +907,11 @@ async fn get_operations<'a>(
                 PerDatabasePhase::DropLogicalSubscriptions => {
                     match &db {
                         DB::UserDB(db) => {
+                            let (db_name, outer_tag) = db.name.pg_quote_dollar();
                             let drop_subscription_query: String = format!(
                                 include_str!("sql/drop_subscriptions.sql"),
-                                datname_str = escape_literal(&db.name),
+                                datname_str = db_name,
+                                outer_tag = outer_tag,
                             );
 
                             let operations = vec![Operation {
@@ -532,6 +950,7 @@ async fn get_operations<'a>(
                                     DB::SystemDB => PgIdent::from("cloud_admin").pg_quote(),
                                     DB::UserDB(db) => db.owner.pg_quote(),
                                 };
+                                let (escaped_role, outer_tag) = op.name.pg_quote_dollar();
 
                                 Some(vec![
                                     // This will reassign all dependent objects to the db owner
@@ -546,7 +965,9 @@ async fn get_operations<'a>(
                                     Operation {
                                         query: format!(
                                             include_str!("sql/pre_drop_role_revoke_privileges.sql"),
-                                            role_name = quoted,
+                                            // N.B. this has to be properly dollar-escaped with `pg_quote_dollar()`
+                                            role_name = escaped_role,
+                                            outer_tag = outer_tag,
                                         ),
                                         comment: None,
                                     },
@@ -571,12 +992,14 @@ async fn get_operations<'a>(
                         DB::SystemDB => return Ok(Box::new(empty())),
                         DB::UserDB(db) => db,
                     };
+                    let (db_owner, outer_tag) = db.owner.pg_quote_dollar();
 
                     let operations = vec![
                         Operation {
                             query: format!(
                                 include_str!("sql/set_public_schema_owner.sql"),
-                                db_owner = db.owner.pg_quote()
+                                db_owner = db_owner,
+                                outer_tag = outer_tag,
                             ),
                             comment: None,
                         },
@@ -603,6 +1026,25 @@ async fn get_operations<'a>(
                 }
             }
             Ok(Box::new(empty()))
+        }
+        ApplySpecPhase::CreatePgauditExtension => Ok(Box::new(once(Operation {
+            query: String::from("CREATE EXTENSION IF NOT EXISTS pgaudit"),
+            comment: Some(String::from("create pgaudit extensions")),
+        }))),
+        ApplySpecPhase::CreatePgauditlogtofileExtension => Ok(Box::new(once(Operation {
+            query: String::from("CREATE EXTENSION IF NOT EXISTS pgauditlogtofile"),
+            comment: Some(String::from("create pgauditlogtofile extensions")),
+        }))),
+        // Disable pgaudit logging for postgres database.
+        // Postgres is neon system database used by monitors
+        // and compute_ctl tuning functions and thus generates a lot of noise.
+        // We do not consider data stored in this database as sensitive.
+        ApplySpecPhase::DisablePostgresDBPgAudit => {
+            let query = "ALTER DATABASE postgres SET pgaudit.log to 'none'";
+            Ok(Box::new(once(Operation {
+                query: query.to_string(),
+                comment: Some(query.to_string()),
+            })))
         }
         ApplySpecPhase::HandleNeonExtension => {
             let operations = vec![

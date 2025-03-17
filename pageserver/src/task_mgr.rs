@@ -40,15 +40,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::FutureExt;
+use once_cell::sync::Lazy;
 use pageserver_api::shard::TenantShardId;
 use tokio::task::JoinHandle;
 use tokio::task_local;
 use tokio_util::sync::CancellationToken;
-
 use tracing::{debug, error, info, warn};
-
-use once_cell::sync::Lazy;
-
 use utils::env;
 use utils::id::TimelineId;
 

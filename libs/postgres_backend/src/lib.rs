@@ -4,28 +4,28 @@
 //! is rather narrow, but we can extend it once required.
 #![deny(unsafe_code)]
 #![deny(clippy::undocumented_unsafe_blocks)]
-use anyhow::Context;
-use bytes::Bytes;
-use serde::{Deserialize, Serialize};
+use std::future::Future;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
-use std::os::fd::AsRawFd;
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::Arc;
-use std::task::{ready, Poll};
+use std::task::{Poll, ready};
 use std::{fmt, io};
-use std::{future::Future, str::FromStr};
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_rustls::TlsAcceptor;
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, trace, warn};
 
+use anyhow::Context;
+use bytes::Bytes;
 use pq_proto::framed::{ConnectionError, Framed, FramedReader, FramedWriter};
 use pq_proto::{
     BeMessage, FeMessage, FeStartupPacket, ProtocolError, SQLSTATE_ADMIN_SHUTDOWN,
     SQLSTATE_INTERNAL_ERROR, SQLSTATE_SUCCESSFUL_COMPLETION,
 };
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_rustls::TlsAcceptor;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, trace, warn};
 
 /// An error, occurred during query processing:
 /// either during the connection ([`ConnectionError`]) or before/after it.
@@ -746,7 +746,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
                     match e {
                         QueryError::Shutdown => return Ok(ProcessMsgResult::Break),
                         QueryError::SimulatedConnectionError => {
-                            return Err(QueryError::SimulatedConnectionError)
+                            return Err(QueryError::SimulatedConnectionError);
                         }
                         err @ QueryError::Reconnect => {
                             // Instruct the client to reconnect, stop processing messages
@@ -1020,7 +1020,9 @@ fn log_query_error(query: &str, e: &QueryError) {
             }
         }
         QueryError::Disconnected(other_connection_error) => {
-            error!("query handler for '{query}' failed with connection error: {other_connection_error:?}")
+            error!(
+                "query handler for '{query}' failed with connection error: {other_connection_error:?}"
+            )
         }
         QueryError::SimulatedConnectionError => {
             error!("query handler for query '{query}' failed due to a simulated connection error")

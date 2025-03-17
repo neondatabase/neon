@@ -42,6 +42,17 @@ def test_timeline_archive(neon_env_builder: NeonEnvBuilder, shard_count: int):
         # If we run the unsharded version, talk to the storage controller
         ps_http = env.storage_controller.pageserver_api()
 
+    for ps in env.pageservers:
+        # We make /archival_config requests that are intended to fail.
+        # It's expected that storcon drops requests to other pageservers after
+        # it gets the first error (https://github.com/neondatabase/neon/issues/11177)
+        ps.allowed_errors.extend(
+            [
+                ".*WARN.* path=/v1/tenant/.*/archival_config .*request was dropped before completing",
+                ".*ERROR.* path=/v1/tenant/.*/archival_config .*Cancelled request finished with an error.*",
+            ]
+        )
+
     # first try to archive a non existing timeline for an existing tenant:
     invalid_timeline_id = TimelineId.generate()
     with pytest.raises(PageserverApiException, match="timeline not found") as exc:

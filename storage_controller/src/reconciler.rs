@@ -1,6 +1,8 @@
-use crate::pageserver_client::PageserverClient;
-use crate::persistence::Persistence;
-use crate::{compute_hook, service};
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use json_structural_diff::JsonDiff;
 use pageserver_api::controller_api::{AvailabilityZone, MigrationConfig, PlacementPolicy};
 use pageserver_api::models::{
@@ -9,10 +11,6 @@ use pageserver_api::models::{
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use pageserver_client::mgmt_api;
 use reqwest::StatusCode;
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use utils::backoff::exponential_backoff;
 use utils::generation::Generation;
@@ -23,7 +21,10 @@ use utils::sync::gate::GateGuard;
 
 use crate::compute_hook::{ComputeHook, NotifyError};
 use crate::node::Node;
+use crate::pageserver_client::PageserverClient;
+use crate::persistence::Persistence;
 use crate::tenant_shard::{IntentState, ObservedState, ObservedStateDelta, ObservedStateLocation};
+use crate::{compute_hook, service};
 
 const DEFAULT_HEATMAP_PERIOD: Duration = Duration::from_secs(60);
 
@@ -298,6 +299,7 @@ impl Reconciler {
                         .await
                 },
                 &self.service_config.pageserver_jwt_token,
+                &self.service_config.ssl_ca_cert,
                 1,
                 3,
                 timeout,
@@ -419,7 +421,8 @@ impl Reconciler {
             node.get_id(),
             node.base_url(),
             self.service_config.pageserver_jwt_token.as_deref(),
-        );
+            self.service_config.ssl_ca_cert.clone(),
+        )?;
 
         client
             .wait_lsn(
@@ -442,7 +445,8 @@ impl Reconciler {
             node.get_id(),
             node.base_url(),
             self.service_config.pageserver_jwt_token.as_deref(),
-        );
+            self.service_config.ssl_ca_cert.clone(),
+        )?;
 
         let timelines = client.timeline_list(&tenant_shard_id).await?;
         Ok(timelines
@@ -480,6 +484,7 @@ impl Reconciler {
                             .await
                     },
                     &self.service_config.pageserver_jwt_token,
+                    &self.service_config.ssl_ca_cert,
                     1,
                     3,
                     request_download_timeout * 2,
@@ -511,7 +516,8 @@ impl Reconciler {
             } else if status == StatusCode::ACCEPTED {
                 let total_runtime = started_at.elapsed();
                 if total_runtime > total_download_timeout {
-                    tracing::warn!("Timed out after {}ms downloading layers to {node}.  Progress so far: {}/{} layers, {}/{} bytes",
+                    tracing::warn!(
+                        "Timed out after {}ms downloading layers to {node}.  Progress so far: {}/{} layers, {}/{} bytes",
                         total_runtime.as_millis(),
                         progress.layers_downloaded,
                         progress.layers_total,
@@ -773,6 +779,7 @@ impl Reconciler {
                 .with_client_retries(
                     |client| async move { client.get_location_config(tenant_shard_id).await },
                     &self.service_config.pageserver_jwt_token,
+                    &self.service_config.ssl_ca_cert,
                     1,
                     1,
                     Duration::from_secs(5),
@@ -1121,6 +1128,7 @@ impl Reconciler {
                 .with_client_retries(
                     |client| async move { client.get_location_config(tenant_shard_id).await },
                     &self.service_config.pageserver_jwt_token,
+                    &self.service_config.ssl_ca_cert,
                     1,
                     3,
                     Duration::from_secs(5),

@@ -1,34 +1,28 @@
-use futures::StreamExt;
-use std::{
-    collections::{HashMap, HashSet},
-    str::FromStr,
-    time::Duration,
-};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use pageserver_api::{
-    controller_api::{
-        AvailabilityZone, NodeAvailabilityWrapper, NodeDescribeResponse, NodeShardResponse,
-        SafekeeperDescribeResponse, SafekeeperSchedulingPolicyRequest, ShardSchedulingPolicy,
-        ShardsPreferredAzsRequest, ShardsPreferredAzsResponse, SkSchedulingPolicy,
-        TenantCreateRequest, TenantDescribeResponse, TenantPolicyRequest,
-    },
-    models::{
-        EvictionPolicy, EvictionPolicyLayerAccessThreshold, LocationConfigSecondary,
-        ShardParameters, TenantConfig, TenantConfigPatchRequest, TenantConfigRequest,
-        TenantShardSplitRequest, TenantShardSplitResponse,
-    },
-    shard::{ShardStripeSize, TenantShardId},
-};
-use pageserver_client::mgmt_api::{self};
-use reqwest::{Method, StatusCode, Url};
-use utils::id::{NodeId, TenantId, TimelineId};
-
+use futures::StreamExt;
 use pageserver_api::controller_api::{
-    NodeConfigureRequest, NodeRegisterRequest, NodeSchedulingPolicy, PlacementPolicy,
+    AvailabilityZone, MigrationConfig, NodeAvailabilityWrapper, NodeConfigureRequest,
+    NodeDescribeResponse, NodeRegisterRequest, NodeSchedulingPolicy, NodeShardResponse,
+    PlacementPolicy, SafekeeperDescribeResponse, SafekeeperSchedulingPolicyRequest,
+    ShardSchedulingPolicy, ShardsPreferredAzsRequest, ShardsPreferredAzsResponse,
+    SkSchedulingPolicy, TenantCreateRequest, TenantDescribeResponse, TenantPolicyRequest,
     TenantShardMigrateRequest, TenantShardMigrateResponse,
 };
+use pageserver_api::models::{
+    EvictionPolicy, EvictionPolicyLayerAccessThreshold, ShardParameters, TenantConfig,
+    TenantConfigPatchRequest, TenantConfigRequest, TenantShardSplitRequest,
+    TenantShardSplitResponse,
+};
+use pageserver_api::shard::{ShardStripeSize, TenantShardId};
+use pageserver_client::mgmt_api::{self};
+use reqwest::{Method, StatusCode, Url};
 use storage_controller_client::control_api::Client;
+use utils::id::{NodeId, TenantId, TimelineId};
 
 #[derive(Subcommand, Debug)]
 enum Command {
@@ -119,6 +113,15 @@ enum Command {
         tenant_shard_id: TenantShardId,
         #[arg(long)]
         node: NodeId,
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        prewarm: bool,
+        #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+        override_scheduler: bool,
+    },
+    /// Watch the location of a tenant shard evolve, e.g. while expecting it to migrate
+    TenantShardWatch {
+        #[arg(long)]
+        tenant_shard_id: TenantShardId,
     },
     /// Migrate the secondary location for a tenant shard to a specific pageserver.
     TenantShardMigrateSecondary {
@@ -152,12 +155,6 @@ enum Command {
     },
     /// Print details about a particular tenant, including all its shards' states.
     TenantDescribe {
-        #[arg(long)]
-        tenant_id: TenantId,
-    },
-    /// For a tenant which hasn't been onboarded to the storage controller yet, add it in secondary
-    /// mode so that it can warm up content on a pageserver.
-    TenantWarmup {
         #[arg(long)]
         tenant_id: TenantId,
     },
@@ -276,6 +273,10 @@ struct Cli {
     /// a token with both scopes to use with this tool.
     jwt: Option<String>,
 
+    #[arg(long)]
+    /// Trusted root CA certificate to use in https APIs.
+    ssl_ca_file: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -386,9 +387,17 @@ async fn main() -> anyhow::Result<()> {
 
     let storcon_client = Client::new(cli.api.clone(), cli.jwt.clone());
 
+    let ssl_ca_cert = match &cli.ssl_ca_file {
+        Some(ssl_ca_file) => {
+            let buf = tokio::fs::read(ssl_ca_file).await?;
+            Some(reqwest::Certificate::from_pem(&buf)?)
+        }
+        None => None,
+    };
+
     let mut trimmed = cli.api.to_string();
     trimmed.pop();
-    let vps_client = mgmt_api::Client::new(trimmed, cli.jwt.as_deref());
+    let vps_client = mgmt_api::Client::new(trimmed, cli.jwt.as_deref(), ssl_ca_cert)?;
 
     match cli.command {
         Command::NodeRegister {
@@ -626,19 +635,43 @@ async fn main() -> anyhow::Result<()> {
         Command::TenantShardMigrate {
             tenant_shard_id,
             node,
+            prewarm,
+            override_scheduler,
         } => {
-            let req = TenantShardMigrateRequest {
-                node_id: node,
-                migration_config: None,
+            let migration_config = MigrationConfig {
+                prewarm,
+                override_scheduler,
+                ..Default::default()
             };
 
-            storcon_client
+            let req = TenantShardMigrateRequest {
+                node_id: node,
+                origin_node_id: None,
+                migration_config,
+            };
+
+            match storcon_client
                 .dispatch::<TenantShardMigrateRequest, TenantShardMigrateResponse>(
                     Method::PUT,
                     format!("control/v1/tenant/{tenant_shard_id}/migrate"),
                     Some(req),
                 )
-                .await?;
+                .await
+            {
+                Err(mgmt_api::Error::ApiError(StatusCode::PRECONDITION_FAILED, msg)) => {
+                    anyhow::bail!(
+                        "Migration to {node} rejected, may require `--force` ({}) ",
+                        msg
+                    );
+                }
+                Err(e) => return Err(e.into()),
+                Ok(_) => {}
+            }
+
+            watch_tenant_shard(storcon_client, tenant_shard_id, Some(node)).await?;
+        }
+        Command::TenantShardWatch { tenant_shard_id } => {
+            watch_tenant_shard(storcon_client, tenant_shard_id, None).await?;
         }
         Command::TenantShardMigrateSecondary {
             tenant_shard_id,
@@ -646,7 +679,8 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let req = TenantShardMigrateRequest {
                 node_id: node,
-                migration_config: None,
+                origin_node_id: None,
+                migration_config: MigrationConfig::default(),
             };
 
             storcon_client
@@ -831,97 +865,11 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?;
         }
-        Command::TenantWarmup { tenant_id } => {
-            let describe_response = storcon_client
-                .dispatch::<(), TenantDescribeResponse>(
-                    Method::GET,
-                    format!("control/v1/tenant/{tenant_id}"),
-                    None,
-                )
-                .await;
-            match describe_response {
-                Ok(describe) => {
-                    if matches!(describe.policy, PlacementPolicy::Secondary) {
-                        // Fine: it's already known to controller in secondary mode: calling
-                        // again to put it into secondary mode won't cause problems.
-                    } else {
-                        anyhow::bail!("Tenant already present with policy {:?}", describe.policy);
-                    }
-                }
-                Err(mgmt_api::Error::ApiError(StatusCode::NOT_FOUND, _)) => {
-                    // Fine: this tenant isn't know to the storage controller yet.
-                }
-                Err(e) => {
-                    // Unexpected API error
-                    return Err(e.into());
-                }
-            }
-
-            vps_client
-                .location_config(
-                    TenantShardId::unsharded(tenant_id),
-                    pageserver_api::models::LocationConfig {
-                        mode: pageserver_api::models::LocationConfigMode::Secondary,
-                        generation: None,
-                        secondary_conf: Some(LocationConfigSecondary { warm: true }),
-                        shard_number: 0,
-                        shard_count: 0,
-                        shard_stripe_size: ShardParameters::DEFAULT_STRIPE_SIZE.0,
-                        tenant_conf: TenantConfig::default(),
-                    },
-                    None,
-                    true,
-                )
-                .await?;
-
-            let describe_response = storcon_client
-                .dispatch::<(), TenantDescribeResponse>(
-                    Method::GET,
-                    format!("control/v1/tenant/{tenant_id}"),
-                    None,
-                )
-                .await?;
-
-            let secondary_ps_id = describe_response
-                .shards
-                .first()
-                .unwrap()
-                .node_secondary
-                .first()
-                .unwrap();
-
-            println!("Tenant {tenant_id} warming up on pageserver {secondary_ps_id}");
-            loop {
-                let (status, progress) = vps_client
-                    .tenant_secondary_download(
-                        TenantShardId::unsharded(tenant_id),
-                        Some(Duration::from_secs(10)),
-                    )
-                    .await?;
-                println!(
-                    "Progress: {}/{} layers, {}/{} bytes",
-                    progress.layers_downloaded,
-                    progress.layers_total,
-                    progress.bytes_downloaded,
-                    progress.bytes_total
-                );
-                match status {
-                    StatusCode::OK => {
-                        println!("Download complete");
-                        break;
-                    }
-                    StatusCode::ACCEPTED => {
-                        // Loop
-                    }
-                    _ => {
-                        anyhow::bail!("Unexpected download status: {status}");
-                    }
-                }
-            }
-        }
         Command::TenantDrop { tenant_id, unclean } => {
             if !unclean {
-                anyhow::bail!("This command is not a tenant deletion, and uncleanly drops all controller state for the tenant.  If you know what you're doing, add `--unclean` to proceed.")
+                anyhow::bail!(
+                    "This command is not a tenant deletion, and uncleanly drops all controller state for the tenant.  If you know what you're doing, add `--unclean` to proceed."
+                )
             }
             storcon_client
                 .dispatch::<(), ()>(
@@ -933,7 +881,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::NodeDrop { node_id, unclean } => {
             if !unclean {
-                anyhow::bail!("This command is not a clean node decommission, and uncleanly drops all controller state for the node, without checking if any tenants still refer to it.  If you know what you're doing, add `--unclean` to proceed.")
+                anyhow::bail!(
+                    "This command is not a clean node decommission, and uncleanly drops all controller state for the node, without checking if any tenants still refer to it.  If you know what you're doing, add `--unclean` to proceed."
+                )
             }
             storcon_client
                 .dispatch::<(), ()>(Method::POST, format!("debug/v1/node/{node_id}/drop"), None)
@@ -1108,7 +1058,8 @@ async fn main() -> anyhow::Result<()> {
                                 format!("control/v1/tenant/{}/migrate", mv.tenant_shard_id),
                                 Some(TenantShardMigrateRequest {
                                     node_id: mv.to,
-                                    migration_config: None,
+                                    origin_node_id: Some(mv.from),
+                                    migration_config: MigrationConfig::default(),
                                 }),
                             )
                             .await
@@ -1285,5 +1236,70 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+static WATCH_INTERVAL: Duration = Duration::from_secs(5);
+
+async fn watch_tenant_shard(
+    storcon_client: Client,
+    tenant_shard_id: TenantShardId,
+    until_migrated_to: Option<NodeId>,
+) -> anyhow::Result<()> {
+    if let Some(until_migrated_to) = until_migrated_to {
+        println!(
+            "Waiting for tenant shard {} to be migrated to node {}",
+            tenant_shard_id, until_migrated_to
+        );
+    }
+
+    loop {
+        let desc = storcon_client
+            .dispatch::<(), TenantDescribeResponse>(
+                Method::GET,
+                format!("control/v1/tenant/{}", tenant_shard_id.tenant_id),
+                None,
+            )
+            .await?;
+
+        // Output the current state of the tenant shard
+        let shard = desc
+            .shards
+            .iter()
+            .find(|s| s.tenant_shard_id == tenant_shard_id)
+            .ok_or(anyhow::anyhow!("Tenant shard not found"))?;
+        let summary = format!(
+            "attached: {} secondary: {} {}",
+            shard
+                .node_attached
+                .map(|n| format!("{}", n))
+                .unwrap_or("none".to_string()),
+            shard
+                .node_secondary
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            if shard.is_reconciling {
+                "(reconciler active)"
+            } else {
+                "(reconciler idle)"
+            }
+        );
+        println!("{}", summary);
+
+        // Maybe drop out if we finished migration
+        if let Some(until_migrated_to) = until_migrated_to {
+            if shard.node_attached == Some(until_migrated_to) && !shard.is_reconciling {
+                println!(
+                    "Tenant shard {} is now on node {}",
+                    tenant_shard_id, until_migrated_to
+                );
+                break;
+            }
+        }
+
+        tokio::time::sleep(WATCH_INTERVAL).await;
+    }
     Ok(())
 }

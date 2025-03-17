@@ -1,9 +1,11 @@
 use anyhow::Context;
+use tracing::instrument;
 
 pub const DISK_QUOTA_BIN: &str = "/neonvm/bin/set-disk-quota";
 
 /// If size_bytes is 0, it disables the quota. Otherwise, it sets filesystem quota to size_bytes.
 /// `fs_mountpoint` should point to the mountpoint of the filesystem where the quota should be set.
+#[instrument]
 pub fn set_disk_quota(size_bytes: u64, fs_mountpoint: &str) -> anyhow::Result<()> {
     let size_kb = size_bytes / 1024;
     // run `/neonvm/bin/set-disk-quota {size_kb} {mountpoint}`

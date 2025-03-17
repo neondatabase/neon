@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
-use axum::{extract::State, response::Response};
+use axum::extract::State;
+use axum::response::Response;
 use compute_api::responses::ComputeStatus;
 use http::StatusCode;
 
-use crate::{checker::check_writability, compute::ComputeNode, http::JsonResponse};
+use crate::checker::check_writability;
+use crate::compute::ComputeNode;
+use crate::http::JsonResponse;
 
 /// Check that the compute is currently running.
 pub(in crate::http) async fn is_writable(State(compute): State<Arc<ComputeNode>>) -> Response {

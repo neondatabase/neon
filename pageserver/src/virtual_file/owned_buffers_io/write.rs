@@ -1,20 +1,14 @@
 mod flush;
 use std::sync::Arc;
 
+pub(crate) use flush::FlushControl;
 use flush::FlushHandle;
 use tokio_epoll_uring::IoBuf;
 
-use crate::{
-    context::RequestContext,
-    virtual_file::{IoBuffer, IoBufferMut},
-};
-
-use super::{
-    io_buf_aligned::IoBufAligned,
-    io_buf_ext::{FullSlice, IoBufExt},
-};
-
-pub(crate) use flush::FlushControl;
+use super::io_buf_aligned::IoBufAligned;
+use super::io_buf_ext::{FullSlice, IoBufExt};
+use crate::context::RequestContext;
+use crate::virtual_file::{IoBuffer, IoBufferMut};
 
 pub(crate) trait CheapCloneForRead {
     /// Returns a cheap clone of the buffer.
@@ -37,7 +31,7 @@ pub trait OwnedAsyncWriter {
         buf: FullSlice<Buf>,
         offset: u64,
         ctx: &RequestContext,
-    ) -> impl std::future::Future<Output = std::io::Result<FullSlice<Buf>>> + Send;
+    ) -> impl std::future::Future<Output = (FullSlice<Buf>, std::io::Result<()>)> + Send;
 }
 
 /// A wrapper aorund an [`OwnedAsyncWriter`] that uses a [`Buffer`] to batch
@@ -72,6 +66,7 @@ where
         buf_new: impl Fn() -> B,
         gate_guard: utils::sync::gate::GateGuard,
         ctx: &RequestContext,
+        flush_task_span: tracing::Span,
     ) -> Self {
         Self {
             writer: writer.clone(),
@@ -81,6 +76,7 @@ where
                 buf_new(),
                 gate_guard,
                 ctx.attached_child(),
+                flush_task_span,
             ),
             bytes_submitted: 0,
         }
@@ -275,12 +271,12 @@ mod tests {
             buf: FullSlice<Buf>,
             offset: u64,
             _: &RequestContext,
-        ) -> std::io::Result<FullSlice<Buf>> {
+        ) -> (FullSlice<Buf>, std::io::Result<()>) {
             self.writes
                 .lock()
                 .unwrap()
                 .push((Vec::from(&buf[..]), offset));
-            Ok(buf)
+            (buf, Ok(()))
         }
     }
 
@@ -299,6 +295,7 @@ mod tests {
             || IoBufferMut::with_capacity(2),
             gate.enter()?,
             ctx,
+            tracing::Span::none(),
         );
 
         writer.write_buffered_borrowed(b"abc", ctx).await?;

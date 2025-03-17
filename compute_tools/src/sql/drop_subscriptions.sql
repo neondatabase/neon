@@ -1,4 +1,4 @@
-DO $$
+DO ${outer_tag}$
 DECLARE
     subname TEXT;
 BEGIN
@@ -9,4 +9,4 @@ BEGIN
         EXECUTE format('DROP SUBSCRIPTION %I;', subname);
     END LOOP;
 END;
-$$;
+${outer_tag}$;

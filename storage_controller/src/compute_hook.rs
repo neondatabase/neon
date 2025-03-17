@@ -1,7 +1,8 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::error::Error as _;
 use std::sync::Arc;
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 
 use control_plane::endpoint::{ComputeControlPlane, EndpointStatus};
 use control_plane::local_env::LocalEnv;
@@ -12,11 +13,9 @@ use pageserver_api::shard::{ShardCount, ShardNumber, ShardStripeSize, TenantShar
 use postgres_connection::parse_host_port;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
-use tracing::{info_span, Instrument};
-use utils::{
-    backoff::{self},
-    id::{NodeId, TenantId},
-};
+use tracing::{Instrument, info_span};
+use utils::backoff::{self};
+use utils::id::{NodeId, TenantId};
 
 use crate::service::Config;
 
@@ -625,7 +624,16 @@ impl ComputeHook {
             MaybeSendResult::Transmit((request, lock)) => (request, lock),
         };
 
-        let result = if let Some(notify_url) = &self.config.compute_hook_url {
+        let compute_hook_url = if let Some(control_plane_url) = &self.config.control_plane_url {
+            Some(if control_plane_url.ends_with('/') {
+                format!("{control_plane_url}notify-attach")
+            } else {
+                format!("{control_plane_url}/notify-attach")
+            })
+        } else {
+            self.config.compute_hook_url.clone()
+        };
+        let result = if let Some(notify_url) = &compute_hook_url {
             self.do_notify(notify_url, &request, cancel).await
         } else {
             self.do_notify_local(&request).await.map_err(|e| {

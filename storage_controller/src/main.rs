@@ -1,26 +1,28 @@
-use anyhow::{anyhow, Context};
-use clap::Parser;
-use hyper0::Uri;
-use metrics::launch_timestamp::LaunchTimestamp;
-use metrics::BuildInfo;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+
+use anyhow::{Context, anyhow};
+use clap::Parser;
+use hyper0::Uri;
+use metrics::BuildInfo;
+use metrics::launch_timestamp::LaunchTimestamp;
+use reqwest::Certificate;
 use storage_controller::http::make_router;
 use storage_controller::metrics::preinitialize_metrics;
 use storage_controller::persistence::Persistence;
 use storage_controller::service::chaos_injector::ChaosInjector;
 use storage_controller::service::{
-    Config, Service, HEARTBEAT_INTERVAL_DEFAULT, LONG_RECONCILE_THRESHOLD_DEFAULT,
+    Config, HEARTBEAT_INTERVAL_DEFAULT, LONG_RECONCILE_THRESHOLD_DEFAULT,
     MAX_OFFLINE_INTERVAL_DEFAULT, MAX_WARMING_UP_INTERVAL_DEFAULT,
-    PRIORITY_RECONCILER_CONCURRENCY_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT,
+    PRIORITY_RECONCILER_CONCURRENCY_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT, Service,
 };
 use tokio::signal::unix::SignalKind;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use utils::auth::{JwtAuth, SwappableJwtAuth};
 use utils::logging::{self, LogFormat};
-
 use utils::sentry_init::init_sentry;
 use utils::{project_build_tag, project_git_version, tcp_listener};
 
@@ -34,7 +36,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 /// This adds roughly 3% overhead for allocations on average, which is acceptable considering
 /// performance-sensitive code will avoid allocations as far as possible anyway.
 #[allow(non_upper_case_globals)]
-#[export_name = "malloc_conf"]
+#[unsafe(export_name = "malloc_conf")]
 pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:21\0";
 
 #[derive(Parser)]
@@ -69,6 +71,10 @@ struct Cli {
     #[arg(long)]
     compute_hook_url: Option<String>,
 
+    /// URL to control plane storage API prefix
+    #[arg(long)]
+    control_plane_url: Option<String>,
+
     /// URL to connect to postgres, like postgresql://localhost:1234/storage_controller
     #[arg(long)]
     database_url: Option<String>,
@@ -98,6 +104,10 @@ struct Cli {
     #[arg(long)]
     priority_reconciler_concurrency: Option<usize>,
 
+    /// Tenant API rate limit, as requests per second per tenant.
+    #[arg(long, default_value = "10")]
+    tenant_rate_limit: NonZeroU32,
+
     /// How long to wait for the initial database connection to be available.
     #[arg(long, default_value = "5s")]
     db_connect_timeout: humantime::Duration,
@@ -123,21 +133,33 @@ struct Cli {
     #[arg(long)]
     chaos_exit_crontab: Option<cron::Schedule>,
 
-    // Maximum acceptable lag for the secondary location while draining
-    // a pageserver
+    /// Maximum acceptable lag for the secondary location while draining
+    /// a pageserver
     #[arg(long)]
     max_secondary_lag_bytes: Option<u64>,
 
-    // Period with which to send heartbeats to registered nodes
+    /// Period with which to send heartbeats to registered nodes
     #[arg(long)]
     heartbeat_interval: Option<humantime::Duration>,
 
     #[arg(long)]
     long_reconcile_threshold: Option<humantime::Duration>,
 
-    // Flag to use https for requests to pageserver API.
+    /// Flag to use https for requests to pageserver API.
     #[arg(long, default_value = "false")]
     use_https_pageserver_api: bool,
+
+    // Whether to put timelines onto safekeepers
+    #[arg(long, default_value = "false")]
+    timelines_onto_safekeepers: bool,
+
+    /// Flag to use https for requests to safekeeper API.
+    #[arg(long, default_value = "false")]
+    use_https_safekeeper_api: bool,
+
+    /// Trusted root CA certificate to use in https APIs.
+    #[arg(long)]
+    ssl_ca_file: Option<PathBuf>,
 }
 
 enum StrictMode {
@@ -281,30 +303,27 @@ async fn async_main() -> anyhow::Result<()> {
 
     let secrets = Secrets::load(&args).await?;
 
-    // TODO: once we've rolled out the safekeeper JWT token everywhere, put it into the validation code below
-    tracing::info!(
-        "safekeeper_jwt_token set: {:?}",
-        secrets.safekeeper_jwt_token.is_some()
-    );
-
     // Validate required secrets and arguments are provided in strict mode
     match strict_mode {
         StrictMode::Strict
             if (secrets.public_key.is_none()
                 || secrets.pageserver_jwt_token.is_none()
-                || secrets.control_plane_jwt_token.is_none()) =>
+                || secrets.control_plane_jwt_token.is_none()
+                || secrets.safekeeper_jwt_token.is_none()) =>
         {
             // Production systems should always have secrets configured: if public_key was not set
             // then we would implicitly disable auth.
             anyhow::bail!(
-                    "Insecure config!  One or more secrets is not set.  This is only permitted in `--dev` mode"
-                );
+                "Insecure config!  One or more secrets is not set.  This is only permitted in `--dev` mode"
+            );
         }
-        StrictMode::Strict if args.compute_hook_url.is_none() => {
-            // Production systems should always have a compute hook set, to prevent falling
+        StrictMode::Strict
+            if args.compute_hook_url.is_none() && args.control_plane_url.is_none() =>
+        {
+            // Production systems should always have a control plane URL set, to prevent falling
             // back to trying to use neon_local.
             anyhow::bail!(
-                "`--compute-hook-url` is not set: this is only permitted in `--dev` mode"
+                "neither `--compute-hook-url` nor `--control-plane-url` are set: this is only permitted in `--dev` mode"
             );
         }
         StrictMode::Strict => {
@@ -315,12 +334,22 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
+    let ssl_ca_cert = match args.ssl_ca_file.as_ref() {
+        Some(ssl_ca_file) => {
+            tracing::info!("Using ssl root CA file: {ssl_ca_file:?}");
+            let buf = tokio::fs::read(ssl_ca_file).await?;
+            Some(Certificate::from_pem(&buf)?)
+        }
+        None => None,
+    };
+
     let config = Config {
         pageserver_jwt_token: secrets.pageserver_jwt_token,
         safekeeper_jwt_token: secrets.safekeeper_jwt_token,
         control_plane_jwt_token: secrets.control_plane_jwt_token,
         peer_jwt_token: secrets.peer_jwt_token,
         compute_hook_url: args.compute_hook_url,
+        control_plane_url: args.control_plane_url,
         max_offline_interval: args
             .max_offline_interval
             .map(humantime::Duration::into)
@@ -335,6 +364,7 @@ async fn async_main() -> anyhow::Result<()> {
         priority_reconciler_concurrency: args
             .priority_reconciler_concurrency
             .unwrap_or(PRIORITY_RECONCILER_CONCURRENCY_DEFAULT),
+        tenant_rate_limit: args.tenant_rate_limit,
         split_threshold: args.split_threshold,
         neon_local_repo_dir: args.neon_local_repo_dir,
         max_secondary_lag_bytes: args.max_secondary_lag_bytes,
@@ -350,6 +380,9 @@ async fn async_main() -> anyhow::Result<()> {
         start_as_candidate: args.start_as_candidate,
         http_service_port: args.listen.port() as i32,
         use_https_pageserver_api: args.use_https_pageserver_api,
+        use_https_safekeeper_api: args.use_https_safekeeper_api,
+        ssl_ca_cert,
+        timelines_onto_safekeepers: args.timelines_onto_safekeepers,
     };
 
     // Validate that we can connect to the database

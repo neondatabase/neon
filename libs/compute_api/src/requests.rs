@@ -1,10 +1,9 @@
 //! Structs representing the JSON formats used in the compute_ctl's HTTP API.
-use crate::{
-    privilege::Privilege,
-    responses::ComputeCtlConfig,
-    spec::{ComputeSpec, ExtVersion, PgIdent},
-};
 use serde::{Deserialize, Serialize};
+
+use crate::privilege::Privilege;
+use crate::responses::ComputeCtlConfig;
+use crate::spec::{ComputeSpec, ExtVersion, PgIdent};
 
 /// Request of the /configure API
 ///
@@ -30,4 +29,10 @@ pub struct SetRoleGrantsRequest {
     pub schema: PgIdent,
     pub privileges: Vec<Privilege>,
     pub role: PgIdent,
+}
+
+/// Request of the /configure_telemetry API
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ConfigureTelemetryRequest {
+    pub logs_export_host: Option<String>,
 }

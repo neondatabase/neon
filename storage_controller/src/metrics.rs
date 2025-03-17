@@ -7,17 +7,18 @@
 //!
 //! The rest of the code defines label group types and deals with converting outer types to labels.
 //!
+use std::sync::Mutex;
+
 use bytes::Bytes;
-use measured::{label::LabelValue, metric::histogram, FixedCardinalityLabel, MetricGroup};
+use measured::label::LabelValue;
+use measured::metric::histogram;
+use measured::{FixedCardinalityLabel, MetricGroup};
 use metrics::NeonMetrics;
 use once_cell::sync::Lazy;
-use std::sync::Mutex;
 use strum::IntoEnumIterator;
 
-use crate::{
-    persistence::{DatabaseError, DatabaseOperation},
-    service::LeadershipStatus,
-};
+use crate::persistence::{DatabaseError, DatabaseOperation};
+use crate::service::LeadershipStatus;
 
 pub(crate) static METRICS_REGISTRY: Lazy<StorageControllerMetrics> =
     Lazy::new(StorageControllerMetrics::default);
@@ -74,6 +75,10 @@ pub(crate) struct StorageControllerMetricGroup {
     #[metric(metadata = histogram::Thresholds::exponential_buckets(0.1, 2.0))]
     pub(crate) storage_controller_http_request_latency:
         measured::HistogramVec<HttpRequestLatencyLabelGroupSet, 5>,
+
+    /// HTTP rate limiting latency across all tenants and endpoints
+    #[metric(metadata = histogram::Thresholds::exponential_buckets(0.1, 10.0))]
+    pub(crate) storage_controller_http_request_rate_limited: measured::Histogram<10>,
 
     /// Count of HTTP requests to the pageserver that resulted in an error,
     /// broken down by the pageserver node id, request name and method

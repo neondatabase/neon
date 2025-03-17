@@ -1,20 +1,20 @@
 //! This file contains generic utility functions over the interface types,
 //! which could be handy for any compaction implementation.
-use crate::interface::*;
+use std::collections::{BinaryHeap, VecDeque};
+use std::fmt::Display;
+use std::future::Future;
+use std::ops::{DerefMut, Range};
+use std::pin::Pin;
+use std::task::{Poll, ready};
 
 use futures::future::BoxFuture;
 use futures::{Stream, StreamExt};
 use itertools::Itertools;
 use pageserver_api::shard::ShardIdentity;
 use pin_project_lite::pin_project;
-use std::collections::BinaryHeap;
-use std::collections::VecDeque;
-use std::fmt::Display;
-use std::future::Future;
-use std::ops::{DerefMut, Range};
-use std::pin::Pin;
-use std::task::{ready, Poll};
 use utils::lsn::Lsn;
+
+use crate::interface::*;
 
 pub const PAGE_SZ: u64 = 8192;
 
@@ -221,12 +221,12 @@ where
             // performed implicitly when `top` is dropped).
             if let Some(mut top) = this.heap.peek_mut() {
                 match top.deref_mut() {
-                    LazyLoadLayer::Unloaded(ref mut l) => {
+                    LazyLoadLayer::Unloaded(l) => {
                         let fut = l.load_keys(this.ctx);
                         this.load_future.set(Some(Box::pin(fut)));
                         continue;
                     }
-                    LazyLoadLayer::Loaded(ref mut entries) => {
+                    LazyLoadLayer::Loaded(entries) => {
                         let result = entries.pop_front().unwrap();
                         if entries.is_empty() {
                             std::collections::binary_heap::PeekMut::pop(top);
