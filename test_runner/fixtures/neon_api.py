@@ -116,7 +116,7 @@ class NeonAPI:
         parent_id: str | None = None,
         add_endpoint=True,
     ) -> dict[str, Any]:
-        data = {}
+        data: dict[str, Any] = {}
         if add_endpoint:
             data["endpoints"] = [{"type": "read_write"}]
         if parent_id or branch_name:

@@ -36,12 +36,10 @@ class NeonEndpoint:
         self.branch.endpoints[self.id] = self
         self.project.endpoints[self.id] = self
         self.host: str = endpoint["host"]
-        self.benchmark: subprocess.Popen | None = None
-        self.connect_env: dict[str, str] | None = None
+        self.benchmark: subprocess.Popen[Any] | None = None
         # The connection environment is used when running benchmark
-        if self.branch.connect_env:
-            self.connect_env = self.branch.connect_env.copy()
-            self.connect_env["PGHOST"] = self.host
+        self.connect_env = self.branch.connect_env.copy()
+        self.connect_env["PGHOST"] = self.host
 
     def delete(self):
         self.project.delete_endpoint(self.id)
@@ -85,24 +83,18 @@ class NeonBranch:
         if self.parent is not None:
             self.parent.children[self.id] = self
         self.endpoints: dict[str, NeonEndpoint] = {}
-        self.connection_parameters: dict[str, str] | None = (
-            branch["connection_uris"][0]["connection_parameters"]
-            if "connection_uris" in branch
-            else None
-        )
-        self.benchmark: subprocess.Popen | None = None
+        self.connection_parameters: dict[str, str] = branch["connection_uris"][0][
+            "connection_parameters"
+        ]
+        self.benchmark: subprocess.Popen[Any] | None = None
         self.updated_at: datetime = datetime.fromisoformat(branch["branch"]["updated_at"])
-        self.connect_env = (
-            {
-                "PGHOST": self.connection_parameters["host"],
-                "PGUSER": self.connection_parameters["role"],
-                "PGDATABASE": self.connection_parameters["database"],
-                "PGPASSWORD": self.connection_parameters["password"],
-                "PGSSLMODE": "require",
-            }
-            if self.connection_parameters
-            else None
-        )
+        self.connect_env: dict[str, str] = {
+            "PGHOST": self.connection_parameters["host"],
+            "PGUSER": self.connection_parameters["role"],
+            "PGDATABASE": self.connection_parameters["database"],
+            "PGPASSWORD": self.connection_parameters["password"],
+            "PGSSLMODE": "require",
+        }
 
     def __str__(self):
         """
@@ -111,7 +103,7 @@ class NeonBranch:
         """
         return f"{self.id}{'(r)' if self.id in self.project.reset_branches else ''}, parent: {self.parent}"
 
-    def create_child_branch(self) -> NeonBranch:
+    def create_child_branch(self) -> NeonBranch | None:
         return self.project.create_branch(self.id)
 
     def create_ro_endpoint(self) -> NeonEndpoint:
@@ -123,7 +115,7 @@ class NeonBranch:
     def delete(self) -> None:
         self.project.delete_branch(self.id)
 
-    def start_benchmark(self, clients=10) -> subprocess.Popen:
+    def start_benchmark(self, clients=10) -> subprocess.Popen[Any]:
         return self.project.start_benchmark(self.id, clients=clients)
 
     def check_benchmark(self) -> None:
@@ -146,7 +138,7 @@ class NeonBranch:
         )
         if res is None:
             return
-        self.updated_at: datetime = datetime.fromisoformat(res["branch"]["updated_at"])
+        self.updated_at = datetime.fromisoformat(res["branch"]["updated_at"])
         parent_id: str = res["branch"]["parent_id"]
         # Creates an object for the parent branch
         # After the reset operation a new parent branch is created
@@ -174,7 +166,7 @@ class NeonBranch:
         for _ in range(10):
             # Try 10 attempts
             try:
-                res = self.neon_api.restore_branch(
+                res: dict[str, Any] | None = self.neon_api.restore_branch(
                     self.project_id,
                     self.id,
                     source_branch_id,
@@ -204,7 +196,7 @@ class NeonBranch:
                     and he.response.json()["code"] == "BRANCHES_LIMIT_EXCEEDED"
                 ):
                     log.info("Branches limit exceeded, skipping")
-                    return
+                    return None
                 else:
                     raise HTTPError(he) from he
             else:
@@ -245,14 +237,11 @@ class NeonProject:
         for endpoint in proj["endpoints"]:
             NeonEndpoint(self, endpoint)
         self.neon_api.wait_for_operation_to_finish(self.id)
-        self.benchmarks: dict[str, subprocess.Popen] = {}
+        self.benchmarks: dict[str, subprocess.Popen[Any]] = {}
         self.restore_num: int = 0
 
     def delete(self):
         self.neon_api.delete_project(self.id)
-
-    def __get_branches_info(self) -> list[Any]:
-        return self.neon_api.get_branches(self.id)["branches"]
 
     def create_branch(self, parent_id: str | None = None) -> NeonBranch | None:
         self.wait()
@@ -273,7 +262,7 @@ class NeonProject:
 
     def delete_branch(self, branch_id: str) -> None:
         parent = self.branches[branch_id].parent
-        if branch_id == self.main_branch.id:
+        if not parent or branch_id == self.main_branch.id:
             raise RuntimeError("Cannot delete the main branch")
         if branch_id not in self.leaf_branches and branch_id not in self.reset_branches:
             raise RuntimeError(f"The branch {branch_id}, probably, has ancestors")
@@ -306,7 +295,7 @@ class NeonProject:
         self.endpoints.pop(endpoint_id)
         self.wait()
 
-    def start_benchmark(self, target: str, clients: int = 10) -> subprocess.Popen:
+    def start_benchmark(self, target: str, clients: int = 10) -> subprocess.Popen[Any]:
         if target in self.benchmarks:
             raise RuntimeError(f"Benchmark was already started for {target}")
         is_endpoint = target.startswith("ep")
@@ -315,6 +304,8 @@ class NeonProject:
         if read_only:
             cmd.extend(["-S", "-n"])
         target_object = self.endpoints[target] if is_endpoint else self.branches[target]
+        if target_object.connect_env is None:
+            raise RuntimeError(f"The connection environment is not defined for {target}")
         log.info(
             "running pgbench on %s, cmd: %s, host: %s",
             target,
