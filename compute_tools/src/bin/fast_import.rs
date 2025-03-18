@@ -551,13 +551,15 @@ async fn cmd_dumprestore(
                     &key_id,
                     spec.source_connstring_ciphertext_base64,
                 )
-                .await?;
+                .await
+                .context("decrypt source connection string")?;
 
                 let dest = if let Some(dest_ciphertext) =
                     spec.destination_connstring_ciphertext_base64
                 {
                     decode_connstring(kms_client.as_ref().unwrap(), &key_id, dest_ciphertext)
-                        .await?
+                        .await
+                        .context("decrypt destination connection string")?
                 } else {
                     bail!(
                         "destination connection string must be provided in spec for dump_restore command"
@@ -610,81 +612,85 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         (None, None)
     };
 
-    let spec: Option<Spec> = if let Some(s3_prefix) = &args.s3_prefix {
-        let spec_key = s3_prefix.append("/spec.json");
-        let object = s3_client
-            .as_ref()
-            .unwrap()
-            .get_object()
-            .bucket(&spec_key.bucket)
-            .key(spec_key.key)
-            .send()
-            .await
-            .context("get spec from s3")?
-            .body
-            .collect()
-            .await
-            .context("download spec body")?;
-        serde_json::from_slice(&object.into_bytes()).context("parse spec as json")?
-    } else {
-        None
-    };
-
-    match tokio::fs::create_dir(&args.working_directory).await {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            if !is_directory_empty(&args.working_directory)
+    // Capture everything from spec assignment onwards to handle errors
+    let res = async {
+        let spec: Option<Spec> = if let Some(s3_prefix) = &args.s3_prefix {
+            let spec_key = s3_prefix.append("/spec.json");
+            let object = s3_client
+                .as_ref()
+                .unwrap()
+                .get_object()
+                .bucket(&spec_key.bucket)
+                .key(spec_key.key)
+                .send()
                 .await
-                .context("check if working directory is empty")?
-            {
-                bail!("working directory is not empty");
-            } else {
-                // ok
-            }
-        }
-        Err(e) => return Err(anyhow::Error::new(e).context("create working directory")),
-    }
+                .context("get spec from s3")?
+                .body
+                .collect()
+                .await
+                .context("download spec body")?;
+            serde_json::from_slice(&object.into_bytes()).context("parse spec as json")?
+        } else {
+            None
+        };
 
-    let res = match args.command {
-        Command::Pgdata {
-            source_connection_string,
-            interactive,
-            pg_port,
-            num_cpus,
-            memory_mb,
-        } => {
-            cmd_pgdata(
-                s3_client.as_ref(),
-                kms_client,
-                args.s3_prefix.clone(),
-                spec,
+        match tokio::fs::create_dir(&args.working_directory).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !is_directory_empty(&args.working_directory)
+                    .await
+                    .context("check if working directory is empty")?
+                {
+                    bail!("working directory is not empty");
+                } else {
+                    // ok
+                }
+            }
+            Err(e) => return Err(anyhow::Error::new(e).context("create working directory")),
+        }
+
+        match args.command {
+            Command::Pgdata {
                 source_connection_string,
                 interactive,
                 pg_port,
-                args.working_directory.clone(),
-                args.pg_bin_dir,
-                args.pg_lib_dir,
                 num_cpus,
                 memory_mb,
-            )
-            .await
-        }
-        Command::DumpRestore {
-            source_connection_string,
-            destination_connection_string,
-        } => {
-            cmd_dumprestore(
-                kms_client,
-                spec,
+            } => {
+                cmd_pgdata(
+                    s3_client.as_ref(),
+                    kms_client,
+                    args.s3_prefix.clone(),
+                    spec,
+                    source_connection_string,
+                    interactive,
+                    pg_port,
+                    args.working_directory.clone(),
+                    args.pg_bin_dir,
+                    args.pg_lib_dir,
+                    num_cpus,
+                    memory_mb,
+                )
+                .await
+            }
+            Command::DumpRestore {
                 source_connection_string,
                 destination_connection_string,
-                args.working_directory.clone(),
-                args.pg_bin_dir,
-                args.pg_lib_dir,
-            )
-            .await
+            } => {
+                cmd_dumprestore(
+                    kms_client,
+                    spec,
+                    source_connection_string,
+                    destination_connection_string,
+                    args.working_directory.clone(),
+                    args.pg_bin_dir,
+                    args.pg_lib_dir,
+                )
+                .await
+            }
         }
-    };
+    }
+    .await;
 
     if let Some(s3_prefix) = args.s3_prefix {
         info!("write job status to s3");
