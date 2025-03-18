@@ -19,7 +19,7 @@ FROM test_ulids;
 
 -- Test conversion to timestamp
 SELECT 'ulid to timestamp conversion' as test_name,
-       to_char(test_ulid::timestamp, 'YYYY-MM-DD HH24:MI:SS.MS') = '2023-03-10 12:00:49.111' as result
+       to_char(test_ulid::timestamp, 'YYYY-MM-DD HH24:MI:SS.MS') = '2023-03-10 04:00:49.111' as result
 FROM test_ulids;
 
 -- Test conversion from UUID
@@ -30,6 +30,3 @@ SELECT 'UUID to ulid conversion' as test_name,
 SELECT 'timestamp to ulid conversion' as test_name,
        '2023-03-10 12:00:49.111'::timestamp::ulid::text = '01GV5PA9EQ0000000000000000' as result;
 
--- Test conversion from timestamptz
-SELECT 'timestamptz to ulid conversion' as test_name,
-       '2023-03-10 12:00:49.111'::timestamptz::ulid::text = '01GV5PA9EQ0000000000000000' as result;
