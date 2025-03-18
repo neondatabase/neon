@@ -1190,14 +1190,11 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         return res.json()
 
     def list_aux_files(
-        self,
-        tenant_id: TenantId | TenantShardId,
-        timeline_id: TimelineId,
-        lsn: Lsn
+        self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId, lsn: Lsn
     ) -> list[dict[str, Any]]:
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/list_aux_files",
-            json={"lsn": str(lsn)}
+            json={"lsn": str(lsn)},
         )
         self.verbose_error(res)
         return res.json()

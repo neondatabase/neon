@@ -1767,6 +1767,7 @@ def test_pageserver_compaction_detach_ancestor_smoke(neon_env_builder: NeonEnvBu
     workload_parent.validate(env.pageserver.id)
     workload_child.validate(env.pageserver.id)
 
+
 def test_timeline_detach_with_aux_files_with_detach_v1(
     neon_env_builder: NeonEnvBuilder,
 ):
@@ -1786,23 +1787,54 @@ def test_timeline_detach_with_aux_files_with_detach_v1(
 
     endpoint = env.endpoints.create_start("main", tenant_id=env.initial_tenant)
     lsn0 = wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
-    endpoint.safe_psql("SELECT pg_create_logical_replication_slot('test_slot_parent_1', 'pgoutput')")
+    endpoint.safe_psql(
+        "SELECT pg_create_logical_replication_slot('test_slot_parent_1', 'pgoutput')"
+    )
     lsn1 = wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
-    endpoint.safe_psql("SELECT pg_create_logical_replication_slot('test_slot_parent_2', 'pgoutput')")
+    endpoint.safe_psql(
+        "SELECT pg_create_logical_replication_slot('test_slot_parent_2', 'pgoutput')"
+    )
     lsn2 = wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
-    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
-    assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn0).keys()) == set([])
-    assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn1).keys()) == set(["pg_replslot/test_slot_parent_1/state"])
-    assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn2).keys()) == set(["pg_replslot/test_slot_parent_1/state", "pg_replslot/test_slot_parent_2/state"])
+    assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn0).keys()) == set(
+        []
+    )
+    assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn1).keys()) == set(
+        ["pg_replslot/test_slot_parent_1/state"]
+    )
+    assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn2).keys()) == set(
+        ["pg_replslot/test_slot_parent_1/state", "pg_replslot/test_slot_parent_2/state"]
+    )
 
     # Restore at LSN1
     branch_timeline_id = env.create_branch("restore", env.initial_tenant, "main", lsn1)
-    assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn0).keys()) == set([])
-
-    # Detach the restore branch so that main doesn't have any child
-    http.detach_ancestor(env.initial_tenant, branch_timeline_id, detach_behavior="v1")
-    assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn2).keys()) == set(["pg_replslot/test_slot_parent_1/state", "pg_replslot/test_slot_parent_2/state"])
+    endpoint2 = env.endpoints.create_start("restore", tenant_id=env.initial_tenant)
     assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn1).keys()) == set([])
+
+    # Add a new slot file to the restore branch (This won't happen in reality because cplane immediately detaches the branch on restore,
+    # but we want to ensure that aux files on the detached branch are NOT inherited during ancestor detach. We could change the behavior
+    # in the future.
+    # TL;DR we should NEVER automatically detach a branch as a background optimization for those tenants that already used the restore
+    # feature before branch detach was introduced because it will clean up the aux files and stop logical replication.
+    endpoint2.safe_psql(
+        "SELECT pg_create_logical_replication_slot('test_slot_restore', 'pgoutput')"
+    )
+    lsn3 = wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, branch_timeline_id)
+    assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn1).keys()) == set([])
+    assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn3).keys()) == set(
+        ["pg_replslot/test_slot_restore/state"]
+    )
+
+    # Detach the restore branch so that main doesn't have any child branches.
+    all_reparented = http.detach_ancestor(env.initial_tenant, branch_timeline_id, detach_behavior="v1")
+    assert all_reparented == []
+    assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn2).keys()) == set(
+        ["pg_replslot/test_slot_parent_1/state", "pg_replslot/test_slot_parent_2/state"]
+    )
+    assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn3).keys()) == set(
+        []
+    )
+    assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn1).keys()) == set([])
+
 
 # TODO:
 # - branch near existing L1 boundary, image layers?

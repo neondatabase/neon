@@ -2,7 +2,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Context;
+use bytes::Bytes;
 use http_utils::error::ApiError;
+use pageserver_api::key::Key;
+use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::DetachBehavior;
 use pageserver_api::models::detach_ancestor::AncestorDetached;
 use pageserver_api::shard::ShardIdentity;
@@ -22,7 +25,10 @@ use crate::task_mgr::TaskKind;
 use crate::tenant::Tenant;
 use crate::tenant::remote_timeline_client::index::GcBlockingReason::DetachAncestor;
 use crate::tenant::storage_layer::layer::local_layer_path;
-use crate::tenant::storage_layer::{AsLayerDesc as _, DeltaLayerWriter, Layer, ResidentLayer};
+use crate::tenant::storage_layer::{
+    AsLayerDesc as _, DeltaLayerWriter, ImageLayerWriter, IoConcurrency, Layer, ResidentLayer,
+    ValuesReconstructState,
+};
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 
 #[derive(Debug, thiserror::Error)]
@@ -352,10 +358,72 @@ pub(super) async fn prepare(
 
     // TODO: copying and lsn prefix copying could be done at the same time with a single fsync after
     let mut new_layers: Vec<Layer> =
-        Vec::with_capacity(straddling_branchpoint.len() + rest_of_historic.len());
+        Vec::with_capacity(straddling_branchpoint.len() + rest_of_historic.len() + 1);
 
     {
-        tracing::debug!(to_rewrite = %straddling_branchpoint.len(), "copying prefix of delta layers");
+        tracing::info!("removing non-inherited keys by writing an image layer at the detach LSN");
+        let io_concurrency = IoConcurrency::spawn_from_conf(
+            detached.conf,
+            detached.gate.enter().map_err(|_| Error::ShuttingDown)?,
+        );
+        let mut reconstruct_state = ValuesReconstructState::new(io_concurrency);
+        // Directly use `get_vectored_impl` to skip the max_vectored_read_key limit check. Note that the keyspace should
+        // not contain too many keys, otherwise this takes a lot of memory.
+        let key_range = Key::sparse_non_inherited_keyspace();
+        // avoid generating a "future layer" which will then be removed
+        let image_lsn = ancestor_lsn;
+        let data = ancestor
+            .get_vectored_impl(
+                KeySpace::single(key_range.clone()),
+                image_lsn,
+                &mut reconstruct_state,
+                ctx,
+            )
+            .await
+            .context("failed to retrieve aux keys")
+            .map_err(|e| Error::launder(e, Error::Prepare))?;
+        if !data.is_empty() {
+            // TODO: is it possible that we can have an image at `image_lsn`? Unlikely because image layers are only generated
+            // upon compaction but theoretically possible.
+            let mut image_layer_writer = ImageLayerWriter::new(
+                detached.conf,
+                detached.timeline_id,
+                detached.tenant_shard_id,
+                &key_range,
+                image_lsn,
+                ctx,
+            )
+            .await
+            .context("failed to create image layer writer")
+            .map_err(Error::Prepare)?;
+            for key in data.keys() {
+                image_layer_writer
+                    .put_image(*key, Bytes::new(), ctx)
+                    .await
+                    .context("failed to write key")
+                    .map_err(|e| Error::launder(e, Error::Prepare))?;
+            }
+            let (desc, path) = image_layer_writer
+                .finish(ctx)
+                .await
+                .context("failed to finish image layer writer")
+                .map_err(|e| Error::launder(e, Error::Prepare))?;
+            let generated = Layer::finish_creating(detached.conf, detached, desc, &path)
+                .map_err(|e| Error::launder(e, Error::Prepare))?;
+            detached
+                .remote_client
+                .upload_layer_file(&generated, &detached.cancel)
+                .await
+                .map_err(|e| Error::launder(e, Error::Prepare))?;
+            tracing::info!(layer=%generated, "wrote image layer");
+            new_layers.push(generated.into());
+        } else {
+            tracing::info!("no aux keys found in ancestor");
+        }
+    }
+
+    {
+        tracing::info!(to_rewrite = %straddling_branchpoint.len(), "copying prefix of delta layers");
 
         let mut tasks = tokio::task::JoinSet::new();
 
@@ -371,7 +439,10 @@ pub(super) async fn prepare(
             let span = tracing::info_span!("upload_rewritten_layer", %layer);
             tasks.spawn(
                 async move {
-                    let _permit = limiter.acquire().await;
+                    let _permit: Result<
+                        tokio::sync::SemaphorePermit<'_>,
+                        tokio::sync::AcquireError,
+                    > = limiter.acquire().await;
                     let copied =
                         upload_rewritten_layer(end_lsn, &layer, &timeline, &timeline.cancel, &ctx)
                             .await?;
