@@ -1026,6 +1026,7 @@ pub(crate) enum ShutdownMode {
     Hard,
 }
 
+#[allow(clippy::large_enum_variant, reason = "TODO")]
 enum ImageLayerCreationOutcome {
     /// We generated an image layer
     Generated {
@@ -2232,7 +2233,7 @@ impl Timeline {
                         .await
                         .expect("holding a reference to self");
                 }
-                TimelineState::Active { .. } => {
+                TimelineState::Active => {
                     return Ok(());
                 }
                 TimelineState::Broken { .. } | TimelineState::Stopping => {

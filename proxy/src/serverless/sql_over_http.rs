@@ -866,12 +866,13 @@ impl QueryData {
         let (inner, mut discard) = client.inner();
         let cancel_token = inner.cancel_token();
 
-        let res = match select(
+        let mut size = 0;
+        match select(
             pin!(query_to_json(
                 config,
                 &mut *inner,
                 self,
-                &mut 0,
+                &mut size,
                 parsed_headers
             )),
             pin!(cancel.cancelled()),
@@ -889,7 +890,7 @@ impl QueryData {
             // The query failed with an error
             Either::Left((Err(e), __not_yet_cancelled)) => {
                 discard.discard();
-                return Err(e);
+                Err(e)
             }
             // The query was cancelled.
             Either::Right((_cancelled, query)) => {
@@ -930,8 +931,7 @@ impl QueryData {
                     }
                 }
             }
-        };
-        res
+        }
     }
 }
 

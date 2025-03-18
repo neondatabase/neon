@@ -766,7 +766,7 @@ mod tests {
                     rand::Rng::fill(&mut rand::thread_rng(), &mut dst_slice[len..]); // to discover bugs
                     Ok((dst, len))
                 }
-                Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+                Err(e) => Err(std::io::Error::other(e)),
             }
         }
     }

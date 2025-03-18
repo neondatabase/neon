@@ -149,13 +149,10 @@ impl EphemeralFile {
         let pos = self.bytes_written;
 
         let new_bytes_written = pos.checked_add(srcbuf.len().into_u64()).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!(
-                    "write would grow EphemeralFile beyond u64::MAX: len={pos} writen={srcbuf_len}",
-                    srcbuf_len = srcbuf.len(),
-                ),
-            )
+            std::io::Error::other(format!(
+                "write would grow EphemeralFile beyond u64::MAX: len={pos} writen={srcbuf_len}",
+                srcbuf_len = srcbuf.len(),
+            ))
         })?;
 
         // Write the payload

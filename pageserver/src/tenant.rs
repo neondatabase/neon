@@ -912,6 +912,7 @@ enum StartCreatingTimelineResult {
     Idempotent(Arc<Timeline>),
 }
 
+#[allow(clippy::large_enum_variant, reason = "TODO")]
 enum TimelineInitAndSyncResult {
     ReadyToActivate(Arc<Timeline>),
     NeedsSpawnImportPgdata(TimelineInitAndSyncNeedsSpawnImportPgdata),
@@ -998,6 +999,7 @@ enum CreateTimelineCause {
     Delete,
 }
 
+#[allow(clippy::large_enum_variant, reason = "TODO")]
 enum LoadTimelineCause {
     Attach,
     Unoffload,
@@ -3678,7 +3680,7 @@ impl Tenant {
                         }
                     }
                 }
-                TenantState::Active { .. } => {
+                TenantState::Active => {
                     return Ok(());
                 }
                 TenantState::Broken { reason, .. } => {
@@ -4383,10 +4385,7 @@ impl Tenant {
         .to_string();
 
         fail::fail_point!("tenant-config-before-write", |_| {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "tenant-config-before-write",
-            ))
+            Err(std::io::Error::other("tenant-config-before-write"))
         });
 
         // Convert the config to a toml file.

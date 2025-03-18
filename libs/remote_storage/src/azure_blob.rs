@@ -801,8 +801,7 @@ where
             // that support needs to be hacked in.
             //
             // including {self:?} into the message would be useful, but unsure how to unproject.
-            _ => std::task::Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            _ => std::task::Poll::Ready(Err(std::io::Error::other(
                 "cloned or initial values cannot be read",
             ))),
         }
@@ -855,7 +854,7 @@ where
         };
         Err(azure_core::error::Error::new(
             azure_core::error::ErrorKind::Io,
-            std::io::Error::new(std::io::ErrorKind::Other, msg),
+            std::io::Error::other(msg),
         ))
     }
 

@@ -116,7 +116,7 @@ fn test_many_tx() -> anyhow::Result<()> {
             }
             None
         })
-        .last()
+        .next_back()
         .unwrap();
 
     let initdb_lsn = 21623024;
