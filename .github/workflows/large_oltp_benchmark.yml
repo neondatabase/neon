@@ -2,8 +2,8 @@ name: large oltp benchmark
 
 on:
   # uncomment to run on push for debugging your PR
-  push:
-    branches: [ bodobolero/synthetic_oltp_workload ]
+  #push:
+  #  branches: [ bodobolero/synthetic_oltp_workload ]
 
   schedule:
     # * is a special character in YAML so you have to quote this string
@@ -12,7 +12,7 @@ on:
     #          │ │  ┌───────────── day of the month (1 - 31)
     #          │ │  │ ┌───────────── month (1 - 12 or JAN-DEC)
     #          │ │  │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
-    - cron:   '0 15 * * *' # run once a day, timezone is utc, avoid conflict with other benchmarks
+    - cron:   '0 15 * * 0,2,4' # run on Sunday, Tuesday, Thursday at 3 PM UTC
   workflow_dispatch: # adds ability to run this manually
 
 defaults:
@@ -22,7 +22,7 @@ defaults:
 concurrency:
   # Allow only one workflow globally because we need dedicated resources which only exist once
   group: large-oltp-bench-workflow
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   oltp:
@@ -31,9 +31,9 @@ jobs:
       matrix:
         include:
           - target: new_branch 
-            custom_scripts: insert_webhooks.sql@2 select_any_webhook_with_skew.sql@4 select_recent_webhook.sql@4 
+            custom_scripts: insert_webhooks.sql@200 select_any_webhook_with_skew.sql@300 select_recent_webhook.sql@397 select_prefetch_webhook.sql@3 IUD_one_transaction.sql@100
           - target: reuse_branch 
-            custom_scripts: insert_webhooks.sql@2 select_any_webhook_with_skew.sql@4 select_recent_webhook.sql@4 
+            custom_scripts: insert_webhooks.sql@200 select_any_webhook_with_skew.sql@300 select_recent_webhook.sql@397 select_prefetch_webhook.sql@3 IUD_one_transaction.sql@100
       max-parallel: 1 # we want to run each stripe size sequentially to be able to compare the results
     permissions:
       contents: write
@@ -46,7 +46,6 @@ jobs:
       PG_VERSION: 16 # pre-determined by pre-determined project
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.ref_name == 'main' }}
       PLATFORM: ${{ matrix.target }}
 
     runs-on: [ self-hosted, us-east-2, x64 ]
@@ -57,8 +56,10 @@ jobs:
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
-    # Increase timeout to 8h, default timeout is 6h
-    timeout-minutes: 480
+    # Increase timeout to 2 days, default timeout is 6h - database maintenance can take a long time
+    # (normally 1h pgbench, 3h vacuum analyze 3.5h re-index) x 2 = 15h, leave some buffer for regressions
+    # in one run vacuum didn't finish within 12 hours
+    timeout-minutes: 2880
 
     steps:
     - uses: actions/checkout@v4
@@ -89,33 +90,64 @@ jobs:
     - name: Set up Connection String
       id: set-up-connstr
       run: |
-          case "${{ matrix.target }}" in
-              new_branch)
-              CONNSTR=${{ steps.create-neon-branch-oltp-target.outputs.dsn }}
-              ;;
-              reuse_branch)
-              CONNSTR=${{ secrets.BENCHMARK_LARGE_OLTP_REUSE_CONNSTR }}
-              ;;
-              *)
-              echo >&2 "Unknown target=${{ matrix.target }}"
-              exit 1
-              ;;
-          esac
+        case "${{ matrix.target }}" in
+          new_branch)
+          CONNSTR=${{ steps.create-neon-branch-oltp-target.outputs.dsn }}
+          ;;
+          reuse_branch)
+          CONNSTR=${{ secrets.BENCHMARK_LARGE_OLTP_REUSE_CONNSTR }}
+          ;;
+          *)
+          echo >&2 "Unknown target=${{ matrix.target }}"
+          exit 1
+          ;;
+        esac
 
-          echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
+        CONNSTR_WITHOUT_POOLER="${CONNSTR//-pooler/}"
 
-    - name: Benchmark pgbench with custom-scripts
+        echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
+        echo "connstr_without_pooler=${CONNSTR_WITHOUT_POOLER}" >> $GITHUB_OUTPUT
+
+    - name: Delete rows from prior runs in reuse branch
+      if: ${{ matrix.target == 'reuse_branch' }}
+      env:
+          BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr_without_pooler }}
+          PG_CONFIG: /tmp/neon/pg_install/v16/bin/pg_config
+          PSQL: /tmp/neon/pg_install/v16/bin/psql
+          PG_16_LIB_PATH: /tmp/neon/pg_install/v16/lib
+      run: |
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Deleting rows in table webhook.incoming_webhooks from prior runs"
+        export LD_LIBRARY_PATH=${PG_16_LIB_PATH}
+        ${PSQL} "${BENCHMARK_CONNSTR}" -c "SET statement_timeout = 0; DELETE FROM webhook.incoming_webhooks WHERE created_at > '2025-02-27 23:59:59+00';"
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Finished deleting rows in table webhook.incoming_webhooks from prior runs"
+
+    - name: Benchmark pgbench with custom-scripts 
       uses: ./.github/actions/run-python-test-set
       with:
         build_type: ${{ env.BUILD_TYPE }}
         test_selection: performance
         run_in_parallel: false
-        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
-        extra_params: -m remote_cluster --timeout 21600 -k test_perf_oltp_large_tenant
+        save_perf_report: true
+        extra_params: -m remote_cluster --timeout 7200 -k test_perf_oltp_large_tenant_pgbench
         pg_version: ${{ env.PG_VERSION }}
         aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+
+    - name: Benchmark database maintenance
+      uses: ./.github/actions/run-python-test-set
+      with:
+        build_type: ${{ env.BUILD_TYPE }}
+        test_selection: performance
+        run_in_parallel: false
+        save_perf_report: true
+        extra_params: -m remote_cluster --timeout 172800 -k test_perf_oltp_large_tenant_maintenance
+        pg_version: ${{ env.PG_VERSION }}
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr_without_pooler }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
 
@@ -126,6 +158,13 @@ jobs:
         project_id: ${{ vars.BENCHMARK_LARGE_OLTP_PROJECTID }}
         branch_id: ${{ steps.create-neon-branch-oltp-target.outputs.branch_id }}
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+
+    - name: Configure AWS credentials # again because prior steps could have exceeded 5 hours
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: eu-central-1
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 18000 # 5 hours
 
     - name: Create Allure report
       id: create-allure-report

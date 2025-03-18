@@ -89,6 +89,7 @@ use super::remote_timeline_client::index::{GcCompactionState, IndexPart};
 use super::remote_timeline_client::{RemoteTimelineClient, WaitCompletionError};
 use super::secondary::heatmap::HeatMapLayer;
 use super::storage_layer::{LayerFringe, LayerVisibilityHint, ReadableLayer};
+use super::tasks::log_compaction_error;
 use super::upload_queue::NotInitialized;
 use super::{
     AttachedTenantConf, GcError, HeatMapTimeline, MaybeOffloaded,
@@ -1856,18 +1857,23 @@ impl Timeline {
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> Result<CompactionOutcome, CompactionError> {
-        self.compact_with_options(
-            cancel,
-            CompactOptions {
-                flags,
-                compact_key_range: None,
-                compact_lsn_range: None,
-                sub_compaction: false,
-                sub_compaction_max_job_size_mb: None,
-            },
-            ctx,
-        )
-        .await
+        let res = self
+            .compact_with_options(
+                cancel,
+                CompactOptions {
+                    flags,
+                    compact_key_range: None,
+                    compact_lsn_range: None,
+                    sub_compaction: false,
+                    sub_compaction_max_job_size_mb: None,
+                },
+                ctx,
+            )
+            .await;
+        if let Err(err) = &res {
+            log_compaction_error(err, None, cancel.is_cancelled());
+        }
+        res
     }
 
     /// Outermost timeline compaction operation; downloads needed layers.

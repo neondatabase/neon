@@ -3,7 +3,6 @@ use std::{io::Write, os::unix::fs::OpenOptionsExt, path::Path, time::Duration};
 use anyhow::{Context, Result, bail};
 use compute_api::responses::TlsConfig;
 use ring::digest;
-use spki::ObjectIdentifier;
 use spki::der::{Decode, PemReader};
 use x509_cert::Certificate;
 
@@ -91,13 +90,13 @@ fn try_update_key_path_blocking(pg_data: &Path, tls_config: &TlsConfig) -> Resul
 }
 
 fn verify_key_cert(key: &str, cert: &str) -> Result<()> {
-    const ECDSA_WITH_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2");
+    use x509_cert::der::oid::db::rfc5912::ECDSA_WITH_SHA_256;
 
     let cert = Certificate::decode(&mut PemReader::new(cert.as_bytes()).context("pem reader")?)
         .context("decode cert")?;
 
     match cert.signature_algorithm.oid {
-        ECDSA_WITH_SHA256 => {
+        ECDSA_WITH_SHA_256 => {
             let key = p256::SecretKey::from_sec1_pem(key).context("parse key")?;
 
             let a = key.public_key().to_sec1_bytes();

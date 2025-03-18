@@ -70,8 +70,9 @@ reqwest-middleware = { workspace = true, features = ["json"] }
 reqwest-retry.workspace = true
 reqwest-tracing.workspace = true
 rustc-hash.workspace = true
-rustls-pemfile.workspace = true
 rustls.workspace = true
+rustls-native-certs.workspace = true
+rustls-pemfile.workspace = true
 scopeguard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -99,8 +100,7 @@ url.workspace = true
 urlencoding.workspace = true
 utils.workspace = true
 uuid.workspace = true
-rustls-native-certs.workspace = true
-x509-parser.workspace = true
+x509-cert.workspace = true
 redis.workspace = true
 zerocopy.workspace = true
 

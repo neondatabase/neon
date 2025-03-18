@@ -7,7 +7,7 @@ use std::io::prelude::*;
 use std::path::Path;
 
 use compute_api::responses::TlsConfig;
-use compute_api::spec::{ComputeAudit, ComputeMode, ComputeSpec, GenericOption};
+use compute_api::spec::{ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, GenericOption};
 
 use crate::pg_helpers::{
     GenericOptionExt, GenericOptionsSearch, PgOptionsSerialize, escape_conf_value,
@@ -167,7 +167,8 @@ pub fn write_postgres_conf(
         writeln!(file, "# Managed by compute_ctl audit settings: begin")?;
         // This log level is very verbose
         // but this is necessary for HIPAA compliance.
-        writeln!(file, "pgaudit.log='all'")?;
+        // Exclude 'misc' category, because it doesn't contain anythig relevant.
+        writeln!(file, "pgaudit.log='all, -misc'")?;
         writeln!(file, "pgaudit.log_parameter=on")?;
         // Disable logging of catalog queries
         // The catalog doesn't contain sensitive data, so we don't need to audit it.
@@ -213,6 +214,12 @@ pub fn write_postgres_conf(
     } else {
         // be explicit about the default value
         writeln!(file, "neon.disable_logical_replication_subscribers=false")?;
+    }
+
+    // We need Postgres to send logs to rsyslog so that we can forward them
+    // further to customers' log aggregation systems.
+    if spec.features.contains(&ComputeFeature::PostgresLogsExport) {
+        writeln!(file, "log_destination='stderr,syslog'")?;
     }
 
     // This is essential to keep this line at the end of the file,

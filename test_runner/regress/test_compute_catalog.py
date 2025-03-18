@@ -16,6 +16,9 @@ TEST_ROLE_NAMES = [
     {"name": "role \";with ';injections $$ $x$ $ %I !/\\&#@"},
     {"name": '"role in double quotes"'},
     {"name": "'role in single quotes'"},
+    {"name": "role$"},
+    {"name": "role$$"},
+    {"name": "role$x$"},
 ]
 
 TEST_DB_NAMES = [
@@ -58,6 +61,18 @@ TEST_DB_NAMES = [
     {
         "name": "'db in single quotes'",
         "owner": "'role in single quotes'",
+    },
+    {
+        "name": "db name$",
+        "owner": "role$",
+    },
+    {
+        "name": "db name$$",
+        "owner": "role$$",
+    },
+    {
+        "name": "db name$x$",
+        "owner": "role$x$",
     },
 ]
 
