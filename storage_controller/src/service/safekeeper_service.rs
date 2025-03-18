@@ -279,7 +279,7 @@ impl Service {
                     safekeeper: Box::new(sk.clone()),
                     host_list,
                     tenant_id,
-                    timeline_id,
+                    timeline_id: Some(timeline_id),
                     generation: timeline_persist.generation as u32,
                     kind: crate::persistence::SafekeeperTimelineOpKind::Pull,
                 };
@@ -340,7 +340,7 @@ impl Service {
                     // we don't use this for this kind, put a dummy value
                     host_list: Vec::new(),
                     tenant_id,
-                    timeline_id,
+                    timeline_id: Some(timeline_id),
                     generation: tl.generation as u32,
                     kind,
                 };

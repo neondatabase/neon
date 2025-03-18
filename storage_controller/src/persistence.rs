@@ -1437,7 +1437,7 @@ impl Persistence {
     pub(crate) async fn remove_pending_op(
         &self,
         tenant_id: TenantId,
-        timeline_id: TimelineId,
+        timeline_id: Option<TimelineId>,
         sk_id: NodeId,
         generation: u32,
     ) -> DatabaseResult<()> {
@@ -1446,10 +1446,11 @@ impl Persistence {
         let tenant_id = &tenant_id;
         let timeline_id = &timeline_id;
         self.with_measured_conn(DatabaseOperation::RemoveTimelineReconcile, move |conn| {
+            let timeline_id_str = timeline_id.map(|tid| tid.to_string()).unwrap_or_default();
             Box::pin(async move {
                 diesel::delete(dsl::safekeeper_timeline_pending_ops)
                     .filter(dsl::tenant_id.eq(tenant_id.to_string()))
-                    .filter(dsl::timeline_id.eq(timeline_id.to_string()))
+                    .filter(dsl::timeline_id.eq(timeline_id_str))
                     .filter(dsl::sk_id.eq(sk_id.0 as i64))
                     .filter(dsl::generation.eq(generation as i32))
                     .execute(conn)
