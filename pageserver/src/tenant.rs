@@ -5684,7 +5684,7 @@ pub(crate) mod harness {
 
     pub struct TenantHarness {
         pub conf: &'static PageServerConf,
-        pub tenant_conf: TenantConf,
+        pub tenant_conf: pageserver_api::models::TenantConfig,
         pub tenant_shard_id: TenantShardId,
         pub generation: Generation,
         pub shard: ShardIndex,
@@ -5711,7 +5711,7 @@ pub(crate) mod harness {
     impl TenantHarness {
         pub async fn create_custom(
             test_name: &'static str,
-            tenant_conf: TenantConf,
+            tenant_conf: pageserver_api::models::TenantConfig,
             tenant_id: TenantId,
             shard_identity: ShardIdentity,
             generation: Generation,
@@ -5764,10 +5764,10 @@ pub(crate) mod harness {
         pub async fn create(test_name: &'static str) -> anyhow::Result<Self> {
             // Disable automatic GC and compaction to make the unit tests more deterministic.
             // The tests perform them manually if needed.
-            let tenant_conf = TenantConf {
-                gc_period: Duration::ZERO,
-                compaction_period: Duration::ZERO,
-                ..TenantConf::default()
+            let tenant_conf = pageserver_api::models::TenantConfig {
+                gc_period: Some(Duration::ZERO),
+                compaction_period: Some(Duration::ZERO),
+                ..Default::default()
             };
             let tenant_id = TenantId::generate();
             let shard = ShardIdentity::unsharded();
@@ -6891,14 +6891,14 @@ mod tests {
     // ```
     #[tokio::test]
     async fn test_get_vectored_key_gap() -> anyhow::Result<()> {
-        let tenant_conf = TenantConf {
+        let tenant_conf = pageserver_api::models::TenantConfig {
             // Make compaction deterministic
-            gc_period: Duration::ZERO,
-            compaction_period: Duration::ZERO,
+            gc_period: Some(Duration::ZERO),
+            compaction_period: Some(Duration::ZERO),
             // Encourage creation of L1 layers
-            checkpoint_distance: 16 * 1024,
-            compaction_target_size: 8 * 1024,
-            ..TenantConf::default()
+            checkpoint_distance: Some(16 * 1024),
+            compaction_target_size: Some(8 * 1024),
+            ..Default::default()
         };
 
         let harness = TenantHarness::create_custom(
@@ -7204,9 +7204,9 @@ mod tests {
         compaction_algorithm: CompactionAlgorithm,
     ) -> anyhow::Result<()> {
         let mut harness = TenantHarness::create(name).await?;
-        harness.tenant_conf.compaction_algorithm = CompactionAlgorithmSettings {
+        harness.tenant_conf.compaction_algorithm = Some(CompactionAlgorithmSettings {
             kind: compaction_algorithm,
-        };
+        });
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
@@ -7573,9 +7573,9 @@ mod tests {
         compaction_algorithm: CompactionAlgorithm,
     ) -> anyhow::Result<()> {
         let mut harness = TenantHarness::create(name).await?;
-        harness.tenant_conf.compaction_algorithm = CompactionAlgorithmSettings {
+        harness.tenant_conf.compaction_algorithm = Some(CompactionAlgorithmSettings {
             kind: compaction_algorithm,
-        };
+        });
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)

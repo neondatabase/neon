@@ -1155,10 +1155,10 @@ mod test {
 
     #[tokio::test]
     async fn image_layer_rewrite() {
-        let tenant_conf = TenantConf {
-            gc_period: Duration::ZERO,
-            compaction_period: Duration::ZERO,
-            ..TenantConf::default()
+        let tenant_conf = pageserver_api::models::TenantConfig {
+            gc_period: Some(Duration::ZERO),
+            compaction_period: Some(Duration::ZERO),
+            ..Default::default()
         };
         let tenant_id = TenantId::generate();
         let mut gen_ = Generation::new(0xdead0001);

@@ -254,15 +254,11 @@ pub use pageserver_api::models::TenantConfig as TenantConfOpt;
 
 #[cfg(test)]
 mod tests {
-    use models::TenantConfig;
-
-    use super::*;
-
     #[test]
     fn serde_roundtrip_tenant_conf_opt() {
-        let small_conf = TenantConfOpt {
+        let small_conf = pageserver_api::models::TenantConfig {
             gc_horizon: Some(42),
-            ..TenantConfOpt::default()
+            ..Default::default()
         };
 
         let toml_form = toml_edit::ser::to_string(&small_conf).unwrap();
@@ -272,20 +268,5 @@ mod tests {
         let json_form = serde_json::to_string(&small_conf).unwrap();
         assert_eq!(json_form, "{\"gc_horizon\":42}");
         assert_eq!(small_conf, serde_json::from_str(&json_form).unwrap());
-    }
-
-    #[test]
-    fn test_try_from_models_tenant_config_success() {
-        let tenant_config = models::TenantConfig {
-            lagging_wal_timeout: Some(Duration::from_secs(5)),
-            ..TenantConfig::default()
-        };
-
-        let tenant_conf_opt = TenantConfOpt::try_from(&tenant_config).unwrap();
-
-        assert_eq!(
-            tenant_conf_opt.lagging_wal_timeout,
-            Some(Duration::from_secs(5))
-        );
     }
 }
