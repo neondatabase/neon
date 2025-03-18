@@ -1148,7 +1148,6 @@ mod test {
     use super::{ImageLayerIterator, ImageLayerWriter};
     use crate::DEFAULT_PG_VERSION;
     use crate::context::RequestContext;
-    use crate::tenant::config::TenantConf;
     use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
     use crate::tenant::storage_layer::{Layer, ResidentLayer};
     use crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner;

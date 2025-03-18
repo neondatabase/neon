@@ -8,19 +8,11 @@
 //! We cannot use global or default config instead, because wrong settings
 //! may lead to a data loss.
 //!
-use std::num::NonZeroU64;
-use std::time::Duration;
 
-pub(crate) use pageserver_api::config::TenantConfigToml as TenantConf;
-use pageserver_api::models::{
-    self, CompactionAlgorithmSettings, EvictionPolicy, TenantConfigPatch,
-};
+use pageserver_api::models;
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
-use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use utils::generation::Generation;
-use utils::postgres_client::PostgresClientProtocol;
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) enum AttachmentMode {
@@ -74,7 +66,7 @@ pub(crate) struct LocationConf {
     pub(crate) shard: ShardIdentity,
 
     /// The pan-cluster tenant configuration, the same on all locations
-    pub(crate) tenant_conf: TenantConfOpt,
+    pub(crate) tenant_conf: pageserver_api::models::TenantConfig,
 }
 
 impl std::fmt::Debug for LocationConf {
@@ -174,7 +166,7 @@ impl LocationConf {
     }
 
     pub(crate) fn try_from(conf: &'_ models::LocationConfig) -> anyhow::Result<Self> {
-        let tenant_conf = TenantConfOpt::try_from(&conf.tenant_conf)?;
+        let tenant_conf = conf.tenant_conf.clone();
 
         fn get_generation(conf: &'_ models::LocationConfig) -> Result<Generation, anyhow::Error> {
             conf.generation
@@ -260,7 +252,6 @@ impl Default for LocationConf {
 /// for more rigor around interface & data format specs-as-code.
 pub use pageserver_api::models::TenantConfig as TenantConfOpt;
 
-
 #[cfg(test)]
 mod tests {
     use models::TenantConfig;
@@ -268,7 +259,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn de_serializing_pageserver_config_omits_empty_values() {
+    fn serde_roundtrip_tenant_conf_opt() {
         let small_conf = TenantConfOpt {
             gc_horizon: Some(42),
             ..TenantConfOpt::default()

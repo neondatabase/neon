@@ -84,7 +84,6 @@ use self::eviction_task::EvictionTaskTimelineState;
 use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
-use super::config::TenantConf;
 use super::remote_timeline_client::index::{GcCompactionState, IndexPart};
 use super::remote_timeline_client::{RemoteTimelineClient, WaitCompletionError};
 use super::secondary::heatmap::HeatMapLayer;
@@ -2599,7 +2598,7 @@ impl Timeline {
 
     fn get_evictions_low_residence_duration_metric_threshold(
         tenant_conf: &TenantConfOpt,
-        default_tenant_conf: &TenantConf,
+        default_tenant_conf: &pageserver_api::config::TenantConfigToml,
     ) -> Duration {
         tenant_conf
             .evictions_low_residence_duration_metric_threshold
