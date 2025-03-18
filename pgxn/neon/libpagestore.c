@@ -407,8 +407,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	{
 		const char *keywords[5];
 		const char *values[5];
-		char pid_str[16];
-		char endpoint_str[36];
+		char pid_str[16] = { 0 };
+		char endpoint_str[36] = { 0 };
 		int			n_pgsql_params;
 		TimestampTz	now;
 		int64		us_since_last_attempt;
@@ -481,25 +481,22 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		}
 
 		{
-			int ret = 0;
 			bool param_set = false;
 			switch (neon_endpoint_type)
 			{
 				case EP_TYPE_PRIMARY:
-					ret = snprintf(endpoint_str, sizeof(endpoint_str), "-c neon.endpoint_type=primary");
+					strncpy(endpoint_str, "-c neon.endpoint_type=primary", sizeof(endpoint_str));
 					param_set = true;
 					break;
 				case EP_TYPE_REPLICA:
-					ret = snprintf(endpoint_str, sizeof(endpoint_str), "-c neon.endpoint_type=replica");
+					strncpy(endpoint_str, "-c neon.endpoint_type=replica", sizeof(endpoint_str));
 					param_set = true;
 					break;
 				case EP_TYPE_STATIC:
-					ret = snprintf(endpoint_str, sizeof(endpoint_str), "-c neon.endpoint_type=static");
+					strncpy(endpoint_str, "-c neon.endpoint_type=static", sizeof(endpoint_str));
 					param_set = true;
 					break;
 			}
-			if (ret < 0 || ret >= (int)(sizeof(endpoint_str)))
-				elog(FATAL, "stack-allocated buffer too small to hold endpoint type");
 			if (param_set)
 			{
 				keywords[n_pgsql_params] = "options";

@@ -2560,12 +2560,20 @@ where
                             tracing::warn!("failed to parse the startup options: {options}");
                             break;
                         }
-                    } else if parsing_config {
-                        let Some((key, value)) = item.split_once('=') else {
+                    } else if item.starts_with("-c") || parsing_config {
+                        let Some((mut key, value)) = item.split_once('=') else {
                             // "-c" followed with an invalid option
                             tracing::warn!("failed to parse the startup options: {options}");
                             break;
                         };
+                        if !parsing_config {
+                            // Parse "-coptions=X"
+                            let Some(stripped_key) = key.strip_prefix("-c") else {
+                                tracing::warn!("failed to parse the startup options: {options}");
+                                break;
+                            };
+                            key = stripped_key;
+                        }
                         if key == "neon.endpoint_type" {
                             Span::current().record("endpoint_type", field::display(value));
                         } else {
