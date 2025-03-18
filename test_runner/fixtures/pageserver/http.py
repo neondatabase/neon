@@ -1173,3 +1173,31 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         log.info(f"Got perf info response code: {res.status_code}")
         self.verbose_error(res)
         return res.json()
+
+    def ingest_aux_files(
+        self,
+        tenant_id: TenantId | TenantShardId,
+        timeline_id: TimelineId,
+        aux_files: dict[str, bytes],
+    ):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/ingest_aux_files",
+            json={
+                "aux_files": aux_files,
+            },
+        )
+        self.verbose_error(res)
+        return res.json()
+
+    def list_aux_files(
+        self,
+        tenant_id: TenantId | TenantShardId,
+        timeline_id: TimelineId,
+        lsn: Lsn
+    ) -> list[dict[str, Any]]:
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/list_aux_files",
+            json={"lsn": str(lsn)}
+        )
+        self.verbose_error(res)
+        return res.json()
