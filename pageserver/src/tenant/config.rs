@@ -242,15 +242,11 @@ impl Default for LocationConf {
                 generation: Generation::none(),
                 attach_mode: AttachmentMode::Single,
             }),
-            tenant_conf: TenantConfOpt::default(),
+            tenant_conf: pageserver_api::models::TenantConfig::default(),
             shard: ShardIdentity::unsharded(),
         }
     }
 }
-
-/// TODO: we should actually have a dedicated runtime type
-/// for more rigor around interface & data format specs-as-code.
-pub use pageserver_api::models::TenantConfig as TenantConfOpt;
 
 #[cfg(test)]
 mod tests {
