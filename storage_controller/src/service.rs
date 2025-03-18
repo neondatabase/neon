@@ -864,11 +864,9 @@ impl Service {
         };
 
         tracing::info!("Sending initial heartbeats...");
-        // Put a small, but reasonable timeout to get the initial heartbeats of the safekeepers to avoid a storage controller downtime
-        const SK_TIMEOUT: Duration = Duration::from_secs(5);
         let (res_ps, res_sk) = tokio::join!(
             self.heartbeater_ps.heartbeat(Arc::new(nodes_to_heartbeat)),
-            tokio::time::timeout(SK_TIMEOUT, self.heartbeater_sk.heartbeat(all_sks))
+            self.heartbeater_sk.heartbeat(all_sks)
         );
 
         let mut online_nodes = HashMap::new();
@@ -887,7 +885,7 @@ impl Service {
         }
 
         let mut online_sks = HashMap::new();
-        if let Ok(Ok(deltas)) = res_sk {
+        if let Ok(deltas) = res_sk {
             for (node_id, status) in deltas.0 {
                 match status {
                     SafekeeperState::Available {
@@ -1123,10 +1121,9 @@ impl Service {
                 locked.safekeepers.clone()
             };
 
-            const SK_TIMEOUT: Duration = Duration::from_secs(3);
             let (res_ps, res_sk) = tokio::join!(
                 self.heartbeater_ps.heartbeat(nodes),
-                tokio::time::timeout(SK_TIMEOUT, self.heartbeater_sk.heartbeat(safekeepers))
+                self.heartbeater_sk.heartbeat(safekeepers)
             );
 
             if let Ok(deltas) = res_ps {
@@ -1230,7 +1227,7 @@ impl Service {
                     }
                 }
             }
-            if let Ok(Ok(deltas)) = res_sk {
+            if let Ok(deltas) = res_sk {
                 let mut locked = self.inner.write().unwrap();
                 let mut safekeepers = (*locked.safekeepers).clone();
                 for (id, state) in deltas.0 {
@@ -3804,7 +3801,7 @@ impl Service {
         create_mode: models::TimelineCreateRequestMode,
     ) -> Result<SafekeepersInfo, ApiError> {
         let timeline_id = timeline_info.timeline_id;
-        let pg_version = timeline_info.pg_version;
+        let pg_version = timeline_info.pg_version * 10000;
         // Initially start_lsn is determined by last_record_lsn in pageserver
         // response as it does initdb. However, later we persist it and in sk
         // creation calls replace with the value from the timeline row if it
@@ -8723,6 +8720,8 @@ impl Service {
     pub(crate) async fn safekeepers_for_new_timeline(
         &self,
     ) -> Result<Vec<SafekeeperInfo>, ApiError> {
+        // Number of safekeepers in different AZs we are looking for
+        let wanted_count = 3;
         let mut all_safekeepers = {
             let locked = self.inner.read().unwrap();
             locked
@@ -8768,15 +8767,17 @@ impl Service {
                 continue;
             }
             sks.push(sk_info.clone());
-            if sks.len() == 3 {
+            if sks.len() == wanted_count {
                 break;
             }
         }
-        if sks.len() == 3 {
+        if sks.len() == wanted_count {
             Ok(sks)
         } else {
             Err(ApiError::InternalServerError(anyhow::anyhow!(
-                "couldn't find three safekeepers in different AZs for new timeline"
+                "couldn't find {wanted_count} safekeepers in different AZs for new timeline (found: {}, total active: {})",
+                sks.len(),
+                all_safekeepers.len(),
             )))
         }
     }

@@ -1014,7 +1014,7 @@ jobs:
 
   add-release-tag-to-neon-test-extensions-image:
     if: ${{ needs.meta.outputs.run-kind == 'compute-release' }}
-    needs: [ meta, compute-node-image ]
+    needs: [ meta ]
     uses: ./.github/workflows/_push-to-container-registry.yml
     with:
       image-map: |
