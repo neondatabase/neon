@@ -12,6 +12,7 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import TenantConfig
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.utils import wait_until
+from fixtures.log_helper import log
 
 
 @pytest.fixture
@@ -190,36 +191,53 @@ def test_fully_custom_config(positive_env: NeonEnv):
     }
 
     vps_http = env.storage_controller.pageserver_api()
+    ps_http = env.pageserver.http_client()
 
+    # storcon returns its db state in GET tenant_config in both fields
+    # https://github.com/neondatabase/neon/issues/9621
     initial_tenant_config = vps_http.tenant_config(env.initial_tenant)
-    assert [
-        (key, val)
-        for key, val in initial_tenant_config.tenant_specific_overrides.items()
-        if val is not None
-    ] == []
+    assert initial_tenant_config.tenant_specific_overrides == {}
+    assert initial_tenant_config.tenant_specific_overrides == initial_tenant_config.effective_config
+
+    # pageserver has built-in defaults for all config options
+    # also self-test that our fully_custom_config covers all of them
+    initial_tenant_config = ps_http.tenant_config(env.initial_tenant)
+    assert initial_tenant_config.tenant_specific_overrides == {}
     assert set(initial_tenant_config.effective_config.keys()) == set(
         fully_custom_config.keys()
     ), "ensure we cover all config options"
 
+    # create a new tenant to test overrides
     (tenant_id, _) = env.create_tenant()
     vps_http.set_tenant_config(tenant_id, fully_custom_config)
-    our_tenant_config = vps_http.tenant_config(tenant_id)
-    assert our_tenant_config.tenant_specific_overrides == fully_custom_config
-    assert set(our_tenant_config.effective_config.keys()) == set(
-        fully_custom_config.keys()
-    ), "ensure we cover all config options"
-    assert (
-        {
-            k: initial_tenant_config.effective_config[k] != our_tenant_config.effective_config[k]
-            for k in fully_custom_config.keys()
-        }
-        == {k: True for k in fully_custom_config.keys()}
-    ), "ensure our custom config has different values than the default config for all config options, so we know we overrode everything"
 
-    env.pageserver.tenant_detach(tenant_id)
-    env.pageserver.tenant_attach(tenant_id, config=fully_custom_config)
+    for iteration in ["first", "after-reattach"]:
+        log.info(f"iteration: {iteration}")
 
-    assert vps_http.tenant_config(tenant_id).tenant_specific_overrides == fully_custom_config
-    assert set(vps_http.tenant_config(tenant_id).effective_config.keys()) == set(
-        fully_custom_config.keys()
-    ), "ensure we cover all config options"
+        # validate that overrides for all fields are returned by storcon
+        our_tenant_config = vps_http.tenant_config(tenant_id)
+        assert our_tenant_config.tenant_specific_overrides == fully_custom_config
+        assert our_tenant_config.tenant_specific_overrides == our_tenant_config.effective_config
+
+        # validate that overrides for all fields reached pageserver
+        our_tenant_config = ps_http.tenant_config(tenant_id)
+        assert our_tenant_config.tenant_specific_overrides == fully_custom_config
+        assert our_tenant_config.tenant_specific_overrides == our_tenant_config.effective_config
+
+        # some more self-validation: assert that none of the values in our
+        # fully custom config are the same as the default values
+        assert set(our_tenant_config.effective_config.keys()) == set(
+            fully_custom_config.keys()
+        ), "ensure we cover all config options"
+        assert (
+            {
+                k: initial_tenant_config.effective_config[k] != our_tenant_config.effective_config[k]
+                for k in fully_custom_config.keys()
+            }
+            == {k: True for k in fully_custom_config.keys()}
+        ), "ensure our custom config has different values than the default config for all config options, so we know we overrode everything"
+
+        # ensure customizations survive reattach
+        env.pageserver.tenant_detach(tenant_id)
+        env.pageserver.tenant_attach(tenant_id, config=fully_custom_config)
+
