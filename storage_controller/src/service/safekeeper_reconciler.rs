@@ -51,6 +51,22 @@ impl SafekeeperReconcilers {
             handle.cancel.cancel();
         }
     }
+    /// Cancel ongoing reconciles for the given timeline
+    ///
+    /// Specifying `None` here only removes reconciles for the tenant-global reconciliation,
+    /// instead of doing this for all timelines of the tenant.
+    ///
+    /// Callers must remove the reconciles from the db manually
+    pub(crate) fn cancel_reconciles_for_timeline(
+        &mut self,
+        node_id: NodeId,
+        tenant_id: TenantId,
+        timeline_id: Option<TimelineId>,
+    ) {
+        if let Some(handle) = self.reconcilers.get(&node_id) {
+            handle.cancel_reconciliation(tenant_id, timeline_id);
+        }
+    }
 }
 
 /// Initial load of the pending operations from the db
@@ -163,6 +179,12 @@ impl ReconcilerHandle {
             cancel.cancel();
         }
         entry.insert(Arc::new(self.cancel.child_token())).clone()
+    }
+    /// Cancel an ongoing reconciliation
+    fn cancel_reconciliation(&self, tenant_id: TenantId, timeline_id: Option<TimelineId>) {
+        if let Some((_, cancel)) = self.ongoing_tokens.remove(&(tenant_id, timeline_id)) {
+            cancel.cancel();
+        }
     }
     fn schedule_reconcile(&self, req: ScheduleRequest) {
         let cancel = self.new_token_slot(req.tenant_id, req.timeline_id);
