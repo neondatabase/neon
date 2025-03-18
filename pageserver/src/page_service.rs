@@ -2505,6 +2505,52 @@ impl PageServiceCmd {
     }
 }
 
+fn parse_options(options: &str) -> (Vec<(String, String)>, bool) {
+    let mut parsing_config = false;
+    let mut has_error = false;
+    let mut config = Vec::new();
+    for item in options.split_whitespace() {
+        if item == "-c" {
+            if !parsing_config {
+                parsing_config = true;
+            } else {
+                // "-c" followed with another "-c"
+                tracing::warn!("failed to parse the startup options: {options}");
+                has_error = true;
+                break;
+            }
+        } else if item.starts_with("-c") || parsing_config {
+            let Some((mut key, value)) = item.split_once('=') else {
+                // "-c" followed with an invalid option
+                tracing::warn!("failed to parse the startup options: {options}");
+                has_error = true;
+                break;
+            };
+            if !parsing_config {
+                // Parse "-coptions=X"
+                let Some(stripped_key) = key.strip_prefix("-c") else {
+                    tracing::warn!("failed to parse the startup options: {options}");
+                    has_error = true;
+                    break;
+                };
+                key = stripped_key;
+            }
+            config.push((key.to_string(), value.to_string()));
+            parsing_config = false;
+        } else {
+            tracing::warn!("failed to parse the startup options: {options}");
+            has_error = true;
+            break;
+        }
+    }
+    if parsing_config {
+        // "-c" without the option
+        tracing::warn!("failed to parse the startup options: {options}");
+        has_error = true;
+    }
+    (config, has_error)
+}
+
 impl<IO> postgres_backend::Handler<IO> for PageServerHandler
 where
     IO: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
@@ -2550,45 +2596,11 @@ where
                 Span::current().record("application_name", field::display(app_name));
             }
             if let Some(options) = params.get("options") {
-                let mut parsing_config = false;
-                for item in options.split_whitespace() {
-                    if item == "-c" {
-                        if !parsing_config {
-                            parsing_config = true;
-                        } else {
-                            // "-c" followed with another "-c"
-                            tracing::warn!("failed to parse the startup options: {options}");
-                            break;
-                        }
-                    } else if item.starts_with("-c") || parsing_config {
-                        let Some((mut key, value)) = item.split_once('=') else {
-                            // "-c" followed with an invalid option
-                            tracing::warn!("failed to parse the startup options: {options}");
-                            break;
-                        };
-                        if !parsing_config {
-                            // Parse "-coptions=X"
-                            let Some(stripped_key) = key.strip_prefix("-c") else {
-                                tracing::warn!("failed to parse the startup options: {options}");
-                                break;
-                            };
-                            key = stripped_key;
-                        }
-                        if key == "neon.endpoint_type" {
-                            Span::current().record("endpoint_type", field::display(value));
-                        } else {
-                            tracing::warn!("failed to parse the startup options: {options}");
-                            break;
-                        }
-                        parsing_config = false;
-                    } else {
-                        tracing::warn!("failed to parse the startup options: {options}");
-                        break;
+                let (config, _) = parse_options(options);
+                for (key, value) in config {
+                    if key == "neon.endpoint_type" {
+                        Span::current().record("endpoint_type", field::display(value));
                     }
-                }
-                if parsing_config {
-                    // "-c" without the option
-                    tracing::warn!("failed to parse the startup options: {options}");
                 }
             }
         };
@@ -2978,5 +2990,47 @@ mod tests {
         assert!(cmd.is_err());
         let cmd = PageServiceCmd::parse(&format!("lease {tenant_id} {timeline_id} gzip 0/16ABCDE"));
         assert!(cmd.is_err());
+    }
+
+    #[test]
+    fn test_parse_options() {
+        let (config, has_error) = parse_options(" -c neon.endpoint_type=primary ");
+        assert!(!has_error);
+        assert_eq!(
+            config,
+            vec![("neon.endpoint_type".to_string(), "primary".to_string())]
+        );
+
+        let (config, has_error) = parse_options(" -c neon.endpoint_type=primary -c foo=bar ");
+        assert!(!has_error);
+        assert_eq!(
+            config,
+            vec![
+                ("neon.endpoint_type".to_string(), "primary".to_string()),
+                ("foo".to_string(), "bar".to_string()),
+            ]
+        );
+
+        let (config, has_error) = parse_options(" -c neon.endpoint_type=primary -cfoo=bar");
+        assert!(!has_error);
+        assert_eq!(
+            config,
+            vec![
+                ("neon.endpoint_type".to_string(), "primary".to_string()),
+                ("foo".to_string(), "bar".to_string()),
+            ]
+        );
+
+        let (_, has_error) = parse_options("-c");
+        assert!(has_error);
+
+        let (_, has_error) = parse_options("-c foo=bar -c -c");
+        assert!(has_error);
+
+        let (_, has_error) = parse_options("    ");
+        assert!(!has_error);
+
+        let (_, has_error) = parse_options(" -c neon.endpoint_type");
+        assert!(has_error);
     }
 }
