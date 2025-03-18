@@ -62,10 +62,11 @@ index b667478..fc1897c 100644
 +#else
 +			RelFileNode rlocator = RelationGetSmgr(index)->smgr_rnode.node;
 +#endif
-+
-+			neon_set_lwlsn_block_range(XactLastRecEnd, rlocator,
-+									   MAIN_FORKNUM, 0, RelationGetNumberOfBlocks(index));
-+			neon_set_lwlsn_relation(XactLastRecEnd, rlocator, MAIN_FORKNUM);
++			if (neon_set_lwlsn_block_range)
++				neon_set_lwlsn_block_range(XactLastRecEnd, rlocator,
++										   MAIN_FORKNUM, 0, RelationGetNumberOfBlocks(index));
++ 			if (neon_set_lwlsn_relation)
++				neon_set_lwlsn_relation(XactLastRecEnd, rlocator, MAIN_FORKNUM);
 +		}
 +#endif
 +	}
