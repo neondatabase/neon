@@ -19,7 +19,7 @@ on:
         value: ${{ jobs.check-image.outputs.tag }}
       image:
         description: "build-tools image"
-        value: neondatabase/build-tools:${{ jobs.check-image.outputs.tag }}
+        value: ghcr.io/neondatabase/build-tools:${{ jobs.check-image.outputs.tag }}
 
 defaults:
   run:
@@ -49,8 +49,17 @@ jobs:
       everything: ${{ steps.set-more-variables.outputs.everything }}
       found: ${{ steps.set-more-variables.outputs.found }}
 
+    permissions:
+      packages: read
+
     steps:
       - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set variables
         id: set-variables
@@ -75,7 +84,7 @@ jobs:
                 contains(fromJson(steps.set-variables.outputs.debians), 'bullseye') &&
                 contains(fromJson(steps.set-variables.outputs.debians), 'bookworm') }}
         run: |
-          if docker manifest inspect neondatabase/build-tools:${IMAGE_TAG}; then
+          if docker manifest inspect ghcr.io/neondatabase/build-tools:${IMAGE_TAG}; then
             found=true
           else
             found=false
@@ -93,6 +102,9 @@ jobs:
         arch: ${{ fromJson(needs.check-image.outputs.archs) }}
         debian: ${{ fromJson(needs.check-image.outputs.debians) }}
 
+    permissions:
+      packages: write
+
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     steps:
@@ -107,6 +119,12 @@ jobs:
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: docker/login-action@v3
         with:
@@ -126,17 +144,26 @@ jobs:
           cache-from: type=registry,ref=cache.neon.build/build-tools:cache-${{ matrix.debian }}-${{ matrix.arch }}
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/build-tools:cache-{0}-{1},mode=max', matrix.debian, matrix.arch) || '' }}
           tags: |
-            neondatabase/build-tools:${{ needs.check-image.outputs.tag }}-${{ matrix.debian }}-${{ matrix.arch }}
+            ghcr.io/neondatabase/build-tools:${{ needs.check-image.outputs.tag }}-${{ matrix.debian }}-${{ matrix.arch }}
 
   merge-images:
     needs: [ check-image, build-image ]
     runs-on: ubuntu-22.04
+
+    permissions:
+      packages: write
 
     steps:
       - uses: docker/login-action@v3
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create multi-arch image
         env:
@@ -147,14 +174,14 @@ jobs:
           IMAGE_TAG: ${{ needs.check-image.outputs.tag }}
         run: |
           for debian in ${DEBIANS}; do
-            tags=("-t" "neondatabase/build-tools:${IMAGE_TAG}-${debian}")
+            tags=("-t" "ghcr.io/neondatabase/build-tools:${IMAGE_TAG}-${debian}")
 
             if [ "${EVERYTHING}" == "true" ] && [ "${debian}" == "${DEFAULT_DEBIAN_VERSION}" ]; then
-              tags+=("-t" "neondatabase/build-tools:${IMAGE_TAG}")
+              tags+=("-t" "ghcr.io/neondatabase/build-tools:${IMAGE_TAG}")
             fi
 
             for arch in ${ARCHS}; do
-              tags+=("neondatabase/build-tools:${IMAGE_TAG}-${debian}-${arch}")
+              tags+=("ghcr.io/neondatabase/build-tools:${IMAGE_TAG}-${debian}-${arch}")
             done
 
             docker buildx imagetools create "${tags[@]}"
