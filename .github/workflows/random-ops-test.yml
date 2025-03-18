@@ -1,4 +1,4 @@
-name: Random API Test
+name: Random Operations Test
 
 on:
   schedule:
@@ -70,7 +70,7 @@ jobs:
         uses: ./.github/actions/run-python-test-set
         with:
           build_type: remote
-          test_selection: random_api
+          test_selection: random_ops
           run_in_parallel: false
           extra_params: -m remote_cluster
           pg_version: ${{ env.DEFAULT_PG_VERSION }}
