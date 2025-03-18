@@ -1824,14 +1824,23 @@ def test_timeline_detach_with_aux_files_with_detach_v1(
         ["pg_replslot/test_slot_restore/state"]
     )
 
+    print("lsn0=", lsn0)
+    print("lsn1=", lsn1)
+    print("lsn2=", lsn2)
+    print("lsn3=", lsn3)
     # Detach the restore branch so that main doesn't have any child branches.
-    all_reparented = http.detach_ancestor(env.initial_tenant, branch_timeline_id, detach_behavior="v1")
-    assert all_reparented == []
+    all_reparented = http.detach_ancestor(
+        env.initial_tenant, branch_timeline_id, detach_behavior="v1"
+    )
+    assert all_reparented == set([])
+
+    # We need to ensure all safekeeper data are ingested before checking aux files: the API does not wait for LSN.
+    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, branch_timeline_id)
     assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn2).keys()) == set(
         ["pg_replslot/test_slot_parent_1/state", "pg_replslot/test_slot_parent_2/state"]
     )
     assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn3).keys()) == set(
-        []
+        ["pg_replslot/test_slot_restore/state"]
     )
     assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn1).keys()) == set([])
 

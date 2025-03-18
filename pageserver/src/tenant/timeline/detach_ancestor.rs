@@ -439,10 +439,7 @@ pub(super) async fn prepare(
             let span = tracing::info_span!("upload_rewritten_layer", %layer);
             tasks.spawn(
                 async move {
-                    let _permit: Result<
-                        tokio::sync::SemaphorePermit<'_>,
-                        tokio::sync::AcquireError,
-                    > = limiter.acquire().await;
+                    let _permit = limiter.acquire().await;
                     let copied =
                         upload_rewritten_layer(end_lsn, &layer, &timeline, &timeline.cancel, &ctx)
                             .await?;
