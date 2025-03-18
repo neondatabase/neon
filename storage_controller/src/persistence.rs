@@ -1367,6 +1367,34 @@ impl Persistence {
 
         Ok(timeline_from_db)
     }
+
+    /// Loads a list of all timelines from database.
+    pub(crate) async fn list_timelines_for_tenant(
+        &self,
+        tenant_id: TenantId,
+    ) -> DatabaseResult<Vec<TimelinePersistence>> {
+        use crate::schema::timelines::dsl;
+
+        let tenant_id = &tenant_id;
+        let timelines = self
+            .with_measured_conn(DatabaseOperation::GetTimeline, move |conn| {
+                Box::pin(async move {
+                    let timelines: Vec<TimelineFromDb> = dsl::timelines
+                        .filter(dsl::tenant_id.eq(&tenant_id.to_string()))
+                        .load(conn)
+                        .await?;
+                    Ok(timelines)
+                })
+            })
+            .await?;
+
+        let timelines = timelines
+            .into_iter()
+            .map(TimelineFromDb::into_persistence)
+            .collect();
+        Ok(timelines)
+    }
+
     /// Persist pending op. Returns if it was newly inserted. If it wasn't, we haven't done any writes.
     pub(crate) async fn insert_pending_op(
         &self,
