@@ -254,8 +254,8 @@ jobs:
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       # for changed limits, see comments on `options:` earlier in this file
       options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     strategy:
