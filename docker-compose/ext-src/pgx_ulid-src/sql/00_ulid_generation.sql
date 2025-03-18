@@ -1,5 +1,4 @@
 -- Test basic ULID generation
-CREATE EXTENSION pgx_ulid;
 
 -- Test gen_ulid() function
 SELECT 'gen_ulid() returns a non-null value' as test_name,
