@@ -45,7 +45,7 @@ mod s3_uri;
 const PG_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 const PG_WAIT_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone, serde::Serialize)]
 enum Command {
     /// Runs local postgres (neon binary), restores into it,
     /// uploads pgdata to s3 to be consumed by pageservers
@@ -649,7 +649,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
             Err(e) => return Err(anyhow::Error::new(e).context("create working directory")),
         }
 
-        match args.command {
+        match args.command.clone() {
             Command::Pgdata {
                 source_connection_string,
                 interactive,
@@ -700,10 +700,11 @@ pub(crate) async fn main() -> anyhow::Result<()> {
                 std::fs::create_dir(&status_dir).context("create status directory")?;
             }
             let status_file = status_dir.join("fast_import");
-            let res_obj = if res.is_ok() {
-                serde_json::json!({"done": true})
-            } else {
-                serde_json::json!({"done": false, "error": res.unwrap_err().to_string()})
+            let res_obj = match res {
+                Ok(_) => serde_json::json!({"command": args.command, "done": true}),
+                Err(err) => {
+                    serde_json::json!({"command": args.command, "done": false, "error": err.to_string()})
+                }
             };
             std::fs::write(&status_file, res_obj.to_string()).context("write status file")?;
             aws_s3_sync::upload_dir_recursive(
