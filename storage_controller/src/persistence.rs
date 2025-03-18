@@ -1490,6 +1490,36 @@ impl Persistence {
 
         Ok(timeline_from_db)
     }
+
+    /// Obtain a list of pending ops for the given timeline.
+    ///
+    /// If the timeline is `None`, it is serialized to the empty string
+    ///
+    /// Use this only at timeline deletion, otherwise use generation based APIs
+    pub(crate) async fn remove_pending_ops_for_timeline(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: Option<TimelineId>,
+    ) -> DatabaseResult<()> {
+        use crate::schema::safekeeper_timeline_pending_ops::dsl;
+
+        let tenant_id = &tenant_id;
+        let timeline_id = &timeline_id;
+        self.with_measured_conn(DatabaseOperation::ListTimelineReconcile, move |conn| {
+            let timeline_id_str = timeline_id.map(|tid| tid.to_string()).unwrap_or_default();
+            Box::pin(async move {
+                diesel::delete(dsl::safekeeper_timeline_pending_ops)
+                    .filter(dsl::tenant_id.eq(tenant_id.to_string()))
+                    .filter(dsl::timeline_id.eq(timeline_id_str))
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .await?;
+
+        Ok(())
+    }
 }
 
 pub(crate) fn load_certs() -> anyhow::Result<Arc<rustls::RootCertStore>> {

@@ -3325,9 +3325,14 @@ impl Service {
         }
     }
 
-    pub(crate) async fn tenant_delete(&self, tenant_id: TenantId) -> Result<StatusCode, ApiError> {
+    pub(crate) async fn tenant_delete(
+        self: &Arc<Self>,
+        tenant_id: TenantId,
+    ) -> Result<StatusCode, ApiError> {
         let _tenant_lock =
             trace_exclusive_lock(&self.tenant_op_locks, tenant_id, TenantOperations::Delete).await;
+
+        self.tenant_delete_safekeepers(tenant_id).await?;
 
         self.maybe_load_tenant(tenant_id, &_tenant_lock).await?;
 

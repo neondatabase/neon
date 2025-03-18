@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,6 +9,7 @@ use crate::persistence::{
     DatabaseError, SafekeeperTimelineOpKind, TimelinePendingOpPersistence, TimelinePersistence,
 };
 use crate::safekeeper::Safekeeper;
+use anyhow::Context;
 use http_utils::error::ApiError;
 use pageserver_api::controller_api::{SafekeeperDescribeResponse, SkSchedulingPolicy};
 use pageserver_api::models::{self, SafekeeperInfo, SafekeepersInfo, TimelineInfo};
@@ -347,6 +349,85 @@ impl Service {
                 };
                 locked.safekeeper_reconcilers.schedule_request(self, req);
             }
+        }
+        Ok(())
+    }
+
+    /// Perform tenant deletion on safekeepers.
+    pub(super) async fn tenant_delete_safekeepers(
+        self: &Arc<Self>,
+        tenant_id: TenantId,
+    ) -> Result<(), ApiError> {
+        let timeline_list = self
+            .persistence
+            .list_timelines_for_tenant(tenant_id)
+            .await?;
+
+        if timeline_list.is_empty() {
+            // Early exit: the tenant is either empty or not migrated to the storcon yet
+            return Ok(());
+        }
+
+        let timeline_list = timeline_list
+            .into_iter()
+            .map(|timeline| {
+                let timeline_id = TimelineId::from_str(&timeline.timeline_id)
+                    .context("timeline id loaded from db")
+                    .map_err(ApiError::InternalServerError)?;
+                Ok((timeline_id, timeline))
+            })
+            .collect::<Result<Vec<_>, ApiError>>()?;
+
+        // Remove pending ops from db.
+        // We cancel them in a later iteration once we hold the state lock.
+        for (timeline_id, _timeline) in timeline_list.iter() {
+            self.persistence
+                .remove_pending_ops_for_timeline(tenant_id, Some(*timeline_id))
+                .await?;
+        }
+
+        let mut locked = self.inner.write().unwrap();
+
+        // The list of safekeepers that have any of the timelines
+        let mut sk_list = HashSet::new();
+
+        // List all pending ops for all timelines, cancel them
+        for (timeline_id, timeline) in timeline_list.iter() {
+            let sk_iter = timeline
+                .sk_set
+                .iter()
+                .chain(timeline.new_sk_set.iter().flatten())
+                .map(|id| NodeId(*id as u64));
+            for sk_id in sk_iter.clone() {
+                locked
+                    .safekeeper_reconcilers
+                    .cancel_reconciles_for_timeline(sk_id, tenant_id, Some(*timeline_id));
+            }
+            sk_list.extend(sk_iter);
+        }
+
+        // unwrap is safe: we return above for an empty timeline list
+        let max_generation = timeline_list
+            .iter()
+            .map(|(_tl_id, tl)| tl.generation as u32)
+            .max()
+            .unwrap();
+
+        for sk_id in sk_list {
+            let Some(safekeeper) = locked.safekeepers.get(&sk_id) else {
+                tracing::warn!("Couldn't find safekeeper with id {sk_id}");
+                continue;
+            };
+            // Add pending op for tenant deletion
+            let req = ScheduleRequest {
+                generation: max_generation,
+                host_list: Vec::new(),
+                kind: SafekeeperTimelineOpKind::Delete,
+                safekeeper: Box::new(safekeeper.clone()),
+                tenant_id,
+                timeline_id: None,
+            };
+            locked.safekeeper_reconcilers.schedule_request(self, req);
         }
         Ok(())
     }
