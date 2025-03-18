@@ -85,6 +85,15 @@ enum Command {
     },
 }
 
+impl Command {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Command::Pgdata { .. } => "pgdata",
+            Command::DumpRestore { .. } => "dump-restore",
+        }
+    }
+}
+
 #[derive(clap::Parser)]
 struct Args {
     #[clap(long, env = "NEON_IMPORTER_WORKDIR")]
@@ -604,7 +613,18 @@ pub(crate) async fn main() -> anyhow::Result<()> {
 
     // Initialize AWS clients only if s3_prefix is specified
     let (s3_client, kms_client) = if args.s3_prefix.is_some() {
-        let config = aws_config::load_defaults(BehaviorVersion::v2024_03_28()).await;
+        // Create AWS config with enhanced retry settings
+        let config = aws_config::defaults(BehaviorVersion::v2024_03_28())
+            .retry_config(
+                aws_config::retry::RetryConfig::standard()
+                    .with_max_attempts(5) // Retry up to 5 times
+                    .with_initial_backoff(std::time::Duration::from_millis(200)) // Start with 200ms delay
+                    .with_max_backoff(std::time::Duration::from_secs(5)), // Cap at 5 seconds
+            )
+            .load()
+            .await;
+
+        // Create clients from the config with enhanced retry settings
         let s3_client = aws_sdk_s3::Client::new(&config);
         let kms = aws_sdk_kms::Client::new(&config);
         (Some(s3_client), Some(kms))
@@ -701,9 +721,9 @@ pub(crate) async fn main() -> anyhow::Result<()> {
             }
             let status_file = status_dir.join("fast_import");
             let res_obj = match res {
-                Ok(_) => serde_json::json!({"command": args.command, "done": true}),
+                Ok(_) => serde_json::json!({"command": args.command.as_str(), "done": true}),
                 Err(err) => {
-                    serde_json::json!({"command": args.command, "done": false, "error": err.to_string()})
+                    serde_json::json!({"command": args.command.as_str(), "done": false, "error": err.to_string()})
                 }
             };
             std::fs::write(&status_file, res_obj.to_string()).context("write status file")?;

@@ -158,6 +158,7 @@ def test_pgdata_import_smoke(
     statusdir = importbucket / "status"
     statusdir.mkdir()
     (statusdir / "pgdata").write_text(json.dumps({"done": True}))
+    (statusdir / "fast_import").write_text(json.dumps({"command": "pgdata", "done": True}))
 
     #
     # Do the import
@@ -451,7 +452,10 @@ def test_fast_import_with_pageserver_ingest(
         Bucket=bucket, Key=f"{key_prefix}/status/fast_import"
     )
     job_status = job_status_obj["Body"].read().decode("utf-8")
-    assert json.loads(job_status) == {"done": True}, f"got status: {job_status}"
+    assert json.loads(job_status) == {
+        "command": "pgdata",
+        "done": True,
+    }, f"got status: {job_status}"
 
     vanilla_pg.stop()
 
@@ -695,7 +699,10 @@ def test_fast_import_restore_to_connstring_from_s3_spec(
             Bucket=bucket, Key=f"{key_prefix}/status/fast_import"
         )
         job_status = job_status_obj["Body"].read().decode("utf-8")
-        assert json.loads(job_status) == {"done": True}, f"got status: {job_status}"
+        assert json.loads(job_status) == {
+            "done": True,
+            "command": "dump-restore",
+        }, f"got status: {job_status}"
         vanilla_pg.stop()
 
         res = destination_vanilla_pg.safe_psql("SELECT count(*) FROM foo;")
@@ -756,6 +763,7 @@ def test_fast_import_restore_to_connstring_error_to_s3_bad_destination(
     )
     job_status = job_status_obj["Body"].read().decode("utf-8")
     assert json.loads(job_status) == {
+        "command": "dump-restore",
         "done": False,
         "error": "pg_restore failed",
     }, f"got status: {job_status}"
@@ -805,6 +813,7 @@ def test_fast_import_restore_to_connstring_error_to_s3_kms_error(
     )
     job_status = job_status_obj["Body"].read().decode("utf-8")
     assert json.loads(job_status) == {
+        "command": "dump-restore",
         "done": False,
         "error": "decrypt source connection string",
     }, f"got status: {job_status}"
