@@ -42,7 +42,7 @@ index e8b209d..e89bf2a 100644
 +		RelFileNode rlocator = RelationGetSmgr(index)->smgr_rnode.node;
 +#endif
 +
-+		SetLastWrittenLSNForBlockRange(XactLastRecEnd, rlocator, MAIN_FORKNUM, 0, RelationGetNumberOfBlocks(index));
++		neon_set_lwlsn_block_range(XactLastRecEnd, rlocator, MAIN_FORKNUM, 0, RelationGetNumberOfBlocks(index));
 +		SetLastWrittenLSNForRelation(XactLastRecEnd, rlocator, MAIN_FORKNUM);
 +
 +		smgr_end_unlogged_build(index->rd_smgr);
