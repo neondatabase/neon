@@ -5096,7 +5096,7 @@ impl Tenant {
         // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
         let pgdata_path_deferred = pgdata_path.clone();
         scopeguard::defer! {
-            if let Err(e) = fs::remove_dir_all(&pgdata_path_deferred) {
+            if let Err(e) = fs::remove_dir_all(&pgdata_path_deferred).or_else(fs_ext::ignore_not_found) {
                 // this is unlikely, but we will remove the directory on pageserver restart or another bootstrap call
                 error!("Failed to remove temporary initdb directory '{pgdata_path_deferred}': {e}");
             }
