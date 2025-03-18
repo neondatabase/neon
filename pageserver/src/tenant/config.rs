@@ -132,7 +132,7 @@ impl LocationConf {
     /// implies it is in AttachmentMode::Single, which used to be the only
     /// possible state.  This function should eventually be removed.
     pub(crate) fn attached_single(
-        tenant_conf: TenantConfOpt,
+        tenant_conf: pageserver_api::models::TenantConfig,
         generation: Generation,
         shard_params: &models::ShardParameters,
     ) -> Self {

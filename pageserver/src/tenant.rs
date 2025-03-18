@@ -3702,16 +3702,13 @@ impl Tenant {
     /// create a Tenant in the same state.  Do not use this in hot paths: it's for relatively
     /// rare external API calls, like a reconciliation at startup.
     pub(crate) fn get_location_conf(&self) -> models::LocationConfig {
-        let conf = self.tenant_conf.load();
+        let attached_tenant_conf = self.tenant_conf.load();
 
-        let location_config_mode = match conf.location.attach_mode {
+        let location_config_mode = match attached_tenant_conf.location.attach_mode {
             AttachmentMode::Single => models::LocationConfigMode::AttachedSingle,
             AttachmentMode::Multi => models::LocationConfigMode::AttachedMulti,
             AttachmentMode::Stale => models::LocationConfigMode::AttachedStale,
         };
-
-        // We have a pageserver TenantConf, we need the API-facing TenantConfig.
-        let tenant_config: models::TenantConfig = conf.tenant_conf.clone().into();
 
         models::LocationConfig {
             mode: location_config_mode,
@@ -3720,7 +3717,7 @@ impl Tenant {
             shard_number: self.shard_identity.number.0,
             shard_count: self.shard_identity.count.literal(),
             shard_stripe_size: self.shard_identity.stripe_size.0,
-            tenant_conf: tenant_config,
+            tenant_conf: attached_tenant_conf.tenant_conf.clone(),
         }
     }
 
@@ -5807,7 +5804,7 @@ pub(crate) mod harness {
                 TenantState::Attaching,
                 self.conf,
                 AttachedTenantConf::try_from(LocationConf::attached_single(
-                    TenantConfOpt::from(self.tenant_conf.clone()),
+                    self.tenant_conf.clone(),
                     self.generation,
                     &ShardParameters::default(),
                 ))

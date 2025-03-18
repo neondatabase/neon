@@ -197,7 +197,7 @@ impl SecondaryTenant {
             shard_number: self.tenant_shard_id.shard_number.0,
             shard_count: self.tenant_shard_id.shard_count.literal(),
             shard_stripe_size: self.shard_identity.stripe_size.0,
-            tenant_conf: tenant_conf.into(),
+            tenant_conf,
         }
     }
 
