@@ -126,6 +126,7 @@ pub(crate) enum DatabaseOperation {
     InsertTimelineReconcile,
     RemoveTimelineReconcile,
     ListTimelineReconcile,
+    InsertTimelineImport,
 }
 
 #[must_use]
@@ -1519,6 +1520,25 @@ impl Persistence {
 
         Ok(())
     }
+
+    pub(crate) async fn insert_timeline_import(
+        &self,
+        import: TimelineImportPersistence,
+    ) -> DatabaseResult<bool> {
+        self.with_measured_conn(DatabaseOperation::InsertTimelineImport, move |conn| {
+            Box::pin({
+                let import = import.clone();
+                async move {
+                    let inserted = diesel::insert_into(crate::schema::timeline_imports::table)
+                        .values(import)
+                        .execute(conn)
+                        .await?;
+                    Ok(inserted == 1)
+                }
+            })
+        })
+        .await
+    }
 }
 
 pub(crate) fn load_certs() -> anyhow::Result<Arc<rustls::RootCertStore>> {
@@ -2075,4 +2095,12 @@ impl ToSql<diesel::sql_types::VarChar, Pg> for SafekeeperTimelineOpKind {
             .map(|_| IsNull::No)
             .map_err(Into::into)
     }
+}
+
+#[derive(Serialize, Deserialize, Queryable, Selectable, Insertable, Eq, PartialEq, Clone)]
+#[diesel(table_name = crate::schema::timeline_imports)]
+pub(crate) struct TimelineImportPersistence {
+    pub(crate) tenant_id: String,
+    pub(crate) timeline_id: String,
+    pub(crate) shard_statuses: serde_json::Value,
 }
