@@ -115,17 +115,33 @@ class NeonAPI:
         project_id: str,
         branch_name: str | None = None,
         parent_id: str | None = None,
+        parent_lsn: str | None = None,
+        parent_timestamp: str | None = None,
+        protected: bool | None = None,
+        archived: bool | None = None,
+        init_source: str | None = None,
         add_endpoint=True,
     ) -> dict[str, Any]:
         data: dict[str, Any] = {}
         if add_endpoint:
             data["endpoints"] = [{"type": "read_write"}]
-        if parent_id or branch_name:
-            data["branch"] = {}
+        data["branch"] = {}
         if parent_id:
             data["branch"]["parent_id"] = parent_id
         if branch_name:
             data["branch"]["name"] = branch_name
+        if parent_lsn is not None:
+            data["branch"]["parent_lsn"] = parent_lsn
+        if parent_timestamp is not None:
+            data["branch"]["parent_timestamp"] = parent_timestamp
+        if protected is not None:
+            data["branch"]["protected"] = protected
+        if init_source is not None:
+            data["branch"]["init_source"] = init_source
+        if archived is not None:
+            data["branch"]["archived"] = archived
+        if not data["branch"]:
+            data.pop("branch")
         resp = self.__request(
             "POST",
             f"/projects/{project_id}/branches",
@@ -181,16 +197,6 @@ class NeonAPI:
                 "Accept": "application/json",
             },
             json=data,
-        )
-        return cast("dict[str, Any]", resp.json())
-
-    def reset_branch_to_parent(self, project_id: str, branch_id: str) -> dict[str, Any]:
-        resp = self.__request(
-            "POST",
-            f"/projects/{project_id}/{branch_id}/reset_to_parent",
-            headers={
-                "Accept": "application/json",
-            },
         )
         return cast("dict[str, Any]", resp.json())
 
