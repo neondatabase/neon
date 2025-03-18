@@ -330,8 +330,15 @@ impl TimelineCreateRequest {
     }
 
     pub fn is_import(&self) -> bool {
-        matches!(self.mode, TimelineCreateRequestMode::Bootstrap { .. })
+        matches!(self.mode, TimelineCreateRequestMode::ImportPgdata { .. })
     }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub enum ShardImportStatus {
+    InProgress,
+    Done,
+    Error(String),
 }
 
 /// Storage controller specific extensions to [`TimelineInfo`].

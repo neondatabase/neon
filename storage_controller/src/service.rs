@@ -97,6 +97,7 @@ use crate::tenant_shard::{
     ReconcileNeeded, ReconcileResult, ReconcileWaitError, ReconcilerStatus, ReconcilerWaiter,
     ScheduleOptimization, ScheduleOptimizationAction, TenantShard,
 };
+use crate::timeline_import::{ShardImportStatuses, TimelineImport};
 
 const WAITER_FILL_DRAIN_POLL_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -3732,13 +3733,14 @@ impl Service {
         create_req: TimelineCreateRequest,
     ) -> Result<TimelineCreateResponseStorcon, ApiError> {
         let safekeepers = self.config.timelines_onto_safekeepers;
+        let timeline_id = create_req.new_timeline_id;
 
         tracing::info!(
             mode=%create_req.mode_tag(),
             %safekeepers,
             "Creating timeline {}/{}",
             tenant_id,
-            create_req.new_timeline_id,
+            timeline_id,
         );
 
         let _tenant_lock = trace_shared_lock(
@@ -3755,7 +3757,46 @@ impl Service {
             .await?;
 
         let selected_safekeepers = if is_import {
-            // TODO(vlad): If the creation is in import mode, create an entry in the db
+            let shards = {
+                let locked = self.inner.read().unwrap();
+                locked
+                    .tenants
+                    .range(TenantShardId::tenant_range(tenant_id))
+                    .map(|(ts_id, _)| ts_id.to_index())
+                    .collect::<Vec<_>>()
+            };
+
+            if !shards
+                .iter()
+                .map(|shard_index| shard_index.shard_count)
+                .all_equal()
+            {
+                return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                    "Inconsistent shard count"
+                )));
+            }
+
+            let import = TimelineImport {
+                tenant_id,
+                timeline_id,
+                shard_statuses: ShardImportStatuses::new(shards),
+            };
+
+            let inserted = self
+                .persistence
+                .insert_timeline_import(import.to_persistent())
+                .await
+                .context("timeline import insert")
+                .map_err(ApiError::InternalServerError)?;
+
+            match inserted {
+                true => {
+                    tracing::debug!(%tenant_id, %timeline_id, "Inserted timeline import");
+                }
+                false => {
+                    tracing::debug!(%tenant_id, %timeline_id, "Timeline import entry already present");
+                }
+            }
 
             // TODO(vlad): Timeline creations in import mode do not return a correct initdb lsn,
             // so we can't create the timeline on the safekeepers. Fix by moving creation when
