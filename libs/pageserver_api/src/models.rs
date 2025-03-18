@@ -577,12 +577,15 @@ pub struct TenantConfigPatch {
 ///
 /// Used in many places, including durably stored ones.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)] // this maps omitted fields in deserialization to None
 pub struct TenantConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoint_distance: Option<u64>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
     pub checkpoint_timeout: Option<Duration>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction_target_size: Option<u64>,
 
