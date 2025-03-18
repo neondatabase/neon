@@ -1,8 +1,8 @@
 # Compute rolling restart with prewarm
 
 Created on 2025-03-17
-Author: Alexey Kondratov (@ololobus)
 Implemented on _TBD_
+Author: Alexey Kondratov (@ololobus)
 
 ## Summary
 
@@ -63,6 +63,9 @@ iif some of the previous states is present in S3.
 ### compute_ctl API
 
 1. `POST /store_lfc_state` -- dump LFC state using Postgres SQL interface and store result in S3.
+    This has to be a blocking call, i.e. it will return only after the state is stored in S3.
+    If there is any concurrent request in progress, we should return `429 Too Many Requests`,
+    and let the caller to retry.
 
 2. `GET /dump_lfc_state` -- dump LFC state using Postgres SQL interface and return it as is
     in text format suitable for the future restore/prewarm. This API is not strictly needed at
@@ -145,7 +148,7 @@ iif some of the previous states is present in S3.
     - If compute is already primary, the call will be no-op and `compute_ctl`
       will return `412 Precondition Failed`.
     - If, for some reason, second request reaches compute that is in progress of promotion,
-      it will respond with `409 Conflict`.
+      it will respond with `429 Too Many Requests`.
     - If compute hit any permanent failure during promotion `500 Internal Server Error`
       will be returned.
 
@@ -158,7 +161,7 @@ the rolling restart via warm replica, but without much of low-level implementati
 1. Register the 'intent' of the instance restart, but not yet interrupt any workload at
     primary and also accept new connections. This may require some endpoint state machine
     changes, e.g. introduction of the `pending_restart` state. Being in this state also
-    mustn't prevent any other operations except restart: suspend, live-reconfiguration
+    **mustn't prevent any other operations except restart**: suspend, live-reconfiguration
     (e.g. due to notify-attach call from the storage controller), deletion.
 
 2. Start new replica compute on the same timeline and start prewarming it. This process
@@ -167,19 +170,92 @@ the rolling restart via warm replica, but without much of low-level implementati
 
 3. When warm replica is ready, control plane should:
 
-    3.1. Terminate the primary compute.
+    3.1. Terminate the primary compute. Starting from here, **this is a critical section**,
+        if anything goes off, the only option is to start the primary normally and proceed
+        with auto-prewarm.
+
     3.2. Send cache invalidation message to all proxies, notifying them that all new connections
         should request and wait for the new connection details.
+
     3.3. Attach warm replica compute to the primary endpoint inside control plane metadata
         database.
-    3.4. Promote replica to primary. **This is a critical section**, if anything goes off,
-        the only option is to start the primary normally and proceed with auto-prewarm.
 
-4. When everything is done, finalize the endpoint state to be just `active`.
+    3.4. Promote replica to primary.
+
+    3.5. When everything is done, finalize the endpoint state to be just `active`.
 
 ### Complete rolling restart flow
 
-TBD
+```mermaid
+  sequenceDiagram
+
+  autonumber
+
+  participant proxy as Neon proxy
+
+  participant cplane as Control plane
+
+  participant primary as Compute (primary)
+  box Compute (replica)
+    participant ctl as compute_ctl
+    participant pg as Postgres
+  end
+
+  box Endpoint unlogged storage
+    participant s3proxy as S3 proxy
+    participant s3 as S3
+  end
+
+
+  cplane ->> primary: POST /store_lfc_state
+  primary -->> cplane: 200 OK
+
+  cplane ->> ctl: POST /restore_lfc_state
+  activate ctl
+  ctl -->> cplane: 202 Accepted
+
+  activate cplane
+  cplane ->> ctl: GET /status: poll prewarm status
+  ctl ->> s3proxy: GET /read_file
+  s3proxy ->> s3: read file
+  s3 -->> s3proxy: file content
+  s3proxy -->> ctl: 200 OK: file content
+
+  proxy ->> cplane: GET /proxy_wake_compute
+  cplane -->> proxy: 200 OK: old primary conninfo
+
+  ctl ->> pg: prewarm LFC
+  activate pg
+  pg -->> ctl: prewarm is completed
+  deactivate pg
+
+  ctl -->> cplane: 200 OK: prewarm is completed
+  deactivate ctl
+  deactivate cplane
+
+  cplane -->> cplane: reassign replica compute to endpoint,<br>start terminating the old primary compute
+  activate cplane
+  cplane ->> proxy: invalidate caches
+
+  proxy ->> cplane: GET /proxy_wake_compute
+
+  cplane -x primary: POST /terminate
+  primary -->> cplane: 200 OK
+  note over primary: old primary<br>compute terminated
+
+  cplane ->> ctl: POST /promote
+  activate ctl
+  ctl ->> pg: pg_ctl promote
+  activate pg
+  pg -->> ctl: done
+  deactivate pg
+  ctl -->> cplane: 200 OK
+  deactivate ctl
+
+  cplane -->> cplane: finalize operation
+  cplane -->> proxy: 200 OK: new primary conninfo
+  deactivate cplane
+```
 
 ### Reliability, failure modes and corner cases
 
