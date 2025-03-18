@@ -77,14 +77,17 @@ jobs:
     secrets: inherit
 
   check-codestyle-python:
-    needs: [ check-permissions, build-build-tools-image ]
+    needs: [ meta, check-permissions, build-build-tools-image ]
+    # No need to run on `main` because we this in the merge queue
+    if: ${{ needs.meta.outputs.run-kind == 'pr' }}
     uses: ./.github/workflows/_check-codestyle-python.yml
     with:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
     secrets: inherit
 
   check-codestyle-jsonnet:
-    needs: [ check-permissions, build-build-tools-image ]
+    needs: [ meta, check-permissions, build-build-tools-image ]
+    if: ${{ contains(fromJSON('["pr", "push-main"]'), needs.meta.outputs.run-kind) }}
     runs-on: [ self-hosted, small ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
@@ -156,7 +159,9 @@ jobs:
           pass_if_unchanged: true
 
   check-codestyle-rust:
-    needs: [ check-permissions, build-build-tools-image ]
+    needs: [ meta, check-permissions, build-build-tools-image ]
+    # No need to run on `main` because we this in the merge queue
+    if: ${{ needs.meta.outputs.run-kind == 'pr' }}
     uses: ./.github/workflows/_check-codestyle-rust.yml
     with:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
@@ -164,8 +169,8 @@ jobs:
     secrets: inherit
 
   check-dependencies-rust:
-    needs: [ files-changed, build-build-tools-image ]
-    if: ${{ needs.files-changed.outputs.check-rust-dependencies == 'true' }}
+    needs: [ meta, files-changed, build-build-tools-image ]
+    if: ${{ needs.files-changed.outputs.check-rust-dependencies == 'true' && needs.meta.outputs.run-kind == 'pr' }}
     uses: ./.github/workflows/cargo-deny.yml
     with:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
@@ -173,12 +178,13 @@ jobs:
 
   build-and-test-locally:
     needs: [ meta, build-build-tools-image ]
+    if: ${{ contains(fromJSON('["pr", "push-main"]'), needs.meta.outputs.run-kind) }}
     strategy:
       fail-fast: false
       matrix:
         arch: [ x64, arm64 ]
         # Do not build or run tests in debug for release branches
-        build-type: ${{ fromJson((startsWith(github.ref_name, 'release') && github.event_name == 'push') && '["release"]' || '["debug", "release"]') }}
+        build-type: ${{ fromJSON((startsWith(github.ref_name, 'release') && github.event_name == 'push') && '["release"]' || '["debug", "release"]') }}
         include:
           - build-type: release
             arch: arm64
@@ -470,14 +476,20 @@ jobs:
             })
 
   trigger-e2e-tests:
-    # Depends on jobs that can get skipped
+    # !failure() && !cancelled() because it depends on jobs that can get skipped
     if: >-
       ${{
         (
-          !github.event.pull_request.draft
-          || contains( github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft')
-          || needs.meta.outputs.run-kind == 'push-main'
-        ) && !failure() && !cancelled()
+          (
+            needs.meta.outputs.run-kind == 'pr'
+            && (
+              !github.event.pull_request.draft
+              || contains(github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft')
+            )
+          )
+          || contains(fromJSON('["push-main", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind)
+        )
+        && !failure() && !cancelled()
       }}
     needs: [ check-permissions, push-neon-image-dev, push-compute-image-dev, meta ]
     uses: ./.github/workflows/trigger-e2e-tests.yml
@@ -492,7 +504,7 @@ jobs:
       matrix:
         arch: [ x64, arm64 ]
 
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
+    runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     permissions:
       packages: write
@@ -594,7 +606,7 @@ jobs:
             debian: bookworm
         arch: [ x64, arm64 ]
 
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
+    runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -715,7 +727,7 @@ jobs:
   vm-compute-node-image-arch:
     needs: [ check-permissions, meta, compute-node-image ]
     if: ${{ contains(fromJSON('["push-main", "pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
+    runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
     permissions:
       contents: read
       packages: write
@@ -815,7 +827,7 @@ jobs:
     permissions:
       packages: read
 
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
+    runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -929,7 +941,7 @@ jobs:
         env:
           SOURCE_TAG: >-
             ${{
-              contains(fromJson('["storage-release", "compute-release", "proxy-release"]'), needs.meta.outputs.run-kind)
+              contains(fromJSON('["storage-release", "compute-release", "proxy-release"]'), needs.meta.outputs.run-kind)
               && needs.meta.outputs.release-pr-run-id
               || needs.meta.outputs.build-tag
             }}
@@ -1434,10 +1446,10 @@ jobs:
         if: |
           contains(needs.*.result, 'failure')
           || contains(needs.*.result, 'cancelled')
-          || (needs.check-dependencies-rust.result == 'skipped' && needs.files-changed.outputs.check-rust-dependencies == 'true')
-          || needs.build-and-test-locally.result == 'skipped'
-          || needs.check-codestyle-python.result == 'skipped'
-          || needs.check-codestyle-rust.result == 'skipped'
+          || (needs.check-dependencies-rust.result == 'skipped' && needs.files-changed.outputs.check-rust-dependencies == 'true' && needs.meta.outputs.run-kind == 'pr')
+          || (needs.build-and-test-locally.result == 'skipped' && needs.meta.outputs.run-kind == 'pr')
+          || (needs.check-codestyle-python.result == 'skipped' && needs.meta.outputs.run-kind == 'pr')
+          || (needs.check-codestyle-rust.result == 'skipped' && needs.meta.outputs.run-kind == 'pr')
           || needs.files-changed.result == 'skipped'
           || (needs.push-compute-image-dev.result == 'skipped' && contains(fromJSON('["push-main", "pr", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind))
           || (needs.push-neon-image-dev.result == 'skipped' && contains(fromJSON('["push-main", "pr", "storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind))
