@@ -3732,7 +3732,9 @@ impl Service {
         create_req: TimelineCreateRequest,
     ) -> Result<TimelineCreateResponseStorcon, ApiError> {
         let safekeepers = self.config.timelines_onto_safekeepers;
+
         tracing::info!(
+            mode=%create_req.mode_tag(),
             %safekeepers,
             "Creating timeline {}/{}",
             tenant_id,
@@ -3746,15 +3748,23 @@ impl Service {
         )
         .await;
         failpoint_support::sleep_millis_async!("tenant-create-timeline-shared-lock");
-        let create_mode = create_req.mode.clone();
+        let is_import = create_req.is_import();
 
         let timeline_info = self
             .tenant_timeline_create_pageservers(tenant_id, create_req)
             .await?;
 
-        let safekeepers = if safekeepers {
+        let selected_safekeepers = if is_import {
+            // TODO(vlad): If the creation is in import mode, create an entry in the db
+
+            // TODO(vlad): Timeline creations in import mode do not return a correct initdb lsn,
+            // so we can't create the timeline on the safekeepers. Fix by moving creation when
+            // the import is done or making the pageserver import code path return all the things
+            // we need.
+            None
+        } else if safekeepers {
             let res = self
-                .tenant_timeline_create_safekeepers(tenant_id, &timeline_info, create_mode)
+                .tenant_timeline_create_safekeepers(tenant_id, &timeline_info)
                 .instrument(tracing::info_span!("timeline_create_safekeepers", %tenant_id, timeline_id=%timeline_info.timeline_id))
                 .await?;
             Some(res)
@@ -3764,7 +3774,7 @@ impl Service {
 
         Ok(TimelineCreateResponseStorcon {
             timeline_info,
-            safekeepers,
+            safekeepers: selected_safekeepers,
         })
     }
 
