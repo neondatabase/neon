@@ -265,7 +265,8 @@ impl Service {
                                 .get(&sk.id)
                                 .ok_or_else(|| {
                                     ApiError::InternalServerError(anyhow::anyhow!(
-                                        "Couldn't find safekeeper with id {remaining_id} to pull from"
+                                        "Couldn't find safekeeper with id {} to pull from",
+                                        sk.id
                                     ))
                                 })?
                                 .base_url(),
