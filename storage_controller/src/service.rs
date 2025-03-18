@@ -80,8 +80,8 @@ use crate::peer_client::GlobalObservedState;
 use crate::persistence::split_state::SplitState;
 use crate::persistence::{
     AbortShardSplitStatus, ControllerPersistence, DatabaseError, DatabaseResult,
-    MetadataHealthPersistence, Persistence, ShardGenerationState,
-    TenantFilter, TenantShardPersistence,
+    MetadataHealthPersistence, Persistence, ShardGenerationState, TenantFilter,
+    TenantShardPersistence,
 };
 use crate::reconciler::{
     ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder, ReconcilerPriority,
