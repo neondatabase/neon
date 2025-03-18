@@ -120,7 +120,7 @@ jobs:
 
       - name: Get the release PR run ID
         id: release-pr-run-id
-        if: ${{ contains(fromJson('["storage-release", "compute-release", "proxy-release"]'), steps.run-kind.outputs.run-kind) }}
+        if: ${{ contains(fromJSON('["storage-release", "compute-release", "proxy-release"]'), steps.run-kind.outputs.run-kind) }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CURRENT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}

@@ -19,6 +19,8 @@ permissions: {}
 jobs:
   meta:
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
     outputs:
       python-changed: ${{ steps.python-src.outputs.any_changed }}
       rust-changed: ${{ steps.rust-src.outputs.any_changed }}
@@ -72,6 +74,9 @@ jobs:
       || needs.meta.outputs.python-changed == 'true'
       || needs.meta.outputs.rust-changed == 'true'
     needs: [ meta ]
+    permissions:
+      contents: read
+      packages: write
     uses: ./.github/workflows/build-build-tools-image.yml
     with:
       # Build only one combination to save time
@@ -82,6 +87,9 @@ jobs:
   check-codestyle-python:
     if: needs.meta.outputs.python-changed == 'true'
     needs: [ meta, build-build-tools-image ]
+    permissions:
+      contents: read
+      packages: read
     uses: ./.github/workflows/_check-codestyle-python.yml
     with:
       # `-bookworm-x64` suffix should match the combination in `build-build-tools-image`
@@ -91,6 +99,9 @@ jobs:
   check-codestyle-rust:
     if: needs.meta.outputs.rust-changed == 'true'
     needs: [ meta, build-build-tools-image ]
+    permissions:
+      contents: read
+      packages: read
     uses: ./.github/workflows/_check-codestyle-rust.yml
     with:
       # `-bookworm-x64` suffix should match the combination in `build-build-tools-image`
@@ -148,7 +159,7 @@ jobs:
           ${{
             always()
             && github.event_name == 'merge_group'
-            && contains(fromJson('["release", "release-proxy", "release-compute"]'), needs.meta.outputs.branch)
+            && contains(fromJSON('["release", "release-proxy", "release-compute"]'), needs.meta.outputs.branch)
           }}
         env:
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}

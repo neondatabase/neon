@@ -441,7 +441,7 @@ jobs:
 
     strategy:
       fail-fast: false
-      matrix: ${{fromJson(needs.generate-matrices.outputs.pgbench-compare-matrix)}}
+      matrix: ${{fromJSON(needs.generate-matrices.outputs.pgbench-compare-matrix)}}
 
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "60m"
@@ -483,7 +483,7 @@ jobs:
         aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Create Neon Project
-      if: contains(fromJson('["neonvm-captest-new", "neonvm-captest-new-many-tables", "neonvm-captest-freetier", "neonvm-azure-captest-freetier", "neonvm-azure-captest-new"]'), matrix.platform)
+      if: contains(fromJSON('["neonvm-captest-new", "neonvm-captest-new-many-tables", "neonvm-captest-freetier", "neonvm-azure-captest-freetier", "neonvm-azure-captest-new"]'), matrix.platform)
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
@@ -523,7 +523,7 @@ jobs:
     # without (neonvm-captest-new)
     # and with (neonvm-captest-new-many-tables) many relations in the database
     - name: Create many relations before the run
-      if: contains(fromJson('["neonvm-captest-new-many-tables"]'), matrix.platform)
+      if: contains(fromJSON('["neonvm-captest-new-many-tables"]'), matrix.platform)
       uses: ./.github/actions/run-python-test-set
       with:
         build_type: ${{ env.BUILD_TYPE }}
@@ -753,7 +753,7 @@ jobs:
 
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.generate-matrices.outputs.olap-compare-matrix) }}
+      matrix: ${{ fromJSON(needs.generate-matrices.outputs.olap-compare-matrix) }}
 
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
@@ -880,7 +880,7 @@ jobs:
 
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.generate-matrices.outputs.tpch-compare-matrix) }}
+      matrix: ${{ fromJSON(needs.generate-matrices.outputs.tpch-compare-matrix) }}
 
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
@@ -999,7 +999,7 @@ jobs:
 
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.generate-matrices.outputs.olap-compare-matrix) }}
+      matrix: ${{ fromJSON(needs.generate-matrices.outputs.olap-compare-matrix) }}
 
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
