@@ -5091,6 +5091,7 @@ impl Tenant {
             fs::remove_dir_all(&pgdata_path).with_context(|| {
                 format!("Failed to remove already existing initdb directory: {pgdata_path}")
             })?;
+            tracing::info!("removed previous attempt's temporary initdb directory '{pgdata_path}'");
         }
 
         // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
@@ -5099,6 +5100,8 @@ impl Tenant {
             if let Err(e) = fs::remove_dir_all(&pgdata_path_deferred).or_else(fs_ext::ignore_not_found) {
                 // this is unlikely, but we will remove the directory on pageserver restart or another bootstrap call
                 error!("Failed to remove temporary initdb directory '{pgdata_path_deferred}': {e}");
+            } else {
+                tracing::info!("removed temporary initdb directory '{pgdata_path_deferred}'");
             }
         }
         if let Some(existing_initdb_timeline_id) = load_existing_initdb {
