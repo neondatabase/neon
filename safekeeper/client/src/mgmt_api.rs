@@ -120,6 +120,12 @@ impl Client {
         resp.json().await.map_err(Error::ReceiveBody)
     }
 
+    pub async fn delete_tenant(&self, tenant_id: TenantId) -> Result<models::TimelineDeleteResult> {
+        let uri = format!("{}/v1/tenant/{}", self.mgmt_api_endpoint, tenant_id);
+        let resp = self.request(Method::DELETE, &uri, ()).await?;
+        resp.json().await.map_err(Error::ReceiveBody)
+    }
+
     pub async fn bump_timeline_term(
         &self,
         tenant_id: TenantId,
