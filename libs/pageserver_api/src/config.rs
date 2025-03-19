@@ -61,6 +61,8 @@ pub struct ConfigToml {
     pub listen_https_addr: Option<String>,
     pub ssl_key_file: Utf8PathBuf,
     pub ssl_cert_file: Utf8PathBuf,
+    #[serde(with = "humantime_serde")]
+    pub ssl_cert_reload_period: Duration,
     pub availability_zone: Option<String>,
     #[serde(with = "humantime_serde")]
     pub wait_lsn_timeout: Duration,
@@ -443,6 +445,7 @@ impl Default for ConfigToml {
             listen_https_addr: (None),
             ssl_key_file: Utf8PathBuf::from(DEFAULT_SSL_KEY_FILE),
             ssl_cert_file: Utf8PathBuf::from(DEFAULT_SSL_CERT_FILE),
+            ssl_cert_reload_period: Duration::from_secs(60),
             availability_zone: (None),
             wait_lsn_timeout: (humantime::parse_duration(DEFAULT_WAIT_LSN_TIMEOUT)
                 .expect("cannot parse default wait lsn timeout")),

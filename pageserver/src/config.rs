@@ -56,8 +56,15 @@ pub struct PageServerConf {
     /// Example: 127.0.0.1:9899
     pub listen_https_addr: Option<String>,
 
+    /// Path to a file with certificate's private key for https API.
+    /// Default: server.key
     pub ssl_key_file: Utf8PathBuf,
+    /// Path to a file with a X509 certificate for https API.
+    /// Default: server.crt
     pub ssl_cert_file: Utf8PathBuf,
+    /// Period to reload certificate and private key from files.
+    /// Default: 60s.
+    pub ssl_cert_reload_period: Duration,
 
     /// Current availability zone. Used for traffic metrics.
     pub availability_zone: Option<String>,
@@ -325,6 +332,7 @@ impl PageServerConf {
             listen_https_addr,
             ssl_key_file,
             ssl_cert_file,
+            ssl_cert_reload_period,
             availability_zone,
             wait_lsn_timeout,
             wal_redo_timeout,
@@ -386,6 +394,7 @@ impl PageServerConf {
             listen_https_addr,
             ssl_key_file,
             ssl_cert_file,
+            ssl_cert_reload_period,
             availability_zone,
             wait_lsn_timeout,
             wal_redo_timeout,

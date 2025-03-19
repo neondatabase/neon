@@ -2862,6 +2862,7 @@ name = "http-utils"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "bytes",
  "camino",
  "fail",
@@ -2874,6 +2875,7 @@ dependencies = [
  "pprof",
  "regex",
  "routerify",
+ "rustls 0.23.18",
  "rustls-pemfile 2.1.1",
  "serde",
  "serde_json",
