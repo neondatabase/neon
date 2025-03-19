@@ -858,7 +858,7 @@ impl ComputeNode {
         config.application_name("compute_ctl");
         if let Some(spec) = &compute_state.pspec {
             config.options(&format!(
-                "-c neon.endpoint_type={}",
+                "-c neon.compute_mode={}",
                 spec.spec.mode.to_type_str()
             ));
         }

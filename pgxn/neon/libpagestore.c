@@ -51,16 +51,16 @@
 #define MAX_RECONNECT_INTERVAL_USEC 1000000
 
 
-enum NeonEndpointType {
-	EP_TYPE_PRIMARY = 0,
-	EP_TYPE_REPLICA,
-	EP_TYPE_STATIC
+enum NeonComputeMode {
+	CP_MODE_PRIMARY = 0,
+	CP_MODE_REPLICA,
+	CP_MODE_STATIC
 };
 
-static const struct config_enum_entry neon_endpoint_types[] = {
-	{"primary", EP_TYPE_PRIMARY, false},
-	{"replica", EP_TYPE_REPLICA, false},
-	{"static", EP_TYPE_STATIC, false},
+static const struct config_enum_entry neon_compute_modes[] = {
+	{"primary", CP_MODE_PRIMARY, false},
+	{"replica", CP_MODE_REPLICA, false},
+	{"static", CP_MODE_STATIC, false},
 	{NULL, 0, false}
 };
 
@@ -76,7 +76,7 @@ int			flush_every_n_requests = 8;
 
 int         neon_protocol_version = 2;
 
-static int	neon_endpoint_type = 0;
+static int	neon_compute_mode = 0;
 static int	max_reconnect_attempts = 60;
 static int	stripe_size;
 
@@ -482,18 +482,18 @@ pageserver_connect(shardno_t shard_no, int elevel)
 
 		{
 			bool param_set = false;
-			switch (neon_endpoint_type)
+			switch (neon_compute_mode)
 			{
-				case EP_TYPE_PRIMARY:
-					strncpy(endpoint_str, "-c neon.endpoint_type=primary", sizeof(endpoint_str));
+				case CP_MODE_PRIMARY:
+					strncpy(endpoint_str, "-c neon.compute_mode=primary", sizeof(endpoint_str));
 					param_set = true;
 					break;
-				case EP_TYPE_REPLICA:
-					strncpy(endpoint_str, "-c neon.endpoint_type=replica", sizeof(endpoint_str));
+				case CP_MODE_REPLICA:
+					strncpy(endpoint_str, "-c neon.compute_mode=replica", sizeof(endpoint_str));
 					param_set = true;
 					break;
-				case EP_TYPE_STATIC:
-					strncpy(endpoint_str, "-c neon.endpoint_type=static", sizeof(endpoint_str));
+				case CP_MODE_STATIC:
+					strncpy(endpoint_str, "-c neon.compute_mode=static", sizeof(endpoint_str));
 					param_set = true;
 					break;
 			}
@@ -1412,12 +1412,12 @@ pg_init_libpagestore(void)
 							NULL, NULL, NULL);
 
 	DefineCustomEnumVariable(
-							"neon.endpoint_type",
+							"neon.compute_mode",
 							"The compute endpoint node type",
 							NULL,
-							&neon_endpoint_type,
-							EP_TYPE_PRIMARY,
-							neon_endpoint_types,
+							&neon_compute_mode,
+							CP_MODE_PRIMARY,
+							neon_compute_modes,
 							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);

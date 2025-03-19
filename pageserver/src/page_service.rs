@@ -237,7 +237,7 @@ pub async fn libpq_listener_main(
 
 type ConnectionHandlerResult = anyhow::Result<()>;
 
-#[instrument(skip_all, fields(peer_addr, application_name, endpoint_type))]
+#[instrument(skip_all, fields(peer_addr, application_name, compute_mode))]
 #[allow(clippy::too_many_arguments)]
 async fn page_service_conn_main(
     conf: &'static PageServerConf,
@@ -2505,6 +2505,12 @@ impl PageServiceCmd {
     }
 }
 
+/// Parse the startup options from the postgres wire protocol startup packet.
+///
+/// It takes a sequence of `-c option=X` or `-coption=X`. It parses the options string
+/// by best effort and returns all the options parsed (key-value pairs) and a bool indicating
+/// whether all options are successfully parsed. There could be duplicates in the options
+/// if the caller passed such parameters.
 fn parse_options(options: &str) -> (Vec<(String, String)>, bool) {
     let mut parsing_config = false;
     let mut has_error = false;
@@ -2598,8 +2604,8 @@ where
             if let Some(options) = params.get("options") {
                 let (config, _) = parse_options(options);
                 for (key, value) in config {
-                    if key == "neon.endpoint_type" {
-                        Span::current().record("endpoint_type", field::display(value));
+                    if key == "neon.compute_mode" {
+                        Span::current().record("compute_mode", field::display(value));
                     }
                 }
             }
@@ -2716,7 +2722,7 @@ where
             PageServiceCmd::Set => {
                 // important because psycopg2 executes "SET datestyle TO 'ISO'"
                 // on connect
-                // TODO: allow setting options, i.e., application_name/endpoint_type via SET commands
+                // TODO: allow setting options, i.e., application_name/compute_mode via SET commands
                 pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
             }
             PageServiceCmd::LeaseLsn(LeaseLsnCmd {
@@ -2994,29 +3000,29 @@ mod tests {
 
     #[test]
     fn test_parse_options() {
-        let (config, has_error) = parse_options(" -c neon.endpoint_type=primary ");
+        let (config, has_error) = parse_options(" -c neon.compute_mode=primary ");
         assert!(!has_error);
         assert_eq!(
             config,
-            vec![("neon.endpoint_type".to_string(), "primary".to_string())]
+            vec![("neon.compute_mode".to_string(), "primary".to_string())]
         );
 
-        let (config, has_error) = parse_options(" -c neon.endpoint_type=primary -c foo=bar ");
+        let (config, has_error) = parse_options(" -c neon.compute_mode=primary -c foo=bar ");
         assert!(!has_error);
         assert_eq!(
             config,
             vec![
-                ("neon.endpoint_type".to_string(), "primary".to_string()),
+                ("neon.compute_mode".to_string(), "primary".to_string()),
                 ("foo".to_string(), "bar".to_string()),
             ]
         );
 
-        let (config, has_error) = parse_options(" -c neon.endpoint_type=primary -cfoo=bar");
+        let (config, has_error) = parse_options(" -c neon.compute_mode=primary -cfoo=bar");
         assert!(!has_error);
         assert_eq!(
             config,
             vec![
-                ("neon.endpoint_type".to_string(), "primary".to_string()),
+                ("neon.compute_mode".to_string(), "primary".to_string()),
                 ("foo".to_string(), "bar".to_string()),
             ]
         );
@@ -3030,7 +3036,7 @@ mod tests {
         let (_, has_error) = parse_options("    ");
         assert!(!has_error);
 
-        let (_, has_error) = parse_options(" -c neon.endpoint_type");
+        let (_, has_error) = parse_options(" -c neon.compute_mode");
         assert!(has_error);
     }
 }
