@@ -10,6 +10,7 @@ OBJS = \
 	libpagestore.o \
 	logical_replication_monitor.o \
 	neon.o \
+	neon_lwlsncache.o \
 	neon_pgversioncompat.o \
 	neon_perf_counters.o \
 	neon_utils.o \
