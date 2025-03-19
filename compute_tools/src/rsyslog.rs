@@ -48,11 +48,20 @@ fn restart_rsyslog() -> Result<()> {
     Ok(())
 }
 
+// Return true if config was updated, false if it was already up-to-date.
 pub fn configure_audit_rsyslog(
     log_directory: String,
     tag: &str,
     remote_endpoint: &str,
 ) -> Result<()> {
+    let rsyslog_conf_path = "/etc/rsyslog.d/compute_audit_rsyslog.conf";
+
+    let old_config_content = match std::fs::read_to_string(rsyslog_conf_path) {
+        Ok(c) => c,
+        Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err.into()),
+    };
+
     let config_content: String = format!(
         include_str!("config_template/compute_audit_rsyslog_template.conf"),
         log_directory = log_directory,
@@ -60,9 +69,13 @@ pub fn configure_audit_rsyslog(
         remote_endpoint = remote_endpoint
     );
 
+    if old_config_content == config_content {
+        info!("rsyslog configuration is up-to-date");
+        return Ok(());
+    }
+
     info!("rsyslog config_content: {}", config_content);
 
-    let rsyslog_conf_path = "/etc/rsyslog.d/compute_audit_rsyslog.conf";
     let mut file = OpenOptions::new()
         .create(true)
         .write(true)
