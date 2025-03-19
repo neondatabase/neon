@@ -377,9 +377,7 @@ class NeonAPI:
 
         return cast("dict[str, Any]", resp.json())
 
-    def set_project_vpc_endpoint(
-        self, project_id: str, vpc_endpoint_id: str
-    ) -> dict[str, Any]:
+    def set_project_vpc_endpoint(self, project_id: str, vpc_endpoint_id: str) -> dict[str, Any]:
         """
         Sets a VPC endpoint for a project.
 
@@ -400,9 +398,7 @@ class NeonAPI:
 
         return cast("dict[str, Any]", resp.json())
 
-    def delete_project_vpc_endpoint(
-        self, project_id: str, vpc_endpoint_id: str
-    ) -> dict[str, Any]:
+    def delete_project_vpc_endpoint(self, project_id: str, vpc_endpoint_id: str) -> dict[str, Any]:
         """
         Deletes a VPC endpoint from a project.
 
@@ -878,9 +874,7 @@ class NeonAPI:
 
         return cast("dict[str, Any]", resp.json())
 
-    def create_branch_role(
-        self, project_id: str, branch_id: str, role_name: str
-    ) -> dict[str, Any]:
+    def create_branch_role(self, project_id: str, branch_id: str, role_name: str) -> dict[str, Any]:
         """
         Creates a new role in a branch.
 
@@ -910,9 +904,7 @@ class NeonAPI:
 
         return cast("dict[str, Any]", resp.json())
 
-    def get_branch_role(
-        self, project_id: str, branch_id: str, role_name: str
-    ) -> dict[str, Any]:
+    def get_branch_role(self, project_id: str, branch_id: str, role_name: str) -> dict[str, Any]:
         """
         Retrieves details of a specific role in a branch.
 
@@ -934,9 +926,7 @@ class NeonAPI:
 
         return cast("dict[str, Any]", resp.json())
 
-    def delete_branch_role(
-        self, project_id: str, branch_id: str, role_name: str
-    ) -> dict[str, Any]:
+    def delete_branch_role(self, project_id: str, branch_id: str, role_name: str) -> dict[str, Any]:
         """
         Deletes a role from a branch.
 
