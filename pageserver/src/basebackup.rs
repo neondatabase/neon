@@ -331,7 +331,15 @@ where
                     .append(&header, data)
                     .await
                     .map_err(|e| BasebackupError::Client(e, "send_tarball,pg_hba.conf"))?;
-            } else {
+            } else if *filepath == "postgresql.auto.conf" {
+			    let ancestor_lsn = format!("neon.ancestor_lsn='{}'", self.timeline.get_ancestor_lsn());
+                let data = ancestor_lsn.as_bytes();
+                let header = new_tar_header(filepath, data.len() as u64)?;
+                self.ar
+                    .append(&header, data)
+                    .await
+                    .map_err(|e| BasebackupError::Client(e, "send_tarball,pg_hba.conf"))?;
+             } else {
                 let header = new_tar_header(filepath, 0)?;
                 self.ar
                     .append(&header, io::empty())

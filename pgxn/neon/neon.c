@@ -497,6 +497,15 @@ _PG_init(void)
 							GUC_UNIT_KB,
 							NULL, NULL, NULL);
 
+	DefineCustomStringVariable("neon.ancestor_lsn",
+							"LSN of the ancestor timeline",
+							"Zero if there is no arent branch",
+							&neon_ancestor_lsn,
+						   "0/0",
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
 	/*
 	 * Important: This must happen after other parts of the extension are
 	 * loaded, otherwise any settings to GUCs that were set before the
