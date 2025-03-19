@@ -316,6 +316,20 @@ There are two security implications to consider:
 
 ### Unresolved questions
 
+#### Billing, metrics and monitoring
+
+Currently, we only label computes with `endpoint_id` after attaching them to the endpoint.
+In this proposal, this means that temporary replica will remain unlabelled until it's promoted
+to primary. We can also hide it from users in the control plane API, but what to do with
+billing and monitoring is still unclear.
+
+We can probably mark it as 'billable' and tag with `project_id`, so it will be billed, but
+not interfere in any way with the current primary monitoring.
+
+Another thing to consider is how logs and metrics export will switch to the new compute.
+It's expected that OpenTelemetry collector will auto-discover the new compute and start
+scraping metrics from it.
+
 #### Auto-prewarm
 
 It's still an open question whether we need auto-prewarm at all. The author's gut-feeling is
