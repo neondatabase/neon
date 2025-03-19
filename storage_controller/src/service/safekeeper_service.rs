@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -316,22 +316,15 @@ impl Service {
         let all_sks = tl
             .new_sk_set
             .iter()
-            .flat_map(|sks| {
-                sks.iter()
-                    .map(|sk| (*sk, SafekeeperTimelineOpKind::Exclude))
-            })
-            .chain(
-                tl.sk_set
-                    .iter()
-                    .map(|v| (*v, SafekeeperTimelineOpKind::Delete)),
-            )
-            .collect::<HashMap<_, _>>();
+            .flatten()
+            .chain(tl.sk_set.iter())
+            .collect::<HashSet<_>>();
 
         // Schedule reconciliations
         {
             let mut locked = self.inner.write().unwrap();
-            for (sk_id, kind) in all_sks {
-                let sk_id = NodeId(sk_id as u64);
+            for sk_id in all_sks {
+                let sk_id = NodeId(*sk_id as u64);
                 let Some(sk) = locked.safekeepers.get(&sk_id) else {
                     return Err(ApiError::InternalServerError(anyhow::anyhow!(
                         "Couldn't find safekeeper with id {sk_id}"
@@ -345,7 +338,7 @@ impl Service {
                     tenant_id,
                     timeline_id: Some(timeline_id),
                     generation: tl.generation as u32,
-                    kind,
+                    kind: SafekeeperTimelineOpKind::Delete,
                 };
                 locked.safekeeper_reconcilers.schedule_request(self, req);
             }
