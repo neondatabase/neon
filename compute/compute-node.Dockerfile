@@ -1372,7 +1372,7 @@ RUN wget https://gitlab.com/dalibo/postgresql_anonymizer/-/archive/latest/postgr
 
 FROM rust-extensions-build-pgrx12 AS pg-anon-pg-build
 ARG PG_VERSION
-COPY --from=pg_anon-src /ext-src/ /ext-src/
+COPY --from=pg-anon-src /ext-src/ /ext-src/
 WORKDIR /ext-src
 RUN if [ -d pg_anon-src ]; then \
     cd pg_anon-src && \
