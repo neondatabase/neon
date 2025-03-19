@@ -59,9 +59,12 @@ impl AsyncAuthorizeRequest<Body> for Authorize {
         Box::pin(async move {
             let request_id = request.extract_parts::<RequestId>().await.unwrap();
 
-            // TODO: Remove this check after a successful rollout
-            if jwks.keys.is_empty() {
-                warn!(%request_id, "Authorization has not been configured");
+            // TODO: Remove this stanza after teaching neon_local and the
+            // regression tests to use a JWT + JWKS.
+            //
+            // https://github.com/neondatabase/neon/issues/11316
+            if cfg!(feature = "testing") {
+                warn!(%request_id, "Skipping compute_ctl authorization check");
 
                 return Ok(request);
             }
@@ -110,8 +113,6 @@ impl AsyncAuthorizeRequest<Body> for Authorize {
 impl Authorize {
     /// Verify the token using the JSON Web Key set and return the token data.
     fn verify(jwks: &JwkSet, token: &str, validation: &Validation) -> Result<TokenData<Claims>> {
-        debug_assert!(!jwks.keys.is_empty());
-
         for jwk in jwks.keys.iter() {
             let decoding_key = match DecodingKey::from_jwk(jwk) {
                 Ok(key) => key,
