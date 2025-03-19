@@ -377,48 +377,6 @@ class NeonAPI:
 
         return cast("dict[str, Any]", resp.json())
 
-    def set_project_vpc_endpoint(self, project_id: str, vpc_endpoint_id: str) -> dict[str, Any]:
-        """
-        Sets a VPC endpoint for a project.
-
-        Args:
-            project_id: The Neon project ID
-            vpc_endpoint_id: The VPC endpoint ID
-
-        Returns:
-            The API response
-        """
-        resp = self.__request(
-            "POST",
-            f"/projects/{project_id}/vpc_endpoints/{vpc_endpoint_id}",
-            headers={
-                "Accept": "application/json",
-            },
-        )
-
-        return cast("dict[str, Any]", resp.json())
-
-    def delete_project_vpc_endpoint(self, project_id: str, vpc_endpoint_id: str) -> dict[str, Any]:
-        """
-        Deletes a VPC endpoint from a project.
-
-        Args:
-            project_id: The Neon project ID
-            vpc_endpoint_id: The VPC endpoint ID
-
-        Returns:
-            The API response
-        """
-        resp = self.__request(
-            "DELETE",
-            f"/projects/{project_id}/vpc_endpoints/{vpc_endpoint_id}",
-            headers={
-                "Accept": "application/json",
-            },
-        )
-
-        return cast("dict[str, Any]", resp.json())
-
     def create_branch(
         self,
         project_id: str,
