@@ -16,6 +16,10 @@ on:
         description: 'The random seed'
         required: false
         default: 0
+      num_operations:
+        type: number
+        description: "The number of operations to test"
+        default: 250
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}
@@ -78,6 +82,7 @@ jobs:
         env:
           NEON_API_KEY: ${{ secrets.NEON_STAGING_API_KEY }}
           RANDOM_SEED: ${{ inputs.random_seed }}
+          NUM_OPERATIONS: ${{ inputs.num_operations }}
 
       - name: Create Allure report
         if: ${{ !cancelled() }}

@@ -450,11 +450,14 @@ def test_api_random(
         ("delete_branch", 1.0),
         ("restore_random_time", 1.2),
     )
-    ACTIONS_LIMIT = 250
+    if num_ops_env := os.getenv('NUM_OPERATIONS'):
+        num_operations = int(num_ops_env)
+    else:
+        num_operations = 250
     pg_bin.run_capture(
         ["pgbench", "-i", "-I", "dtGvp", "-s100"], env=project.main_branch.connect_env
     )
-    for _ in range(ACTIONS_LIMIT):
+    for _ in range(num_operations):
         log.info("Starting action #%s", _ + 1)
         do_action(
             project, random.choices([a[0] for a in ACTIONS], weights=[w[1] for w in ACTIONS])[0]
