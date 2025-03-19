@@ -160,25 +160,20 @@ pub(crate) struct ScheduleRequest {
 }
 
 struct ReconcilerHandle {
-    tx: UnboundedSender<(ScheduleRequest, Arc<CancellationToken>)>,
-    #[allow(clippy::type_complexity)]
-    ongoing_tokens: Arc<ClashMap<(TenantId, Option<TimelineId>), Arc<CancellationToken>>>,
+    tx: UnboundedSender<(ScheduleRequest, CancellationToken)>,
+    ongoing_tokens: Arc<ClashMap<(TenantId, Option<TimelineId>), CancellationToken>>,
     cancel: CancellationToken,
 }
 
 impl ReconcilerHandle {
     /// Obtain a new token slot, cancelling any existing reconciliations for that timeline
-    fn new_token_slot(
-        &self,
-        tenant_id: TenantId,
-        timeline_id: Option<TimelineId>,
-    ) -> Arc<CancellationToken> {
+    fn new_token_slot(&self, tenant_id: TenantId, timeline_id: Option<TimelineId>) -> CancellationToken {
         let entry = self.ongoing_tokens.entry((tenant_id, timeline_id));
         if let Entry::Occupied(entry) = &entry {
             let cancel: &CancellationToken = entry.get();
             cancel.cancel();
         }
-        entry.insert(Arc::new(self.cancel.child_token())).clone()
+        entry.insert(self.cancel.child_token()).clone()
     }
     /// Cancel an ongoing reconciliation
     fn cancel_reconciliation(&self, tenant_id: TenantId, timeline_id: Option<TimelineId>) {
@@ -197,7 +192,7 @@ impl ReconcilerHandle {
 
 pub(crate) struct SafekeeperReconciler {
     service: Arc<Service>,
-    rx: UnboundedReceiver<(ScheduleRequest, Arc<CancellationToken>)>,
+    rx: UnboundedReceiver<(ScheduleRequest, CancellationToken)>,
     cancel: CancellationToken,
 }
 
@@ -243,7 +238,7 @@ impl SafekeeperReconciler {
                 .await;
         }
     }
-    async fn reconcile_one(&self, req: ScheduleRequest, req_cancel: Arc<CancellationToken>) {
+    async fn reconcile_one(&self, req: ScheduleRequest, req_cancel: CancellationToken) {
         let req_host = req.safekeeper.skp.host.clone();
         match req.kind {
             SafekeeperTimelineOpKind::Pull => {
@@ -328,7 +323,7 @@ impl SafekeeperReconciler {
         req: ScheduleRequest,
         closure: impl Fn(SafekeeperClient) -> F,
         log_success: impl FnOnce(T) -> U,
-        req_cancel: Arc<CancellationToken>,
+        req_cancel: CancellationToken,
     ) where
         F: Future<Output = Result<T, safekeeper_client::mgmt_api::Error>>,
     {
