@@ -1,0 +1,56 @@
+-- HTML to Markdown conversion tests
+SELECT rag.markdown_from_html('<p>Hello</p>');
+ markdown_from_html 
+--------------------
+ Hello
+(1 row)
+
+SELECT rag.markdown_from_html('<p>Hello <i>world</i></p>');
+ markdown_from_html 
+--------------------
+ Hello _world_
+(1 row)
+
+SELECT rag.markdown_from_html('<h1>Title</h1><p>Paragraph</p>');
+ markdown_from_html 
+--------------------
+ # Title           +
+                   +
+ Paragraph
+(1 row)
+
+SELECT rag.markdown_from_html('<ul><li>Item 1</li><li>Item 2</li></ul>');
+ markdown_from_html 
+--------------------
+ *   Item 1        +
+ *   Item 2
+(1 row)
+
+SELECT rag.markdown_from_html('<a href="https://example.com">Link</a>');
+     markdown_from_html      
+-----------------------------
+ [Link](https://example.com)
+(1 row)
+
+-- Note: text_from_pdf and text_from_docx require binary input which is harder to test in regression tests
+-- We'll test that the functions exist and have the right signature
+SELECT 'text_from_pdf_exists' AS test_name,
+       count(*) > 0 AS result
+FROM pg_proc
+WHERE proname = 'text_from_pdf'
+  AND pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'rag');
+      test_name       | result 
+----------------------+--------
+ text_from_pdf_exists | t
+(1 row)
+
+SELECT 'text_from_docx_exists' AS test_name,
+       count(*) > 0 AS result
+FROM pg_proc
+WHERE proname = 'text_from_docx'
+  AND pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'rag');
+       test_name       | result 
+-----------------------+--------
+ text_from_docx_exists | t
+(1 row)
+

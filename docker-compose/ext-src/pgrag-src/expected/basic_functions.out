@@ -1,0 +1,13 @@
+-- Basic function tests
+SELECT rag.markdown_from_html('<p>Hello</p>');
+ markdown_from_html 
+--------------------
+ Hello
+(1 row)
+
+SELECT array_length(rag.chunks_by_character_count('the cat sat on the mat', 10, 5), 1);
+ array_length 
+--------------
+            3
+(1 row)
+
