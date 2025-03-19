@@ -20,7 +20,7 @@ Neon currently implements several features that guarantee high uptime of compute
 3. Preemptive NeonVM compute provisioning in case of k8s node unavailability.
 
 This helps us to be well-within the uptime SLO of 99.95% most of the time. Problems begin when we go up to multi-TB workloads and 32-64 CU computes.
-During restart, compute looses all caches: LFC, shared buffers, file system cache. Depending on the workload, it can take a lot of time to warm up the caches,
+During restart, compute loses all caches: LFC, shared buffers, file system cache. Depending on the workload, it can take a lot of time to warm up the caches,
 so that performance could be degraded and might be even unacceptable for certain workloads. The latter means that although current approach works well for small to
 medium workloads, we still have to do some additional work to avoid performance degradation after restart of large instances.
 
@@ -32,7 +32,9 @@ medium workloads, we still have to do some additional work to avoid performance 
 
 ## Impacted components
 
-Postgres, compute_ctl, Control plane, S3 proxy for unlogged storage of compute files.
+Postgres, compute_ctl, Control plane, Object storage proxy for unlogged storage of compute files.
+For the latter, we will need to implement a uniform abstraction layer on top of S3, ABS, etc., but
+S3 is used in text interchangeably with 'object storage' for simplicity.
 
 ## Proposed implementation
 
@@ -55,7 +57,8 @@ struct ComputeSpec {
 
 When `lfc_dump_interval_sec` is set to `N`, `compute_ctl` will periodically dump the LFC state
 and store it in S3, so that it could be used either for auto-prewarm after restart or by replica
-during the rolling restart.
+during the rolling restart. For enabling periodic dumping, we should consider the following value
+`lfc_dump_interval_sec=300` (5 minutes), same as in the upstream's `pg_prewarm.autoprewarm_interval`.
 
 When `lfc_auto_prewarm` is set to `true`, `compute_ctl` will start prewarming the LFC upon restart
 iif some of the previous states is present in S3.
@@ -111,11 +114,13 @@ iif some of the previous states is present in S3.
     }
 
     /// Compute prewarm state. Will be stored in the shared Compute state
-    //. in compute_ctl
+    /// in compute_ctl
     struct PrewarmState {
         pub status: PrewarmStatus
-        /// Prewarm progress in the range [0, 1]
-        pub progress: f32
+        /// Total number of pages to prewarm
+        pub pages_total: i64
+        /// Number of pages prewarmed so far
+        pub pages_processed: i64
         /// Optional prewarm error
         pub error: Option<String>
     }
@@ -144,6 +149,10 @@ iif some of the previous states is present in S3.
     ```
 
 5. `POST /promote` -- this is a **blocking** API call to promote compute replica into primary.
+    This API should be very similar to the existing `POST /configure` API, i.e. accept the
+    spec (primary spec, because originally compute was started as replica). It's a distinct
+    API method because semantics and response codes are different:
+
     - If promotion is done successfully, it will return `200 OK`.
     - If compute is already primary, the call will be no-op and `compute_ctl`
       will return `412 Precondition Failed`.
@@ -175,7 +184,8 @@ the rolling restart via warm replica, but without much of low-level implementati
         with auto-prewarm.
 
     3.2. Send cache invalidation message to all proxies, notifying them that all new connections
-        should request and wait for the new connection details.
+        should request and wait for the new connection details. At this stage, proxy has to also
+        drop any existing connections to the old primary, so they didn't do stale reads.
 
     3.3. Attach warm replica compute to the primary endpoint inside control plane metadata
         database.
@@ -202,8 +212,8 @@ the rolling restart via warm replica, but without much of low-level implementati
   end
 
   box Endpoint unlogged storage
-    participant s3proxy as S3 proxy
-    participant s3 as S3
+    participant s3proxy as Object storage proxy
+    participant s3 as S3/ABS/etc
   end
 
 
@@ -285,6 +295,11 @@ We consider following failures while implementing this RFC:
 6. Any unexpected failure during auto-prewarm. This **failure mustn't be fatal**,
     `compute_ctl` has to report the failure, but do not crash the compute.
 
+7. Control plane failed to confirm that old primary has terminated. This can happen, especially
+    in the future HA setup. In this case, control plane has to ensure that it sent VM deletion
+    and pod termination requests to k8s, so long-term we do not have two running primaries
+    on the same timeline.
+
 ### Security implications
 
 There are two security implications to consider:
@@ -323,16 +338,21 @@ There are many things to consider here, but three items just off the top of my h
 
 2. What to do with logical replication. Currently, we do not include logical replication slots
     inside basebackup, because nobody advances them at replica, so they just prevent the WAL
-    deletion. Yet, we do need to have them at primary after promotion, should we request a new
-    basebackup during promotion?
+    deletion. Yet, we do need to have them at primary after promotion. Starting with Postgres 17,
+    there is a new feature called
+    [logical replication failover](https://www.postgresql.org/docs/current/logical-replication-failover.html)
+    and `synchronized_standby_slots` setting, but we need a plan for the older versions. Should we
+    request a new basebackup during promotion?
 
-3. How do we guarantee that replica will receive all the latest WAL from safekeepers?
+3. How do we guarantee that replica will receive all the latest WAL from safekeepers? Do some
+    'shallow' version of sync safekeepers without data copying? Or just a standard version of
+    sync safekeepers?
 
 ## Alternative implementation
 
 The proposal already assumes one of the alternatives -- do not have any persistent storage for
 LFC state. This is possible to implement faster with the proposed API, but it means that
-we do not implement auto-prewarm at all.
+we do not implement auto-prewarm yet.
 
 ## Definition of Done
 
