@@ -365,6 +365,7 @@ impl Service {
 
         if timeline_list.is_empty() {
             // Early exit: the tenant is either empty or not migrated to the storcon yet
+            tracing::info!("Skipping tenant delete as the timeline doesn't exist in db");
             return Ok(());
         }
 

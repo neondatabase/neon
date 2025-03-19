@@ -3332,8 +3332,6 @@ impl Service {
         let _tenant_lock =
             trace_exclusive_lock(&self.tenant_op_locks, tenant_id, TenantOperations::Delete).await;
 
-        self.tenant_delete_safekeepers(tenant_id).await?;
-
         self.maybe_load_tenant(tenant_id, &_tenant_lock).await?;
 
         // Detach all shards. This also deletes local pageserver shard data.
@@ -3437,6 +3435,11 @@ impl Service {
                 locked.tenants.len()
             );
         };
+
+        // Delete the tenant from safekeepers (if needed)
+        self.tenant_delete_safekeepers(tenant_id)
+            .instrument(tracing::info_span!("tenant_delete_safekeepers", %tenant_id))
+            .await?;
 
         // Success is represented as 404, to imitate the existing pageserver deletion API
         Ok(StatusCode::NOT_FOUND)

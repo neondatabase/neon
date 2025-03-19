@@ -1491,9 +1491,7 @@ impl Persistence {
         Ok(timeline_from_db)
     }
 
-    /// Obtain a list of pending ops for the given timeline.
-    ///
-    /// If the timeline is `None`, it is serialized to the empty string
+    /// Delete all pending ops for the given timeline.
     ///
     /// Use this only at timeline deletion, otherwise use generation based APIs
     pub(crate) async fn remove_pending_ops_for_timeline(
