@@ -1974,7 +1974,7 @@ impl ToSql<crate::schema::sql_types::PgLsn, Pg> for LsnWrapper {
     }
 }
 
-#[derive(Insertable, AsChangeset, Queryable, Selectable, Clone)]
+#[derive(Insertable, AsChangeset, Clone)]
 #[diesel(table_name = crate::schema::timelines)]
 pub(crate) struct TimelinePersistence {
     pub(crate) tenant_id: String,
