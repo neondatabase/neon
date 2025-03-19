@@ -24,6 +24,9 @@ concurrency:
   group: large-oltp-bench-workflow
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   oltp:
     strategy:
@@ -62,10 +65,15 @@ jobs:
     timeout-minutes: 2880
 
     steps:
-    - uses: actions/checkout@v4
+    - name: Harden the runner (Audit all outbound calls)
+      uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+      with:
+        egress-policy: audit
+
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
     - name: Configure AWS credentials # necessary to download artefacts
-      uses: aws-actions/configure-aws-credentials@v4
+      uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
       with:
         aws-region: eu-central-1
         role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
@@ -160,7 +168,7 @@ jobs:
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
     - name: Configure AWS credentials # again because prior steps could have exceeded 5 hours
-      uses: aws-actions/configure-aws-credentials@v4
+      uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
       with:
         aws-region: eu-central-1
         role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
@@ -175,7 +183,7 @@ jobs:
   
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
-      uses: slackapi/slack-github-action@v1
+      uses: slackapi/slack-github-action@fcfb566f8b0aab22203f066d80ca1d7e4b5d05b3 # v1.27.1
       with:
         channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
         slack-message: |

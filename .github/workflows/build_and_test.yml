@@ -37,6 +37,11 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
       - name: Cancel previous e2e-tests runs for this PR
         env:
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
@@ -53,8 +58,13 @@ jobs:
       check-rust-dependencies: ${{ steps.files-changed.outputs.rust_dependencies }}
 
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: true
 
@@ -97,8 +107,13 @@ jobs:
       options: --init
 
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Check Jsonnet code formatting
         run: |
@@ -110,12 +125,17 @@ jobs:
     needs: [ check-permissions ]
     runs-on: ubuntu-22.04
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: true
 
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
         id: check-if-submodules-changed
         with:
           filters: |
@@ -124,7 +144,7 @@ jobs:
 
       - name: Check vendor/postgres-v14 submodule reference
         if: steps.check-if-submodules-changed.outputs.vendor == 'true'
-        uses: jtmullen/submodule-branch-check-action@v1
+        uses: jtmullen/submodule-branch-check-action@ab0d3a69278e3fa0a2d4f3be3199d2514b676e13 # v1.3.0
         with:
           path: "vendor/postgres-v14"
           fetch_depth: "50"
@@ -133,7 +153,7 @@ jobs:
 
       - name: Check vendor/postgres-v15 submodule reference
         if: steps.check-if-submodules-changed.outputs.vendor == 'true'
-        uses: jtmullen/submodule-branch-check-action@v1
+        uses: jtmullen/submodule-branch-check-action@ab0d3a69278e3fa0a2d4f3be3199d2514b676e13 # v1.3.0
         with:
           path: "vendor/postgres-v15"
           fetch_depth: "50"
@@ -142,7 +162,7 @@ jobs:
 
       - name: Check vendor/postgres-v16 submodule reference
         if: steps.check-if-submodules-changed.outputs.vendor == 'true'
-        uses: jtmullen/submodule-branch-check-action@v1
+        uses: jtmullen/submodule-branch-check-action@ab0d3a69278e3fa0a2d4f3be3199d2514b676e13 # v1.3.0
         with:
           path: "vendor/postgres-v16"
           fetch_depth: "50"
@@ -151,7 +171,7 @@ jobs:
 
       - name: Check vendor/postgres-v17 submodule reference
         if: steps.check-if-submodules-changed.outputs.vendor == 'true'
-        uses: jtmullen/submodule-branch-check-action@v1
+        uses: jtmullen/submodule-branch-check-action@ab0d3a69278e3fa0a2d4f3be3199d2514b676e13 # v1.3.0
         with:
           path: "vendor/postgres-v17"
           fetch_depth: "50"
@@ -219,11 +239,16 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
       options: --init
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Cache poetry deps
-        uses: actions/cache@v4
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
         with:
           path: ~/.cache/pypoetry/virtualenvs
           key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-bookworm-${{ hashFiles('poetry.lock') }}
@@ -265,8 +290,13 @@ jobs:
         pytest_split_group: [ 1, 2, 3, 4, 5 ]
         build_type: [ release ]
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Pytest benchmarks
         uses: ./.github/actions/run-python-test-set
@@ -294,7 +324,12 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-    - uses: slackapi/slack-github-action@v2
+    - name: Harden the runner (Audit all outbound calls)
+      uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+      with:
+        egress-policy: audit
+
+    - uses: slackapi/slack-github-action@485a9d42d3a73031f12ec201c457e2162c45d02d # v2.0.0
       with:
         method: chat.postMessage
         token: ${{ secrets.SLACK_BOT_TOKEN }}
@@ -325,7 +360,12 @@ jobs:
       options: --init
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Create Allure report
         if: ${{ !cancelled() }}
@@ -337,7 +377,7 @@ jobs:
         env:
           REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
 
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         if: ${{ !cancelled() }}
         with:
           # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
@@ -385,7 +425,12 @@ jobs:
         coverage-json: ${{ steps.upload-coverage-report-new.outputs.summary-json }}
     steps:
       # Need `fetch-depth: 0` for differential coverage (to get diff between two commits)
-      - uses: actions/checkout@v4
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: true
           fetch-depth: 0
@@ -456,7 +501,7 @@ jobs:
           REPORT_URL=https://${BUCKET}.s3.amazonaws.com/code-coverage/${COMMIT_SHA}/lcov/summary.json
           echo "summary-json=${REPORT_URL}" >> $GITHUB_OUTPUT
 
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         env:
           REPORT_URL_NEW: ${{ steps.upload-coverage-report-new.outputs.report-url }}
           COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -510,33 +555,38 @@ jobs:
       packages: write
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: true
 
       - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
         with:
           cache-binary: false
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           registry: cache.neon.build
           username: ${{ secrets.NEON_CI_DOCKERCACHE_USERNAME }}
           password: ${{ secrets.NEON_CI_DOCKERCACHE_PASSWORD }}
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
         with:
           context: .
           # ARM-specific flags are recommended for Graviton ≥ 2, these flags are also supported by Ampere Altra (Azure)
@@ -567,7 +617,12 @@ jobs:
       packages: write
 
     steps:
-      - uses: docker/login-action@v3
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -609,12 +664,17 @@ jobs:
     runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: true
 
       - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
         with:
           cache-binary: false
           # Disable parallelism for docker buildkit.
@@ -623,25 +683,25 @@ jobs:
             [worker.oci]
               max-parallelism = 1
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           registry: cache.neon.build
           username: ${{ secrets.NEON_CI_DOCKERCACHE_USERNAME }}
           password: ${{ secrets.NEON_CI_DOCKERCACHE_PASSWORD }}
 
       - name: Build compute-node image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
         with:
           context: .
           build-args: |
@@ -661,7 +721,7 @@ jobs:
 
       - name: Build neon extensions test image
         if: matrix.version.pg >= 'v16'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
         with:
           context: .
           build-args: |
@@ -703,7 +763,12 @@ jobs:
             debian: bookworm
 
     steps:
-      - uses: docker/login-action@v3
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -748,7 +813,12 @@ jobs:
       VM_BUILDER_VERSION: v0.42.2
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Downloading vm-builder
         run: |
@@ -756,7 +826,7 @@ jobs:
           chmod +x vm-builder
 
       - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -796,7 +866,12 @@ jobs:
           - pg: v16
           - pg: v17
     steps:
-      - uses: docker/login-action@v3
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -830,16 +905,21 @@ jobs:
     runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -930,7 +1010,12 @@ jobs:
       compute-dev: ${{ steps.generate.outputs.compute-dev }}
       compute-prod: ${{ steps.generate.outputs.compute-prod }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           sparse-checkout: .github/scripts/generate_image_maps.py
           sparse-checkout-cone-mode: false
@@ -1098,6 +1183,11 @@ jobs:
       contents: write
       pull-requests: write
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
       - name: Set PR's status to pending and request a remote CI test
         run: |
           COMMIT_SHA=${{ github.event.pull_request.head.sha || github.sha }}
@@ -1179,11 +1269,16 @@ jobs:
     runs-on: [ self-hosted, small ]
     container: ${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/ansible:latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Create git tag and GitHub release
         if: ${{ contains(fromJSON('["storage-release", "proxy-release", "compute-release"]'), needs.meta.outputs.run-kind) }}
-        uses: actions/github-script@v7
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         env:
           TAG: "${{ needs.meta.outputs.build-tag }}"
           BRANCH: "${{ github.ref_name }}"
@@ -1331,8 +1426,13 @@ jobs:
     if: github.ref_name == 'release' && needs.deploy.result != 'success' && always()
     runs-on: ubuntu-22.04
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
       - name: Post release-deploy failure to team-storage slack channel
-        uses: slackapi/slack-github-action@v2
+        uses: slackapi/slack-github-action@485a9d42d3a73031f12ec201c457e2162c45d02d # v2.0.0
         with:
           method: chat.postMessage
           token: ${{ secrets.SLACK_BOT_TOKEN }}
@@ -1353,7 +1453,12 @@ jobs:
 
     runs-on: ubuntu-22.04
     steps:
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
           aws-region: eu-central-1
           role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
@@ -1441,6 +1546,11 @@ jobs:
     steps:
       # The list of possible results:
       # https://docs.github.com/en/actions/learn-github-actions/contexts#needs-context
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
       - name: Fail the job if any of the dependencies do not succeed
         run: exit 1
         if: |
