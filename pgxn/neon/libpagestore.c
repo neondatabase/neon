@@ -89,6 +89,8 @@ static int pageserver_response_log_timeout = 10000;
 static int pageserver_response_disconnect_timeout = 150000;
 
 static int	conf_refresh_reconnect_attempt_threshold = 16;
+// Hadron: timeout for refresh errors (1 minute)
+static uint64 	kRefreshErrorTimeoutUSec = 1 * USECS_PER_MINUTE;
 
 typedef struct
 {
@@ -1046,14 +1048,22 @@ pageserver_disconnect_shard(shardno_t shard_no)
 
 extern int hadron_extension_server_port;
 
-static void
+// The timestamp (usec) of the first error that occurred while trying to refresh the configuration.
+// Will be reset to 0 after a successful refresh.
+static uint64 first_recorded_refresh_error_usec = 0;
+
+// Request compute_ctl to refresh the configuration. This operation may fail, e.g., if the compute_ctl
+// is already in the configuration state. The function returns true if the caller needs to cancel the
+// current query to avoid dead/live lock.
+static bool
 hadron_request_configuration_refresh() {
 	static CURL	   *handle = NULL;
 	CURLcode	res;
 	char	   *compute_ctl_url;
+	bool cancel_query = false;
 
 	if (!lakebase_mode)
-		return;
+		return false;
 
 	if (handle == NULL)
 	{
@@ -1073,9 +1083,40 @@ hadron_request_configuration_refresh() {
 	curl_easy_setopt(handle, CURLOPT_URL, compute_ctl_url);
 
 	res = curl_easy_perform(handle);
-	if (res != CURLE_OK)
+	if (res != CURLE_OK )
 	{
-		elog(WARNING, "compute_ctl refresh_configuration request failed: %s\n", curl_easy_strerror(res));
+		elog(WARNING, "refresh_configuration request failed: %s\n", curl_easy_strerror(res));
+	}
+	else
+	{
+		long http_code = 0;
+		curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &http_code);
+		if ( res != CURLE_OK )
+		{
+			elog(WARNING, "compute_ctl refresh_configuration request getinfo failed: %s\n", curl_easy_strerror(res));
+		}
+		else
+		{
+			elog(LOG, "compute_ctl refresh_configuration got HTTP response: %ld\n", http_code);
+			if( http_code == 200 )
+			{
+				first_recorded_refresh_error_usec = 0;
+			}
+			else
+			{
+				if (first_recorded_refresh_error_usec == 0)
+				{
+					first_recorded_refresh_error_usec = GetCurrentTimestamp();
+				}
+				else if(GetCurrentTimestamp() - first_recorded_refresh_error_usec > kRefreshErrorTimeoutUSec)
+				{
+					{
+						first_recorded_refresh_error_usec = 0;
+						cancel_query = true;
+					}
+				}
+			}
+		}
 	}
 
 	// In regular Postgres usage, it is not necessary to manually free memory allocated by palloc (psprintf) because
@@ -1086,6 +1127,7 @@ hadron_request_configuration_refresh() {
 	{
 		pfree(compute_ctl_url);
 	}
+	return cancel_query;
 }
 // END HADRON
 
@@ -1123,8 +1165,10 @@ pageserver_send(shardno_t shard_no, NeonRequest *request)
 		while (!pageserver_connect(shard_no, shard->n_reconnect_attempts < max_reconnect_attempts ? LOG : ERROR))
 		{
 			shard->n_reconnect_attempts += 1;
-			if (shard->n_reconnect_attempts > conf_refresh_reconnect_attempt_threshold) {
-				hadron_request_configuration_refresh();
+			if (shard->n_reconnect_attempts > conf_refresh_reconnect_attempt_threshold
+				&& hadron_request_configuration_refresh() )
+			{
+				neon_shard_log(shard_no, ERROR, "request failed too many times, cancelling query");
 			}
 		}
 		shard->n_reconnect_attempts = 0;
@@ -1336,6 +1380,16 @@ pageserver_try_receive(shardno_t shard_no)
 		pageserver_disconnect(shard_no);
 		hadron_request_configuration_refresh();
 		neon_shard_log(shard_no, ERROR, "pageserver_receive disconnect: unexpected PQgetCopyData return value: %d", rc);
+	}
+
+	/*
+	 * Always poke compute_ctl to request a configuration refresh if we have issues receiving data from pageservers after
+	 * successfully connecting to it. It could be an indication that we are connecting to the wrong pageservers (e.g. PS
+	 * is in secondary mode or otherwise refuses to respond our request).
+	 */
+	if ( rc < 0 && hadron_request_configuration_refresh() )
+	{
+		neon_shard_log(shard_no, ERROR, "refresh_configuration request failed, cancelling query");
 	}
 
 	shard->nresponses_received++;
