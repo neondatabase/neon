@@ -192,7 +192,7 @@ pub fn write_postgres_conf(
             }
             writeln!(file, "# Managed by compute_ctl base audit settings: end")?;
         }
-        ComputeAudit::Hipaa | ComputeAudit::Full | ComputeAudit::FullWithParameters => {
+        ComputeAudit::Hipaa => {
             writeln!(
                 file,
                 "# Managed by compute_ctl compliance audit settings: begin"
@@ -201,11 +201,8 @@ pub fn write_postgres_conf(
             // but this is necessary for HIPAA compliance.
             // Exclude 'misc' category, because it doesn't contain anything relevant.
             writeln!(file, "pgaudit.log='all, -misc'")?;
-
-            if ComputeAudit::FullWithParameters == spec.audit_log_level {
-                // Log parameters for all queries
-                writeln!(file, "pgaudit.log_parameter=on")?;
-            }
+            // Log parameters for all queries
+            writeln!(file, "pgaudit.log_parameter=on")?;
             // Disable logging of catalog queries
             // The catalog doesn't contain sensitive data, so we don't need to audit it.
             writeln!(file, "pgaudit.log_catalog=off")?;

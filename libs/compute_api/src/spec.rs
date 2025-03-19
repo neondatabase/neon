@@ -275,19 +275,10 @@ pub enum ComputeAudit {
     #[default]
     /// no audit logging. This is the default.
     Disabled,
-    ///  write masked audit log statements to the postgres log using pgaudit extension
+    /// write masked audit log statements to the postgres log using pgaudit extension
     Log,
-    /// Deprecated.
-    /// Has the same logic as Full.
-    /// TODO: remove when cplane is updated to use new name
+    /// log unmasked statements to the file using pgaudit and pgauditlogtofile extensions
     Hipaa,
-    /// write unmasked audit log statements to the AUDIT_LOGGING_ENDPOINT
-    /// using pgaudit and pgauditlogtofile extension
-    Full,
-    /// write unmasked audit log statements to the AUDIT_LOGGING_ENDPOINT
-    /// using pgaudit and pgauditlogtofile extensions.
-    /// log query parameters
-    FullWithParameters,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]

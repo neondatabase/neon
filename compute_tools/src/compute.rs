@@ -627,17 +627,14 @@ impl ComputeNode {
         }
 
         // If extended compute audit is enabled configure and start rsyslog
-        match pspec.spec.audit_log_level {
-            ComputeAudit::Hipaa | ComputeAudit::Full | ComputeAudit::FullWithParameters => {
-                let log_directory_path = Path::new(&self.params.pgdata).join("log");
-                let log_directory_path = log_directory_path.to_string_lossy().to_string();
-                configure_audit_rsyslog(log_directory_path.clone(), "hipaa")?;
+        if pspec.spec.audit_log_level == ComputeAudit::Hipaa {
+            let log_directory_path = Path::new(&self.params.pgdata).join("log");
+            let log_directory_path = log_directory_path.to_string_lossy().to_string();
+            configure_audit_rsyslog(log_directory_path.clone(), "hipaa")?;
 
-                // Launch a background task to clean up the audit logs
-                launch_pgaudit_gc(log_directory_path);
-            }
-            _ => {}
-        };
+            // Launch a background task to clean up the audit logs
+            launch_pgaudit_gc(log_directory_path);
+        }
 
         // Configure and start rsyslog for Postgres logs export
         if self.has_feature(ComputeFeature::PostgresLogsExport) {
@@ -1561,29 +1558,24 @@ impl ComputeNode {
         // We check that the audit_log_level changed compared to the previous spec and skip this step if not.
         let audit_log_level = self.get_audit_log_level();
 
-        match spec.audit_log_level {
-            ComputeAudit::Hipaa | ComputeAudit::Full | ComputeAudit::FullWithParameters => {
-                if audit_log_level != spec.audit_log_level {
-                    info!(
-                        "audit_log_level changed from {:?} to {:?}. Configuring audit logging",
-                        audit_log_level, spec.audit_log_level
-                    );
+        if spec.audit_log_level == ComputeAudit::Hipaa && audit_log_level != spec.audit_log_level {
+            info!(
+                "audit_log_level changed from {:?} to {:?}. Configuring audit logging",
+                audit_log_level, spec.audit_log_level
+            );
 
-                    let log_directory_path = Path::new(&self.params.pgdata).join("log");
-                    let log_directory_path = log_directory_path.to_string_lossy().to_string();
-                    configure_audit_rsyslog(log_directory_path.clone(), "hipaa")?;
+            let log_directory_path = Path::new(&self.params.pgdata).join("log");
+            let log_directory_path = log_directory_path.to_string_lossy().to_string();
+            configure_audit_rsyslog(log_directory_path.clone(), "hipaa")?;
 
-                    // Launch a background task to clean up the audit logs
-                    // If rsyslog was already configured, we don't need to start this process again.
-                    match audit_log_level {
-                        ComputeAudit::Disabled | ComputeAudit::Log => {
-                            launch_pgaudit_gc(log_directory_path);
-                        }
-                        _ => {}
-                    }
+            // Launch a background task to clean up the audit logs
+            // If rsyslog was already configured, we don't need to start this process again.
+            match audit_log_level {
+                ComputeAudit::Disabled | ComputeAudit::Log => {
+                    launch_pgaudit_gc(log_directory_path);
                 }
+                _ => {}
             }
-            _ => {}
         }
 
         // Write new config
