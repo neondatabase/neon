@@ -133,7 +133,7 @@ InitBufferTag(BufferTag *tag, const RelFileNode *rnode,
 		.relNumber = (tag).relNumber, \
 	})
 
-	#define BufTagInit(tag, relNumber, forknum, blkno, spcOid, dbOid) \
+#define BufTagInit(tag, relNumber, forknum, blkno, spcOid, dbOid) \
 	do { \
 		(tag).forkNum = forknum; \
 		(tag).blockNum = blkno; \
