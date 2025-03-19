@@ -848,6 +848,7 @@ impl ComputeNode {
         let mut state = self.state.lock().unwrap();
         state.audit_log_level = audit_log_level;
     }
+    
     pub fn get_audit_log_level(&self) -> ComputeAudit {
         self.state.lock().unwrap().audit_log_level
     }
