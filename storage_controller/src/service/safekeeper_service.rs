@@ -321,6 +321,17 @@ impl Service {
             .collect::<HashSet<_>>();
 
         // Schedule reconciliations
+        for &sk_id in all_sks.iter() {
+            let pending_op = TimelinePendingOpPersistence {
+                tenant_id: tenant_id.to_string(),
+                timeline_id: timeline_id.to_string(),
+                generation: tl.generation,
+                op_kind: SafekeeperTimelineOpKind::Delete,
+                sk_id: *sk_id,
+            };
+            tracing::info!("writing pending op for sk id {sk_id}");
+            self.persistence.insert_pending_op(pending_op).await?;
+        }
         {
             let mut locked = self.inner.write().unwrap();
             for sk_id in all_sks {
