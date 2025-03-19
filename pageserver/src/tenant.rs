@@ -67,7 +67,7 @@ use utils::try_rcu::ArcSwapExt;
 use utils::zstd::{create_zst_tarball, extract_zst_tarball};
 use utils::{backoff, completion, failpoint_support, fs_ext, pausable_failpoint};
 
-use self::config::{AttachedLocationConfig, AttachmentMode, LocationConf, TenantConf};
+use self::config::{AttachedLocationConfig, AttachmentMode, LocationConf};
 use self::metadata::TimelineMetadata;
 use self::mgr::{GetActiveTenantError, GetTenantError};
 use self::remote_timeline_client::upload::{upload_index_part, upload_tenant_manifest};
@@ -88,7 +88,7 @@ use crate::metrics::{
     TENANT_SYNTHETIC_SIZE_METRIC, remove_tenant_metrics,
 };
 use crate::task_mgr::TaskKind;
-use crate::tenant::config::{LocationMode, TenantConfOpt};
+use crate::tenant::config::LocationMode;
 use crate::tenant::gc_result::GcResult;
 pub use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::remote_timeline_client::{
@@ -162,7 +162,7 @@ pub struct TenantSharedResources {
 /// in this struct.
 #[derive(Clone)]
 pub(super) struct AttachedTenantConf {
-    tenant_conf: TenantConfOpt,
+    tenant_conf: pageserver_api::models::TenantConfig,
     location: AttachedLocationConfig,
     /// The deadline before which we are blocked from GC so that
     /// leases have a chance to be renewed.
@@ -170,7 +170,10 @@ pub(super) struct AttachedTenantConf {
 }
 
 impl AttachedTenantConf {
-    fn new(tenant_conf: TenantConfOpt, location: AttachedLocationConfig) -> Self {
+    fn new(
+        tenant_conf: pageserver_api::models::TenantConfig,
+        location: AttachedLocationConfig,
+    ) -> Self {
         // Sets a deadline before which we cannot proceed to GC due to lsn lease.
         //
         // We do this as the leases mapping are not persisted to disk. By delaying GC by lease
@@ -251,7 +254,7 @@ pub struct Tenant {
     state: watch::Sender<TenantState>,
 
     // Overridden tenant-specific config parameters.
-    // We keep TenantConfOpt sturct here to preserve the information
+    // We keep pageserver_api::models::TenantConfig sturct here to preserve the information
     // about parameters that are not set.
     // This is necessary to allow global config updates.
     tenant_conf: Arc<ArcSwap<AttachedTenantConf>>,
@@ -3702,16 +3705,13 @@ impl Tenant {
     /// create a Tenant in the same state.  Do not use this in hot paths: it's for relatively
     /// rare external API calls, like a reconciliation at startup.
     pub(crate) fn get_location_conf(&self) -> models::LocationConfig {
-        let conf = self.tenant_conf.load();
+        let attached_tenant_conf = self.tenant_conf.load();
 
-        let location_config_mode = match conf.location.attach_mode {
+        let location_config_mode = match attached_tenant_conf.location.attach_mode {
             AttachmentMode::Single => models::LocationConfigMode::AttachedSingle,
             AttachmentMode::Multi => models::LocationConfigMode::AttachedMulti,
             AttachmentMode::Stale => models::LocationConfigMode::AttachedStale,
         };
-
-        // We have a pageserver TenantConf, we need the API-facing TenantConfig.
-        let tenant_config: models::TenantConfig = conf.tenant_conf.clone().into();
 
         models::LocationConfig {
             mode: location_config_mode,
@@ -3720,7 +3720,7 @@ impl Tenant {
             shard_number: self.shard_identity.number.0,
             shard_count: self.shard_identity.count.literal(),
             shard_stripe_size: self.shard_identity.stripe_size.0,
-            tenant_conf: tenant_config,
+            tenant_conf: attached_tenant_conf.tenant_conf.clone(),
         }
     }
 
@@ -3926,11 +3926,11 @@ enum ActivateTimelineArgs {
 }
 
 impl Tenant {
-    pub fn tenant_specific_overrides(&self) -> TenantConfOpt {
+    pub fn tenant_specific_overrides(&self) -> pageserver_api::models::TenantConfig {
         self.tenant_conf.load().tenant_conf.clone()
     }
 
-    pub fn effective_config(&self) -> TenantConf {
+    pub fn effective_config(&self) -> pageserver_api::config::TenantConfigToml {
         self.tenant_specific_overrides()
             .merge(self.conf.default_tenant_conf.clone())
     }
@@ -4072,10 +4072,14 @@ impl Tenant {
         }
     }
 
-    pub fn update_tenant_config<F: Fn(TenantConfOpt) -> anyhow::Result<TenantConfOpt>>(
+    pub fn update_tenant_config<
+        F: Fn(
+            pageserver_api::models::TenantConfig,
+        ) -> anyhow::Result<pageserver_api::models::TenantConfig>,
+    >(
         &self,
         update: F,
-    ) -> anyhow::Result<TenantConfOpt> {
+    ) -> anyhow::Result<pageserver_api::models::TenantConfig> {
         // Use read-copy-update in order to avoid overwriting the location config
         // state if this races with [`Tenant::set_new_location_config`]. Note that
         // this race is not possible if both request types come from the storage
@@ -4122,7 +4126,7 @@ impl Tenant {
 
     fn get_pagestream_throttle_config(
         psconf: &'static PageServerConf,
-        overrides: &TenantConfOpt,
+        overrides: &pageserver_api::models::TenantConfig,
     ) -> throttle::Config {
         overrides
             .timeline_get_throttle
@@ -4130,7 +4134,7 @@ impl Tenant {
             .unwrap_or(psconf.default_tenant_conf.timeline_get_throttle.clone())
     }
 
-    pub(crate) fn tenant_conf_updated(&self, new_conf: &TenantConfOpt) {
+    pub(crate) fn tenant_conf_updated(&self, new_conf: &pageserver_api::models::TenantConfig) {
         let conf = Self::get_pagestream_throttle_config(self.conf, new_conf);
         self.pagestream_throttle.reconfigure(conf)
     }
@@ -5492,7 +5496,7 @@ impl Tenant {
         Ok(())
     }
 
-    pub(crate) fn get_tenant_conf(&self) -> TenantConfOpt {
+    pub(crate) fn get_tenant_conf(&self) -> pageserver_api::models::TenantConfig {
         self.tenant_conf.load().tenant_conf.clone()
     }
 
@@ -5682,59 +5686,9 @@ pub(crate) mod harness {
         buf.freeze()
     }
 
-    impl From<TenantConf> for TenantConfOpt {
-        fn from(tenant_conf: TenantConf) -> Self {
-            Self {
-                checkpoint_distance: Some(tenant_conf.checkpoint_distance),
-                checkpoint_timeout: Some(tenant_conf.checkpoint_timeout),
-                compaction_target_size: Some(tenant_conf.compaction_target_size),
-                compaction_period: Some(tenant_conf.compaction_period),
-                compaction_threshold: Some(tenant_conf.compaction_threshold),
-                compaction_upper_limit: Some(tenant_conf.compaction_upper_limit),
-                compaction_algorithm: Some(tenant_conf.compaction_algorithm),
-                compaction_l0_first: Some(tenant_conf.compaction_l0_first),
-                compaction_l0_semaphore: Some(tenant_conf.compaction_l0_semaphore),
-                l0_flush_delay_threshold: tenant_conf.l0_flush_delay_threshold,
-                l0_flush_stall_threshold: tenant_conf.l0_flush_stall_threshold,
-                l0_flush_wait_upload: Some(tenant_conf.l0_flush_wait_upload),
-                gc_horizon: Some(tenant_conf.gc_horizon),
-                gc_period: Some(tenant_conf.gc_period),
-                image_creation_threshold: Some(tenant_conf.image_creation_threshold),
-                pitr_interval: Some(tenant_conf.pitr_interval),
-                walreceiver_connect_timeout: Some(tenant_conf.walreceiver_connect_timeout),
-                lagging_wal_timeout: Some(tenant_conf.lagging_wal_timeout),
-                max_lsn_wal_lag: Some(tenant_conf.max_lsn_wal_lag),
-                eviction_policy: Some(tenant_conf.eviction_policy),
-                min_resident_size_override: tenant_conf.min_resident_size_override,
-                evictions_low_residence_duration_metric_threshold: Some(
-                    tenant_conf.evictions_low_residence_duration_metric_threshold,
-                ),
-                heatmap_period: Some(tenant_conf.heatmap_period),
-                lazy_slru_download: Some(tenant_conf.lazy_slru_download),
-                timeline_get_throttle: Some(tenant_conf.timeline_get_throttle),
-                image_layer_creation_check_threshold: Some(
-                    tenant_conf.image_layer_creation_check_threshold,
-                ),
-                image_creation_preempt_threshold: Some(
-                    tenant_conf.image_creation_preempt_threshold,
-                ),
-                lsn_lease_length: Some(tenant_conf.lsn_lease_length),
-                lsn_lease_length_for_ts: Some(tenant_conf.lsn_lease_length_for_ts),
-                timeline_offloading: Some(tenant_conf.timeline_offloading),
-                wal_receiver_protocol_override: tenant_conf.wal_receiver_protocol_override,
-                rel_size_v2_enabled: Some(tenant_conf.rel_size_v2_enabled),
-                gc_compaction_enabled: Some(tenant_conf.gc_compaction_enabled),
-                gc_compaction_initial_threshold_kb: Some(
-                    tenant_conf.gc_compaction_initial_threshold_kb,
-                ),
-                gc_compaction_ratio_percent: Some(tenant_conf.gc_compaction_ratio_percent),
-            }
-        }
-    }
-
     pub struct TenantHarness {
         pub conf: &'static PageServerConf,
-        pub tenant_conf: TenantConf,
+        pub tenant_conf: pageserver_api::models::TenantConfig,
         pub tenant_shard_id: TenantShardId,
         pub generation: Generation,
         pub shard: ShardIndex,
@@ -5761,7 +5715,7 @@ pub(crate) mod harness {
     impl TenantHarness {
         pub async fn create_custom(
             test_name: &'static str,
-            tenant_conf: TenantConf,
+            tenant_conf: pageserver_api::models::TenantConfig,
             tenant_id: TenantId,
             shard_identity: ShardIdentity,
             generation: Generation,
@@ -5814,10 +5768,10 @@ pub(crate) mod harness {
         pub async fn create(test_name: &'static str) -> anyhow::Result<Self> {
             // Disable automatic GC and compaction to make the unit tests more deterministic.
             // The tests perform them manually if needed.
-            let tenant_conf = TenantConf {
-                gc_period: Duration::ZERO,
-                compaction_period: Duration::ZERO,
-                ..TenantConf::default()
+            let tenant_conf = pageserver_api::models::TenantConfig {
+                gc_period: Some(Duration::ZERO),
+                compaction_period: Some(Duration::ZERO),
+                ..Default::default()
             };
             let tenant_id = TenantId::generate();
             let shard = ShardIdentity::unsharded();
@@ -5857,7 +5811,7 @@ pub(crate) mod harness {
                 TenantState::Attaching,
                 self.conf,
                 AttachedTenantConf::try_from(LocationConf::attached_single(
-                    TenantConfOpt::from(self.tenant_conf.clone()),
+                    self.tenant_conf.clone(),
                     self.generation,
                     &ShardParameters::default(),
                 ))
@@ -6941,14 +6895,14 @@ mod tests {
     // ```
     #[tokio::test]
     async fn test_get_vectored_key_gap() -> anyhow::Result<()> {
-        let tenant_conf = TenantConf {
+        let tenant_conf = pageserver_api::models::TenantConfig {
             // Make compaction deterministic
-            gc_period: Duration::ZERO,
-            compaction_period: Duration::ZERO,
+            gc_period: Some(Duration::ZERO),
+            compaction_period: Some(Duration::ZERO),
             // Encourage creation of L1 layers
-            checkpoint_distance: 16 * 1024,
-            compaction_target_size: 8 * 1024,
-            ..TenantConf::default()
+            checkpoint_distance: Some(16 * 1024),
+            compaction_target_size: Some(8 * 1024),
+            ..Default::default()
         };
 
         let harness = TenantHarness::create_custom(
@@ -7254,9 +7208,9 @@ mod tests {
         compaction_algorithm: CompactionAlgorithm,
     ) -> anyhow::Result<()> {
         let mut harness = TenantHarness::create(name).await?;
-        harness.tenant_conf.compaction_algorithm = CompactionAlgorithmSettings {
+        harness.tenant_conf.compaction_algorithm = Some(CompactionAlgorithmSettings {
             kind: compaction_algorithm,
-        };
+        });
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
@@ -7623,9 +7577,9 @@ mod tests {
         compaction_algorithm: CompactionAlgorithm,
     ) -> anyhow::Result<()> {
         let mut harness = TenantHarness::create(name).await?;
-        harness.tenant_conf.compaction_algorithm = CompactionAlgorithmSettings {
+        harness.tenant_conf.compaction_algorithm = Some(CompactionAlgorithmSettings {
             kind: compaction_algorithm,
-        };
+        });
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
