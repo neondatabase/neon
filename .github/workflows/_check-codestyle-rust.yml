@@ -23,14 +23,17 @@ jobs:
   check-codestyle-rust:
     strategy:
       matrix:
-        arch: ${{ fromJson(inputs.archs) }}
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
+        arch: ${{ fromJSON(inputs.archs) }}
+    runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
+
+    permissions:
+      packages: read
 
     container:
       image: ${{ inputs.build-tools-image }}
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       options: --init
 
     steps:

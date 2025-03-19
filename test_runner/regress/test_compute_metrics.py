@@ -3,12 +3,13 @@ from __future__ import annotations
 import enum
 import os
 import shutil
-import sys
 from enum import StrEnum
 from logging import debug
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+# Docs are available at https://jsonnet.org/ref/bindings.html#python_api
+import _jsonnet
 import pytest
 import requests
 import yaml
@@ -92,10 +93,6 @@ def jsonnet_evaluate_file(
     ext_vars: str | dict[str, str] | None = None,
     tla_vars: str | dict[str, str] | None = None,
 ) -> str:
-    # Jsonnet doesn't support Python 3.13 yet
-    # Docs are available at https://jsonnet.org/ref/bindings.html#python_api
-    import _jsonnet
-
     return cast(
         "str",
         _jsonnet.evaluate_file(
@@ -130,7 +127,6 @@ class SqlExporterProcess(StrEnum):
     AUTOSCALING = "autoscaling"
 
 
-@pytest.mark.xfail(sys.version_info >= (3, 13), reason="Jsonnet doesn't support Python 3.13 yet")
 @pytest.mark.parametrize(
     "collector_name",
     ["neon_collector", "neon_collector_autoscaling"],
@@ -359,7 +355,6 @@ else:
             self.__proc.wait()
 
 
-@pytest.mark.xfail(sys.version_info >= (3, 13), reason="Jsonnet doesn't support Python 3.13 yet")
 @pytest.mark.parametrize(
     "exporter",
     [SqlExporterProcess.COMPUTE, SqlExporterProcess.AUTOSCALING],

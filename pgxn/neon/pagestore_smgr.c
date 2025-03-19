@@ -2778,6 +2778,9 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
 			mdextend(reln, forkNum, blkno, buffer, skipFsync);
+			/* Update LFC in case of unlogged index build */
+			if (reln == unlogged_build_rel && unlogged_build_phase == UNLOGGED_BUILD_PHASE_2)
+				lfc_write(InfoFromSMgrRel(reln), forkNum, blkno, buffer);
 			return;
 
 		default:
@@ -2866,6 +2869,14 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
 			mdzeroextend(reln, forkNum, blocknum, nblocks, skipFsync);
+			/* Update LFC in case of unlogged index build */
+			if (reln == unlogged_build_rel && unlogged_build_phase == UNLOGGED_BUILD_PHASE_2)
+			{
+				for (int i = 0; i < nblocks; i++)
+				{
+					lfc_write(InfoFromSMgrRel(reln), forkNum, blocknum + i, buffer.data);
+				}
+			}
 			return;
 
 		default:
@@ -3714,6 +3725,9 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 			#else
 			mdwrite(reln, forknum, blocknum, buffer, skipFsync);
 			#endif
+			/* Update LFC in case of unlogged index build */
+			if (reln == unlogged_build_rel && unlogged_build_phase == UNLOGGED_BUILD_PHASE_2)
+				lfc_write(InfoFromSMgrRel(reln), forknum, blocknum, buffer);
 			return;
 		default:
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
@@ -3777,6 +3791,9 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
 			mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
+			/* Update LFC in case of unlogged index build */
+			if (reln == unlogged_build_rel && unlogged_build_phase == UNLOGGED_BUILD_PHASE_2)
+				lfc_writev(InfoFromSMgrRel(reln), forknum, blkno, buffers, nblocks);
 			return;
 		default:
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
@@ -4176,8 +4193,10 @@ neon_start_unlogged_build(SMgrRelation reln)
 	 * FIXME: should we pass isRedo true to create the tablespace dir if it
 	 * doesn't exist? Is it needed?
 	 */
-	if (!IsParallelWorker())
+#ifndef DEBUG_COMPARE_LOCAL
+ 	if (!IsParallelWorker())
 		mdcreate(reln, MAIN_FORKNUM, false);
+#endif
 }
 
 /*
@@ -4252,8 +4271,10 @@ neon_end_unlogged_build(SMgrRelation reln)
 
 			forget_cached_relsize(InfoFromNInfoB(rinfob), forknum);
 			mdclose(reln, forknum);
+#ifndef DEBUG_COMPARE_LOCAL
 			/* use isRedo == true, so that we drop it immediately */
 			mdunlink(rinfob, forknum, true);
+#endif
 		}
 	}
 

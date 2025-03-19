@@ -77,20 +77,23 @@ jobs:
     secrets: inherit
 
   check-codestyle-python:
-    needs: [ check-permissions, build-build-tools-image ]
+    needs: [ meta, check-permissions, build-build-tools-image ]
+    # No need to run on `main` because we this in the merge queue
+    if: ${{ needs.meta.outputs.run-kind == 'pr' }}
     uses: ./.github/workflows/_check-codestyle-python.yml
     with:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
     secrets: inherit
 
   check-codestyle-jsonnet:
-    needs: [ check-permissions, build-build-tools-image ]
+    needs: [ meta, check-permissions, build-build-tools-image ]
+    if: ${{ contains(fromJSON('["pr", "push-main"]'), needs.meta.outputs.run-kind) }}
     runs-on: [ self-hosted, small ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       options: --init
 
     steps:
@@ -156,7 +159,9 @@ jobs:
           pass_if_unchanged: true
 
   check-codestyle-rust:
-    needs: [ check-permissions, build-build-tools-image ]
+    needs: [ meta, check-permissions, build-build-tools-image ]
+    # No need to run on `main` because we this in the merge queue
+    if: ${{ needs.meta.outputs.run-kind == 'pr' }}
     uses: ./.github/workflows/_check-codestyle-rust.yml
     with:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
@@ -164,8 +169,8 @@ jobs:
     secrets: inherit
 
   check-dependencies-rust:
-    needs: [ files-changed, build-build-tools-image ]
-    if: ${{ needs.files-changed.outputs.check-rust-dependencies == 'true' }}
+    needs: [ meta, files-changed, build-build-tools-image ]
+    if: ${{ needs.files-changed.outputs.check-rust-dependencies == 'true' && needs.meta.outputs.run-kind == 'pr' }}
     uses: ./.github/workflows/cargo-deny.yml
     with:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
@@ -173,12 +178,13 @@ jobs:
 
   build-and-test-locally:
     needs: [ meta, build-build-tools-image ]
+    if: ${{ contains(fromJSON('["pr", "push-main"]'), needs.meta.outputs.run-kind) }}
     strategy:
       fail-fast: false
       matrix:
         arch: [ x64, arm64 ]
         # Do not build or run tests in debug for release branches
-        build-type: ${{ fromJson((startsWith(github.ref_name, 'release') && github.event_name == 'push') && '["release"]' || '["debug", "release"]') }}
+        build-type: ${{ fromJSON((startsWith(github.ref_name, 'release') && github.event_name == 'push') && '["release"]' || '["debug", "release"]') }}
         include:
           - build-type: release
             arch: arm64
@@ -209,8 +215,8 @@ jobs:
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       options: --init
     steps:
       - name: Checkout
@@ -248,8 +254,8 @@ jobs:
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       # for changed limits, see comments on `options:` earlier in this file
       options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     strategy:
@@ -314,8 +320,8 @@ jobs:
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       options: --init
 
     steps:
@@ -367,8 +373,8 @@ jobs:
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       options: --init
     strategy:
       fail-fast: false
@@ -470,14 +476,20 @@ jobs:
             })
 
   trigger-e2e-tests:
-    # Depends on jobs that can get skipped
+    # !failure() && !cancelled() because it depends on jobs that can get skipped
     if: >-
       ${{
         (
-          !github.event.pull_request.draft
-          || contains( github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft')
-          || needs.meta.outputs.run-kind == 'push-main'
-        ) && !failure() && !cancelled()
+          (
+            needs.meta.outputs.run-kind == 'pr'
+            && (
+              !github.event.pull_request.draft
+              || contains(github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft')
+            )
+          )
+          || contains(fromJSON('["push-main", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind)
+        )
+        && !failure() && !cancelled()
       }}
     needs: [ check-permissions, push-neon-image-dev, push-compute-image-dev, meta ]
     uses: ./.github/workflows/trigger-e2e-tests.yml
@@ -492,7 +504,10 @@ jobs:
       matrix:
         arch: [ x64, arm64 ]
 
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
+    runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
+
+    permissions:
+      packages: write
 
     steps:
       - uses: actions/checkout@v4
@@ -511,6 +526,12 @@ jobs:
 
       - uses: docker/login-action@v3
         with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/login-action@v3
+        with:
           registry: cache.neon.build
           username: ${{ secrets.NEON_CI_DOCKERCACHE_USERNAME }}
           password: ${{ secrets.NEON_CI_DOCKERCACHE_PASSWORD }}
@@ -523,7 +544,7 @@ jobs:
           build-args: |
             ADDITIONAL_RUSTFLAGS=${{ matrix.arch == 'arm64' && '-Ctarget-feature=+lse -Ctarget-cpu=neoverse-n1' || '' }}
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
-            BUILD_TAG=${{ needs.meta.outputs.build-tag }}
+            BUILD_TAG=${{ needs.meta.outputs.release-tag || needs.meta.outputs.build-tag }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}-bookworm
             DEBIAN_VERSION=bookworm
           provenance: false
@@ -533,7 +554,7 @@ jobs:
           cache-from: type=registry,ref=cache.neon.build/neon:cache-bookworm-${{ matrix.arch }}
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon:cache-{0}-{1},mode=max', 'bookworm', matrix.arch) || '' }}
           tags: |
-            neondatabase/neon:${{ needs.meta.outputs.build-tag }}-bookworm-${{ matrix.arch }}
+            ghcr.io/neondatabase/neon:${{ needs.meta.outputs.build-tag }}-bookworm-${{ matrix.arch }}
 
   neon-image:
     needs: [ neon-image-arch, meta ]
@@ -543,19 +564,21 @@ jobs:
       id-token: write # aws-actions/configure-aws-credentials
       statuses: write
       contents: read
+      packages: write
 
     steps:
       - uses: docker/login-action@v3
         with:
-          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create multi-arch image
         run: |
-          docker buildx imagetools create -t neondatabase/neon:${{ needs.meta.outputs.build-tag }} \
-                                          -t neondatabase/neon:${{ needs.meta.outputs.build-tag }}-bookworm \
-                                             neondatabase/neon:${{ needs.meta.outputs.build-tag }}-bookworm-x64 \
-                                             neondatabase/neon:${{ needs.meta.outputs.build-tag }}-bookworm-arm64
+          docker buildx imagetools create -t ghcr.io/neondatabase/neon:${{ needs.meta.outputs.build-tag }} \
+                                          -t ghcr.io/neondatabase/neon:${{ needs.meta.outputs.build-tag }}-bookworm \
+                                             ghcr.io/neondatabase/neon:${{ needs.meta.outputs.build-tag }}-bookworm-x64 \
+                                             ghcr.io/neondatabase/neon:${{ needs.meta.outputs.build-tag }}-bookworm-arm64
 
   compute-node-image-arch:
     needs: [ check-permissions, build-build-tools-image, meta ]
@@ -564,6 +587,7 @@ jobs:
       id-token: write # aws-actions/configure-aws-credentials
       statuses: write
       contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -582,7 +606,7 @@ jobs:
             debian: bookworm
         arch: [ x64, arm64 ]
 
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
+    runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -606,6 +630,12 @@ jobs:
 
       - uses: docker/login-action@v3
         with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/login-action@v3
+        with:
           registry: cache.neon.build
           username: ${{ secrets.NEON_CI_DOCKERCACHE_USERNAME }}
           password: ${{ secrets.NEON_CI_DOCKERCACHE_PASSWORD }}
@@ -617,7 +647,7 @@ jobs:
           build-args: |
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             PG_VERSION=${{ matrix.version.pg }}
-            BUILD_TAG=${{ needs.meta.outputs.build-tag }}
+            BUILD_TAG=${{ needs.meta.outputs.release-tag || needs.meta.outputs.build-tag }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}-${{ matrix.version.debian }}
             DEBIAN_VERSION=${{ matrix.version.debian }}
           provenance: false
@@ -627,7 +657,7 @@ jobs:
           cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-node-{0}:cache-{1}-{2},mode=max', matrix.version.pg, matrix.version.debian, matrix.arch) || '' }}
           tags: |
-            neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-${{ matrix.arch }}
+            ghcr.io/neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-${{ matrix.arch }}
 
       - name: Build neon extensions test image
         if: matrix.version.pg >= 'v16'
@@ -637,7 +667,7 @@ jobs:
           build-args: |
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             PG_VERSION=${{ matrix.version.pg }}
-            BUILD_TAG=${{ needs.meta.outputs.build-tag }}
+            BUILD_TAG=${{ needs.meta.outputs.release-tag || needs.meta.outputs.build-tag }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}-${{ matrix.version.debian }}
             DEBIAN_VERSION=${{ matrix.version.debian }}
           provenance: false
@@ -647,7 +677,7 @@ jobs:
           target: extension-tests
           cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
           tags: |
-            neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{needs.meta.outputs.build-tag}}-${{ matrix.version.debian }}-${{ matrix.arch }}
+            ghcr.io/neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{needs.meta.outputs.build-tag}}-${{ matrix.version.debian }}-${{ matrix.arch }}
 
   compute-node-image:
     needs: [ compute-node-image-arch, meta ]
@@ -656,6 +686,7 @@ jobs:
       id-token: write # aws-actions/configure-aws-credentials
       statuses: write
       contents: read
+      packages: write
     runs-on: ubuntu-22.04
 
     strategy:
@@ -674,28 +705,32 @@ jobs:
     steps:
       - uses: docker/login-action@v3
         with:
-          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create multi-arch compute-node image
         run: |
-          docker buildx imagetools create -t neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }} \
-                                          -t neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }} \
-                                             neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-x64 \
-                                             neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
+          docker buildx imagetools create -t ghcr.io/neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }} \
+                                          -t ghcr.io/neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }} \
+                                             ghcr.io/neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-x64 \
+                                             ghcr.io/neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
 
       - name: Create multi-arch neon-test-extensions image
         if: matrix.version.pg >= 'v16'
         run: |
-          docker buildx imagetools create -t neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }} \
-                                          -t neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }} \
-                                             neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-x64 \
-                                             neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
+          docker buildx imagetools create -t ghcr.io/neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }} \
+                                          -t ghcr.io/neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }} \
+                                             ghcr.io/neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-x64 \
+                                             ghcr.io/neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
 
   vm-compute-node-image-arch:
     needs: [ check-permissions, meta, compute-node-image ]
     if: ${{ contains(fromJSON('["push-main", "pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
+    runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -723,31 +758,34 @@ jobs:
       - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
       - uses: docker/login-action@v3
         with:
-          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       # Note: we need a separate pull step here because otherwise vm-builder will try to pull, and
       # it won't have the proper authentication (written at v0.6.0)
       - name: Pulling compute-node image
         run: |
-          docker pull neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}
+          docker pull ghcr.io/neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}
 
       - name: Build vm image
         run: |
           ./vm-builder \
             -size=2G \
             -spec=compute/vm-image-spec-${{ matrix.version.debian }}.yaml \
-            -src=neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }} \
-            -dst=neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.arch }} \
+            -src=ghcr.io/neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }} \
+            -dst=ghcr.io/neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.arch }} \
             -target-arch=linux/${{ matrix.arch }}
 
       - name: Pushing vm-compute-node image
         run: |
-          docker push neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.arch }}
+          docker push ghcr.io/neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.arch }}
 
   vm-compute-node-image:
     needs: [ vm-compute-node-image-arch, meta ]
     if: ${{ contains(fromJSON('["push-main", "pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    permissions:
+      packages: write
     runs-on: ubuntu-22.04
     strategy:
       matrix:
@@ -760,14 +798,15 @@ jobs:
     steps:
       - uses: docker/login-action@v3
         with:
-          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create multi-arch compute-node image
         run: |
-          docker buildx imagetools create -t neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }} \
-                                             neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-amd64 \
-                                             neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-arm64
+          docker buildx imagetools create -t ghcr.io/neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }} \
+                                             ghcr.io/neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-amd64 \
+                                             ghcr.io/neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-arm64
 
 
   test-images:
@@ -785,18 +824,28 @@ jobs:
         arch: [ x64, arm64 ]
         pg_version: [v16, v17]
 
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
+    permissions:
+      packages: read
+
+    runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
+
       - uses: docker/login-action@v3
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      # `neondatabase/neon` contains multiple binaries, all of them use the same input for the version into the same version formatting library.
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # `ghcr.io/neondatabase/neon` contains multiple binaries, all of them use the same input for the version into the same version formatting library.
       # Pick pageserver as currently the only binary with extra "version" features printed in the string to verify.
       # Regular pageserver version string looks like
       #   Neon page server git-env:32d14403bd6ab4f4520a94cbfd81a6acef7a526c failpoints: true, features: []
@@ -807,7 +856,7 @@ jobs:
         shell: bash # ensure no set -e for better error messages
         if: ${{ contains(fromJSON('["push-main", "pr", "storage-rc-pr", "proxy-rc-pr"]'), needs.meta.outputs.run-kind) }}
         run: |
-          pageserver_version=$(docker run --rm neondatabase/neon:${{ needs.meta.outputs.build-tag }} "/bin/sh" "-c" "/usr/local/bin/pageserver --version")
+          pageserver_version=$(docker run --rm ghcr.io/neondatabase/neon:${{ needs.meta.outputs.build-tag }} "/bin/sh" "-c" "/usr/local/bin/pageserver --version")
 
           echo "Pageserver version string: $pageserver_version"
 
@@ -892,7 +941,7 @@ jobs:
         env:
           SOURCE_TAG: >-
             ${{
-              contains(fromJson('["storage-release", "compute-release", "proxy-release"]'), needs.meta.outputs.run-kind)
+              contains(fromJSON('["storage-release", "compute-release", "proxy-release"]'), needs.meta.outputs.run-kind)
               && needs.meta.outputs.release-pr-run-id
               || needs.meta.outputs.build-tag
             }}
@@ -978,18 +1027,21 @@ jobs:
       acr-registry-name: ${{ vars.AZURE_PROD_REGISTRY_NAME }}
     secrets: inherit
 
-  push-neon-test-extensions-image-ghcr:
+  push-neon-test-extensions-image-dockerhub:
     if: ${{ contains(fromJSON('["push-main", "pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     needs: [ meta, compute-node-image ]
     uses: ./.github/workflows/_push-to-container-registry.yml
+    permissions:
+      packages: write
+      id-token: write
     with:
       image-map: |
         {
-          "docker.io/neondatabase/neon-test-extensions-v16:${{ needs.meta.outputs.build-tag }}": [
-            "ghcr.io/neondatabase/neon-test-extensions-v16:${{ needs.meta.outputs.build-tag }}"
+          "ghcr.io/neondatabase/neon-test-extensions-v16:${{ needs.meta.outputs.build-tag }}": [
+            "docker.io/neondatabase/neon-test-extensions-v16:${{ needs.meta.outputs.build-tag }}"
           ],
-          "docker.io/neondatabase/neon-test-extensions-v17:${{ needs.meta.outputs.build-tag }}": [
-            "ghcr.io/neondatabase/neon-test-extensions-v17:${{ needs.meta.outputs.build-tag }}"
+          "ghcr.io/neondatabase/neon-test-extensions-v17:${{ needs.meta.outputs.build-tag }}": [
+            "docker.io/neondatabase/neon-test-extensions-v17:${{ needs.meta.outputs.build-tag }}"
           ]
         }
     secrets: inherit
@@ -998,14 +1050,17 @@ jobs:
     if: ${{ needs.meta.outputs.run-kind == 'push-main' }}
     needs: [ meta, compute-node-image ]
     uses: ./.github/workflows/_push-to-container-registry.yml
+    permissions:
+      packages: write
+      id-token: write
     with:
       image-map: |
         {
-          "docker.io/neondatabase/neon-test-extensions-v16:${{ needs.meta.outputs.build-tag }}": [
+          "ghcr.io/neondatabase/neon-test-extensions-v16:${{ needs.meta.outputs.build-tag }}": [
             "docker.io/neondatabase/neon-test-extensions-v16:latest",
             "ghcr.io/neondatabase/neon-test-extensions-v16:latest"
           ],
-          "docker.io/neondatabase/neon-test-extensions-v17:${{ needs.meta.outputs.build-tag }}": [
+          "ghcr.io/neondatabase/neon-test-extensions-v17:${{ needs.meta.outputs.build-tag }}": [
             "docker.io/neondatabase/neon-test-extensions-v17:latest",
             "ghcr.io/neondatabase/neon-test-extensions-v17:latest"
           ]
@@ -1014,16 +1069,19 @@ jobs:
 
   add-release-tag-to-neon-test-extensions-image:
     if: ${{ needs.meta.outputs.run-kind == 'compute-release' }}
-    needs: [ meta, compute-node-image ]
+    needs: [ meta ]
     uses: ./.github/workflows/_push-to-container-registry.yml
+    permissions:
+      packages: write
+      id-token: write
     with:
       image-map: |
         {
-          "docker.io/neondatabase/neon-test-extensions-v16:${{ needs.meta.outputs.release-pr-run-id }}": [
+          "ghcr.io/neondatabase/neon-test-extensions-v16:${{ needs.meta.outputs.release-pr-run-id }}": [
             "docker.io/neondatabase/neon-test-extensions-v16:${{ needs.meta.outputs.build-tag }}",
             "ghcr.io/neondatabase/neon-test-extensions-v16:${{ needs.meta.outputs.build-tag }}"
           ],
-          "docker.io/neondatabase/neon-test-extensions-v17:${{ needs.meta.outputs.release-pr-run-id }}": [
+          "ghcr.io/neondatabase/neon-test-extensions-v17:${{ needs.meta.outputs.release-pr-run-id }}": [
             "docker.io/neondatabase/neon-test-extensions-v17:${{ needs.meta.outputs.build-tag }}",
             "ghcr.io/neondatabase/neon-test-extensions-v17:${{ needs.meta.outputs.build-tag }}"
           ]
@@ -1388,10 +1446,10 @@ jobs:
         if: |
           contains(needs.*.result, 'failure')
           || contains(needs.*.result, 'cancelled')
-          || (needs.check-dependencies-rust.result == 'skipped' && needs.files-changed.outputs.check-rust-dependencies == 'true')
-          || needs.build-and-test-locally.result == 'skipped'
-          || needs.check-codestyle-python.result == 'skipped'
-          || needs.check-codestyle-rust.result == 'skipped'
+          || (needs.check-dependencies-rust.result == 'skipped' && needs.files-changed.outputs.check-rust-dependencies == 'true' && needs.meta.outputs.run-kind == 'pr')
+          || (needs.build-and-test-locally.result == 'skipped' && needs.meta.outputs.run-kind == 'pr')
+          || (needs.check-codestyle-python.result == 'skipped' && needs.meta.outputs.run-kind == 'pr')
+          || (needs.check-codestyle-rust.result == 'skipped' && needs.meta.outputs.run-kind == 'pr')
           || needs.files-changed.result == 'skipped'
           || (needs.push-compute-image-dev.result == 'skipped' && contains(fromJSON('["push-main", "pr", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind))
           || (needs.push-neon-image-dev.result == 'skipped' && contains(fromJSON('["push-main", "pr", "storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind))

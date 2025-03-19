@@ -87,10 +87,10 @@ jobs:
 
     runs-on: ${{ matrix.RUNNER }}
     container:
-      image: neondatabase/build-tools:pinned-bookworm
+      image: ghcr.io/neondatabase/build-tools:pinned-bookworm
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       options: --init
 
     steps:
@@ -190,10 +190,10 @@ jobs:
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: neondatabase/build-tools:pinned-bookworm
+      image: ghcr.io/neondatabase/build-tools:pinned-bookworm
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       options: --init
 
     steps:
@@ -245,10 +245,10 @@ jobs:
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: neondatabase/build-tools:pinned-bookworm
+      image: ghcr.io/neondatabase/build-tools:pinned-bookworm
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       options: --init
 
     steps:
@@ -352,7 +352,7 @@ jobs:
         region_id_default=${{ env.DEFAULT_REGION_ID }}
         runner_default='["self-hosted", "us-east-2", "x64"]'
         runner_azure='["self-hosted", "eastus2", "x64"]'
-        image_default="neondatabase/build-tools:pinned-bookworm"
+        image_default="ghcr.io/neondatabase/build-tools:pinned-bookworm"
         matrix='{
           "pg_version" : [
             16
@@ -368,18 +368,18 @@ jobs:
           "db_size": [ "10gb" ],
           "runner": ['"$runner_default"'],
           "image": [ "'"$image_default"'" ],
-          "include": [{ "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-freetier",       "db_size": "3gb" ,"runner": '"$runner_default"', "image": "'"$image_default"'" },
-                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'" },
-                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new-many-tables","db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'" },
-                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "50gb","runner": '"$runner_default"', "image": "'"$image_default"'" },
-                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-freetier", "db_size": "3gb" ,"runner": '"$runner_azure"',   "image": "neondatabase/build-tools:pinned-bookworm" },
-                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "10gb","runner": '"$runner_azure"',   "image": "neondatabase/build-tools:pinned-bookworm" },
-                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "50gb","runner": '"$runner_azure"',   "image": "neondatabase/build-tools:pinned-bookworm" },
-                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-sharding-reuse", "db_size": "50gb","runner": '"$runner_default"', "image": "'"$image_default"'" },
-                      { "pg_version": 17, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-freetier",       "db_size": "3gb" ,"runner": '"$runner_default"', "image": "'"$image_default"'" },
-                      { "pg_version": 17, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'" },
-                      { "pg_version": 17, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new-many-tables","db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'" },
-                      { "pg_version": 17, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "50gb","runner": '"$runner_default"', "image": "'"$image_default"'" }]
+          "include": [{ "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-freetier",       "db_size": "3gb" ,"runner": '"$runner_default"', "image": "'"$image_default"'"                               },
+                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'"                               },
+                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new-many-tables","db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'"                               },
+                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "50gb","runner": '"$runner_default"', "image": "'"$image_default"'"                               },
+                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-freetier", "db_size": "3gb" ,"runner": '"$runner_azure"',   "image": "ghcr.io/neondatabase/build-tools:pinned-bookworm" },
+                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "10gb","runner": '"$runner_azure"',   "image": "ghcr.io/neondatabase/build-tools:pinned-bookworm" },
+                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "50gb","runner": '"$runner_azure"',   "image": "ghcr.io/neondatabase/build-tools:pinned-bookworm" },
+                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-sharding-reuse", "db_size": "50gb","runner": '"$runner_default"', "image": "'"$image_default"'"                               },
+                      { "pg_version": 17, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-freetier",       "db_size": "3gb" ,"runner": '"$runner_default"', "image": "'"$image_default"'"                               },
+                      { "pg_version": 17, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'"                               },
+                      { "pg_version": 17, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new-many-tables","db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'"                               },
+                      { "pg_version": 17, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "50gb","runner": '"$runner_default"', "image": "'"$image_default"'"                               }]
         }'
 
         if [ "$(date +%A)" = "Saturday" ] || [ ${RUN_AWS_RDS_AND_AURORA} = "true" ]; then
@@ -441,7 +441,7 @@ jobs:
 
     strategy:
       fail-fast: false
-      matrix: ${{fromJson(needs.generate-matrices.outputs.pgbench-compare-matrix)}}
+      matrix: ${{fromJSON(needs.generate-matrices.outputs.pgbench-compare-matrix)}}
 
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "60m"
@@ -457,8 +457,8 @@ jobs:
     container:
       image: ${{ matrix.image }}
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       options: --init
 
     # Increase timeout to 8h, default timeout is 6h
@@ -483,7 +483,7 @@ jobs:
         aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Create Neon Project
-      if: contains(fromJson('["neonvm-captest-new", "neonvm-captest-new-many-tables", "neonvm-captest-freetier", "neonvm-azure-captest-freetier", "neonvm-azure-captest-new"]'), matrix.platform)
+      if: contains(fromJSON('["neonvm-captest-new", "neonvm-captest-new-many-tables", "neonvm-captest-freetier", "neonvm-azure-captest-freetier", "neonvm-azure-captest-new"]'), matrix.platform)
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
@@ -523,7 +523,7 @@ jobs:
     # without (neonvm-captest-new)
     # and with (neonvm-captest-new-many-tables) many relations in the database
     - name: Create many relations before the run
-      if: contains(fromJson('["neonvm-captest-new-many-tables"]'), matrix.platform)
+      if: contains(fromJSON('["neonvm-captest-new-many-tables"]'), matrix.platform)
       uses: ./.github/actions/run-python-test-set
       with:
         build_type: ${{ env.BUILD_TYPE }}
@@ -642,10 +642,10 @@ jobs:
 
     runs-on: ${{ matrix.RUNNER }}
     container:
-      image: neondatabase/build-tools:pinned-bookworm
+      image: ghcr.io/neondatabase/build-tools:pinned-bookworm
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       options: --init
 
     steps:
@@ -753,7 +753,7 @@ jobs:
 
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.generate-matrices.outputs.olap-compare-matrix) }}
+      matrix: ${{ fromJSON(needs.generate-matrices.outputs.olap-compare-matrix) }}
 
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
@@ -767,10 +767,10 @@ jobs:
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: neondatabase/build-tools:pinned-bookworm
+      image: ghcr.io/neondatabase/build-tools:pinned-bookworm
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       options: --init
 
     # Increase timeout to 12h, default timeout is 6h
@@ -880,7 +880,7 @@ jobs:
 
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.generate-matrices.outputs.tpch-compare-matrix) }}
+      matrix: ${{ fromJSON(needs.generate-matrices.outputs.tpch-compare-matrix) }}
 
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
@@ -892,10 +892,10 @@ jobs:
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: neondatabase/build-tools:pinned-bookworm
+      image: ghcr.io/neondatabase/build-tools:pinned-bookworm
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       options: --init
 
     steps:
@@ -999,7 +999,7 @@ jobs:
 
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.generate-matrices.outputs.olap-compare-matrix) }}
+      matrix: ${{ fromJSON(needs.generate-matrices.outputs.olap-compare-matrix) }}
 
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
@@ -1011,10 +1011,10 @@ jobs:
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: neondatabase/build-tools:pinned-bookworm
+      image: ghcr.io/neondatabase/build-tools:pinned-bookworm
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       options: --init
 
     steps:

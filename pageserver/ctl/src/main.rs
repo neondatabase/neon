@@ -208,7 +208,8 @@ async fn print_layerfile(path: &Utf8Path) -> anyhow::Result<()> {
         virtual_file::SyncMode::Sync,
     );
     page_cache::init(100);
-    let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
+    let ctx =
+        RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error).with_scope_debug_tools();
     dump_layerfile_from_path(path, true, &ctx).await
 }
 

@@ -34,10 +34,10 @@ jobs:
       pull-requests: write
     runs-on: [ self-hosted, small ]
     container:
-      image: neondatabase/build-tools:pinned-bookworm
+      image: ghcr.io/neondatabase/build-tools:pinned-bookworm
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       options: --init
     timeout-minutes: 360  # Set the timeout to 6 hours
     env:

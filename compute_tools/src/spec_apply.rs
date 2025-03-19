@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use compute_api::responses::ComputeStatus;
-use compute_api::spec::{ComputeAudit, ComputeFeature, ComputeSpec, Database, PgIdent, Role};
+use compute_api::spec::{ComputeAudit, ComputeSpec, Database, PgIdent, Role};
 use futures::future::join_all;
 use tokio::sync::RwLock;
 use tokio_postgres::Client;
@@ -26,7 +26,7 @@ use crate::spec_apply::ApplySpecPhase::{
     RunInEachDatabase,
 };
 use crate::spec_apply::PerDatabasePhase::{
-    ChangeSchemaPerms, DeleteDBRoleReferences, DropLogicalSubscriptions, HandleAnonExtension,
+    ChangeSchemaPerms, DeleteDBRoleReferences, DropLogicalSubscriptions,
 };
 
 impl ComputeNode {
@@ -238,7 +238,6 @@ impl ComputeNode {
                     let mut phases = vec![
                         DeleteDBRoleReferences,
                         ChangeSchemaPerms,
-                        HandleAnonExtension,
                     ];
 
                     if spec.drop_subscriptions_before_start && !drop_subscriptions_done {
@@ -287,7 +286,10 @@ impl ComputeNode {
                     phases.push(CreatePgauditlogtofileExtension);
                     phases.push(DisablePostgresDBPgAudit);
                 }
-                ComputeAudit::Log => { /* not implemented yet */ }
+                ComputeAudit::Log => {
+                    phases.push(CreatePgauditExtension);
+                    phases.push(DisablePostgresDBPgAudit);
+                }
                 ComputeAudit::Disabled => {}
             }
 
@@ -458,7 +460,6 @@ impl Debug for DB {
 pub enum PerDatabasePhase {
     DeleteDBRoleReferences,
     ChangeSchemaPerms,
-    HandleAnonExtension,
     /// This is a shared phase, used for both i) dropping dangling LR subscriptions
     /// before dropping the DB, and ii) dropping all subscriptions after creating
     /// a fresh branch.
@@ -1008,98 +1009,6 @@ async fn get_operations<'a>(
                         Operation {
                             query: String::from(include_str!("sql/default_grants.sql")),
                             comment: None,
-                        },
-                    ]
-                    .into_iter();
-
-                    Ok(Box::new(operations))
-                }
-                // TODO: remove this completely https://github.com/neondatabase/cloud/issues/22663
-                PerDatabasePhase::HandleAnonExtension => {
-                    // Only install Anon into user databases
-                    let db = match &db {
-                        DB::SystemDB => return Ok(Box::new(empty())),
-                        DB::UserDB(db) => db,
-                    };
-                    // Never install Anon when it's not enabled as feature
-                    if !spec.features.contains(&ComputeFeature::AnonExtension) {
-                        return Ok(Box::new(empty()));
-                    }
-
-                    // Only install Anon when it's added in preload libraries
-                    let opt_libs = spec.cluster.settings.find("shared_preload_libraries");
-
-                    let libs = match opt_libs {
-                        Some(libs) => libs,
-                        None => return Ok(Box::new(empty())),
-                    };
-
-                    if !libs.contains("anon") {
-                        return Ok(Box::new(empty()));
-                    }
-
-                    let db_owner = db.owner.pg_quote();
-
-                    let operations = vec![
-                        // Create anon extension if this compute needs it
-                        // Users cannot create it themselves, because superuser is required.
-                        Operation {
-                            query: String::from("CREATE EXTENSION IF NOT EXISTS anon CASCADE"),
-                            comment: Some(String::from("creating anon extension")),
-                        },
-                        // Initialize anon extension
-                        // This also requires superuser privileges, so users cannot do it themselves.
-                        Operation {
-                            query: String::from("SELECT anon.init()"),
-                            comment: Some(String::from("initializing anon extension data")),
-                        },
-                        Operation {
-                            query: format!("GRANT ALL ON SCHEMA anon TO {}", db_owner),
-                            comment: Some(String::from(
-                                "granting anon extension schema permissions",
-                            )),
-                        },
-                        Operation {
-                            query: format!(
-                                "GRANT ALL ON ALL FUNCTIONS IN SCHEMA anon TO {}",
-                                db_owner
-                            ),
-                            comment: Some(String::from(
-                                "granting anon extension schema functions permissions",
-                            )),
-                        },
-                        // We need this, because some functions are defined as SECURITY DEFINER.
-                        // In Postgres SECURITY DEFINER functions are executed with the privileges
-                        // of the owner.
-                        // In anon extension this it is needed to access some GUCs, which are only accessible to
-                        // superuser. But we've patched postgres to allow db_owner to access them as well.
-                        // So we need to change owner of these functions to db_owner.
-                        Operation {
-                            query: format!(
-                                include_str!("sql/anon_ext_fn_reassign.sql"),
-                                db_owner = db_owner,
-                            ),
-                            comment: Some(String::from(
-                                "change anon extension functions owner to database_owner",
-                            )),
-                        },
-                        Operation {
-                            query: format!(
-                                "GRANT ALL ON ALL TABLES IN SCHEMA anon TO {}",
-                                db_owner,
-                            ),
-                            comment: Some(String::from(
-                                "granting anon extension tables permissions",
-                            )),
-                        },
-                        Operation {
-                            query: format!(
-                                "GRANT ALL ON ALL SEQUENCES IN SCHEMA anon TO {}",
-                                db_owner,
-                            ),
-                            comment: Some(String::from(
-                                "granting anon extension sequences permissions",
-                            )),
                         },
                     ]
                     .into_iter();
