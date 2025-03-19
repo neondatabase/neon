@@ -48,12 +48,12 @@ fn restart_rsyslog() -> Result<()> {
     Ok(())
 }
 
-// Return true if config was updated, false if it was already up-to-date.
-pub fn configure_audit_rsyslog(
-    log_directory: String,
-    tag: &str,
-    remote_endpoint: &str,
-) -> Result<()> {
+pub fn configure_audit_rsyslog(log_directory: String, tag: &str) -> Result<()> {
+    let remote_endpoint = std::env::var("AUDIT_LOGGING_ENDPOINT")?;
+    if remote_endpoint.is_empty() {
+        return Err(anyhow!("AUDIT_LOGGING_ENDPOINT is not set"));
+    }
+
     let rsyslog_conf_path = "/etc/rsyslog.d/compute_audit_rsyslog.conf";
 
     let old_config_content = match std::fs::read_to_string(rsyslog_conf_path) {

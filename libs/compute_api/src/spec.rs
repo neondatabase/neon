@@ -289,6 +289,7 @@ pub enum ComputeAudit {
     /// log query parameters
     FullWithParameters,
 }
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Cluster {
     pub cluster_id: Option<String>,
