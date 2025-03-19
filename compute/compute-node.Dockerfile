@@ -1358,7 +1358,7 @@ RUN cargo pgrx install --release
 # compile anon extension
 #
 #########################################################################################
-FROM pg-build AS pg-anon-src
+FROM pg-build AS pg_anon-src
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
@@ -1373,13 +1373,13 @@ RUN wget https://gitlab.com/dalibo/postgresql_anonymizer/-/archive/latest/postgr
 
 FROM rust-extensions-build-pgrx12 AS pg-anon-pg-build
 ARG PG_VERSION
-COPY --from=pg-anon-src /ext-src/ /ext-src/
+COPY --from=pg_anon-src /ext-src/ /ext-src/
 WORKDIR /ext-src
 RUN if [ -d pg_anon-src ]; then \
         cd pg_anon-src && \
         make -j $(getconf _NPROCESSORS_ONLN) extension PG_CONFIG=/usr/local/pgsql/bin/pg_config PGVER=pg$(echo "$PG_VERSION" | sed 's/^v//') && \
         make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config PGVER=pg$(echo "$PG_VERSION" | sed 's/^v//') && \
-        echo 'trusted = true' >> /usr/local/pgsql/share/extension/anon.control \
+        echo 'trusted = true' >> /usr/local/pgsql/share/extension/anon.control; \
     fi
 
 ########################################################################################
