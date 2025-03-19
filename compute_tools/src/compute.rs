@@ -1561,7 +1561,7 @@ impl ComputeNode {
 
         if spec.audit_log_level == ComputeAudit::Hipaa && audit_log_level != spec.audit_log_level {
             info!(
-                "audit_log_level changed from {:?} to {:?}. Configuring audit logging",
+                "Configuring audit logging because audit_log_level changed from {:?} to {:?}",
                 audit_log_level, spec.audit_log_level
             );
 
