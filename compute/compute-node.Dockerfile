@@ -1376,10 +1376,11 @@ ARG PG_VERSION
 COPY --from=pg-anon-src /ext-src/ /ext-src/
 WORKDIR /ext-src
 RUN if [ -d pg_anon-src ]; then \
-    cd pg_anon-src && \
-    make -j $(getconf _NPROCESSORS_ONLN) extension PG_CONFIG=/usr/local/pgsql/bin/pg_config PGVER=pg$(echo "$PG_VERSION" | sed 's/^v//') && \
-    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config PGVER=pg$(echo "$PG_VERSION" | sed 's/^v//') && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/anon.control
+        cd pg_anon-src && \
+        make -j $(getconf _NPROCESSORS_ONLN) extension PG_CONFIG=/usr/local/pgsql/bin/pg_config PGVER=pg$(echo "$PG_VERSION" | sed 's/^v//') && \
+        make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config PGVER=pg$(echo "$PG_VERSION" | sed 's/^v//') && \
+        echo 'trusted = true' >> /usr/local/pgsql/share/extension/anon.control \
+    fi
 
 ########################################################################################
 
