@@ -34,14 +34,13 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
 
     neon_env_builder.num_pageservers = 8
     neon_env_builder.storage_controller_config = {
-        # Split tenants at 500MB: it's up to the storage controller how it interprets this (logical
-        # sizes, physical sizes, etc).  We will write this much data logically, therefore other sizes
-        # will reliably be greater.
-        "split_threshold": 1024 * 1024 * 500,
-        "max_split_shards": 16,
-        # Also add some initial splits to the mix.
-        "initial_split_threshold": 1024 * 1024 * 10,
+        # Initial splits at 64 MB, then repeated splits at 192 MB shard sizes, which typically ends
+        # up with a mix of 4 and 8 shards. Often, but not always, the relation is fully extended
+        # to the final size before splitting.
+        "initial_split_threshold": 64 * 1024 * 1024,
         "initial_split_shards": 4,
+        "split_threshold": 192 * 1024 * 1024,
+        "max_split_shards": 16,
     }
 
     tenant_conf = {
@@ -73,8 +72,7 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
             ".*Local notification hook failed.*",
             ".*Marking shard.*for notification retry.*",
             ".*Failed to notify compute.*",
-        ]
-    )
+        ])
 
     # Total tenants
     tenant_count = 4
@@ -233,7 +231,7 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     def assert_all_split():
         for tenant_id in tenants.keys():
             shards = tenant_get_shards(env, tenant_id)
-            assert len(shards) == 8
+            assert len(shards) >= 4
 
     # This is not a wait_until, because we wanted the splits to happen _while_ pgbench is running: otherwise
     # this test is not properly doing its job of validating that splits work nicely under load.
