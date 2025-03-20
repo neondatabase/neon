@@ -75,15 +75,12 @@ impl ComputeNode {
 
             if spec.drop_subscriptions_before_start {
                 let timeline_id = self.get_timeline_id().context("timeline_id must be set")?;
-                let query = format!("select 1 from neon.drop_subscriptions_done where timeline_id = '{}'", timeline_id);
 
                 info!("Checking if drop subscription operation was already performed for timeline_id: {}", timeline_id);
 
-                drop_subscriptions_done =  match
-                    client.simple_query(&query).await {
-                    Ok(result) => {
-                        matches!(&result[0], postgres::SimpleQueryMessage::Row(_))
-                    },
+                drop_subscriptions_done = match
+                    client.query("select 1 from neon.drop_subscriptions_done where timeline_id = $1", &[&timeline_id.to_string()]).await {
+                    Ok(result) => !result.is_empty(),
                     Err(e) =>
                     {
                         match e.code() {
@@ -286,7 +283,10 @@ impl ComputeNode {
                     phases.push(CreatePgauditlogtofileExtension);
                     phases.push(DisablePostgresDBPgAudit);
                 }
-                ComputeAudit::Log => { /* not implemented yet */ }
+                ComputeAudit::Log => {
+                    phases.push(CreatePgauditExtension);
+                    phases.push(DisablePostgresDBPgAudit);
+                }
                 ComputeAudit::Disabled => {}
             }
 

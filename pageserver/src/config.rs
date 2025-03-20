@@ -95,7 +95,7 @@ pub struct PageServerConf {
 
     pub remote_storage_config: Option<RemoteStorageConfig>,
 
-    pub default_tenant_conf: crate::tenant::config::TenantConf,
+    pub default_tenant_conf: pageserver_api::config::TenantConfigToml,
 
     /// Storage broker endpoints to connect to.
     pub broker_endpoint: Uri,

@@ -1,4 +1,4 @@
-//! Types in this file are for pageserver's upward-facing API calls to the control plane,
+//! Types in this file are for pageserver's upward-facing API calls to the storage controller,
 //! required for acquiring and validating tenant generation numbers.
 //!
 //! See docs/rfcs/025-generation-numbers.md

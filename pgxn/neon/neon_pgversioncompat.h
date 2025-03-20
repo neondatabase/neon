@@ -76,6 +76,14 @@ InitBufferTag(BufferTag *tag, const RelFileNode *rnode,
 
 #define BufTagGetRelNumber(tagp) ((tagp)->rnode.relNode)
 
+#define BufTagInit(tag, relNumber, forknum, blkno, spcOid, dbOid) \
+	do { \
+		RelFileNode rnode = { .spcNode = spcOid, .dbNode = dbOid, .relNode = relNumber}; \
+		(tag).forkNum = forknum; \
+		(tag).blockNum = blkno; \
+		(tag).rnode = rnode; \
+	} while (false)
+
 #define InvalidRelFileNumber InvalidOid
 
 #define SMgrRelGetRelInfo(reln) \
@@ -124,6 +132,15 @@ InitBufferTag(BufferTag *tag, const RelFileNode *rnode,
 		.dbOid = (tag).dbOid, \
 		.relNumber = (tag).relNumber, \
 	})
+
+#define BufTagInit(tag, relNumber, forknum, blkno, spcOid, dbOid) \
+	do { \
+		(tag).forkNum = forknum; \
+		(tag).blockNum = blkno; \
+		(tag).spcOid = spcOid; \
+		(tag).dbOid = dbOid; \
+		(tag).relNumber = relNumber; \
+	} while (false)
 
 #define SMgrRelGetRelInfo(reln) \
 	((reln)->smgr_rlocator)

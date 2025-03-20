@@ -60,7 +60,7 @@ use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
-use crate::tenant::config::{LocationConf, TenantConfOpt};
+use crate::tenant::config::LocationConf;
 use crate::tenant::mgr::{
     GetActiveTenantError, GetTenantError, TenantManager, TenantMapError, TenantMapInsertError,
     TenantSlot, TenantSlotError, TenantSlotUpsertError, TenantStateError, UpsertLocationError,
@@ -1849,8 +1849,7 @@ async fn update_tenant_config_handler(
     let tenant_id = request_data.tenant_id;
     check_permission(&request, Some(tenant_id))?;
 
-    let new_tenant_conf =
-        TenantConfOpt::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
+    let new_tenant_conf = request_data.config;
 
     let state = get_state(&request);
 
@@ -1899,7 +1898,10 @@ async fn patch_tenant_config_handler(
     tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
     let updated = tenant
-        .update_tenant_config(|crnt| crnt.apply_patch(request_data.config.clone()))
+        .update_tenant_config(|crnt| {
+            crnt.apply_patch(request_data.config.clone())
+                .map_err(anyhow::Error::new)
+        })
         .map_err(ApiError::BadRequest)?;
 
     // This is a legacy API that only operates on attached tenants: the preferred

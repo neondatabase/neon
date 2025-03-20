@@ -1112,6 +1112,7 @@ mod tests {
     };
     use pageserver_api::key::DBDIR_KEY;
     use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
+    use tokio_util::sync::CancellationToken;
     use utils::id::{TenantId, TimelineId};
     use utils::shard::TenantShardId;
 
@@ -1193,6 +1194,7 @@ mod tests {
     async fn ranged_search() {
         let harness = TenantHarness::create("ranged_search").await.unwrap();
         let (tenant, ctx) = harness.load().await;
+        let cancel = CancellationToken::new();
         let timeline_id = TimelineId::generate();
         // Create the timeline such that the in-memory layers can be written
         // to the timeline directory.
@@ -1209,6 +1211,7 @@ mod tests {
                 harness.tenant_shard_id,
                 lsn_range.start,
                 &gate,
+                &cancel,
                 &ctx,
             )
             .await

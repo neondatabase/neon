@@ -84,7 +84,6 @@ use self::eviction_task::EvictionTaskTimelineState;
 use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
-use super::config::TenantConf;
 use super::remote_timeline_client::index::{GcCompactionState, IndexPart};
 use super::remote_timeline_client::{RemoteTimelineClient, WaitCompletionError};
 use super::secondary::heatmap::HeatMapLayer;
@@ -111,7 +110,7 @@ use crate::pgdatadir_mapping::{
     MAX_AUX_FILE_V2_DELTAS, MetricsUpdate,
 };
 use crate::task_mgr::TaskKind;
-use crate::tenant::config::{AttachmentMode, TenantConfOpt};
+use crate::tenant::config::AttachmentMode;
 use crate::tenant::gc_result::GcResult;
 use crate::tenant::layer_map::{LayerMap, SearchResult};
 use crate::tenant::metadata::TimelineMetadata;
@@ -536,11 +535,11 @@ impl GcInfo {
 /// between time-based and space-based retention for observability and consumption metrics purposes.
 #[derive(Debug, Clone)]
 pub(crate) struct GcCutoffs {
-    /// Calculated from the [`TenantConf::gc_horizon`], this LSN indicates how much
+    /// Calculated from the [`pageserver_api::models::TenantConfig::gc_horizon`], this LSN indicates how much
     /// history we must keep to retain a specified number of bytes of WAL.
     pub(crate) space: Lsn,
 
-    /// Calculated from [`TenantConf::pitr_interval`], this LSN indicates how much
+    /// Calculated from [`pageserver_api::models::TenantConfig::pitr_interval`], this LSN indicates how much
     /// history we must keep to enable reading back at least the PITR interval duration.
     pub(crate) time: Lsn,
 }
@@ -2598,8 +2597,8 @@ impl Timeline {
     }
 
     fn get_evictions_low_residence_duration_metric_threshold(
-        tenant_conf: &TenantConfOpt,
-        default_tenant_conf: &TenantConf,
+        tenant_conf: &pageserver_api::models::TenantConfig,
+        default_tenant_conf: &pageserver_api::config::TenantConfigToml,
     ) -> Duration {
         tenant_conf
             .evictions_low_residence_duration_metric_threshold
@@ -4186,6 +4185,7 @@ impl Timeline {
                 self.timeline_id,
                 self.tenant_shard_id,
                 &self.gate,
+                &self.cancel,
                 ctx,
             )
             .await?;
@@ -6742,6 +6742,8 @@ impl Timeline {
             self.tenant_shard_id,
             in_memory.lsn_range.start,
             &self.gate,
+            // TODO: if we ever use this function in production code, we need to pass the real cancellation token
+            &CancellationToken::new(),
             ctx,
         )
         .await

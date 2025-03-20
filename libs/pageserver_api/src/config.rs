@@ -241,11 +241,7 @@ impl Default for EvictionOrder {
 #[serde(transparent)]
 pub struct MaxVectoredReadBytes(pub NonZeroUsize);
 
-/// A tenant's calcuated configuration, which is the result of merging a
-/// tenant's TenantConfOpt with the global TenantConf from PageServerConf.
-///
-/// For storing and transmitting individual tenant's configuration, see
-/// TenantConfOpt.
+/// Tenant-level configuration values, used for various purposes.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct TenantConfigToml {

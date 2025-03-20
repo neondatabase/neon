@@ -26,8 +26,13 @@ jobs:
     needs: [ check-permissions ]
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: reviewdog/action-actionlint@v1
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: reviewdog/action-actionlint@a5524e1c19e62881d79c1f1b9b6f09f16356e281 # v1.65.2
         env:
           # SC2046 - Quote this to prevent word splitting. - https://www.shellcheck.net/wiki/SC2046
           # SC2086 - Double quote to prevent globbing and word splitting. - https://www.shellcheck.net/wiki/SC2086
