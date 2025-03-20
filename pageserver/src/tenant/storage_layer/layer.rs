@@ -3,12 +3,13 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime};
 
+use crate::PERF_TRACE_TARGET;
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::HistoricLayerInfo;
 use pageserver_api::shard::{ShardIdentity, ShardIndex, TenantShardId};
-use tracing::Instrument;
+use tracing::{Instrument, info_span};
 use utils::generation::Generation;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
@@ -18,7 +19,7 @@ use super::delta_layer::{self};
 use super::image_layer::{self};
 use super::{
     AsLayerDesc, ImageLayerWriter, LayerAccessStats, LayerAccessStatsReset, LayerName,
-    LayerVisibilityHint, PersistentLayerDesc, ValuesReconstructState,
+    LayerVisibilityHint, PerfInstrumentFutureExt, PersistentLayerDesc, ValuesReconstructState,
 };
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
@@ -324,16 +325,29 @@ impl Layer {
         reconstruct_data: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
-        let downloaded =
+        let downloaded = {
+            let ctx = RequestContextBuilder::from(ctx)
+                .perf_span(|crnt_perf_span| {
+                    info_span!(
+                        target: PERF_TRACE_TARGET,
+                        parent: crnt_perf_span,
+                        "GET_LAYER",
+                    )
+                })
+                .attached_child();
+
             self.0
-                .get_or_maybe_download(true, ctx)
+                .get_or_maybe_download(true, &ctx)
+                .maybe_perf_instrument(&ctx, |crnt_perf_context| crnt_perf_context.clone())
                 .await
                 .map_err(|err| match err {
                     DownloadError::TimelineShutdown | DownloadError::DownloadCancelled => {
                         GetVectoredError::Cancelled
                     }
                     other => GetVectoredError::Other(anyhow::anyhow!(other)),
-                })?;
+                })?
+        };
+
         let this = ResidentLayer {
             downloaded: downloaded.clone(),
             owner: self.clone(),
@@ -341,9 +355,20 @@ impl Layer {
 
         self.record_access(ctx);
 
+        let ctx = RequestContextBuilder::from(ctx)
+            .perf_span(|crnt_perf_span| {
+                info_span!(
+                    target: PERF_TRACE_TARGET,
+                    parent: crnt_perf_span,
+                    "VISIT_LAYER",
+                )
+            })
+            .attached_child();
+
         downloaded
-            .get_values_reconstruct_data(this, keyspace, lsn_range, reconstruct_data, ctx)
+            .get_values_reconstruct_data(this, keyspace, lsn_range, reconstruct_data, &ctx)
             .instrument(tracing::debug_span!("get_values_reconstruct_data", layer=%self))
+            .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
             .await
             .map_err(|err| match err {
                 GetVectoredError::Other(err) => GetVectoredError::Other(
@@ -1045,15 +1070,34 @@ impl LayerInner {
             return Err(DownloadError::DownloadRequired);
         }
 
-        let download_ctx = ctx.detached_child(TaskKind::LayerDownload, DownloadBehavior::Download);
+        let ctx = if ctx.has_perf_span() {
+            let dl_ctx = RequestContextBuilder::from(ctx)
+                .task_kind(TaskKind::LayerDownload)
+                .download_behavior(DownloadBehavior::Download)
+                .root_perf_span(|| {
+                    info_span!(
+                        target: PERF_TRACE_TARGET,
+                        "DOWNLOAD_LAYER",
+                        layer = %self,
+                        reason = %reason
+                    )
+                })
+                .detached_child();
+            ctx.perf_follows_from(&dl_ctx);
+            dl_ctx
+        } else {
+            ctx.attached_child()
+        };
 
         async move {
             tracing::info!(%reason, "downloading on-demand");
 
             let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
             let res = self
-                .download_init_and_wait(timeline, permit, download_ctx)
+                .download_init_and_wait(timeline, permit, ctx.attached_child())
+                .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
                 .await?;
+
             scopeguard::ScopeGuard::into_inner(init_cancelled);
             Ok(res)
         }
@@ -1720,9 +1764,9 @@ impl DownloadedLayer {
             );
 
             let res = if owner.desc.is_delta {
-                let ctx = RequestContextBuilder::extend(ctx)
+                let ctx = RequestContextBuilder::from(ctx)
                     .page_content_kind(crate::context::PageContentKind::DeltaLayerSummary)
-                    .build();
+                    .attached_child();
                 let summary = Some(delta_layer::Summary::expected(
                     owner.desc.tenant_shard_id.tenant_id,
                     owner.desc.timeline_id,
@@ -1738,9 +1782,9 @@ impl DownloadedLayer {
                 .await
                 .map(LayerKind::Delta)
             } else {
-                let ctx = RequestContextBuilder::extend(ctx)
+                let ctx = RequestContextBuilder::from(ctx)
                     .page_content_kind(crate::context::PageContentKind::ImageLayerSummary)
-                    .build();
+                    .attached_child();
                 let lsn = owner.desc.image_layer_lsn();
                 let summary = Some(image_layer::Summary::expected(
                     owner.desc.tenant_shard_id.tenant_id,
