@@ -669,6 +669,13 @@ paths:
         Detach a timeline from its ancestor and reparent all ancestors timelines with lower `ancestor_lsn`.
         Current implementation might not be retryable across failure cases, but will be enhanced in future.
         Detaching should be expected to be expensive operation. Timeouts should be retried.
+      parameters:
+        - name: detach_behavior
+          in: query
+          required: false
+          schema:
+            description: Currently valid values are `v1`, `v2`
+            type: string
       responses:
         "200":
           description: |
