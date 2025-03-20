@@ -412,8 +412,6 @@ pub struct Config {
 
     pub start_as_candidate: bool,
 
-    pub http_service_port: i32,
-
     pub long_reconcile_threshold: Duration,
 
     pub use_https_pageserver_api: bool,

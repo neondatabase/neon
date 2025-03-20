@@ -6605,6 +6605,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "camino",
  "chrono",
  "clap",
  "clashmap",
@@ -6648,6 +6649,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",
+ "tokio-rustls 0.26.0",
  "tokio-util",
  "tracing",
  "utils",
