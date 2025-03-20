@@ -1105,7 +1105,7 @@ pub struct CompactionAlgorithmSettings {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
-#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(tag = "mode", rename_all = "kebab-case")]
 pub enum L0FlushConfig {
     #[serde(rename_all = "snake_case")]
     Direct { max_concurrency: NonZeroUsize },
