@@ -53,6 +53,11 @@ jobs:
     needs: [ build-build-tools-image ]
     runs-on: ubuntu-22.04
 
+    strategy:
+      fail-fast: false
+      matrix:
+        pg-version: [16, 17]
+
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
@@ -77,7 +82,7 @@ jobs:
           test_selection: random_ops
           run_in_parallel: false
           extra_params: -m remote_cluster
-          pg_version: ${{ env.DEFAULT_PG_VERSION }}
+          pg_version: ${{ matrix.pg-version }}
           aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
         env:
           NEON_API_KEY: ${{ secrets.NEON_STAGING_API_KEY }}
