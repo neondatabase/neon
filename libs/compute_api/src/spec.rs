@@ -269,6 +269,18 @@ pub enum ComputeMode {
     Replica,
 }
 
+impl ComputeMode {
+    /// Convert the compute mode to a string that can be used to identify the type of compute,
+    /// which means that if it's a static compute, the LSN will not be included.
+    pub fn to_type_str(&self) -> &'static str {
+        match self {
+            ComputeMode::Primary => "primary",
+            ComputeMode::Static(_) => "static",
+            ComputeMode::Replica => "replica",
+        }
+    }
+}
+
 /// Log level for audit logging
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 pub enum ComputeAudit {

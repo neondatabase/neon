@@ -50,6 +50,20 @@
 #define MIN_RECONNECT_INTERVAL_USEC 1000
 #define MAX_RECONNECT_INTERVAL_USEC 1000000
 
+
+enum NeonComputeMode {
+	CP_MODE_PRIMARY = 0,
+	CP_MODE_REPLICA,
+	CP_MODE_STATIC
+};
+
+static const struct config_enum_entry neon_compute_modes[] = {
+	{"primary", CP_MODE_PRIMARY, false},
+	{"replica", CP_MODE_REPLICA, false},
+	{"static", CP_MODE_STATIC, false},
+	{NULL, 0, false}
+};
+
 /* GUCs */
 char	   *neon_timeline;
 char	   *neon_tenant;
@@ -62,6 +76,7 @@ int			flush_every_n_requests = 8;
 
 int         neon_protocol_version = 2;
 
+static int	neon_compute_mode = 0;
 static int	max_reconnect_attempts = 60;
 static int	stripe_size;
 
@@ -390,9 +405,10 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	{
 	case PS_Disconnected:
 	{
-		const char *keywords[4];
-		const char *values[4];
-		char pid_str[16];
+		const char *keywords[5];
+		const char *values[5];
+		char pid_str[16] = { 0 };
+		char endpoint_str[36] = { 0 };
 		int			n_pgsql_params;
 		TimestampTz	now;
 		int64		us_since_last_attempt;
@@ -462,6 +478,31 @@ pageserver_connect(shardno_t shard_no, int elevel)
 			keywords[n_pgsql_params] = "password";
 			values[n_pgsql_params] = neon_auth_token;
 			n_pgsql_params++;
+		}
+
+		{
+			bool param_set = false;
+			switch (neon_compute_mode)
+			{
+				case CP_MODE_PRIMARY:
+					strncpy(endpoint_str, "-c neon.compute_mode=primary", sizeof(endpoint_str));
+					param_set = true;
+					break;
+				case CP_MODE_REPLICA:
+					strncpy(endpoint_str, "-c neon.compute_mode=replica", sizeof(endpoint_str));
+					param_set = true;
+					break;
+				case CP_MODE_STATIC:
+					strncpy(endpoint_str, "-c neon.compute_mode=static", sizeof(endpoint_str));
+					param_set = true;
+					break;
+			}
+			if (param_set)
+			{
+				keywords[n_pgsql_params] = "options";
+				values[n_pgsql_params] = endpoint_str;
+				n_pgsql_params++;
+			}
 		}
 
 		keywords[n_pgsql_params] = NULL;
@@ -1389,6 +1430,17 @@ pg_init_libpagestore(void)
 							120000, 100, INT_MAX,
 							PGC_SUSET,
 							GUC_UNIT_MS,
+							NULL, NULL, NULL);
+
+	DefineCustomEnumVariable(
+							"neon.compute_mode",
+							"The compute endpoint node type",
+							NULL,
+							&neon_compute_mode,
+							CP_MODE_PRIMARY,
+							neon_compute_modes,
+							PGC_POSTMASTER,
+							0,
 							NULL, NULL, NULL);
 
 	relsize_hash_init();

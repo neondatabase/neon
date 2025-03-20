@@ -896,6 +896,14 @@ impl ComputeNode {
             info!("Storage auth token not set");
         }
 
+        config.application_name("compute_ctl");
+        if let Some(spec) = &compute_state.pspec {
+            config.options(&format!(
+                "-c neon.compute_mode={}",
+                spec.spec.mode.to_type_str()
+            ));
+        }
+
         // Connect to pageserver
         let mut client = config.connect(NoTls)?;
         let pageserver_connect_micros = start_time.elapsed().as_micros() as u64;
