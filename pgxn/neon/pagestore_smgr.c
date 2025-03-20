@@ -1040,6 +1040,16 @@ prefetch_lookupv(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blocknum, n
 				continue;
 			}
 			memcpy(buffers[i], ((NeonGetPageResponse*)slot->response)->page, BLCKSZ);
+
+
+			/*
+			 * With lfc_store_prefetch_result=true prefetch result is stored in LFC in prefetch_pump_state when response is received
+			 * from page server. But if lfc_store_prefetch_result=false then it is not yet stored in LFC and we have to do it here
+			 * under buffer lock.
+			 */
+			if (!lfc_store_prefetch_result)
+				lfc_write(rinfo, forknum, blocknum + i, buffers[i]);
+
 			prefetch_set_unused(ring_index);
 			BITMAP_SET(mask, i);
 
@@ -3277,6 +3287,12 @@ Retry:
 					}
 				}
 				memcpy(buffer, getpage_resp->page, BLCKSZ);
+
+				/*
+				 * With lfc_store_prefetch_result=true prefetch result is stored in LFC in prefetch_pump_state when response is received
+				 * from page server. But if lfc_store_prefetch_result=false then it is not yet stored in LFC and we have to do it here
+				 * under buffer lock.
+				 */
 				if (!lfc_store_prefetch_result)
 					lfc_write(rinfo, forkNum, blockno, buffer);
 				break;
