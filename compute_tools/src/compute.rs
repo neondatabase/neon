@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::os::unix::fs::{PermissionsExt, symlink};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -628,9 +628,8 @@ impl ComputeNode {
 
         // If extended compute audit is enabled configure and start rsyslog
         if pspec.spec.audit_log_level == ComputeAudit::Hipaa {
-            let log_directory_path = Path::new(&self.params.pgdata).join("log");
-            let log_directory_path = log_directory_path.to_string_lossy().to_string();
-            configure_audit_rsyslog(log_directory_path.clone(), "hipaa")?;
+            let log_directory_path = self.get_audit_log_dir().to_string_lossy().to_string();
+            configure_audit_rsyslog(&log_directory_path, pspec.spec.audit_log_level.as_str())?;
 
             // Launch a background task to clean up the audit logs
             launch_pgaudit_gc(log_directory_path);
@@ -848,9 +847,13 @@ impl ComputeNode {
         let mut state = self.state.lock().unwrap();
         state.audit_log_level = audit_log_level;
     }
-    
+
     pub fn get_audit_log_level(&self) -> ComputeAudit {
         self.state.lock().unwrap().audit_log_level
+    }
+
+    pub fn get_audit_log_dir(&self) -> PathBuf {
+        Path::new(&self.params.pgdata).join("log")
     }
 
     pub fn get_timeline_id(&self) -> Option<TimelineId> {
@@ -1565,9 +1568,8 @@ impl ComputeNode {
                 audit_log_level, spec.audit_log_level
             );
 
-            let log_directory_path = Path::new(&self.params.pgdata).join("log");
-            let log_directory_path = log_directory_path.to_string_lossy().to_string();
-            configure_audit_rsyslog(log_directory_path.clone(), "hipaa")?;
+            let log_directory_path = self.get_audit_log_dir().to_string_lossy().to_string();
+            configure_audit_rsyslog(&log_directory_path, spec.audit_log_level.as_str())?;
 
             // Launch a background task to clean up the audit logs
             // If rsyslog was already configured, we don't need to start this process again.

@@ -281,6 +281,16 @@ pub enum ComputeAudit {
     Hipaa,
 }
 
+impl ComputeAudit {
+    pub fn as_str(&self) -> &str {
+        match self {
+            ComputeAudit::Disabled => "disabled",
+            ComputeAudit::Log => "log",
+            ComputeAudit::Hipaa => "hipaa",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Cluster {
     pub cluster_id: Option<String>,

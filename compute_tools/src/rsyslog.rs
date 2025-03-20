@@ -9,6 +9,7 @@ use anyhow::{Context, Result, anyhow};
 use tracing::{error, info, instrument, warn};
 
 const POSTGRES_LOGS_CONF_PATH: &str = "/etc/rsyslog.d/postgres_logs.conf";
+const AUDIT_LOGS_CONF_PATH: &str = "/etc/rsyslog.d/compute_audit_rsyslog.conf";
 
 fn get_rsyslog_pid() -> Option<String> {
     let output = Command::new("pgrep")
@@ -48,15 +49,13 @@ fn restart_rsyslog() -> Result<()> {
     Ok(())
 }
 
-pub fn configure_audit_rsyslog(log_directory: String, tag: &str) -> Result<()> {
+pub fn configure_audit_rsyslog(log_directory: &str, audit_log_level: &str) -> Result<()> {
     let remote_endpoint = std::env::var("AUDIT_LOGGING_ENDPOINT")?;
     if remote_endpoint.is_empty() {
         return Err(anyhow!("AUDIT_LOGGING_ENDPOINT is not set"));
     }
 
-    let rsyslog_conf_path = "/etc/rsyslog.d/compute_audit_rsyslog.conf";
-
-    let old_config_content = match std::fs::read_to_string(rsyslog_conf_path) {
+    let old_config_content = match std::fs::read_to_string(AUDIT_LOGS_CONF_PATH) {
         Ok(c) => c,
         Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
         Err(err) => return Err(err.into()),
@@ -65,7 +64,7 @@ pub fn configure_audit_rsyslog(log_directory: String, tag: &str) -> Result<()> {
     let config_content: String = format!(
         include_str!("config_template/compute_audit_rsyslog_template.conf"),
         log_directory = log_directory,
-        tag = tag,
+        tag = audit_log_level,
         remote_endpoint = remote_endpoint
     );
 
@@ -80,13 +79,13 @@ pub fn configure_audit_rsyslog(log_directory: String, tag: &str) -> Result<()> {
         .create(true)
         .write(true)
         .truncate(true)
-        .open(rsyslog_conf_path)?;
+        .open(AUDIT_LOGS_CONF_PATH)?;
 
     file.write_all(config_content.as_bytes())?;
 
     info!(
         "rsyslog configuration file {} added successfully. Starting rsyslogd",
-        rsyslog_conf_path
+        AUDIT_LOGS_CONF_PATH
     );
 
     // start the service, using the configuration
