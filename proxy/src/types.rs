@@ -1,4 +1,4 @@
-use crate::intern::{EndpointIdInt, EndpointIdTag, InternId};
+use crate::intern::EndpointIdInt;
 
 macro_rules! smol_str_wrapper {
     ($name:ident) => {
@@ -85,7 +85,7 @@ impl EndpointId {
 
     #[must_use]
     pub fn normalize_intern(&self) -> EndpointIdInt {
-        EndpointIdTag::get_interner().get_or_intern(self.normalize_str())
+        EndpointIdInt::get_or_intern(self.normalize_str())
     }
 }
 
