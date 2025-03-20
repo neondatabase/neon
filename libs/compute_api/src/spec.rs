@@ -160,12 +160,6 @@ pub struct ComputeSpec {
     pub drop_subscriptions_before_start: bool,
 
     /// Log level for audit logging:
-    ///
-    /// Disabled - no audit logging. This is the default.
-    /// log - log masked statements to the postgres log using pgaudit extension
-    /// hipaa - log unmasked statements to the file using pgaudit and pgauditlogtofile extension
-    ///
-    /// Extensions should be present in shared_preload_libraries
     #[serde(default)]
     pub audit_log_level: ComputeAudit,
 }
@@ -276,14 +270,25 @@ pub enum ComputeMode {
 }
 
 /// Log level for audit logging
-/// Disabled, log, hipaa
-/// Default is Disabled
-#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 pub enum ComputeAudit {
     #[default]
+    /// no audit logging. This is the default.
     Disabled,
+    /// write masked audit log statements to the postgres log using pgaudit extension
     Log,
+    /// log unmasked statements to the file using pgaudit and pgauditlogtofile extensions
     Hipaa,
+}
+
+impl ComputeAudit {
+    pub fn as_str(&self) -> &str {
+        match self {
+            ComputeAudit::Disabled => "disabled",
+            ComputeAudit::Log => "log",
+            ComputeAudit::Hipaa => "hipaa",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
