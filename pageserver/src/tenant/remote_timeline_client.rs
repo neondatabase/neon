@@ -194,7 +194,7 @@ pub(crate) use download::{
 };
 use index::GcCompactionState;
 pub(crate) use index::LayerFileMetadata;
-use pageserver_api::models::{RelSizeMigration, TimelineArchivalState};
+use pageserver_api::models::{RelSizeMigration, TimelineArchivalState, TimelineVisibilityState};
 use pageserver_api::shard::{ShardIndex, TenantShardId};
 use regex::Regex;
 use remote_storage::{
@@ -573,6 +573,16 @@ impl RemoteTimelineClient {
             .ok()
     }
 
+    /// Returns true if the timeline is invisible in synthetic size calculations.
+    pub(crate) fn is_invisible(&self) -> Option<bool> {
+        self.upload_queue
+            .lock()
+            .unwrap()
+            .initialized_mut()
+            .map(|q| q.clean.0.marked_invisible_at.is_some())
+            .ok()
+    }
+
     /// Returns `Ok(Some(timestamp))` if the timeline has been archived, `Ok(None)` if the timeline hasn't been archived.
     ///
     /// Return Err(_) if the remote index_part hasn't been downloaded yet, or the timeline hasn't been stopped yet.
@@ -843,6 +853,37 @@ impl RemoteTimelineClient {
 
         let need_wait = need_change(&upload_queue.clean.0.archived_at, state).is_some();
         Ok(need_wait)
+    }
+
+    pub(crate) fn schedule_index_upload_for_timeline_invisible_state(
+        self: &Arc<Self>,
+        state: TimelineVisibilityState,
+    ) -> anyhow::Result<()> {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+
+        fn need_change(
+            marked_invisible_at: &Option<NaiveDateTime>,
+            state: TimelineVisibilityState,
+        ) -> Option<bool> {
+            match (marked_invisible_at, state) {
+                (Some(_), TimelineVisibilityState::Invisible) => Some(false),
+                (None, TimelineVisibilityState::Invisible) => Some(true),
+                (Some(_), TimelineVisibilityState::Visible) => Some(false),
+                (None, TimelineVisibilityState::Visible) => Some(true),
+            }
+        }
+
+        let need_upload_scheduled = need_change(&upload_queue.dirty.marked_invisible_at, state);
+
+        if let Some(marked_invisible_at_set) = need_upload_scheduled {
+            let intended_marked_invisible_at =
+                marked_invisible_at_set.then(|| Utc::now().naive_utc());
+            upload_queue.dirty.marked_invisible_at = intended_marked_invisible_at;
+            self.schedule_index_upload(upload_queue);
+        }
+
+        Ok(())
     }
 
     /// Shuts the timeline client down, but only if the timeline is archived.
