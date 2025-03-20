@@ -284,7 +284,6 @@ impl SafekeeperReconciler {
             .safekeeper_jwt_token
             .clone()
             .map(SecretString::from);
-        let ssl_ca_cert = self.service.config.ssl_ca_cert.clone();
         loop {
             let res = req
                 .safekeeper
@@ -293,8 +292,8 @@ impl SafekeeperReconciler {
                         let closure = &closure;
                         async move { closure(client).await }
                     },
+                    self.service.get_http_client(),
                     &jwt,
-                    &ssl_ca_cert,
                     3,
                     10,
                     Duration::from_secs(10),
