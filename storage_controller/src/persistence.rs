@@ -1491,6 +1491,34 @@ impl Persistence {
 
         Ok(timeline_from_db)
     }
+    /// List pending operations for a given timeline (including tenant-global ones)
+    pub(crate) async fn list_pending_ops_for_timeline(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> DatabaseResult<Vec<TimelinePendingOpPersistence>> {
+        use crate::schema::safekeeper_timeline_pending_ops::dsl;
+
+        let timelines_from_db = self
+            .with_measured_conn(DatabaseOperation::ListTimelineReconcile, move |conn| {
+                Box::pin(async move {
+                    let from_db: Vec<TimelinePendingOpPersistence> =
+                        dsl::safekeeper_timeline_pending_ops
+                            .filter(dsl::tenant_id.eq(tenant_id.to_string()))
+                            .filter(
+                                dsl::timeline_id
+                                    .eq(timeline_id.to_string())
+                                    .or(dsl::timeline_id.eq("")),
+                            )
+                            .load(conn)
+                            .await?;
+                    Ok(from_db)
+                })
+            })
+            .await?;
+
+        Ok(timelines_from_db)
+    }
 
     /// Delete all pending ops for the given timeline.
     ///
