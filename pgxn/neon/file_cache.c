@@ -48,6 +48,7 @@
 #include "hll.h"
 #include "bitmap.h"
 #include "neon.h"
+#include "neon_lwlsncache.h"
 #include "neon_perf_counters.h"
 
 #define CriticalAssert(cond) do if (!(cond)) elog(PANIC, "LFC: assertion %s failed at %s:%d: ", #cond, __FILE__, __LINE__); while (0)
@@ -999,7 +1000,9 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 		LWLockRelease(lfc_lock);
 		return false;
 	}
-	lwlsn = GetLastWrittenLSN(rinfo, forknum, blkno);
+	
+	lwlsn = neon_get_lwlsn(rinfo, forknum, blkno);
+
 	if (lwlsn > lsn)
 	{
 		elog(DEBUG1, "Skip LFC write for %d because LwLSN=%X/%X is greater than not_nodified_since LSN %X/%X",

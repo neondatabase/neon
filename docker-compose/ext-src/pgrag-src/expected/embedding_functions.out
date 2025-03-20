@@ -1,0 +1,9 @@
+BEGIN
+CREATE EXTENSION IF NOT EXISTS vector;
+DROP EXTENSION IF EXISTS rag CASCADE;
+CREATE EXTENSION rag CASCADE;
+test_name|result
+openai_embedding_dimensions_test|t
+test_name|result
+fireworks_embedding_dimensions_test|t
+COMMIT
