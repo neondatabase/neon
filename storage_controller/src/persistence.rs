@@ -1369,6 +1369,31 @@ impl Persistence {
         Ok(timeline_from_db)
     }
 
+    /// Load timeline from db. Returns `None` if not present.
+    pub(crate) async fn delete_timeline(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> DatabaseResult<()> {
+        use crate::schema::timelines::dsl;
+
+        let tenant_id = &tenant_id;
+        let timeline_id = &timeline_id;
+        self.with_measured_conn(DatabaseOperation::GetTimeline, move |conn| {
+            Box::pin(async move {
+                diesel::delete(dsl::timelines)
+                    .filter(dsl::tenant_id.eq(&tenant_id.to_string()))
+                    .filter(dsl::timeline_id.eq(&timeline_id.to_string()))
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .await?;
+
+        Ok(())
+    }
+
     /// Loads a list of all timelines from database.
     pub(crate) async fn list_timelines_for_tenant(
         &self,
