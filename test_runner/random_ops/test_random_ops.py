@@ -142,8 +142,11 @@ class NeonBranch:
         parent_id: str = res["branch"]["parent_id"]
         # Creates an object for the parent branch
         # After the reset operation a new parent branch is created
+        # XXX remove before merge
+        temp_br = self.neon_api.get_branch_details(self.project_id, parent_id)
+        log.info("Branch: %s", temp_br)
         parent = NeonBranch(
-            self.project, self.neon_api.get_branch_details(self.project_id, parent_id), True
+            self.project, temp_br, True
         )
         self.project.branches[parent_id] = parent
         self.parent = parent
