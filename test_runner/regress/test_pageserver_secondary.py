@@ -1096,3 +1096,62 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
     # Warm up the current secondary.
     ps_attached.http_client().tenant_secondary_download(tenant_id, wait_ms=100)
     wait_until(lambda: all_layers_downloaded(ps_secondary, expected_locally))
+
+
+@run_only_on_default_postgres("PG version is not interesting here")
+def test_io_metrics_match_secondary_timeline_lifecycle(neon_env_builder: NeonEnvBuilder):
+    """
+    Check that IO metrics for secondary timelines are de-registered when the timeline
+    is removed
+    """
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_id = TenantId.generate()
+    parent_timeline_id = TimelineId.generate()
+
+    # We do heatmap uploads and pulls manually
+    tenant_conf = {"heatmap_period": "0s"}
+    env.create_tenant(
+        tenant_id, parent_timeline_id, conf=tenant_conf, placement_policy='{"Attached":1}'
+    )
+
+    child_timeline_id = env.create_branch("foo", tenant_id)
+
+    attached_to_id = env.storage_controller.locate(tenant_id)[0]["node_id"]
+    ps_attached = env.get_pageserver(attached_to_id)
+    ps_secondary = next(p for p in env.pageservers if p != ps_attached)
+
+    ps_attached.http_client().tenant_heatmap_upload(tenant_id)
+    status, _ = ps_secondary.http_client().tenant_secondary_download(tenant_id, wait_ms=5000)
+    assert status == 200
+
+    labels = {
+        "operation": "write",
+        "tenant_id": str(tenant_id),
+        "timeline_id": str(child_timeline_id),
+    }
+    bytes_written = (
+        ps_secondary.http_client()
+        .get_metrics()
+        .query_one("pageserver_io_operations_bytes_total", labels)
+        .value
+    )
+
+    assert bytes_written == 0
+
+    env.storage_controller.pageserver_api().timeline_delete(tenant_id, child_timeline_id)
+
+    ps_attached.http_client().tenant_heatmap_upload(tenant_id)
+    status, _ = ps_secondary.http_client().tenant_secondary_download(tenant_id, wait_ms=5000)
+    assert status == 200
+
+    assert (
+        len(
+            ps_secondary.http_client()
+            .get_metrics()
+            .query_all("pageserver_io_operations_bytes_total", labels)
+        )
+        == 0
+    )
