@@ -674,7 +674,7 @@ paths:
           in: query
           required: false
           schema:
-            # values: "v1", "v2"
+            description: Currently valid values are `v1`, `v2`
             type: string
       responses:
         "200":
