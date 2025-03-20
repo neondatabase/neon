@@ -1614,6 +1614,10 @@ impl Service {
         let mut http_client = reqwest::Client::builder();
         // We intentionally disable the connection pool, so every request will create its own TCP connection.
         // It's especially important for heartbeaters to notice more network problems.
+        // TODO: It makes sense to create two clients: one without pooling for heartbeeters,
+        // and one within for everything else. But storcon now exits with `std::process:exit(0)` and doesn't
+        // close keep-alive connections gracefully. It leads to "connection broken" errors in pageservers and
+        // they may hang on graceful HTTP server shutdown waiting for keep-alive connections close by timeout.
         http_client = http_client.pool_max_idle_per_host(0);
         if let Some(ssl_ca_cert) = &config.ssl_ca_cert {
             http_client = http_client.add_root_certificate(ssl_ca_cert.clone());
