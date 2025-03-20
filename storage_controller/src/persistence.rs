@@ -1367,6 +1367,34 @@ impl Persistence {
 
         Ok(timeline_from_db)
     }
+
+    /// Loads a list of all timelines from database.
+    pub(crate) async fn list_timelines_for_tenant(
+        &self,
+        tenant_id: TenantId,
+    ) -> DatabaseResult<Vec<TimelinePersistence>> {
+        use crate::schema::timelines::dsl;
+
+        let tenant_id = &tenant_id;
+        let timelines = self
+            .with_measured_conn(DatabaseOperation::GetTimeline, move |conn| {
+                Box::pin(async move {
+                    let timelines: Vec<TimelineFromDb> = dsl::timelines
+                        .filter(dsl::tenant_id.eq(&tenant_id.to_string()))
+                        .load(conn)
+                        .await?;
+                    Ok(timelines)
+                })
+            })
+            .await?;
+
+        let timelines = timelines
+            .into_iter()
+            .map(TimelineFromDb::into_persistence)
+            .collect();
+        Ok(timelines)
+    }
+
     /// Persist pending op. Returns if it was newly inserted. If it wasn't, we haven't done any writes.
     pub(crate) async fn insert_pending_op(
         &self,
@@ -1409,7 +1437,7 @@ impl Persistence {
     pub(crate) async fn remove_pending_op(
         &self,
         tenant_id: TenantId,
-        timeline_id: TimelineId,
+        timeline_id: Option<TimelineId>,
         sk_id: NodeId,
         generation: u32,
     ) -> DatabaseResult<()> {
@@ -1418,10 +1446,11 @@ impl Persistence {
         let tenant_id = &tenant_id;
         let timeline_id = &timeline_id;
         self.with_measured_conn(DatabaseOperation::RemoveTimelineReconcile, move |conn| {
+            let timeline_id_str = timeline_id.map(|tid| tid.to_string()).unwrap_or_default();
             Box::pin(async move {
                 diesel::delete(dsl::safekeeper_timeline_pending_ops)
                     .filter(dsl::tenant_id.eq(tenant_id.to_string()))
-                    .filter(dsl::timeline_id.eq(timeline_id.to_string()))
+                    .filter(dsl::timeline_id.eq(timeline_id_str))
                     .filter(dsl::sk_id.eq(sk_id.0 as i64))
                     .filter(dsl::generation.eq(generation as i32))
                     .execute(conn)
@@ -1460,6 +1489,34 @@ impl Persistence {
             .await?;
 
         Ok(timeline_from_db)
+    }
+
+    /// Delete all pending ops for the given timeline.
+    ///
+    /// Use this only at timeline deletion, otherwise use generation based APIs
+    pub(crate) async fn remove_pending_ops_for_timeline(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: Option<TimelineId>,
+    ) -> DatabaseResult<()> {
+        use crate::schema::safekeeper_timeline_pending_ops::dsl;
+
+        let tenant_id = &tenant_id;
+        let timeline_id = &timeline_id;
+        self.with_measured_conn(DatabaseOperation::ListTimelineReconcile, move |conn| {
+            let timeline_id_str = timeline_id.map(|tid| tid.to_string()).unwrap_or_default();
+            Box::pin(async move {
+                diesel::delete(dsl::safekeeper_timeline_pending_ops)
+                    .filter(dsl::tenant_id.eq(tenant_id.to_string()))
+                    .filter(dsl::timeline_id.eq(timeline_id_str))
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .await?;
+
+        Ok(())
     }
 }
 

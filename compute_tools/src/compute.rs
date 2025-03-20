@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::os::unix::fs::{PermissionsExt, symlink};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -153,6 +153,11 @@ pub struct ComputeState {
     pub startup_span: Option<tracing::span::Span>,
 
     pub metrics: ComputeMetrics,
+
+    /// current audit log level
+    /// to know if it is already configured, or we need to set up audit
+    /// when compute receives a new spec
+    pub audit_log_level: ComputeAudit,
 }
 
 impl ComputeState {
@@ -165,6 +170,7 @@ impl ComputeState {
             pspec: None,
             startup_span: None,
             metrics: ComputeMetrics::default(),
+            audit_log_level: ComputeAudit::default(),
         }
     }
 
@@ -620,16 +626,10 @@ impl ComputeNode {
             });
         }
 
-        // Configure and start rsyslog for HIPAA if necessary
-        if let ComputeAudit::Hipaa = pspec.spec.audit_log_level {
-            let remote_endpoint = std::env::var("AUDIT_LOGGING_ENDPOINT").unwrap_or("".to_string());
-            if remote_endpoint.is_empty() {
-                anyhow::bail!("AUDIT_LOGGING_ENDPOINT is empty");
-            }
-
-            let log_directory_path = Path::new(&self.params.pgdata).join("log");
-            let log_directory_path = log_directory_path.to_string_lossy().to_string();
-            configure_audit_rsyslog(log_directory_path.clone(), "hipaa", &remote_endpoint)?;
+        // If extended compute audit is enabled configure and start rsyslog
+        if pspec.spec.audit_log_level == ComputeAudit::Hipaa {
+            let log_directory_path = self.get_audit_log_dir().to_string_lossy().to_string();
+            configure_audit_rsyslog(&log_directory_path, pspec.spec.audit_log_level.as_str())?;
 
             // Launch a background task to clean up the audit logs
             launch_pgaudit_gc(log_directory_path);
@@ -683,6 +683,11 @@ impl ComputeNode {
                 }
             });
         }
+
+        // after all the configuration is done
+        // preserve the information about the current audit log level
+        // so that we don't relaunch rsyslog on every spec change
+        self.set_audit_log_level(pspec.spec.audit_log_level);
 
         // All done!
         let startup_end_time = Utc::now();
@@ -836,6 +841,19 @@ impl ComputeNode {
 
     pub fn get_status(&self) -> ComputeStatus {
         self.state.lock().unwrap().status
+    }
+
+    pub fn set_audit_log_level(&self, audit_log_level: ComputeAudit) {
+        let mut state = self.state.lock().unwrap();
+        state.audit_log_level = audit_log_level;
+    }
+
+    pub fn get_audit_log_level(&self) -> ComputeAudit {
+        self.state.lock().unwrap().audit_log_level
+    }
+
+    pub fn get_audit_log_dir(&self) -> PathBuf {
+        Path::new(&self.params.pgdata).join("log")
     }
 
     pub fn get_timeline_id(&self) -> Option<TimelineId> {
@@ -1540,6 +1558,29 @@ impl ComputeNode {
             });
         }
 
+        // If extended compute audit is enabled configure and start rsyslog
+        // We check that the audit_log_level changed compared to the previous spec and skip this step if not.
+        let audit_log_level = self.get_audit_log_level();
+
+        if spec.audit_log_level == ComputeAudit::Hipaa && audit_log_level != spec.audit_log_level {
+            info!(
+                "Configuring audit logging because audit_log_level changed from {:?} to {:?}",
+                audit_log_level, spec.audit_log_level
+            );
+
+            let log_directory_path = self.get_audit_log_dir().to_string_lossy().to_string();
+            configure_audit_rsyslog(&log_directory_path, spec.audit_log_level.as_str())?;
+
+            // Launch a background task to clean up the audit logs
+            // If rsyslog was already configured, we don't need to start this process again.
+            match audit_log_level {
+                ComputeAudit::Disabled | ComputeAudit::Log => {
+                    launch_pgaudit_gc(log_directory_path);
+                }
+                _ => {}
+            }
+        }
+
         // Write new config
         let pgdata_path = Path::new(&self.params.pgdata);
         config::write_postgres_conf(
@@ -1549,7 +1590,14 @@ impl ComputeNode {
             &self.compute_ctl_config.tls,
         )?;
 
-        if !spec.skip_pg_catalog_updates {
+        // Override the skip_catalog_updates flag
+        // if we need to install new extensions
+        //
+        // Check that audit_log_level changed compared to the previous spec and skip this step if not.
+        // All operations are idempotent, so this is just a performance optimization.
+        let force_catalog_updates = audit_log_level != spec.audit_log_level;
+
+        if !spec.skip_pg_catalog_updates || force_catalog_updates {
             let max_concurrent_connections = spec.reconfigure_concurrency;
             // Temporarily reset max_cluster_size in config
             // to avoid the possibility of hitting the limit, while we are reconfiguring:
@@ -1573,6 +1621,11 @@ impl ComputeNode {
         }
 
         self.pg_reload_conf()?;
+
+        // after all the configuration is done
+        // preserve the information about the current audit log level
+        // so that we don't relaunch rsyslog on every spec change
+        self.set_audit_log_level(spec.audit_log_level);
 
         let unknown_op = "unknown".to_string();
         let op_id = spec.operation_uuid.as_ref().unwrap_or(&unknown_op);
