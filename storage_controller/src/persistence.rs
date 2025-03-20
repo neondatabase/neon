@@ -1369,7 +1369,40 @@ impl Persistence {
         Ok(timeline_from_db)
     }
 
+    /// Set `delete_at` for the given timeline
+    pub(crate) async fn timeline_set_deleted_at(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> DatabaseResult<()> {
+        use crate::schema::timelines;
+
+        let deletion_time = chrono::Local::now().to_utc();
+        self.with_measured_conn(DatabaseOperation::InsertTimeline, move |conn| {
+            Box::pin(async move {
+                let updated = diesel::update(timelines::table)
+                    .filter(timelines::tenant_id.eq(tenant_id.to_string()))
+                    .filter(timelines::timeline_id.eq(timeline_id.to_string()))
+                    .set(timelines::deleted_at.eq(Some(deletion_time)))
+                    .execute(conn)
+                    .await?;
+
+                match updated {
+                    0 => Ok(()),
+                    1 => Ok(()),
+                    _ => Err(DatabaseError::Logical(format!(
+                        "unexpected number of rows ({})",
+                        updated
+                    ))),
+                }
+            })
+        })
+        .await
+    }
+
     /// Load timeline from db. Returns `None` if not present.
+    ///
+    /// Only works if `deleted_at` is set, so you should call [`Self::timeline_set_deleted_at`] before.
     pub(crate) async fn delete_timeline(
         &self,
         tenant_id: TenantId,
@@ -1384,6 +1417,7 @@ impl Persistence {
                 diesel::delete(dsl::timelines)
                     .filter(dsl::tenant_id.eq(&tenant_id.to_string()))
                     .filter(dsl::timeline_id.eq(&timeline_id.to_string()))
+                    .filter(dsl::deleted_at.is_not_null())
                     .execute(conn)
                     .await?;
                 Ok(())

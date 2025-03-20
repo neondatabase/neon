@@ -313,6 +313,9 @@ impl Service {
             );
             return Ok(());
         };
+        self.persistence
+            .timeline_set_deleted_at(tenant_id, timeline_id)
+            .await?;
         let all_sks = tl
             .new_sk_set
             .iter()
@@ -383,11 +386,14 @@ impl Service {
             })
             .collect::<Result<Vec<_>, ApiError>>()?;
 
-        // Remove pending ops from db.
+        // Remove pending ops from db, and set `deleted_at`.
         // We cancel them in a later iteration once we hold the state lock.
         for (timeline_id, _timeline) in timeline_list.iter() {
             self.persistence
                 .remove_pending_ops_for_timeline(tenant_id, Some(*timeline_id))
+                .await?;
+            self.persistence
+                .timeline_set_deleted_at(tenant_id, *timeline_id)
                 .await?;
         }
 
