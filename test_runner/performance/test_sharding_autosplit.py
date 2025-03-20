@@ -72,7 +72,8 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
             ".*Local notification hook failed.*",
             ".*Marking shard.*for notification retry.*",
             ".*Failed to notify compute.*",
-        ])
+        ]
+    )
 
     # Total tenants
     tenant_count = 4
