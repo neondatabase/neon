@@ -101,6 +101,7 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*WARN.*path=/v1/utilization .*request was dropped before completing",
     # Can happen during shutdown
     ".*scheduling deletion on drop failed: queue is in state Stopped.*",
+    ".*scheduling deletion on drop failed: queue is shutting down.*",
     # L0 flush backpressure delays are expected under heavy ingest load. We want to exercise
     # this backpressure in tests.
     ".*delaying layer flush by \\S+ for compaction backpressure.*",
