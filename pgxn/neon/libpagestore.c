@@ -729,17 +729,18 @@ get_socket_stats(int socketfd, int *sndbuf, int *recvbuf)
 static void
 get_local_port(int socketfd, int *port)
 {
-	*port = -1;
-
 #ifdef __linux__
 	struct sockaddr_in addr;
+	socklen_t addr_len = sizeof(addr);
 
-	memset(&addr, 0, sizeof(addr));
-	if (getsockname(socketfd, (struct sockaddr*) &addr, sizeof(addr)) == 0)
+	memset(&addr, 0, addr_len);
+	if (getsockname(socketfd, (struct sockaddr*) &addr, &addr_len) == 0)
 	{
 		*port = ntohs(addr.sin_port);
+		return;
 	}
 #endif
+	*port = -1;
 }
 
 /*
