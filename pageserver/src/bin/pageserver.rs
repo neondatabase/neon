@@ -96,7 +96,7 @@ fn main() -> anyhow::Result<()> {
     env::set_current_dir(&workdir)
         .with_context(|| format!("Failed to set application's current dir to '{workdir}'"))?;
 
-    let conf = initialize_config(&identity_file_path, &cfg_file_path, &workdir)?;
+    let (conf, ignored) = initialize_config(&identity_file_path, &cfg_file_path, &workdir)?;
 
     // Initialize logging.
     //
@@ -127,7 +127,17 @@ fn main() -> anyhow::Result<()> {
         &[("node_id", &conf.id.to_string())],
     );
 
-    // after setting up logging, log the effective IO engine choice and read path implementations
+    // Warn about ignored config items; see pageserver_api::config::ConfigToml
+    // doc comment for rationale why we prefer this over serde(deny_unknown_fields).
+    {
+        let IgnoredConfigItems { paths } = ignored;
+        for path in paths {
+            warn!(?path, "ignoring unknown configuration item");
+        }
+    }
+
+    // Log configuration items for feature-flag-like config
+    // (maybe we should automate this with a visitor?).
     info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
     info!(?conf.virtual_file_io_mode, "starting with virtual_file IO mode");
     info!(?conf.wal_receiver_protocol, "starting with WAL receiver protocol");
@@ -196,11 +206,15 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+struct IgnoredConfigItems {
+    paths: Vec<String>,
+}
+
 fn initialize_config(
     identity_file_path: &Utf8Path,
     cfg_file_path: &Utf8Path,
     workdir: &Utf8Path,
-) -> anyhow::Result<&'static PageServerConf> {
+) -> anyhow::Result<(&'static PageServerConf, IgnoredConfigItems)> {
     // The deployment orchestrator writes out an indentity file containing the node id
     // for all pageservers. This file is the source of truth for the node id. In order
     // to allow for rolling back pageserver releases, the node id is also included in
@@ -229,15 +243,23 @@ fn initialize_config(
 
     let config_file_contents =
         std::fs::read_to_string(cfg_file_path).context("read config file from filesystem")?;
-    let config_toml = serde_path_to_error::deserialize(
-        toml_edit::de::Deserializer::from_str(&config_file_contents)
-            .context("build toml deserializer")?,
-    )
-    .context("deserialize config toml")?;
+    let deserializer = toml_edit::de::Deserializer::from_str(&config_file_contents)
+        .context("build toml deserializer")?;
+    let mut path_to_error_track = serde_path_to_error::Track::new();
+    let deserializer =
+        serde_path_to_error::Deserializer::new(deserializer, &mut path_to_error_track);
+    let mut ignored = Vec::new();
+    let mut push_to_ignored = |path: serde_ignored::Path<'_>| {
+        ignored.push(path.to_string());
+    };
+    let deserializer = serde_ignored::Deserializer::new(deserializer, &mut push_to_ignored);
+    let config_toml: pageserver_api::config::ConfigToml =
+        serde::Deserialize::deserialize(deserializer).context("deserialize config toml")?;
     let conf = PageServerConf::parse_and_validate(identity.id, config_toml, workdir)
         .context("runtime-validation of config toml")?;
-
-    Ok(Box::leak(Box::new(conf)))
+    let conf = Box::leak(Box::new(conf));
+    let ignored = IgnoredConfigItems { paths: ignored };
+    Ok((conf, ignored))
 }
 
 struct WaitForPhaseResult<F: std::future::Future + Unpin> {

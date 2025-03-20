@@ -4270,6 +4270,7 @@ dependencies = [
  "scopeguard",
  "send-future",
  "serde",
+ "serde_ignored",
  "serde_json",
  "serde_path_to_error",
  "serde_with",
@@ -4692,7 +4693,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.6"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#1f21e7959a96a34dcfbfce1b14b73286cdadffe9"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#394851e467755562b4173ff68f9eb0e7f737be13"
 dependencies = [
  "base64 0.22.1",
  "byteorder",
@@ -4726,7 +4727,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.6"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#1f21e7959a96a34dcfbfce1b14b73286cdadffe9"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#394851e467755562b4173ff68f9eb0e7f737be13"
 dependencies = [
  "bytes",
  "chrono",
@@ -6288,6 +6289,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_ignored"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "566da67d80e92e009728b3731ff0e5360cb181432b8ca73ea30bb1d170700d76"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "serde_json"
 version = "1.0.125"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7170,7 +7180,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.10"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#1f21e7959a96a34dcfbfce1b14b73286cdadffe9"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#394851e467755562b4173ff68f9eb0e7f737be13"
 dependencies = [
  "async-trait",
  "byteorder",
