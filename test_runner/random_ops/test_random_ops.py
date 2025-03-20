@@ -38,8 +38,10 @@ class NeonEndpoint:
         self.host: str = endpoint["host"]
         self.benchmark: subprocess.Popen[Any] | None = None
         # The connection environment is used when running benchmark
-        self.connect_env = self.branch.connect_env.copy()
-        self.connect_env["PGHOST"] = self.host
+        self.connect_env: dict[str, str] | None = None
+        if self.branch.connect_env:
+            self.connect_env = self.branch.connect_env.copy()
+            self.connect_env["PGHOST"] = self.host
 
     def delete(self):
         self.project.delete_endpoint(self.id)
@@ -83,18 +85,20 @@ class NeonBranch:
         if self.parent is not None:
             self.parent.children[self.id] = self
         self.endpoints: dict[str, NeonEndpoint] = {}
-        self.connection_parameters: dict[str, str] = branch["connection_uris"][0][
-            "connection_parameters"
-        ]
+        self.connection_parameters: dict[str, str] | None = branch["connection_uris"][0].get(
+            "connection_parameters", None
+        )
         self.benchmark: subprocess.Popen[Any] | None = None
         self.updated_at: datetime = datetime.fromisoformat(branch["branch"]["updated_at"])
-        self.connect_env: dict[str, str] = {
-            "PGHOST": self.connection_parameters["host"],
-            "PGUSER": self.connection_parameters["role"],
-            "PGDATABASE": self.connection_parameters["database"],
-            "PGPASSWORD": self.connection_parameters["password"],
-            "PGSSLMODE": "require",
-        }
+        self.connect_env: dict[str, str] | None = None
+        if self.connection_parameters:
+            self.connect_env = {
+                "PGHOST": self.connection_parameters["host"],
+                "PGUSER": self.connection_parameters["role"],
+                "PGDATABASE": self.connection_parameters["database"],
+                "PGPASSWORD": self.connection_parameters["password"],
+                "PGSSLMODE": "require",
+            }
 
     def __str__(self):
         """
@@ -142,12 +146,7 @@ class NeonBranch:
         parent_id: str = res["branch"]["parent_id"]
         # Creates an object for the parent branch
         # After the reset operation a new parent branch is created
-        # XXX remove before merge
-        temp_br = self.neon_api.get_branch_details(self.project_id, parent_id)
-        log.info("Branch: %s", temp_br)
-        parent = NeonBranch(
-            self.project, temp_br, True
-        )
+        parent = NeonBranch(self.project, self.neon_api.get_branch_details(self.project_id, parent_id), True)
         self.project.branches[parent_id] = parent
         self.parent = parent
         parent.children[self.id] = self
@@ -453,7 +452,7 @@ def test_api_random(
         ("delete_branch", 1.0),
         ("restore_random_time", 1.2),
     )
-    if num_ops_env := os.getenv('NUM_OPERATIONS'):
+    if num_ops_env := os.getenv("NUM_OPERATIONS"):
         num_operations = int(num_ops_env)
     else:
         num_operations = 250
