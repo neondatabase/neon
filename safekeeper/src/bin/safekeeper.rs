@@ -21,7 +21,7 @@ use safekeeper::defaults::{
     DEFAULT_CONTROL_FILE_SAVE_INTERVAL, DEFAULT_EVICTION_MIN_RESIDENT, DEFAULT_HEARTBEAT_TIMEOUT,
     DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_MAX_OFFLOADER_LAG_BYTES, DEFAULT_PARTIAL_BACKUP_CONCURRENCY,
     DEFAULT_PARTIAL_BACKUP_TIMEOUT, DEFAULT_PG_LISTEN_ADDR, DEFAULT_SSL_CERT_FILE,
-    DEFAULT_SSL_KEY_FILE,
+    DEFAULT_SSL_CERT_RELOAD_PERIOD, DEFAULT_SSL_KEY_FILE,
 };
 use safekeeper::{
     BROKER_RUNTIME, GlobalTimelines, HTTP_RUNTIME, SafeKeeperConf, WAL_SERVICE_RUNTIME, broker,
@@ -214,6 +214,9 @@ struct Args {
     /// Path to a file with a X509 certificate for https API.
     #[arg(long, default_value = DEFAULT_SSL_CERT_FILE)]
     ssl_cert_file: Utf8PathBuf,
+    /// Period to reload certificate and private key from files.
+    #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_SSL_CERT_RELOAD_PERIOD)]
+    pub ssl_cert_reload_period: Duration,
     /// Trusted root CA certificate to use in https APIs.
     #[arg(long)]
     ssl_ca_file: Option<Utf8PathBuf>,
@@ -394,6 +397,7 @@ async fn main() -> anyhow::Result<()> {
         max_delta_for_fanout: args.max_delta_for_fanout,
         ssl_key_file: args.ssl_key_file,
         ssl_cert_file: args.ssl_cert_file,
+        ssl_cert_reload_period: args.ssl_cert_reload_period,
         ssl_ca_cert,
     });
 

@@ -7,6 +7,7 @@ use anyhow::{Context, anyhow};
 use camino::Utf8PathBuf;
 use clap::Parser;
 use futures::future::OptionFuture;
+use http_utils::tls_certs::ReloadingCertificateResolver;
 use hyper0::Uri;
 use metrics::BuildInfo;
 use metrics::launch_timestamp::LaunchTimestamp;
@@ -43,6 +44,7 @@ pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:21\0
 
 const DEFAULT_SSL_KEY_FILE: &str = "server.key";
 const DEFAULT_SSL_CERT_FILE: &str = "server.crt";
+const DEFAULT_SSL_CERT_RELOAD_PERIOD: &str = "60s";
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -195,6 +197,9 @@ struct Cli {
     /// Path to a file with a X509 certificate for https API.
     #[arg(long, default_value = DEFAULT_SSL_CERT_FILE)]
     ssl_cert_file: Utf8PathBuf,
+    /// Period to reload certificate and private key from files.
+    #[arg(long, default_value = DEFAULT_SSL_CERT_RELOAD_PERIOD)]
+    ssl_cert_reload_period: humantime::Duration,
     /// Trusted root CA certificate to use in https APIs.
     #[arg(long)]
     ssl_ca_file: Option<PathBuf>,
@@ -460,12 +465,17 @@ async fn async_main() -> anyhow::Result<()> {
     let https_server_task: OptionFuture<_> = match args.listen_https {
         Some(https_addr) => {
             let https_listener = tcp_listener::bind(https_addr)?;
-            let certs = http_utils::tls_certs::load_cert_chain(args.ssl_cert_file.as_path())?;
-            let key = http_utils::tls_certs::load_private_key(args.ssl_key_file.as_path())?;
+
+            let resolver = ReloadingCertificateResolver::new(
+                &args.ssl_key_file,
+                &args.ssl_cert_file,
+                *args.ssl_cert_reload_period,
+            )
+            .await?;
 
             let server_config = rustls::ServerConfig::builder()
                 .with_no_client_auth()
-                .with_single_cert(certs, key)?;
+                .with_cert_resolver(resolver);
 
             let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
             let https_server =
