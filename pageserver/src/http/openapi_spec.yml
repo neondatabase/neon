@@ -1079,6 +1079,7 @@ components:
         - last_record_lsn
         - disk_consistent_lsn
         - state
+        - min_readable_lsn
       properties:
         timeline_id:
           type: string
