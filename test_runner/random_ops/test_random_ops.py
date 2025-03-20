@@ -85,8 +85,10 @@ class NeonBranch:
         if self.parent is not None:
             self.parent.children[self.id] = self
         self.endpoints: dict[str, NeonEndpoint] = {}
-        self.connection_parameters: dict[str, str] | None = branch["connection_uris"][0].get(
-            "connection_parameters", None
+        self.connection_parameters: dict[str, str] | None = (
+            branch["connection_uris"][0]["connection_parameters"]
+            if "connection_uris" in branch
+            else None
         )
         self.benchmark: subprocess.Popen[Any] | None = None
         self.updated_at: datetime = datetime.fromisoformat(branch["branch"]["updated_at"])
@@ -146,7 +148,9 @@ class NeonBranch:
         parent_id: str = res["branch"]["parent_id"]
         # Creates an object for the parent branch
         # After the reset operation a new parent branch is created
-        parent = NeonBranch(self.project, self.neon_api.get_branch_details(self.project_id, parent_id), True)
+        parent = NeonBranch(
+            self.project, self.neon_api.get_branch_details(self.project_id, parent_id), True
+        )
         self.project.branches[parent_id] = parent
         self.parent = parent
         parent.children[self.id] = self
