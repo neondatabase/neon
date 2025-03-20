@@ -402,7 +402,7 @@ pub struct Config {
     pub split_threshold: Option<u64>,
 
     /// The maximum number of shards a tenant can be split into during autosplits. Does not affect
-    /// manual split requests. 0 or 1 disables autosplits.
+    /// manual split requests. 0 or 1 disables autosplits, as we already have 1 shard.
     pub max_split_shards: u8,
 
     /// The size at which an unsharded tenant should initially split. Ingestion is significantly
