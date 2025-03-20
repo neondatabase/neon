@@ -101,7 +101,7 @@ def test_certificate_rotation(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.pageserver_config_override = "ssl_cert_reload_period='100 ms'"
     env = neon_env_builder.init_start()
 
-    # It's expecte
+    # We intentionally set an incorrect key/cert pair during the test to test this error.
     env.pageserver.allowed_errors.append(".*Error reloading certificate.*")
 
     port = env.pageserver.service_port.https
