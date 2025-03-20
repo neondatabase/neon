@@ -151,7 +151,7 @@ impl StorageController {
         }
         let http_client = http_client
             .build()
-            .expect("HTTP client should counstruct with no error");
+            .expect("HTTP client should construct with no error");
 
         Self {
             env: env.clone(),
@@ -351,28 +351,22 @@ impl StorageController {
             )?;
         }
 
-        let (scheme, host, listen_port, postgres_port) = {
-            let listen_url = &self.env.control_plane_api;
+        let listen_url = &self.env.control_plane_api;
 
-            let (listen_port, postgres_port) = if let Some(base_port) = start_args.base_port {
-                (
-                    base_port,
-                    self.config
-                        .database_url
-                        .expect("--base-port requires NeonStorageControllerConf::database_url")
-                        .port(),
-                )
-            } else {
-                let port = listen_url.port().unwrap();
-                (port, port + 1)
-            };
+        let scheme = listen_url.scheme();
+        let host = listen_url.host_str().unwrap();
 
+        let (listen_port, postgres_port) = if let Some(base_port) = start_args.base_port {
             (
-                listen_url.scheme(),
-                listen_url.host_str().unwrap(),
-                listen_port,
-                postgres_port,
+                base_port,
+                self.config
+                    .database_url
+                    .expect("--base-port requires NeonStorageControllerConf::database_url")
+                    .port(),
             )
+        } else {
+            let port = listen_url.port().unwrap();
+            (port, port + 1)
         };
 
         self.listen_port
