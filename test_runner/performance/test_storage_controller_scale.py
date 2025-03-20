@@ -82,6 +82,7 @@ def test_storage_controller_many_tenants(
         # guard against regressions in restart time.
         "max_offline": "30s",
         "max_warming_up": "300s",
+        "use_local_compute_notifications": False,
     }
     neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
 

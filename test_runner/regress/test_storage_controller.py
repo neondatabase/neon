@@ -620,6 +620,8 @@ def test_storage_controller_compute_hook(
 
     httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(handler)
 
+    neon_env_builder.storage_controller_config = {"use_local_compute_notifications": False}
+
     # Start running
     env = neon_env_builder.init_start(initial_tenant_conf={"lsn_lease_length": "0s"})
 
@@ -737,6 +739,8 @@ def test_storage_controller_stuck_compute_hook(
         return Response(status=status)
 
     httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(handler)
+
+    neon_env_builder.storage_controller_config = {"use_local_compute_notifications": False}
 
     # Start running
     env = neon_env_builder.init_start(initial_tenant_conf={"lsn_lease_length": "0s"})
@@ -885,6 +889,8 @@ def test_storage_controller_compute_hook_retry(
 
     httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(handler)
 
+    neon_env_builder.storage_controller_config = {"use_local_compute_notifications": False}
+
     # Start running
     env = neon_env_builder.init_configs()
     env.start()
@@ -1007,6 +1013,8 @@ def test_storage_controller_compute_hook_revert(
         return Response(status=status)
 
     httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(handler)
+
+    neon_env_builder.storage_controller_config = {"use_local_compute_notifications": False}
 
     # Start running
     env = neon_env_builder.init_start(initial_tenant_conf={"lsn_lease_length": "0s"})
@@ -1397,6 +1405,11 @@ def test_storage_controller_tenant_deletion(
     neon_env_builder.num_pageservers = 4
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
+
+    neon_env_builder.storage_controller_config = {
+        # Route to `compute_reconfigure_listener` instead
+        "use_local_compute_notifications": False,
+    }
 
     env = neon_env_builder.init_configs()
     env.start()
@@ -2437,7 +2450,6 @@ def test_background_operation_cancellation(neon_env_builder: NeonEnvBuilder):
 @pytest.mark.parametrize("while_offline", [True, False])
 def test_storage_controller_node_deletion(
     neon_env_builder: NeonEnvBuilder,
-    compute_reconfigure_listener: ComputeReconfigure,
     while_offline: bool,
 ):
     """

@@ -203,6 +203,11 @@ struct Cli {
     /// Trusted root CA certificate to use in https APIs.
     #[arg(long)]
     ssl_ca_file: Option<PathBuf>,
+
+    /// Neon local specific flag. When set, ignore [`Cli::control_plane_url`] and deliver
+    /// the compute notification directly (instead of via control plane).
+    #[arg(long, default_value = "false")]
+    use_local_compute_notifications: bool,
 }
 
 enum StrictMode {
@@ -368,6 +373,11 @@ async fn async_main() -> anyhow::Result<()> {
                 "neither `--compute-hook-url` nor `--control-plane-url` are set: this is only permitted in `--dev` mode"
             );
         }
+        StrictMode::Strict if args.use_local_compute_notifications => {
+            anyhow::bail!(
+                "neither `--use-local-compute-notifications` is only permitted in `--dev` mode"
+            );
+        }
         StrictMode::Strict => {
             tracing::info!("Starting in strict mode: configuration is OK.")
         }
@@ -427,6 +437,7 @@ async fn async_main() -> anyhow::Result<()> {
         use_https_safekeeper_api: args.use_https_safekeeper_api,
         ssl_ca_cert,
         timelines_onto_safekeepers: args.timelines_onto_safekeepers,
+        use_local_compute_notifications: args.use_local_compute_notifications,
     };
 
     // Validate that we can connect to the database

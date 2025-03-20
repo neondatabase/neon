@@ -808,6 +808,8 @@ def test_sharding_split_stripe_size(
 
     httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(handler)
 
+    neon_env_builder.storage_controller_config = {"use_local_compute_notifications": False}
+
     env = neon_env_builder.init_start(
         initial_tenant_shard_count=1, initial_tenant_shard_stripe_size=initial_stripe_size
     )
@@ -1315,6 +1317,11 @@ def test_sharding_split_failures(
     neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
     initial_shard_count = 2
     split_shard_count = 4
+
+    neon_env_builder.storage_controller_config = {
+        # Route to `compute_reconfigure_listener` instead
+        "use_local_compute_notifications": False,
+    }
 
     env = neon_env_builder.init_configs()
     env.start()
