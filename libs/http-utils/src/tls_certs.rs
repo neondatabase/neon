@@ -53,7 +53,7 @@ pub async fn load_certified_key(
     Ok(certified_key)
 }
 
-/// Implementation of [`rustls::ResolvesServerCert`] which reloads certificates from
+/// Implementation of [`rustls::server::ResolvesServerCert`] which reloads certificates from
 /// the disk periodically.
 #[derive(Debug)]
 pub struct ReloadingCertificateResolver {
