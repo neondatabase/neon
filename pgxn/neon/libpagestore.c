@@ -15,6 +15,7 @@
 #include "postgres.h"
 
 #include <math.h>
+#include <sys/socket.h>
 
 #include "libpq-int.h"
 
@@ -42,7 +43,6 @@
 
 #ifdef __linux__
 #include <sys/ioctl.h>
-#include <sys/socket.h>
 #include <linux/sockios.h>
 #endif
 
@@ -729,7 +729,6 @@ get_socket_stats(int socketfd, int *sndbuf, int *recvbuf)
 static void
 get_local_port(int socketfd, int *port)
 {
-#ifdef __linux__
 	struct sockaddr_in addr;
 	socklen_t addr_len = sizeof(addr);
 
@@ -737,10 +736,9 @@ get_local_port(int socketfd, int *port)
 	if (getsockname(socketfd, (struct sockaddr*) &addr, &addr_len) == 0)
 	{
 		*port = ntohs(addr.sin_port);
-		return;
+	} else {
+		*port = -1;
 	}
-#endif
-	*port = -1;
 }
 
 /*
