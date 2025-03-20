@@ -15,6 +15,7 @@
 #include "postgres.h"
 
 #include <math.h>
+#include <sys/socket.h>
 
 #include "libpq-int.h"
 
@@ -764,6 +765,24 @@ get_socket_stats(int socketfd, int *sndbuf, int *recvbuf)
 }
 
 /*
+ * Tries to get the local port of a socket. Sets 'port' to -1 on error.
+ */
+static void
+get_local_port(int socketfd, int *port)
+{
+	struct sockaddr_in addr;
+	socklen_t addr_len = sizeof(addr);
+
+	memset(&addr, 0, addr_len);
+	if (getsockname(socketfd, (struct sockaddr*) &addr, &addr_len) == 0)
+	{
+		*port = ntohs(addr.sin_port);
+	} else {
+		*port = -1;
+	}
+}
+
+/*
  * A wrapper around PQgetCopyData that checks for interrupts while sleeping.
  */
 static int
@@ -852,15 +871,17 @@ retry:
 		 */
 		if (INSTR_TIME_GET_MILLISEC(since_last_log) >= pageserver_response_log_timeout)
 		{
+			int			port;
 			int			sndbuf;
 			int			recvbuf;
 
+			get_local_port(PQsocket(pageserver_conn), &port);
 			get_socket_stats(PQsocket(pageserver_conn), &sndbuf, &recvbuf);
 
 			neon_shard_log(shard_no, LOG,
-						   "no response received from pageserver for %0.3f s, still waiting (sent " UINT64_FORMAT " requests, received " UINT64_FORMAT " responses) (socket sndbuf=%d recvbuf=%d) (conn start=%d end=%d)",
+						   "no response received from pageserver for %0.3f s, still waiting (sent " UINT64_FORMAT " requests, received " UINT64_FORMAT " responses) (socket port=%d sndbuf=%d recvbuf=%d) (conn start=%d end=%d)",
 						   INSTR_TIME_GET_DOUBLE(since_start),
-						   shard->nrequests_sent, shard->nresponses_received, sndbuf, recvbuf,
+						   shard->nrequests_sent, shard->nresponses_received, port, sndbuf, recvbuf,
 				           pageserver_conn->inStart, pageserver_conn->inEnd);
 			shard->receive_last_log_time = now;
 			shard->receive_logged = true;
@@ -882,8 +903,10 @@ retry:
 		 */
 		if (INSTR_TIME_GET_MILLISEC(since_start) >= pageserver_response_disconnect_timeout)
 		{
-			neon_shard_log(shard_no, LOG, "no response from pageserver for %0.3f s, disconnecting",
-					   INSTR_TIME_GET_DOUBLE(since_start));
+			int 		port;
+			get_local_port(PQsocket(pageserver_conn), &port);
+			neon_shard_log(shard_no, LOG, "no response from pageserver for %0.3f s, disconnecting (socket port=%d)",
+					   INSTR_TIME_GET_DOUBLE(since_start), port);
 			pageserver_disconnect(shard_no);
 			return -1;
 		}
