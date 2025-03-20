@@ -6,7 +6,7 @@ use anyhow::Context;
 use rustls::pki_types::CertificateDer;
 use sha2::{Digest, Sha256};
 use tracing::{error, info};
-use x509_parser::oid_registry;
+use x509_cert::der::{Reader, SliceReader, oid};
 
 /// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L159>
 pub const PG_ALPN_PROTOCOL: &[u8] = b"postgresql";
@@ -41,27 +41,27 @@ pub enum TlsServerEndPoint {
 
 impl TlsServerEndPoint {
     pub fn new(cert: &CertificateDer<'_>) -> anyhow::Result<Self> {
-        let sha256_oids = [
+        const SHA256_OIDS: &[oid::ObjectIdentifier] = &[
             // I'm explicitly not adding MD5 or SHA1 here... They're bad.
-            oid_registry::OID_SIG_ECDSA_WITH_SHA256,
-            oid_registry::OID_PKCS1_SHA256WITHRSA,
+            oid::db::rfc5912::ECDSA_WITH_SHA_256,
+            oid::db::rfc5912::SHA_256_WITH_RSA_ENCRYPTION,
         ];
 
-        let pem = x509_parser::parse_x509_certificate(cert)
-            .context("Failed to parse PEM object from cerficiate")?
-            .1;
+        let certificate = SliceReader::new(cert)
+            .context("Failed to parse cerficiate")?
+            .decode::<x509_cert::Certificate>()
+            .context("Failed to parse cerficiate")?;
 
-        info!(subject = %pem.subject, "parsing TLS certificate");
+        let subject = certificate.tbs_certificate.subject;
+        info!(%subject, "parsing TLS certificate");
 
-        let reg = oid_registry::OidRegistry::default().with_all_crypto();
-        let oid = pem.signature_algorithm.oid();
-        let alg = reg.get(oid);
-        if sha256_oids.contains(oid) {
+        let oid = certificate.signature_algorithm.oid;
+        if SHA256_OIDS.contains(&oid) {
             let tls_server_end_point: [u8; 32] = Sha256::new().chain_update(cert).finalize().into();
-            info!(subject = %pem.subject, signature_algorithm = alg.map(|a| a.description()), tls_server_end_point = %base64::encode(tls_server_end_point), "determined channel binding");
+            info!(%subject, tls_server_end_point = %base64::encode(tls_server_end_point), "determined channel binding");
             Ok(Self::Sha256(tls_server_end_point))
         } else {
-            error!(subject = %pem.subject, signature_algorithm = alg.map(|a| a.description()), "unknown channel binding");
+            error!(%subject, "unknown channel binding");
             Ok(Self::Undefined)
         }
     }

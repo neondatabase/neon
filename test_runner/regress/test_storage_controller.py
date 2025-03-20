@@ -1374,8 +1374,9 @@ def test_storage_controller_tenant_conf(neon_env_builder: NeonEnvBuilder):
     # vs. pageserver API calls, because pageserver has defaults.
     http.set_tenant_config(tenant_id, {})
     readback_controller = http.tenant_config(tenant_id)
-    assert readback_controller.effective_config["pitr_interval"] is None
-    assert readback_controller.tenant_specific_overrides["pitr_interval"] is None
+
+    assert "pitr_interval" not in readback_controller.effective_config.keys()
+    assert "pitr_interval" not in readback_controller.tenant_specific_overrides.keys()
     readback_ps = env.pageservers[0].http_client().tenant_config(tenant_id)
     assert readback_ps.effective_config["pitr_interval"] == default_value
     assert "pitr_interval" not in readback_ps.tenant_specific_overrides

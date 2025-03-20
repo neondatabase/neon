@@ -61,7 +61,7 @@ thiserror.workspace = true
 url.workspace = true
 uuid.workspace = true
 walkdir.workspace = true
-x509-cert = { version = "0.2.5" }
+x509-cert.workspace = true
 
 postgres_initdb.workspace = true
 compute_api.workspace = true

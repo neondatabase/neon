@@ -1,6 +1,5 @@
 use std::ffi::OsStr;
 use std::fs;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::str::FromStr;
@@ -38,9 +37,9 @@ pub struct StorageController {
     client: reqwest::Client,
     config: NeonStorageControllerConf,
 
-    // The listen addresses is learned when starting the storage controller,
+    // The listen port is learned when starting the storage controller,
     // hence the use of OnceLock to init it at the right time.
-    listen: OnceLock<SocketAddr>,
+    listen_port: OnceLock<u16>,
 }
 
 const COMMAND: &str = "storage_controller";
@@ -144,15 +143,23 @@ impl StorageController {
             }
         };
 
+        let mut http_client = reqwest::Client::builder();
+        if let Some(ssl_ca_file) = env.ssl_ca_cert_path() {
+            let buf = std::fs::read(ssl_ca_file).expect("SSL CA file should exist");
+            let cert = reqwest::Certificate::from_pem(&buf).expect("SSL CA file should be valid");
+            http_client = http_client.add_root_certificate(cert);
+        }
+        let http_client = http_client
+            .build()
+            .expect("HTTP client should construct with no error");
+
         Self {
             env: env.clone(),
             private_key,
             public_key,
-            client: reqwest::ClientBuilder::new()
-                .build()
-                .expect("Failed to construct http client"),
+            client: http_client,
             config: env.storage_controller.clone(),
-            listen: OnceLock::default(),
+            listen_port: OnceLock::default(),
         }
     }
 
@@ -337,34 +344,34 @@ impl StorageController {
             }
         }
 
-        let (listen, postgres_port) = {
-            if let Some(base_port) = start_args.base_port {
-                (
-                    format!("127.0.0.1:{base_port}"),
-                    self.config
-                        .database_url
-                        .expect("--base-port requires NeonStorageControllerConf::database_url")
-                        .port(),
-                )
-            } else {
-                let listen_url = self.env.control_plane_api.clone();
+        if self.env.generate_local_ssl_certs {
+            self.env.generate_ssl_cert(
+                &instance_dir.join("server.crt"),
+                &instance_dir.join("server.key"),
+            )?;
+        }
 
-                let listen = format!(
-                    "{}:{}",
-                    listen_url.host_str().unwrap(),
-                    listen_url.port().unwrap()
-                );
+        let listen_url = &self.env.control_plane_api;
 
-                (listen, listen_url.port().unwrap() + 1)
-            }
+        let scheme = listen_url.scheme();
+        let host = listen_url.host_str().unwrap();
+
+        let (listen_port, postgres_port) = if let Some(base_port) = start_args.base_port {
+            (
+                base_port,
+                self.config
+                    .database_url
+                    .expect("--base-port requires NeonStorageControllerConf::database_url")
+                    .port(),
+            )
+        } else {
+            let port = listen_url.port().unwrap();
+            (port, port + 1)
         };
 
-        let socket_addr = listen
-            .parse()
-            .expect("listen address is a valid socket address");
-        self.listen
-            .set(socket_addr)
-            .expect("StorageController::listen is only set here");
+        self.listen_port
+            .set(listen_port)
+            .expect("StorageController::listen_port is only set here");
 
         // Do we remove the pid file on stop?
         let pg_started = self.is_postgres_running().await?;
@@ -500,20 +507,15 @@ impl StorageController {
         drop(client);
         conn.await??;
 
-        let listen = self
-            .listen
-            .get()
-            .expect("cell is set earlier in this function");
+        let addr = format!("{}:{}", host, listen_port);
         let address_for_peers = Uri::builder()
-            .scheme("http")
-            .authority(format!("{}:{}", listen.ip(), listen.port()))
+            .scheme(scheme)
+            .authority(addr.clone())
             .path_and_query("")
             .build()
             .unwrap();
 
         let mut args = vec![
-            "-l",
-            &listen.to_string(),
             "--dev",
             "--database-url",
             &database_url,
@@ -529,6 +531,14 @@ impl StorageController {
         .into_iter()
         .map(|s| s.to_string())
         .collect::<Vec<_>>();
+
+        match scheme {
+            "http" => args.extend(["--listen".to_string(), addr]),
+            "https" => args.extend(["--listen-https".to_string(), addr]),
+            _ => {
+                panic!("Unexpected url scheme in control_plane_api: {scheme}");
+            }
+        }
 
         if self.config.start_as_candidate {
             args.push("--start-as-candidate".to_string());
@@ -589,6 +599,8 @@ impl StorageController {
         if self.config.timelines_onto_safekeepers {
             args.push("--timelines-onto-safekeepers".to_string());
         }
+
+        println!("Starting storage controller");
 
         background_process::start_process(
             COMMAND,
@@ -716,29 +728,25 @@ impl StorageController {
     {
         // In the special case of the `storage_controller start` subcommand, we wish
         // to use the API endpoint of the newly started storage controller in order
-        // to pass the readiness check. In this scenario [`Self::listen`] will be set
-        // (see [`Self::start`]).
+        // to pass the readiness check. In this scenario [`Self::listen_port`] will
+        // be set (see [`Self::start`]).
         //
         // Otherwise, we infer the storage controller api endpoint from the configured
         // control plane API.
-        let url = if let Some(socket_addr) = self.listen.get() {
-            Url::from_str(&format!(
-                "http://{}:{}/{path}",
-                socket_addr.ip().to_canonical(),
-                socket_addr.port()
-            ))
-            .unwrap()
+        let port = if let Some(port) = self.listen_port.get() {
+            *port
         } else {
-            // The configured URL has the /upcall path prefix for pageservers to use: we will strip that out
-            // for general purpose API access.
-            let listen_url = self.env.control_plane_api.clone();
-            Url::from_str(&format!(
-                "http://{}:{}/{path}",
-                listen_url.host_str().unwrap(),
-                listen_url.port().unwrap()
-            ))
-            .unwrap()
+            self.env.control_plane_api.port().unwrap()
         };
+
+        // The configured URL has the /upcall path prefix for pageservers to use: we will strip that out
+        // for general purpose API access.
+        let url = Url::from_str(&format!(
+            "{}://{}:{port}/{path}",
+            self.env.control_plane_api.scheme(),
+            self.env.control_plane_api.host_str().unwrap(),
+        ))
+        .unwrap();
 
         let mut builder = self.client.request(method, url);
         if let Some(body) = body {

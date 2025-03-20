@@ -71,6 +71,19 @@ def test_safekeeper_https_api(neon_env_builder: NeonEnvBuilder):
     wait_until(storcon_heartbeat)
 
 
+def test_storage_controller_https_api(neon_env_builder: NeonEnvBuilder):
+    """
+    Test HTTPS storage controller API.
+    If NeonEnv starts with use_https_storage_controller_api with no errors, it's already a success.
+    Make /status request to HTTPS API to ensure it's appropriately configured.
+    """
+    neon_env_builder.use_https_storage_controller_api = True
+    env = neon_env_builder.init_start()
+
+    addr = f"https://localhost:{env.storage_controller.port}/status"
+    requests.get(addr, verify=str(env.ssl_ca_file)).raise_for_status()
+
+
 def test_certificate_rotation(neon_env_builder: NeonEnvBuilder):
     """
     Test that pageserver reloads certificates when they are updated on the disk.
@@ -138,4 +151,3 @@ def test_certificate_rotation(neon_env_builder: NeonEnvBuilder):
     requests.get(addr, verify=str(env.ssl_ca_file)).raise_for_status()
     cur_cert = ssl.get_server_certificate(("localhost", port))
     assert cur_cert == sk_cert
-

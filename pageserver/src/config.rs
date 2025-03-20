@@ -17,7 +17,7 @@ use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
 use postgres_backend::AuthType;
 use remote_storage::{RemotePath, RemoteStorageConfig};
-use reqwest::Url;
+use reqwest::{Certificate, Url};
 use storage_broker::Uri;
 use utils::id::{NodeId, TimelineId};
 use utils::logging::{LogFormat, SecretString};
@@ -43,7 +43,7 @@ use crate::{TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME, virtual_file};
 ///
 /// For fields that require additional validation or filling in of defaults at runtime,
 /// check for examples in the [`PageServerConf::parse_and_validate`] method.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct PageServerConf {
     // Identifier of that particular pageserver so e g safekeepers
     // can safely distinguish different pageservers
@@ -65,6 +65,8 @@ pub struct PageServerConf {
     /// Period to reload certificate and private key from files.
     /// Default: 60s.
     pub ssl_cert_reload_period: Duration,
+    /// Trusted root CA certificate to use in https APIs.
+    pub ssl_ca_cert: Option<Certificate>,
 
     /// Current availability zone. Used for traffic metrics.
     pub availability_zone: Option<String>,
@@ -101,7 +103,7 @@ pub struct PageServerConf {
 
     pub remote_storage_config: Option<RemoteStorageConfig>,
 
-    pub default_tenant_conf: crate::tenant::config::TenantConf,
+    pub default_tenant_conf: pageserver_api::config::TenantConfigToml,
 
     /// Storage broker endpoints to connect to.
     pub broker_endpoint: Uri,
@@ -333,6 +335,7 @@ impl PageServerConf {
             ssl_key_file,
             ssl_cert_file,
             ssl_cert_reload_period,
+            ssl_ca_file,
             availability_zone,
             wait_lsn_timeout,
             wal_redo_timeout,
@@ -478,6 +481,13 @@ impl PageServerConf {
             validate_wal_contiguity: validate_wal_contiguity.unwrap_or(false),
             load_previous_heatmap: load_previous_heatmap.unwrap_or(true),
             generate_unarchival_heatmap: generate_unarchival_heatmap.unwrap_or(true),
+            ssl_ca_cert: match ssl_ca_file {
+                Some(ssl_ca_file) => {
+                    let buf = std::fs::read(ssl_ca_file)?;
+                    Some(Certificate::from_pem(&buf)?)
+                }
+                None => None,
+            },
         };
 
         // ------------------------------------------------------------

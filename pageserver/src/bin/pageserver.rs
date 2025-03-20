@@ -17,7 +17,7 @@ use metrics::launch_timestamp::{LaunchTimestamp, set_launch_timestamp_metric};
 use metrics::set_build_info_metric;
 use nix::sys::socket::{setsockopt, sockopt};
 use pageserver::config::{PageServerConf, PageserverIdentity};
-use pageserver::controller_upcall_client::ControllerUpcallClient;
+use pageserver::controller_upcall_client::StorageControllerUpcallClient;
 use pageserver::deletion_queue::DeletionQueue;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
@@ -235,6 +235,7 @@ fn initialize_config(
             .context("build toml deserializer")?,
     )
     .context("deserialize config toml")?;
+
     let conf = PageServerConf::parse_and_validate(identity.id, config_toml, workdir)
         .context("runtime-validation of config toml")?;
 
@@ -428,7 +429,7 @@ fn start_pageserver(
     // Set up deletion queue
     let (deletion_queue, deletion_workers) = DeletionQueue::new(
         remote_storage.clone(),
-        ControllerUpcallClient::new(conf, &shutdown_pageserver),
+        StorageControllerUpcallClient::new(conf, &shutdown_pageserver)?,
         conf,
     );
     deletion_workers.spawn_with(BACKGROUND_RUNTIME.handle());
