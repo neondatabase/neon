@@ -40,6 +40,9 @@ jobs:
   run-random-rests:
     needs: [ build-build-tools-image ]
     runs-on: ubuntu-22.04
+    permissions:
+      id-token: write
+      statuses: write
 
     strategy:
       fail-fast: false
