@@ -10,6 +10,11 @@ on:
         type: string
         required: true
 
+  workflow_run:
+    workflows: ["Build and Test"]
+    types:
+      - completed
+
 defaults:
   run:
     shell: bash -euxo pipefail {0}
