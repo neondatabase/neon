@@ -460,7 +460,7 @@ def test_api_random(
         num_operations = int(num_ops_env)
     else:
         num_operations = 250
-    pg_bin.run_capture(
+    pg_bin.run(
         ["pgbench", "-i", "-I", "dtGvp", "-s100"], env=project.main_branch.connect_env
     )
     for _ in range(num_operations):
