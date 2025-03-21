@@ -1,8 +1,8 @@
-# Random Operations Test for Neon API Stability
+# Random Operations Test for Neon Stability
 
 ## Problem Statement
 
-Neon needs robust testing of its API stability to ensure reliability for users. The random operations test addresses this by continuously exercising the API with unpredictable sequences of operations, helping to identify edge cases and potential issues that might not be caught by deterministic tests.
+Neon needs robust testing of Neon's stability to ensure reliability for users. The random operations test addresses this by continuously exercising the API with unpredictable sequences of operations, helping to identify edge cases and potential issues that might not be caught by deterministic tests.
 
 ### Key Components
 
