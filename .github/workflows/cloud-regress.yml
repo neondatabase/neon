@@ -4,11 +4,11 @@ on:
   schedule:
     # * is a special character in YAML so you have to quote this string
     #          ┌───────────── minute (0 - 59)
-    #          │ ┌───────────── hour (0 - 23)
-    #          │ │ ┌───────────── day of the month (1 - 31)
-    #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
-    #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
-    - cron:  '23 02 * * *' # run once a day, timezone is utc
+    #          │  ┌───────────── hour (0 - 23)
+    #          │  │  ┌───────────── day of the month (1 - 31)
+    #          │  │  │ ┌───────────── month (1 - 12 or JAN-DEC)
+    #          │  │  │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
+    - cron:  '23 */2 * * *' # runs every 2 hours
   workflow_dispatch:
     inputs:
       random_seed:
@@ -52,10 +52,9 @@ jobs:
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init --user root
-
     steps:
       - uses: actions/checkout@v4
 
