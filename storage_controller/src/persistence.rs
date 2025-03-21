@@ -997,10 +997,11 @@ impl Persistence {
                 // Clear sharding flag
                 let updated = diesel::update(tenant_shards)
                     .filter(tenant_id.eq(split_tenant_id.to_string()))
+                    .filter(shard_count.eq(new_shard_count.literal() as i32))
                     .set((splitting.eq(0),))
                     .execute(conn)
                     .await?;
-                debug_assert!(updated > 0);
+                assert!(updated == new_shard_count.count() as usize);
 
                 Ok(())
             })

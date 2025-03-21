@@ -5456,6 +5456,8 @@ impl Service {
             }
         }
 
+        pausable_failpoint!("shard-split-pre-complete");
+
         // TODO: if the pageserver restarted concurrently with our split API call,
         // the actual generation of the child shard might differ from the generation
         // we expect it to have.  In order for our in-database generation to end up
