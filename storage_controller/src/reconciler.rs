@@ -762,7 +762,9 @@ impl Reconciler {
         Ok(())
     }
 
-    async fn maybe_refresh_observed(&mut self) -> Result<(), ReconcileError> {
+    /// Returns true if the observed state of the attached location was refreshed
+    /// and false otherwise.
+    async fn maybe_refresh_observed(&mut self) -> Result<bool, ReconcileError> {
         // If the attached node has uncertain state, read it from the pageserver before proceeding: this
         // is important to avoid spurious generation increments.
         //
@@ -772,7 +774,7 @@ impl Reconciler {
 
         let Some(attached_node) = self.intent.attached.as_ref() else {
             // Nothing to do
-            return Ok(());
+            return Ok(false);
         };
 
         if matches!(
@@ -817,7 +819,7 @@ impl Reconciler {
             }
         }
 
-        Ok(())
+        Ok(true)
     }
 
     /// Reconciling a tenant makes API calls to pageservers until the observed state
@@ -833,7 +835,7 @@ impl Reconciler {
     /// state where it still requires later reconciliation.
     pub(crate) async fn reconcile(&mut self) -> Result<(), ReconcileError> {
         // Prepare: if we have uncertain `observed` state for our would-be attachement location, then refresh it
-        self.maybe_refresh_observed().await?;
+        let refreshed = self.maybe_refresh_observed().await?;
 
         // Special case: live migration
         self.maybe_live_migrate().await?;
@@ -857,8 +859,14 @@ impl Reconciler {
             );
             match self.observed.locations.get(&node.get_id()) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {
-                    // Nothing to do
-                    tracing::info!(node_id=%node.get_id(), "Observed configuration already correct.")
+                    if refreshed {
+                        tracing::info!(
+                            node_id=%node.get_id(), "Observed configuration correct after refresh. Notifying compute.");
+                        self.compute_notify().await?;
+                    } else {
+                        // Nothing to do
+                        tracing::info!(node_id=%node.get_id(), "Observed configuration already correct.");
+                    }
                 }
                 observed => {
                     // In all cases other than a matching observed configuration, we will
