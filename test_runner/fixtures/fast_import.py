@@ -12,6 +12,7 @@ from _pytest.config import Config
 from fixtures.log_helper import log
 from fixtures.neon_cli import AbstractNeonCli
 from fixtures.pg_version import PgVersion
+from fixtures.remote_storage import MockS3Server
 
 
 class FastImport(AbstractNeonCli):
@@ -110,6 +111,18 @@ class FastImport(AbstractNeonCli):
 
         self.cmd = self.raw_cli(args)
         return self.cmd
+
+    def set_aws_creds(self, mock_s3_server: MockS3Server, extra_env: dict[str, str] | None = None):
+        if self.extra_env is None:
+            self.extra_env = {}
+        self.extra_env["AWS_ACCESS_KEY_ID"] = mock_s3_server.access_key()
+        self.extra_env["AWS_SECRET_ACCESS_KEY"] = mock_s3_server.secret_key()
+        self.extra_env["AWS_SESSION_TOKEN"] = mock_s3_server.session_token()
+        self.extra_env["AWS_REGION"] = mock_s3_server.region()
+        self.extra_env["AWS_ENDPOINT_URL"] = mock_s3_server.endpoint()
+
+        if extra_env is not None:
+            self.extra_env.update(extra_env)
 
     def __enter__(self):
         return self

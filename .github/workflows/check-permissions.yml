@@ -18,6 +18,11 @@ jobs:
   check-permissions:
     runs-on: ubuntu-22.04
     steps:
+    - name: Harden the runner (Audit all outbound calls)
+      uses: step-security/harden-runner@v2
+      with:
+        egress-policy: audit
+
     - name: Disallow CI runs on PRs from forks
       if: |
         inputs.github-event-name  == 'pull_request' &&

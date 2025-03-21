@@ -20,7 +20,7 @@ use utils::sync::gate::Gate;
 use self::downloader::{SecondaryDetail, downloader_task};
 use self::heatmap_uploader::heatmap_uploader_task;
 use super::GetTenantError;
-use super::config::{SecondaryLocationConfig, TenantConfOpt};
+use super::config::SecondaryLocationConfig;
 use super::mgr::TenantManager;
 use super::span::debug_assert_current_span_has_tenant_id;
 use super::storage_layer::LayerName;
@@ -98,11 +98,11 @@ pub(crate) struct SecondaryTenant {
 
     pub(crate) gate: Gate,
 
-    // Secondary mode does not need the full shard identity or the TenantConfOpt.  However,
+    // Secondary mode does not need the full shard identity or the pageserver_api::models::TenantConfig.  However,
     // storing these enables us to report our full LocationConf, enabling convenient reconciliation
     // by the control plane (see [`Self::get_location_conf`])
     shard_identity: ShardIdentity,
-    tenant_conf: std::sync::Mutex<TenantConfOpt>,
+    tenant_conf: std::sync::Mutex<pageserver_api::models::TenantConfig>,
 
     // Internal state used by the Downloader.
     detail: std::sync::Mutex<SecondaryDetail>,
@@ -121,7 +121,7 @@ impl SecondaryTenant {
     pub(crate) fn new(
         tenant_shard_id: TenantShardId,
         shard_identity: ShardIdentity,
-        tenant_conf: TenantConfOpt,
+        tenant_conf: pageserver_api::models::TenantConfig,
         config: &SecondaryLocationConfig,
     ) -> Arc<Self> {
         let tenant_id = tenant_shard_id.tenant_id.to_string();
@@ -177,7 +177,7 @@ impl SecondaryTenant {
         self.detail.lock().unwrap().config = config.clone();
     }
 
-    pub(crate) fn set_tenant_conf(&self, config: &TenantConfOpt) {
+    pub(crate) fn set_tenant_conf(&self, config: &pageserver_api::models::TenantConfig) {
         *(self.tenant_conf.lock().unwrap()) = config.clone();
     }
 
@@ -197,7 +197,7 @@ impl SecondaryTenant {
             shard_number: self.tenant_shard_id.shard_number.0,
             shard_count: self.tenant_shard_id.shard_count.literal(),
             shard_stripe_size: self.shard_identity.stripe_size.0,
-            tenant_conf: tenant_conf.into(),
+            tenant_conf,
         }
     }
 

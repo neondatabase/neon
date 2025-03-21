@@ -51,6 +51,22 @@ impl SafekeeperReconcilers {
             handle.cancel.cancel();
         }
     }
+    /// Cancel ongoing reconciles for the given timeline
+    ///
+    /// Specifying `None` here only removes reconciles for the tenant-global reconciliation,
+    /// instead of doing this for all timelines of the tenant.
+    ///
+    /// Callers must remove the reconciles from the db manually
+    pub(crate) fn cancel_reconciles_for_timeline(
+        &mut self,
+        node_id: NodeId,
+        tenant_id: TenantId,
+        timeline_id: Option<TimelineId>,
+    ) {
+        if let Some(handle) = self.reconcilers.get(&node_id) {
+            handle.cancel_reconciliation(tenant_id, timeline_id);
+        }
+    }
 }
 
 /// Initial load of the pending operations from the db
@@ -73,12 +89,21 @@ pub(crate) async fn load_schedule_requests(
         };
         let sk = Box::new(sk.clone());
         let tenant_id = TenantId::from_str(&op_persist.tenant_id)?;
-        let timeline_id = TimelineId::from_str(&op_persist.timeline_id)?;
+        let timeline_id = if !op_persist.timeline_id.is_empty() {
+            Some(TimelineId::from_str(&op_persist.timeline_id)?)
+        } else {
+            None
+        };
         let host_list = match op_persist.op_kind {
             SafekeeperTimelineOpKind::Delete => Vec::new(),
             SafekeeperTimelineOpKind::Exclude => Vec::new(),
             SafekeeperTimelineOpKind::Pull => {
                 // TODO this code is super hacky, it doesn't take migrations into account
+                let Some(timeline_id) = timeline_id else {
+                    anyhow::bail!(
+                        "timeline_id is empty for `pull` schedule request for {tenant_id}"
+                    );
+                };
                 let timeline_persist = service
                     .persistence
                     .get_timeline(tenant_id, timeline_id)
@@ -129,14 +154,15 @@ pub(crate) struct ScheduleRequest {
     pub(crate) safekeeper: Box<Safekeeper>,
     pub(crate) host_list: Vec<(NodeId, String)>,
     pub(crate) tenant_id: TenantId,
-    pub(crate) timeline_id: TimelineId,
+    pub(crate) timeline_id: Option<TimelineId>,
     pub(crate) generation: u32,
     pub(crate) kind: SafekeeperTimelineOpKind,
 }
 
 struct ReconcilerHandle {
     tx: UnboundedSender<(ScheduleRequest, Arc<CancellationToken>)>,
-    ongoing_tokens: Arc<ClashMap<(TenantId, TimelineId), Arc<CancellationToken>>>,
+    #[allow(clippy::type_complexity)]
+    ongoing_tokens: Arc<ClashMap<(TenantId, Option<TimelineId>), Arc<CancellationToken>>>,
     cancel: CancellationToken,
 }
 
@@ -145,7 +171,7 @@ impl ReconcilerHandle {
     fn new_token_slot(
         &self,
         tenant_id: TenantId,
-        timeline_id: TimelineId,
+        timeline_id: Option<TimelineId>,
     ) -> Arc<CancellationToken> {
         let entry = self.ongoing_tokens.entry((tenant_id, timeline_id));
         if let Entry::Occupied(entry) = &entry {
@@ -153,6 +179,12 @@ impl ReconcilerHandle {
             cancel.cancel();
         }
         entry.insert(Arc::new(self.cancel.child_token())).clone()
+    }
+    /// Cancel an ongoing reconciliation
+    fn cancel_reconciliation(&self, tenant_id: TenantId, timeline_id: Option<TimelineId>) {
+        if let Some((_, cancel)) = self.ongoing_tokens.remove(&(tenant_id, timeline_id)) {
+            cancel.cancel();
+        }
     }
     fn schedule_reconcile(&self, req: ScheduleRequest) {
         let cancel = self.new_token_slot(req.tenant_id, req.timeline_id);
@@ -206,7 +238,7 @@ impl SafekeeperReconciler {
                     "reconcile_one",
                     ?kind,
                     %tenant_id,
-                    %timeline_id
+                    ?timeline_id
                 ))
                 .await;
         }
@@ -215,6 +247,12 @@ impl SafekeeperReconciler {
         let req_host = req.safekeeper.skp.host.clone();
         match req.kind {
             SafekeeperTimelineOpKind::Pull => {
+                let Some(timeline_id) = req.timeline_id else {
+                    tracing::warn!(
+                        "ignoring invalid schedule request: timeline_id is empty for `pull`"
+                    );
+                    return;
+                };
                 let our_id = req.safekeeper.get_id();
                 let http_hosts = req
                     .host_list
@@ -225,7 +263,7 @@ impl SafekeeperReconciler {
                 let pull_req = PullTimelineRequest {
                     http_hosts,
                     tenant_id: req.tenant_id,
-                    timeline_id: req.timeline_id,
+                    timeline_id,
                 };
                 self.reconcile_inner(
                     req,
@@ -243,7 +281,12 @@ impl SafekeeperReconciler {
             SafekeeperTimelineOpKind::Exclude => {
                 // TODO actually exclude instead of delete here
                 let tenant_id = req.tenant_id;
-                let timeline_id = req.timeline_id;
+                let Some(timeline_id) = req.timeline_id else {
+                    tracing::warn!(
+                        "ignoring invalid schedule request: timeline_id is empty for `exclude`"
+                    );
+                    return;
+                };
                 self.reconcile_inner(
                     req,
                     async |client| client.delete_timeline(tenant_id, timeline_id).await,
@@ -256,16 +299,27 @@ impl SafekeeperReconciler {
             }
             SafekeeperTimelineOpKind::Delete => {
                 let tenant_id = req.tenant_id;
-                let timeline_id = req.timeline_id;
-                self.reconcile_inner(
-                    req,
-                    async |client| client.delete_timeline(tenant_id, timeline_id).await,
-                    |_resp| {
-                        tracing::info!("deleted timeline from {req_host}");
-                    },
-                    req_cancel,
-                )
-                .await;
+                if let Some(timeline_id) = req.timeline_id {
+                    self.reconcile_inner(
+                        req,
+                        async |client| client.delete_timeline(tenant_id, timeline_id).await,
+                        |_resp| {
+                            tracing::info!("deleted timeline from {req_host}");
+                        },
+                        req_cancel,
+                    )
+                    .await;
+                } else {
+                    self.reconcile_inner(
+                        req,
+                        async |client| client.delete_tenant(tenant_id).await,
+                        |_resp| {
+                            tracing::info!("deleted tenant from {req_host}");
+                        },
+                        req_cancel,
+                    )
+                    .await;
+                }
             }
         }
     }

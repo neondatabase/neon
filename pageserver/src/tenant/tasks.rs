@@ -268,7 +268,7 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 error_run += 1;
                 let backoff =
                     exponential_backoff_duration(error_run, BASE_BACKOFF_SECS, MAX_BACKOFF_SECS);
-                log_compaction_error(&err, error_run, backoff, cancel.is_cancelled());
+                log_compaction_error(&err, Some((error_run, backoff)), cancel.is_cancelled());
                 continue;
             }
         }
@@ -281,10 +281,9 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
     }
 }
 
-fn log_compaction_error(
+pub(crate) fn log_compaction_error(
     err: &CompactionError,
-    error_count: u32,
-    sleep_duration: Duration,
+    retry_info: Option<(u32, Duration)>,
     task_cancelled: bool,
 ) {
     use CompactionError::*;
@@ -318,14 +317,26 @@ fn log_compaction_error(
         }
     };
 
-    match level {
-        Level::ERROR => {
-            error!("Compaction failed {error_count} times, retrying in {sleep_duration:?}: {err:#}")
+    if let Some((error_count, sleep_duration)) = retry_info {
+        match level {
+            Level::ERROR => {
+                error!(
+                    "Compaction failed {error_count} times, retrying in {sleep_duration:?}: {err:#}"
+                )
+            }
+            Level::INFO => {
+                info!(
+                    "Compaction failed {error_count} times, retrying in {sleep_duration:?}: {err:#}"
+                )
+            }
+            level => unimplemented!("unexpected level {level:?}"),
         }
-        Level::INFO => {
-            info!("Compaction failed {error_count} times, retrying in {sleep_duration:?}: {err:#}")
+    } else {
+        match level {
+            Level::ERROR => error!("Compaction failed: {err:#}"),
+            Level::INFO => info!("Compaction failed: {err:#}"),
+            level => unimplemented!("unexpected level {level:?}"),
         }
-        level => unimplemented!("unexpected level {level:?}"),
     }
 }
 

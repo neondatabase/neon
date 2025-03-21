@@ -87,6 +87,7 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                 let authenticated_router = Router::<Arc<ComputeNode>>::new()
                     .route("/check_writability", post(check_writability::is_writable))
                     .route("/configure", post(configure::configure))
+                    .route("/configure_telemetry", post(configure::configure_telemetry))
                     .route("/database_schema", get(database_schema::get_schema_dump))
                     .route("/dbs_and_roles", get(dbs_and_roles::get_catalog_objects))
                     .route("/insights", get(insights::get_insights))

@@ -23,8 +23,13 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
       - name: Add comment
-        uses: thollander/actions-comment-pull-request@v3
+        uses: thollander/actions-comment-pull-request@65f9e5c9a1f2cd378bd74b2e057c9736982a8e74 # v3
         with:
           comment-tag: ${{ github.job }}
           pr-number: ${{ github.event.number }}

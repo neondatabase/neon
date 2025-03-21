@@ -29,7 +29,7 @@ services:
 
   pageserver:
     restart: always
-    image: ${REPOSITORY:-neondatabase}/neon:${TAG:-latest}
+    image: ${REPOSITORY:-ghcr.io/neondatabase}/neon:${TAG:-latest}
     environment:
       - AWS_ACCESS_KEY_ID=minio
       - AWS_SECRET_ACCESS_KEY=password
@@ -45,7 +45,7 @@ services:
 
   safekeeper1:
     restart: always
-    image: ${REPOSITORY:-neondatabase}/neon:${TAG:-latest}
+    image: ${REPOSITORY:-ghcr.io/neondatabase}/neon:${TAG:-latest}
     environment:
       - SAFEKEEPER_ADVERTISE_URL=safekeeper1:5454
       - SAFEKEEPER_ID=1
@@ -75,7 +75,7 @@ services:
 
   safekeeper2:
     restart: always
-    image: ${REPOSITORY:-neondatabase}/neon:${TAG:-latest}
+    image: ${REPOSITORY:-ghcr.io/neondatabase}/neon:${TAG:-latest}
     environment:
       - SAFEKEEPER_ADVERTISE_URL=safekeeper2:5454
       - SAFEKEEPER_ID=2
@@ -105,7 +105,7 @@ services:
 
   safekeeper3:
     restart: always
-    image: ${REPOSITORY:-neondatabase}/neon:${TAG:-latest}
+    image: ${REPOSITORY:-ghcr.io/neondatabase}/neon:${TAG:-latest}
     environment:
       - SAFEKEEPER_ADVERTISE_URL=safekeeper3:5454
       - SAFEKEEPER_ID=3
@@ -135,7 +135,7 @@ services:
 
   storage_broker:
     restart: always
-    image: ${REPOSITORY:-neondatabase}/neon:${TAG:-latest}
+    image: ${REPOSITORY:-ghcr.io/neondatabase}/neon:${TAG:-latest}
     ports:
       - 50051:50051
     command:
@@ -147,7 +147,7 @@ services:
     build:
       context: ./compute_wrapper/
       args:
-        - REPOSITORY=${REPOSITORY:-neondatabase}
+        - REPOSITORY=${REPOSITORY:-ghcr.io/neondatabase}
         - COMPUTE_IMAGE=compute-node-v${PG_VERSION:-16}
         - TAG=${COMPUTE_TAG:-${TAG:-latest}}
         - http_proxy=${http_proxy:-}
@@ -186,7 +186,7 @@ services:
 
   neon-test-extensions:
     profiles: ["test-extensions"]
-    image: ${REPOSITORY:-neondatabase}/neon-test-extensions-v${PG_TEST_VERSION:-16}:${TEST_EXTENSIONS_TAG:-${TAG:-latest}}
+    image: ${REPOSITORY:-ghcr.io/neondatabase}/neon-test-extensions-v${PG_TEST_VERSION:-16}:${TEST_EXTENSIONS_TAG:-${TAG:-latest}}
     environment:
       - PGPASSWORD=cloud_admin
     entrypoint:

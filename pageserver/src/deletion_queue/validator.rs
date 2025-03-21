@@ -25,7 +25,7 @@ use tracing::{debug, info, warn};
 use super::deleter::DeleterMessage;
 use super::{DeletionHeader, DeletionList, DeletionQueueError, FlushOp, VisibleLsnUpdates};
 use crate::config::PageServerConf;
-use crate::controller_upcall_client::{ControlPlaneGenerationsApi, RetryForeverError};
+use crate::controller_upcall_client::{RetryForeverError, StorageControllerUpcallApi};
 use crate::metrics;
 use crate::virtual_file::MaybeFatalIo;
 
@@ -46,7 +46,7 @@ pub(super) enum ValidatorQueueMessage {
 }
 pub(super) struct Validator<C>
 where
-    C: ControlPlaneGenerationsApi,
+    C: StorageControllerUpcallApi,
 {
     conf: &'static PageServerConf,
     rx: tokio::sync::mpsc::Receiver<ValidatorQueueMessage>,
@@ -80,7 +80,7 @@ where
 
 impl<C> Validator<C>
 where
-    C: ControlPlaneGenerationsApi,
+    C: StorageControllerUpcallApi,
 {
     pub(super) fn new(
         conf: &'static PageServerConf,

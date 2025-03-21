@@ -3,7 +3,7 @@ name: Create Release Branch
 on:
   schedule:
     # It should be kept in sync with if-condition in jobs
-    - cron: '0 6 * * THU' # Proxy release
+    - cron: '0 6 * * TUE' # Proxy release
     - cron: '0 6 * * FRI' # Storage release
     - cron: '0 7 * * FRI' # Compute release
   workflow_dispatch:
@@ -43,7 +43,7 @@ jobs:
       ci-access-token: ${{ secrets.CI_ACCESS_TOKEN }}
 
   create-proxy-release-branch:
-    if: ${{ github.event.schedule == '0 6 * * THU' || inputs.create-proxy-release-branch }}
+    if: ${{ github.event.schedule == '0 6 * * TUE' || inputs.create-proxy-release-branch }}
 
     permissions:
       contents: write

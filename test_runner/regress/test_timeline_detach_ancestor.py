@@ -812,11 +812,13 @@ def test_timeline_ancestor_detach_errors(neon_env_builder: NeonEnvBuilder, shard
 
     for ps in pageservers.values():
         ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+        # We make /detach_ancestor requests that are intended to fail.
+        # It's expected that storcon drops requests to other pageservers after
+        # it gets the first error (https://github.com/neondatabase/neon/issues/11177)
         ps.allowed_errors.extend(
             [
                 ".* WARN .* path=/v1/tenant/.*/timeline/.*/detach_ancestor request_id=.*: request was dropped before completing",
-                # rare error logging, which is hard to reproduce without instrumenting responding with random sleep
-                '.* ERROR .* path=/v1/tenant/.*/timeline/.*/detach_ancestor request_id=.*: Cancelled request finished with an error: Conflict\\("no ancestors"\\)',
+                ".* ERROR .* path=/v1/tenant/.*/timeline/.*/detach_ancestor request_id=.*: Cancelled request finished with an error.*",
             ]
         )
 

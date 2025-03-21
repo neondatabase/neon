@@ -77,7 +77,7 @@
 # build_and_test.yml github workflow for how that's done.
 
 ARG PG_VERSION
-ARG REPOSITORY=neondatabase
+ARG REPOSITORY=ghcr.io/neondatabase
 ARG IMAGE=build-tools
 ARG TAG=pinned
 ARG BUILD_TAG

@@ -1,0 +1,19 @@
+-- Test ULID error handling
+-- Test invalid ULID string (too short)
+SELECT '01GV5PA9EQG7D82Q3Y4PKBZSY'::ulid;
+ERROR:  invalid input syntax for type ulid: "01GV5PA9EQG7D82Q3Y4PKBZSY": invalid length
+LINE 1: SELECT '01GV5PA9EQG7D82Q3Y4PKBZSY'::ulid;
+               ^
+-- Test invalid ULID string (invalid character)
+SELECT '01GV5PA9EQG7D82Q3Y4PKBZSYU'::ulid;
+ERROR:  invalid input syntax for type ulid: "01GV5PA9EQG7D82Q3Y4PKBZSYU": invalid character
+LINE 1: SELECT '01GV5PA9EQG7D82Q3Y4PKBZSYU'::ulid;
+               ^
+-- Test NULL handling
+SELECT 'NULL to ulid conversion returns NULL' as test_name,
+       NULL::ulid IS NULL as result;
+              test_name               | result 
+--------------------------------------+--------
+ NULL to ulid conversion returns NULL | t
+(1 row)
+

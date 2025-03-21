@@ -56,6 +56,7 @@ use crate::tenant::storage_layer::merge_iterator::MergeIterator;
 use crate::tenant::storage_layer::{
     AsLayerDesc, PersistentLayerDesc, PersistentLayerKey, ValueReconstructState,
 };
+use crate::tenant::tasks::log_compaction_error;
 use crate::tenant::timeline::{
     DeltaLayerWriter, ImageLayerCreationOutcome, ImageLayerWriter, IoConcurrency, Layer,
     ResidentLayer, drop_rlock,
@@ -435,6 +436,20 @@ impl GcCompactionQueue {
 
     /// Take a job from the queue and process it. Returns if there are still pending tasks.
     pub async fn iteration(
+        &self,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
+        gc_block: &GcBlock,
+        timeline: &Arc<Timeline>,
+    ) -> Result<CompactionOutcome, CompactionError> {
+        let res = self.iteration_inner(cancel, ctx, gc_block, timeline).await;
+        if let Err(err) = &res {
+            log_compaction_error(err, None, cancel.is_cancelled());
+        }
+        res
+    }
+
+    async fn iteration_inner(
         &self,
         cancel: &CancellationToken,
         ctx: &RequestContext,

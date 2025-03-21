@@ -19,6 +19,7 @@ use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
@@ -552,13 +553,15 @@ impl InMemoryLayer {
         tenant_shard_id: TenantShardId,
         start_lsn: Lsn,
         gate: &utils::sync::gate::Gate,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<InMemoryLayer> {
         trace!(
             "initializing new empty InMemoryLayer for writing on timeline {timeline_id} at {start_lsn}"
         );
 
-        let file = EphemeralFile::create(conf, tenant_shard_id, timeline_id, gate, ctx).await?;
+        let file =
+            EphemeralFile::create(conf, tenant_shard_id, timeline_id, gate, cancel, ctx).await?;
         let key = InMemoryLayerFileId(file.page_cache_file_id());
 
         Ok(InMemoryLayer {

@@ -54,7 +54,12 @@ def test_threshold_based_eviction(
 
     ps_http = env.pageserver.http_client()
     vps_http = env.storage_controller.pageserver_api()
-    assert vps_http.tenant_config(tenant_id).effective_config["eviction_policy"] is None
+    # check config on pageserver, set via storcon; https://github.com/neondatabase/neon/issues/9621
+
+    assert ps_http.tenant_config(tenant_id).tenant_specific_overrides == {}
+    assert ps_http.tenant_config(tenant_id).effective_config["eviction_policy"] == {
+        "kind": "NoEviction"
+    }
 
     eviction_threshold = 10
     eviction_period = 2
@@ -68,7 +73,7 @@ def test_threshold_based_eviction(
             },
         },
     )
-    assert vps_http.tenant_config(tenant_id).effective_config["eviction_policy"] == {
+    assert ps_http.tenant_config(tenant_id).effective_config["eviction_policy"] == {
         "kind": "LayerAccessThreshold",
         "threshold": f"{eviction_threshold}s",
         "period": f"{eviction_period}s",
@@ -77,7 +82,7 @@ def test_threshold_based_eviction(
     # restart because changing tenant config is not instant
     env.pageserver.restart()
 
-    assert vps_http.tenant_config(tenant_id).effective_config["eviction_policy"] == {
+    assert ps_http.tenant_config(tenant_id).effective_config["eviction_policy"] == {
         "kind": "LayerAccessThreshold",
         "threshold": f"{eviction_threshold}s",
         "period": f"{eviction_period}s",

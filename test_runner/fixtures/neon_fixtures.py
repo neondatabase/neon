@@ -469,6 +469,9 @@ class NeonEnvBuilder:
         # Flag to enable https listener in safekeeper, generate local ssl certs,
         # and force storage controller to use https for safekeeper api.
         self.use_https_safekeeper_api: bool = False
+        # Flag to use https listener in storage controller, generate local ssl certs,
+        # and force pageservers and neon_local to use https for storage controller api.
+        self.use_https_storage_controller_api: bool = False
 
         self.pageserver_virtual_file_io_engine: str | None = pageserver_virtual_file_io_engine
         self.pageserver_get_vectored_concurrent_io: str | None = (
@@ -1067,7 +1070,9 @@ class NeonEnv:
         self.initial_timeline = config.initial_timeline
 
         self.generate_local_ssl_certs = (
-            config.use_https_pageserver_api or config.use_https_safekeeper_api
+            config.use_https_pageserver_api
+            or config.use_https_safekeeper_api
+            or config.use_https_storage_controller_api
         )
         self.ssl_ca_file = (
             self.repo_dir.joinpath("rootCA.crt") if self.generate_local_ssl_certs else None
@@ -1096,7 +1101,10 @@ class NeonEnv:
 
             self.storage_controller_port = config.storage_controller_port_override
             self.storage_controller = NeonProxiedStorageController(
-                self, config.storage_controller_port_override, config.auth_enabled
+                self,
+                config.storage_controller_port_override,
+                config.auth_enabled,
+                config.use_https_storage_controller_api,
             )
         else:
             # Find two adjacent ports for storage controller and its postgres DB.  This
@@ -1110,7 +1118,10 @@ class NeonEnv:
 
             self.storage_controller_port = storage_controller_port
             self.storage_controller = NeonStorageController(
-                self, storage_controller_port, config.auth_enabled
+                self,
+                storage_controller_port,
+                config.auth_enabled,
+                config.use_https_storage_controller_api,
             )
 
             log.info(
@@ -1320,6 +1331,28 @@ class NeonEnv:
 
         for f in futs:
             f.result()
+
+        # Last step: register safekeepers at the storage controller
+        if (
+            self.storage_controller_config is not None
+            and self.storage_controller_config.get("timelines_onto_safekeepers") is True
+        ):
+            for sk_id, sk in enumerate(self.safekeepers):
+                body = {
+                    "id": sk_id,
+                    "created_at": "2023-10-25T09:11:25Z",
+                    "updated_at": "2024-08-28T11:32:43Z",
+                    "region_id": "aws-us-east-2",
+                    "host": "127.0.0.1",
+                    "port": sk.port.pg,
+                    "http_port": sk.port.http,
+                    "https_port": None,
+                    "version": 5957,
+                    "availability_zone_id": f"us-east-2b-{sk_id}",
+                }
+
+                self.storage_controller.on_safekeeper_deploy(sk_id, body)
+                self.storage_controller.safekeeper_scheduling_policy(sk_id, "Active")
 
     def stop(self, immediate=False, ps_assert_metric_no_errors=False, fail_on_endpoint_errors=True):
         """
@@ -1755,14 +1788,16 @@ class StorageControllerMigrationConfig:
 
 
 class NeonStorageController(MetricsGetter, LogUtils):
-    def __init__(self, env: NeonEnv, port: int, auth_enabled: bool):
+    def __init__(self, env: NeonEnv, port: int, auth_enabled: bool, use_https: bool):
         self.env = env
         self.port: int = port
-        self.api: str = f"http://127.0.0.1:{port}"
+        scheme = "https" if use_https else "http"
+        self.api: str = f"{scheme}://127.0.0.1:{port}"
         self.running = False
         self.auth_enabled = auth_enabled
         self.allowed_errors: list[str] = DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS
         self.logfile = self.env.repo_dir / "storage_controller_1" / "storage_controller.log"
+        self.ssl_ca_file = env.ssl_ca_file
 
     def start(
         self,
@@ -1832,6 +1867,8 @@ class NeonStorageController(MetricsGetter, LogUtils):
         return PageserverHttpClient(self.port, lambda: True, auth_token, *args, **kwargs)
 
     def request(self, method, *args, **kwargs) -> requests.Response:
+        if self.ssl_ca_file is not None:
+            kwargs["verify"] = self.ssl_ca_file
         resp = requests.request(method, *args, **kwargs)
         NeonStorageController.raise_api_exception(resp)
 
@@ -2543,8 +2580,8 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
 
 class NeonProxiedStorageController(NeonStorageController):
-    def __init__(self, env: NeonEnv, proxy_port: int, auth_enabled: bool):
-        super().__init__(env, proxy_port, auth_enabled)
+    def __init__(self, env: NeonEnv, proxy_port: int, auth_enabled: bool, use_https: bool):
+        super().__init__(env, proxy_port, auth_enabled, use_https)
         self.instances: dict[int, dict[str, Any]] = {}
 
     def start(

@@ -48,6 +48,7 @@
 #include "hll.h"
 #include "bitmap.h"
 #include "neon.h"
+#include "neon_lwlsncache.h"
 #include "neon_perf_counters.h"
 
 #define CriticalAssert(cond) do if (!(cond)) elog(PANIC, "LFC: assertion %s failed at %s:%d: ", #cond, __FILE__, __LINE__); while (0)
@@ -999,7 +1000,9 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 		LWLockRelease(lfc_lock);
 		return false;
 	}
-	lwlsn = GetLastWrittenLSN(rinfo, forknum, blkno);
+	
+	lwlsn = neon_get_lwlsn(rinfo, forknum, blkno);
+
 	if (lwlsn > lsn)
 	{
 		elog(DEBUG1, "Skip LFC write for %d because LwLSN=%X/%X is greater than not_nodified_since LSN %X/%X",
@@ -1009,6 +1012,9 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 	}
 
 	entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_ENTER, &found);
+
+	tag.blockNum = blkno;
+	addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
 
 	if (found)
 	{
@@ -1159,6 +1165,13 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		cv = &lfc_ctl->cv[hash % N_COND_VARS];
 
 		entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_ENTER, &found);
+
+		/* Approximate working set for the blocks assumed in this entry */
+		for (int i = 0; i < blocks_in_chunk; i++)
+		{
+			tag.blockNum = blkno + i;
+			addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
+		}
 
 		if (found)
 		{
