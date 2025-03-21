@@ -308,6 +308,75 @@ impl ComputeNode {
         Ok(())
     }
 
+    // Similar to apply_spec_sql, but for the simplified set of operations
+    // that we perform even when `pg_skip_catalog_updates` is set.
+    //
+    // Keep the list of operations as small as possible,
+    // as it will be run on every spec change and affect compute start time.
+    pub fn apply_spec_sql_non_skippable(
+        &self,
+        spec: Arc<ComputeSpec>,
+        conf: Arc<tokio_postgres::Config>,
+    ) -> Result<()> {
+        info!("Applying non_skippable config",);
+        debug!("Config: {:?}", spec);
+
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(async {
+            let client = Self::get_maintenance_client(&conf).await?;
+            let spec = spec.clone();
+
+            let jwks_roles = Arc::new(
+                spec.as_ref()
+                    .local_proxy_config
+                    .iter()
+                    .flat_map(|it| &it.jwks)
+                    .flatten()
+                    .flat_map(|setting| &setting.role_names)
+                    .cloned()
+                    .collect::<HashSet<_>>(),
+            );
+
+            // NOTE: Here we assume that operations below don't use ctx
+            // TODO: refactor apply_operations() to accept ctx as option.
+            let ctx = Arc::new(tokio::sync::RwLock::new(MutableApplyContext {
+                roles: HashMap::new(),
+                dbs: HashMap::new(),
+            }));
+
+            let mut phases = vec![];
+
+            match spec.audit_log_level {
+                ComputeAudit::Hipaa => {
+                    phases.push(CreatePgauditExtension);
+                    phases.push(CreatePgauditlogtofileExtension);
+                    phases.push(DisablePostgresDBPgAudit);
+                }
+                ComputeAudit::Log => {
+                    phases.push(CreatePgauditExtension);
+                    phases.push(DisablePostgresDBPgAudit);
+                }
+                ComputeAudit::Disabled => {}
+            }
+
+            for phase in phases {
+                debug!("Applying phase {:?}", &phase);
+                apply_operations(
+                    spec.clone(),
+                    ctx.clone(),
+                    jwks_roles.clone(),
+                    phase,
+                    || async { Ok(&client) },
+                )
+                .await?;
+            }
+
+            Ok::<(), anyhow::Error>(())
+        })?;
+
+        Ok(())
+    }
+
     /// Apply SQL migrations of the RunInEachDatabase phase.
     ///
     /// May opt to not connect to databases that don't have any scheduled

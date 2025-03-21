@@ -1497,6 +1497,27 @@ impl ComputeNode {
         Ok::<(), anyhow::Error>(())
     }
 
+    /// Apply config operations that are not covered by `skip_pg_catalog_updates`
+    #[instrument(skip_all)]
+    pub fn apply_config_non_skippable(&self, compute_state: &ComputeState) -> Result<()> {
+        let conf = self.get_tokio_conn_conf(Some("compute_ctl:apply_config"));
+
+        let conf = Arc::new(conf);
+        let spec = Arc::new(
+            compute_state
+                .pspec
+                .as_ref()
+                .expect("spec must be set")
+                .spec
+                .clone(),
+        );
+
+        // Merge-apply spec & changes to PostgreSQL state.
+        self.apply_spec_sql_non_skippable(spec.clone(), conf.clone())?;
+
+        Ok::<(), anyhow::Error>(())
+    }
+
     // Wrapped this around `pg_ctl reload`, but right now we don't use
     // `pg_ctl` for start / stop.
     #[instrument(skip_all)]
@@ -1620,7 +1641,23 @@ impl ComputeNode {
                 );
             }
             self.pg_reload_conf()?;
+        } else {
+            // We need to run some operations even if skip_pg_catalog_updates is set
+            let pgdata_path = Path::new(&self.params.pgdata);
+            // temporarily reset max_cluster_size in config
+            // to avoid the possibility of hitting the limit, while we are applying config:
+            // creating new extensions, roles, etc...
+            config::with_compute_ctl_tmp_override(pgdata_path, "neon.max_cluster_size=-1", || {
+                self.pg_reload_conf()?;
+
+                self.apply_config_non_skippable(compute_state)?;
+
+                Ok(())
+            })?;
+
+            self.pg_reload_conf()?;
         }
+
         self.post_apply_config()?;
 
         Ok(())
