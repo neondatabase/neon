@@ -375,7 +375,7 @@ async fn async_main() -> anyhow::Result<()> {
         }
         StrictMode::Strict if args.use_local_compute_notifications => {
             anyhow::bail!(
-                "neither `--use-local-compute-notifications` is only permitted in `--dev` mode"
+                "`--use-local-compute-notifications` is only permitted in `--dev` mode"
             );
         }
         StrictMode::Strict => {
