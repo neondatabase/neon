@@ -73,7 +73,9 @@ def get_node_shard_counts(env: NeonEnv, tenant_ids):
 
 
 @pytest.mark.parametrize(**fixtures.utils.allpairs_versions())
-def test_storage_controller_smoke(neon_env_builder: NeonEnvBuilder, combination):
+def test_storage_controller_smoke(
+    neon_env_builder: NeonEnvBuilder, compute_reconfigure_listener: ComputeReconfigure, combination
+):
     """
     Test the basic lifecycle of a storage controller:
     - Restarting
@@ -83,6 +85,7 @@ def test_storage_controller_smoke(neon_env_builder: NeonEnvBuilder, combination)
     """
 
     neon_env_builder.num_pageservers = 3
+    neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
     env = neon_env_builder.init_configs()
 
     # Start services by hand so that we can skip a pageserver (this will start + register later)
@@ -2183,7 +2186,12 @@ def test_tenant_import(neon_env_builder: NeonEnvBuilder, shard_count, remote_sto
 
 @pytest.mark.parametrize(**fixtures.utils.allpairs_versions())
 @pytest.mark.parametrize("num_azs", [1, 2])
-def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder, num_azs: int, combination):
+def test_graceful_cluster_restart(
+    neon_env_builder: NeonEnvBuilder,
+    num_azs: int,
+    compute_reconfigure_listener: ComputeReconfigure,
+    combination,
+):
     """
     Graceful reststart of storage controller clusters use the drain and
     fill hooks in order to migrate attachments away from pageservers before
@@ -2195,6 +2203,7 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder, num_azs: int
     """
     neon_env_builder.num_azs = num_azs
     neon_env_builder.num_pageservers = 2
+    neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
     env = neon_env_builder.init_configs()
     env.start()
 
