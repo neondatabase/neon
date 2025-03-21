@@ -1614,10 +1614,16 @@ impl Service {
         let mut http_client = reqwest::Client::builder();
         // We intentionally disable the connection pool, so every request will create its own TCP connection.
         // It's especially important for heartbeaters to notice more network problems.
-        // TODO: It makes sense to create two clients: one without pooling for heartbeeters,
-        // and one within for everything else. But storcon now exits with `std::process:exit(0)` and doesn't
-        // close keep-alive connections gracefully. It leads to "connection broken" errors in pageservers and
-        // they may hang on graceful HTTP server shutdown waiting for keep-alive connections close by timeout.
+        //
+        // TODO: It makes sense to use this client only in heartbeaters and create a second one with
+        // connection pooling for everything else. But reqwest::Client may create a connection without
+        // ever using it (it uses hyper's Client under the hood):
+        // https://github.com/hyperium/hyper-util/blob/d51318df3461d40e5f5e5ca163cb3905ac960209/src/client/legacy/client.rs#L415
+        //
+        // Because of a bug in hyper0::Connection::graceful_shutdown such connections hang during
+        // graceful server shutdown: https://github.com/hyperium/hyper/issues/2730
+        //
+        // The bug has been fixed in hyper v1, so keep alive may be enabled only after we migrate to hyper1.
         http_client = http_client.pool_max_idle_per_host(0);
         if let Some(ssl_ca_cert) = &config.ssl_ca_cert {
             http_client = http_client.add_root_certificate(ssl_ca_cert.clone());
