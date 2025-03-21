@@ -81,6 +81,14 @@ pub(crate) static COMPUTE_CTL_UP: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub(crate) static PG_DOWNTIME_MS: Lazy<GenericGauge<AtomicF64>> = Lazy::new(|| {
+    register_gauge!(
+        "compute_pg_downtime_ms",
+        "Non-cumulative duration of Postgres downtime in ms; resets after successful check",
+    )
+    .expect("failed to define a metric")
+});
+
 pub fn collect() -> Vec<MetricFamily> {
     let mut metrics = COMPUTE_CTL_UP.collect();
     metrics.extend(INSTALLED_EXTENSIONS.collect());
@@ -88,5 +96,6 @@ pub fn collect() -> Vec<MetricFamily> {
     metrics.extend(REMOTE_EXT_REQUESTS_TOTAL.collect());
     metrics.extend(DB_MIGRATION_FAILED.collect());
     metrics.extend(AUDIT_LOG_DIR_SIZE.collect());
+    metrics.extend(PG_DOWNTIME_MS.collect());
     metrics
 }
