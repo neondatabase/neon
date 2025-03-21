@@ -21,9 +21,6 @@ on:
         description: "The number of operations to test"
         default: 250
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref_name }}
-
 defaults:
   run:
     shell: bash -euxo pipefail {0}
