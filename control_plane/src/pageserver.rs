@@ -56,6 +56,14 @@ impl PageServerNode {
             Certificate::from_pem(&buf).expect("CA certificate should be valid")
         });
 
+        let mut http_client = reqwest::Client::builder();
+        if let Some(ssl_ca_cert) = ssl_ca_cert {
+            http_client = http_client.add_root_certificate(ssl_ca_cert);
+        }
+        let http_client = http_client
+            .build()
+            .expect("Client constructs with no errors");
+
         let endpoint = if env.storage_controller.use_https_pageserver_api {
             format!(
                 "https://{}",
@@ -72,6 +80,7 @@ impl PageServerNode {
             conf: conf.clone(),
             env: env.clone(),
             http_client: mgmt_api::Client::new(
+                http_client,
                 endpoint,
                 {
                     match conf.http_auth_type {
@@ -83,9 +92,7 @@ impl PageServerNode {
                     }
                 }
                 .as_deref(),
-                ssl_ca_cert,
-            )
-            .expect("Client constructs with no errors"),
+            ),
         }
     }
 

@@ -395,9 +395,15 @@ async fn main() -> anyhow::Result<()> {
         None => None,
     };
 
+    let mut http_client = reqwest::Client::builder();
+    if let Some(ssl_ca_cert) = ssl_ca_cert {
+        http_client = http_client.add_root_certificate(ssl_ca_cert);
+    }
+    let http_client = http_client.build()?;
+
     let mut trimmed = cli.api.to_string();
     trimmed.pop();
-    let vps_client = mgmt_api::Client::new(trimmed, cli.jwt.as_deref(), ssl_ca_cert)?;
+    let vps_client = mgmt_api::Client::new(http_client, trimmed, cli.jwt.as_deref());
 
     match cli.command {
         Command::NodeRegister {

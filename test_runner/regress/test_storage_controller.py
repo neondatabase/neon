@@ -1599,6 +1599,12 @@ def test_storage_controller_heartbeats(
     env.storage_controller.allowed_errors.append(
         ".*Call to node.*management API.*failed.*failpoint.*"
     )
+    # The server starts listening to the socket before sending re-attach request,
+    # but it starts serving HTTP only when re-attach is completed.
+    # If re-attach is slow (last scenario), storcon's heartbeat requests will time out.
+    env.storage_controller.allowed_errors.append(
+        ".*Call to node.*management API.*failed.* Timeout.*"
+    )
 
     # Initially we have two online pageservers
     nodes = env.storage_controller.node_list()
