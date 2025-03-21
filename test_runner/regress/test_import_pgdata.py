@@ -1,9 +1,9 @@
 import base64
 import json
-import re
 import time
 from enum import Enum
 from pathlib import Path
+from threading import Event
 
 import psycopg2
 import psycopg2.errors
@@ -14,12 +14,11 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, PgProtocol, VanillaPostgres
 from fixtures.pageserver.http import (
     ImportPgdataIdemptencyKey,
-    PageserverApiException,
 )
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import MockS3Server, RemoteStorageKind
-from fixtures.utils import shared_buffers_for_max_cu
+from fixtures.utils import shared_buffers_for_max_cu, wait_until
 from mypy_boto3_kms import KMSClient
 from mypy_boto3_kms.type_defs import EncryptResponseTypeDef
 from mypy_boto3_s3 import S3Client
@@ -56,24 +55,29 @@ def test_pgdata_import_smoke(
     #
     # Setup fake control plane for import progress
     #
+    import_completion_signaled = Event()
+
     def handler(request: Request) -> Response:
-        log.info(f"control plane request: {request.json}")
+        log.info(f"control plane /import_complete request: {request.json}")
+        import_completion_signaled.set()
         return Response(json.dumps({}), status=200)
 
     cplane_mgmt_api_server = make_httpserver
-    cplane_mgmt_api_server.expect_request(re.compile(".*")).respond_with_handler(handler)
+    cplane_mgmt_api_server.expect_request(
+        "/storage/api/v1/import_complete", method="PUT"
+    ).respond_with_handler(handler)
 
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
+
+    neon_env_builder.control_plane_hooks_api = (
+        f"http://{cplane_mgmt_api_server.host}:{cplane_mgmt_api_server.port}/storage/api/v1/"
+    )
+
     env = neon_env_builder.init_start()
 
     # The test needs LocalFs support, which is only built in testing mode.
     env.pageserver.is_testing_enabled_or_skip()
 
-    env.pageserver.patch_config_toml_nonrecursive(
-        {
-            "import_pgdata_upcall_api": f"http://{cplane_mgmt_api_server.host}:{cplane_mgmt_api_server.port}/path/to/mgmt/api"
-        }
-    )
     env.pageserver.stop()
     env.pageserver.start()
 
@@ -193,40 +197,10 @@ def test_pgdata_import_smoke(
     )
     env.neon_cli.mappings_map_branch(import_branch_name, tenant_id, timeline_id)
 
-    while True:
-        locations = env.storage_controller.locate(tenant_id)
-        active_count = 0
-        for location in locations:
-            shard_id = TenantShardId.parse(location["shard_id"])
-            ps = env.get_pageserver(location["node_id"])
-            try:
-                detail = ps.http_client().timeline_detail(shard_id, timeline_id)
-                state = detail["state"]
-                log.info(f"shard {shard_id} state: {state}")
-                if state == "Active":
-                    active_count += 1
-            except PageserverApiException as e:
-                if e.status_code == 404:
-                    log.info("not found, import is in progress")
-                    continue
-                elif e.status_code == 429:
-                    log.info("import is in progress")
-                    continue
-                else:
-                    raise
+    def cplane_notified():
+        assert import_completion_signaled.is_set()
 
-            shard_status_file = statusdir / f"shard-{shard_id.shard_index}"
-            if state == "Active":
-                shard_status_file_contents = (
-                    shard_status_file.read_text()
-                )  # Active state implies import is done
-                shard_status = json.loads(shard_status_file_contents)
-                assert shard_status["done"] is True
-
-        if active_count == len(locations):
-            log.info("all shards are active")
-            break
-        time.sleep(1)
+    wait_until(cplane_notified)
 
     import_duration = time.monotonic() - start
     log.info(f"import complete; duration={import_duration:.2f}s")
@@ -372,19 +346,27 @@ def test_fast_import_with_pageserver_ingest(
     vanilla_pg.safe_psql("CREATE TABLE foo (a int); INSERT INTO foo SELECT generate_series(1, 10);")
 
     # Setup pageserver and fake cplane for import progress
+    import_completion_signaled = Event()
+
     def handler(request: Request) -> Response:
-        log.info(f"control plane request: {request.json}")
+        log.info(f"control plane /import_complete request: {request.json}")
+        import_completion_signaled.set()
         return Response(json.dumps({}), status=200)
 
     cplane_mgmt_api_server = make_httpserver
-    cplane_mgmt_api_server.expect_request(re.compile(".*")).respond_with_handler(handler)
+    cplane_mgmt_api_server.expect_request(
+        "/storage/api/v1/import_complete", method="PUT"
+    ).respond_with_handler(handler)
+
+    neon_env_builder.control_plane_hooks_api = (
+        f"http://{cplane_mgmt_api_server.host}:{cplane_mgmt_api_server.port}/storage/api/v1/"
+    )
 
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
     env = neon_env_builder.init_start()
 
     env.pageserver.patch_config_toml_nonrecursive(
         {
-            "import_pgdata_upcall_api": f"http://{cplane_mgmt_api_server.host}:{cplane_mgmt_api_server.port}/path/to/mgmt/api",
             # because import_pgdata code uses this endpoint, not the one in common remote storage config
             # TODO: maybe use common remote_storage config in pageserver?
             "import_pgdata_aws_endpoint_url": env.s3_mock_server.endpoint(),
@@ -476,42 +458,10 @@ def test_fast_import_with_pageserver_ingest(
         conn = PgProtocol(dsn=f"postgresql://cloud_admin@localhost:{pg_port}/neondb")
         validate_vanilla_equivalence(conn)
 
-    # Poll pageserver statuses in s3
-    while True:
-        locations = env.storage_controller.locate(tenant_id)
-        active_count = 0
-        for location in locations:
-            shard_id = TenantShardId.parse(location["shard_id"])
-            ps = env.get_pageserver(location["node_id"])
-            try:
-                detail = ps.http_client().timeline_detail(shard_id, timeline_id)
-                log.info(f"timeline {tenant_id}/{timeline_id} detail: {detail}")
-                state = detail["state"]
-                log.info(f"shard {shard_id} state: {state}")
-                if state == "Active":
-                    active_count += 1
-            except PageserverApiException as e:
-                if e.status_code == 404:
-                    log.info("not found, import is in progress")
-                    continue
-                elif e.status_code == 429:
-                    log.info("import is in progress")
-                    continue
-                else:
-                    raise
+    def cplane_notified():
+        assert import_completion_signaled.is_set()
 
-            if state == "Active":
-                key = f"{key_prefix}/status/shard-{shard_id.shard_index}"
-                shard_status_file_contents = (
-                    mock_s3_client.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8")
-                )
-                shard_status = json.loads(shard_status_file_contents)
-                assert shard_status["done"] is True
-
-        if active_count == len(locations):
-            log.info("all shards are active")
-            break
-        time.sleep(0.5)
+    wait_until(cplane_notified)
 
     import_duration = time.monotonic() - start
     log.info(f"import complete; duration={import_duration:.2f}s")
