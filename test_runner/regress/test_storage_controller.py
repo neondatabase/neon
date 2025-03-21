@@ -4244,7 +4244,7 @@ def test_storage_controller_migrate_with_pageserver_restart(
             )
 
             def has_hit_migration_failpoint():
-                expr = f"at failpoint reconciler-live-migrate-post-generation-inc"
+                expr = "at failpoint reconciler-live-migrate-post-generation-inc"
                 log.info(expr)
                 assert env.storage_controller.log_contains(expr)
 
