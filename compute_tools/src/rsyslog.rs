@@ -119,16 +119,9 @@ impl<'a> PostgresLogsRsyslogConfig<'a> {
         };
         Ok(config_content)
     }
-
-    /// Returns the default host for otel collector that receives Postgres logs
-    pub fn default_host(project_id: &str) -> String {
-        format!(
-            "config-{}-collector.neon-telemetry.svc.cluster.local:10514",
-            project_id
-        )
-    }
 }
 
+/// Writes rsyslog configuration for Postgres logs export and restart rsyslog.
 pub fn configure_postgres_logs_export(conf: PostgresLogsRsyslogConfig) -> Result<()> {
     let new_config = conf.build()?;
     let current_config = PostgresLogsRsyslogConfig::current_config()?;
@@ -260,17 +253,6 @@ mod tests {
             let conf = PostgresLogsRsyslogConfig::new(Some("invalid"));
             let res = conf.build();
             assert!(res.is_err());
-        }
-
-        {
-            // Verify config with default host
-            let host = PostgresLogsRsyslogConfig::default_host("shy-breeze-123");
-            let conf = PostgresLogsRsyslogConfig::new(Some(&host));
-            let res = conf.build();
-            assert!(res.is_ok());
-            let conf_str = res.unwrap();
-            assert!(conf_str.contains(r#"shy-breeze-123"#));
-            assert!(conf_str.contains(r#"port="10514""#));
         }
     }
 }
