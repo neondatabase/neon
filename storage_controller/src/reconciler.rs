@@ -686,6 +686,8 @@ impl Reconciler {
                 .await?,
         );
 
+        pausable_failpoint!("reconciler-live-migrate-post-generation-inc");
+
         let dest_conf = build_location_config(
             &self.shard,
             &self.config,
