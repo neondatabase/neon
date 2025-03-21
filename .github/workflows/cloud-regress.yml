@@ -40,9 +40,6 @@ jobs:
   run-random-rests:
     needs: [ build-build-tools-image ]
     runs-on: ubuntu-22.04
-    permissions:
-      id-token: write
-      statuses: write
 
     strategy:
       fail-fast: false
@@ -52,8 +49,8 @@ jobs:
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
     steps:
       - uses: actions/checkout@v4
