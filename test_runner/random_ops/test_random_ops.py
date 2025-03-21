@@ -411,11 +411,11 @@ def do_action(project: NeonProject, action: str) -> None:
         log.info("Created the RO endpoint with id %s branch: %s", ep.id, ep.branch.id)
         ep.start_benchmark()
     elif action == "delete_ro_endpoint":
-        ro_endpoints = [ep for ep in project.endpoints.values() if ep.type == "read_only"]
+        ro_endpoints: list[NeonEndpoint] = [endpoint for endpoint in project.endpoints.values() if endpoint.type == "read_only"]
         if ro_endpoints:
-            target = random.choice(ro_endpoints)
-            target.delete()
-            log.info("endpoint %s deleted", target.id)
+            target_ep: NeonEndpoint = random.choice(ro_endpoints)
+            target_ep.delete()
+            log.info("endpoint %s deleted", target_ep.id)
         else:
             log.info("no read_only endpoints present, skipping")
     elif action == "restore_random_time":
@@ -460,9 +460,7 @@ def test_api_random(
         num_operations = int(num_ops_env)
     else:
         num_operations = 250
-    pg_bin.run(
-        ["pgbench", "-i", "-I", "dtGvp", "-s100"], env=project.main_branch.connect_env
-    )
+    pg_bin.run(["pgbench", "-i", "-I", "dtGvp", "-s100"], env=project.main_branch.connect_env)
     for _ in range(num_operations):
         log.info("Starting action #%s", _ + 1)
         do_action(
