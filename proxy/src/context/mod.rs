@@ -232,7 +232,7 @@ impl RequestContext {
     pub(crate) fn set_project(&self, x: MetricsAuxInfo) {
         let mut this = self.0.try_lock().expect("should not deadlock");
         if this.endpoint_id.is_none() {
-            this.set_endpoint_id(x.endpoint_id.as_str().into());
+            this.set_endpoint_id(x.endpoint_id.resolve().into());
         }
         this.branch = Some(x.branch_id);
         this.project = Some(x.project_id);

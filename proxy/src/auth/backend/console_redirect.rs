@@ -197,7 +197,7 @@ async fn authenticate(
 
     let user: RoleName = db_info.user.into();
     let user_info = ComputeUserInfo {
-        endpoint: db_info.aux.endpoint_id.as_str().into(),
+        endpoint: db_info.aux.endpoint_id.resolve().into(),
         user: user.clone(),
         options: NeonOptions::default(),
     };

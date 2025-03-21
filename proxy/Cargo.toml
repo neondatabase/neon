@@ -114,6 +114,7 @@ ed25519-dalek = { version = "2", default-features = false, features = ["rand_cor
 rsa = "0.9"
 
 workspace_hack.workspace = true
+paracord = { version = "0.1.0-rc.5", features = ["serde"] }
 
 [dev-dependencies]
 assert-json-diff.workspace = true

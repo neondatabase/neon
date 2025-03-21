@@ -85,7 +85,7 @@ impl JwkCacheEntry {
         self.key_sets
             .values()
             // make sure our requested role has access to the key set
-            .filter(|key_set| key_set.role_names.iter().any(|role| **role == **role_name))
+            .filter(|key_set| key_set.role_names.iter().any(|role| *role.resolve() == **role_name))
             // try and find the requested key-id in the key set
             .find_map(|key_set| {
                 key_set
