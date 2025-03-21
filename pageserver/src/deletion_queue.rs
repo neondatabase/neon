@@ -787,6 +787,15 @@ mod test {
 
             Ok(result)
         }
+
+        async fn put_timeline_import_status(
+            &self,
+            _tenant_shard_id: TenantShardId,
+            _timeline_id: TimelineId,
+            _status: pageserver_api::models::ShardImportStatus,
+        ) -> Result<(), RetryForeverError> {
+            unimplemented!()
+        }
     }
 
     async fn setup(test_name: &str) -> anyhow::Result<TestSetup> {
