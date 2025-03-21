@@ -35,14 +35,7 @@ env:
   AWS_DEFAULT_REGION: eu-central-1
 
 jobs:
-  check-permissions:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
-    uses: ./.github/workflows/check-permissions.yml
-    with:
-      github-event-name: ${{ github.event_name }}
-
   build-build-tools-image:
-    needs: [ check-permissions ]
     uses: ./.github/workflows/build-build-tools-image.yml
     secrets: inherit
 
