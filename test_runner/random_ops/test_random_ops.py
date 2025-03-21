@@ -411,7 +411,7 @@ def do_action(project: NeonProject, action: str) -> None:
         log.info("Created the RO endpoint with id %s branch: %s", ep.id, ep.branch.id)
         ep.start_benchmark()
     elif action == "delete_ro_endpoint":
-        ro_endpoints = [_ for _ in project.endpoints.values() if _.type == "read_only"]
+        ro_endpoints = [ep for ep in project.endpoints.values() if ep.type == "read_only"]
         if ro_endpoints:
             target = random.choice(ro_endpoints)
             target.delete()
