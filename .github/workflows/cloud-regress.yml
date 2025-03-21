@@ -25,7 +25,9 @@ defaults:
   run:
     shell: bash -euxo pipefail {0}
 
-permissions: {}
+permissions:
+  id-token: write
+  statuses: write
 
 env:
   DEFAULT_PG_VERSION: 16
@@ -40,9 +42,6 @@ jobs:
   run-random-rests:
     needs: [ build-build-tools-image ]
     runs-on: ubuntu-22.04
-    permissions:
-      id-token: write
-      statuses: write
 
     strategy:
       fail-fast: false
