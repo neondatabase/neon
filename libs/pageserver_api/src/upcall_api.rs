@@ -4,10 +4,10 @@
 //! See docs/rfcs/025-generation-numbers.md
 
 use serde::{Deserialize, Serialize};
-use utils::id::NodeId;
+use utils::id::{NodeId, TimelineId};
 
 use crate::controller_api::NodeRegisterRequest;
-use crate::models::LocationConfigMode;
+use crate::models::{LocationConfigMode, ShardImportStatus};
 use crate::shard::TenantShardId;
 
 /// Upcall message sent by the pageserver to the configured `control_plane_api` on
@@ -61,4 +61,11 @@ pub struct ValidateResponse {
 pub struct ValidateResponseTenant {
     pub id: TenantShardId,
     pub valid: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PutTimelineImportStatusRequest {
+    pub tenant_shard_id: TenantShardId,
+    pub timeline_id: TimelineId,
+    pub status: ShardImportStatus,
 }
