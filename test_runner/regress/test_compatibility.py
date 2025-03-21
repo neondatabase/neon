@@ -9,10 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import fixtures.utils
-from fixtures.compute_reconfigure import ComputeReconfigure
 import pytest
 import toml
 from fixtures.common_types import TenantId, TimelineId
+from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
