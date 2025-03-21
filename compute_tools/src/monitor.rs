@@ -6,11 +6,187 @@ use chrono::{DateTime, Utc};
 use compute_api::responses::ComputeStatus;
 use compute_api::spec::ComputeFeature;
 use postgres::{Client, NoTls};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info};
 
 use crate::compute::ComputeNode;
+use crate::metrics::PG_DOWNTIME_MS;
 
 const MONITOR_CHECK_INTERVAL: Duration = Duration::from_millis(500);
+
+struct PGActivityState {
+    // The moment when we report that Postgres had some activity,
+    // that should prevent compute from being suspended.
+    pub last_active: Option<DateTime<Utc>>,
+    // The moment when we last successfully checked for activity.
+    pub last_checked: DateTime<Utc>,
+
+    // These two attributes are purely for statistics change tracking,
+    // they can be outdated.
+    active_time: Option<f64>,
+    sessions: Option<i64>,
+
+    experimental_monitor: bool,
+}
+
+impl PGActivityState {
+    fn report_downtime(&self) {
+        let now = Utc::now();
+        let downtime = now.signed_duration_since(self.last_checked);
+        PG_DOWNTIME_MS.set(downtime.num_milliseconds() as f64);
+    }
+
+    fn report_up(&mut self) {
+        self.last_checked = Utc::now();
+        PG_DOWNTIME_MS.set(0.0);
+    }
+
+    fn refresh(&mut self, cli: &mut Client) -> anyhow::Result<()> {
+        // This is new logic, only enable if the feature flag is set.
+        // TODO: remove this once we are sure that it works OR drop it altogether.
+        if self.experimental_monitor {
+            // Check if the total active time or sessions across all databases has changed.
+            // If it did, it means that user executed some queries. In theory, it can even go down if
+            // some databases were dropped, but it's still a user activity.
+            match get_database_stats(cli) {
+                Ok((active_time, sessions)) => {
+                    let mut detected_activity = false;
+
+                    self.active_time = match self.active_time {
+                        Some(prev_active_time) => {
+                            if active_time != prev_active_time {
+                                detected_activity = true;
+                            }
+                            Some(active_time)
+                        }
+                        None => Some(active_time),
+                    };
+                    self.sessions = match self.sessions {
+                        Some(prev_sessions) => {
+                            if sessions != prev_sessions {
+                                detected_activity = true;
+                            }
+                            Some(sessions)
+                        }
+                        None => Some(sessions),
+                    };
+
+                    if detected_activity {
+                        // Update the last active time and continue, we don't need to
+                        // check backends state change.
+                        self.last_active = Some(Utc::now());
+                        return Ok(());
+                    }
+                }
+                Err(e) => {
+                    return Err(e.context("could not get database statistics"));
+                }
+            }
+        }
+
+        // If database statistics is the same, check all backends state change,
+        // maybe there is some with more recent activity. `get_backends_state_change()`
+        // can return None or stale timestamp, so it's `compute.update_last_active()`
+        // responsibility to check if the new timestamp is more recent than the current one.
+        // This helps us to discover new sessions, that did nothing yet.
+        match get_backends_state_change(cli) {
+            Ok(last_active) => match (last_active, self.last_active) {
+                (Some(last_active), Some(prev_last_active)) => {
+                    if last_active > prev_last_active {
+                        self.last_active = Some(last_active);
+                        return Ok(());
+                    }
+                }
+                (Some(last_active), None) => {
+                    self.last_active = Some(last_active);
+                    return Ok(());
+                }
+                _ => {}
+            },
+            Err(e) => {
+                return Err(e.context("could not get backends state change"));
+            }
+        }
+
+        // If there are existing (logical) walsenders, do not suspend.
+        //
+        // N.B. walproposer doesn't currently show up in pg_stat_replication,
+        // but protect if it will.
+        let ws_count_query =
+            "select count(*) from pg_stat_replication where application_name != 'walproposer';";
+        match cli.query_one(ws_count_query, &[]) {
+            Ok(r) => match r.try_get::<&str, i64>("count") {
+                Ok(num_ws) => {
+                    if num_ws > 0 {
+                        self.last_active = Some(Utc::now());
+                        return Ok(());
+                    }
+                }
+                Err(e) => {
+                    let err: anyhow::Error = e.into();
+                    return Err(err.context("failed to parse walsenders count"));
+                }
+            },
+            Err(e) => {
+                let err: anyhow::Error = e.into();
+                return Err(err.context("failed to get list of walsenders"));
+            }
+        }
+
+        //
+        // Don't suspend compute if there is an active logical replication subscription
+        //
+        // `where pid is not null` – to filter out read only computes and subscription on branches
+        //
+        let logical_subscriptions_query =
+            "select count(*) from pg_stat_subscription where pid is not null;";
+        match cli.query_one(logical_subscriptions_query, &[]) {
+            Ok(row) => match row.try_get::<&str, i64>("count") {
+                Ok(num_subscribers) => {
+                    if num_subscribers > 0 {
+                        self.last_active = Some(Utc::now());
+                        return Ok(());
+                    }
+                }
+                Err(e) => {
+                    let err: anyhow::Error = e.into();
+                    return Err(err.context("failed to parse 'pg_stat_subscription' count"));
+                }
+            },
+            Err(e) => {
+                let err: anyhow::Error = e.into();
+                return Err(
+                    err.context("failed to get list of active logical replication subscriptions")
+                );
+            }
+        }
+
+        //
+        // Do not suspend compute if autovacuum is running
+        //
+        let autovacuum_count_query =
+            "select count(*) from pg_stat_activity where backend_type = 'autovacuum worker'";
+        match cli.query_one(autovacuum_count_query, &[]) {
+            Ok(r) => match r.try_get::<&str, i64>("count") {
+                Ok(num_workers) => {
+                    if num_workers > 0 {
+                        self.last_active = Some(Utc::now());
+                        return Ok(());
+                    };
+                }
+                Err(e) => {
+                    let err: anyhow::Error = e.into();
+                    return Err(err.context("failed to parse autovacuum workers count"));
+                }
+            },
+            Err(e) => {
+                let err: anyhow::Error = e.into();
+                return Err(err.context("failed to get list of autovacuum workers"));
+            }
+        }
+
+        Ok(())
+    }
+}
 
 // Spin in a loop and figure out the last activity time in the Postgres.
 // Then update it in the shared state. This function never errors out.
@@ -29,174 +205,52 @@ fn watch_compute_activity(compute: &ComputeNode) {
     // Define `client` outside of the loop to reuse existing connection if it's active.
     let mut client = conf.connect(NoTls);
 
-    let mut sleep = false;
-    let mut prev_active_time: Option<f64> = None;
-    let mut prev_sessions: Option<i64> = None;
+    let mut state = PGActivityState {
+        last_active: None,
+        last_checked: Utc::now(),
+        active_time: None,
+        sessions: None,
+        experimental_monitor: compute.has_feature(ComputeFeature::ActivityMonitorExperimental),
+    };
 
-    if compute.has_feature(ComputeFeature::ActivityMonitorExperimental) {
-        info!("starting experimental activity monitor for {}", connstr);
-    } else {
-        info!("starting activity monitor for {}", connstr);
-    }
+    info!("starting activity monitor for {}", connstr);
 
     loop {
-        // We use `continue` a lot, so it's more convenient to sleep at the top of the loop.
-        // But skip the first sleep, so we can connect to Postgres immediately.
-        if sleep {
-            // Should be outside of the mutex lock to allow others to read while we sleep.
-            thread::sleep(MONITOR_CHECK_INTERVAL);
-        } else {
-            sleep = true;
-        }
-
         match &mut client {
             Ok(cli) => {
                 if cli.is_closed() {
                     info!("connection to Postgres is closed, trying to reconnect");
+                    state.report_downtime();
 
                     // Connection is closed, reconnect and try again.
                     client = conf.connect(NoTls);
-                    continue;
-                }
-
-                // This is a new logic, only enable if the feature flag is set.
-                // TODO: remove this once we are sure that it works OR drop it altogether.
-                if compute.has_feature(ComputeFeature::ActivityMonitorExperimental) {
-                    // First, check if the total active time or sessions across all databases has changed.
-                    // If it did, it means that user executed some queries. In theory, it can even go down if
-                    // some databases were dropped, but it's still a user activity.
-                    match get_database_stats(cli) {
-                        Ok((active_time, sessions)) => {
-                            let mut detected_activity = false;
-
-                            prev_active_time = match prev_active_time {
-                                Some(prev_active_time) => {
-                                    if active_time != prev_active_time {
-                                        detected_activity = true;
-                                    }
-                                    Some(active_time)
-                                }
-                                None => Some(active_time),
-                            };
-                            prev_sessions = match prev_sessions {
-                                Some(prev_sessions) => {
-                                    if sessions != prev_sessions {
-                                        detected_activity = true;
-                                    }
-                                    Some(sessions)
-                                }
-                                None => Some(sessions),
-                            };
-
-                            if detected_activity {
-                                // Update the last active time and continue, we don't need to
-                                // check backends state change.
-                                compute.update_last_active(Some(Utc::now()));
-                                continue;
-                            }
+                } else {
+                    match state.refresh(cli) {
+                        Ok(_) => {
+                            state.report_up();
+                            compute.update_last_active(state.last_active);
                         }
                         Err(e) => {
-                            error!("could not get database statistics: {}", e);
-                            continue;
+                            // Although we have many places where we can return errors in `refresh()`,
+                            // normally it shouldn't happen. I.e., we will likely return error if
+                            // connection got broken, query timed out, Postgres returned invalid data, etc.
+                            // In all such cases it's suspicious, so let's report this as downtime.
+                            state.report_downtime();
+                            error!("could not refresh compute activity: {}", e)
                         }
-                    }
-                }
-
-                // Second, if database statistics is the same, check all backends state change,
-                // maybe there is some with more recent activity. `get_backends_state_change()`
-                // can return None or stale timestamp, so it's `compute.update_last_active()`
-                // responsibility to check if the new timestamp is more recent than the current one.
-                // This helps us to discover new sessions, that did nothing yet.
-                match get_backends_state_change(cli) {
-                    Ok(last_active) => {
-                        compute.update_last_active(last_active);
-                    }
-                    Err(e) => {
-                        error!("could not get backends state change: {}", e);
-                    }
-                }
-
-                // Finally, if there are existing (logical) walsenders, do not suspend.
-                //
-                // walproposer doesn't currently show up in pg_stat_replication,
-                // but protect if it will be
-                let ws_count_query = "select count(*) from pg_stat_replication where application_name != 'walproposer';";
-                match cli.query_one(ws_count_query, &[]) {
-                    Ok(r) => match r.try_get::<&str, i64>("count") {
-                        Ok(num_ws) => {
-                            if num_ws > 0 {
-                                compute.update_last_active(Some(Utc::now()));
-                                continue;
-                            }
-                        }
-                        Err(e) => {
-                            warn!("failed to parse walsenders count: {:?}", e);
-                            continue;
-                        }
-                    },
-                    Err(e) => {
-                        warn!("failed to get list of walsenders: {:?}", e);
-                        continue;
-                    }
-                }
-                //
-                // Don't suspend compute if there is an active logical replication subscription
-                //
-                // `where pid is not null` – to filter out read only computes and subscription on branches
-                //
-                let logical_subscriptions_query =
-                    "select count(*) from pg_stat_subscription where pid is not null;";
-                match cli.query_one(logical_subscriptions_query, &[]) {
-                    Ok(row) => match row.try_get::<&str, i64>("count") {
-                        Ok(num_subscribers) => {
-                            if num_subscribers > 0 {
-                                compute.update_last_active(Some(Utc::now()));
-                                continue;
-                            }
-                        }
-                        Err(e) => {
-                            warn!("failed to parse `pg_stat_subscription` count: {:?}", e);
-                            continue;
-                        }
-                    },
-                    Err(e) => {
-                        warn!(
-                            "failed to get list of active logical replication subscriptions: {:?}",
-                            e
-                        );
-                        continue;
-                    }
-                }
-                //
-                // Do not suspend compute if autovacuum is running
-                //
-                let autovacuum_count_query = "select count(*) from pg_stat_activity where backend_type = 'autovacuum worker'";
-                match cli.query_one(autovacuum_count_query, &[]) {
-                    Ok(r) => match r.try_get::<&str, i64>("count") {
-                        Ok(num_workers) => {
-                            if num_workers > 0 {
-                                compute.update_last_active(Some(Utc::now()));
-                                continue;
-                            }
-                        }
-                        Err(e) => {
-                            warn!("failed to parse autovacuum workers count: {:?}", e);
-                            continue;
-                        }
-                    },
-                    Err(e) => {
-                        warn!("failed to get list of autovacuum workers: {:?}", e);
-                        continue;
                     }
                 }
             }
             Err(e) => {
-                debug!("could not connect to Postgres: {}, retrying", e);
+                info!("could not connect to Postgres: {}, retrying", e);
+                state.report_downtime();
 
                 // Establish a new connection and try again.
                 client = conf.connect(NoTls);
             }
         }
+
+        thread::sleep(MONITOR_CHECK_INTERVAL);
     }
 }
 
