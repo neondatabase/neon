@@ -40,14 +40,14 @@ use pageserver_api::models::{
     TenantLocationConfigResponse, TenantShardLocation, TenantShardSplitRequest,
     TenantShardSplitResponse, TenantSorting, TenantTimeTravelRequest,
     TimelineArchivalConfigRequest, TimelineCreateRequest, TimelineCreateResponseStorcon,
-    TimelineInfo, TopTenantShardItem, TopTenantShardsRequest,
+    TimelineInfo, TimelineState, TopTenantShardItem, TopTenantShardsRequest,
 };
 use pageserver_api::shard::{
     DEFAULT_STRIPE_SIZE, ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId,
 };
 use pageserver_api::upcall_api::{
-    ReAttachRequest, ReAttachResponse, ReAttachResponseTenant, ValidateRequest, ValidateResponse,
-    ValidateResponseTenant,
+    PutTimelineImportStatusRequest, ReAttachRequest, ReAttachResponse, ReAttachResponseTenant,
+    ValidateRequest, ValidateResponse, ValidateResponseTenant,
 };
 use pageserver_client::{BlockUnblock, mgmt_api};
 use reqwest::{Certificate, StatusCode};
@@ -97,7 +97,7 @@ use crate::tenant_shard::{
     ReconcileNeeded, ReconcileResult, ReconcileWaitError, ReconcilerStatus, ReconcilerWaiter,
     ScheduleOptimization, ScheduleOptimizationAction, TenantShard,
 };
-use crate::timeline_import::{ShardImportStatuses, TimelineImport};
+use crate::timeline_import::{ShardImportStatuses, TimelineImport, UpcallClient};
 
 const WAITER_FILL_DRAIN_POLL_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -3791,17 +3791,13 @@ impl Service {
 
             match inserted {
                 true => {
-                    tracing::debug!(%tenant_id, %timeline_id, "Inserted timeline import");
+                    tracing::info!(%tenant_id, %timeline_id, "Inserted timeline import");
                 }
                 false => {
-                    tracing::debug!(%tenant_id, %timeline_id, "Timeline import entry already present");
+                    tracing::info!(%tenant_id, %timeline_id, "Timeline import entry already present");
                 }
             }
 
-            // TODO(vlad): Timeline creations in import mode do not return a correct initdb lsn,
-            // so we can't create the timeline on the safekeepers. Fix by moving creation when
-            // the import is done or making the pageserver import code path return all the things
-            // we need.
             None
         } else if safekeepers {
             let res = self
@@ -3817,6 +3813,165 @@ impl Service {
             timeline_info,
             safekeepers: selected_safekeepers,
         })
+    }
+
+    pub(crate) async fn put_timeline_import_status(
+        self: &Arc<Self>,
+        req: PutTimelineImportStatusRequest,
+    ) -> Result<(), ApiError> {
+        let res = self
+            .persistence
+            .update_timeline_import(req.tenant_shard_id, req.timeline_id, req.status)
+            .await;
+        let timeline_import = match res {
+            Ok(Ok(Some(timeline_import))) => timeline_import,
+            Ok(Ok(None)) => {
+                return Ok(());
+            }
+            Ok(Err(logical_err)) => {
+                return Err(logical_err.into());
+            }
+            Err(db_err) => {
+                return Err(db_err.into());
+            }
+        };
+
+        tracing::info!(
+            tenant_id=%req.tenant_shard_id.tenant_id,
+            timeline_id=%req.timeline_id,
+            shard_id=%req.tenant_shard_id.shard_slug(),
+            "Updated timeline import status to: {timeline_import:?}");
+
+        if timeline_import.is_complete() {
+            tokio::task::spawn({
+                let this = self.clone();
+                async move { this.finalize_timeline_import(timeline_import).await }
+            });
+        }
+
+        Ok(())
+    }
+
+    #[instrument(skip_all, fields(
+        tenant_id=%import.tenant_id,
+        shard_id=%import.timeline_id,
+    ))]
+    async fn finalize_timeline_import(
+        self: &Arc<Self>,
+        import: TimelineImport,
+    ) -> anyhow::Result<()> {
+        // TODO(vlad): On start-up, load up the imports and notify cplane of the
+        // ones that have been completed. This assumes the new cplane API will
+        // be idempotent. If that's not possible, bang a flag in the database.
+        // https://github.com/neondatabase/neon/issues/11570
+
+        tracing::info!("Finalizing timeline import");
+
+        let import_failed = import.completion_error().is_some();
+        if import_failed {
+            let client = UpcallClient::new(self.get_config(), self.cancel.child_token());
+            client.notify_import_complete(&import).await?;
+        }
+
+        loop {
+            if self.cancel.is_cancelled() {
+                anyhow::bail!("Shut down requested while finalizing import");
+            }
+
+            let active = self.timeline_active_on_all_shards(&import).await?;
+
+            match active {
+                true => {
+                    tracing::info!("Timeline became active on all shards");
+                    break;
+                }
+                false => {
+                    tracing::info!("Timeline not active on all shards yet");
+
+                    tokio::select! {
+                        _ = self.cancel.cancelled() => {
+                            anyhow::bail!("Shut down requested while finalizing import");
+                        },
+                        _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    };
+                }
+            }
+        }
+
+        tracing::info!(%import_failed, "Notifying cplane of import completion");
+
+        let client = UpcallClient::new(self.get_config(), self.cancel.child_token());
+        client.notify_import_complete(&import).await?;
+
+        if let Err(err) = self
+            .persistence
+            .delete_timeline_import(import.tenant_id, import.timeline_id)
+            .await
+        {
+            tracing::warn!("Failed to delete timeline import entry from database: {err}");
+        }
+
+        // TODO(vlad): Timeline creations in import mode do not return a correct initdb lsn,
+        // so we can't create the timeline on the safekeepers. Fix by moving creation here.
+        // https://github.com/neondatabase/neon/issues/11569
+        tracing::info!(%import_failed, "Timeline import complete");
+
+        Ok(())
+    }
+
+    async fn timeline_active_on_all_shards(
+        self: &Arc<Self>,
+        import: &TimelineImport,
+    ) -> anyhow::Result<bool> {
+        let targets = {
+            let locked = self.inner.read().unwrap();
+            let mut targets = Vec::new();
+
+            for (tenant_shard_id, shard) in locked
+                .tenants
+                .range(TenantShardId::tenant_range(import.tenant_id))
+            {
+                if !import
+                    .shard_statuses
+                    .0
+                    .contains_key(&tenant_shard_id.to_index())
+                {
+                    anyhow::bail!("Shard layout change detected on completion");
+                }
+
+                if let Some(node_id) = shard.intent.get_attached() {
+                    let node = locked
+                        .nodes
+                        .get(node_id)
+                        .expect("Pageservers may not be deleted while referenced");
+                    targets.push((*tenant_shard_id, node.clone()));
+                } else {
+                    return Ok(false);
+                }
+            }
+
+            targets
+        };
+
+        let results = self
+            .tenant_for_shards_api(
+                targets,
+                |tenant_shard_id, client| async move {
+                    client
+                        .timeline_detail(tenant_shard_id, import.timeline_id)
+                        .await
+                },
+                1,
+                1,
+                SHORT_RECONCILE_TIMEOUT,
+                &self.cancel,
+            )
+            .await;
+
+        Ok(results.into_iter().all(|res| match res {
+            Ok(info) => info.state == TimelineState::Active,
+            Err(_) => false,
+        }))
     }
 
     pub(crate) async fn tenant_timeline_archival_config(

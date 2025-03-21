@@ -22,7 +22,7 @@ use pageserver_api::controller_api::{
     AvailabilityZone, MetadataHealthRecord, NodeSchedulingPolicy, PlacementPolicy,
     SafekeeperDescribeResponse, ShardSchedulingPolicy, SkSchedulingPolicy,
 };
-use pageserver_api::models::TenantConfig;
+use pageserver_api::models::{ShardImportStatus, TenantConfig};
 use pageserver_api::shard::{
     ShardConfigError, ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId,
 };
@@ -40,6 +40,9 @@ use crate::metrics::{
     DatabaseQueryErrorLabelGroup, DatabaseQueryLatencyLabelGroup, METRICS_REGISTRY,
 };
 use crate::node::Node;
+use crate::timeline_import::{
+    TimelineImport, TimelineImportUpdateError, TimelineImportUpdateFollowUp,
+};
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations");
 
 /// ## What do we store?
@@ -128,6 +131,8 @@ pub(crate) enum DatabaseOperation {
     ListTimelineReconcile,
     ListTimelineReconcileStartup,
     InsertTimelineImport,
+    UpdateTimelineImport,
+    DeleteTimelineImport,
 }
 
 #[must_use]
@@ -1629,6 +1634,110 @@ impl Persistence {
                         .execute(conn)
                         .await?;
                     Ok(inserted == 1)
+                }
+            })
+        })
+        .await
+    }
+
+    pub(crate) async fn delete_timeline_import(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> DatabaseResult<()> {
+        use crate::schema::timeline_imports::dsl;
+
+        self.with_measured_conn(DatabaseOperation::DeleteTimelineImport, move |conn| {
+            Box::pin(async move {
+                diesel::delete(crate::schema::timeline_imports::table)
+                    .filter(
+                        dsl::tenant_id
+                            .eq(tenant_id.to_string())
+                            .and(dsl::timeline_id.eq(timeline_id.to_string())),
+                    )
+                    .execute(conn)
+                    .await?;
+
+                Ok(())
+            })
+        })
+        .await
+    }
+
+    /// Idempotently update the status of one shard for an ongoing timeline import
+    ///
+    /// If the update was persisted to the database, then the current state of the
+    /// import is returned to the caller. In case of logical errors a bespoke
+    /// [`TimelineImportUpdateError`] instance is returned. Other database errors
+    /// are covered by the outer [`DatabaseError`].
+    pub(crate) async fn update_timeline_import(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        shard_status: ShardImportStatus,
+    ) -> DatabaseResult<Result<Option<TimelineImport>, TimelineImportUpdateError>> {
+        use crate::schema::timeline_imports::dsl;
+
+        self.with_measured_conn(DatabaseOperation::UpdateTimelineImport, move |conn| {
+            Box::pin({
+                let shard_status = shard_status.clone();
+                async move {
+                    // Load the current state from the database
+                    let mut from_db: Vec<TimelineImportPersistence> = dsl::timeline_imports
+                        .filter(
+                            dsl::tenant_id
+                                .eq(tenant_shard_id.tenant_id.to_string())
+                                .and(dsl::timeline_id.eq(timeline_id.to_string())),
+                        )
+                        .load(conn)
+                        .await?;
+
+                    assert!(from_db.len() <= 1);
+
+                    let mut status = match from_db.pop() {
+                        Some(some) => TimelineImport::from_persistent(some).unwrap(),
+                        None => {
+                            return Ok(Err(TimelineImportUpdateError::ImportNotFound {
+                                tenant_id: tenant_shard_id.tenant_id,
+                                timeline_id,
+                            }));
+                        }
+                    };
+
+                    // Perform the update in-memory
+                    let follow_up = match status.update(tenant_shard_id.to_index(), shard_status) {
+                        Ok(ok) => ok,
+                        Err(err) => {
+                            return Ok(Err(err));
+                        }
+                    };
+
+                    let new_persistent = status.to_persistent();
+
+                    // Write back if required (in the same transaction)
+                    match follow_up {
+                        TimelineImportUpdateFollowUp::Persist => {
+                            let updated = diesel::update(dsl::timeline_imports)
+                                .filter(
+                                    dsl::tenant_id
+                                        .eq(tenant_shard_id.tenant_id.to_string())
+                                        .and(dsl::timeline_id.eq(timeline_id.to_string())),
+                                )
+                                .set(dsl::shard_statuses.eq(new_persistent.shard_statuses))
+                                .execute(conn)
+                                .await?;
+
+                            if updated != 1 {
+                                return Ok(Err(TimelineImportUpdateError::ImportNotFound {
+                                    tenant_id: tenant_shard_id.tenant_id,
+                                    timeline_id,
+                                }));
+                            }
+
+                            Ok(Ok(Some(status)))
+                        }
+                        TimelineImportUpdateFollowUp::None => Ok(Ok(None)),
+                    }
                 }
             })
         })
