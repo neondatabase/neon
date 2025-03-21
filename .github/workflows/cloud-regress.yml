@@ -40,22 +40,22 @@ jobs:
   run-random-rests:
     needs: [ build-build-tools-image ]
     runs-on: ubuntu-22.04
+    permissions:
+      id-token: write
+      statuses: write
 
     strategy:
       fail-fast: false
       matrix:
         pg-version: [16, 17]
 
-    permissions:
-      id-token: write # aws-actions/configure-aws-credentials
-      statuses: write # require for posting a status update
-
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       options: --init --user root
+
     steps:
       - uses: actions/checkout@v4
 
