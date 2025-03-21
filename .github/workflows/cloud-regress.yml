@@ -53,7 +53,7 @@ jobs:
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
-      options: --init --user root
+      options: --init
     steps:
       - uses: actions/checkout@v4
 
