@@ -552,7 +552,7 @@ impl StorageController {
             args.push("--use-https-safekeeper-api".to_string());
         }
 
-        if self.config.use_local_compute_notifications {
+        if self.config.use_local_compute_notifications == Some(true) {
             args.push("--use-local-compute-notifications".to_string());
         }
 

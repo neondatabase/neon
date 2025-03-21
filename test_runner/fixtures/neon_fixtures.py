@@ -1169,6 +1169,12 @@ class NeonEnv:
         if storage_controller_config is not None:
             cfg["storage_controller"] = storage_controller_config
 
+        if config.test_may_use_compatibility_snapshot_binaries:
+            if "storage_controller" in cfg:
+                cfg["storage_controller"]["use_local_compute_notifications"] = None
+            else:
+                cfg["storage_controller"] = {"use_local_compute_notifications": None}
+
         # Create config for pageserver
         http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
         pg_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
