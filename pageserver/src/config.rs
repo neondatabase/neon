@@ -65,7 +65,7 @@ pub struct PageServerConf {
     /// Period to reload certificate and private key from files.
     /// Default: 60s.
     pub ssl_cert_reload_period: Duration,
-    /// Trusted root CA certificate to use in https APIs. // TODO(diko): s
+    /// Trusted root CA certificates to use in https APIs.
     pub ssl_ca_certs: Vec<Certificate>,
 
     /// Current availability zone. Used for traffic metrics.

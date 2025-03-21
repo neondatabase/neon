@@ -200,7 +200,7 @@ struct Cli {
     /// Period to reload certificate and private key from files.
     #[arg(long, default_value = DEFAULT_SSL_CERT_RELOAD_PERIOD)]
     ssl_cert_reload_period: humantime::Duration,
-    /// Trusted root CA certificate to use in https APIs.
+    /// Trusted root CA certificates to use in https APIs.
     #[arg(long)]
     ssl_ca_file: Option<PathBuf>,
 }

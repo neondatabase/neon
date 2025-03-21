@@ -217,7 +217,7 @@ struct Args {
     /// Period to reload certificate and private key from files.
     #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_SSL_CERT_RELOAD_PERIOD)]
     pub ssl_cert_reload_period: Duration,
-    /// Trusted root CA certificate to use in https APIs.
+    /// Trusted root CA certificates to use in https APIs.
     #[arg(long)]
     ssl_ca_file: Option<Utf8PathBuf>,
 }
