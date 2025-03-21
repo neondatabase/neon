@@ -28,6 +28,7 @@ defaults:
 permissions:
   id-token: write
   statuses: write
+  contents: write
 
 env:
   DEFAULT_PG_VERSION: 16
