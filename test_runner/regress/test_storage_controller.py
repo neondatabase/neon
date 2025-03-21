@@ -4192,8 +4192,7 @@ def test_storage_controller_migrate_with_pageserver_restart(
     neon_env_builder.storage_controller_config = {
         # Disable transitions to offline
         "max_offline": "600s",
-        # For when https://github.com/neondatabase/neon/pull/11333 merges
-        # "use_local_compute_notifications": False
+        "use_local_compute_notifications": False
     }
 
     neon_env_builder.control_plane_hooks_api = (
