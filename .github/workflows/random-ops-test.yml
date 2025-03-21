@@ -34,7 +34,6 @@ env:
 
 jobs:
   build-build-tools-image:
-    needs: [ check-permissions ]
     uses: ./.github/workflows/build-build-tools-image.yml
     secrets: inherit
 
