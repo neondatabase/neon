@@ -637,13 +637,14 @@ impl ComputeNode {
 
         // Configure and start rsyslog for Postgres logs export
         if self.has_feature(ComputeFeature::PostgresLogsExport) {
-            if let Some(ref project_id) = pspec.spec.cluster.cluster_id {
-                let host = PostgresLogsRsyslogConfig::default_host(project_id);
-                let conf = PostgresLogsRsyslogConfig::new(Some(&host));
-                configure_postgres_logs_export(conf)?;
-            } else {
-                warn!("not configuring rsyslog for Postgres logs export: project ID is missing")
-            }
+            let metadata = pspec.spec.metadata.as_ref();
+            let logs_export_host = metadata
+                .and_then(|m| m.telemetryapi.as_ref())
+                .and_then(|t| t.logs_export_host.as_ref())
+                .map(|h| h.as_str());
+
+            let conf = PostgresLogsRsyslogConfig::new(logs_export_host);
+            configure_postgres_logs_export(conf)?;
         }
 
         // Launch remaining service threads
