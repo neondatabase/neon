@@ -374,9 +374,7 @@ async fn async_main() -> anyhow::Result<()> {
             );
         }
         StrictMode::Strict if args.use_local_compute_notifications => {
-            anyhow::bail!(
-                "`--use-local-compute-notifications` is only permitted in `--dev` mode"
-            );
+            anyhow::bail!("`--use-local-compute-notifications` is only permitted in `--dev` mode");
         }
         StrictMode::Strict => {
             tracing::info!("Starting in strict mode: configuration is OK.")
