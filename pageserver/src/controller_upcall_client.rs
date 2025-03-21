@@ -76,7 +76,7 @@ impl StorageControllerUpcallClient {
             client = client.default_headers(headers);
         }
 
-        if let Some(ssl_ca_cert) = &conf.ssl_ca_cert {
+        for ssl_ca_cert in &conf.ssl_ca_certs {
             client = client.add_root_certificate(ssl_ca_cert.clone());
         }
 

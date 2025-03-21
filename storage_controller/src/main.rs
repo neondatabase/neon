@@ -200,7 +200,7 @@ struct Cli {
     /// Period to reload certificate and private key from files.
     #[arg(long, default_value = DEFAULT_SSL_CERT_RELOAD_PERIOD)]
     ssl_cert_reload_period: humantime::Duration,
-    /// Trusted root CA certificate to use in https APIs.
+    /// Trusted root CA certificates to use in https APIs.
     #[arg(long)]
     ssl_ca_file: Option<PathBuf>,
 }
@@ -376,13 +376,13 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
-    let ssl_ca_cert = match args.ssl_ca_file.as_ref() {
+    let ssl_ca_certs = match args.ssl_ca_file.as_ref() {
         Some(ssl_ca_file) => {
             tracing::info!("Using ssl root CA file: {ssl_ca_file:?}");
             let buf = tokio::fs::read(ssl_ca_file).await?;
-            Some(Certificate::from_pem(&buf)?)
+            Certificate::from_pem_bundle(&buf)?
         }
-        None => None,
+        None => Vec::new(),
     };
 
     let config = Config {
@@ -425,7 +425,7 @@ async fn async_main() -> anyhow::Result<()> {
         start_as_candidate: args.start_as_candidate,
         use_https_pageserver_api: args.use_https_pageserver_api,
         use_https_safekeeper_api: args.use_https_safekeeper_api,
-        ssl_ca_cert,
+        ssl_ca_certs,
         timelines_onto_safekeepers: args.timelines_onto_safekeepers,
     };
 

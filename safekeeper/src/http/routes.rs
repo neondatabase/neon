@@ -235,7 +235,7 @@ async fn timeline_pull_handler(mut request: Request<Body>) -> Result<Response<Bo
     let resp = pull_timeline::handle_request(
         data,
         conf.sk_auth_token.clone(),
-        conf.ssl_ca_cert.clone(),
+        conf.ssl_ca_certs.clone(),
         global_timelines,
     )
     .await

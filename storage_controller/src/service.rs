@@ -445,7 +445,7 @@ pub struct Config {
 
     pub use_https_safekeeper_api: bool,
 
-    pub ssl_ca_cert: Option<Certificate>,
+    pub ssl_ca_certs: Vec<Certificate>,
 
     pub timelines_onto_safekeepers: bool,
 }
@@ -1668,7 +1668,7 @@ impl Service {
         //
         // The bug has been fixed in hyper v1, so keep alive may be enabled only after we migrate to hyper1.
         http_client = http_client.pool_max_idle_per_host(0);
-        if let Some(ssl_ca_cert) = &config.ssl_ca_cert {
+        for ssl_ca_cert in &config.ssl_ca_certs {
             http_client = http_client.add_root_certificate(ssl_ca_cert.clone());
         }
         let http_client = http_client.build()?;

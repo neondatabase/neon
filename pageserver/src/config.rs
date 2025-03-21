@@ -65,8 +65,8 @@ pub struct PageServerConf {
     /// Period to reload certificate and private key from files.
     /// Default: 60s.
     pub ssl_cert_reload_period: Duration,
-    /// Trusted root CA certificate to use in https APIs.
-    pub ssl_ca_cert: Option<Certificate>,
+    /// Trusted root CA certificates to use in https APIs.
+    pub ssl_ca_certs: Vec<Certificate>,
 
     /// Current availability zone. Used for traffic metrics.
     pub availability_zone: Option<String>,
@@ -481,12 +481,12 @@ impl PageServerConf {
             validate_wal_contiguity: validate_wal_contiguity.unwrap_or(false),
             load_previous_heatmap: load_previous_heatmap.unwrap_or(true),
             generate_unarchival_heatmap: generate_unarchival_heatmap.unwrap_or(true),
-            ssl_ca_cert: match ssl_ca_file {
+            ssl_ca_certs: match ssl_ca_file {
                 Some(ssl_ca_file) => {
                     let buf = std::fs::read(ssl_ca_file)?;
-                    Some(Certificate::from_pem(&buf)?)
+                    Certificate::from_pem_bundle(&buf)?
                 }
-                None => None,
+                None => Vec::new(),
             },
         };
 

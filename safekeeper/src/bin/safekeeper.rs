@@ -217,7 +217,7 @@ struct Args {
     /// Period to reload certificate and private key from files.
     #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_SSL_CERT_RELOAD_PERIOD)]
     pub ssl_cert_reload_period: Duration,
-    /// Trusted root CA certificate to use in https APIs.
+    /// Trusted root CA certificates to use in https APIs.
     #[arg(long)]
     ssl_ca_file: Option<Utf8PathBuf>,
 }
@@ -353,13 +353,13 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let ssl_ca_cert = match args.ssl_ca_file.as_ref() {
+    let ssl_ca_certs = match args.ssl_ca_file.as_ref() {
         Some(ssl_ca_file) => {
             tracing::info!("Using ssl root CA file: {ssl_ca_file:?}");
             let buf = tokio::fs::read(ssl_ca_file).await?;
-            Some(Certificate::from_pem(&buf)?)
+            Certificate::from_pem_bundle(&buf)?
         }
-        None => None,
+        None => Vec::new(),
     };
 
     let conf = Arc::new(SafeKeeperConf {
@@ -398,7 +398,7 @@ async fn main() -> anyhow::Result<()> {
         ssl_key_file: args.ssl_key_file,
         ssl_cert_file: args.ssl_cert_file,
         ssl_cert_reload_period: args.ssl_cert_reload_period,
-        ssl_ca_cert,
+        ssl_ca_certs,
     });
 
     // initialize sentry if SENTRY_DSN is provided
