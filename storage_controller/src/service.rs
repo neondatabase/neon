@@ -448,6 +448,8 @@ pub struct Config {
     pub ssl_ca_certs: Vec<Certificate>,
 
     pub timelines_onto_safekeepers: bool,
+
+    pub use_local_compute_notifications: bool,
 }
 
 impl From<DatabaseError> for ApiError {

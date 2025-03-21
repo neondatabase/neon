@@ -12,6 +12,7 @@ import fixtures.utils
 import pytest
 import toml
 from fixtures.common_types import TenantId, TimelineId
+from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -592,17 +593,22 @@ def test_historic_storage_formats(
 
 @check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
-@pytest.mark.parametrize(**fixtures.utils.allpairs_versions())
+@pytest.mark.parametrize(
+    **fixtures.utils.allpairs_versions(),
+)
 def test_versions_mismatch(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
     pg_version: PgVersion,
     compatibility_snapshot_dir,
+    compute_reconfigure_listener: ComputeReconfigure,
     combination,
 ):
     """
     Checks compatibility of different combinations of versions of the components
     """
+    neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
+
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.from_repo_dir(
         compatibility_snapshot_dir / "repo",

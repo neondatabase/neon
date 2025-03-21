@@ -555,6 +555,10 @@ impl StorageController {
             args.push("--use-https-safekeeper-api".to_string());
         }
 
+        if self.config.use_local_compute_notifications {
+            args.push("--use-local-compute-notifications".to_string());
+        }
+
         if let Some(ssl_ca_file) = self.env.ssl_ca_cert_path() {
             args.push(format!("--ssl-ca-file={}", ssl_ca_file.to_str().unwrap()));
         }
