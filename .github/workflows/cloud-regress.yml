@@ -25,9 +25,7 @@ defaults:
   run:
     shell: bash -euxo pipefail {0}
 
-permissions:
-  id-token: write # aws-actions/configure-aws-credentials
-  statuses: write # require for posting a status update
+permissions: {}
 
 env:
   DEFAULT_PG_VERSION: 16
@@ -47,6 +45,10 @@ jobs:
       fail-fast: false
       matrix:
         pg-version: [16, 17]
+
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write # require for posting a status update
 
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
