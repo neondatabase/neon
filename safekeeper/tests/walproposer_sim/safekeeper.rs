@@ -183,7 +183,7 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
         ssl_key_file: Utf8PathBuf::from(""),
         ssl_cert_file: Utf8PathBuf::from(""),
         ssl_cert_reload_period: Duration::ZERO,
-        ssl_ca_cert: None,
+        ssl_ca_certs: Vec::new(),
     };
 
     let mut global = GlobalMap::new(disk, conf.clone())?;

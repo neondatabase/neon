@@ -51,13 +51,13 @@ impl PageServerNode {
             parse_host_port(&conf.listen_pg_addr).expect("Unable to parse listen_pg_addr");
         let port = port.unwrap_or(5432);
 
-        let ssl_ca_cert = env.ssl_ca_cert_path().map(|ssl_ca_file| {
+        let ssl_ca_certs = env.ssl_ca_cert_path().map(|ssl_ca_file| {
             let buf = std::fs::read(ssl_ca_file).expect("SSL root CA file should exist");
-            Certificate::from_pem(&buf).expect("CA certificate should be valid")
+            Certificate::from_pem_bundle(&buf).expect("SSL CA file should be valid")
         });
 
         let mut http_client = reqwest::Client::builder();
-        if let Some(ssl_ca_cert) = ssl_ca_cert {
+        for ssl_ca_cert in ssl_ca_certs.unwrap_or_default() {
             http_client = http_client.add_root_certificate(ssl_ca_cert);
         }
         let http_client = http_client
