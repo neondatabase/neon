@@ -334,11 +334,19 @@ impl TimelineCreateRequest {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ShardImportStatus {
     InProgress,
     Done,
     Error(String),
+}
+impl ShardImportStatus {
+    pub fn is_terminal(&self) -> bool {
+        match self {
+            ShardImportStatus::InProgress => false,
+            ShardImportStatus::Done | ShardImportStatus::Error(_) => true,
+        }
+    }
 }
 
 /// Storage controller specific extensions to [`TimelineInfo`].

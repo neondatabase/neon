@@ -419,6 +419,23 @@ impl Client {
         }
     }
 
+    pub async fn timeline_detail(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+    ) -> Result<TimelineInfo> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}",
+            self.mgmt_api_endpoint
+        );
+
+        self.request(Method::GET, &uri, ())
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
     pub async fn timeline_archival_config(
         &self,
         tenant_shard_id: TenantShardId,
