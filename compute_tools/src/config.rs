@@ -200,9 +200,8 @@ pub fn write_postgres_conf(
             )?;
             // This log level is very verbose
             // but this is necessary for HIPAA compliance.
-            // Exclude 'misc' category, because it doesn't contain anything relevant.
+            // Exclude 'misc' category, because it doesn't contain anythig relevant.
             writeln!(file, "pgaudit.log='all, -misc'")?;
-            // Log parameters for all queries
             writeln!(file, "pgaudit.log_parameter=on")?;
             // Disable logging of catalog queries
             // The catalog doesn't contain sensitive data, so we don't need to audit it.
