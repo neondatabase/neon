@@ -1883,7 +1883,7 @@ CalculateMinFlushLsn(WalProposer *wp)
 	return lsn;
 }
 
-/* 
+/*
  * GetAcknowledgedByQuorumWALPosition for a single member set `mset`.
  *
  * `msk` is the member -> safekeeper mapping for mset, i.e. members_safekeepers
@@ -1904,11 +1904,11 @@ GetCommittedMset(WalProposer *wp, MemberSet *mset, Safekeeper **msk)
 
 		/*
 		 * Like in Raft, we aren't allowed to commit entries from previous
-		 * terms, so ignore reported LSN until it gets to epochStartLsn.
+		 * terms, so ignore reported LSN until it gets to propTermStartLsn.
 		 *
-		 * Note: we ignore sk state, which is ok: before first ack flushLsn
-		 * is 0, and later we just preserve value across reconnections. It
-		 * would be ok to check for SS_ACTIVE as well.
+		 * Note: we ignore sk state, which is ok: before first ack flushLsn is
+		 * 0, and later we just preserve value across reconnections. It would
+		 * be ok to check for SS_ACTIVE as well.
 		 */
 		if (sk != NULL && sk->appendResponse.flushLsn >= wp->propTermStartLsn)
 		{
@@ -1922,11 +1922,11 @@ GetCommittedMset(WalProposer *wp, MemberSet *mset, Safekeeper **msk)
 	qsort(responses, mset->len, sizeof(XLogRecPtr), CompareLsn);
 
 	/*
-	* And get value committed by the quorum. A way to view this: to get the
-	* highest value committed on the quorum, in the ordered array we skip n -
-	* n_quorum elements to get to the first (lowest) value present on all sks of
-	* the highest quorum.
-	*/
+	 * And get value committed by the quorum. A way to view this: to get the
+	 * highest value committed on the quorum, in the ordered array we skip n -
+	 * n_quorum elements to get to the first (lowest) value present on all sks
+	 * of the highest quorum.
+	 */
 	return responses[mset->len - MsetQuorum(mset)];
 }
 
@@ -1940,7 +1940,7 @@ GetCommittedMset(WalProposer *wp, MemberSet *mset, Safekeeper **msk)
 static XLogRecPtr
 GetAcknowledgedByQuorumWALPosition(WalProposer *wp)
 {
-	XLogRecPtr committed;
+	XLogRecPtr	committed;
 
 	/* legacy: generations disabled */
 	if (!WalProposerGenerationsEnabled(wp) && wp->mconf.generation == INVALID_GENERATION)
@@ -1948,25 +1948,25 @@ GetAcknowledgedByQuorumWALPosition(WalProposer *wp)
 		XLogRecPtr	responses[MAX_SAFEKEEPERS];
 
 		/*
-		* Sort acknowledged LSNs
-		*/
+		 * Sort acknowledged LSNs
+		 */
 		for (int i = 0; i < wp->n_safekeepers; i++)
 		{
 			/*
 			 * Like in Raft, we aren't allowed to commit entries from previous
-			 * terms, so ignore reported LSN until it gets to epochStartLsn.
+			 * terms, so ignore reported LSN until it gets to propTermStartLsn.
 			 *
-			 * Note: we ignore sk state, which is ok: before first ack flushLsn
-			 * is 0, and later we just preserve value across reconnections. It
-			 * would be ok to check for SS_ACTIVE as well.
+			 * Note: we ignore sk state, which is ok: before first ack
+			 * flushLsn is 0, and later we just preserve value across
+			 * reconnections. It would be ok to check for SS_ACTIVE as well.
 			 */
 			responses[i] = wp->safekeeper[i].appendResponse.flushLsn >= wp->propTermStartLsn ? wp->safekeeper[i].appendResponse.flushLsn : 0;
 		}
 		qsort(responses, wp->n_safekeepers, sizeof(XLogRecPtr), CompareLsn);
 
 		/*
-		* Get the smallest LSN committed by quorum
-		*/
+		 * Get the smallest LSN committed by quorum
+		 */
 		return responses[wp->n_safekeepers - wp->quorum];
 	}
 
