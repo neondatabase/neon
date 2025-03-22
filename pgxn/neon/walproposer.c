@@ -759,8 +759,8 @@ UpdateMemberSafekeeperPtr(WalProposer *wp, Safekeeper *sk)
 		if (wp->mconf.members.m[i].node_id == sk->greetResponse.nodeId)
 		{
 			/*
-			 * If mconf or list of safekeepers to connect to changed (the latter
-			 * always currently goes through restart though),
+			 * If mconf or list of safekeepers to connect to changed (the
+			 * latter always currently goes through restart though),
 			 * ResetMemberSafekeeperPtrs is expected to be called before
 			 * UpdateMemberSafekeeperPtr. So, other value suggests that we are
 			 * connected to the same sk under different host name, complain
@@ -812,15 +812,17 @@ ResetMemberSafekeeperPtrs(WalProposer *wp)
 }
 
 /* Does n forms quorum in mset? */
-static bool MsetHasQuorum(MemberSet *mset, uint32 n)
+static bool
+MsetHasQuorum(MemberSet *mset, uint32 n)
 {
 	return n >= (mset->len / 2 + 1);
 }
 
 /* TermsCollected helper for single member set. */
-static bool TermsCollectedMset(WalProposer *wp, MemberSet *mset, StringInfo s)
+static bool
+TermsCollectedMset(WalProposer *wp, MemberSet *mset, StringInfo s)
 {
-	uint32 n_greeted = 0;
+	uint32		n_greeted = 0;
 
 	for (uint32 i = 0; i < wp->mconf.members.len; i++)
 	{
@@ -830,10 +832,11 @@ static bool TermsCollectedMset(WalProposer *wp, MemberSet *mset, StringInfo s)
 		{
 			if (n_greeted > 0)
 				appendStringInfoString(s, ", ");
-			appendStringInfo(s, "{id = %lu, ep = %s:%s }", sk->greetResponse.nodeId, sk->host, sk->port);
+			appendStringInfo(s, "{id = %lu, ep = %s:%s}", sk->greetResponse.nodeId, sk->host, sk->port);
 			n_greeted++;
 		}
 	}
+	appendStringInfo(s, ", %u/%u total", n_greeted, mset->len);
 	return MsetHasQuorum(mset, n_greeted);
 }
 
@@ -843,20 +846,21 @@ static bool TermsCollectedMset(WalProposer *wp, MemberSet *mset, StringInfo s)
 static bool
 TermsCollected(WalProposer *wp)
 {
-	StringInfoData s; /* str for logging */
-	bool res = false;
+	StringInfoData s;			/* str for logging */
+	bool		collected = false;
 
 	/* legacy: generations disabled */
 	if (!WalProposerGenerationsEnabled(wp) && wp->mconf.generation == INVALID_GENERATION)
 	{
-		bool enough = wp->n_connected >= wp->quorum;
-		if (enough)
+		collected = wp->n_connected >= wp->quorum;
+		if (collected)
 		{
 			wp->propTerm++;
 			wp_log(LOG, "walproposer connected to quorum (%d) safekeepers, propTerm=" INT64_FORMAT ", starting voting", wp->quorum, wp->propTerm);
 		}
-		return enough;
+		return collected;
 	}
+
 	/*
 	 * With generations enabled, we start campaign only when 1) some mconf is
 	 * actually received 2) we have greetings from majority of members as well
@@ -876,12 +880,12 @@ TermsCollected(WalProposer *wp)
 			goto res;
 	}
 	wp->propTerm++;
-	wp_log(LOG, "walproposer connected to quorum of safekeepers, propTerm=" INT64_FORMAT ", starting voting. %s", wp->propTerm, s.data);
-	res = true;
+	wp_log(LOG, "walproposer connected to quorum of safekeepers: %s, propTerm=" INT64_FORMAT ", starting voting", s.data, wp->propTerm);
+	collected = true;
 
 res:
 	pfree(s.data);
-	return res;
+	return collected;
 }
 
 static void
@@ -1061,6 +1065,39 @@ RecvVoteResponse(Safekeeper *sk)
 	}
 }
 
+/* VotesCollected helper for single member set. */
+static bool
+VotesCollectedMset(WalProposer *wp, MemberSet *mset, StringInfo s)
+{
+	uint32		n_votes = 0;
+
+	for (uint32 i = 0; i < wp->mconf.members.len; i++)
+	{
+		Safekeeper *sk = wp->members_safekeepers[i];
+
+		if (sk != NULL && sk->state == SS_WAIT_ELECTED)
+		{
+			if (GetLastLogTerm(sk) > wp->donorLastLogTerm ||
+				(GetLastLogTerm(sk) == wp->donorLastLogTerm &&
+				 sk->voteResponse.flushLsn > wp->propTermStartLsn))
+			{
+				wp->donorLastLogTerm = GetLastLogTerm(sk);
+				wp->propTermStartLsn = sk->voteResponse.flushLsn;
+				wp->donor = sk;
+			}
+			wp->truncateLsn = Max(wp->safekeeper[i].voteResponse.truncateLsn, wp->truncateLsn);
+
+			if (n_votes > 0)
+				appendStringInfoString(s, ", ");
+			appendStringInfo(s, "{id = %lu, ep = %s:%s}", sk->greetResponse.nodeId, sk->host, sk->port);
+			n_votes++;
+		}
+	}
+	appendStringInfo(s, ", %u/%u total", n_votes, mset->len);
+	return MsetHasQuorum(mset, n_votes);
+}
+
+
 /*
  * Checks if enough votes has been collected to get elected and if that's the
  * case finds the highest vote, setting donor, donorLastLogTerm,
@@ -1069,7 +1106,8 @@ RecvVoteResponse(Safekeeper *sk)
 static bool
 VotesCollected(WalProposer *wp)
 {
-	int			n_ready = 0;
+	StringInfoData s;			/* str for logging */
+	bool		collected = false;
 
 	/* assumed to be called only when not elected yet */
 	Assert(wp->state == WPS_CAMPAIGN);
@@ -1078,25 +1116,61 @@ VotesCollected(WalProposer *wp)
 	wp->donorLastLogTerm = 0;
 	wp->truncateLsn = InvalidXLogRecPtr;
 
-	for (int i = 0; i < wp->n_safekeepers; i++)
+	/* legacy: generations disabled */
+	if (!WalProposerGenerationsEnabled(wp) && wp->mconf.generation == INVALID_GENERATION)
 	{
-		if (wp->safekeeper[i].state == SS_WAIT_ELECTED)
-		{
-			n_ready++;
+		int			n_ready = 0;
 
-			if (GetLastLogTerm(&wp->safekeeper[i]) > wp->donorLastLogTerm ||
-				(GetLastLogTerm(&wp->safekeeper[i]) == wp->donorLastLogTerm &&
-				 wp->safekeeper[i].voteResponse.flushLsn > wp->propTermStartLsn))
+		for (int i = 0; i < wp->n_safekeepers; i++)
+		{
+			if (wp->safekeeper[i].state == SS_WAIT_ELECTED)
 			{
-				wp->donorLastLogTerm = GetLastLogTerm(&wp->safekeeper[i]);
-				wp->propTermStartLsn = wp->safekeeper[i].voteResponse.flushLsn;
-				wp->donor = i;
+				n_ready++;
+
+				if (GetLastLogTerm(&wp->safekeeper[i]) > wp->donorLastLogTerm ||
+					(GetLastLogTerm(&wp->safekeeper[i]) == wp->donorLastLogTerm &&
+					 wp->safekeeper[i].voteResponse.flushLsn > wp->propTermStartLsn))
+				{
+					wp->donorLastLogTerm = GetLastLogTerm(&wp->safekeeper[i]);
+					wp->propTermStartLsn = wp->safekeeper[i].voteResponse.flushLsn;
+					wp->donor = &wp->safekeeper[i];
+				}
+				wp->truncateLsn = Max(wp->safekeeper[i].voteResponse.truncateLsn, wp->truncateLsn);
 			}
-			wp->truncateLsn = Max(wp->safekeeper[i].voteResponse.truncateLsn, wp->truncateLsn);
 		}
+		collected = n_ready >= wp->quorum;
+		if (collected)
+		{
+			wp_log(LOG, "walproposer elected with %d/%d votes", n_ready, wp->n_safekeepers);
+		}
+		return collected;
 	}
 
-	return n_ready >= wp->quorum;
+	/*
+	 * if generations are enabled we're expected to get to voting only when
+	 * mconf is established.
+	 */
+	Assert(wp->mconf.generation != INVALID_GENERATION);
+
+	/*
+	 * We must get votes from both msets if both are present.
+	 */
+	initStringInfo(&s);
+	appendStringInfoString(&s, "mset votes: ");
+	if (!VotesCollectedMset(wp, &wp->mconf.members, &s))
+		goto res;
+	if (wp->mconf.new_members.len > 0)
+	{
+		appendStringInfoString(&s, ", new_mset votes: ");
+		if (!VotesCollectedMset(wp, &wp->mconf.new_members, &s))
+			goto res;
+	}
+	wp_log(LOG, "walproposer elected, %s", s.data);
+	collected = true;
+
+res:
+	pfree(s.data);
+	return collected;
 }
 
 /*
@@ -1117,7 +1191,7 @@ HandleElectedProposer(WalProposer *wp)
 	 * that only for logical replication (and switching logical walsenders to
 	 * neon_walreader is a todo.)
 	 */
-	if (!wp->api.recovery_download(wp, &wp->safekeeper[wp->donor]))
+	if (!wp->api.recovery_download(wp, wp->donor))
 	{
 		wp_log(FATAL, "failed to download WAL for logical replicaiton");
 	}
@@ -1240,7 +1314,7 @@ ProcessPropStartPos(WalProposer *wp)
 	/*
 	 * Proposer's term history is the donor's + its own entry.
 	 */
-	dth = &wp->safekeeper[wp->donor].voteResponse.termHistory;
+	dth = &wp->donor->voteResponse.termHistory;
 	wp->propTermHistory.n_entries = dth->n_entries + 1;
 	wp->propTermHistory.entries = palloc(sizeof(TermSwitchEntry) * wp->propTermHistory.n_entries);
 	if (dth->n_entries > 0)
@@ -1248,11 +1322,10 @@ ProcessPropStartPos(WalProposer *wp)
 	wp->propTermHistory.entries[wp->propTermHistory.n_entries - 1].term = wp->propTerm;
 	wp->propTermHistory.entries[wp->propTermHistory.n_entries - 1].lsn = wp->propTermStartLsn;
 
-	wp_log(LOG, "got votes from majority (%d) of nodes, term " UINT64_FORMAT ", epochStartLsn %X/%X, donor %s:%s, truncate_lsn %X/%X",
-		   wp->quorum,
+	wp_log(LOG, "walproposer elected in term " UINT64_FORMAT ", epochStartLsn %X/%X, donor %s:%s, truncate_lsn %X/%X",
 		   wp->propTerm,
 		   LSN_FORMAT_ARGS(wp->propTermStartLsn),
-		   wp->safekeeper[wp->donor].host, wp->safekeeper[wp->donor].port,
+		   wp->donor->host, wp->donor->port,
 		   LSN_FORMAT_ARGS(wp->truncateLsn));
 
 	/*
@@ -1835,9 +1908,9 @@ UpdateDonorShmem(WalProposer *wp)
 	 * about its position immediately after election before any feedbacks are
 	 * sent.
 	 */
-	if (wp->safekeeper[wp->donor].state >= SS_WAIT_ELECTED)
+	if (wp->donor->state >= SS_WAIT_ELECTED)
 	{
-		donor = &wp->safekeeper[wp->donor];
+		donor = wp->donor;
 		donor_lsn = wp->propTermStartLsn;
 	}
 
