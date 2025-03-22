@@ -621,7 +621,7 @@ async def quorum_sanity_single(
     )
     sks_to_stop_ids_str = "-".join([str(sk.id) for sk in sks_to_stop])
     log.info(
-        f"running quorum_sanity_single with compute_sks={compute_sks_ids_str}, members_sks={members_sks_ids_str}, new_members_sks={new_members_sks}, sks_to_stop={sks_to_stop_ids_str}, should_work_when_stopped={should_work_when_stopped}"
+        f"running quorum_sanity_single with compute_sks={compute_sks_ids_str}, members_sks={members_sks_ids_str}, new_members_sks={new_members_sks_ids_str}, sks_to_stop={sks_to_stop_ids_str}, should_work_when_stopped={should_work_when_stopped}"
     )
     branch_name = f"test_quorum_single_c{compute_sks_ids_str}_m{members_sks_ids_str}_{new_members_sks_ids_str}_s{sks_to_stop_ids_str}"
     timeline_id = env.create_branch(branch_name)
@@ -671,6 +671,13 @@ async def run_quorum_sanity(env: NeonEnv):
     await quorum_sanity_single(env, sks[1:4], sks[:3], None, [], True)
     # 3 members, 2/3 up, could work but wp talks to different 3s, so it shouldn't
     await quorum_sanity_single(env, sks[1:4], sks[:3], None, sks[2:3], False)
+
+    # joint conf of 1-2-3 and 2-3-4, all up, should work
+    await quorum_sanity_single(env, sks[:], sks[:3], sks[1:4], [], True)
+    # joint conf of 1-2-3 and 4, all up, should work
+    await quorum_sanity_single(env, sks[:], sks[:3], sks[3:4], [], True)
+    # joint conf of 1-2-3 and 4, 4 down, shouldn't work
+    await quorum_sanity_single(env, sks[:], sks[:3], sks[3:4], sks[3:4], False)
 
 
 # Test various combinations of membership configurations / neon.safekeepers
