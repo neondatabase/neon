@@ -600,22 +600,30 @@ def test_wal_truncation(neon_env_builder: NeonEnvBuilder, safekeeper_proto_versi
 async def quorum_sanity_single(
     env: NeonEnv,
     compute_sks: list[Safekeeper],
-    mconf: MembershipConfiguration,
+    members_sks: list[Safekeeper],
+    new_members_sks: list[Safekeeper] | None,
     sks_to_stop: list[Safekeeper],
     should_work_when_stopped: bool,
 ):
+    mconf = MembershipConfiguration(
+        generation=1,
+        members=Safekeeper.sks_to_safekeeper_ids(members_sks),
+        new_members=Safekeeper.sks_to_safekeeper_ids(new_members_sks) if new_members_sks else None,
+    )
     members_sks = Safekeeper.mconf_sks(env, mconf)
-    log.info(f"members_sks: {members_sks}")
 
     tenant_id = env.initial_tenant
     compute_sks_ids = [sk.id for sk in compute_sks]
-    compute_sks_ids_str = [str(sk_id) for sk_id in compute_sks_ids]
-    members_sks_ids_str = [str(sk.id) for sk in mconf.members]
-    new_members_sks_ids_str = (
+    compute_sks_ids_str = "-".join([str(sk_id) for sk_id in compute_sks_ids])
+    members_sks_ids_str = "-".join([str(sk.id) for sk in mconf.members])
+    new_members_sks_ids_str = "-".join(
         [str(sk.id) for sk in mconf.new_members] if mconf.new_members is not None else []
     )
-    sks_to_stop_ids_str = [str(sk.id) for sk in sks_to_stop]
-    branch_name = f"test_quorum_single_c{'-'.join(compute_sks_ids_str)}_m{'-'.join(members_sks_ids_str)}_{'-'.join(new_members_sks_ids_str)}_s{'-'.join(sks_to_stop_ids_str)}"
+    sks_to_stop_ids_str = "-".join([str(sk.id) for sk in sks_to_stop])
+    log.info(
+        f"running quorum_sanity_single with compute_sks={compute_sks_ids_str}, members_sks={members_sks_ids_str}, new_members_sks={new_members_sks}, sks_to_stop={sks_to_stop_ids_str}, should_work_when_stopped={should_work_when_stopped}"
+    )
+    branch_name = f"test_quorum_single_c{compute_sks_ids_str}_m{members_sks_ids_str}_{new_members_sks_ids_str}_s{sks_to_stop_ids_str}"
     timeline_id = env.create_branch(branch_name)
 
     # create timeline on `members_sks`
@@ -632,11 +640,14 @@ async def quorum_sanity_single(
     for sk in sks_to_stop:
         sk.stop()
     if should_work_when_stopped:
+        log.info("checking that writes still work")
         ep.safe_psql("insert into t select generate_series(1, 100), 'Papaya'")
         bg_query = None
     else:
-        bg_query = assert_query_hangs(ep, "insert into t select generate_series(1, 100), 'Papaya'")
-        pass
+        log.info("checking that writes hang")
+        bg_query = await assert_query_hangs(
+            ep, "insert into t select generate_series(1, 100), 'Papaya'"
+        )
     # start again; now they should work
     for sk in sks_to_stop:
         sk.start()
@@ -647,10 +658,19 @@ async def quorum_sanity_single(
 
 async def run_quorum_sanity(env: NeonEnv):
     sks = env.safekeepers  # shorter typing
-    mconf = MembershipConfiguration(
-        generation=1, members=Safekeeper.sks_to_safekeeper_ids(sks), new_members=None
-    )
-    await quorum_sanity_single(env, sks, mconf, [], True)
+    # 3 members, all up, should work
+    await quorum_sanity_single(env, sks[:3], sks[:3], None, [], True)
+    # 3 members, 2/3 up, should work
+    await quorum_sanity_single(env, sks[:3], sks[:3], None, sks[2:3], True)
+    # 3 members, 1/3 up, should not work
+    await quorum_sanity_single(env, sks[:3], sks[:3], None, sks[1:3], False)
+
+    # 3 members, all up, should work; wp redundantly talks to 4th.
+    await quorum_sanity_single(env, sks[:], sks[:3], None, [], True)
+    # 3 members, all up, should work with wp talking to 2 of these 3 + plus one redundant
+    await quorum_sanity_single(env, sks[1:4], sks[:3], None, [], True)
+    # 3 members, 2/3 up, could work but wp talks to different 3s, so it shouldn't
+    await quorum_sanity_single(env, sks[1:4], sks[:3], None, sks[2:3], False)
 
 
 # Test various combinations of membership configurations / neon.safekeepers
