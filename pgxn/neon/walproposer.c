@@ -811,22 +811,34 @@ ResetMemberSafekeeperPtrs(WalProposer *wp)
 	}
 }
 
+static uint32
+MsetQuorum(MemberSet *mset)
+{
+	Assert(mset->len > 0);
+	return mset->len / 2 + 1;
+}
+
 /* Does n forms quorum in mset? */
 static bool
 MsetHasQuorum(MemberSet *mset, uint32 n)
 {
-	return n >= (mset->len / 2 + 1);
+	return n >= MsetQuorum(mset);
 }
 
-/* TermsCollected helper for single member set. */
+/*
+ * TermsCollected helper for a single member set `mset`.
+ *
+ * `msk` is the member -> safekeeper mapping for mset, i.e. members_safekeepers
+ * or new_members_safekeepers.
+ */
 static bool
-TermsCollectedMset(WalProposer *wp, MemberSet *mset, StringInfo s)
+TermsCollectedMset(WalProposer *wp, MemberSet *mset, Safekeeper **msk, StringInfo s)
 {
 	uint32		n_greeted = 0;
 
 	for (uint32 i = 0; i < wp->mconf.members.len; i++)
 	{
-		Safekeeper *sk = wp->members_safekeepers[i];
+		Safekeeper *sk = msk[i];
 
 		if (sk != NULL && sk->state == SS_WAIT_VOTING)
 		{
@@ -871,12 +883,12 @@ TermsCollected(WalProposer *wp)
 
 	initStringInfo(&s);
 	appendStringInfoString(&s, "mset greeters: ");
-	if (!TermsCollectedMset(wp, &wp->mconf.members, &s))
+	if (!TermsCollectedMset(wp, &wp->mconf.members, wp->members_safekeepers, &s))
 		goto res;
 	if (wp->mconf.new_members.len > 0)
 	{
 		appendStringInfoString(&s, ", new_mset greeters: ");
-		if (!TermsCollectedMset(wp, &wp->mconf.new_members, &s))
+		if (!TermsCollectedMset(wp, &wp->mconf.new_members, wp->new_members_safekeepers, &s))
 			goto res;
 	}
 	wp->propTerm++;
@@ -1065,15 +1077,20 @@ RecvVoteResponse(Safekeeper *sk)
 	}
 }
 
-/* VotesCollected helper for single member set. */
+/*
+ * VotesCollected helper for a single member set `mset`.
+ *
+ * `msk` is the member -> safekeeper mapping for mset, i.e. members_safekeepers
+ * or new_members_safekeepers.
+ */
 static bool
-VotesCollectedMset(WalProposer *wp, MemberSet *mset, StringInfo s)
+VotesCollectedMset(WalProposer *wp, MemberSet *mset, Safekeeper **msk, StringInfo s)
 {
 	uint32		n_votes = 0;
 
 	for (uint32 i = 0; i < wp->mconf.members.len; i++)
 	{
-		Safekeeper *sk = wp->members_safekeepers[i];
+		Safekeeper *sk = msk[i];
 
 		if (sk != NULL && sk->state == SS_WAIT_ELECTED)
 		{
@@ -1157,12 +1174,12 @@ VotesCollected(WalProposer *wp)
 	 */
 	initStringInfo(&s);
 	appendStringInfoString(&s, "mset votes: ");
-	if (!VotesCollectedMset(wp, &wp->mconf.members, &s))
+	if (!VotesCollectedMset(wp, &wp->mconf.members, wp->members_safekeepers, &s))
 		goto res;
 	if (wp->mconf.new_members.len > 0)
 	{
 		appendStringInfoString(&s, ", new_mset votes: ");
-		if (!VotesCollectedMset(wp, &wp->mconf.new_members, &s))
+		if (!VotesCollectedMset(wp, &wp->mconf.new_members, wp->new_members_safekeepers, &s))
 			goto res;
 	}
 	wp_log(LOG, "walproposer elected, %s", s.data);
@@ -1743,6 +1760,14 @@ RecvAppendResponses(Safekeeper *sk)
 
 		readAnything = true;
 
+		/* should never happen: sk is expected to send ERROR instead */
+		if (sk->appendResponse.generation != wp->mconf.generation)
+		{
+			wp_log(FATAL, "safekeeper {id = %lu, ep = %s:%s} sent response with generation %u, expected %u",
+				   sk->greetResponse.nodeId, sk->host, sk->port,
+				   sk->appendResponse.generation, wp->mconf.generation);
+		}
+
 		if (sk->appendResponse.term > wp->propTerm)
 		{
 			/*
@@ -1858,31 +1883,101 @@ CalculateMinFlushLsn(WalProposer *wp)
 	return lsn;
 }
 
-/*
- * Calculate WAL position acknowledged by quorum
+/* 
+ * GetAcknowledgedByQuorumWALPosition for a single member set `mset`.
+ *
+ * `msk` is the member -> safekeeper mapping for mset, i.e. members_safekeepers
+ * or new_members_safekeepers.
  */
 static XLogRecPtr
-GetAcknowledgedByQuorumWALPosition(WalProposer *wp)
+GetCommittedMset(WalProposer *wp, MemberSet *mset, Safekeeper **msk)
 {
 	XLogRecPtr	responses[MAX_SAFEKEEPERS];
 
 	/*
-	 * Sort acknowledged LSNs
+	 * Ascending sort acknowledged LSNs.
 	 */
-	for (int i = 0; i < wp->n_safekeepers; i++)
+	Assert(mset->len <= MAX_SAFEKEEPERS);
+	for (uint32 i = 0; i < mset->len; i++)
 	{
+		Safekeeper *sk = msk[i];
+
 		/*
 		 * Like in Raft, we aren't allowed to commit entries from previous
 		 * terms, so ignore reported LSN until it gets to epochStartLsn.
+		 *
+		 * Note: we ignore sk state, which is ok: before first ack flushLsn
+		 * is 0, and later we just preserve value across reconnections. It
+		 * would be ok to check for SS_ACTIVE as well.
 		 */
-		responses[i] = wp->safekeeper[i].appendResponse.flushLsn >= wp->propTermStartLsn ? wp->safekeeper[i].appendResponse.flushLsn : 0;
+		if (sk != NULL && sk->appendResponse.flushLsn >= wp->propTermStartLsn)
+		{
+			responses[i] = sk->appendResponse.flushLsn;
+		}
+		else
+		{
+			responses[i] = 0;
+		}
 	}
-	qsort(responses, wp->n_safekeepers, sizeof(XLogRecPtr), CompareLsn);
+	qsort(responses, mset->len, sizeof(XLogRecPtr), CompareLsn);
 
 	/*
-	 * Get the smallest LSN committed by quorum
-	 */
-	return responses[wp->n_safekeepers - wp->quorum];
+	* And get value committed by the quorum. A way to view this: to get the
+	* highest value committed on the quorum, in the ordered array we skip n -
+	* n_quorum elements to get to the first (lowest) value present on all sks of
+	* the highest quorum.
+	*/
+	return responses[mset->len - MsetQuorum(mset)];
+}
+
+/*
+ * Calculate WAL position acknowledged by quorum, i.e. which may be regarded
+ * committed.
+ *
+ * Zero may be returned when there is no quorum of nodes recovered to term start
+ * lsn which sent feedback yet.
+ */
+static XLogRecPtr
+GetAcknowledgedByQuorumWALPosition(WalProposer *wp)
+{
+	XLogRecPtr committed;
+
+	/* legacy: generations disabled */
+	if (!WalProposerGenerationsEnabled(wp) && wp->mconf.generation == INVALID_GENERATION)
+	{
+		XLogRecPtr	responses[MAX_SAFEKEEPERS];
+
+		/*
+		* Sort acknowledged LSNs
+		*/
+		for (int i = 0; i < wp->n_safekeepers; i++)
+		{
+			/*
+			 * Like in Raft, we aren't allowed to commit entries from previous
+			 * terms, so ignore reported LSN until it gets to epochStartLsn.
+			 *
+			 * Note: we ignore sk state, which is ok: before first ack flushLsn
+			 * is 0, and later we just preserve value across reconnections. It
+			 * would be ok to check for SS_ACTIVE as well.
+			 */
+			responses[i] = wp->safekeeper[i].appendResponse.flushLsn >= wp->propTermStartLsn ? wp->safekeeper[i].appendResponse.flushLsn : 0;
+		}
+		qsort(responses, wp->n_safekeepers, sizeof(XLogRecPtr), CompareLsn);
+
+		/*
+		* Get the smallest LSN committed by quorum
+		*/
+		return responses[wp->n_safekeepers - wp->quorum];
+	}
+
+	committed = GetCommittedMset(wp, &wp->mconf.members, wp->members_safekeepers);
+	if (wp->mconf.new_members.len > 0)
+	{
+		XLogRecPtr	new_mset_committed = GetCommittedMset(wp, &wp->mconf.new_members, wp->new_members_safekeepers);
+
+		committed = Min(committed, new_mset_committed);
+	}
+	return committed;
 }
 
 /*
