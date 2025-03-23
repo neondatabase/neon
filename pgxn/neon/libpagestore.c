@@ -1135,9 +1135,6 @@ pageserver_receive(shardno_t shard_no)
 	return (NeonResponse *) resp;
 }
 
-#define MIN_SOCKET_PROBE_DELAY 100
-
-
 static NeonResponse *
 pageserver_try_receive(shardno_t shard_no)
 {
@@ -1145,8 +1142,6 @@ pageserver_try_receive(shardno_t shard_no)
 	NeonResponse *resp;
 	PageServer *shard = &page_servers[shard_no];
 	PGconn	   *pageserver_conn = shard->conn;
-	TimestampTz	now = GetCurrentTimestamp();
-	static TimestampTz prev = 0;
 	int	rc;
 
 	if (shard->state != PS_Connected)
@@ -1154,23 +1149,14 @@ pageserver_try_receive(shardno_t shard_no)
 
 	Assert(pageserver_conn);
 
-	if (now - prev < MIN_SOCKET_PROBE_DELAY)
-		return NULL;
-
-	prev = now;
-
-	while (true)
+	rc = PQgetCopyData(shard->conn, &resp_buff.data, 1 /* async */);
+	if (rc == 0)
 	{
-		rc = PQgetCopyData(shard->conn, &resp_buff.data, 1 /* async */);
-		if (rc == 0)
+		if (!PQconsumeInput(shard->conn))
 		{
-			if (!PQconsumeInput(shard->conn))
-			{
-				return NULL;
-			}
-		} else {
-			break;
+			return NULL;
 		}
+		rc = PQgetCopyData(shard->conn, &resp_buff.data, 1 /* async */);
 	}
 
 	if (rc == 0)
