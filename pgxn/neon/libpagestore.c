@@ -727,8 +727,6 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		 * will do fast retries again, with exponential backoff.
 		 */
 		shard->delay_us = MIN_RECONNECT_INTERVAL_USEC;
-		if (PQsetnonblocking(shard->conn, true) == -1)
-			neon_shard_log(shard_no, WARNING, "libpagestore: failed to switch connection to '%s' in non blocking mode: %m", connstr);
 
 		neon_shard_log(shard_no, DEBUG5, "Connection state: Connected");
 		neon_shard_log(shard_no, LOG, "libpagestore: connected to '%s' with protocol version %d", connstr, neon_protocol_version);
