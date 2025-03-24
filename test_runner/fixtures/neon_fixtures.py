@@ -1169,6 +1169,12 @@ class NeonEnv:
         if storage_controller_config is not None:
             cfg["storage_controller"] = storage_controller_config
 
+        if config.test_may_use_compatibility_snapshot_binaries:
+            if "storage_controller" in cfg:
+                cfg["storage_controller"]["use_local_compute_notifications"] = False
+            else:
+                cfg["storage_controller"] = {"use_local_compute_notifications": False}
+
         # Create config for pageserver
         http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
         pg_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
@@ -1724,6 +1730,8 @@ class LogUtils:
         if not logfile.exists():
             log.warning(f"Skipping log check: {logfile} does not exist")
             return None
+
+        log.info(f"Checking log {logfile} for pattern '{pattern}'")
 
         contains_re = re.compile(pattern)
 
@@ -2618,10 +2626,13 @@ class NeonProxiedStorageController(NeonStorageController):
         self.running = False
         return self
 
+    def instance_log_path(self, instance_id: int) -> Path:
+        return self.env.repo_dir / f"storage_controller_{instance_id}" / "storage_controller.log"
+
     def assert_no_errors(self):
         for instance_id in self.instances.keys():
             assert_no_errors(
-                self.env.repo_dir / f"storage_controller_{instance_id}" / "storage_controller.log",
+                self.instance_log_path(instance_id),
                 "storage_controller",
                 self.allowed_errors,
             )
@@ -2629,7 +2640,14 @@ class NeonProxiedStorageController(NeonStorageController):
     def log_contains(
         self, pattern: str, offset: None | LogCursor = None
     ) -> tuple[str, LogCursor] | None:
-        raise NotImplementedError()
+        for instance_id in self.instances.keys():
+            log_path = self.instance_log_path(instance_id)
+            checker = LogUtils(log_path)
+            found = checker.log_contains(pattern, offset)
+            if found is not None:
+                return found
+
+        return None
 
 
 @dataclass

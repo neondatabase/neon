@@ -20,7 +20,7 @@ use pageserver_api::models::{
 };
 use pageserver_api::shard::{ShardStripeSize, TenantShardId};
 use pageserver_client::mgmt_api::{self};
-use reqwest::{Method, StatusCode, Url};
+use reqwest::{Certificate, Method, StatusCode, Url};
 use storage_controller_client::control_api::Client;
 use utils::id::{NodeId, TenantId, TimelineId};
 
@@ -274,7 +274,7 @@ struct Cli {
     jwt: Option<String>,
 
     #[arg(long)]
-    /// Trusted root CA certificate to use in https APIs.
+    /// Trusted root CA certificates to use in https APIs.
     ssl_ca_file: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -387,17 +387,23 @@ async fn main() -> anyhow::Result<()> {
 
     let storcon_client = Client::new(cli.api.clone(), cli.jwt.clone());
 
-    let ssl_ca_cert = match &cli.ssl_ca_file {
+    let ssl_ca_certs = match &cli.ssl_ca_file {
         Some(ssl_ca_file) => {
             let buf = tokio::fs::read(ssl_ca_file).await?;
-            Some(reqwest::Certificate::from_pem(&buf)?)
+            Certificate::from_pem_bundle(&buf)?
         }
-        None => None,
+        None => Vec::new(),
     };
+
+    let mut http_client = reqwest::Client::builder();
+    for ssl_ca_cert in ssl_ca_certs {
+        http_client = http_client.add_root_certificate(ssl_ca_cert);
+    }
+    let http_client = http_client.build()?;
 
     let mut trimmed = cli.api.to_string();
     trimmed.pop();
-    let vps_client = mgmt_api::Client::new(trimmed, cli.jwt.as_deref(), ssl_ca_cert)?;
+    let vps_client = mgmt_api::Client::new(http_client, trimmed, cli.jwt.as_deref());
 
     match cli.command {
         Command::NodeRegister {

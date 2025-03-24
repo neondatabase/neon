@@ -38,9 +38,8 @@ pub enum Error {
     #[error("Cancelled")]
     Cancelled,
 
-    /// Failed to create client.
-    #[error("create client: {0}{}", .0.source().map(|e| format!(": {e}")).unwrap_or_default())]
-    CreateClient(reqwest::Error),
+    #[error("request timed out: {0}")]
+    Timeout(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

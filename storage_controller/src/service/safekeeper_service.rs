@@ -78,8 +78,8 @@ impl Service {
         for sk in timeline_persistence.sk_set.iter() {
             let sk_id = NodeId(*sk as u64);
             let safekeepers = safekeepers.clone();
+            let http_client = self.http_client.clone();
             let jwt = jwt.clone();
-            let ssl_ca_cert = self.config.ssl_ca_cert.clone();
             let req = req.clone();
             joinset.spawn(async move {
                 // Unwrap is fine as we already would have returned error above
@@ -90,8 +90,8 @@ impl Service {
                             let req = req.clone();
                             async move { client.create_timeline(&req).await }
                         },
+                        &http_client,
                         &jwt,
-                        &ssl_ca_cert,
                         3,
                         3,
                         SK_CREATE_TIMELINE_RECONCILE_TIMEOUT,

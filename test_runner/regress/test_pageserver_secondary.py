@@ -91,6 +91,8 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
         f"http://{make_httpserver.host}:{make_httpserver.port}/"
     )
 
+    neon_env_builder.storage_controller_config = {"use_local_compute_notifications": False}
+
     def ignore_notify(request: Request):
         # This test does all its own compute configuration (by passing explicit pageserver ID to Workload functions),
         # so we send controller notifications to /dev/null to prevent it fighting the test for control of the compute.

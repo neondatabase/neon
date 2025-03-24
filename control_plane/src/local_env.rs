@@ -165,8 +165,11 @@ pub struct NeonStorageControllerConf {
     /// Database url used when running multiple storage controller instances
     pub database_url: Option<SocketAddr>,
 
-    /// Threshold for auto-splitting a tenant into shards
+    /// Thresholds for auto-splitting a tenant into shards.
     pub split_threshold: Option<u64>,
+    pub max_split_shards: Option<u8>,
+    pub initial_split_threshold: Option<u64>,
+    pub initial_split_shards: Option<u8>,
 
     pub max_secondary_lag_bytes: Option<u64>,
 
@@ -181,6 +184,8 @@ pub struct NeonStorageControllerConf {
     pub timelines_onto_safekeepers: bool,
 
     pub use_https_safekeeper_api: bool,
+
+    pub use_local_compute_notifications: bool,
 }
 
 impl NeonStorageControllerConf {
@@ -201,12 +206,16 @@ impl Default for NeonStorageControllerConf {
             start_as_candidate: false,
             database_url: None,
             split_threshold: None,
+            max_split_shards: None,
+            initial_split_threshold: None,
+            initial_split_shards: None,
             max_secondary_lag_bytes: None,
             heartbeat_interval: Self::DEFAULT_HEARTBEAT_INTERVAL,
             long_reconcile_threshold: None,
             use_https_pageserver_api: false,
             timelines_onto_safekeepers: false,
             use_https_safekeeper_api: false,
+            use_local_compute_notifications: true,
         }
     }
 }

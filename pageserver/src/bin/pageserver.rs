@@ -12,6 +12,7 @@ use std::time::Duration;
 use anyhow::{Context, anyhow};
 use camino::Utf8Path;
 use clap::{Arg, ArgAction, Command};
+use http_utils::tls_certs::ReloadingCertificateResolver;
 use metrics::launch_timestamp::{LaunchTimestamp, set_launch_timestamp_metric};
 use metrics::set_build_info_metric;
 use nix::sys::socket::{setsockopt, sockopt};
@@ -622,12 +623,15 @@ fn start_pageserver(
 
         let https_task = match https_listener {
             Some(https_listener) => {
-                let certs = http_utils::tls_certs::load_cert_chain(&conf.ssl_cert_file)?;
-                let key = http_utils::tls_certs::load_private_key(&conf.ssl_key_file)?;
+                let resolver = MGMT_REQUEST_RUNTIME.block_on(ReloadingCertificateResolver::new(
+                    &conf.ssl_key_file,
+                    &conf.ssl_cert_file,
+                    conf.ssl_cert_reload_period,
+                ))?;
 
                 let server_config = rustls::ServerConfig::builder()
                     .with_no_client_auth()
-                    .with_single_cert(certs, key)?;
+                    .with_cert_resolver(resolver);
 
                 let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
 
