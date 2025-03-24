@@ -6,44 +6,146 @@ use chrono::{DateTime, Utc};
 use compute_api::responses::ComputeStatus;
 use compute_api::spec::ComputeFeature;
 use postgres::{Client, NoTls};
-use tracing::{error, info};
+use tracing::{Level, error, info, instrument, span};
 
 use crate::compute::ComputeNode;
-use crate::metrics::PG_DOWNTIME_MS;
+use crate::metrics::{PG_DOWNTIME_MS, PG_TOTAL_DOWNTIME_MS};
 
 const MONITOR_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
-struct PGActivityState {
-    // The moment when we report that Postgres had some activity,
+struct ComputeMonitor {
+    compute: Arc<ComputeNode>,
+
+    // The moment when Postgres had some activity,
     // that should prevent compute from being suspended.
-    pub last_active: Option<DateTime<Utc>>,
-    // The moment when we last successfully checked for activity.
-    pub last_checked: DateTime<Utc>,
+    last_active: Option<DateTime<Utc>>,
+
+    // The moment when we last tried to check Postgres.
+    last_checked: DateTime<Utc>,
+    // The last moment we did a successful Postgres check.
+    last_up: DateTime<Utc>,
 
     // These two attributes are purely for statistics change tracking,
     // they can be outdated.
     active_time: Option<f64>,
     sessions: Option<i64>,
 
-    experimental_monitor: bool,
+    experimental: bool,
 }
 
-impl PGActivityState {
-    fn report_downtime(&self) {
+impl ComputeMonitor {
+    fn report_down(&mut self) {
         let now = Utc::now();
-        let downtime = now.signed_duration_since(self.last_checked);
+
+        // Calculate and report current downtime
+        // (since the last time Postgres was up )
+        let downtime = now.signed_duration_since(self.last_up);
         PG_DOWNTIME_MS.set(downtime.num_milliseconds() as f64);
+
+        // Calculate and update total downtime
+        // (cumulative duration of Postgres downtime in ms)
+        let inc = now
+            .signed_duration_since(self.last_checked)
+            .num_milliseconds();
+        PG_TOTAL_DOWNTIME_MS.inc_by(inc as u64);
     }
 
     fn report_up(&mut self) {
-        self.last_checked = Utc::now();
+        self.last_up = Utc::now();
         PG_DOWNTIME_MS.set(0.0);
     }
 
-    fn refresh(&mut self, cli: &mut Client) -> anyhow::Result<()> {
+    fn downtime_info(&self) -> String {
+        format!(
+            "total_ms: {}, current_ms: {}, last_up: {}",
+            PG_TOTAL_DOWNTIME_MS.get(),
+            PG_DOWNTIME_MS.get(),
+            self.last_up
+        )
+    }
+
+    /// Spin in a loop and figure out the last activity time in the Postgres.
+    /// Then update it in the shared state. This function never errors out.
+    /// NB: the only expected panic is at `Mutex` unwrap(), all other errors
+    /// should be handled gracefully.
+    #[instrument(skip_all)]
+    pub fn run(&mut self) {
+        // Suppose that `connstr` doesn't change
+        let connstr = self.compute.params.connstr.clone();
+        let conf = self
+            .compute
+            .get_conn_conf(Some("compute_ctl:compute_monitor"));
+
+        // During startup and configuration we connect to every Postgres database,
+        // but we don't want to count this as some user activity. So wait until
+        // the compute fully started before monitoring activity.
+        wait_for_postgres_start(&self.compute);
+
+        // Define `client` outside of the loop to reuse existing connection if it's active.
+        let mut client = conf.connect(NoTls);
+
+        info!("starting compute monitor for {}", connstr);
+
+        loop {
+            match &mut client {
+                Ok(cli) => {
+                    if cli.is_closed() {
+                        info!(
+                            downtime_info = self.downtime_info(),
+                            "connection to Postgres is closed, trying to reconnect"
+                        );
+                        self.report_down();
+
+                        // Connection is closed, reconnect and try again.
+                        client = conf.connect(NoTls);
+                    } else {
+                        match self.check(cli) {
+                            Ok(_) => {
+                                self.report_up();
+                                self.compute.update_last_active(self.last_active);
+                            }
+                            Err(e) => {
+                                // Although we have many places where we can return errors in `refresh()`,
+                                // normally it shouldn't happen. I.e., we will likely return error if
+                                // connection got broken, query timed out, Postgres returned invalid data, etc.
+                                // In all such cases it's suspicious, so let's report this as downtime.
+                                self.report_down();
+                                error!(
+                                    downtime_info = self.downtime_info(),
+                                    "could not check Postgres: {}", e
+                                );
+
+                                // Reconnect to Postgres just in case. During tests, I noticed
+                                // that queries in `check()` can fail with `connection closed`,
+                                // but `cli.is_closed()` above doesn't detect it.
+                                client = conf.connect(NoTls);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    info!(
+                        downtime_info = self.downtime_info(),
+                        "could not connect to Postgres: {}, retrying", e
+                    );
+                    self.report_down();
+
+                    // Establish a new connection and try again.
+                    client = conf.connect(NoTls);
+                }
+            }
+
+            // Reset the `last_checked` timestamp and sleep before the next iteration.
+            self.last_checked = Utc::now();
+            thread::sleep(MONITOR_CHECK_INTERVAL);
+        }
+    }
+
+    #[instrument(skip_all)]
+    fn check(&mut self, cli: &mut Client) -> anyhow::Result<()> {
         // This is new logic, only enable if the feature flag is set.
         // TODO: remove this once we are sure that it works OR drop it altogether.
-        if self.experimental_monitor {
+        if self.experimental {
             // Check if the total active time or sessions across all databases has changed.
             // If it did, it means that user executed some queries. In theory, it can even go down if
             // some databases were dropped, but it's still a user activity.
@@ -78,7 +180,7 @@ impl PGActivityState {
                     }
                 }
                 Err(e) => {
-                    return Err(e.context("could not get database statistics"));
+                    return Err(anyhow::anyhow!("could not get database statistics: {}", e));
                 }
             }
         }
@@ -103,7 +205,10 @@ impl PGActivityState {
                 _ => {}
             },
             Err(e) => {
-                return Err(e.context("could not get backends state change"));
+                return Err(anyhow::anyhow!(
+                    "could not get backends state change: {}",
+                    e
+                ));
             }
         }
 
@@ -127,8 +232,7 @@ impl PGActivityState {
                 }
             },
             Err(e) => {
-                let err: anyhow::Error = e.into();
-                return Err(err.context("failed to get list of walsenders"));
+                return Err(anyhow::anyhow!("failed to get list of walsenders: {}", e));
             }
         }
 
@@ -148,15 +252,17 @@ impl PGActivityState {
                     }
                 }
                 Err(e) => {
-                    let err: anyhow::Error = e.into();
-                    return Err(err.context("failed to parse 'pg_stat_subscription' count"));
+                    return Err(anyhow::anyhow!(
+                        "failed to parse 'pg_stat_subscription' count: {}",
+                        e
+                    ));
                 }
             },
             Err(e) => {
-                let err: anyhow::Error = e.into();
-                return Err(
-                    err.context("failed to get list of active logical replication subscriptions")
-                );
+                return Err(anyhow::anyhow!(
+                    "failed to get list of active logical replication subscriptions: {}",
+                    e
+                ));
             }
         }
 
@@ -174,83 +280,21 @@ impl PGActivityState {
                     };
                 }
                 Err(e) => {
-                    let err: anyhow::Error = e.into();
-                    return Err(err.context("failed to parse autovacuum workers count"));
+                    return Err(anyhow::anyhow!(
+                        "failed to parse autovacuum workers count: {}",
+                        e
+                    ));
                 }
             },
             Err(e) => {
-                let err: anyhow::Error = e.into();
-                return Err(err.context("failed to get list of autovacuum workers"));
+                return Err(anyhow::anyhow!(
+                    "failed to get list of autovacuum workers: {}",
+                    e
+                ));
             }
         }
 
         Ok(())
-    }
-}
-
-// Spin in a loop and figure out the last activity time in the Postgres.
-// Then update it in the shared state. This function never errors out.
-// NB: the only expected panic is at `Mutex` unwrap(), all other errors
-// should be handled gracefully.
-fn watch_compute_activity(compute: &ComputeNode) {
-    // Suppose that `connstr` doesn't change
-    let connstr = compute.params.connstr.clone();
-    let conf = compute.get_conn_conf(Some("compute_ctl:activity_monitor"));
-
-    // During startup and configuration we connect to every Postgres database,
-    // but we don't want to count this as some user activity. So wait until
-    // the compute fully started before monitoring activity.
-    wait_for_postgres_start(compute);
-
-    // Define `client` outside of the loop to reuse existing connection if it's active.
-    let mut client = conf.connect(NoTls);
-
-    let mut state = PGActivityState {
-        last_active: None,
-        last_checked: Utc::now(),
-        active_time: None,
-        sessions: None,
-        experimental_monitor: compute.has_feature(ComputeFeature::ActivityMonitorExperimental),
-    };
-
-    info!("starting activity monitor for {}", connstr);
-
-    loop {
-        match &mut client {
-            Ok(cli) => {
-                if cli.is_closed() {
-                    info!("connection to Postgres is closed, trying to reconnect");
-                    state.report_downtime();
-
-                    // Connection is closed, reconnect and try again.
-                    client = conf.connect(NoTls);
-                } else {
-                    match state.refresh(cli) {
-                        Ok(_) => {
-                            state.report_up();
-                            compute.update_last_active(state.last_active);
-                        }
-                        Err(e) => {
-                            // Although we have many places where we can return errors in `refresh()`,
-                            // normally it shouldn't happen. I.e., we will likely return error if
-                            // connection got broken, query timed out, Postgres returned invalid data, etc.
-                            // In all such cases it's suspicious, so let's report this as downtime.
-                            state.report_downtime();
-                            error!("could not refresh compute activity: {}", e)
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                info!("could not connect to Postgres: {}, retrying", e);
-                state.report_downtime();
-
-                // Establish a new connection and try again.
-                client = conf.connect(NoTls);
-            }
-        }
-
-        thread::sleep(MONITOR_CHECK_INTERVAL);
     }
 }
 
@@ -369,9 +413,24 @@ fn get_backends_state_change(cli: &mut Client) -> anyhow::Result<Option<DateTime
 /// Launch a separate compute monitor thread and return its `JoinHandle`.
 pub fn launch_monitor(compute: &Arc<ComputeNode>) -> thread::JoinHandle<()> {
     let compute = Arc::clone(compute);
+    let experimental = compute.has_feature(ComputeFeature::ActivityMonitorExperimental);
+    let now = Utc::now();
+    let mut monitor = ComputeMonitor {
+        compute,
+        last_active: None,
+        last_checked: now,
+        last_up: now,
+        active_time: None,
+        sessions: None,
+        experimental,
+    };
 
+    let span = span!(Level::INFO, "compute_monitor");
     thread::Builder::new()
         .name("compute-monitor".into())
-        .spawn(move || watch_compute_activity(&compute))
+        .spawn(move || {
+            let _enter = span.enter();
+            monitor.run();
+        })
         .expect("cannot launch compute monitor thread")
 }
