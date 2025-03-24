@@ -18,7 +18,7 @@ from fixtures.pageserver.http import (
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import MockS3Server, RemoteStorageKind
-from fixtures.utils import shared_buffers_for_max_cu, wait_until
+from fixtures.utils import shared_buffers_for_max_cu, skip_in_debug_build, wait_until
 from mypy_boto3_kms import KMSClient
 from mypy_boto3_kms.type_defs import EncryptResponseTypeDef
 from mypy_boto3_s3 import S3Client
@@ -43,6 +43,7 @@ smoke_params = [
 ]
 
 
+@skip_in_debug_build("MULTIPLE_RELATION_SEGMENTS has non trivial amount of data")
 @pytest.mark.parametrize("shard_count,stripe_size,rel_block_size", smoke_params)
 def test_pgdata_import_smoke(
     vanilla_pg: VanillaPostgres,
