@@ -290,8 +290,9 @@ pub struct Tenant {
     /// Initially populated during tenant attach, updated via `maybe_upload_tenant_manifest`.
     ///
     /// Do not modify this directly. It is used to check whether a new manifest needs to be
-    /// uploaded.
-    tenant_manifest: tokio::sync::Mutex<Option<TenantManifest>>,
+    /// uploaded. The manifest is constructed in `build_tenant_manifest`, and uploaded via
+    /// `maybe_upload_tenant_manifest`.
+    remote_tenant_manifest: tokio::sync::Mutex<Option<TenantManifest>>,
 
     // This mutex prevents creation of new timelines during GC.
     // Adding yet another mutex (in addition to `timelines`) is needed because holding
@@ -1814,7 +1815,7 @@ impl Tenant {
         // offloaded timelines which will be included in the manifest.
         {
             // The tenant manifest is first populated here. Assert that.
-            let mut guard = self.tenant_manifest.lock().await;
+            let mut guard = self.remote_tenant_manifest.lock().await;
             assert!(guard.is_none(), "tenant manifest set before preload");
             *guard = preload.tenant_manifest;
         }
@@ -4306,7 +4307,7 @@ impl Tenant {
             timelines: Mutex::new(HashMap::new()),
             timelines_creating: Mutex::new(HashSet::new()),
             timelines_offloaded: Mutex::new(HashMap::new()),
-            tenant_manifest: Default::default(),
+            remote_tenant_manifest: Default::default(),
             gc_cs: tokio::sync::Mutex::new(()),
             walredo_mgr,
             remote_storage,
@@ -5544,7 +5545,7 @@ impl Tenant {
     pub(crate) async fn maybe_upload_tenant_manifest(&self) -> Result<(), TenantManifestError> {
         // Serialize manifest updates to avoid races that may clobber it.
         let mut guard = tokio::select! {
-            guard = self.tenant_manifest.lock() => guard,
+            guard = self.remote_tenant_manifest.lock() => guard,
             _ = self.cancel.cancelled() => return Err(TenantManifestError::Cancelled),
         };
 
