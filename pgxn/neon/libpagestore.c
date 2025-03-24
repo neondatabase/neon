@@ -1152,15 +1152,12 @@ pageserver_try_receive(shardno_t shard_no)
 
 	while (true)
 	{
-		if (PQisBusy(shard->conn))
+		WaitEvent	event;
+		if (WaitEventSetWait(shard->wes_read, 0, &event, 1,
+							 WAIT_EVENT_NEON_PS_READ) != 1
+			|| (event.events & WL_SOCKET_READABLE) == 0)
 		{
-			WaitEvent	event;
-			if (WaitEventSetWait(shard->wes_read, 0, &event, 1,
-								 WAIT_EVENT_NEON_PS_READ) != 1
-				|| (event.events & WL_SOCKET_READABLE) == 0)
-			{
-				return NULL;
-			}
+			return NULL;
 		}
 		rc = PQgetCopyData(shard->conn, &resp_buff.data, 1 /* async */);
 		if (rc == 0)
