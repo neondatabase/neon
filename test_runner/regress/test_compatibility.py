@@ -244,6 +244,7 @@ def test_forward_compatibility(
     top_output_dir: Path,
     pg_version: PgVersion,
     compatibility_snapshot_dir: Path,
+    compute_reconfigure_listener: ComputeReconfigure,
 ):
     """
     Test that the old binaries can read new data
@@ -252,6 +253,7 @@ def test_forward_compatibility(
         os.environ.get("ALLOW_FORWARD_COMPATIBILITY_BREAKAGE", "false").lower() == "true"
     )
 
+    neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
     neon_env_builder.test_may_use_compatibility_snapshot_binaries = True
 
     try:
