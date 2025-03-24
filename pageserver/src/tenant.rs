@@ -1360,19 +1360,12 @@ impl Tenant {
                 }
 
                 // Ideally we should use Tenant::set_broken_no_wait, but it is not supposed to be used when tenant is in loading state.
-                enum BrokenVerbosity {
-                    Error,
-                    Info
-                }
-                let make_broken =
-                    |t: &Tenant, err: anyhow::Error, verbosity: BrokenVerbosity| {
-                        match verbosity {
-                            BrokenVerbosity::Info => {
-                                info!("attach cancelled, setting tenant state to Broken: {err}");
-                            },
-                            BrokenVerbosity::Error => {
-                                error!("attach failed, setting tenant state to Broken: {err:?}");
-                            }
+                fn make_broken(t: &Tenant, err: anyhow::Error) {
+                        // If the tenant is cancelled, assume the error was caused by cancellation.
+                        if t.cancel.is_cancelled() {
+                            info!("attach cancelled, setting tenant state to Broken: {err}");
+                        } else {
+                            error!("attach failed, setting tenant state to Broken: {err:?}");
                         }
                         t.state.send_modify(|state| {
                             // The Stopping case is for when we have passed control on to DeleteTenantFlow:
@@ -1384,11 +1377,11 @@ impl Tenant {
 
                             *state = TenantState::broken_from_reason(err.to_string());
                         });
-                    };
+                    }
 
                 // TODO: should also be rejecting tenant conf changes that violate this check.
                 if let Err(e) = crate::tenant::storage_layer::inmemory_layer::IndexEntry::validate_checkpoint_distance(tenant_clone.get_checkpoint_distance()) {
-                    make_broken(&tenant_clone, anyhow::anyhow!(e), BrokenVerbosity::Error);
+                    make_broken(&tenant_clone, anyhow::anyhow!(e));
                     return Ok(());
                 }
 
@@ -1443,7 +1436,7 @@ impl Tenant {
                             // Make the tenant broken so that set_stopping will not hang waiting for it to leave
                             // the Attaching state.  This is an over-reaction (nothing really broke, the tenant is
                             // just shutting down), but ensures progress.
-                            make_broken(&tenant_clone, anyhow::anyhow!("Shut down while Attaching"), BrokenVerbosity::Info);
+                            make_broken(&tenant_clone, anyhow::anyhow!("Shut down while Attaching"));
                             return Ok(());
                         },
                     )
@@ -1462,7 +1455,7 @@ impl Tenant {
                         match res {
                             Ok(p) => Some(p),
                             Err(e) => {
-                                make_broken(&tenant_clone, anyhow::anyhow!(e), BrokenVerbosity::Error);
+                                make_broken(&tenant_clone, anyhow::anyhow!(e));
                                 return Ok(());
                             }
                         }
@@ -1488,9 +1481,7 @@ impl Tenant {
                         info!("attach finished, activating");
                         tenant_clone.activate(broker_client, None, &ctx);
                     }
-                    Err(e) => {
-                        make_broken(&tenant_clone, anyhow::anyhow!(e), BrokenVerbosity::Error);
-                    }
+                    Err(e) => make_broken(&tenant_clone, anyhow::anyhow!(e)),
                 }
 
                 // If we are doing an opportunistic warmup attachment at startup, initialize
