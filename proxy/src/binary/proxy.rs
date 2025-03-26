@@ -314,9 +314,9 @@ pub async fn run() -> anyhow::Result<()> {
             None => {
                 bail!("plain auth requires redis_notifications to be set");
             }
-            Some(url) => Some(
-                ConnectionWithCredentialsProvider::new_with_static_credentials(url.to_string()),
-            ),
+            Some(url) => {
+                Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url.clone()))
+            }
         },
         ("irsa", _) => match (&args.redis_host, args.redis_port) {
             (Some(host), Some(port)) => Some(
