@@ -392,6 +392,7 @@ def do_action(project: NeonProject, action: str) -> None:
         parent = project.branches[
             random.choice(list(set(project.branches.keys()) - project.reset_branches))
         ]
+        log.info("Parent: %s", parent)
         child = parent.create_child_branch()
         if child is None:
             return
