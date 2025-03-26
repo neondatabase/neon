@@ -1,9 +1,10 @@
-use anyhow::{Context, Result, anyhow, bail};
-use axum::body::{Body, Bytes};
+use anyhow::{Context, Result, bail};
+use axum::body::{Body, BodyDataStream};
 use axum::extract::State as AxumState;
 use axum::response::{IntoResponse, Response};
 use axum::{extract::Path, http::StatusCode, routing::get};
 use camino::{Utf8Path, Utf8PathBuf};
+use clap::Parser;
 use jsonwebtoken::{DecodingKey, Validation};
 use remote_storage::{DownloadError, DownloadOpts, GenericRemoteStorage, RemotePath};
 use serde::{Deserialize, Serialize};
@@ -14,59 +15,57 @@ use tracing::{debug, error, info};
 
 const HELP: &str = "s3 proxy:
 If \"type\" is \"aws\", cli may look up the following environment variables:
- AWS_ACCESS_KEY_ID
+ AWS_ENDPOINT_URL
+ AWS_ACCESS_KEY_ID (note the lowercase, https://github.com/awslabs/aws-sdk-rust/issues/1020)
  AWS_SECRET_ACCESS_KEY
  or others, see https://docs.aws.amazon.com/sdkref/latest/guide/standardized-credentials.html
 In case of \"azure\", it may look up the following:
  AZURE_STORAGE_ACCOUNT
  AZURE_STORAGE_ACCESS_KEY";
 
+#[derive(clap::ValueEnum, Clone)]
+#[clap(rename_all = "kebab_case")]
+enum StorageType {
+    AWS,
+    Azure,
+}
+
+#[derive(Parser)]
+#[command(version, about, long_about = HELP)]
+struct Args {
+    #[arg(short, long)]
+    listen: std::net::SocketAddr,
+    #[arg(short, long)]
+    bucket: String,
+    #[arg(short, long)]
+    region: String,
+    #[arg(short = 't', long = "type")]
+    storage_type: StorageType,
+    #[arg(short, long, help = "Public key for verifying JWT tokens")]
+    pemfile: Utf8PathBuf,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut opts = getopts::Options::new();
-    opts.reqopt("l", "listen", "Address to listen on", "LISTEN");
-    opts.reqopt("b", "bucket", "Bucket/container name", "BUCKET");
-    opts.reqopt("r", "region", "Bucket/container region", "REGION");
-    opts.reqopt("t", "type", "Object storage type: aws or azure", "TYPE");
-    opts.optflag("h", "help", "Show help");
-    opts.reqopt("p", "pemfile", "Key for verifying JWT tokens", "FILE");
-    let matches = match opts.parse(std::env::args().skip(1)) {
-        Ok(m) => m,
-        Err(e) => {
-            print!("{}", opts.usage(HELP));
-            bail!(e)
-        }
-    };
-    if matches.opt_present("h") {
-        print!("{}", opts.usage(HELP));
-        return Ok(());
-    }
-    let listen: std::net::SocketAddr = matches.opt_str("l").unwrap().parse()?;
-    let bucket_name = matches.opt_str("b").ok_or(anyhow!("Missing --bucket"))?;
-    let bucket_region = matches.opt_str("r").ok_or(anyhow!("Missing --region"))?;
-    let storage_type = matches.opt_str("t").ok_or(anyhow!("Missing --type"))?;
-    if storage_type != "aws" && storage_type != "azure" {
-        bail!("Invalid --type {storage_type}")
-    }
-    let pemfile_path: Utf8PathBuf = matches
-        .opt_str("p")
-        .ok_or(anyhow!("Missing --pemfile"))?
-        .parse()?;
-
-    tracing_subscriber::fmt::init();
-    let listener = tokio::net::TcpListener::bind(listen).await.unwrap();
+    utils::logging::init(
+        utils::logging::LogFormat::Plain,
+        utils::logging::TracingErrorLayerEnablement::EnableWithRustLogFilter,
+        utils::logging::Output::Stdout,
+    )?;
+    let args = Args::parse();
+    let listener = tokio::net::TcpListener::bind(args.listen).await.unwrap();
     info!("listening on {}", listener.local_addr().unwrap());
-    let pemfile = std::fs::read(pemfile_path).context("reading pemfile")?;
+    let pemfile = std::fs::read(args.pemfile).context("reading pemfile")?;
     let auth = JwtAuth::new(&pemfile).context("loading JwtAuth")?;
 
     let concurrency_limit = std::num::NonZero::new(10).unwrap(); // TODO?
     let timeout = Duration::from_secs(3);
     let azure_small_timeout = Duration::from_secs(1);
     let azure_conn_pool_size = 10;
-    let storage = if storage_type == "aws" {
+    let storage = if let StorageType::AWS = args.storage_type {
         let config = remote_storage::S3Config {
-            bucket_name,
-            bucket_region,
+            bucket_name: args.bucket,
+            bucket_region: args.region,
             prefix_in_bucket: None,
             endpoint: None,
             concurrency_limit,
@@ -79,9 +78,9 @@ async fn main() -> Result<()> {
             .map(GenericRemoteStorage::AwsS3)?
     } else {
         let config = remote_storage::AzureConfig {
-            container_name: bucket_name,
+            container_name: args.bucket,
             storage_account: None,
-            container_region: bucket_region,
+            container_region: args.region,
             prefix_in_container: None,
             concurrency_limit,
             max_keys_per_list_response: None,
@@ -91,10 +90,24 @@ async fn main() -> Result<()> {
             .map(Arc::new)
             .map(GenericRemoteStorage::AzureBlob)?
     };
-    check_storage_permissions(&storage).await?;
+    let cancel = CancellationToken::new();
+    check_storage_permissions(&storage, cancel.clone()).await?;
 
-    let proxy = Arc::new(Proxy { auth, storage });
-    axum::serve(listener, app().with_state(proxy)).await?;
+    let proxy = Arc::new(Proxy {
+        auth,
+        storage,
+        cancel: cancel.clone(),
+    });
+
+    let ctrl_c_cancel = cancel.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.unwrap();
+        info!("Shutting down");
+        ctrl_c_cancel.cancel()
+    });
+    axum::serve(listener, app().with_state(proxy))
+        .with_graceful_shutdown(async move { cancel.cancelled().await })
+        .await?;
     Ok(())
 }
 
@@ -121,10 +134,12 @@ impl JwtAuth {
     }
 }
 
-async fn check_storage_permissions(client: &GenericRemoteStorage) -> Result<()> {
+async fn check_storage_permissions(
+    client: &GenericRemoteStorage,
+    cancel: CancellationToken,
+) -> Result<()> {
     debug!("Storage permissions check");
-    use futures::stream::{StreamExt, once};
-    let cancel = CancellationToken::new();
+
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs()
@@ -132,24 +147,29 @@ async fn check_storage_permissions(client: &GenericRemoteStorage) -> Result<()> 
 
     // TODO what if multiple instances try to write a file?
     // random delay before writing? Instances will be ~3 per region + dedicated for computes
-    let body_str = format!("{now}");
-    let body_bytes = Bytes::from_owner(body_str.clone());
-    let stream = once(futures::future::ready(Ok(body_bytes.clone())));
     let path = RemotePath::from_string(&format!("write_access_{now}"))?;
+    let body_str = format!("{now}");
+    let stream = Body::from(body_str.clone()).into_data_stream();
+    let stream = body_stream_to_sync_stream(stream);
 
     debug!(%path, "uploading");
     client
-        .upload(stream, body_bytes.len(), &path, None, &cancel)
-        .await?;
+        .upload(stream, body_str.len(), &path, None, &cancel)
+        .await
+        .context(format!("uploading {path} to test permissions"))?;
 
     debug!(%path, "downloading");
-    let mut download_opts = DownloadOpts::default();
-    download_opts.kind = remote_storage::DownloadKind::Small;
+    let download_opts = DownloadOpts {
+        kind: remote_storage::DownloadKind::Small,
+        ..Default::default()
+    };
     let mut stream = client
         .download(&path, &download_opts, &cancel)
-        .await?
+        .await
+        .context(format!("downloading {path} to test permissions"))?
         .download_stream;
     let mut out = Vec::new();
+    use futures::stream::StreamExt;
     while let Some(res) = stream.next().await {
         out.extend_from_slice(&res?[..]);
     }
@@ -160,6 +180,14 @@ async fn check_storage_permissions(client: &GenericRemoteStorage) -> Result<()> 
 
     debug!(%path, "removing");
     client.delete(&path, &cancel).await
+}
+
+fn body_stream_to_sync_stream(
+    stream: BodyDataStream,
+) -> impl futures::Stream<Item = std::io::Result<axum::body::Bytes>> {
+    use futures::stream::TryStreamExt;
+    sync_wrapper::SyncStream::new(stream)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
 }
 
 fn app() -> Router {
@@ -212,7 +240,7 @@ async fn get_key_impl(key_path: KeyPath, state: AxumState<State>) -> Result<Resp
 
     let stream = state
         .storage
-        .download(&path, &opts, &CancellationToken::new())
+        .download(&path, &opts, &state.cancel.clone())
         .await
         .map_err(|err| {
             error!(
@@ -290,21 +318,16 @@ async fn set_key_impl(
     body: Body,
 ) -> Result<Response, Response> {
     let remote_path = construct_s3_key(&key_path).map_err(bad_request)?;
-    let cancel = CancellationToken::new();
     info!(path = remote_path.to_string(), "Uploading");
 
     use axum::body::HttpBody;
-    use futures::stream::TryStreamExt;
-    use std::io::{Error, ErrorKind};
     let stream = body.into_data_stream();
     // TODO Get stream hint size without reading it into Bytes
     let body_size = stream.size_hint().upper().unwrap_or(0) as usize;
-    let stream = sync_wrapper::SyncStream::new(stream)
-        // upload() wants std::io::Error, but we have axum::Error
-        .map_err(|e| Error::new(ErrorKind::Other, e.to_string()));
+    let stream = body_stream_to_sync_stream(stream);
     state
         .storage
-        .upload(stream, body_size, &remote_path, None, &cancel)
+        .upload(stream, body_size, &remote_path, None, &state.cancel.clone())
         .await
         .map(|_| StatusCode::OK.into_response())
         .map_err(|err| {
@@ -326,7 +349,7 @@ async fn delete_key_impl(key_path: KeyPath, state: AxumState<State>) -> Result<R
     debug!(%path, "Deleting");
     state
         .storage
-        .delete(&path, &CancellationToken::new())
+        .delete(&path, &state.cancel.clone())
         .await
         .map(|_| StatusCode::OK.into_response())
         .map_err(|err| {
@@ -342,6 +365,7 @@ async fn delete_key_impl(key_path: KeyPath, state: AxumState<State>) -> Result<R
 struct Proxy {
     auth: JwtAuth,
     storage: GenericRemoteStorage,
+    cancel: CancellationToken,
 }
 type State = Arc<Proxy>;
 type Router = axum::Router<State>;
@@ -380,7 +404,7 @@ impl axum::extract::FromRequestParts<State> for KeyPath {
         let TypedHeader(Authorization(bearer)) = parts
             .extract::<TypedHeader<Authorization<Bearer>>>()
             .await
-            .map_err(|_| bad_request("invalid_token"))?;
+            .map_err(|_| bad_request("invalid token"))?;
         let claims = state
             .auth
             .decode(bearer.token())
@@ -410,11 +434,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
         let fs = remote_storage::LocalFs::new(path, Duration::from_secs(5)).unwrap();
+        let cancel = CancellationToken::new();
         let proxy = Proxy {
             auth: JwtAuth::new(TEST_PUB_KEY_ED25519).unwrap(),
             storage: GenericRemoteStorage::LocalFs(fs),
+            cancel: cancel.clone(),
         };
-        check_storage_permissions(&proxy.storage).await.unwrap();
+        check_storage_permissions(&proxy.storage, cancel)
+            .await
+            .unwrap();
         (proxy, dir)
     }
 

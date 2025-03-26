@@ -2603,15 +2603,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "getopts"
-version = "0.2.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14dbbfd5c71d70241ecf9e6f13737f7b5ce823821063188d7e46c41d371eebd5"
-dependencies = [
- "unicode-width",
-]
-
-[[package]]
 name = "getrandom"
 version = "0.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6280,9 +6271,10 @@ dependencies = [
  "axum",
  "axum-extra",
  "axum-prometheus",
+ "bytes",
  "camino",
+ "clap",
  "futures",
- "getopts",
  "http-body-util",
  "itertools 0.10.5",
  "jsonwebtoken",
@@ -6298,6 +6290,7 @@ dependencies = [
  "tower 0.5.2",
  "tracing",
  "tracing-subscriber",
+ "utils",
  "workspace_hack",
 ]
 

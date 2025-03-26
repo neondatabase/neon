@@ -8,9 +8,10 @@ anyhow.workspace = true
 axum-extra.workspace = true
 axum-prometheus.workspace = true
 axum.workspace = true
+bytes.workspace = true
 camino.workspace = true
+clap.workspace = true
 futures.workspace = true
-getopts = "0.2.21"
 jsonwebtoken.workspace = true
 remote_storage.workspace = true
 serde.workspace = true
@@ -20,6 +21,7 @@ tokio-util.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
 tracing.workspace = true
+utils = { path = "../libs/utils", default-features = false }
 workspace_hack.workspace = true
 
 [dev-dependencies]
