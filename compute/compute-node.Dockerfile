@@ -1916,7 +1916,6 @@ RUN apt update && \
       ;; \
     esac && \
     apt install --no-install-recommends -y \
-        bpftrace \
         ca-certificates \
         gdb \
         iproute2 \
