@@ -435,6 +435,8 @@ class NeonEnvBuilder:
         # Safekeepers remote storage
         self.safekeepers_remote_storage: RemoteStorage | None = None
 
+        self.s3_proxy_remote_storage: RemoteStorage | None = None
+
         self.run_id = run_id
         self.mock_s3_server: MockS3Server = mock_s3_server
         self.pageserver_config_override = pageserver_config_override
@@ -871,6 +873,15 @@ class NeonEnvBuilder:
             kind, RemoteStorageUser.SAFEKEEPER
         )
 
+    def enable_s3_proxy_with(self, kind: RemoteStorageKind):
+        assert (
+            self.s3_proxy_remote_storage is None
+        ), "s3 proxy already configured"
+        self.s3_proxy_remote_storage = self._configure_and_create_remote_storage(
+            kind, RemoteStorageUser.S3PROXY
+        )
+        return self.s3_proxy_remote_storage
+
     def _configure_and_create_remote_storage(
         self,
         kind: RemoteStorageKind,
@@ -930,7 +941,7 @@ class NeonEnvBuilder:
                     log.error(f"Error removing empty directory {directory_to_clean}: {e}")
 
     def cleanup_remote_storage(self):
-        for x in [self.pageserver_remote_storage, self.safekeepers_remote_storage]:
+        for x in [self.pageserver_remote_storage, self.safekeepers_remote_storage, self.s3_proxy_remote_storage]:
             if isinstance(x, S3Storage):
                 x.do_cleanup()
 
@@ -958,6 +969,7 @@ class NeonEnvBuilder:
 
             # If we are running with S3Storage (required by the scrubber), check that whatever the test
             # did does not generate any corruption
+            # TODO s3 proxy storage
             if (
                 isinstance(self.env.pageserver_remote_storage, S3Storage)
                 and self.enable_scrub_on_exit
@@ -1056,6 +1068,7 @@ class NeonEnv:
         self.broker = NeonBroker(self)
         self.pageserver_remote_storage = config.pageserver_remote_storage
         self.safekeepers_remote_storage = config.safekeepers_remote_storage
+        self.s3_proxy_remote_storage = config.s3_proxy_remote_storage
         self.pg_version = config.pg_version
         # Binary path for pageserver, safekeeper, etc
         self.neon_binpath = config.neon_binpath

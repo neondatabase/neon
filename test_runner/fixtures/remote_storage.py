@@ -37,6 +37,7 @@ class RemoteStorageUser(StrEnum):
     PAGESERVER = "pageserver"
     EXTENSIONS = "ext"
     SAFEKEEPER = "safekeeper"
+    S3PROXY = "s3_proxy"
 
     @override
     def __str__(self) -> str:
@@ -367,6 +368,10 @@ class S3Storage:
     def mock_remote_tenant_path(self, tenant_id: TenantId):
         assert self.real is False
 
+
+class S3Proxy:
+    def __init__(self):
+        pass
 
 RemoteStorage = LocalFsStorage | S3Storage
 
