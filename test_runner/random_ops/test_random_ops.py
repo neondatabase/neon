@@ -197,12 +197,22 @@ class NeonBranch:
                     else:
                         continue
                 # Skip restore if we cannot create more branches due to limit
+                elif he.response.status_code == 422:
+                    if he.response.json()["code"] == "BRANCHES_LIMIT_EXCEEDED":
+                        log.info("Branches limit exceeded, skipping")
+                        return None
+                    elif he.response.json()["message"] == "branch not ready yet":
+                        log.info("Retrying")
+                        continue
+                    else:
+                        raise HTTPError(he) from he
                 elif (
-                    he.response.status_code == 422
-                    and he.response.json()["code"] == "BRANCHES_LIMIT_EXCEEDED"
+                    he.response.status_code == 423
+                    and he.response.json()["message"]
+                    == "endpoint is in some transitive state, could not suspend"
                 ):
-                    log.info("Branches limit exceeded, skipping")
-                    return None
+                    log.info("Retrying")
+                    continue
                 else:
                     raise HTTPError(he) from he
             else:
