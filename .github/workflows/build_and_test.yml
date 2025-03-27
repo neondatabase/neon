@@ -254,6 +254,7 @@ jobs:
           bucket: ${{ vars.HETZNER_CACHE_BUCKET }}
           accessKey: ${{ secrets.HETZNER_CACHE_ACCESS_KEY }}
           secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
+          use-fallback: false
           path: ~/.cache/pypoetry/virtualenvs
           key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-bookworm-${{ hashFiles('poetry.lock') }}
 
