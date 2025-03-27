@@ -25,12 +25,12 @@ def connection_parameters_to_env(params: dict[str, str]) -> dict[str, str]:
 # Some API calls not yet implemented.
 # You may want to copy not-yet-implemented methods from the PR https://github.com/neondatabase/neon/pull/11305
 class NeonAPI:
-    def __init__(self, neon_api_key: str, neon_api_base_url: str, retry_if_possible: bool = False, attempts: int = 10, sleep_before_retry: int = 1):
+    def __init__(self, neon_api_key: str, neon_api_base_url: str):
         self.__neon_api_key = neon_api_key
         self.__neon_api_base_url = neon_api_base_url.strip("/")
-        self.retry_if_possible = retry_if_possible
-        self.attempts = attempts
-        self.sleep_before_retry = sleep_before_retry
+        self.retry_if_possible = False
+        self.attempts = 10
+        self.sleep_before_retry = 1
         self.retries524 = 0
         self.retries4xx = 0
 
