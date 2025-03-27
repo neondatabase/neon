@@ -4614,9 +4614,9 @@ dependencies = [
 
 [[package]]
 name = "paracord"
-version = "0.1.0-rc.5"
+version = "0.1.0-rc.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe4d20c42ae2826a91463e015d3d76064b07b222d94d3646e854071aae25043b"
+checksum = "965ee8b44c8a2556aa73279eab88d5aa63a2859336d8a61295104c8d8a4fb248"
 dependencies = [
  "boxcar",
  "clashmap",
