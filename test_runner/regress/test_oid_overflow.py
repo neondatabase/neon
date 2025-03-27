@@ -32,7 +32,7 @@ def test_oid_overflow(neon_env_builder: NeonEnvBuilder):
     log.info(f"t1.relfilenode={oid}")
 
     cur.execute("set statement_timeout=0")
-    cur.execute(f"select test_consume_oids({oid-1})")
+    cur.execute(f"select test_consume_oids({oid - 1})")
     cur.execute("VACUUM FULL t2")
 
     cur.execute("SELECT relfilenode FROM pg_class where relname='t2'")

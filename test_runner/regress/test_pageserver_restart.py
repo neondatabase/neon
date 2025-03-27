@@ -135,9 +135,9 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     for phase, expectation in expectations:
         assert phase in values, f"No data for phase {phase}"
         sample = values[phase]
-        assert expectation(
-            sample.value, prev_value
-        ), f"Unexpected value for {phase}: {sample.value}"
+        assert expectation(sample.value, prev_value), (
+            f"Unexpected value for {phase}: {sample.value}"
+        )
         prev_value = sample.value
 
     # Startup is complete, this metric should exist but be zero

@@ -310,9 +310,9 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
     new_res = client.timeline_detail(
         env.initial_tenant, new_timeline_id, include_non_incremental_logical_size=True
     )
-    assert (
-        new_res["current_logical_size"] == new_res["current_logical_size_non_incremental"]
-    ), "after the WAL is streamed, current_logical_size is expected to be calculated and to be equal its non-incremental value"
+    assert new_res["current_logical_size"] == new_res["current_logical_size_non_incremental"], (
+        "after the WAL is streamed, current_logical_size is expected to be calculated and to be equal its non-incremental value"
+    )
 
 
 @pytest.mark.parametrize("deletion_method", ["tenant_detach", "timeline_delete"])

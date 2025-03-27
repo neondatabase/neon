@@ -84,9 +84,9 @@ async def test_websockets(static_proxy: NeonProxy):
         assert query_response[0:1] == b"D", "should be data row message"
         data_row_len = int.from_bytes(query_response[1:5], byteorder="big") + 1
         data_row, query_response = query_response[:data_row_len], query_response[data_row_len:]
-        assert (
-            data_row == b"D\x00\x00\x00\x0b\x00\x01\x00\x00\x00\x011"
-        ), "should contain 1 column with text value 1"
+        assert data_row == b"D\x00\x00\x00\x0b\x00\x01\x00\x00\x00\x011", (
+            "should contain 1 column with text value 1"
+        )
 
         assert query_response[0:1] == b"C", "should be command complete message"
         command_complete_len = int.from_bytes(query_response[1:5], byteorder="big") + 1
@@ -184,9 +184,9 @@ async def test_websockets_pipelined(static_proxy: NeonProxy):
         assert query_response[0:1] == b"D", "should be data row message"
         data_row_len = int.from_bytes(query_response[1:5], byteorder="big") + 1
         data_row, query_response = query_response[:data_row_len], query_response[data_row_len:]
-        assert (
-            data_row == b"D\x00\x00\x00\x0b\x00\x01\x00\x00\x00\x011"
-        ), "should contain 1 column with text value 1"
+        assert data_row == b"D\x00\x00\x00\x0b\x00\x01\x00\x00\x00\x011", (
+            "should contain 1 column with text value 1"
+        )
 
         assert query_response[0:1] == b"C", "should be command complete message"
         command_complete_len = int.from_bytes(query_response[1:5], byteorder="big") + 1

@@ -628,7 +628,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     except:
         # On assertion failures, log some details to help with debugging
         heatmap = env.pageserver_remote_storage.heatmap_content(tenant_id)
-        log.warn(f"heatmap contents: {json.dumps(heatmap,indent=2)}")
+        log.warn(f"heatmap contents: {json.dumps(heatmap, indent=2)}")
         raise
 
     # Scrub the remote storage

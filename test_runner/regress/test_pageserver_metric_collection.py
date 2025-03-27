@@ -287,9 +287,9 @@ def test_metric_collection_cleans_up_tempfile(
 
     initially = iterate_pageserver_workdir(env.pageserver.workdir, "last_consumption_metrics.json")
 
-    assert (
-        len(initially.matching) == 2
-    ), f"expecting actual file and tempfile, but not found: {initially.matching}"
+    assert len(initially.matching) == 2, (
+        f"expecting actual file and tempfile, but not found: {initially.matching}"
+    )
 
     uploads.put("ready")
     env.pageserver.start()
@@ -308,9 +308,9 @@ def test_metric_collection_cleans_up_tempfile(
     # it is possible we shutdown the pageserver right at the correct time, so the old tempfile
     # is gone, but we also have a new one.
     only = set(["last_consumption_metrics.json"])
-    assert (
-        initially.matching.intersection(later.matching) == only
-    ), "only initial tempfile should had been removed"
+    assert initially.matching.intersection(later.matching) == only, (
+        "only initial tempfile should had been removed"
+    )
     assert initially.other.issuperset(later.other), "no other files should had been removed"
 
 
@@ -497,9 +497,9 @@ class SyntheticSizeVerifier:
     def post_batch(self, parent):
         if self.prev is not None:
             # this is assuming no one goes and deletes the cache file
-            assert (
-                self.value is not None
-            ), "after calculating first synthetic size, cached or more recent should be sent"
+            assert self.value is not None, (
+                "after calculating first synthetic size, cached or more recent should be sent"
+            )
         self.prev = self.value
         self.value = None
 

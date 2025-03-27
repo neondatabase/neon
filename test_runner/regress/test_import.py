@@ -179,7 +179,7 @@ def test_import_from_pageserver_multisegment(
     logical_size = env.pageserver.http_client().timeline_detail(env.initial_tenant, timeline)[
         "current_logical_size"
     ]
-    log.info(f"timeline logical size = {logical_size / (1024 ** 2)}MB")
+    log.info(f"timeline logical size = {logical_size / (1024**2)}MB")
     assert logical_size > 1024**3  # = 1GB
 
     tar_output_file = _import(num_rows, lsn, env, pg_bin, timeline, test_output_dir)

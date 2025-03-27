@@ -37,9 +37,9 @@ def pg_compare(request) -> Generator[PgCompare, None, None]:
 
         yield fixture
     else:
-        assert (
-            len(x) == 2
-        ), f"request param ({request.param}) should have a format of `neon_{{safekeepers_enable_fsync}}`"
+        assert len(x) == 2, (
+            f"request param ({request.param}) should have a format of `neon_{{safekeepers_enable_fsync}}`"
+        )
 
         # `NeonCompare` interface
         neon_env_builder = request.getfixturevalue("neon_env_builder")
@@ -278,7 +278,7 @@ def record_read_latency(
                 t2 = timeit.default_timer()
 
                 log.info(
-                    f"Executed read query {read_query}, got {cur.fetchall()}, read time {t2-t1:.2f}s"
+                    f"Executed read query {read_query}, got {cur.fetchall()}, read time {t2 - t1:.2f}s"
                 )
                 read_latencies.append(t2 - t1)
             except Exception as err:

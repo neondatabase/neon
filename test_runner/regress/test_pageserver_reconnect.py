@@ -25,7 +25,7 @@ def test_pageserver_reconnect(neon_simple_env: NeonEnv, pg_bin: PgBin):
     def run_pgbench(connstr: str):
         log.info(f"Start a pgbench workload on pg {connstr}")
         pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", f"-s{scale}", connstr])
-        pg_bin.run_capture(["pgbench", f"-T{int(n_reconnects*timeout)}", connstr])
+        pg_bin.run_capture(["pgbench", f"-T{int(n_reconnects * timeout)}", connstr])
 
     thread = threading.Thread(target=run_pgbench, args=(endpoint.connstr(),), daemon=True)
     thread.start()

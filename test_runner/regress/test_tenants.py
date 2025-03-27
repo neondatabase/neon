@@ -313,9 +313,9 @@ def test_pageserver_with_empty_tenants(neon_env_builder: NeonEnvBuilder):
     files_in_timelines_dir = sum(
         1 for _p in Path.iterdir(env.pageserver.timeline_dir(tenant_with_empty_timelines))
     )
-    assert (
-        files_in_timelines_dir == 0
-    ), f"Tenant {tenant_with_empty_timelines} should have an empty timelines/ directory"
+    assert files_in_timelines_dir == 0, (
+        f"Tenant {tenant_with_empty_timelines} should have an empty timelines/ directory"
+    )
 
     # Trigger timeline re-initialization after pageserver restart
     env.endpoints.stop_all()
@@ -335,14 +335,14 @@ def test_pageserver_with_empty_tenants(neon_env_builder: NeonEnvBuilder):
     tenants = client.tenant_list()
 
     [loaded_tenant] = [t for t in tenants if t["id"] == str(tenant_with_empty_timelines)]
-    assert (
-        loaded_tenant["state"]["slug"] == "Active"
-    ), "Tenant {tenant_with_empty_timelines} with empty timelines dir should be active and ready for timeline creation"
+    assert loaded_tenant["state"]["slug"] == "Active", (
+        "Tenant {tenant_with_empty_timelines} with empty timelines dir should be active and ready for timeline creation"
+    )
 
     loaded_tenant_status = client.tenant_status(tenant_with_empty_timelines)
-    assert (
-        loaded_tenant_status["state"]["slug"] == "Active"
-    ), f"Tenant {tenant_with_empty_timelines} without timelines dir should be active"
+    assert loaded_tenant_status["state"]["slug"] == "Active", (
+        f"Tenant {tenant_with_empty_timelines} without timelines dir should be active"
+    )
 
     time.sleep(1)  # to allow metrics propagation
 
@@ -357,9 +357,9 @@ def test_pageserver_with_empty_tenants(neon_env_builder: NeonEnvBuilder):
         ).value
     )
 
-    assert (
-        tenant_active_count == 1
-    ), f"Tenant {tenant_with_empty_timelines} should have metric as active"
+    assert tenant_active_count == 1, (
+        f"Tenant {tenant_with_empty_timelines} should have metric as active"
+    )
 
 
 def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):

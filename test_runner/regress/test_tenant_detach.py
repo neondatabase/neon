@@ -434,9 +434,9 @@ def test_detach_while_activating(
 
     tenants_after_detach = [tenant["id"] for tenant in pageserver_http.tenant_list()]
     assert tenant_id not in tenants_after_detach, "Detached tenant should be missing"
-    assert len(tenants_after_detach) + 1 == len(
-        tenants_before_detach
-    ), "Only ignored tenant should be missing"
+    assert len(tenants_after_detach) + 1 == len(tenants_before_detach), (
+        "Only ignored tenant should be missing"
+    )
 
     # Subsequently attaching it again should still work
     pageserver_http.configure_failpoints([("attach-before-activate-sleep", "off")])
@@ -478,9 +478,9 @@ def insert_test_data(
 
 def ensure_test_data(data_id: int, data: str, endpoint: Endpoint):
     with endpoint.cursor() as cur:
-        assert (
-            query_scalar(cur, f"SELECT secret FROM test WHERE id = {data_id};") == data
-        ), "Should have timeline data back"
+        assert query_scalar(cur, f"SELECT secret FROM test WHERE id = {data_id};") == data, (
+            "Should have timeline data back"
+        )
 
 
 def test_metrics_while_ignoring_broken_tenant_and_reloading(

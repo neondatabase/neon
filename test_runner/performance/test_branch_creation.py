@@ -45,9 +45,9 @@ def test_branch_creation_heavy_write(neon_compare: NeonCompare, n_branches: int)
     tenant, _ = env.create_tenant(
         conf={
             "gc_period": "5 s",
-            "gc_horizon": f"{4 * 1024 ** 2}",
-            "checkpoint_distance": f"{2 * 1024 ** 2}",
-            "compaction_target_size": f"{1024 ** 2}",
+            "gc_horizon": f"{4 * 1024**2}",
+            "checkpoint_distance": f"{2 * 1024**2}",
+            "compaction_target_size": f"{1024**2}",
             "compaction_threshold": "2",
             # set PITR interval to be small, so we can do GC
             "pitr_interval": "5 s",
@@ -82,10 +82,10 @@ def test_branch_creation_heavy_write(neon_compare: NeonCompare, n_branches: int)
         env.create_branch(f"b{i + 1}", ancestor_branch_name=f"b{p}", tenant_id=tenant)
         dur = timeit.default_timer() - timer
 
-        log.info(f"Creating branch b{i+1} took {dur}s")
+        log.info(f"Creating branch b{i + 1} took {dur}s")
         branch_creation_durations.append(dur)
 
-        threads.append(threading.Thread(target=run_pgbench, args=(f"b{i+1}",), daemon=True))
+        threads.append(threading.Thread(target=run_pgbench, args=(f"b{i + 1}",), daemon=True))
         threads[-1].start()
 
     for thread in threads:

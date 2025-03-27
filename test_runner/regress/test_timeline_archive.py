@@ -292,7 +292,7 @@ def test_timeline_offload_persist(neon_env_builder: NeonEnvBuilder, delete_timel
         conf={
             "gc_period": "0s",
             "compaction_period": "0s",
-            "checkpoint_distance": f"{1024 ** 2}",
+            "checkpoint_distance": f"{1024**2}",
         }
     )
 
@@ -898,7 +898,7 @@ def test_timeline_offload_generations(neon_env_builder: NeonEnvBuilder):
         conf={
             "gc_period": "0s",
             "compaction_period": "0s",
-            "checkpoint_distance": f"{1024 ** 2}",
+            "checkpoint_distance": f"{1024**2}",
         }
     )
 

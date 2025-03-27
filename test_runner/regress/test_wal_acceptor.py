@@ -138,20 +138,24 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
 
             for flush_lsn, commit_lsn in zip(m.flush_lsns, m.commit_lsns, strict=False):
                 # Invariant. May be < when transaction is in progress.
-                assert (
-                    commit_lsn <= flush_lsn
-                ), f"timeline_id={timeline_id}, timeline_detail={timeline_detail}, sk_metrics={sk_metrics}"
+                assert commit_lsn <= flush_lsn, (
+                    f"timeline_id={timeline_id}, timeline_detail={timeline_detail}, sk_metrics={sk_metrics}"
+                )
             # We only call collect_metrics() after a transaction is confirmed by
             # the compute node, which only happens after a consensus of safekeepers
             # has confirmed the transaction. We assume majority consensus here.
             assert (
                 2 * sum(m.last_record_lsn <= lsn for lsn in m.flush_lsns)
                 > neon_env_builder.num_safekeepers
-            ), f"timeline_id={timeline_id}, timeline_detail={timeline_detail}, sk_metrics={sk_metrics}"
+            ), (
+                f"timeline_id={timeline_id}, timeline_detail={timeline_detail}, sk_metrics={sk_metrics}"
+            )
             assert (
                 2 * sum(m.last_record_lsn <= lsn for lsn in m.commit_lsns)
                 > neon_env_builder.num_safekeepers
-            ), f"timeline_id={timeline_id}, timeline_detail={timeline_detail}, sk_metrics={sk_metrics}"
+            ), (
+                f"timeline_id={timeline_id}, timeline_detail={timeline_detail}, sk_metrics={sk_metrics}"
+            )
             timeline_metrics.append(m)
         log.info(f"{message}: {timeline_metrics}")
         return timeline_metrics
@@ -1112,16 +1116,16 @@ def cmp_sk_wal(sks: list[Safekeeper], tenant_id: TenantId, timeline_id: Timeline
     statuses = [sk_http_cli.timeline_status(tenant_id, timeline_id) for sk_http_cli in sk_http_clis]
     term_flush_lsns = [(s.last_log_term, s.flush_lsn) for s in statuses]
     for tfl, sk in zip(term_flush_lsns[1:], sks[1:], strict=False):
-        assert (
-            term_flush_lsns[0] == tfl
-        ), f"(last_log_term, flush_lsn) are not equal on sks {sks[0].id} and {sk.id}: {term_flush_lsns[0]} != {tfl}"
+        assert term_flush_lsns[0] == tfl, (
+            f"(last_log_term, flush_lsn) are not equal on sks {sks[0].id} and {sk.id}: {term_flush_lsns[0]} != {tfl}"
+        )
 
     # check that WALs are identic.
     segs = [sk.list_segments(tenant_id, timeline_id) for sk in sks]
     for cmp_segs, sk in zip(segs[1:], sks[1:], strict=False):
-        assert (
-            segs[0] == cmp_segs
-        ), f"lists of segments on sks {sks[0].id} and {sk.id} are not identic: {segs[0]} and {cmp_segs}"
+        assert segs[0] == cmp_segs, (
+            f"lists of segments on sks {sks[0].id} and {sk.id} are not identic: {segs[0]} and {cmp_segs}"
+        )
     log.info(f"comparing segs {segs[0]}")
 
     sk0 = sks[0]
@@ -2418,7 +2422,7 @@ def test_s3_eviction(
             for j in range(n_timelines):
                 detail = ps_client.timeline_detail(env.initial_tenant, timelines[j])
                 log.debug(
-                    f'{branch_names[j]}: RCL={detail["remote_consistent_lsn"]}, LRL={detail["last_record_lsn"]}'
+                    f"{branch_names[j]}: RCL={detail['remote_consistent_lsn']}, LRL={detail['last_record_lsn']}"
                 )
 
         i = random.randint(0, n_timelines - 1)

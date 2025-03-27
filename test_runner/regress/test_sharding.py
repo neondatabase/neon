@@ -334,9 +334,9 @@ def test_sharding_split_compaction(
         result = ps.timeline_scan_no_disposable_keys(shard, timeline_id)
         tally = result.tally
         raw_page_count = tally.not_disposable_count + tally.disposable_count
-        assert tally.not_disposable_count > (
-            raw_page_count // 2
-        ), "compaction doesn't rewrite layers that are >=50pct local"
+        assert tally.not_disposable_count > (raw_page_count // 2), (
+            "compaction doesn't rewrite layers that are >=50pct local"
+        )
 
         log.info("check sizes")
         timeline_info = ps.http_client().timeline_detail(shard, timeline_id)
@@ -1601,7 +1601,7 @@ def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
             delta_bytes = lsn - last_flush_lsn
             avg_speed = delta_bytes / delta / 1024 / 1024
             log.info(
-                f"flush_lsn {lsn}, written {delta_bytes/1024}kb for {delta:.3f}s, avg_speed {avg_speed:.3f} MiB/s"
+                f"flush_lsn {lsn}, written {delta_bytes / 1024}kb for {delta:.3f}s, avg_speed {avg_speed:.3f} MiB/s"
             )
 
         last_flush_lsn = lsn

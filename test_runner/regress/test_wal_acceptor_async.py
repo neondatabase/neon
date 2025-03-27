@@ -692,7 +692,7 @@ async def run_race_conditions(env: NeonEnv, endpoint: Endpoint):
         expected_sum += i
         i += 1
 
-    log.info(f"Executed {i-1} queries")
+    log.info(f"Executed {i - 1} queries")
 
     res = await conn.fetchval("SELECT sum(key) FROM t")
     assert res == expected_sum
@@ -766,7 +766,7 @@ async def run_wal_lagging(env: NeonEnv, endpoint: Endpoint, test_output_dir: Pat
     endpoint.start()
     conn = await endpoint.connect_async()
 
-    log.info(f"Executed {i-1} queries")
+    log.info(f"Executed {i - 1} queries")
 
     res = await conn.fetchval("SELECT sum(key) FROM t")
     assert res == expected_sum

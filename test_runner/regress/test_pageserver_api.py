@@ -65,15 +65,15 @@ def test_pageserver_http_get_wal_receiver_not_found(neon_simple_env: NeonEnv):
             tenant_id=tenant_id, timeline_id=timeline_id, include_non_incremental_logical_size=True
         )
 
-        assert (
-            timeline_details.get("wal_source_connstr") is None
-        ), "Should not be able to connect to WAL streaming without PG compute node running"
-        assert (
-            timeline_details.get("last_received_msg_lsn") is None
-        ), "Should not be able to connect to WAL streaming without PG compute node running"
-        assert (
-            timeline_details.get("last_received_msg_ts") is None
-        ), "Should not be able to connect to WAL streaming without PG compute node running"
+        assert timeline_details.get("wal_source_connstr") is None, (
+            "Should not be able to connect to WAL streaming without PG compute node running"
+        )
+        assert timeline_details.get("last_received_msg_lsn") is None, (
+            "Should not be able to connect to WAL streaming without PG compute node running"
+        )
+        assert timeline_details.get("last_received_msg_ts") is None, (
+            "Should not be able to connect to WAL streaming without PG compute node running"
+        )
 
 
 def expect_updated_msg_lsn(
@@ -89,14 +89,14 @@ def expect_updated_msg_lsn(
     assert "last_received_msg_lsn" in timeline_details.keys()
     assert "last_received_msg_ts" in timeline_details.keys()
 
-    assert (
-        timeline_details["last_received_msg_lsn"] is not None
-    ), "the last received message's LSN is empty"
+    assert timeline_details["last_received_msg_lsn"] is not None, (
+        "the last received message's LSN is empty"
+    )
 
     last_msg_lsn = Lsn(timeline_details["last_received_msg_lsn"])
-    assert (
-        prev_msg_lsn is None or prev_msg_lsn < last_msg_lsn
-    ), f"the last received message's LSN {last_msg_lsn} hasn't been updated compared to the previous message's LSN {prev_msg_lsn}"
+    assert prev_msg_lsn is None or prev_msg_lsn < last_msg_lsn, (
+        f"the last received message's LSN {last_msg_lsn} hasn't been updated compared to the previous message's LSN {prev_msg_lsn}"
+    )
 
     return last_msg_lsn
 

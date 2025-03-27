@@ -80,14 +80,14 @@ def test_tenant_s3_restore(
     ts_before_deletion = datetime.now(tz=UTC).replace(tzinfo=None)
     time.sleep(4)
 
-    assert (
-        ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 1
-    ), "tenant removed before we deletion was issued"
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 1, (
+        "tenant removed before we deletion was issued"
+    )
     ps_http.tenant_delete(tenant_id)
     ps_http.deletion_queue_flush(execute=True)
-    assert (
-        ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 0
-    ), "tenant removed before we deletion was issued"
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 0, (
+        "tenant removed before we deletion was issued"
+    )
     env.storage_controller.attach_hook_drop(tenant_id)
 
     tenant_path = env.pageserver.tenant_dir(tenant_id)

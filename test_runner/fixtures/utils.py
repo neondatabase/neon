@@ -512,7 +512,9 @@ def assert_no_errors(log_file: Path, service: str, allowed_errors: list[str]):
     for _lineno, error in errors:
         log.info(f"not allowed {service} error: {error.strip()}")
 
-    assert not errors, f"First log error on {service}: {errors[0]}\nHint: use scripts/check_allowed_errors.sh to test any new allowed_error you add"
+    assert not errors, (
+        f"First log error on {service}: {errors[0]}\nHint: use scripts/check_allowed_errors.sh to test any new allowed_error you add"
+    )
 
 
 def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: set[str]):
@@ -550,18 +552,18 @@ def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: set[str
 
     left_list, right_list = map(build_hash_list, [left, right])
 
-    assert len(left_list) == len(
-        right_list
-    ), f"unexpected number of files on tar files, {len(left_list)} != {len(right_list)}"
+    assert len(left_list) == len(right_list), (
+        f"unexpected number of files on tar files, {len(left_list)} != {len(right_list)}"
+    )
 
     mismatching: set[str] = set()
 
     for left_tuple, right_tuple in zip(left_list, right_list, strict=False):
         left_path, left_hash = left_tuple
         right_path, right_hash = right_tuple
-        assert (
-            left_path == right_path
-        ), f"file count matched, expected these to be same paths: {left_path}, {right_path}"
+        assert left_path == right_path, (
+            f"file count matched, expected these to be same paths: {left_path}, {right_path}"
+        )
         if left_hash != right_hash:
             mismatching.add(left_path)
 

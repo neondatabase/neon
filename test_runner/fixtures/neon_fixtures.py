@@ -497,9 +497,9 @@ class NeonEnvBuilder:
         else:
             self.pageserver_wal_receiver_protocol = PageserverWalReceiverProtocol.INTERPRETED
 
-        assert test_name.startswith(
-            "test_"
-        ), "Unexpectedly instantiated from outside a test function"
+        assert test_name.startswith("test_"), (
+            "Unexpectedly instantiated from outside a test function"
+        )
         self.test_name = test_name
         self.compatibility_neon_binpath = compatibility_neon_binpath
         self.compatibility_pg_distrib_dir = compatibility_pg_distrib_dir
@@ -508,12 +508,12 @@ class NeonEnvBuilder:
         self.mixdir = self.test_output_dir / "mixdir_neon"
 
         if self.version_combination is not None:
-            assert (
-                self.compatibility_neon_binpath is not None
-            ), "the environment variable COMPATIBILITY_NEON_BIN is required when using mixed versions"
-            assert (
-                self.compatibility_pg_distrib_dir is not None
-            ), "the environment variable COMPATIBILITY_POSTGRES_DISTRIB_DIR is required when using mixed versions"
+            assert self.compatibility_neon_binpath is not None, (
+                "the environment variable COMPATIBILITY_NEON_BIN is required when using mixed versions"
+            )
+            assert self.compatibility_pg_distrib_dir is not None, (
+                "the environment variable COMPATIBILITY_POSTGRES_DISTRIB_DIR is required when using mixed versions"
+            )
             self.mixdir.mkdir(mode=0o755, exist_ok=True)
             self._mix_versions()
             self.test_may_use_compatibility_snapshot_binaries = True
@@ -795,9 +795,9 @@ class NeonEnvBuilder:
         work = ident_state_dir / "work"
         assert upper.is_dir()
         assert work.is_dir()
-        assert (
-            self.test_overlay_dir not in dst.parents
-        ), "otherwise workdir cleanup below wouldn't work"
+        assert self.test_overlay_dir not in dst.parents, (
+            "otherwise workdir cleanup below wouldn't work"
+        )
         # find index, still not mutating state
         idxmap = {
             existing_ident: idx
@@ -863,9 +863,9 @@ class NeonEnvBuilder:
         self.pageserver_remote_storage = ret
 
     def enable_safekeeper_remote_storage(self, kind: RemoteStorageKind):
-        assert (
-            self.safekeepers_remote_storage is None
-        ), "safekeepers_remote_storage already configured"
+        assert self.safekeepers_remote_storage is None, (
+            "safekeepers_remote_storage already configured"
+        )
 
         self.safekeepers_remote_storage = self._configure_and_create_remote_storage(
             kind, RemoteStorageUser.SAFEKEEPER
@@ -1421,9 +1421,9 @@ class NeonEnv:
         assert that there is only one. Tests with multiple pageservers should always use
         get_pageserver with an explicit ID.
         """
-        assert (
-            len(self.pageservers) == 1
-        ), "env.pageserver must only be used with single pageserver NeonEnv"
+        assert len(self.pageservers) == 1, (
+            "env.pageserver must only be used with single pageserver NeonEnv"
+        )
         return self.pageservers[0]
 
     def get_pageserver(self, id: int | None) -> NeonPageserver:
@@ -3577,9 +3577,9 @@ class NeonProxy(PgProtocol):
 
     @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_time=10)
     def _wait_until_ready(self):
-        assert (
-            self._popen and self._popen.poll() is None
-        ), "Proxy exited unexpectedly. Check test log."
+        assert self._popen and self._popen.poll() is None, (
+            "Proxy exited unexpectedly. Check test log."
+        )
         requests.get(f"http://{self.host}:{self.http_port}/v1/status")
 
     def http_query(self, query, args, **kwargs):
@@ -3787,9 +3787,9 @@ class NeonAuthBroker:
 
     @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_time=10)
     def _wait_until_ready(self):
-        assert (
-            self._popen and self._popen.poll() is None
-        ), "Proxy exited unexpectedly. Check test log."
+        assert self._popen and self._popen.poll() is None, (
+            "Proxy exited unexpectedly. Check test log."
+        )
         requests.get(f"http://{self.host}:{self.http_port}/v1/status")
 
     async def query(self, query, args, **kwargs):
@@ -4069,9 +4069,9 @@ class Endpoint(PgProtocol, LogUtils):
                     m = re.search(r"=\s*(\S+)", line)
                     assert m is not None, f"malformed config line {line}"
                     size = m.group(1)
-                    assert size_to_bytes(size) >= size_to_bytes(
-                        "1MB"
-                    ), "LFC size cannot be set less than 1MB"
+                    assert size_to_bytes(size) >= size_to_bytes("1MB"), (
+                        "LFC size cannot be set less than 1MB"
+                    )
             lfc_path_escaped = str(lfc_path).replace("'", "''")
             config_lines = [
                 f"neon.file_cache_path = '{lfc_path_escaped}'",
@@ -4082,12 +4082,12 @@ class Endpoint(PgProtocol, LogUtils):
             ] + config_lines
         else:
             for line in config_lines:
-                assert (
-                    line.find("neon.max_file_cache_size") == -1
-                ), "Setting LFC parameters is not allowed when LFC is disabled"
-                assert (
-                    line.find("neon.file_cache_size_limit") == -1
-                ), "Setting LFC parameters is not allowed when LFC is disabled"
+                assert line.find("neon.max_file_cache_size") == -1, (
+                    "Setting LFC parameters is not allowed when LFC is disabled"
+                )
+                assert line.find("neon.file_cache_size_limit") == -1, (
+                    "Setting LFC parameters is not allowed when LFC is disabled"
+                )
 
         self.config(config_lines)
 
@@ -4925,9 +4925,9 @@ class StorageScrubber:
                     healthy = False
             else:
                 for _, warnings in with_warnings.items():
-                    assert (
-                        len(warnings) > 0
-                    ), "with_warnings value should not be empty, running without verbose mode?"
+                    assert len(warnings) > 0, (
+                        "with_warnings value should not be empty, running without verbose mode?"
+                    )
                     if not self._check_line_list_allowed(warnings):
                         healthy = False
                         break
@@ -4941,9 +4941,9 @@ class StorageScrubber:
                     healthy = False
             else:
                 for _, errors in with_errors.items():
-                    assert (
-                        len(errors) > 0
-                    ), "with_errors value should not be empty, running without verbose mode?"
+                    assert len(errors) > 0, (
+                        "with_errors value should not be empty, running without verbose mode?"
+                    )
                     if not self._check_line_list_allowed(errors):
                         healthy = False
                         break

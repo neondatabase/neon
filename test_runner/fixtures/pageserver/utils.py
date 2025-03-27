@@ -241,9 +241,9 @@ def wait_for_upload_queue_empty(
             found = False
             for f in finished:
                 if all([s.labels[label] == f.labels[label] for label in remaining_labels]):
-                    assert (
-                        not found
-                    ), "duplicate match, remaining_labels don't uniquely identify sample"
+                    assert not found, (
+                        "duplicate match, remaining_labels don't uniquely identify sample"
+                    )
                     tl.append((s.labels, int(s.value) - int(f.value)))
                     found = True
             if not found:

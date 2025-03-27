@@ -147,9 +147,9 @@ def test_storage_controller_smoke(
     for node_id, count in get_node_shard_counts(env, tenant_ids).items():
         # we used a multiple of pagservers for the total shard count,
         # so expect equal number on all pageservers
-        assert count == tenant_shard_count / len(
-            env.pageservers
-        ), f"Node {node_id} has bad count {count}"
+        assert count == tenant_shard_count / len(env.pageservers), (
+            f"Node {node_id} has bad count {count}"
+        )
 
     # Creating and deleting timelines should work, using identical API to pageserver
     timeline_crud_tenant = next(iter(tenant_ids))

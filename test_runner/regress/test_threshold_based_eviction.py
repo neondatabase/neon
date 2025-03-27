@@ -181,14 +181,14 @@ def test_threshold_based_eviction(
 
     # TODO: can we be more precise here? E.g., require we're stable _within_ X*threshold,
     # instead of what we do here, i.e., stable _for at least_ X*threshold toward the end of the observation window
-    assert (
-        stable_for > consider_stable_when_no_change_for_seconds
-    ), "layer residencies did not become stable within the observation window"
+    assert stable_for > consider_stable_when_no_change_for_seconds, (
+        "layer residencies did not become stable within the observation window"
+    )
 
     post = map_info_changes[-1][1].by_local_and_remote()
     assert len(post.remote_layers) > 0, "some layers should be evicted once it's stabilized"
     assert len(post.local_layers) > 0, "the imitate accesses should keep some layers resident"
 
-    assert (
-        env.pageserver.log_contains(metrics_refused_log_line) is not None
-    ), "ensure the metrics collection worker ran"
+    assert env.pageserver.log_contains(metrics_refused_log_line) is not None, (
+        "ensure the metrics collection worker ran"
+    )

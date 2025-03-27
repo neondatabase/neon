@@ -68,9 +68,9 @@ def test_tenant_config(neon_env_builder: NeonEnvBuilder):
     # check the configuration of the default tenant
     # it should match global configuration
     default_tenant_config = http_client.tenant_config(tenant_id=env.initial_tenant)
-    assert (
-        not default_tenant_config.tenant_specific_overrides
-    ), "Should have no specific settings yet"
+    assert not default_tenant_config.tenant_specific_overrides, (
+        "Should have no specific settings yet"
+    )
     effective_config = default_tenant_config.effective_config
     assert effective_config["checkpoint_distance"] == 10000
     assert effective_config["compaction_target_size"] == 1048576
@@ -92,22 +92,22 @@ def test_tenant_config(neon_env_builder: NeonEnvBuilder):
     new_specific_config = new_tenant_config.tenant_specific_overrides
     assert new_specific_config["checkpoint_distance"] == 20000
     assert new_specific_config["gc_period"] == "30s"
-    assert len(new_specific_config) == len(
-        new_conf
-    ), f"No more specific properties were expected, but got: {new_specific_config}"
+    assert len(new_specific_config) == len(new_conf), (
+        f"No more specific properties were expected, but got: {new_specific_config}"
+    )
     new_effective_config = new_tenant_config.effective_config
-    assert (
-        new_effective_config["checkpoint_distance"] == 20000
-    ), "Specific 'checkpoint_distance' config should override the default value"
-    assert (
-        new_effective_config["gc_period"] == "30s"
-    ), "Specific 'gc_period' config should override the default value"
-    assert (
-        new_effective_config["evictions_low_residence_duration_metric_threshold"] == "42s"
-    ), "Should override default value"
-    assert new_effective_config["eviction_policy"] == {
-        "kind": "NoEviction"
-    }, "Specific 'eviction_policy' config should override the default value"
+    assert new_effective_config["checkpoint_distance"] == 20000, (
+        "Specific 'checkpoint_distance' config should override the default value"
+    )
+    assert new_effective_config["gc_period"] == "30s", (
+        "Specific 'gc_period' config should override the default value"
+    )
+    assert new_effective_config["evictions_low_residence_duration_metric_threshold"] == "42s", (
+        "Should override default value"
+    )
+    assert new_effective_config["eviction_policy"] == {"kind": "NoEviction"}, (
+        "Specific 'eviction_policy' config should override the default value"
+    )
     assert new_effective_config["compaction_target_size"] == 1048576
     assert new_effective_config["compaction_period"] == "20s"
     assert new_effective_config["compaction_threshold"] == 10
@@ -134,22 +134,22 @@ def test_tenant_config(neon_env_builder: NeonEnvBuilder):
     assert updated_specific_config["checkpoint_distance"] == 15000
     assert updated_specific_config["gc_period"] == "1m 20s"
     assert updated_specific_config["compaction_period"] == "1m 20s"
-    assert len(updated_specific_config) == len(
-        conf_update
-    ), f"No more specific properties were expected, but got: {updated_specific_config}"
+    assert len(updated_specific_config) == len(conf_update), (
+        f"No more specific properties were expected, but got: {updated_specific_config}"
+    )
     updated_effective_config = updated_tenant_config.effective_config
-    assert (
-        updated_effective_config["checkpoint_distance"] == 15000
-    ), "Specific 'checkpoint_distance' config should override the default value"
-    assert (
-        updated_effective_config["gc_period"] == "1m 20s"
-    ), "Specific 'gc_period' config should override the default value"
-    assert (
-        updated_effective_config["compaction_period"] == "1m 20s"
-    ), "Specific 'compaction_period' config should override the default value"
-    assert (
-        updated_effective_config["evictions_low_residence_duration_metric_threshold"] == "23h"
-    ), "Should override default value"
+    assert updated_effective_config["checkpoint_distance"] == 15000, (
+        "Specific 'checkpoint_distance' config should override the default value"
+    )
+    assert updated_effective_config["gc_period"] == "1m 20s", (
+        "Specific 'gc_period' config should override the default value"
+    )
+    assert updated_effective_config["compaction_period"] == "1m 20s", (
+        "Specific 'compaction_period' config should override the default value"
+    )
+    assert updated_effective_config["evictions_low_residence_duration_metric_threshold"] == "23h", (
+        "Should override default value"
+    )
     assert updated_effective_config["eviction_policy"] == {
         "kind": "LayerAccessThreshold",
         "period": "1m 20s",
@@ -167,9 +167,9 @@ def test_tenant_config(neon_env_builder: NeonEnvBuilder):
     env.pageserver.start()
 
     restarted_tenant_config = http_client.tenant_config(tenant_id=tenant)
-    assert (
-        restarted_tenant_config == updated_tenant_config
-    ), "Updated config should not change after the restart"
+    assert restarted_tenant_config == updated_tenant_config, (
+        "Updated config should not change after the restart"
+    )
 
     # update the config with very short config and make sure no trailing chars are left from previous config
     final_conf = {
@@ -180,13 +180,13 @@ def test_tenant_config(neon_env_builder: NeonEnvBuilder):
     final_tenant_config = http_client.tenant_config(tenant_id=tenant)
     final_specific_config = final_tenant_config.tenant_specific_overrides
     assert final_specific_config["pitr_interval"] == "1m"
-    assert len(final_specific_config) == len(
-        final_conf
-    ), f"No more specific properties were expected, but got: {final_specific_config}"
+    assert len(final_specific_config) == len(final_conf), (
+        f"No more specific properties were expected, but got: {final_specific_config}"
+    )
     final_effective_config = final_tenant_config.effective_config
-    assert (
-        final_effective_config["pitr_interval"] == "1m"
-    ), "Specific 'pitr_interval' config should override the default value"
+    assert final_effective_config["pitr_interval"] == "1m", (
+        "Specific 'pitr_interval' config should override the default value"
+    )
     assert final_effective_config["checkpoint_distance"] == 10000
     assert final_effective_config["compaction_target_size"] == 1048576
     assert final_effective_config["compaction_period"] == "20s"
@@ -207,9 +207,9 @@ def test_tenant_config(neon_env_builder: NeonEnvBuilder):
     env.pageserver.start()
 
     restarted_final_tenant_config = http_client.tenant_config(tenant_id=tenant)
-    assert (
-        restarted_final_tenant_config == final_tenant_config
-    ), "Updated config should not change after the restart"
+    assert restarted_final_tenant_config == final_tenant_config, (
+        "Updated config should not change after the restart"
+    )
 
 
 def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
@@ -299,9 +299,9 @@ def test_live_reconfig_get_evictions_low_residence_duration_metric_threshold(
         tenant_id, {"evictions_low_residence_duration_metric_threshold": default_value}
     )
     updated_metric = get_metric()
-    assert int(updated_metric.value) == int(
-        metric.value
-    ), "metric is unchanged when setting same value"
+    assert int(updated_metric.value) == int(metric.value), (
+        "metric is unchanged when setting same value"
+    )
 
     env.config_tenant(tenant_id, {"evictions_low_residence_duration_metric_threshold": "2day"})
     metric = get_metric()

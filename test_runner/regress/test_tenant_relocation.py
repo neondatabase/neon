@@ -158,9 +158,9 @@ def switch_pg_to_new_pageserver(
 
     timeline_to_detach_local_path = origin_ps.timeline_dir(tenant_id, timeline_id)
     files_before_detach = os.listdir(timeline_to_detach_local_path)
-    assert (
-        len(files_before_detach) >= 1
-    ), f"Regular timeline {timeline_to_detach_local_path} should have at least one layer file, but got {files_before_detach}"
+    assert len(files_before_detach) >= 1, (
+        f"Regular timeline {timeline_to_detach_local_path} should have at least one layer file, but got {files_before_detach}"
+    )
 
     return timeline_to_detach_local_path
 
@@ -175,9 +175,9 @@ def post_migration_check(endpoint: Endpoint, sum_before_migration: int, old_loca
         cur.execute("SELECT sum(key) FROM t")
         assert cur.fetchone() == (sum_before_migration + 1500500,)
 
-    assert not os.path.exists(
-        old_local_path
-    ), f"After detach, local timeline dir {old_local_path} should be removed"
+    assert not os.path.exists(old_local_path), (
+        f"After detach, local timeline dir {old_local_path} should be removed"
+    )
 
 
 @pytest.mark.parametrize(

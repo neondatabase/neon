@@ -207,9 +207,9 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
 
             # Note: cannot assert on `layers_removed` here because it could be layers
             # not guarded by the lease. Instead, use layer map dump.
-            assert layers_guarded_before_gc.issubset(
-                layers_guarded_after_gc
-            ), "Layers guarded by lease before GC should not be removed"
+            assert layers_guarded_before_gc.issubset(layers_guarded_after_gc), (
+                "Layers guarded by lease before GC should not be removed"
+            )
 
             log.info(f"{gc_result=}")
 

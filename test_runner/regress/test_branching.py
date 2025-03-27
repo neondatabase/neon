@@ -43,9 +43,9 @@ def test_branching_with_pgbench(
     tenant, _ = env.create_tenant(
         conf={
             "gc_period": "5 s",
-            "gc_horizon": f"{1024 ** 2}",
-            "checkpoint_distance": f"{1024 ** 2}",
-            "compaction_target_size": f"{1024 ** 2}",
+            "gc_horizon": f"{1024**2}",
+            "checkpoint_distance": f"{1024**2}",
+            "compaction_target_size": f"{1024**2}",
             # set PITR interval to be small, so we can do GC
             "pitr_interval": "5 s",
         }

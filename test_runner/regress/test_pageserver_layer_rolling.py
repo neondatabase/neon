@@ -130,7 +130,7 @@ def test_pageserver_small_inmemory_layers(
     tenant_conf = {
         # Large `checkpoint_distance` effectively disables size
         # based checkpointing.
-        "checkpoint_distance": f"{2 * 1024 ** 3}",
+        "checkpoint_distance": f"{2 * 1024**3}",
         "checkpoint_timeout": f"{CHECKPOINT_TIMEOUT_SECONDS}s",
         "compaction_period": "1s",
     }
@@ -179,7 +179,7 @@ def test_idle_checkpoints(neon_env_builder: NeonEnvBuilder):
     tenant_conf = {
         # Large `checkpoint_distance` effectively disables size
         # based checkpointing.
-        "checkpoint_distance": f"{2 * 1024 ** 3}",
+        "checkpoint_distance": f"{2 * 1024**3}",
         "checkpoint_timeout": f"{CHECKPOINT_TIMEOUT_SECONDS}s",
         "compaction_period": "1s",
     }
@@ -279,9 +279,9 @@ def test_total_size_limit(neon_env_builder: NeonEnvBuilder):
         http_client = env.pageserver.http_client()
         initdb_lsn = Lsn(http_client.timeline_detail(tenant, timeline)["initdb_lsn"])
         this_timeline_ingested = last_flush_lsn - initdb_lsn
-        assert (
-            this_timeline_ingested < checkpoint_distance * 0.8
-        ), "this test is supposed to fill InMemoryLayer"
+        assert this_timeline_ingested < checkpoint_distance * 0.8, (
+            "this test is supposed to fill InMemoryLayer"
+        )
         total_bytes_ingested += this_timeline_ingested
 
     log.info(f"Ingested {total_bytes_ingested} bytes since initdb (vs max dirty {max_dirty_data})")

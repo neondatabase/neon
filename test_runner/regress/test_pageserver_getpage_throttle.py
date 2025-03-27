@@ -101,12 +101,12 @@ def test_pageserver_getpage_throttle(neon_env_builder: NeonEnvBuilder, pg_bin: P
     expect_ncompleted = duration_secs * rate_limit_rps
     delta_abs = abs(expect_ncompleted - actual_ncompleted)
     threshold = 0.05 * expect_ncompleted
-    assert (
-        threshold / rate_limit_rps < 0.1 * duration_secs
-    ), "test self-test: unrealistic expecations regarding precision in this test"
-    assert (
-        delta_abs < 0.05 * expect_ncompleted
-    ), "the throttling deviates more than 5percent from the expectation"
+    assert threshold / rate_limit_rps < 0.1 * duration_secs, (
+        "test self-test: unrealistic expecations regarding precision in this test"
+    )
+    assert delta_abs < 0.05 * expect_ncompleted, (
+        "the throttling deviates more than 5percent from the expectation"
+    )
 
     log.info("validate that we logged the throttling")
 
@@ -127,14 +127,14 @@ def test_pageserver_getpage_throttle(neon_env_builder: NeonEnvBuilder, pg_bin: P
     actual_throttled_secs = actual_throttled_usecs / 1_000_000
 
     log.info("validate that the metric doesn't include throttle wait time")
-    assert (
-        duration_secs >= 10 * actual_smgr_query_seconds
-    ), "smgr metrics should not include throttle wait time"
+    assert duration_secs >= 10 * actual_smgr_query_seconds, (
+        "smgr metrics should not include throttle wait time"
+    )
 
     log.info("validate that the throttling wait time metrics is correct")
-    assert (
-        pytest.approx(actual_throttled_secs + actual_smgr_query_seconds, 0.1) == duration_secs
-    ), "most of the time in this test is spent throttled because the rate-limit's contribution to latency dominates"
+    assert pytest.approx(actual_throttled_secs + actual_smgr_query_seconds, 0.1) == duration_secs, (
+        "most of the time in this test is spent throttled because the rate-limit's contribution to latency dominates"
+    )
 
 
 throttle_config_with_field_fair_set = {

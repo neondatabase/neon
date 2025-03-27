@@ -578,9 +578,9 @@ def test_get_tenant_size_with_multiple_branches(
 
     wait_for_last_flush_lsn(env, second_branch_endpoint, tenant_id, second_branch_timeline_id)
     size_after_thinning_branch = http_client.tenant_size(tenant_id)
-    assert (
-        size_after_thinning_branch > size_after_growing_second_branch
-    ), "tenant_size should grow with dropped tables and full vacuum"
+    assert size_after_thinning_branch > size_after_growing_second_branch, (
+        "tenant_size should grow with dropped tables and full vacuum"
+    )
 
     first_branch_endpoint.stop_and_destroy()
     second_branch_endpoint.stop_and_destroy()

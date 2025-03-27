@@ -186,7 +186,7 @@ def test_replication_start_stop(
     prefix = "pgbench_agg"
     num_replicas = 2
     configuration_test_time_sec = 10 * 60
-    pgbench_duration = f"-T{2 ** num_replicas * configuration_test_time_sec}"
+    pgbench_duration = f"-T{2**num_replicas * configuration_test_time_sec}"
     error_occurred = False
 
     project = neon_api.create_project(pg_version)

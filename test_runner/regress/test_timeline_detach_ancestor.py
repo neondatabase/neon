@@ -431,9 +431,9 @@ def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder):
         if expected_ancestor is None:
             assert ancestor_timeline_id is None
         else:
-            assert (
-                TimelineId(ancestor_timeline_id) == expected_ancestor
-            ), f"when checking branch {branch_name}, mapping={expected_result}"
+            assert TimelineId(ancestor_timeline_id) == expected_ancestor, (
+                f"when checking branch {branch_name}, mapping={expected_result}"
+            )
 
         index_part = env.pageserver_remote_storage.index_content(
             env.initial_tenant, queried_timeline
@@ -1301,9 +1301,9 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
                 offset,
             )
             if mode == "delete_reparentable_timeline":
-                assert (
-                    retried is None
-                ), "detaching should had converged after both nodes saw the deletion"
+                assert retried is None, (
+                    "detaching should had converged after both nodes saw the deletion"
+                )
             elif mode == "create_reparentable_timeline":
                 assert retried is not None, "detaching should not have converged"
                 _, offset = retried
@@ -1531,9 +1531,9 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     # first round -- do more checking to make sure the gc gets paused
     try_detach()
 
-    assert (
-        http.timeline_detail(env.initial_tenant, detached)["ancestor_timeline_id"] is None
-    ), "first round should had detached 'detached'"
+    assert http.timeline_detail(env.initial_tenant, detached)["ancestor_timeline_id"] is None, (
+        "first round should had detached 'detached'"
+    )
 
     reparented, not_reparented = reparenting_progress(timelines)
     assert reparented == 1
@@ -1569,9 +1569,9 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     for _ in range(2):
         try_detach()
 
-        assert (
-            http.timeline_detail(env.initial_tenant, detached)["ancestor_timeline_id"] is None
-        ), "first round should had detached 'detached'"
+        assert http.timeline_detail(env.initial_tenant, detached)["ancestor_timeline_id"] is None, (
+            "first round should had detached 'detached'"
+        )
 
         reparented, not_reparented = reparenting_progress(timelines)
         assert reparented == reparented_before + 1
@@ -1611,9 +1611,9 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     assert reparented == len(timelines)
 
     time.sleep(2)
-    assert (
-        env.pageserver.log_contains(".*: attach finished, activating", offset) is None
-    ), "there should be no restart with the final detach_ancestor as it only completed"
+    assert env.pageserver.log_contains(".*: attach finished, activating", offset) is None, (
+        "there should be no restart with the final detach_ancestor as it only completed"
+    )
 
     # gc is unblocked
     env.pageserver.assert_log_contains(".* gc_loop.*: 5 timelines need GC", offset)
@@ -1702,7 +1702,7 @@ def test_pageserver_compaction_detach_ancestor_smoke(neon_env_builder: NeonEnvBu
         "compaction_period": "5s",
         # No PiTR interval and small GC horizon
         "pitr_interval": "0s",
-        "gc_horizon": f"{1024 ** 2}",
+        "gc_horizon": f"{1024**2}",
         "lsn_lease_length": "0s",
         # Small checkpoint distance to create many layers
         "checkpoint_distance": 1024**2,
