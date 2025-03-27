@@ -4,6 +4,7 @@ import json
 import random
 import threading
 import time
+from typing import TYPE_CHECKING
 
 import pytest
 import requests
@@ -23,10 +24,12 @@ from fixtures.pageserver.utils import (
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import S3Storage, s3_storage
 from fixtures.utils import run_only_on_default_postgres, skip_in_debug_build, wait_until
-from mypy_boto3_s3.type_defs import (
-    ObjectTypeDef,
-)
 from psycopg2.errors import IoError, UndefinedTable
+
+if TYPE_CHECKING:
+    from mypy_boto3_s3.type_defs import (
+        ObjectTypeDef,
+    )
 
 
 @pytest.mark.parametrize("shard_count", [0, 4])

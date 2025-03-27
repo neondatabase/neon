@@ -5,16 +5,12 @@ import random
 import time
 from enum import StrEnum
 from threading import Thread
+from typing import TYPE_CHECKING
 
 import asyncpg
 import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    Endpoint,
-    NeonEnv,
-    NeonEnvBuilder,
-)
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
@@ -25,7 +21,14 @@ from fixtures.remote_storage import (
     RemoteStorageKind,
 )
 from fixtures.utils import query_scalar, wait_until
-from prometheus_client.samples import Sample
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import (
+        Endpoint,
+        NeonEnv,
+        NeonEnvBuilder,
+    )
+    from prometheus_client.samples import Sample
 
 # In tests that overlap endpoint activity with tenant attach/detach, there are
 # a variety of warnings that the page service may emit when it cannot acquire

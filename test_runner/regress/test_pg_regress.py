@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -21,6 +20,8 @@ from fixtures.remote_storage import s3_storage
 from fixtures.utils import skip_in_debug_build
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from fixtures.neon_fixtures import PgBin
     from pytest import CaptureFixture
 

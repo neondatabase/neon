@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from contextlib import closing
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import Endpoint, NeonEnv, NeonPageserver
-from fixtures.pageserver.http import PageserverHttpClient
 from psycopg2.errors import QueryCanceled
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import Endpoint, NeonEnv, NeonPageserver
+    from fixtures.pageserver.http import PageserverHttpClient
 
 CRITICAL_PG_PS_WAIT_FAILPOINTS: set[str] = {
     "ps::connection-start::pre-login",

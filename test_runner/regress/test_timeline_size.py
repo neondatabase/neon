@@ -6,7 +6,7 @@ import random
 import time
 from collections import defaultdict
 from contextlib import closing
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import psycopg2.errors
 import psycopg2.extras
@@ -22,17 +22,21 @@ from fixtures.neon_fixtures import (
     VanillaPostgres,
     wait_for_last_flush_lsn,
 )
-from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
     assert_tenant_state,
     timeline_delete_wait_completed,
     wait_for_upload_queue_empty,
     wait_until_tenant_active,
 )
-from fixtures.pg_version import PgVersion
-from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind
 from fixtures.utils import get_timeline_dir_size, wait_until
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from fixtures.pageserver.http import PageserverHttpClient
+    from fixtures.pg_version import PgVersion
+    from fixtures.port_distributor import PortDistributor
 
 
 def test_timeline_size(neon_simple_env: NeonEnv):

@@ -6,7 +6,6 @@ import subprocess
 import threading
 from fcntl import LOCK_EX, LOCK_UN, flock
 from pathlib import Path
-from types import TracebackType
 from typing import TYPE_CHECKING
 
 import pytest
@@ -18,6 +17,7 @@ from fixtures.utils import allure_attach_from_dir
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from types import TracebackType
 
 
 BASE_DIR = Path(__file__).parents[2]

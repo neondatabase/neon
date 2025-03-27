@@ -5,9 +5,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import Lsn
-from fixtures.neon_fixtures import (
-    NeonEnvBuilder,
-)
 from fixtures.pageserver.utils import assert_tenant_state, wait_for_upload
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.utils import run_only_on_default_postgres, wait_until
@@ -15,6 +12,10 @@ from fixtures.workload import Workload
 
 if TYPE_CHECKING:
     from typing import Any
+
+    from fixtures.neon_fixtures import (
+        NeonEnvBuilder,
+    )
 
 
 def test_tenant_config(neon_env_builder: NeonEnvBuilder):

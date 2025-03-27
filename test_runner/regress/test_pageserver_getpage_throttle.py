@@ -3,14 +3,17 @@ from __future__ import annotations
 import copy
 import json
 import uuid
+from typing import TYPE_CHECKING
 
 import pytest
 from anyio import Path
 from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, PgBin
 from fixtures.pg_version import PgVersion
 from fixtures.utils import wait_until
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnvBuilder, PgBin
 
 
 def test_pageserver_getpage_throttle(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):

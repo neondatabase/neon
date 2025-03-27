@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import csv
 import os
-import subprocess
 import time
 import traceback
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import psycopg2
@@ -15,14 +13,16 @@ from fixtures.benchmark_fixture import MetricReport
 from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_api import connection_parameters_to_env
-from fixtures.pg_version import PgVersion
 
 if TYPE_CHECKING:
+    import subprocess
+    from pathlib import Path
     from typing import Any
 
     from fixtures.benchmark_fixture import NeonBenchmarker
     from fixtures.neon_api import NeonAPI
     from fixtures.neon_fixtures import PgBin
+    from fixtures.pg_version import PgVersion
 
 
 # Granularity of ~0.5 sec

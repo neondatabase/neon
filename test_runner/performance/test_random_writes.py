@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import random
 from contextlib import closing
+from typing import TYPE_CHECKING
 
 from fixtures.benchmark_fixture import MetricReport
-from fixtures.compare_fixtures import PgCompare
 from fixtures.utils import query_scalar
+
+if TYPE_CHECKING:
+    from fixtures.compare_fixtures import PgCompare
 
 
 # This is a clear-box test that demonstrates the worst case scenario for the

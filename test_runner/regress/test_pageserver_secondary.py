@@ -4,7 +4,6 @@ import json
 import os
 import random
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -24,11 +23,13 @@ from fixtures.pageserver.utils import (
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind, S3Storage, s3_storage
 from fixtures.utils import run_only_on_default_postgres, skip_in_debug_build, wait_until
 from fixtures.workload import Workload
-from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from typing import Any
+
+    from werkzeug.wrappers.request import Request
 
 
 # A tenant configuration that is convenient for generating uploads and deletions

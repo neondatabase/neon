@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import ssl
+from typing import TYPE_CHECKING
 
 import asyncpg
 import pytest
 import websocket_tunnel
 import websockets
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonProxy
-from fixtures.port_distributor import PortDistributor
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonProxy
+    from fixtures.port_distributor import PortDistributor
 
 
 @pytest.mark.asyncio

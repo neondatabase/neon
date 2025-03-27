@@ -4,7 +4,6 @@ import statistics
 import threading
 import time
 import timeit
-from collections.abc import Generator
 from typing import TYPE_CHECKING
 
 import pytest
@@ -17,7 +16,7 @@ from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, flush_ep_to_pageserver
 from performance.test_perf_pgbench import get_durations_matrix, get_scales_matrix
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Generator
     from typing import Any
 
 

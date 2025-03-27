@@ -5,7 +5,6 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from queue import SimpleQueue
 from typing import TYPE_CHECKING
 
@@ -20,14 +19,15 @@ from fixtures.remote_storage import (
     RemoteStorageKind,
     remote_storage_to_toml_inline_table,
 )
-from pytest_httpserver import HTTPServer
-from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from typing import Any
 
     from fixtures.httpserver import ListenAddress
+    from pytest_httpserver import HTTPServer
+    from werkzeug.wrappers.request import Request
 
 
 # TODO: collect all of the env setup *AFTER* removal of RemoteStorageKind.NOOP

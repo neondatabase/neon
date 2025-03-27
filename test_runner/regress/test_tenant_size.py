@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
-from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
@@ -19,8 +18,13 @@ from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
     wait_until_tenant_active,
 )
-from fixtures.pg_version import PgVersion
 from fixtures.utils import skip_in_debug_build, wait_until
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from fixtures.common_types import Lsn, TenantId, TimelineId
+    from fixtures.pg_version import PgVersion
 
 
 def test_empty_tenant_size(neon_env_builder: NeonEnvBuilder):

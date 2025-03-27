@@ -1,18 +1,22 @@
 from __future__ import annotations
 
-from collections.abc import Generator
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import TenantId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    NeonEnv,
-    NeonEnvBuilder,
-)
-from fixtures.pageserver.http import PageserverHttpClient, TenantConfig
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.utils import wait_until
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
+
+    from fixtures.neon_fixtures import (
+        NeonEnv,
+        NeonEnvBuilder,
+    )
+    from fixtures.pageserver.http import PageserverHttpClient, TenantConfig
 
 
 @pytest.fixture

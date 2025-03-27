@@ -19,7 +19,6 @@ from urllib.parse import urlencode
 import allure
 import pytest
 import zstandard
-from psycopg2.extensions import cursor
 from typing_extensions import override
 
 from fixtures.common_types import Id, Lsn
@@ -33,6 +32,8 @@ from fixtures.pg_version import PgVersion
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from typing import IO
+
+    from psycopg2.extensions import cursor
 
     from fixtures.common_types import TimelineId
     from fixtures.neon_fixtures import PgBin

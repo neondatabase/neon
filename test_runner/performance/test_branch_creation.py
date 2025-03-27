@@ -7,16 +7,19 @@ import threading
 import time
 import timeit
 from contextlib import closing
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.common_types import Lsn
-from fixtures.compare_fixtures import NeonCompare
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonPageserver
 from fixtures.pageserver.utils import wait_for_last_record_lsn
 from fixtures.utils import wait_until
-from prometheus_client.samples import Sample
+
+if TYPE_CHECKING:
+    from fixtures.compare_fixtures import NeonCompare
+    from fixtures.neon_fixtures import NeonPageserver
+    from prometheus_client.samples import Sample
 
 
 def _record_branch_creation_durations(neon_compare: NeonCompare, durs: list[float]):

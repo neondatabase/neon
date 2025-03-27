@@ -6,23 +6,27 @@ import re
 import shutil
 import tarfile
 from contextlib import closing
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    Endpoint,
-    NeonEnv,
-    NeonEnvBuilder,
-    PgBin,
-)
 from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
     wait_for_last_record_lsn,
 )
 from fixtures.remote_storage import RemoteStorageKind
 from fixtures.utils import assert_pageserver_backups_equal, subprocess_capture
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from fixtures.neon_fixtures import (
+        Endpoint,
+        NeonEnv,
+        NeonEnvBuilder,
+        PgBin,
+    )
 
 
 def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_builder):

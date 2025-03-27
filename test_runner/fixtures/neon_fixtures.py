@@ -14,14 +14,12 @@ import threading
 import time
 import uuid
 from collections import defaultdict
-from collections.abc import Iterable, Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from functools import cached_property
 from pathlib import Path
-from types import TracebackType
 from typing import TYPE_CHECKING, cast
 from urllib.parse import quote, urlparse
 
@@ -34,19 +32,12 @@ import psycopg2.sql
 import pytest
 import requests
 import toml
-from _pytest.config import Config
-from _pytest.config.argparsing import Parser
-from _pytest.fixtures import FixtureRequest
 from jwcrypto import jwk
-from mypy_boto3_kms import KMSClient
-from mypy_boto3_s3 import S3Client
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
 from psycopg2.extensions import cursor as PgCursor
 from psycopg2.extensions import make_dsn, parse_dsn
-from pytest_httpserver import HTTPServer
-from urllib3.util.retry import Retry
 
 from fixtures import overlayfs
 from fixtures.auth_tokens import AuthKeys, TokenScope
@@ -60,7 +51,6 @@ from fixtures.common_types import (
 )
 from fixtures.compute_migrations import NUM_COMPUTE_MIGRATIONS
 from fixtures.endpoint.http import EndpointHttpClient
-from fixtures.h2server import H2Server
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.neon_cli import NeonLocalCli, Pagectl
@@ -78,7 +68,6 @@ from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
 )
 from fixtures.paths import get_test_repo_dir, shared_snapshot_dir
-from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import (
     LocalFsStorage,
@@ -108,10 +97,21 @@ from fixtures.utils import (
 from .neon_api import NeonAPI, NeonApiEndpoint
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable, Iterator
+    from types import TracebackType
     from typing import Any, Self, TypeVar
 
+    from _pytest.config import Config
+    from _pytest.config.argparsing import Parser
+    from _pytest.fixtures import FixtureRequest
+    from mypy_boto3_kms import KMSClient
+    from mypy_boto3_s3 import S3Client
+    from pytest_httpserver import HTTPServer
+    from urllib3.util.retry import Retry
+
+    from fixtures.h2server import H2Server
     from fixtures.paths import SnapshotDirLocked
+    from fixtures.pg_version import PgVersion
 
     T = TypeVar("T")
 
@@ -1614,7 +1614,7 @@ def neon_simple_env(
         compatibility_pg_distrib_dir=compatibility_pg_distrib_dir,
         pg_version=pg_version,
         run_id=run_id,
-        preserve_database_files=cast(bool, pytestconfig.getoption("--preserve-database-files")),
+        preserve_database_files=cast("bool", pytestconfig.getoption("--preserve-database-files")),
         test_name=request.node.name,
         test_output_dir=test_output_dir,
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
@@ -1683,7 +1683,7 @@ def neon_env_builder(
         combination=combination,
         pg_version=pg_version,
         run_id=run_id,
-        preserve_database_files=cast(bool, pytestconfig.getoption("--preserve-database-files")),
+        preserve_database_files=cast("bool", pytestconfig.getoption("--preserve-database-files")),
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
         test_name=request.node.name,
         test_output_dir=test_output_dir,

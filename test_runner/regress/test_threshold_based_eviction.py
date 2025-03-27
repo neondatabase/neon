@@ -10,12 +10,12 @@ from fixtures.neon_fixtures import (
     PgBin,
     last_flush_lsn_upload,
 )
-from fixtures.pageserver.http import LayerMapInfo
 from fixtures.remote_storage import RemoteStorageKind
-from pytest_httpserver import HTTPServer
 
 if TYPE_CHECKING:
     from fixtures.httpserver import ListenAddress
+    from fixtures.pageserver.http import LayerMapInfo
+    from pytest_httpserver import HTTPServer
 
 # NB: basic config change tests are in test_tenant_conf.py
 

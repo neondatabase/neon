@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.neon_fixtures import (
     DEFAULT_BRANCH_NAME,
     NeonEnv,
     NeonEnvBuilder,
 )
-from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.utils import run_only_on_default_postgres, wait_until
+
+if TYPE_CHECKING:
+    from fixtures.pageserver.http import PageserverHttpClient
 
 
 def check_client(env: NeonEnv, client: PageserverHttpClient):

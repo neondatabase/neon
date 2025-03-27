@@ -39,7 +39,6 @@ from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
 )
 from fixtures.pg_version import PgVersion
-from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import (
     RemoteStorageKind,
     default_remote_storage,
@@ -71,6 +70,8 @@ from fixtures.utils import (
 
 if TYPE_CHECKING:
     from typing import Any, Self
+
+    from fixtures.port_distributor import PortDistributor
 
 
 @dataclass

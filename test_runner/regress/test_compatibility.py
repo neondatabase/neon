@@ -7,12 +7,12 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import fixtures.utils
 import pytest
 import toml
 from fixtures.common_types import TenantId, TimelineId
-from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -27,6 +27,9 @@ from fixtures.pageserver.utils import (
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, S3Storage, s3_storage
 from fixtures.workload import Workload
+
+if TYPE_CHECKING:
+    from fixtures.compute_reconfigure import ComputeReconfigure
 
 #
 # A test suite that help to prevent unintentionally breaking backward or forward compatibility between Neon releases.

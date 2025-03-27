@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import threading
+from typing import TYPE_CHECKING
 
 import pytest
-from fixtures.compare_fixtures import PgCompare
-from fixtures.neon_fixtures import PgProtocol
 
 from performance.test_perf_pgbench import get_scales_matrix
 from performance.test_wal_backpressure import record_read_latency
+
+if TYPE_CHECKING:
+    from fixtures.compare_fixtures import PgCompare
+    from fixtures.neon_fixtures import PgProtocol
 
 
 def start_write_workload(pg: PgProtocol, scale: int = 10):

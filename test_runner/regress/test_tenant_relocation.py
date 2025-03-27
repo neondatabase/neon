@@ -5,14 +5,11 @@ import shutil
 import threading
 import time
 from contextlib import closing, contextmanager
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import Endpoint, NeonEnvBuilder, NeonPageserver
-from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
     assert_tenant_state,
     wait_for_last_record_lsn,
@@ -28,7 +25,11 @@ from fixtures.utils import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from typing import Any
+
+    from fixtures.neon_fixtures import Endpoint, NeonEnvBuilder, NeonPageserver
+    from fixtures.pageserver.http import PageserverHttpClient
 
 
 def assert_abs_margin_ratio(a: float, b: float, margin_ratio: float):

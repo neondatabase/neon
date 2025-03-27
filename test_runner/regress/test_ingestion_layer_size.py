@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_last_flush_lsn
-from fixtures.pageserver.http import HistoricLayerInfo, LayerMapInfo
 from fixtures.utils import human_bytes, skip_in_debug_build
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from fixtures.pageserver.http import HistoricLayerInfo, LayerMapInfo
 
 
 @skip_in_debug_build("debug run is unnecessarily slow")

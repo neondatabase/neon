@@ -13,7 +13,6 @@ import fixtures.utils
 import pytest
 from fixtures.auth_tokens import TokenScope
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
-from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     DEFAULT_AZ_ID,
@@ -40,9 +39,7 @@ from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
 )
 from fixtures.pg_version import PgVersion
-from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
-from fixtures.storage_controller_proxy import StorageControllerProxy
 from fixtures.utils import (
     run_only_on_default_postgres,
     run_pg_bench_small,
@@ -50,18 +47,21 @@ from fixtures.utils import (
     wait_until,
 )
 from fixtures.workload import Workload
-from mypy_boto3_s3.type_defs import (
-    ObjectTypeDef,
-)
-from pytest_httpserver import HTTPServer
 from urllib3 import Retry
-from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 if TYPE_CHECKING:
     from typing import Any
 
+    from fixtures.compute_reconfigure import ComputeReconfigure
     from fixtures.httpserver import ListenAddress
+    from fixtures.port_distributor import PortDistributor
+    from fixtures.storage_controller_proxy import StorageControllerProxy
+    from mypy_boto3_s3.type_defs import (
+        ObjectTypeDef,
+    )
+    from pytest_httpserver import HTTPServer
+    from werkzeug.wrappers.request import Request
 
 
 def get_node_shard_counts(env: NeonEnv, tenant_ids):

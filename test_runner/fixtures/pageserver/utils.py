@@ -3,13 +3,6 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from mypy_boto3_s3.type_defs import (
-    DeleteObjectOutputTypeDef,
-    EmptyResponseMetadataTypeDef,
-    ListObjectsV2OutputTypeDef,
-    ObjectTypeDef,
-)
-
 from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
@@ -18,6 +11,13 @@ from fixtures.utils import wait_until
 
 if TYPE_CHECKING:
     from typing import Any
+
+    from mypy_boto3_s3.type_defs import (
+        DeleteObjectOutputTypeDef,
+        EmptyResponseMetadataTypeDef,
+        ListObjectsV2OutputTypeDef,
+        ObjectTypeDef,
+    )
 
 
 def assert_tenant_state(

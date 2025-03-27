@@ -7,21 +7,23 @@ import os
 import re
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import boto3
 import toml
 from moto.server import ThreadedMotoServer
-from mypy_boto3_s3 import S3Client
 from typing_extensions import override
 
-from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 from fixtures.pageserver.common_types import IndexPartDump
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from typing import Any
+
+    from mypy_boto3_s3 import S3Client
+
+    from fixtures.common_types import TenantId, TenantShardId, TimelineId
 
 
 TIMELINE_INDEX_PART_FILE_NAME = "index_part.json"

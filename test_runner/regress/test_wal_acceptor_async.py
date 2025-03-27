@@ -4,9 +4,8 @@ import asyncio
 import random
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-import asyncpg
 import pytest
 import toml
 from fixtures.common_types import Lsn, TenantId, TimelineId
@@ -20,6 +19,11 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.remote_storage import RemoteStorageKind
 from fixtures.utils import skip_in_debug_build
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    import asyncpg
 
 log = getLogger("root.safekeeper_async")
 

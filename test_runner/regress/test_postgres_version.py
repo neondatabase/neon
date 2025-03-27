@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from fixtures.neon_fixtures import PgBin
-from fixtures.pg_version import PgVersion
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import PgBin
+    from fixtures.pg_version import PgVersion
 
 
 def test_postgres_version(base_dir: Path, pg_bin: PgBin, pg_version: PgVersion):

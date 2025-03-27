@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import random
 from contextlib import closing
+from typing import TYPE_CHECKING
 
 import psycopg2.errors as pgerr
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.remote_storage import s3_storage
 from fixtures.utils import skip_in_debug_build, wait_until
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 # Test restarting page server, while safekeeper and compute node keep

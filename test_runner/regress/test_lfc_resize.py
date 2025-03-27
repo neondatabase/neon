@@ -5,11 +5,14 @@ import re
 import subprocess
 import threading
 import time
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, PgBin
 from fixtures.utils import USE_LFC
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv, PgBin
 
 
 @pytest.mark.timeout(600)

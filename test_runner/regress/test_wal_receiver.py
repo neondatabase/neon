@@ -5,11 +5,12 @@ from typing import TYPE_CHECKING
 
 from fixtures.common_types import Lsn, TenantId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
 from fixtures.utils import wait_until
 
 if TYPE_CHECKING:
     from typing import Any
+
+    from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
 
 
 # Checks that pageserver's walreceiver state is printed in the logs during WAL wait timeout.

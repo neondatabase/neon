@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from io import BytesIO
+from typing import TYPE_CHECKING
 
-from fixtures.neon_fixtures import Endpoint, NeonEnv
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import Endpoint, NeonEnv
 
 
 async def repeat_bytes(buf, repetitions: int):

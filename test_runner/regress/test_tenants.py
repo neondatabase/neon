@@ -8,6 +8,7 @@ from contextlib import closing
 from datetime import datetime
 from itertools import chain
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 import requests
@@ -29,7 +30,9 @@ from fixtures.pageserver.utils import timeline_delete_wait_completed, wait_until
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind
 from fixtures.utils import wait_until
-from prometheus_client.samples import Sample
+
+if TYPE_CHECKING:
+    from prometheus_client.samples import Sample
 
 
 def test_tenant_creation_fails(neon_simple_env: NeonEnv):

@@ -3,7 +3,6 @@ from __future__ import annotations
 import enum
 import time
 from collections import Counter
-from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -18,13 +17,15 @@ from fixtures.neon_fixtures import (
     PgBin,
     wait_for_last_flush_lsn,
 )
-from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_upload_queue_empty
 from fixtures.remote_storage import RemoteStorageKind
 from fixtures.utils import human_bytes, wait_until
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from typing import Any
+
+    from fixtures.pageserver.http import PageserverHttpClient
 
 
 GLOBAL_LRU_LOG_LINE = "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy"

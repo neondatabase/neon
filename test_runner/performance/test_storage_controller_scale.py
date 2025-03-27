@@ -5,10 +5,10 @@ import random
 import time
 from collections import defaultdict
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineArchivalState, TimelineId
-from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -21,6 +21,9 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pg_version import PgVersion
 from fixtures.utils import wait_until
+
+if TYPE_CHECKING:
+    from fixtures.compute_reconfigure import ComputeReconfigure
 
 
 def get_consistent_node_shard_counts(env: NeonEnv, total_shards) -> defaultdict[str, int]:

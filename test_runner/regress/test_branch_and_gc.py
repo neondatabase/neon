@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import Lsn, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
 from fixtures.pageserver.http import TimelineCreate406
 from fixtures.utils import query_scalar, skip_in_debug_build
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv
 
 
 # Test the GC implementation when running with branching.

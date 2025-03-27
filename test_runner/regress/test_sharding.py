@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 import pytest
 import requests
 from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineArchivalState, TimelineId
-from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     DEFAULT_AZ_ID,
@@ -23,13 +22,14 @@ from fixtures.pageserver.utils import assert_prefix_empty, assert_prefix_not_emp
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind, s3_storage
 from fixtures.utils import skip_in_debug_build, wait_until
 from fixtures.workload import Workload
-from pytest_httpserver import HTTPServer
 from typing_extensions import override
-from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 if TYPE_CHECKING:
+    from fixtures.compute_reconfigure import ComputeReconfigure
     from fixtures.httpserver import ListenAddress
+    from pytest_httpserver import HTTPServer
+    from werkzeug.wrappers.request import Request
 
 
 def test_sharding_smoke(
