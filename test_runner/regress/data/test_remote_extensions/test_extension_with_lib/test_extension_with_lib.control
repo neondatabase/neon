@@ -1,0 +1,2 @@
+comment = 'Test extension with lib'
+module_pathname = '$libdir/test_extension_with_lib'
