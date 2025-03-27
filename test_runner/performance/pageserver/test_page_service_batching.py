@@ -31,15 +31,15 @@ class PageServicePipeliningConfigPipelined(PageServicePipeliningConfig):
     mode: str = "pipelined"
 
 
-EXECUTION = ["concurrent-futures", "tasks"]
+EXECUTION = ["concurrent-futures"]
 
 NON_BATCHABLE: list[PageServicePipeliningConfig] = [PageServicePipeliningConfigSerial()]
 for max_batch_size in [1, 32]:
     for execution in EXECUTION:
         NON_BATCHABLE.append(PageServicePipeliningConfigPipelined(max_batch_size, execution))
 
-BATCHABLE: list[PageServicePipeliningConfig] = [PageServicePipeliningConfigSerial()]
-for max_batch_size in [1, 2, 4, 8, 16, 32]:
+BATCHABLE: list[PageServicePipeliningConfig] = []
+for max_batch_size in [32]:
     for execution in EXECUTION:
         BATCHABLE.append(PageServicePipeliningConfigPipelined(max_batch_size, execution))
 
@@ -47,19 +47,6 @@ for max_batch_size in [1, 2, 4, 8, 16, 32]:
 @pytest.mark.parametrize(
     "tablesize_mib, pipelining_config, target_runtime, effective_io_concurrency, readhead_buffer_size, name",
     [
-        # non-batchable workloads
-        # (A separate benchmark will consider latency).
-        *[
-            (
-                50,
-                config,
-                TARGET_RUNTIME,
-                1,
-                128,
-                f"not batchable {dataclasses.asdict(config)}",
-            )
-            for config in NON_BATCHABLE
-        ],
         # batchable workloads should show throughput and CPU efficiency improvements
         *[
             (
@@ -137,7 +124,11 @@ def test_throughput(
 
     env = neon_env_builder.init_start()
     ps_http = env.pageserver.http_client()
-    endpoint = env.endpoints.create_start("main")
+    endpoint = env.endpoints.create_start("main", config_lines=[
+        # disable lfc & use small shared buffers to force requests to pageserver
+        "neon.max_file_cache_size=0",
+        "shared_buffers=64MB",
+    ])
     conn = endpoint.connect()
     cur = conn.cursor()
 
@@ -155,7 +146,8 @@ def test_throughput(
     tablesize = tablesize_mib * 1024 * 1024
     npages = tablesize // (8 * 1024)
     cur.execute("INSERT INTO t SELECT generate_series(1, %s)", (npages,))
-    # TODO: can we force postgres to do sequential scans?
+
+    cur.execute("CREATE TABLE advancelsn(data char(1000)) with (fillfactor=10)");
 
     #
     # Run the workload, collect `Metrics` before and after, calculate difference, normalize.
@@ -211,7 +203,7 @@ def test_throughput(
                 ).value,
             )
 
-    def workload() -> Metrics:
+    def seqscan_workload() -> Metrics:
         start = time.time()
         iters = 0
         while time.time() - start < target_runtime or iters < 2:
@@ -232,7 +224,7 @@ def test_throughput(
         {"page_service_pipelining": dataclasses.asdict(pipelining_config)}
     )
     env.pageserver.restart()
-    metrics = workload()
+    metrics = seqscan_workload()
 
     log.info("Results: %s", metrics)
 
