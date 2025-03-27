@@ -53,7 +53,7 @@ jsonnet = "^0.21.0-rc2"
 
 [tool.poetry.group.dev.dependencies]
 mypy = "==1.13.0"
-ruff = "^0.7.0"
+ruff = "^0.11.2"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
