@@ -223,17 +223,10 @@ class NeonProject:
 
     def create_branch(self, parent_id: str | None = None) -> NeonBranch | None:
         self.wait()
-        try:
-            branch_def = self.neon_api.create_branch(self.id, parent_id=parent_id)
-        except HTTPError as he:
-            if (
-                he.response.status_code == 422
-                and he.response.json()["code"] == "BRANCHES_LIMIT_EXCEEDED"
-            ):
-                log.info("Branch limit exceeded, skipping")
-                return None
-            else:
-                raise HTTPError(he) from he
+        branch_def = self.neon_api.create_branch(self.id, parent_id=parent_id)
+        if branch_def is None:
+            log.info("Branch limit exceeded, skipping")
+            return None
         new_branch = NeonBranch(self, branch_def)
         self.wait()
         return new_branch
@@ -347,9 +340,12 @@ def setup_class(
     pg_bin: PgBin,
     neon_api: NeonAPI,
 ):
+    neon_api.retry_if_possible = True
     project = NeonProject(neon_api, pg_bin, pg_version)
     log.info("Created a project with id %s, name %s", project.id, project.name)
     yield pg_bin, project
+    log.info("Retried 524 errors: %s", neon_api.retries524)
+    log.info("Retried 4xx errors: %s", neon_api.retries4xx)
     log.info("Removing the project")
     project.delete()
 
