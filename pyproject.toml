@@ -109,4 +109,5 @@ select = [
     "W", # pycodestyle
     "B", # bugbear
     "UP", # pyupgrade
+    "TC", # flake8-type-checking
 ]
