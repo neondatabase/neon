@@ -191,13 +191,8 @@ runs:
         fi
 
     - name: Cache poetry deps
-      uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
+      uses: actions/cache@v4
       with:
-        endpoint: ${{ vars.HETZNER_CACHE_REGION }}.${{ vars.HETZNER_CACHE_ENDPOINT }}
-        bucket: ${{ vars.HETZNER_CACHE_BUCKET }}
-        accessKey: ${{ secrets.HETZNER_CACHE_ACCESS_KEY }}
-        secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
-        use-fallback: false
         path: ~/.cache/pypoetry/virtualenvs
         key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-bookworm-${{ hashFiles('poetry.lock') }}
 
