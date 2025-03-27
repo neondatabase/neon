@@ -25,27 +25,58 @@ def connection_parameters_to_env(params: dict[str, str]) -> dict[str, str]:
 # Some API calls not yet implemented.
 # You may want to copy not-yet-implemented methods from the PR https://github.com/neondatabase/neon/pull/11305
 class NeonAPI:
-    def __init__(self, neon_api_key: str, neon_api_base_url: str):
+    def __init__(self, neon_api_key: str, neon_api_base_url: str, retry_if_possible: bool = False, attempts: int = 10, sleep_before_retry: int = 1):
         self.__neon_api_key = neon_api_key
         self.__neon_api_base_url = neon_api_base_url.strip("/")
+        self.retry_if_possible = retry_if_possible
+        self.attempts = attempts
+        self.sleep_before_retry = sleep_before_retry
+        self.retries524 = 0
+        self.retries4xx = 0
 
-    def __request(self, method: str | bytes, endpoint: str, **kwargs: Any) -> requests.Response:
-        if "headers" not in kwargs:
-            kwargs["headers"] = {}
+    def __request(self, method: str | bytes, endpoint: str, **kwargs: Any) -> requests.Response | None:
+        kwargs["headers"] = kwargs.get("headers", {})
         kwargs["headers"]["Authorization"] = f"Bearer {self.__neon_api_key}"
 
-        resp = requests.request(method, f"{self.__neon_api_base_url}{endpoint}", **kwargs)
-        if resp.status_code >= 400:
-            log.error(
-                "%s %s returned a %d: %s",
-                method,
-                endpoint,
-                resp.status_code,
-                resp.text if resp.status_code != 524 else "CloudFlare error page",
-            )
+        for attempt in range(self.attempts):
+            retry = False
+            resp = requests.request(method, f"{self.__neon_api_base_url}{endpoint}", **kwargs)
+            if resp.status_code >= 400:
+                log.error(
+                    "%s %s returned a %d: %s",
+                    method,
+                    endpoint,
+                    resp.status_code,
+                    resp.text if resp.status_code != 524 else "CloudFlare error page",
+                )
+            else:
+                log.debug("%s %s returned a %d: %s", method, endpoint, resp.status_code, resp.text)
+            if not self.retry_if_possible:
+                resp.raise_for_status()
+                break
+            elif resp.status_code >= 400:
+                if resp.status_code == 422:
+                    if resp.json()["code"] == "BRANCHES_LIMIT_EXCEEDED":
+                        return None
+                    if resp.json()["message"] == "branch not ready yet":
+                        retry = True
+                        self.retries4xx += 1
+                elif resp.status_code == 423 and resp.json()["message"] in {"endpoint is in some transitive state, could not suspend", "project already has running conflicting operations, scheduling of new ones is prohibited"}:
+                    retry = True
+                    self.retries4xx += 1
+                elif resp.status_code == 524:
+                    log.info("The request was timed out, trying to get operations")
+                    retry = True
+                    self.retries524 += 1
+            if retry:
+                log.info("Retrying, attempt %s/%s", attempt+1, self.attempts)
+                time.sleep(self.sleep_before_retry)
+                continue
+            else:
+                resp.raise_for_status()
+            break
         else:
-            log.debug("%s %s returned a %d: %s", method, endpoint, resp.status_code, resp.text)
-        resp.raise_for_status()
+            raise RuntimeError("Max retry count is reached")
 
         return resp
 
