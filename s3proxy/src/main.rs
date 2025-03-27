@@ -16,7 +16,7 @@ use tracing::{debug, error, info};
 const HELP: &str = "s3 proxy:
 If \"type\" is \"aws\", cli may look up the following environment variables:
  AWS_ENDPOINT_URL
- AWS_ACCESS_KEY_ID (note the lowercase, https://github.com/awslabs/aws-sdk-rust/issues/1020)
+ AWS_ACCESS_KEY_ID
  AWS_SECRET_ACCESS_KEY
  or others, see https://docs.aws.amazon.com/sdkref/latest/guide/standardized-credentials.html
 In case of \"azure\", it may look up the following:
@@ -145,37 +145,37 @@ async fn check_storage_permissions(
         .as_secs()
         .to_string();
 
+    let path = RemotePath::from_string(&format!("write_access_{now}"))?;
+    debug!(%path, "uploading");
+
     // TODO what if multiple instances try to write a file?
     // random delay before writing? Instances will be ~3 per region + dedicated for computes
-    let path = RemotePath::from_string(&format!("write_access_{now}"))?;
     let body_str = format!("{now}");
     let stream = Body::from(body_str.clone()).into_data_stream();
     let stream = body_stream_to_sync_stream(stream);
-
-    debug!(%path, "uploading");
     client
         .upload(stream, body_str.len(), &path, None, &cancel)
         .await
         .context(format!("uploading {path} to test permissions"))?;
 
+    use tokio::io::AsyncReadExt;
     debug!(%path, "downloading");
     let download_opts = DownloadOpts {
         kind: remote_storage::DownloadKind::Small,
         ..Default::default()
     };
-    let mut stream = client
+    let mut body_read_buf = Vec::new();
+    let stream = client
         .download(&path, &download_opts, &cancel)
         .await
         .context(format!("downloading {path} to test permissions"))?
         .download_stream;
-    let mut out = Vec::new();
-    use futures::stream::StreamExt;
-    while let Some(res) = stream.next().await {
-        out.extend_from_slice(&res?[..]);
-    }
-    let read_back = String::from_utf8(out)?;
-    if body_str != read_back {
-        bail!("{} (original) != {} (read back)", body_str, read_back)
+    tokio_util::io::StreamReader::new(stream)
+        .read_to_end(&mut body_read_buf)
+        .await?;
+    let body_read_str = String::from_utf8(body_read_buf)?;
+    if body_str != body_read_str {
+        bail!("{} (original) != {} (read back)", body_str, body_read_str)
     }
 
     debug!(%path, "removing");
@@ -192,7 +192,7 @@ fn body_stream_to_sync_stream(
 
 fn app() -> Router {
     let router = Router::new().route(
-        "/{tenant_id}/{timeline_id}/{endpoint_id}/{key}",
+        "/{tenant_id}/{timeline_id}/{endpoint_id}/{*path}",
         get(get_key).put(set_key).delete(delete_key),
     );
     // axum-prometheus doesn't work with tokio tests
@@ -261,13 +261,13 @@ async fn get_key_impl(key_path: KeyPath, state: AxumState<State>) -> Result<Resp
         .map_err(|_| internal_error())
 }
 
-fn construct_s3_key(path: &KeyPath) -> Result<RemotePath> {
-    let auth = &path.auth;
+fn construct_s3_key(key_path: &KeyPath) -> Result<RemotePath> {
+    let auth = &key_path.auth;
     let buf = format!(
         "{}/{}/{}",
         auth.tenant_id, auth.timeline_id, auth.endpoint_id
     );
-    RemotePath::new(&Utf8PathBuf::from(buf).join(normalize_key(&path.key)?))
+    RemotePath::new(&Utf8PathBuf::from(buf).join(normalize_key(&key_path.path)?))
 }
 
 fn normalize_key(key: &str) -> Result<Utf8PathBuf> {
@@ -281,7 +281,7 @@ fn normalize_key(key: &str) -> Result<Utf8PathBuf> {
     Ok(path)
 }
 
-// path_clean implementation which uses Utf8PathBuf to avoid converting to and from these
+// Copied from path_clean crate with PathBuf->Utf8PathBuf
 fn clean_utf8(path: &Utf8Path) -> Utf8PathBuf {
     use camino::Utf8Component;
     let mut out = Vec::new();
@@ -389,7 +389,7 @@ pub struct Claims {
 struct KeyPath {
     #[serde(flatten)]
     auth: Claims,
-    key: String,
+    path: String,
 }
 
 use axum::RequestPartsExt;
@@ -524,7 +524,7 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
         );
         for (tenant, timeline, endpoint) in triples.skip(1) {
             let request = Request::builder()
-                .uri(format!("/{tenant}/{timeline}/{endpoint}/cache_key"))
+                .uri(format!("/{tenant}/{timeline}/{endpoint}/sub/path/key"))
                 .method(method)
                 .header("Authorization", format!("Bearer {}", token))
                 .body(Body::empty())
@@ -659,20 +659,26 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
     #[test]
     fn construct_s3_key() {
         let f = super::construct_s3_key;
-        let key = "cache_key".to_string();
-        let s3_key = format!("{TENANT_ID}/{TIMELINE_ID}/{ENDPOINT_ID}/{key}");
         let auth = Claims {
             tenant_id: TENANT_ID.into(),
             timeline_id: TIMELINE_ID.into(),
             endpoint_id: ENDPOINT_ID.into(),
         };
-        let mut key_path = KeyPath { auth, key };
-        assert_eq!(
-            f(&key_path).unwrap(),
-            RemotePath::from_string(&s3_key).unwrap()
-        );
+        let remote_path = |key| {
+            RemotePath::from_string(&format!("{TENANT_ID}/{TIMELINE_ID}/{ENDPOINT_ID}/{key}"))
+                .unwrap()
+        };
 
-        key_path.key = "../error/hello/../".to_string();
+        let mut key_path = KeyPath {
+            auth,
+            path: "cache_key".to_string(),
+        };
+        assert_eq!(f(&key_path).unwrap(), remote_path(key_path.path));
+
+        key_path.path = "we/can/have/nested/paths".to_string();
+        assert_eq!(f(&key_path).unwrap(), remote_path(key_path.path));
+
+        key_path.path = "../error/hello/../".to_string();
         assert!(f(&key_path).is_err());
     }
 }

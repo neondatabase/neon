@@ -23,7 +23,6 @@ tracing-subscriber.workspace = true
 tracing.workspace = true
 utils = { path = "../libs/utils", default-features = false }
 workspace_hack.workspace = true
-
 [dev-dependencies]
 http-body-util = "0.1.3"
 itertools.workspace = true
