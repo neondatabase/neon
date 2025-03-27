@@ -4786,7 +4786,7 @@ class Safekeeper(LogUtils):
         timeline_id: TimelineId,
         ps: NeonPageserver,
         mconf: MembershipConfiguration,
-        sks: list[Safekeeper],
+        members_sks: list[Safekeeper],
     ):
         """
         Manually create timeline on safekeepers with given (presumably inital)
@@ -4803,14 +4803,12 @@ class Safekeeper(LogUtils):
         # sk timeline creation request expects minor version
         pg_version = ps_timeline_detail["pg_version"] * 10000
         # create inital mconf
-        sk_ids = [SafekeeperId(sk.id, "localhost", sk.port.pg_tenant_only) for sk in sks]
-        mconf = MembershipConfiguration(generation=1, members=sk_ids, new_members=None)
         create_r = TimelineCreateRequest(
             tenant_id, timeline_id, mconf, pg_version, Lsn(init_lsn), commit_lsn=None
         )
         log.info(f"sending timeline create: {create_r.to_json()}")
 
-        for sk in sks:
+        for sk in members_sks:
             sk.http_client().timeline_create(create_r)
 
 
