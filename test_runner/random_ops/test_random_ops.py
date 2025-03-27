@@ -169,10 +169,7 @@ class NeonBranch:
         for ep in endpoints:
             ep.terminate_benchmark()
         self.terminate_benchmark()
-        for _ in range(10):
-            # Try 10 attempts
-            try:
-                res: dict[str, Any] | None = self.neon_api.restore_branch(
+        res: dict[str, Any] | None = self.neon_api.restore_branch(
                     self.project_id,
                     self.id,
                     source_branch_id,
@@ -180,44 +177,9 @@ class NeonBranch:
                     source_timestamp,
                     preserve_under_name,
                 )
-            except HTTPError as he:
-                # We are getting 524 error on CPlane timeout.
-                # Retry.
-                if he.response.status_code == 524:
-                    log.info("The request was timed out, trying to get operations")
-                    # Check if the operation was started.
-                    # Fail if yes.
-                    for op in self.neon_api.get_operations(self.project_id)["operations"]:
-                        if (
-                            datetime.fromisoformat(op["created_at"]) >= start_time
-                            and op["action"] == "create_branch"
-                            and op["branch_id"] == self.id
-                        ):
-                            raise RuntimeError("The operation started, please investigate") from he
-                    else:
-                        continue
-                # Skip restore if we cannot create more branches due to limit
-                elif he.response.status_code == 422:
-                    if he.response.json()["code"] == "BRANCHES_LIMIT_EXCEEDED":
-                        log.info("Branches limit exceeded, skipping")
-                        return None
-                    elif he.response.json()["message"] == "branch not ready yet":
-                        log.info("Retrying")
-                        continue
-                    else:
-                        raise HTTPError(he) from he
-                elif (
-                    he.response.status_code == 423
-                    and he.response.json()["message"]
-                    == "endpoint is in some transitive state, could not suspend"
-                ):
-                    log.info("Retrying")
-                    continue
-                else:
-                    raise HTTPError(he) from he
-            else:
-                break
-        # Start a benchmark, instead of the terminated one
+        if res is None:
+            log.info("Branches limit exceeded, skipping")
+            return None
         self.start_benchmark()
         for ep in endpoints:
             ep.start_benchmark()
