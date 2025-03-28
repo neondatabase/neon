@@ -78,7 +78,8 @@ def test_perf_simple_many_relations_reldir_v2(
     ep = env.endpoints.create_start(
         "main",
         config_lines=[
-            "shared_buffers=1000MB",
+            # use shared_buffers size like in production for 8 CU compute
+            "shared_buffers=900MB",
             "max_locks_per_transaction=16384",
         ],
     )

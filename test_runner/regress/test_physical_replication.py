@@ -180,7 +180,8 @@ def test_physical_replication_config_mismatch_too_many_known_xids(neon_simple_en
         endpoint_id="primary",
         config_lines=[
             "max_connections=1000",
-            "shared_buffers=128MB",  # prevent "no unpinned buffers available" error
+            # use shared_buffers size like in production for 2 CU compute (which has 901 connections limit)
+            "shared_buffers=225MB",  # prevent "no unpinned buffers available" error
         ],
     )
     secondary = env.endpoints.new_replica_start(
