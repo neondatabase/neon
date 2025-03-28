@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import timeit
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from fixtures.benchmark_fixture import PgBenchRunResult
-from fixtures.compare_fixtures import NeonCompare
 from fixtures.neon_fixtures import fork_at_current_lsn
 
 from performance.test_perf_pgbench import utc_now_timestamp
+
+if TYPE_CHECKING:
+    from fixtures.compare_fixtures import NeonCompare
 
 # -----------------------------------------------------------------------
 # Start of `test_compare_child_and_root_*` tests

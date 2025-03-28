@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-from fixtures.neon_fixtures import NeonEnv
+from typing import TYPE_CHECKING
+
 from fixtures.utils import wait_until
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv
 
 
 def test_compute_reconfigure(neon_simple_env: NeonEnv):

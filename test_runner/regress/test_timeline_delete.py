@@ -167,7 +167,7 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
         initial_tenant_conf={
             "gc_period": "0s",
             "compaction_period": "0s",
-            "checkpoint_distance": f"{1024 ** 2}",
+            "checkpoint_distance": f"{1024**2}",
             "image_creation_threshold": "100",
         }
     )
@@ -363,9 +363,9 @@ def test_timeline_resurrection_on_attach(
     wait_until_tenant_active(ps_http, tenant_id=tenant_id)
 
     timelines = ps_http.timeline_list(tenant_id=tenant_id)
-    assert {TimelineId(tl["timeline_id"]) for tl in timelines} == {
-        main_timeline_id
-    }, "the deleted timeline should not have been resurrected"
+    assert {TimelineId(tl["timeline_id"]) for tl in timelines} == {main_timeline_id}, (
+        "the deleted timeline should not have been resurrected"
+    )
     assert all([tl["state"] == "Active" for tl in timelines])
 
 
@@ -423,9 +423,9 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
 
     wait_timeline_detail_404(ps_http, env.initial_tenant, leaf_timeline_id)
 
-    assert (
-        not leaf_timeline_path.exists()
-    ), "timeline load procedure should have resumed the deletion interrupted by the failpoint"
+    assert not leaf_timeline_path.exists(), (
+        "timeline load procedure should have resumed the deletion interrupted by the failpoint"
+    )
     timelines = ps_http.timeline_list(env.initial_tenant)
     assert {TimelineId(tl["timeline_id"]) for tl in timelines} == {
         intermediate_timeline_id,
@@ -705,7 +705,7 @@ def test_delete_orphaned_objects(
         initial_tenant_conf={
             "gc_period": "0s",
             "compaction_period": "0s",
-            "checkpoint_distance": f"{1024 ** 2}",
+            "checkpoint_distance": f"{1024**2}",
             "image_creation_threshold": "100",
         }
     )

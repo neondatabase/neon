@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import random
+from typing import TYPE_CHECKING
 
-from fixtures.common_types import TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
@@ -13,6 +13,9 @@ from fixtures.neon_fixtures import (
     wait_for_last_flush_lsn,
 )
 from fixtures.remote_storage import RemoteStorageKind
+
+if TYPE_CHECKING:
+    from fixtures.common_types import TimelineId
 
 # Test configuration
 #

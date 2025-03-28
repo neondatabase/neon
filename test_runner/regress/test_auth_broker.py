@@ -23,13 +23,13 @@ async def test_auth_broker_happy(
     # local proxy mock just echos back the request
     # check that we forward the correct data
 
-    assert (
-        res["headers"]["authorization"] == f"Bearer {token.serialize()}"
-    ), "JWT should be forwarded"
+    assert res["headers"]["authorization"] == f"Bearer {token.serialize()}", (
+        "JWT should be forwarded"
+    )
 
-    assert (
-        "anonymous" in res["headers"]["neon-connection-string"]
-    ), "conn string should be forwarded"
+    assert "anonymous" in res["headers"]["neon-connection-string"], (
+        "conn string should be forwarded"
+    )
 
     assert json.loads(res["body"]) == {
         "query": "foo",

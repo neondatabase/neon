@@ -7,13 +7,16 @@ from __future__ import annotations
 import hashlib
 import os
 import time
+from typing import TYPE_CHECKING
 
 import clickhouse_connect
 import psycopg2
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import RemotePostgres
 from fixtures.utils import wait_until
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import RemotePostgres
 
 
 def query_clickhouse(

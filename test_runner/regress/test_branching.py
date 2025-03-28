@@ -4,22 +4,25 @@ import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import Lsn, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    Endpoint,
-    NeonEnv,
-    NeonEnvBuilder,
-    PgBin,
-)
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import wait_until_tenant_active
 from fixtures.utils import query_scalar
 from performance.test_perf_pgbench import get_scales_matrix
 from requests import RequestException
 from requests.exceptions import RetryError
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import (
+        Endpoint,
+        NeonEnv,
+        NeonEnvBuilder,
+        PgBin,
+    )
 
 
 # Test branch creation
@@ -43,9 +46,9 @@ def test_branching_with_pgbench(
     tenant, _ = env.create_tenant(
         conf={
             "gc_period": "5 s",
-            "gc_horizon": f"{1024 ** 2}",
-            "checkpoint_distance": f"{1024 ** 2}",
-            "compaction_target_size": f"{1024 ** 2}",
+            "gc_horizon": f"{1024**2}",
+            "checkpoint_distance": f"{1024**2}",
+            "compaction_target_size": f"{1024**2}",
             # set PITR interval to be small, so we can do GC
             "pitr_interval": "5 s",
         }

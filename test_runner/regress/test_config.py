@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 from contextlib import closing
+from typing import TYPE_CHECKING
 
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
 
 
 #

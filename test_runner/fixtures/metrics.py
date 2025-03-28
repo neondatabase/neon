@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from typing import TYPE_CHECKING
 
 from prometheus_client.parser import text_string_to_metric_families
-from prometheus_client.samples import Sample
 
 from fixtures.log_helper import log
+
+if TYPE_CHECKING:
+    from prometheus_client.samples import Sample
 
 
 class Metrics:

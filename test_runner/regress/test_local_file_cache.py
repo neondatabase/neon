@@ -5,10 +5,13 @@ import queue
 import random
 import threading
 import time
+from typing import TYPE_CHECKING
 
 import pytest
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
 from fixtures.utils import USE_LFC, query_scalar
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
 
 """
 Test whether LFC doesn't error out when the LRU is empty, but the LFC is

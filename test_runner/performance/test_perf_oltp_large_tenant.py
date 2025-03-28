@@ -4,13 +4,16 @@ import os
 import timeit
 from contextlib import closing
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.benchmark_fixture import PgBenchRunResult
-from fixtures.compare_fixtures import PgCompare
 from fixtures.log_helper import log
 
 from performance.test_perf_pgbench import get_durations_matrix, utc_now_timestamp
+
+if TYPE_CHECKING:
+    from fixtures.compare_fixtures import PgCompare
 
 
 def get_custom_scripts(
