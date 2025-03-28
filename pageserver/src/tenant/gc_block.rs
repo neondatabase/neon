@@ -14,7 +14,7 @@ pub(crate) struct GcBlock {
     ///
     /// LOCK ORDER: this is held locked while scheduling the next index_part update. This is done
     /// to keep the this field up to date with RemoteTimelineClient `upload_queue.dirty`.
-    reasons: std::sync::Mutex<Storage>,
+    reasons: tokio::sync::Mutex<Storage>,
 
     /// GC background task or manually run `Tenant::gc_iteration` holds a lock on this.
     ///
@@ -33,7 +33,7 @@ impl GcBlock {
     /// Cancellation safe.
     pub(super) async fn start(&self) -> Result<Guard, BlockingReasons> {
         let reasons = {
-            let g = self.reasons.lock().unwrap();
+            let g = self.reasons.lock().await;
 
             // TODO: the assumption is that this method gets called periodically. in prod, we use 1h, in
             // tests, we use everything. we should warn if the gc has been consecutively blocked
@@ -53,8 +53,8 @@ impl GcBlock {
     /// Describe the current gc blocking reasons.
     ///
     /// TODO: make this json serializable.
-    pub(crate) fn summary(&self) -> Option<BlockingReasons> {
-        let g = self.reasons.lock().unwrap();
+    pub(crate) async fn summary(&self) -> Option<BlockingReasons> {
+        let g = self.reasons.lock().await;
 
         BlockingReasons::summarize(&g)
     }
@@ -74,7 +74,7 @@ impl GcBlock {
         reason: GcBlockingReason,
     ) -> anyhow::Result<bool> {
         let (added, uploaded) = {
-            let mut g = self.reasons.lock().unwrap();
+            let mut g = self.reasons.lock().await;
             let set = g.entry(timeline.timeline_id).or_default();
             let added = set.insert(reason);
 
@@ -105,7 +105,7 @@ impl GcBlock {
         super::span::debug_assert_current_span_has_tenant_and_timeline_id();
 
         let (remaining_blocks, uploaded) = {
-            let mut g = self.reasons.lock().unwrap();
+            let mut g = self.reasons.lock().await;
             match g.entry(timeline.timeline_id) {
                 Entry::Occupied(mut oe) => {
                     let set = oe.get_mut();
@@ -142,9 +142,9 @@ impl GcBlock {
         Ok(())
     }
 
-    pub(crate) fn before_delete(&self, timeline_id: &super::TimelineId) {
+    pub(crate) async fn before_delete(&self, timeline_id: &super::TimelineId) {
         let unblocked = {
-            let mut g = self.reasons.lock().unwrap();
+            let mut g = self.reasons.lock().await;
             if g.is_empty() {
                 return;
             }
@@ -160,8 +160,8 @@ impl GcBlock {
     }
 
     /// Initialize with the non-deleted timelines of this tenant.
-    pub(crate) fn set_scanned(&self, scanned: Storage) {
-        let mut g = self.reasons.lock().unwrap();
+    pub(crate) async fn set_scanned(&self, scanned: Storage) {
+        let mut g = self.reasons.lock().await;
         assert!(g.is_empty());
         g.extend(scanned.into_iter().filter(|(_, v)| !v.is_empty()));
 
@@ -192,7 +192,7 @@ impl std::fmt::Display for BlockingReasons {
 }
 
 impl BlockingReasons {
-    fn clean_and_summarize(mut g: std::sync::MutexGuard<'_, Storage>) -> Option<Self> {
+    fn clean_and_summarize(mut g: tokio::sync::MutexGuard<'_, Storage>) -> Option<Self> {
         let mut reasons = enumset::EnumSet::empty();
         g.retain(|_key, value| {
             reasons = reasons.union(*value);
@@ -208,7 +208,7 @@ impl BlockingReasons {
         }
     }
 
-    fn summarize(g: &std::sync::MutexGuard<'_, Storage>) -> Option<Self> {
+    fn summarize(g: &tokio::sync::MutexGuard<'_, Storage>) -> Option<Self> {
         if g.is_empty() {
             None
         } else {

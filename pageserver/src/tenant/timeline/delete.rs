@@ -207,7 +207,7 @@ impl DeleteTimelineFlow {
             timeline.shutdown(super::ShutdownMode::Hard).await;
         }
 
-        tenant.gc_block.before_delete(&timeline.timeline_id());
+        tenant.gc_block.before_delete(&timeline.timeline_id()).await;
 
         fail::fail_point!("timeline-delete-before-index-deleted-at", |_| {
             Err(anyhow::anyhow!(

@@ -1220,7 +1220,7 @@ async fn tenant_status(
                     .generation()
                     .into()
                     .expect("Tenants are always attached with a generation"),
-                gc_blocking: tenant.gc_block.summary().map(|x| format!("{x:?}")),
+                gc_blocking: tenant.gc_block.summary().await.map(|x| format!("{x:?}")),
             },
             walredo: tenant.wal_redo_manager_status(),
             timelines: tenant.list_timeline_ids(),
