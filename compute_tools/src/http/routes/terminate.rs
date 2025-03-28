@@ -22,7 +22,11 @@ pub(in crate::http) async fn terminate(State(compute): State<Arc<ComputeNode>>) 
             return JsonResponse::invalid_status(state.status);
         }
 
-        state.set_status(ComputeStatus::TerminationPending, &compute.state_changed);
+        state.set_status(
+            ComputeStatus::TerminationPending,
+            &compute.state_changed,
+            &compute.params.build_tag,
+        );
         drop(state);
     }
 

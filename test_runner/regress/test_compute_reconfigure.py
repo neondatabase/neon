@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from fixtures.metrics import parse_metrics
 from fixtures.utils import wait_until
 
 if TYPE_CHECKING:
@@ -64,3 +65,15 @@ def test_compute_reconfigure(neon_simple_env: NeonEnv):
         row = cursor.fetchone()
         assert row is not None
         assert row[0] == TEST_LOG_LINE_PREFIX
+
+    # Check that even after reconfigure and state transitions we still report
+    # only the current status.
+    client = endpoint.http_client()
+    raw_metrics = client.metrics()
+    metrics = parse_metrics(raw_metrics)
+    samples = metrics.query_all("compute_ctl_up")
+    assert len(samples) == 1
+    assert samples[0].value == 1
+    samples = metrics.query_all("compute_ctl_up", {"status": "running"})
+    assert len(samples) == 1
+    assert samples[0].value == 1

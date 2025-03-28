@@ -35,6 +35,7 @@ use crate::disk_quota::set_disk_quota;
 use crate::installed_extensions::get_installed_extensions;
 use crate::logger::startup_context_from_env;
 use crate::lsn_lease::launch_lsn_lease_bg_task_for_static;
+use crate::metrics::COMPUTE_CTL_UP;
 use crate::monitor::launch_monitor;
 use crate::pg_helpers::*;
 use crate::rsyslog::{
@@ -168,16 +169,26 @@ impl ComputeState {
         }
     }
 
-    pub fn set_status(&mut self, status: ComputeStatus, state_changed: &Condvar) {
+    pub fn set_status(&mut self, status: ComputeStatus, state_changed: &Condvar, build_tag: &str) {
         let prev = self.status;
         info!("Changing compute status from {} to {}", prev, status);
         self.status = status;
         state_changed.notify_all();
+
+        COMPUTE_CTL_UP.reset();
+        COMPUTE_CTL_UP
+            .with_label_values(&[build_tag, format!("{}", status).as_str()])
+            .set(1);
     }
 
-    pub fn set_failed_status(&mut self, err: anyhow::Error, state_changed: &Condvar) {
+    pub fn set_failed_status(
+        &mut self,
+        err: anyhow::Error,
+        state_changed: &Condvar,
+        build_tag: &str,
+    ) {
         self.error = Some(format!("{err:?}"));
-        self.set_status(ComputeStatus::Failed, state_changed);
+        self.set_status(ComputeStatus::Failed, state_changed, build_tag);
     }
 }
 
@@ -352,12 +363,21 @@ impl ComputeNode {
         }
         .launch(&this);
 
-        // The internal HTTP server could be launched later, but there isn't much
-        // sense in waiting.
+        // The internal HTTP server is needed for a further activation by control plane
+        // if compute was started for a pool, so we have to start server before hanging
+        // waiting for a spec.
         crate::http::server::Server::Internal {
             port: this.params.internal_http_port,
         }
         .launch(&this);
+
+        // HTTP server is running, so we can officially declare compute_ctl as 'up'
+        COMPUTE_CTL_UP
+            .with_label_values(&[
+                this.params.build_tag.as_str(),
+                format!("{}", ComputeStatus::Empty).as_str(),
+            ])
+            .set(1);
 
         // If we got a spec from the CLI already, use that. Otherwise wait for the
         // control plane to pass it to us with a /configure HTTP request
@@ -506,7 +526,11 @@ impl ComputeNode {
             };
             _this_entered = start_compute_span.enter();
 
-            state_guard.set_status(ComputeStatus::Init, &self.state_changed);
+            state_guard.set_status(
+                ComputeStatus::Init,
+                &self.state_changed,
+                &self.params.build_tag,
+            );
             compute_state = state_guard.clone()
         }
 
@@ -826,12 +850,12 @@ impl ComputeNode {
 
     pub fn set_status(&self, status: ComputeStatus) {
         let mut state = self.state.lock().unwrap();
-        state.set_status(status, &self.state_changed);
+        state.set_status(status, &self.state_changed, &self.params.build_tag);
     }
 
     pub fn set_failed_status(&self, err: anyhow::Error) {
         let mut state = self.state.lock().unwrap();
-        state.set_failed_status(err, &self.state_changed);
+        state.set_failed_status(err, &self.state_changed, &self.params.build_tag);
     }
 
     pub fn get_status(&self) -> ComputeStatus {
@@ -1648,6 +1672,7 @@ impl ComputeNode {
                                 state.set_status(
                                     ComputeStatus::ConfigurationPending,
                                     &self.state_changed,
+                                    &self.params.build_tag,
                                 );
                                 break 'status_update;
                             }
