@@ -10,6 +10,7 @@ members = [
     "pageserver/client",
     "pageserver/pagebench",
     "proxy",
+    "s3proxy",
     "safekeeper",
     "safekeeper/client",
     "storage_broker",
@@ -68,6 +69,7 @@ aws-sigv4 = { version = "1.2", features = ["sign-http"] }
 aws-types = "1.3"
 axum = { version = "0.8.1", features = ["ws"] }
 axum-extra = { version = "0.10.0", features = ["typed-header"] }
+axum-prometheus = "0.8.0"
 base64 = "0.13.0"
 bincode = "1.3"
 bindgen = "0.71"

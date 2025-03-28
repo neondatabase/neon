@@ -5,7 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = []
+default = ["rename_noreplace"]
+rename_noreplace = []
 # Enables test-only APIs, incuding failpoints. In particular, enables the `fail_point!` macro,
 # which adds some runtime cost to run tests on outage conditions
 testing = ["fail/failpoints"]
