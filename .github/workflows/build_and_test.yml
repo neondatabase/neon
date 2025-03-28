@@ -80,6 +80,7 @@ jobs:
     uses: ./.github/workflows/_meta.yml
     with:
       github-event-name: ${{ github.event_name }}
+      github-event-json: ${{ toJSON(github.event) }}
 
   build-build-tools-image:
     needs: [ check-permissions ]
@@ -545,6 +546,7 @@ jobs:
     uses: ./.github/workflows/trigger-e2e-tests.yml
     with:
       github-event-name: ${{ github.event_name }}
+      github-event-json: ${{ toJSON(github.event) }}
     secrets: inherit
 
   neon-image-arch:
@@ -568,6 +570,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: true
+          ref: ${{ needs.meta.outputs.sha }}
 
       - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
       - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
@@ -677,6 +680,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: true
+          ref: ${{ needs.meta.outputs.sha }}
 
       - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
       - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
