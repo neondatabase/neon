@@ -107,19 +107,19 @@ impl EndpointsCache {
 
     fn should_reject(&self, endpoint: &EndpointId) -> bool {
         if endpoint.is_endpoint() {
-            let Some(endpoint) = EndpointIdInt::get(endpoint) else {
+            let Some(endpoint) = EndpointIdInt::try_from_str(endpoint) else {
                 // if we haven't interned this endpoint, it's not in the cache.
                 return true;
             };
             !self.endpoints.contains(&endpoint)
         } else if endpoint.is_branch() {
-            let Some(branch) = BranchIdInt::get(endpoint) else {
+            let Some(branch) = BranchIdInt::try_from_str(endpoint) else {
                 // if we haven't interned this branch, it's not in the cache.
                 return true;
             };
             !self.branches.contains(&branch)
         } else {
-            let Some(project) = ProjectIdInt::get(endpoint) else {
+            let Some(project) = ProjectIdInt::try_from_str(endpoint) else {
                 // if we haven't interned this project, it's not in the cache.
                 return true;
             };
