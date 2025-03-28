@@ -1674,6 +1674,7 @@ pub struct SecondaryProgress {
 pub struct TenantScanRemoteStorageShard {
     pub tenant_shard_id: TenantShardId,
     pub generation: Option<u32>,
+    pub stripe_size: Option<ShardStripeSize>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
