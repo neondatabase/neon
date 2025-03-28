@@ -1,11 +1,9 @@
 use std::sync::Arc;
 
-use axum::body::Body;
 use axum::extract::State;
 use axum::response::Response;
-use compute_api::requests::{ConfigurationRequest, ConfigureTelemetryRequest};
+use compute_api::requests::ConfigurationRequest;
 use compute_api::responses::{ComputeStatus, ComputeStatusResponse};
-use compute_api::spec::ComputeFeature;
 use http::StatusCode;
 use tokio::task;
 use tracing::info;
@@ -13,7 +11,6 @@ use tracing::info;
 use crate::compute::{ComputeNode, ParsedSpec};
 use crate::http::JsonResponse;
 use crate::http::extract::Json;
-use crate::rsyslog::{PostgresLogsRsyslogConfig, configure_postgres_logs_export};
 
 // Accept spec in JSON format and request compute configuration. If anything
 // goes wrong after we set the compute status to `ConfigurationPending` and
@@ -94,26 +91,4 @@ pub(in crate::http) async fn configure(
     let body = ComputeStatusResponse::from(&state);
 
     JsonResponse::success(StatusCode::OK, body)
-}
-
-pub(in crate::http) async fn configure_telemetry(
-    State(compute): State<Arc<ComputeNode>>,
-    request: Json<ConfigureTelemetryRequest>,
-) -> Response {
-    if !compute.has_feature(ComputeFeature::PostgresLogsExport) {
-        return JsonResponse::error(
-            StatusCode::PRECONDITION_FAILED,
-            "Postgres logs export feature is not enabled".to_string(),
-        );
-    }
-
-    let conf = PostgresLogsRsyslogConfig::new(request.logs_export_host.as_deref());
-    if let Err(err) = configure_postgres_logs_export(conf) {
-        return JsonResponse::error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
-    }
-
-    Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(Body::from(""))
-        .unwrap()
 }

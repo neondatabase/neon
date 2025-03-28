@@ -168,6 +168,9 @@ pub struct ComputeSpec {
     /// Extensions should be present in shared_preload_libraries
     #[serde(default)]
     pub audit_log_level: ComputeAudit,
+
+    /// Optional metadata for additional configuration options
+    pub metadata: Option<ComputeMetadata>,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
@@ -384,6 +387,19 @@ pub struct JwksSettings {
     pub jwks_url: String,
     pub provider_name: String,
     pub jwt_audience: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ComputeMetadata {
+    /// Metadata fields that could be optionally provided by telemetryapi service
+    pub telemetryapi: Option<ComputeTelemetryMetadata>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ComputeTelemetryMetadata {
+    /// Hostname and the port of the otel collector. Leave empty to disable logs forwarding.
+    /// Example: config-shy-breeze-123-collector-monitoring.neon-telemetry.svc.cluster.local:54526
+    pub logs_export_host: Option<String>,
 }
 
 #[cfg(test)]
