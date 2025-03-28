@@ -68,6 +68,9 @@ static const struct config_enum_entry neon_compute_modes[] = {
 /* GUCs */
 char	   *neon_timeline;
 char	   *neon_tenant;
+char	   *neon_project_id;
+char	   *neon_branch_id;
+char	   *neon_endpoint_id;
 int32		max_cluster_size;
 char	   *page_server_connstring;
 char	   *neon_auth_token;
@@ -1364,6 +1367,31 @@ pg_init_libpagestore(void)
 							   "Neon tenant_id the server is running on",
 							   NULL,
 							   &neon_tenant,
+							   "",
+							   PGC_POSTMASTER,
+							   0,	/* no flags required */
+							   check_neon_id, NULL, NULL);
+
+	DefineCustomStringVariable("neon.project_id",
+							   "Neon project_id the server is running on",
+							   NULL,
+							   &neon_project_id,
+							   "",
+							   PGC_POSTMASTER,
+							   0,	/* no flags required */
+							   check_neon_id, NULL, NULL);
+	DefineCustomStringVariable("neon.branch_id",
+							   "Neon branch_id the server is running on",
+							   NULL,
+							   &neon_branch_id,
+							   "",
+							   PGC_POSTMASTER,
+							   0,	/* no flags required */
+							   check_neon_id, NULL, NULL);
+	DefineCustomStringVariable("neon.endpoint_id",
+							   "Neon endpoint_id the server is running on",
+							   NULL,
+							   &neon_endpoint_id,
 							   "",
 							   PGC_POSTMASTER,
 							   0,	/* no flags required */

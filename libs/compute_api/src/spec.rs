@@ -104,6 +104,12 @@ pub struct ComputeSpec {
     pub timeline_id: Option<TimelineId>,
     pub pageserver_connstring: Option<String>,
 
+    // More neon ids that we expose to the compute_ctl
+    // and to postgres as neon extension GUCs.
+    pub project_id: Option<String>,
+    pub branch_id: Option<String>,
+    pub endpoint_id: Option<String>,
+
     /// Safekeeper membership config generation. It is put in
     /// neon.safekeepers GUC and serves two purposes:
     /// 1) Non zero value forces walproposer to use membership configurations.
