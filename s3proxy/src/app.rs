@@ -129,11 +129,11 @@ pub async fn check_storage_permissions(
 
     // TODO what if multiple instances try to write a file?
     // random delay before writing? Instances will be ~3 per region + dedicated for computes
-    let body_str = format!("{now}");
-    let stream = Body::from(body_str.clone()).into_data_stream();
+    let body = format!("{now}");
+    let stream = Body::from(body.clone()).into_data_stream();
     let stream = body_stream_to_sync_stream(stream);
     client
-        .upload(stream, body_str.len(), &path, None, &cancel)
+        .upload(stream, body.len(), &path, None, &cancel)
         .await
         .context(format!("uploading {path} to test permissions"))?;
 
@@ -152,9 +152,10 @@ pub async fn check_storage_permissions(
     tokio_util::io::StreamReader::new(stream)
         .read_to_end(&mut body_read_buf)
         .await?;
-    let body_read_str = String::from_utf8(body_read_buf)?;
-    if body_str != body_read_str {
-        anyhow::bail!("{} (original) != {} (read back)", body_str, body_read_str)
+    let body_read = String::from_utf8(body_read_buf)?;
+    if body != body_read {
+        error!(%body, %body_read, "File contents do not match");
+        anyhow::bail!("Read back file doesn't match original")
     }
 
     debug!(%path, "removing");
@@ -193,7 +194,7 @@ mod tests {
     use super::*;
     use axum::{body::Body, extract::Request, response::Response};
     use camino::Utf8PathBuf;
-    use parameterized::parameterized;
+    use itertools::iproduct;
     use std::sync::Arc;
     use tempfile::TempDir;
     use test_log::test as testlog;
@@ -238,33 +239,48 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
             .unwrap()
     }
 
-    #[parameterized(method = { "GET", "PUT", "DELETE" })]
-    #[parameterized_macro(testlog(tokio::test))]
-    async fn no_token(method: &str) {
-        let status = Request::builder()
-            .uri("/1/2/3/4")
-            .method(method)
-            .body(Body::empty())
-            .map(request)
-            .unwrap()
-            .await
-            .status();
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+    fn routes() -> impl Iterator<Item = (&'static str, &'static str)> {
+        iproduct!(
+            vec!["/1", "/1/2", "/1/2/3", "/1/2/3/4"],
+            vec!["GET", "PUT", "DELETE"]
+        )
     }
 
-    #[parameterized(method = { "GET", "PUT", "DELETE" })]
-    #[parameterized_macro(testlog(tokio::test))]
-    async fn invalid_token(method: &str) {
-        let status = Request::builder()
-            .uri("/1/2/3/4")
-            .header("Authorization", "Bearer 123")
-            .method(method)
-            .body(Body::empty())
-            .map(request)
-            .unwrap()
-            .await
-            .status();
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+    #[testlog(tokio::test)]
+    async fn no_token() {
+        for (uri, method) in routes() {
+            info!(%uri, %method);
+            let status = Request::builder()
+                .uri(uri)
+                .method(method)
+                .body(Body::empty())
+                .map(request)
+                .unwrap()
+                .await;
+            assert!(matches!(
+                status.status(),
+                StatusCode::METHOD_NOT_ALLOWED | StatusCode::BAD_REQUEST
+            ));
+        }
+    }
+
+    #[testlog(tokio::test)]
+    async fn invalid_token() {
+        for (uri, method) in routes() {
+            info!(%uri, %method);
+            let status = Request::builder()
+                .uri(uri)
+                .header("Authorization", "Bearer 123")
+                .method(method)
+                .body(Body::empty())
+                .map(request)
+                .unwrap()
+                .await;
+            assert!(matches!(
+                status.status(),
+                StatusCode::METHOD_NOT_ALLOWED | StatusCode::BAD_REQUEST
+            ));
+        }
     }
 
     const TENANT_ID: &str = "1adcba3c01c578d1c1be7b8048a4484d";
@@ -281,25 +297,27 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
         jsonwebtoken::encode(&header, &claims, &key).unwrap()
     }
 
-    #[parameterized(method = { "GET", "PUT", "DELETE" })]
-    #[parameterized_macro(testlog(tokio::test))]
-    async fn unauthorized(method: &str) {
+    #[testlog(tokio::test)]
+    async fn unauthorized() {
         let (proxy, _) = proxy().await;
         let mut app = app(Arc::new(proxy)).into_service();
         let token = token();
-        let triples = itertools::iproduct!(
+        let args = itertools::iproduct!(
             vec![TENANT_ID, "12345"],
             vec![TIMELINE_ID, "12345"],
             vec![ENDPOINT_ID, "ep-ololo"]
-        );
-        for (tenant, timeline, endpoint) in triples.skip(1) {
+        )
+        .skip(1);
+
+        for ((uri, method), (tenant, timeline, endpoint)) in iproduct!(routes(), args) {
+            info!(%uri, %method, %tenant, %timeline, %endpoint);
             let request = Request::builder()
                 .uri(format!("/{tenant}/{timeline}/{endpoint}/sub/path/key"))
                 .method(method)
                 .header("Authorization", format!("Bearer {}", token))
                 .body(Body::empty())
                 .unwrap();
-            let status = ServiceExt::<Request<Body>>::ready(&mut app)
+            let status = ServiceExt::ready(&mut app)
                 .await
                 .unwrap()
                 .call(request)
@@ -310,102 +328,129 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
         }
     }
 
-    #[parameterized(method = { "GET", "PUT", "DELETE" })]
-    #[parameterized_macro(testlog(tokio::test))]
-    async fn invalid_cache_key(method: &str) {
+    #[testlog(tokio::test)]
+    async fn method_not_allowed() {
         let token = token();
-        let status = Request::builder()
-            .uri(format!("/{TENANT_ID}/{TIMELINE_ID}/{ENDPOINT_ID}/.."))
-            .method(method)
-            .header("Authorization", format!("Bearer {token}"))
-            .body(Body::empty())
-            .map(request)
-            .unwrap()
-            .await
-            .status();
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let iter = iproduct!(vec!["", "/.."], vec!["GET", "PUT"]);
+        for (key, method) in iter {
+            let status = Request::builder()
+                .uri(format!("/{TENANT_ID}/{TIMELINE_ID}/{ENDPOINT_ID}{key}"))
+                .method(method)
+                .header("Authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .map(request)
+                .unwrap()
+                .await
+                .status();
+            assert!(matches!(
+                status,
+                StatusCode::BAD_REQUEST | StatusCode::METHOD_NOT_ALLOWED
+            ));
+        }
+    }
+
+    async fn requests_chain(
+        chain: impl Iterator<Item = (&str, &str, &'static str, StatusCode, bool)>,
+        token: impl Fn(&str) -> String,
+    ) {
+        let (proxy, _) = proxy().await;
+        let mut app = app(Arc::new(proxy)).into_service();
+        for (uri, method, body, expected_status, compare_body) in chain {
+            info!(%uri, %method, %body, %expected_status);
+            let bearer = format!("Bearer {}", token(uri));
+            let request = Request::builder()
+                .uri(uri)
+                .method(method)
+                .header("Authorization", &bearer)
+                .body(Body::from(body))
+                .unwrap();
+            let response = ServiceExt::ready(&mut app)
+                .await
+                .unwrap()
+                .call(request)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected_status);
+            if !compare_body {
+                continue;
+            }
+            use http_body_util::BodyExt;
+            let read_body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(body, read_body);
+        }
     }
 
     #[testlog(tokio::test)]
-    async fn get_put_get_delete_get() {
-        let (proxy, _) = proxy().await;
-        let mut app = app(Arc::new(proxy)).into_service();
-        let bearer = format!("Bearer {}", token());
+    async fn insert_retrieve_remove() {
         let uri = format!("/{TENANT_ID}/{TIMELINE_ID}/{ENDPOINT_ID}/key");
+        let uri = uri.as_str();
+        let chain = vec![
+            (uri, "GET", "", StatusCode::NOT_FOUND, false),
+            (uri, "PUT", "пыщьпыщь", StatusCode::OK, false),
+            (uri, "GET", "пыщьпыщь", StatusCode::OK, true),
+            (uri, "DELETE", "", StatusCode::OK, false),
+            (uri, "GET", "", StatusCode::NOT_FOUND, false),
+        ];
+        requests_chain(chain.into_iter(), |_| token()).await;
+    }
 
-        let request = Request::builder()
-            .uri(&uri)
-            .header("Authorization", &bearer)
-            .body(Body::empty())
-            .unwrap();
-        let status = ServiceExt::<Request<Body>>::ready(&mut app)
-            .await
-            .unwrap()
-            .call(request)
-            .await
-            .unwrap()
-            .status();
-        assert_eq!(status, StatusCode::NOT_FOUND);
+    fn delete_prefix_token(uri: &str) -> String {
+        let parts = uri.split("/").collect::<Vec<&str>>();
+        let claims = s3proxy::PrefixKeyPath {
+            tenant_id: parts.get(1).map(ToString::to_string).unwrap(),
+            timeline_id: parts.get(2).map(ToString::to_string).into(),
+            endpoint_id: parts.get(3).map(ToString::to_string).into(),
+        };
+        let key = jsonwebtoken::EncodingKey::from_ed_pem(TEST_PRIV_KEY_ED25519).unwrap();
+        let header = jsonwebtoken::Header::new(s3proxy::VALIDATION_ALGO);
+        jsonwebtoken::encode(&header, &claims, &key).unwrap()
+    }
 
-        let content = "пыщьпыщь";
-        let request = Request::builder()
-            .uri(&uri)
-            .header("Authorization", &bearer)
-            .method("PUT")
-            .body(Body::from(content))
-            .unwrap();
-        let status = ServiceExt::<Request<Body>>::ready(&mut app)
-            .await
-            .unwrap()
-            .call(request)
-            .await
-            .unwrap()
-            .status();
-        assert_eq!(status, StatusCode::OK);
-
-        let request = Request::builder()
-            .uri(&uri)
-            .header("Authorization", &bearer)
-            .body(Body::empty())
-            .unwrap();
-        let response = ServiceExt::<Request<Body>>::ready(&mut app)
-            .await
-            .unwrap()
-            .call(request)
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        use http_body_util::BodyExt;
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(body, content);
-
-        let request = Request::builder()
-            .uri(&uri)
-            .header("Authorization", &bearer)
-            .method("DELETE")
-            .body(Body::empty())
-            .unwrap();
-        let status = ServiceExt::<Request<Body>>::ready(&mut app)
-            .await
-            .unwrap()
-            .call(request)
-            .await
-            .unwrap()
-            .status();
-        assert_eq!(status, StatusCode::OK);
-
-        let request = Request::builder()
-            .uri(&uri)
-            .header("Authorization", &bearer)
-            .body(Body::empty())
-            .unwrap();
-        let status = ServiceExt::<Request<Body>>::ready(&mut app)
-            .await
-            .unwrap()
-            .call(request)
-            .await
-            .unwrap()
-            .status();
-        assert_eq!(status, StatusCode::NOT_FOUND);
+    #[testlog(tokio::test)]
+    async fn delete_prefix() {
+        let chain = vec![
+            ("/", "DELETE", "", StatusCode::NOT_FOUND, false),
+            // create 1/2/3/4, 1/2/3/5, delete prefix 1/2/3 -> empty
+            ("/1/2/3/4", "PUT", "", StatusCode::OK, false),
+            ("/1/2/3/4", "PUT", "", StatusCode::OK, false), // we can override file contents
+            ("/1/2/3/5", "PUT", "", StatusCode::OK, false),
+            ("/1/2/3", "DELETE", "", StatusCode::OK, false),
+            ("/1/2/3/4", "GET", "", StatusCode::NOT_FOUND, false),
+            ("/1/2/3/5", "GET", "", StatusCode::NOT_FOUND, false),
+            // create 1/2/3/4, 1/2/5/6, delete prefix 1/2/3 -> 1/2/5/6
+            ("/1/2/3/4", "PUT", "", StatusCode::OK, false),
+            ("/1/2/5/6", "PUT", "", StatusCode::OK, false),
+            ("/1/2/3", "DELETE", "", StatusCode::OK, false),
+            ("/1/2/3/4", "GET", "", StatusCode::NOT_FOUND, false),
+            ("/1/2/5/6", "GET", "", StatusCode::OK, false),
+            // create 1/2/3/4, 1/2/7/8, delete prefix 1/2 -> empty
+            ("/1/2/3/4", "PUT", "", StatusCode::OK, false),
+            ("/1/2/7/8", "PUT", "", StatusCode::OK, false),
+            ("/1/2", "DELETE", "", StatusCode::OK, false),
+            ("/1/2/3/4", "GET", "", StatusCode::NOT_FOUND, false),
+            ("/1/2/7/8", "GET", "", StatusCode::NOT_FOUND, false),
+            // create 1/2/3/4, 1/2/5/6, 1/3/8/9, delete prefix 1/2/3 -> 1/2/5/6, 1/3/8/9
+            ("/1/2/3/4", "PUT", "", StatusCode::OK, false),
+            ("/1/2/5/6", "PUT", "", StatusCode::OK, false),
+            ("/1/3/8/9", "PUT", "", StatusCode::OK, false),
+            ("/1/2/3", "DELETE", "", StatusCode::OK, false),
+            ("/1/2/3/4", "GET", "", StatusCode::NOT_FOUND, false),
+            ("/1/2/5/6", "GET", "", StatusCode::OK, false),
+            ("/1/3/8/9", "GET", "", StatusCode::OK, false),
+            // create 1/4/5/6, delete prefix 1/2 -> 1/3/8/9, 1/4/5/6
+            ("/1/4/5/6", "PUT", "", StatusCode::OK, false),
+            ("/1/2", "DELETE", "", StatusCode::OK, false),
+            ("/1/2/3/4", "GET", "", StatusCode::NOT_FOUND, false),
+            ("/1/2/5/6", "GET", "", StatusCode::NOT_FOUND, false),
+            ("/1/3/8/9", "GET", "", StatusCode::OK, false),
+            ("/1/4/5/6", "GET", "", StatusCode::OK, false),
+            // delete prefix 1 -> empty
+            ("/1", "DELETE", "", StatusCode::OK, false),
+            ("/1/2/3/4", "GET", "", StatusCode::NOT_FOUND, false),
+            ("/1/2/5/6", "GET", "", StatusCode::NOT_FOUND, false),
+            ("/1/3/8/9", "GET", "", StatusCode::NOT_FOUND, false),
+            ("/1/4/5/6", "GET", "", StatusCode::NOT_FOUND, false),
+        ];
+        requests_chain(chain.into_iter(), delete_prefix_token).await;
     }
 }

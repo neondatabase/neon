@@ -1,18 +1,17 @@
-use anyhow::{Context, Result, bail};
-use axum::body::{Body, BodyDataStream};
+use anyhow::Result;
 use axum::extract::{FromRequestParts, Path};
 use axum::response::{IntoResponse, Response};
-use axum::{RequestPartsExt, Router, http::StatusCode, http::request::Parts};
+use axum::{RequestPartsExt, http::StatusCode, http::request::Parts};
 use axum_extra::TypedHeader;
 use axum_extra::headers::{Authorization, authorization::Bearer};
 use camino::{Utf8Path, Utf8PathBuf};
 use jsonwebtoken::{DecodingKey, Validation};
-use remote_storage::{DownloadError, DownloadOpts, GenericRemoteStorage, RemotePath};
+use remote_storage::{GenericRemoteStorage, RemotePath};
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 use std::result::Result as StdResult;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
 
 // simplified version of utils::auth::JwtAuth
 pub struct JwtAuth {
@@ -35,13 +34,6 @@ impl JwtAuth {
     pub fn decode<T: serde::de::DeserializeOwned>(&self, token: &str) -> Result<T> {
         Ok(jsonwebtoken::decode(token, &self.decoding_key, &self.validation).map(|t| t.claims)?)
     }
-}
-
-fn unauthorized() -> Response {
-    StatusCode::UNAUTHORIZED.into_response()
-}
-fn bad_request(e: impl ToString) -> Response {
-    (StatusCode::BAD_REQUEST, e.to_string()).into_response()
 }
 
 fn normalize_key(key: &str) -> StdResult<Utf8PathBuf, String> {
@@ -103,6 +95,16 @@ pub struct Claims {
     pub endpoint_id: EndpointId,
 }
 
+impl Display for Claims {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Claims(tenant_id {} timeline_id {} endpoint_id {})",
+            self.tenant_id, self.timeline_id, self.endpoint_id,
+        )
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 struct KeyPath {
     #[serde(flatten)]
@@ -130,6 +132,13 @@ impl TryFrom<&KeyPath> for S3Path {
     }
 }
 
+fn unauthorized() -> Response {
+    StatusCode::UNAUTHORIZED.into_response()
+}
+fn bad_request(e: impl ToString) -> Response {
+    (StatusCode::BAD_REQUEST, e.to_string()).into_response()
+}
+
 impl FromRequestParts<Arc<Proxy>> for S3Path {
     type Rejection = Response;
     async fn from_request_parts(
@@ -149,6 +158,7 @@ impl FromRequestParts<Arc<Proxy>> for S3Path {
             .await
             .map_err(|_| bad_request("invalid route"))?;
         if path.auth != claims {
+            tracing::debug!(%path.auth, %claims, "route doesn't match claims");
             return Err(unauthorized());
         }
         (&path).try_into().map_err(|_| bad_request("invalid route"))
@@ -156,21 +166,34 @@ impl FromRequestParts<Arc<Proxy>> for S3Path {
 }
 
 #[derive(Deserialize, Serialize, PartialEq)]
-struct PrefixKeyPath {
-    tenant_id: TenantId,
-    timeline_id: Option<TimelineId>,
-    endpoint_id: Option<EndpointId>,
+pub struct PrefixKeyPath {
+    pub tenant_id: TenantId,
+    pub timeline_id: Option<TimelineId>,
+    pub endpoint_id: Option<EndpointId>,
 }
 
+impl Display for PrefixKeyPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "PrefixKeyPath(tenant_id {} timeline_id {} endpoint_id {})",
+            self.tenant_id,
+            self.timeline_id.as_ref().unwrap_or(&"".to_string()),
+            self.endpoint_id.as_ref().unwrap_or(&"".to_string())
+        )
+    }
+}
+
+#[derive(Debug, PartialEq)]
 pub struct PrefixS3Path {
     pub path: RemotePath,
 }
 
-impl From<PrefixKeyPath> for PrefixS3Path {
-    fn from(path: PrefixKeyPath) -> Self {
-        let path = Utf8PathBuf::from(&path.tenant_id.to_string())
-            .join(&path.timeline_id.unwrap_or_default())
-            .join(&path.endpoint_id.unwrap_or_default());
+impl From<&PrefixKeyPath> for PrefixS3Path {
+    fn from(path: &PrefixKeyPath) -> Self {
+        let path = Utf8PathBuf::from(path.tenant_id.to_string())
+            .join(path.timeline_id.as_ref().unwrap_or(&"".to_string()))
+            .join(path.endpoint_id.as_ref().unwrap_or(&"".to_string()));
         let path = RemotePath::new(&path).unwrap(); // unwrap() because the path is already relative
         PrefixS3Path { path }
     }
@@ -195,14 +218,18 @@ impl FromRequestParts<Arc<Proxy>> for PrefixS3Path {
             .await
             .map_err(|_| bad_request("invalid route"))?;
         if path != claims {
+            tracing::debug!(%path, %claims, "route doesn't match claims");
             return Err(unauthorized());
         }
-        Ok(path.into())
+        Ok((&path).into())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use camino::Utf8PathBuf;
+
     #[test]
     fn normalize_key() {
         let f = super::normalize_key;
@@ -219,6 +246,10 @@ mod tests {
         assert!(f("/1/2/3/../../../").is_err());
         assert!(f("/1/2/3/../../../../").is_err());
     }
+
+    const TENANT_ID: &str = "1adcba3c01c578d1c1be7b8048a4484d";
+    const TIMELINE_ID: &str = "16fde223c5e55c4b791e63284681d951";
+    const ENDPOINT_ID: &str = "ep-winter-frost-a662z3vg";
 
     #[test]
     fn s3_path() {
@@ -242,5 +273,31 @@ mod tests {
 
         key_path.path = "../error/hello/../".to_string();
         assert!(S3Path::try_from(&key_path).is_err());
+    }
+
+    #[test]
+    fn prefix_s3_path() {
+        let mut path = PrefixKeyPath {
+            tenant_id: TENANT_ID.into(),
+            timeline_id: None,
+            endpoint_id: None,
+        };
+        let prefix_path = |s: String| RemotePath::from_string(&s).unwrap();
+        assert_eq!(
+            PrefixS3Path::from(&path).path,
+            prefix_path(format!("{TENANT_ID}"))
+        );
+
+        path.timeline_id = Some(TIMELINE_ID.into());
+        assert_eq!(
+            PrefixS3Path::from(&path).path,
+            prefix_path(format!("{TENANT_ID}/{TIMELINE_ID}"))
+        );
+
+        path.endpoint_id = Some(ENDPOINT_ID.into());
+        assert_eq!(
+            PrefixS3Path::from(&path).path,
+            prefix_path(format!("{TENANT_ID}/{TIMELINE_ID}/{ENDPOINT_ID}"))
+        );
     }
 }

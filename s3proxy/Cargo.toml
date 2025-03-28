@@ -26,7 +26,6 @@ workspace_hack.workspace = true
 [dev-dependencies]
 http-body-util = "0.1.3"
 itertools.workspace = true
-parameterized = "2.0.0"
 tempfile = "3.19.1"
 test-log = "0.2.17"
 tower.workspace = true
