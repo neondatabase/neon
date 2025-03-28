@@ -107,7 +107,7 @@ def pytest_generate_tests(metafunc: Metafunc):
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_runtest_makereport(*args, **kwargs):
-    # Add test parameters to Allue report to distinguish the same tests with different parameters.
+    # Add test parameters to Allure report to distinguish the same tests with different parameters.
     # Names has `__` prefix to avoid conflicts with `pytest.mark.parametrize` parameters
 
     # A mapping between `uname -m` and `RUNNER_ARCH` values.
@@ -121,6 +121,8 @@ def pytest_runtest_makereport(*args, **kwargs):
     }.get(os.uname().machine, "UNKNOWN")
     arch = os.getenv("RUNNER_ARCH", uname_m)
     allure.dynamic.parameter("__arch", arch)
+    if (special_kind := os.getenv("SPECIAL_KIND", "")) != "":
+        allure.dynamic.parameter("__special_kind", special_kind)
     allure.dynamic.parameter(
         "__lfc", "with-lfc" if os.getenv("USE_LFC") != "false" else "without-lfc"
     )
