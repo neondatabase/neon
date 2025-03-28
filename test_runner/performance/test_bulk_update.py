@@ -20,7 +20,9 @@ def test_bulk_update(neon_env_builder: NeonEnvBuilder, zenbenchmark, fillfactor)
 
     timeline_id = env.create_branch("test_bulk_update")
     tenant_id = env.initial_tenant
-    endpoint = env.endpoints.create_start("test_bulk_update")
+    # use shared_buffers size like in production for 8 CU compute
+    # see https://github.com/neondatabase/cloud/blob/877e33b4289a471b8f0a35c84009846358f3e5a3/goapp/controlplane/internal/pkg/compute/computespec/pg_settings.go#L405
+    endpoint = env.endpoints.create_start("test_bulk_update", config_lines=["shared_buffers=900MB"])
     cur = endpoint.connect().cursor()
     cur.execute("set statement_timeout=0")
 

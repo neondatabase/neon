@@ -80,7 +80,8 @@ def test_pgdata_import_smoke(
     # doesn't allow any prefetching on v17 and above, where the new streaming
     # read machinery keeps buffers pinned while prefetching them.  Use a higher
     # setting to enable prefetching and speed up the tests
-    ep_config = ["shared_buffers=64MB"]
+    # use shared_buffers size like in production for 8 CU compute
+    ep_config = ["shared_buffers=900MB"]
 
     #
     # Put data in vanilla pg
