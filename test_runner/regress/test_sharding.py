@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 import pytest
 import requests
 from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineArchivalState, TimelineId
-from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     DEFAULT_AZ_ID,
@@ -23,13 +22,14 @@ from fixtures.pageserver.utils import assert_prefix_empty, assert_prefix_not_emp
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind, s3_storage
 from fixtures.utils import skip_in_debug_build, wait_until
 from fixtures.workload import Workload
-from pytest_httpserver import HTTPServer
 from typing_extensions import override
-from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 if TYPE_CHECKING:
+    from fixtures.compute_reconfigure import ComputeReconfigure
     from fixtures.httpserver import ListenAddress
+    from pytest_httpserver import HTTPServer
+    from werkzeug.wrappers.request import Request
 
 
 def test_sharding_smoke(
@@ -334,9 +334,9 @@ def test_sharding_split_compaction(
         result = ps.timeline_scan_no_disposable_keys(shard, timeline_id)
         tally = result.tally
         raw_page_count = tally.not_disposable_count + tally.disposable_count
-        assert tally.not_disposable_count > (
-            raw_page_count // 2
-        ), "compaction doesn't rewrite layers that are >=50pct local"
+        assert tally.not_disposable_count > (raw_page_count // 2), (
+            "compaction doesn't rewrite layers that are >=50pct local"
+        )
 
         log.info("check sizes")
         timeline_info = ps.http_client().timeline_detail(shard, timeline_id)
@@ -1601,7 +1601,7 @@ def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
             delta_bytes = lsn - last_flush_lsn
             avg_speed = delta_bytes / delta / 1024 / 1024
             log.info(
-                f"flush_lsn {lsn}, written {delta_bytes/1024}kb for {delta:.3f}s, avg_speed {avg_speed:.3f} MiB/s"
+                f"flush_lsn {lsn}, written {delta_bytes / 1024}kb for {delta:.3f}s, avg_speed {avg_speed:.3f} MiB/s"
             )
 
         last_flush_lsn = lsn

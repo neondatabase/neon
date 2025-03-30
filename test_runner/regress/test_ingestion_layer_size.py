@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_last_flush_lsn
-from fixtures.pageserver.http import HistoricLayerInfo, LayerMapInfo
 from fixtures.utils import human_bytes, skip_in_debug_build
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from fixtures.pageserver.http import HistoricLayerInfo, LayerMapInfo
 
 
 @skip_in_debug_build("debug run is unnecessarily slow")
@@ -27,9 +31,9 @@ def test_ingesting_large_batches_of_images(neon_env_builder: NeonEnvBuilder):
     # bucket lower limits
     buckets = [0, minimum_initdb_size, minimum_good_layer_size, minimum_too_large_layer_size]
 
-    assert (
-        minimum_initdb_size < minimum_good_layer_size
-    ), "keep checkpoint_distance higher than the initdb size (find it by experimenting)"
+    assert minimum_initdb_size < minimum_good_layer_size, (
+        "keep checkpoint_distance higher than the initdb size (find it by experimenting)"
+    )
 
     env = neon_env_builder.init_start(
         initial_tenant_conf={
@@ -57,9 +61,9 @@ def test_ingesting_large_batches_of_images(neon_env_builder: NeonEnvBuilder):
         assert size is not None
         assert isinstance(size[0], int)
         log.info(f"gin index size: {human_bytes(size[0])}")
-        assert (
-            size[0] > checkpoint_distance * 3
-        ), f"gin index is not large enough: {human_bytes(size[0])}"
+        assert size[0] > checkpoint_distance * 3, (
+            f"gin index is not large enough: {human_bytes(size[0])}"
+        )
         wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
 
     ps_http = env.pageserver.http_client()
@@ -91,13 +95,13 @@ def test_ingesting_large_batches_of_images(neon_env_builder: NeonEnvBuilder):
     log.info("non-cumulative layer size distribution after compaction:")
     print_layer_size_histogram(post_compact)
 
-    assert (
-        post_ingest.counts[3] == 0
-    ), f"there should be no layers larger than 2*checkpoint_distance ({human_bytes(2*checkpoint_distance)})"
+    assert post_ingest.counts[3] == 0, (
+        f"there should be no layers larger than 2*checkpoint_distance ({human_bytes(2 * checkpoint_distance)})"
+    )
     assert post_ingest.counts[1] == 1, "expect one smaller layer for initdb"
-    assert (
-        post_ingest.counts[0] <= 1
-    ), "expect at most one tiny layer from shutting down the endpoint"
+    assert post_ingest.counts[0] <= 1, (
+        "expect at most one tiny layer from shutting down the endpoint"
+    )
 
     # just make sure we don't have trouble splitting the layers apart
     assert post_compact.counts[3] == 0

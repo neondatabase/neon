@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
-from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
@@ -19,8 +18,13 @@ from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
     wait_until_tenant_active,
 )
-from fixtures.pg_version import PgVersion
 from fixtures.utils import skip_in_debug_build, wait_until
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from fixtures.common_types import Lsn, TenantId, TimelineId
+    from fixtures.pg_version import PgVersion
 
 
 def test_empty_tenant_size(neon_env_builder: NeonEnvBuilder):
@@ -578,9 +582,9 @@ def test_get_tenant_size_with_multiple_branches(
 
     wait_for_last_flush_lsn(env, second_branch_endpoint, tenant_id, second_branch_timeline_id)
     size_after_thinning_branch = http_client.tenant_size(tenant_id)
-    assert (
-        size_after_thinning_branch > size_after_growing_second_branch
-    ), "tenant_size should grow with dropped tables and full vacuum"
+    assert size_after_thinning_branch > size_after_growing_second_branch, (
+        "tenant_size should grow with dropped tables and full vacuum"
+    )
 
     first_branch_endpoint.stop_and_destroy()
     second_branch_endpoint.stop_and_destroy()

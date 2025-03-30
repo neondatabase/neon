@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import time
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
@@ -15,6 +15,9 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.remote_storage import RemoteStorageKind
 from fixtures.utils import query_scalar
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_next_xid(neon_env_builder: NeonEnvBuilder):

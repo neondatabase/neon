@@ -5,16 +5,12 @@ import random
 import time
 from enum import StrEnum
 from threading import Thread
+from typing import TYPE_CHECKING
 
 import asyncpg
 import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    Endpoint,
-    NeonEnv,
-    NeonEnvBuilder,
-)
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
@@ -25,7 +21,14 @@ from fixtures.remote_storage import (
     RemoteStorageKind,
 )
 from fixtures.utils import query_scalar, wait_until
-from prometheus_client.samples import Sample
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import (
+        Endpoint,
+        NeonEnv,
+        NeonEnvBuilder,
+    )
+    from prometheus_client.samples import Sample
 
 # In tests that overlap endpoint activity with tenant attach/detach, there are
 # a variety of warnings that the page service may emit when it cannot acquire
@@ -434,9 +437,9 @@ def test_detach_while_activating(
 
     tenants_after_detach = [tenant["id"] for tenant in pageserver_http.tenant_list()]
     assert tenant_id not in tenants_after_detach, "Detached tenant should be missing"
-    assert len(tenants_after_detach) + 1 == len(
-        tenants_before_detach
-    ), "Only ignored tenant should be missing"
+    assert len(tenants_after_detach) + 1 == len(tenants_before_detach), (
+        "Only ignored tenant should be missing"
+    )
 
     # Subsequently attaching it again should still work
     pageserver_http.configure_failpoints([("attach-before-activate-sleep", "off")])
@@ -478,9 +481,9 @@ def insert_test_data(
 
 def ensure_test_data(data_id: int, data: str, endpoint: Endpoint):
     with endpoint.cursor() as cur:
-        assert (
-            query_scalar(cur, f"SELECT secret FROM test WHERE id = {data_id};") == data
-        ), "Should have timeline data back"
+        assert query_scalar(cur, f"SELECT secret FROM test WHERE id = {data_id};") == data, (
+            "Should have timeline data back"
+        )
 
 
 def test_metrics_while_ignoring_broken_tenant_and_reloading(

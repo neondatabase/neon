@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from fixtures.common_types import TenantId, TimelineId
+from typing import TYPE_CHECKING
+
 from fixtures.log_helper import log
-from fixtures.safekeeper.http import SafekeeperHttpClient
 from fixtures.utils import wait_until
+
+if TYPE_CHECKING:
+    from fixtures.common_types import TenantId, TimelineId
+    from fixtures.safekeeper.http import SafekeeperHttpClient
 
 
 def wait_walreceivers_absent(
