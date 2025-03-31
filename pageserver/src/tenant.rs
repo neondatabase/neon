@@ -502,8 +502,6 @@ pub struct OffloadedTimeline {
     pub timeline_id: TimelineId,
     pub ancestor_timeline_id: Option<TimelineId>,
     /// Whether to retain the branch lsn at the ancestor or not
-    /// TODO: this field is not utilized yet. It should be either an `Option<bool>` which indicates
-    /// if the branch is flattened, or an `Option<Vec<Lsn>>` to indicate all accessible branch LSNs.
     pub ancestor_retain_lsn: Option<Lsn>,
 
     /// When the timeline was archived.

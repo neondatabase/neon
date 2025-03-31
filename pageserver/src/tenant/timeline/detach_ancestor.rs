@@ -1166,14 +1166,20 @@ fn check_no_archived_children_of_ancestor(
 ) -> Result<(), Error> {
     let timelines = tenant.timelines.lock().unwrap();
     let timelines_offloaded = tenant.timelines_offloaded.lock().unwrap();
-    if let DetachBehavior::NoAncestorAndReparent = detach_behavior {
-        for timeline in reparentable_timelines(timelines.values(), detached, ancestor, ancestor_lsn)
-        {
-            if timeline.is_archived() == Some(true) {
-                return Err(Error::Archived(timeline.timeline_id));
+
+    match detach_behavior {
+        DetachBehavior::NoAncestorAndReparent => {
+            for timeline in
+                reparentable_timelines(timelines.values(), detached, ancestor, ancestor_lsn)
+            {
+                if timeline.is_archived() == Some(true) {
+                    return Err(Error::Archived(timeline.timeline_id));
+                }
             }
         }
+        DetachBehavior::MultiLevelAndNoReparent => {}
     }
+
     for timeline_offloaded in timelines_offloaded.values() {
         if timeline_offloaded.ancestor_timeline_id != Some(ancestor.timeline_id) {
             continue;
