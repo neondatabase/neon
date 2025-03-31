@@ -6,6 +6,7 @@ from fixtures.benchmark_fixture import NeonBenchmarker
 from fixtures.compare_fixtures import RemoteCompare
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.utils import shared_buffers_for_max_cu
 
 
 def get_num_relations(default: int = 1000) -> list[int]:
@@ -79,7 +80,7 @@ def test_perf_simple_many_relations_reldir_v2(
         "main",
         config_lines=[
             # use shared_buffers size like in production for 8 CU compute
-            "shared_buffers=900MB",
+            f"shared_buffers={shared_buffers_for_max_cu(8.0)}",
             "max_locks_per_transaction=16384",
         ],
     )

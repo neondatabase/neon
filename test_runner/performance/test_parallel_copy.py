@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from fixtures.neon_fixtures import Endpoint, NeonEnv
 
+from fixtures.utils import shared_buffers_for_max_cu
+
 
 async def repeat_bytes(buf, repetitions: int):
     for _ in range(repetitions):
@@ -46,7 +48,9 @@ async def parallel_load_same_table(endpoint: Endpoint, n_parallel: int):
 def test_parallel_copy(neon_simple_env: NeonEnv, n_parallel=5):
     env = neon_simple_env
     # use shared_buffers size like in production for 8 CU compute
-    endpoint = env.endpoints.create_start("main", config_lines=["shared_buffers=900MB"])
+    endpoint = env.endpoints.create_start(
+        "main", config_lines=[f"shared_buffers={shared_buffers_for_max_cu(8.0)}"]
+    )
 
     # Create test table
     conn = endpoint.connect()

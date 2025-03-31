@@ -17,6 +17,7 @@ from fixtures.pageserver.utils import (
     wait_for_upload_queue_empty,
 )
 from fixtures.remote_storage import s3_storage
+from fixtures.utils import shared_buffers_for_max_cu
 
 
 @pytest.mark.timeout(900)
@@ -61,7 +62,7 @@ def test_ingest_insert_bulk(
             "max_replication_apply_lag = 0",
             f"max_replication_flush_lag = {'10GB' if backpressure else '0'}",
             # use shared_buffers size like in production for 8 CU compute
-            "shared_buffers=900MB",
+            f"shared_buffers={shared_buffers_for_max_cu(8.0)}",
             # NB: neon_local defaults to 15MB, which is too slow -- production uses 500MB.
             f"max_replication_write_lag = {'500MB' if backpressure else '0'}",
         ],
