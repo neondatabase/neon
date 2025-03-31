@@ -19,6 +19,7 @@ use utils::auth::{Claims, encode_from_key_file};
 use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 
 use crate::pageserver::{PAGESERVER_REMOTE_STORAGE_DIR, PageServerNode};
+use crate::s3proxy::{S3PROXY_REMOTE_STORAGE_DIR, S3ProxyNode};
 use crate::safekeeper::SafekeeperNode;
 
 pub const DEFAULT_PG_VERSION: u32 = 16;
@@ -55,6 +56,7 @@ pub struct LocalEnv {
 
     // used to issue tokens during e.g pg start
     pub private_key_path: PathBuf,
+    pub public_key_path: PathBuf,
 
     pub broker: NeonBroker,
 
@@ -95,6 +97,7 @@ pub struct OnDiskConfig {
     pub neon_distrib_dir: PathBuf,
     pub default_tenant_id: Option<TenantId>,
     pub private_key_path: PathBuf,
+    pub public_key_path: PathBuf,
     pub broker: NeonBroker,
     pub storage_controller: NeonStorageControllerConf,
     #[serde(
@@ -398,6 +401,10 @@ impl LocalEnv {
         self.pg_dir(pg_version, "lib")
     }
 
+    pub fn s3proxy_bin(&self) -> PathBuf {
+        self.neon_distrib_dir.join("s3proxy")
+    }
+
     pub fn pageserver_bin(&self) -> PathBuf {
         self.neon_distrib_dir.join("pageserver")
     }
@@ -429,6 +436,10 @@ impl LocalEnv {
 
     pub fn safekeeper_data_dir(&self, data_dir_name: &str) -> PathBuf {
         self.base_data_dir.join("safekeepers").join(data_dir_name)
+    }
+
+    pub fn s3proxy_data_dir(&self) -> PathBuf {
+        self.base_data_dir.join("s3proxy")
     }
 
     pub fn get_pageserver_conf(&self, id: NodeId) -> anyhow::Result<&PageServerConf> {
@@ -582,6 +593,7 @@ impl LocalEnv {
                 neon_distrib_dir,
                 default_tenant_id,
                 private_key_path,
+                public_key_path,
                 broker,
                 storage_controller,
                 pageservers,
@@ -598,6 +610,7 @@ impl LocalEnv {
                 neon_distrib_dir,
                 default_tenant_id,
                 private_key_path,
+                public_key_path,
                 broker,
                 storage_controller,
                 pageservers,
@@ -705,6 +718,7 @@ impl LocalEnv {
                 neon_distrib_dir: self.neon_distrib_dir.clone(),
                 default_tenant_id: self.default_tenant_id,
                 private_key_path: self.private_key_path.clone(),
+                public_key_path: self.public_key_path.clone(),
                 broker: self.broker.clone(),
                 storage_controller: self.storage_controller.clone(),
                 pageservers: vec![], // it's skip_serializing anyway
@@ -828,6 +842,7 @@ impl LocalEnv {
         )
         .context("generate auth keys")?;
         let private_key_path = PathBuf::from("auth_private_key.pem");
+        let public_key_path = PathBuf::from("auth_public_key.pem");
 
         // create the runtime type because the remaining initialization code below needs
         // a LocalEnv instance op operation
@@ -838,6 +853,7 @@ impl LocalEnv {
             neon_distrib_dir,
             default_tenant_id: Some(default_tenant_id),
             private_key_path,
+            public_key_path,
             broker,
             storage_controller: storage_controller.unwrap_or_default(),
             pageservers: pageservers.iter().map(Into::into).collect(),
@@ -873,8 +889,13 @@ impl LocalEnv {
                 .context("pageserver init failed")?;
         }
 
+        S3ProxyNode::from_env(&env)
+            .init()
+            .context("s3proxy init failed")?;
+
         // setup remote remote location for default LocalFs remote storage
         std::fs::create_dir_all(env.base_data_dir.join(PAGESERVER_REMOTE_STORAGE_DIR))?;
+        std::fs::create_dir_all(env.base_data_dir.join(S3PROXY_REMOTE_STORAGE_DIR))?;
 
         env.persist_config()
     }
