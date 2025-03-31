@@ -1,7 +1,8 @@
-use metrics::core::{AtomicF64, Collector, GenericGauge};
+use metrics::core::{AtomicF64, AtomicU64, Collector, GenericCounter, GenericGauge};
 use metrics::proto::MetricFamily;
 use metrics::{
-    IntCounterVec, UIntGaugeVec, register_gauge, register_int_counter_vec, register_uint_gauge_vec,
+    IntCounterVec, UIntGaugeVec, register_gauge, register_int_counter, register_int_counter_vec,
+    register_uint_gauge_vec,
 };
 use once_cell::sync::Lazy;
 
@@ -70,11 +71,29 @@ pub(crate) static AUDIT_LOG_DIR_SIZE: Lazy<GenericGauge<AtomicF64>> = Lazy::new(
     .expect("failed to define a metric")
 });
 
+pub(crate) static PG_DOWNTIME_MS: Lazy<GenericGauge<AtomicF64>> = Lazy::new(|| {
+    register_gauge!(
+        "compute_pg_downtime_ms",
+        "Non-cumulative duration of Postgres downtime in ms; resets after successful check",
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static PG_TOTAL_DOWNTIME_MS: Lazy<GenericCounter<AtomicU64>> = Lazy::new(|| {
+    register_int_counter!(
+        "compute_pg_downtime_ms_total",
+        "Cumulative duration of Postgres downtime in ms",
+    )
+    .expect("failed to define a metric")
+});
+
 pub fn collect() -> Vec<MetricFamily> {
     let mut metrics = INSTALLED_EXTENSIONS.collect();
     metrics.extend(CPLANE_REQUESTS_TOTAL.collect());
     metrics.extend(REMOTE_EXT_REQUESTS_TOTAL.collect());
     metrics.extend(DB_MIGRATION_FAILED.collect());
     metrics.extend(AUDIT_LOG_DIR_SIZE.collect());
+    metrics.extend(PG_DOWNTIME_MS.collect());
+    metrics.extend(PG_TOTAL_DOWNTIME_MS.collect());
     metrics
 }
