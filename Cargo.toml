@@ -10,6 +10,7 @@ members = [
     "pageserver/client",
     "pageserver/pagebench",
     "proxy",
+    "s3proxy",
     "safekeeper",
     "safekeeper/client",
     "storage_broker",
