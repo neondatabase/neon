@@ -45,7 +45,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use compute_api::responses::ComputeCtlConfig;
 use compute_api::spec::ComputeSpec;
-use compute_tools::compute::{ComputeNode, ComputeNodeParams, forward_termination_signal};
+use compute_tools::compute::{
+    BUILD_TAG, ComputeNode, ComputeNodeParams, forward_termination_signal,
+};
 use compute_tools::extension_server::get_pg_version_string;
 use compute_tools::logger::*;
 use compute_tools::params::*;
@@ -148,6 +150,11 @@ fn main() -> Result<()> {
     let _rt_guard = runtime.enter();
 
     let build_tag = runtime.block_on(init())?;
+    BUILD_TAG
+        .set(build_tag.clone())
+        // sanity check, should never happen
+        .map_err(anyhow::Error::msg)
+        .context("could not set BUILD_TAG")?;
 
     // enable core dumping for all child processes
     setrlimit(Resource::CORE, rlimit::INFINITY, rlimit::INFINITY)?;
@@ -174,8 +181,6 @@ fn main() -> Result<()> {
             cgroup: cli.cgroup,
             #[cfg(target_os = "linux")]
             vm_monitor_addr: cli.vm_monitor_addr,
-            build_tag,
-
             live_config_allowed: cli_spec.live_config_allowed,
         },
         cli_spec.spec,

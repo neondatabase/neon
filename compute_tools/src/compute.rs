@@ -20,6 +20,7 @@ use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
+use once_cell::sync::OnceCell;
 use postgres;
 use postgres::NoTls;
 use postgres::error::SqlState;
@@ -50,6 +51,11 @@ use crate::{config, extension_server, local_proxy};
 
 pub static SYNC_SAFEKEEPERS_PID: AtomicU32 = AtomicU32::new(0);
 pub static PG_PID: AtomicU32 = AtomicU32::new(0);
+/// Build tag/version of the compute node binaries/image. It's tricky and ugly
+/// to pass it everywhere as a part of `ComputeNodeParams`, so we use a
+/// global static variable, just ensure that it's written to only once at the
+/// very start of `compute_ctl`.
+pub static BUILD_TAG: OnceCell<String> = OnceCell::new();
 
 /// Static configuration params that don't change after startup. These mostly
 /// come from the CLI args, or are derived from them.
@@ -73,7 +79,6 @@ pub struct ComputeNodeParams {
     pub pgdata: String,
     pub pgbin: String,
     pub pgversion: String,
-    pub build_tag: String,
 
     /// The port that the compute's external HTTP server listens on
     pub external_http_port: u16,
@@ -169,7 +174,7 @@ impl ComputeState {
         }
     }
 
-    pub fn set_status(&mut self, status: ComputeStatus, state_changed: &Condvar, build_tag: &str) {
+    pub fn set_status(&mut self, status: ComputeStatus, state_changed: &Condvar) {
         let prev = self.status;
         info!("Changing compute status from {} to {}", prev, status);
         self.status = status;
@@ -177,18 +182,13 @@ impl ComputeState {
 
         COMPUTE_CTL_UP.reset();
         COMPUTE_CTL_UP
-            .with_label_values(&[build_tag, format!("{}", status).as_str()])
+            .with_label_values(&[BUILD_TAG.get().unwrap(), format!("{}", status).as_str()])
             .set(1);
     }
 
-    pub fn set_failed_status(
-        &mut self,
-        err: anyhow::Error,
-        state_changed: &Condvar,
-        build_tag: &str,
-    ) {
+    pub fn set_failed_status(&mut self, err: anyhow::Error, state_changed: &Condvar) {
         self.error = Some(format!("{err:?}"));
-        self.set_status(ComputeStatus::Failed, state_changed, build_tag);
+        self.set_status(ComputeStatus::Failed, state_changed);
     }
 }
 
@@ -374,8 +374,8 @@ impl ComputeNode {
         // HTTP server is running, so we can officially declare compute_ctl as 'up'
         COMPUTE_CTL_UP
             .with_label_values(&[
-                this.params.build_tag.as_str(),
-                format!("{}", ComputeStatus::Empty).as_str(),
+                BUILD_TAG.get().unwrap(),
+                ComputeStatus::Empty.to_string().as_str(),
             ])
             .set(1);
 
@@ -526,11 +526,7 @@ impl ComputeNode {
             };
             _this_entered = start_compute_span.enter();
 
-            state_guard.set_status(
-                ComputeStatus::Init,
-                &self.state_changed,
-                &self.params.build_tag,
-            );
+            state_guard.set_status(ComputeStatus::Init, &self.state_changed);
             compute_state = state_guard.clone()
         }
 
@@ -850,12 +846,12 @@ impl ComputeNode {
 
     pub fn set_status(&self, status: ComputeStatus) {
         let mut state = self.state.lock().unwrap();
-        state.set_status(status, &self.state_changed, &self.params.build_tag);
+        state.set_status(status, &self.state_changed);
     }
 
     pub fn set_failed_status(&self, err: anyhow::Error) {
         let mut state = self.state.lock().unwrap();
-        state.set_failed_status(err, &self.state_changed, &self.params.build_tag);
+        state.set_failed_status(err, &self.state_changed);
     }
 
     pub fn get_status(&self) -> ComputeStatus {
@@ -1672,7 +1668,6 @@ impl ComputeNode {
                                 state.set_status(
                                     ComputeStatus::ConfigurationPending,
                                     &self.state_changed,
-                                    &self.params.build_tag,
                                 );
                                 break 'status_update;
                             }
@@ -2060,7 +2055,7 @@ LIMIT 100",
             let (ext_name, ext_path) = remote_extensions.get_ext(
                 library,
                 true,
-                &self.params.build_tag,
+                BUILD_TAG.get().unwrap(),
                 &self.params.pgversion,
             )?;
             download_tasks.push(self.download_extension(ext_name, ext_path));

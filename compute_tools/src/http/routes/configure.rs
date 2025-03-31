@@ -54,11 +54,7 @@ pub(in crate::http) async fn configure(
         state.startup_span = Some(tracing::Span::current());
 
         state.pspec = Some(pspec);
-        state.set_status(
-            ComputeStatus::ConfigurationPending,
-            &compute.state_changed,
-            &compute.params.build_tag,
-        );
+        state.set_status(ComputeStatus::ConfigurationPending, &compute.state_changed);
         drop(state);
     }
 

@@ -5,7 +5,7 @@ use axum::response::{IntoResponse, Response};
 use http::StatusCode;
 use serde::Deserialize;
 
-use crate::compute::ComputeNode;
+use crate::compute::{BUILD_TAG, ComputeNode};
 use crate::http::JsonResponse;
 use crate::http::extract::{Path, Query};
 
@@ -47,7 +47,7 @@ pub(in crate::http) async fn download_extension(
         remote_extensions.get_ext(
             &filename,
             ext_server_params.is_library,
-            &compute.params.build_tag,
+            BUILD_TAG.get().unwrap(),
             &compute.params.pgversion,
         )
     };
