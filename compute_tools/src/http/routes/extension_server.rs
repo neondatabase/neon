@@ -47,7 +47,7 @@ pub(in crate::http) async fn download_extension(
         remote_extensions.get_ext(
             &filename,
             ext_server_params.is_library,
-            BUILD_TAG.get().unwrap(),
+            &BUILD_TAG,
             &compute.params.pgversion,
         )
     };

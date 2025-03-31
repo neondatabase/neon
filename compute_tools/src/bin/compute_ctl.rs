@@ -59,10 +59,6 @@ use tracing::{error, info};
 use url::Url;
 use utils::failpoint_support;
 
-// this is an arbitrary build tag. Fine as a default / for testing purposes
-// in-case of not-set environment var
-const BUILD_TAG_DEFAULT: &str = "latest";
-
 // Compatibility hack: if the control plane specified any remote-ext-config
 // use the default value for extension storage proxy gateway.
 // Remove this once the control plane is updated to pass the gateway URL
@@ -149,12 +145,7 @@ fn main() -> Result<()> {
         .build()?;
     let _rt_guard = runtime.enter();
 
-    let build_tag = runtime.block_on(init())?;
-    BUILD_TAG
-        .set(build_tag.clone())
-        // sanity check, should never happen
-        .map_err(anyhow::Error::msg)
-        .context("could not set BUILD_TAG")?;
+    runtime.block_on(init())?;
 
     // enable core dumping for all child processes
     setrlimit(Resource::CORE, rlimit::INFINITY, rlimit::INFINITY)?;
@@ -194,7 +185,7 @@ fn main() -> Result<()> {
     deinit_and_exit(exit_code);
 }
 
-async fn init() -> Result<String> {
+async fn init() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL).await?;
 
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGQUIT])?;
@@ -204,12 +195,9 @@ async fn init() -> Result<String> {
         }
     });
 
-    let build_tag = option_env!("BUILD_TAG")
-        .unwrap_or(BUILD_TAG_DEFAULT)
-        .to_string();
-    info!("build_tag: {build_tag}");
+    info!("compute build_tag: {}", &BUILD_TAG.to_string());
 
-    Ok(build_tag)
+    Ok(())
 }
 
 fn try_spec_from_cli(cli: &Cli) -> Result<CliSpecParams> {
