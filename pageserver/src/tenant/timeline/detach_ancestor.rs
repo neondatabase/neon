@@ -1164,11 +1164,11 @@ fn check_no_archived_children_of_ancestor(
     ancestor_lsn: Lsn,
     detach_behavior: DetachBehavior,
 ) -> Result<(), Error> {
-    let timelines = tenant.timelines.lock().unwrap();
-    let timelines_offloaded = tenant.timelines_offloaded.lock().unwrap();
-
     match detach_behavior {
         DetachBehavior::NoAncestorAndReparent => {
+            let timelines = tenant.timelines.lock().unwrap();
+            let timelines_offloaded = tenant.timelines_offloaded.lock().unwrap();
+
             for timeline in
                 reparentable_timelines(timelines.values(), detached, ancestor, ancestor_lsn)
             {
@@ -1176,27 +1176,30 @@ fn check_no_archived_children_of_ancestor(
                     return Err(Error::Archived(timeline.timeline_id));
                 }
             }
-        }
-        DetachBehavior::MultiLevelAndNoReparent => {}
-    }
 
-    for timeline_offloaded in timelines_offloaded.values() {
-        if timeline_offloaded.ancestor_timeline_id != Some(ancestor.timeline_id) {
-            continue;
-        }
-        // This forbids the detach ancestor feature if flattened timelines are present,
-        // even if the ancestor_lsn is from after the branchpoint of the detached timeline.
-        // But as per current design, we don't record the ancestor_lsn of flattened timelines.
-        // This is a bit unfortunate, but as of writing this we don't support flattening
-        // anyway. Maybe we can evolve the data model in the future.
-        if let Some(retain_lsn) = timeline_offloaded.ancestor_retain_lsn {
-            let is_earlier = retain_lsn <= ancestor_lsn;
-            if !is_earlier {
-                continue;
+            for timeline_offloaded in timelines_offloaded.values() {
+                if timeline_offloaded.ancestor_timeline_id != Some(ancestor.timeline_id) {
+                    continue;
+                }
+                // This forbids the detach ancestor feature if flattened timelines are present,
+                // even if the ancestor_lsn is from after the branchpoint of the detached timeline.
+                // But as per current design, we don't record the ancestor_lsn of flattened timelines.
+                // This is a bit unfortunate, but as of writing this we don't support flattening
+                // anyway. Maybe we can evolve the data model in the future.
+                if let Some(retain_lsn) = timeline_offloaded.ancestor_retain_lsn {
+                    let is_earlier = retain_lsn <= ancestor_lsn;
+                    if !is_earlier {
+                        continue;
+                    }
+                }
+                return Err(Error::Archived(timeline_offloaded.timeline_id));
             }
         }
-        return Err(Error::Archived(timeline_offloaded.timeline_id));
+        DetachBehavior::MultiLevelAndNoReparent => {
+            // We don't need to check anything if the user requested to not reparent.
+        }
     }
+
     Ok(())
 }
 
