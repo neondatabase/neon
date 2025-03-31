@@ -163,7 +163,6 @@ class NeonBranch:
         source_timestamp: str | None = None,
         preserve_under_name: str | None = None,
     ) -> dict[str, Any] | None:
-        start_time = datetime.now(UTC) - timedelta(seconds=1)
         endpoints = [ep for ep in self.endpoints.values() if ep.type == "read_only"]
         # Terminate all the benchmarks running to prevent errors. Errors in benchmark during pgbench are expected
         for ep in endpoints:
@@ -180,6 +179,7 @@ class NeonBranch:
         if res is None:
             log.info("Branches limit exceeded, skipping")
             return None
+        self.project.wait()
         self.start_benchmark()
         for ep in endpoints:
             ep.start_benchmark()
