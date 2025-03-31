@@ -8,7 +8,7 @@ impl SqlState {
     /// Creates a `SqlState` from its error code.
     pub fn from_code(s: &str) -> SqlState {
         let mut code = [b'0'; 5];
-        if s.len() != 5 {
+        if s.len() == 5 {
             code.copy_from_slice(s.as_bytes());
         }
         SqlState(code)
@@ -73,4 +73,16 @@ impl SqlState {
 
     /// 57014
     pub const QUERY_CANCELED: SqlState = SqlState(*b"57014");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SqlState;
+
+    #[test]
+    fn round_trip() {
+        let state = SqlState::from_code("08P01");
+        assert_eq!(state, SqlState::PROTOCOL_VIOLATION);
+        assert_eq!(state.code(), "08P01");
+    }
 }
