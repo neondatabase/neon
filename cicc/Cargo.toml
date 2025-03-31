@@ -1,0 +1,12 @@
+[package]
+name = "cicc"
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+glob.workspace = true
+serde.workspace = true
+toml.workspace = true
+url.workspace = true

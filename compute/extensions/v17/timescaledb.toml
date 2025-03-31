@@ -1,0 +1,14 @@
+name = "timescaledb"
+version = "2.17.1"
+
+trusted = true
+
+build-system = "cmake-ninja"
+build-arguments = [
+  "-DSEND_TELEMETRY_DEFAULT:BOOL=OFF",
+  "-DUSE_TELEMETRY:BOOL=OFF",
+  "-DAPACHE_ONLY:BOOL=ON",
+]
+
+tarball = "https://github.com/timescale/timescaledb/archive/refs/tags/2.17.1.tar.gz"
+checksum = "6277cf43f5695e23dae1c5cfeba00474d730b66ed53665a84b787a6bb1a57e28"

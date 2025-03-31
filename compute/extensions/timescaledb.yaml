@@ -1,0 +1,20 @@
+name: ip4r
+
+build-system: "pgxs"
+
+trusted: true
+
+pg14: &pg14
+  version: "2.10.1"
+  tarball: "https://github.com/timescale/timescaledb/archive/refs/tags/{version}.tar.gz"
+  checksum: 6fca72a6ed0f6d32d2b3523951ede73dc5f9b0077b38450a029a5f411fdb8c73
+
+pg15:
+  <<: *pg14
+
+pg16:
+  <<: *pg14
+
+
+pg17:
+  <<: *pg14

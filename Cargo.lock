@@ -1168,6 +1168,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cicc"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "glob",
+ "serde",
+ "toml",
+ "url",
+]
+
+[[package]]
 name = "clang-sys"
 version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2498,9 +2510,9 @@ dependencies = [
 
 [[package]]
 name = "glob"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
+checksum = "a8d1add55171497b4705a648c6b583acafb01d58050a51727785f0b2c8e0a2b2"
 
 [[package]]
 name = "governor"
@@ -4692,7 +4704,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.6"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#1f21e7959a96a34dcfbfce1b14b73286cdadffe9"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#394851e467755562b4173ff68f9eb0e7f737be13"
 dependencies = [
  "base64 0.22.1",
  "byteorder",
@@ -4726,7 +4738,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.6"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#1f21e7959a96a34dcfbfce1b14b73286cdadffe9"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#394851e467755562b4173ff68f9eb0e7f737be13"
 dependencies = [
  "bytes",
  "chrono",
@@ -7170,7 +7182,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.10"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#1f21e7959a96a34dcfbfce1b14b73286cdadffe9"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#394851e467755562b4173ff68f9eb0e7f737be13"
 dependencies = [
  "async-trait",
  "byteorder",

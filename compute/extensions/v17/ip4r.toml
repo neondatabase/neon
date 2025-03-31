@@ -1,0 +1,9 @@
+name = "ip4r"
+version = "2.4.2"
+
+trusted = true
+
+build-system = "pgxs"
+
+tarball = "https://github.com/RhodiumToad/ip4r/archive/refs/tags/2.4.2.tar.gz"
+checksum = "0f7b1f159974f49a47842a8ab6751aecca1ed1142b6d5e38d81b064b2ead1b4b"

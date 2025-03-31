@@ -1,0 +1,22 @@
+{
+  "$id": "extension",
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "build-system": {
+      "enum": [
+        "pgxs"
+      ]
+    },
+    "tarball": {
+      "type": "string"
+    },
+    "checksum": {
+      "type": "string"
+    }
+  }
+}
