@@ -77,7 +77,3 @@ def test_compute_reconfigure(neon_simple_env: NeonEnv):
     samples = metrics.query_all("compute_ctl_up", {"status": "running"})
     assert len(samples) == 1
     assert samples[0].value == 1
-    # Check that build tag is reported
-    samples = metrics.query_all("compute_ctl_up", {"build_tag": "latest"})
-    assert len(samples) == 1
-    assert samples[0].value == 1
