@@ -3080,6 +3080,7 @@ impl Tenant {
             let mut has_pending_l0 = false;
             for timeline in compact_l0 {
                 let ctx = &ctx.with_scope_timeline(&timeline);
+                // NB: don't YieldForL0 here, since this is an L0-only compaction pass.
                 let outcome = timeline
                     .compact(cancel, CompactFlags::OnlyL0Compaction.into(), ctx)
                     .instrument(info_span!("compact_timeline", timeline_id = %timeline.timeline_id))
@@ -3098,9 +3099,8 @@ impl Tenant {
         }
 
         // Pass 2: image compaction and timeline offloading. If any timelines have accumulated
-        // more L0 layers, they may also be compacted here.
-        //
-        // NB: image compaction may yield if there is pending L0 compaction.
+        // more L0 layers, they may also be compacted here. L0 compaction will yield if there is
+        // pending L0 compaction.
         //
         // TODO: it will only yield if there is pending L0 compaction on the same timeline. If a
         // different timeline needs compaction, it won't. It should check `l0_compaction_trigger`.
@@ -3115,8 +3115,14 @@ impl Tenant {
             }
             let ctx = &ctx.with_scope_timeline(&timeline);
 
+            // Yield for L0 if the separate L0 pass is enabled (otherwise there's no point).
+            let mut flags = EnumSet::default();
+            if self.get_compaction_l0_first() {
+                flags |= CompactFlags::YieldForL0;
+            }
+
             let mut outcome = timeline
-                .compact(cancel, EnumSet::default(), ctx)
+                .compact(cancel, flags, ctx)
                 .instrument(info_span!("compact_timeline", timeline_id = %timeline.timeline_id))
                 .await
                 .inspect_err(|err| self.maybe_trip_compaction_breaker(err))?;
@@ -6516,11 +6522,7 @@ mod tests {
 
         tline.freeze_and_flush().await?;
         tline
-            .compact(
-                &CancellationToken::new(),
-                CompactFlags::NoYield.into(),
-                &ctx,
-            )
+            .compact(&CancellationToken::new(), EnumSet::default(), &ctx)
             .await?;
 
         let mut writer = tline.writer().await;
@@ -6537,11 +6539,7 @@ mod tests {
 
         tline.freeze_and_flush().await?;
         tline
-            .compact(
-                &CancellationToken::new(),
-                CompactFlags::NoYield.into(),
-                &ctx,
-            )
+            .compact(&CancellationToken::new(), EnumSet::default(), &ctx)
             .await?;
 
         let mut writer = tline.writer().await;
@@ -6558,11 +6556,7 @@ mod tests {
 
         tline.freeze_and_flush().await?;
         tline
-            .compact(
-                &CancellationToken::new(),
-                CompactFlags::NoYield.into(),
-                &ctx,
-            )
+            .compact(&CancellationToken::new(), EnumSet::default(), &ctx)
             .await?;
 
         let mut writer = tline.writer().await;
@@ -6579,11 +6573,7 @@ mod tests {
 
         tline.freeze_and_flush().await?;
         tline
-            .compact(
-                &CancellationToken::new(),
-                CompactFlags::NoYield.into(),
-                &ctx,
-            )
+            .compact(&CancellationToken::new(), EnumSet::default(), &ctx)
             .await?;
 
         assert_eq!(
@@ -6666,9 +6656,7 @@ mod tests {
             timeline.freeze_and_flush().await?;
             if compact {
                 // this requires timeline to be &Arc<Timeline>
-                timeline
-                    .compact(&cancel, CompactFlags::NoYield.into(), ctx)
-                    .await?;
+                timeline.compact(&cancel, EnumSet::default(), ctx).await?;
             }
 
             // this doesn't really need to use the timeline_id target, but it is closer to what it
@@ -6995,7 +6983,6 @@ mod tests {
         child_timeline.freeze_and_flush().await?;
         let mut flags = EnumSet::new();
         flags.insert(CompactFlags::ForceRepartition);
-        flags.insert(CompactFlags::NoYield);
         child_timeline
             .compact(&CancellationToken::new(), flags, &ctx)
             .await?;
@@ -7374,9 +7361,7 @@ mod tests {
 
             // Perform a cycle of flush, compact, and GC
             tline.freeze_and_flush().await?;
-            tline
-                .compact(&cancel, CompactFlags::NoYield.into(), &ctx)
-                .await?;
+            tline.compact(&cancel, EnumSet::default(), &ctx).await?;
             tenant
                 .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
                 .await?;
@@ -7705,7 +7690,6 @@ mod tests {
                             let mut flags = EnumSet::new();
                             flags.insert(CompactFlags::ForceImageLayerCreation);
                             flags.insert(CompactFlags::ForceRepartition);
-                            flags.insert(CompactFlags::NoYield);
                             flags
                         } else {
                             EnumSet::empty()
@@ -7756,9 +7740,7 @@ mod tests {
         let before_num_l0_delta_files =
             tline.layers.read().await.layer_map()?.level0_deltas().len();
 
-        tline
-            .compact(&cancel, CompactFlags::NoYield.into(), &ctx)
-            .await?;
+        tline.compact(&cancel, EnumSet::default(), &ctx).await?;
 
         let after_num_l0_delta_files = tline.layers.read().await.layer_map()?.level0_deltas().len();
 
@@ -7923,7 +7905,6 @@ mod tests {
                             let mut flags = EnumSet::new();
                             flags.insert(CompactFlags::ForceImageLayerCreation);
                             flags.insert(CompactFlags::ForceRepartition);
-                            flags.insert(CompactFlags::NoYield);
                             flags
                         },
                         &ctx,
@@ -8386,7 +8367,6 @@ mod tests {
                     let mut flags = EnumSet::new();
                     flags.insert(CompactFlags::ForceImageLayerCreation);
                     flags.insert(CompactFlags::ForceRepartition);
-                    flags.insert(CompactFlags::NoYield);
                     flags
                 },
                 &ctx,
@@ -8454,7 +8434,6 @@ mod tests {
                     let mut flags = EnumSet::new();
                     flags.insert(CompactFlags::ForceImageLayerCreation);
                     flags.insert(CompactFlags::ForceRepartition);
-                    flags.insert(CompactFlags::NoYield);
                     flags
                 },
                 &ctx,
