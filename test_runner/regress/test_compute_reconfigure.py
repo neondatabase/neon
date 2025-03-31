@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 from fixtures.metrics import parse_metrics
@@ -75,5 +76,10 @@ def test_compute_reconfigure(neon_simple_env: NeonEnv):
     assert len(samples) == 1
     assert samples[0].value == 1
     samples = metrics.query_all("compute_ctl_up", {"status": "running"})
+    assert len(samples) == 1
+    assert samples[0].value == 1
+    # Check that build tag is reported
+    build_tag = os.environ.get("BUILD_TAG", "latest")
+    samples = metrics.query_all("compute_ctl_up", {"build_tag": build_tag})
     assert len(samples) == 1
     assert samples[0].value == 1
