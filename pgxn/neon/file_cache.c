@@ -1370,21 +1370,26 @@ neon_get_lfc_stats(PG_FUNCTION_ARGS)
 				value = lfc_ctl->size;
 			break;
 		case 5:
+			key = "file_cache_used";
+			if (lfc_ctl)
+				value = lfc_ctl->used;
+			break;
+		case 6:
 			key = "file_cache_used_pages";
 			if (lfc_ctl)
 				value = lfc_ctl->used_pages;
 			break;
-		case 6:
+		case 7:
 			key = "file_cache_evicted_pages";
 			if (lfc_ctl)
 				value = lfc_ctl->evicted_pages;
 			break;
-		case 7:
+		case 8:
 			key = "file_cache_limit";
 			if (lfc_ctl)
 				value = lfc_ctl->limit;
 			break;
-		case 8:
+		case 9:
 			key = "file_cache_chunk_size_pages";
 			value = BLOCKS_PER_CHUNK;
 			break;
