@@ -187,6 +187,18 @@ impl Flow {
             &self,
         ));
 
+        // How to recover from failure.
+        // 1. Make sure that job split always yields the same result given the same input (I think
+        //    that's the case already)
+        // 2. Limit concurrency of jobs.
+        // 3. Encode the finished jobs in the progress object in remote storage (or perhaps just the
+        //    max job id). I think each shard has a separate progress objects
+        // 4. Resume from that job. Can we validate the the previous work was done?
+
+        // Storcon may shard split during the import process. Even if it doesn't see the stuff
+        // from this timeline, size (what size?) may grow due to other timelines. When the shard
+        // split happens, all bets are off.
+
         // Start all jobs simultaneosly
         let mut work = JoinSet::new();
         // TODO: semaphore?
@@ -424,6 +436,7 @@ impl PgDataDirDb {
         dboid: u32,
         datadir_path: &RemotePath,
     ) -> anyhow::Result<Self> {
+        // TODO: Big in-mem alloc? nope just figuring out sizes
         let mut files: Vec<PgDataDirDbFile> = storage
             .listfilesindir(db_path)
             .await?
