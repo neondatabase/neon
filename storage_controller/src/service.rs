@@ -8642,9 +8642,24 @@ impl Service {
         failpoint_support::sleep_millis_async!("sleep-on-step-down-handling");
 
         self.inner.write().unwrap().step_down();
-        // TODO: would it make sense to have a time-out for this?
-        self.stop_reconciliations(StopReconciliationsReason::SteppingDown)
-            .await;
+
+        // Wait for reconciliations to stop, or terminate this process if they
+        // fail to stop in time (this indicates a bug in shutdown)
+        tokio::select! {
+            _ = self.stop_reconciliations(StopReconciliationsReason::SteppingDown) => {
+                tracing::info!("Reconciliations stopped, proceeding with step down");
+            }
+            _ = async {
+                failpoint_support::sleep_millis_async!("step-down-delay-timeout");
+                tokio::time::sleep(Duration::from_secs(10)).await
+            } => {
+                tracing::warn!("Step down timed out while waiting for reconciliation gate, terminating process");
+
+                // The caller may proceed to act as leader when it sees this request fail: reduce the chance
+                // of a split-brain situation by terminating this controller instead of leaving it up in a partially-shut-down state.
+                std::process::exit(1);
+            }
+        }
 
         let mut global_observed = GlobalObservedState::default();
         let locked = self.inner.read().unwrap();
