@@ -9,6 +9,22 @@ on:
     #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
     - cron:  '45 2 * * *' # run once a day, timezone is utc
   workflow_dispatch: # adds ability to run this manually
+    inputs:
+      new-compute-tag:
+        type: string
+        description: 'New compute tag'
+        required: false
+        default: latest
+      old-compute-tag:
+        type: string
+        description: 'Old compute tag'
+        required: false
+        default: latest
+      test-extension-tag:
+        type: string
+        description: 'Test extension tag'
+        required: false
+        default: latest
 
 defaults:
   run:
@@ -57,9 +73,9 @@ jobs:
       - name: Test extension upgrade
         timeout-minutes: 20
         env:
-          NEW_COMPUTE_TAG: latest
-          OLD_COMPUTE_TAG: ${{ steps.get-last-compute-release-tag.outputs.tag }}
-          TEST_EXTENSIONS_TAG: ${{ steps.get-last-compute-release-tag.outputs.tag }}
+          NEW_COMPUTE_TAG: ${{ inputs.new-compute-tag }}
+          OLD_COMPUTE_TAG: ${{ inputs.old-compute-tag }}
+          TEST_EXTENSIONS_TAG: ${{ inputs.test-extension-tag }}
           PG_VERSION: ${{ matrix.pg-version }}
           FORCE_ALL_UPGRADE_TESTS: true
         run: ./docker-compose/test_extensions_upgrade.sh
