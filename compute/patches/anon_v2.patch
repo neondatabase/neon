@@ -1,0 +1,12 @@
+diff --git a/sql/anon.sql b/sql/anon.sql
+index 0cdc769..5ceb91c 100644
+--- a/sql/anon.sql
++++ b/sql/anon.sql
+@@ -1141,3 +1141,7 @@ $$
+ -- TODO : https://en.wikipedia.org/wiki/L-diversity
+ 
+ -- TODO : https://en.wikipedia.org/wiki/T-closeness
++
++-- NEON Patches
++
++GRANT EXECUTE ON FUNCTION pg_config to neon_superuser;

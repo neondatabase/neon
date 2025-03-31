@@ -1361,15 +1361,17 @@ RUN cargo pgrx install --release
 FROM pg-build AS pg_anon-src
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+WORKDIR /ext-src
+COPY compute/patches/anon_v2.patch .
 
 # This is an experimental extension, never got to real production.
 # !Do not remove! It can be present in shared_preload_libraries and compute will fail to start if library is not found.
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
-WORKDIR /ext-src
 RUN wget https://gitlab.com/dalibo/postgresql_anonymizer/-/archive/latest/postgresql_anonymizer-latest.tar.gz -O pg_anon.tar.gz && \
     mkdir pg_anon-src && cd pg_anon-src && tar xzf ../pg_anon.tar.gz --strip-components=1 -C . && \
     find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt && \
-    sed -i 's/pgrx = "0.12.9"/pgrx = { version = "=0.12.9", features = [ "unsafe-postgres" ] }/g' Cargo.toml
+    sed -i 's/pgrx = "0.12.9"/pgrx = { version = "=0.12.9", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    patch -p1 < /ext-src/anon_v2.patch
 
 FROM rust-extensions-build-pgrx12 AS pg-anon-pg-build
 ARG PG_VERSION
