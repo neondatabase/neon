@@ -235,7 +235,7 @@ pub(super) async fn prepare(
         return Err(NoAncestor);
     }
 
-    check_no_archived_children_of_ancestor(tenant, detached, &ancestor, ancestor_lsn)?;
+    check_no_archived_children_of_ancestor(tenant, detached, &ancestor, ancestor_lsn, behavior)?;
 
     if let DetachBehavior::MultiLevelAndNoReparent = behavior {
         // If the ancestor has an ancestor, we might be able to fast-path detach it if the current ancestor does not have any data written/used by the detaching timeline.
@@ -249,7 +249,13 @@ pub(super) async fn prepare(
             ancestor_lsn = ancestor.ancestor_lsn; // Get the LSN first before resetting the `ancestor` variable
             ancestor = ancestor_of_ancestor;
             // TODO: do we still need to check if we don't want to reparent?
-            check_no_archived_children_of_ancestor(tenant, detached, &ancestor, ancestor_lsn)?;
+            check_no_archived_children_of_ancestor(
+                tenant,
+                detached,
+                &ancestor,
+                ancestor_lsn,
+                behavior,
+            )?;
         }
     } else if ancestor.ancestor_timeline.is_some() {
         // non-technical requirement; we could flatten N ancestors just as easily but we chose
@@ -1156,12 +1162,16 @@ fn check_no_archived_children_of_ancestor(
     detached: &Arc<Timeline>,
     ancestor: &Arc<Timeline>,
     ancestor_lsn: Lsn,
+    detach_behavior: DetachBehavior,
 ) -> Result<(), Error> {
     let timelines = tenant.timelines.lock().unwrap();
     let timelines_offloaded = tenant.timelines_offloaded.lock().unwrap();
-    for timeline in reparentable_timelines(timelines.values(), detached, ancestor, ancestor_lsn) {
-        if timeline.is_archived() == Some(true) {
-            return Err(Error::Archived(timeline.timeline_id));
+    if let DetachBehavior::NoAncestorAndReparent = detach_behavior {
+        for timeline in reparentable_timelines(timelines.values(), detached, ancestor, ancestor_lsn)
+        {
+            if timeline.is_archived() == Some(true) {
+                return Err(Error::Archived(timeline.timeline_id));
+            }
         }
     }
     for timeline_offloaded in timelines_offloaded.values() {
