@@ -7214,15 +7214,14 @@ dependencies = [
  "bytes",
  "fallible-iterator",
  "futures-util",
- "log",
  "parking_lot 0.12.1",
- "phf",
  "pin-project-lite",
  "postgres-protocol2",
  "postgres-types2",
  "serde",
  "tokio",
  "tokio-util",
+ "tracing",
 ]
 
 [[package]]
