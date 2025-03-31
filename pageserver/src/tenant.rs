@@ -11590,7 +11590,7 @@ mod tests {
         tenant
             .branch_timeline_test_with_layers(
                 &main_tline,
-                snapshot1.clone(),
+                snapshot1,
                 Some(Lsn(0x20)),
                 &ctx,
                 vec![],
@@ -11602,7 +11602,7 @@ mod tests {
         tenant
             .branch_timeline_test_with_layers(
                 &main_tline,
-                snapshot2.clone(),
+                snapshot2,
                 Some(Lsn(0x30)),
                 &ctx,
                 vec![],
@@ -11614,7 +11614,7 @@ mod tests {
         tenant
             .branch_timeline_test_with_layers(
                 &main_tline,
-                snapshot3.clone(),
+                snapshot3,
                 Some(Lsn(0x40)),
                 &ctx,
                 vec![],
