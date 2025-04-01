@@ -1158,6 +1158,7 @@ impl LayerInner {
         permit: heavier_once_cell::InitPermit,
         ctx: &RequestContext,
     ) -> Result<Arc<DownloadedLayer>, remote_storage::DownloadError> {
+        let start = std::time::Instant::now();
         let result = timeline
             .remote_client
             .download_layer_file(
@@ -1169,7 +1170,8 @@ impl LayerInner {
                 ctx,
             )
             .await;
-
+        let latency = start.elapsed();
+        let latency_millis = u64::try_from(latency.as_millis()).unwrap();
         match result {
             Ok(size) => {
                 assert_eq!(size, self.desc.file_size);
@@ -1185,9 +1187,8 @@ impl LayerInner {
                     Err(e) => {
                         panic!("post-condition failed: needs_download errored: {e:?}");
                     }
-                }
-
-                tracing::info!(size=%self.desc.file_size, "on-demand download successful");
+                };
+                tracing::info!(size=%self.desc.file_size, %latency_millis, "on-demand download successful");
                 timeline
                     .metrics
                     .resident_physical_size_add(self.desc.file_size);
@@ -1216,7 +1217,7 @@ impl LayerInner {
                     return Err(e);
                 }
 
-                tracing::error!(consecutive_failures, "layer file download failed: {e:#}");
+                tracing::error!(consecutive_failures, %latency_millis, "layer file download failed: {e:#}");
 
                 let backoff = utils::backoff::exponential_backoff_duration_seconds(
                     consecutive_failures.min(u32::MAX as usize) as u32,
