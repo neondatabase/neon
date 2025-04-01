@@ -854,7 +854,10 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         return res_json
 
     def timeline_mark_invisible(
-        self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId, is_visible: bool | None
+        self,
+        tenant_id: TenantId | TenantShardId,
+        timeline_id: TimelineId,
+        is_visible: bool | None = None,
     ):
         data = {
             "is_visible": is_visible,

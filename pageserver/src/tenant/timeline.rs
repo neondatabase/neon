@@ -898,7 +898,7 @@ pub(crate) struct CompactRequest {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub(crate) struct MarkInvisibleRequest {
     #[serde(default)]
-    pub is_visible: Option<bool>
+    pub is_visible: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]

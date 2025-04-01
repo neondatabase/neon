@@ -92,11 +92,11 @@ impl Client {
     ///
     /// Use/add one of the properly typed methods below if you know aren't proxying, and
     /// know what kind of response you expect.
-    pub async fn get_raw(&self, path: String) -> Result<reqwest::Response> {
+    pub async fn op_raw(&self, method: Method, path: String) -> Result<reqwest::Response> {
         debug_assert!(path.starts_with('/'));
         let uri = format!("{}{}", self.mgmt_api_endpoint, path);
 
-        let mut req = self.client.request(Method::GET, uri);
+        let mut req = self.client.request(method, uri);
         if let Some(value) = &self.authorization_header {
             req = req.header(reqwest::header::AUTHORIZATION, value);
         }
