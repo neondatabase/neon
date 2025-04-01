@@ -671,9 +671,7 @@ async fn get_operations<'a>(
                 .cluster
                 .databases
                 .iter()
-                .map(|db| {
-                    return db.owner.clone();
-                })
+                .map(|db| db.owner.clone())
                 .collect::<Vec<String>>();
 
             let operations = spec.cluster.roles
