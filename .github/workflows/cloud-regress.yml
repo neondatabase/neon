@@ -64,12 +64,6 @@ jobs:
 
       - name: Run the regression tests
         run: /run-tests.sh
-        with:
-          build_type: ${{ env.BUILD_TYPE }}
-          test_selection: cloud_regress
-          pg_version: ${{matrix.pg-version}}
-          extra_params: -m remote_cluster
-          aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
         env:
           BENCHMARK_CONNSTR: ${{steps.create-branch.outputs.dsn}}
 
