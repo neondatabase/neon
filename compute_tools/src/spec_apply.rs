@@ -707,9 +707,10 @@ async fn get_operations<'a>(
                                 )
                             } else {
                                 format!(
-                                    "CREATE ROLE {} {} ROLE {}",
+                                    // GenericOptions are explicitly ignored for JWKS roles
+                                    // JWKS roles are ment to have minimal privileges
+                                    "CREATE ROLE {} ROLE {}",
                                     role.name.pg_quote(),
-                                    role.to_pg_options(),
                                     db_owners.join(","),
                                 )
                             };
