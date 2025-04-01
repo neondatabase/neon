@@ -98,6 +98,18 @@ impl SafekeeperClient {
         )
     }
 
+    pub(crate) async fn delete_tenant(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<models::TimelineDeleteResult> {
+        measured_request!(
+            "delete_tenant",
+            crate::metrics::Method::Delete,
+            &self.node_id_label,
+            self.inner.delete_tenant(tenant_id).await
+        )
+    }
+
     pub(crate) async fn pull_timeline(
         &self,
         req: &PullTimelineRequest,

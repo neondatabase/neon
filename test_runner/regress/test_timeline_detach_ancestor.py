@@ -343,7 +343,8 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
     wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline)
 
 
-def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("snapshots_archived", ["archived", "normal"])
+def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder, snapshots_archived: str):
     """
     Test the v2 behavior of ancestor detach.
 
@@ -385,6 +386,11 @@ def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder):
 
         ep.safe_psql("INSERT INTO foo SELECT i::bigint FROM generate_series(0, 8191) g(i);")
 
+        branchpoint_y = wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
+        client.timeline_checkpoint(env.initial_tenant, env.initial_timeline)
+
+        ep.safe_psql("INSERT INTO foo SELECT i::bigint FROM generate_series(0, 8191) g(i);")
+
         branchpoint_x = wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
         client.timeline_checkpoint(env.initial_tenant, env.initial_timeline)
 
@@ -393,6 +399,10 @@ def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder):
 
     earlier = env.create_branch(
         "earlier", ancestor_branch_name="main", ancestor_start_lsn=branchpoint_pipe
+    )
+
+    snapshot_branchpoint_old = env.create_branch(
+        "snapshot_branchpoint_old", ancestor_branch_name="main", ancestor_start_lsn=branchpoint_y
     )
 
     snapshot_branchpoint = env.create_branch(
@@ -407,19 +417,32 @@ def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder):
 
     after = env.create_branch("after", ancestor_branch_name="main", ancestor_start_lsn=None)
 
+    if snapshots_archived == "archived":
+        # archive the previous snapshot branchpoint
+        client.timeline_archival_config(
+            env.initial_tenant, snapshot_branchpoint_old, TimelineArchivalState.ARCHIVED
+        )
+
     all_reparented = client.detach_ancestor(
         env.initial_tenant, branch_to_detach, detach_behavior="v2"
     )
     assert set(all_reparented) == set()
 
+    if snapshots_archived == "archived":
+        # restore the branchpoint so that we can query from the endpoint
+        client.timeline_archival_config(
+            env.initial_tenant, snapshot_branchpoint_old, TimelineArchivalState.UNARCHIVED
+        )
+
     env.pageserver.quiesce_tenants()
 
     # checking the ancestor after is much faster than waiting for the endpoint not start
     expected_result = [
-        ("main", env.initial_timeline, None, 16384, 1),
-        ("after", after, env.initial_timeline, 16384, 1),
-        ("snapshot_branchpoint", snapshot_branchpoint, env.initial_timeline, 8192, 1),
-        ("branch_to_detach", branch_to_detach, None, 8192, 1),
+        ("main", env.initial_timeline, None, 24576, 1),
+        ("after", after, env.initial_timeline, 24576, 1),
+        ("snapshot_branchpoint_old", snapshot_branchpoint_old, env.initial_timeline, 8192, 1),
+        ("snapshot_branchpoint", snapshot_branchpoint, env.initial_timeline, 16384, 1),
+        ("branch_to_detach", branch_to_detach, None, 16384, 1),
         ("earlier", earlier, env.initial_timeline, 0, 1),
     ]
 
@@ -431,9 +454,9 @@ def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder):
         if expected_ancestor is None:
             assert ancestor_timeline_id is None
         else:
-            assert (
-                TimelineId(ancestor_timeline_id) == expected_ancestor
-            ), f"when checking branch {branch_name}, mapping={expected_result}"
+            assert TimelineId(ancestor_timeline_id) == expected_ancestor, (
+                f"when checking branch {branch_name}, mapping={expected_result}"
+            )
 
         index_part = env.pageserver_remote_storage.index_content(
             env.initial_tenant, queried_timeline
@@ -812,11 +835,13 @@ def test_timeline_ancestor_detach_errors(neon_env_builder: NeonEnvBuilder, shard
 
     for ps in pageservers.values():
         ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+        # We make /detach_ancestor requests that are intended to fail.
+        # It's expected that storcon drops requests to other pageservers after
+        # it gets the first error (https://github.com/neondatabase/neon/issues/11177)
         ps.allowed_errors.extend(
             [
                 ".* WARN .* path=/v1/tenant/.*/timeline/.*/detach_ancestor request_id=.*: request was dropped before completing",
-                # rare error logging, which is hard to reproduce without instrumenting responding with random sleep
-                '.* ERROR .* path=/v1/tenant/.*/timeline/.*/detach_ancestor request_id=.*: Cancelled request finished with an error: Conflict\\("no ancestors"\\)',
+                ".* ERROR .* path=/v1/tenant/.*/timeline/.*/detach_ancestor request_id=.*: Cancelled request finished with an error.*",
             ]
         )
 
@@ -1299,9 +1324,9 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
                 offset,
             )
             if mode == "delete_reparentable_timeline":
-                assert (
-                    retried is None
-                ), "detaching should had converged after both nodes saw the deletion"
+                assert retried is None, (
+                    "detaching should had converged after both nodes saw the deletion"
+                )
             elif mode == "create_reparentable_timeline":
                 assert retried is not None, "detaching should not have converged"
                 _, offset = retried
@@ -1529,9 +1554,9 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     # first round -- do more checking to make sure the gc gets paused
     try_detach()
 
-    assert (
-        http.timeline_detail(env.initial_tenant, detached)["ancestor_timeline_id"] is None
-    ), "first round should had detached 'detached'"
+    assert http.timeline_detail(env.initial_tenant, detached)["ancestor_timeline_id"] is None, (
+        "first round should had detached 'detached'"
+    )
 
     reparented, not_reparented = reparenting_progress(timelines)
     assert reparented == 1
@@ -1567,9 +1592,9 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     for _ in range(2):
         try_detach()
 
-        assert (
-            http.timeline_detail(env.initial_tenant, detached)["ancestor_timeline_id"] is None
-        ), "first round should had detached 'detached'"
+        assert http.timeline_detail(env.initial_tenant, detached)["ancestor_timeline_id"] is None, (
+            "first round should had detached 'detached'"
+        )
 
         reparented, not_reparented = reparenting_progress(timelines)
         assert reparented == reparented_before + 1
@@ -1609,9 +1634,9 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     assert reparented == len(timelines)
 
     time.sleep(2)
-    assert (
-        env.pageserver.log_contains(".*: attach finished, activating", offset) is None
-    ), "there should be no restart with the final detach_ancestor as it only completed"
+    assert env.pageserver.log_contains(".*: attach finished, activating", offset) is None, (
+        "there should be no restart with the final detach_ancestor as it only completed"
+    )
 
     # gc is unblocked
     env.pageserver.assert_log_contains(".* gc_loop.*: 5 timelines need GC", offset)
@@ -1700,7 +1725,7 @@ def test_pageserver_compaction_detach_ancestor_smoke(neon_env_builder: NeonEnvBu
         "compaction_period": "5s",
         # No PiTR interval and small GC horizon
         "pitr_interval": "0s",
-        "gc_horizon": f"{1024 ** 2}",
+        "gc_horizon": f"{1024**2}",
         "lsn_lease_length": "0s",
         # Small checkpoint distance to create many layers
         "checkpoint_distance": 1024**2,

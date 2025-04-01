@@ -3,10 +3,13 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from typing import TYPE_CHECKING
 
 import pytest
-from fixtures.neon_fixtures import RemotePostgres
 from fixtures.utils import subprocess_capture
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import RemotePostgres
 
 
 @pytest.mark.remote_cluster

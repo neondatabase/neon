@@ -86,6 +86,9 @@ pub(super) struct Reconciler {
 
     /// Access to persistent storage for updating generation numbers
     pub(crate) persistence: Arc<Persistence>,
+
+    /// HTTP client with proper CA certs.
+    pub(crate) http_client: reqwest::Client,
 }
 
 pub(crate) struct ReconcilerConfigBuilder {
@@ -298,8 +301,8 @@ impl Reconciler {
                         .location_config(tenant_shard_id, config.clone(), flush_ms, lazy)
                         .await
                 },
+                &self.http_client,
                 &self.service_config.pageserver_jwt_token,
-                &self.service_config.ssl_ca_cert,
                 1,
                 3,
                 timeout,
@@ -419,10 +422,10 @@ impl Reconciler {
 
         let client = PageserverClient::new(
             node.get_id(),
+            self.http_client.clone(),
             node.base_url(),
             self.service_config.pageserver_jwt_token.as_deref(),
-            self.service_config.ssl_ca_cert.clone(),
-        )?;
+        );
 
         client
             .wait_lsn(
@@ -443,10 +446,10 @@ impl Reconciler {
     ) -> anyhow::Result<HashMap<TimelineId, Lsn>> {
         let client = PageserverClient::new(
             node.get_id(),
+            self.http_client.clone(),
             node.base_url(),
             self.service_config.pageserver_jwt_token.as_deref(),
-            self.service_config.ssl_ca_cert.clone(),
-        )?;
+        );
 
         let timelines = client.timeline_list(&tenant_shard_id).await?;
         Ok(timelines
@@ -483,8 +486,8 @@ impl Reconciler {
                             )
                             .await
                     },
+                    &self.http_client,
                     &self.service_config.pageserver_jwt_token,
-                    &self.service_config.ssl_ca_cert,
                     1,
                     3,
                     request_download_timeout * 2,
@@ -778,8 +781,8 @@ impl Reconciler {
             let observed_conf = match attached_node
                 .with_client_retries(
                     |client| async move { client.get_location_config(tenant_shard_id).await },
+                    &self.http_client,
                     &self.service_config.pageserver_jwt_token,
-                    &self.service_config.ssl_ca_cert,
                     1,
                     1,
                     Duration::from_secs(5),
@@ -1127,8 +1130,8 @@ impl Reconciler {
             match origin
                 .with_client_retries(
                     |client| async move { client.get_location_config(tenant_shard_id).await },
+                    &self.http_client,
                     &self.service_config.pageserver_jwt_token,
-                    &self.service_config.ssl_ca_cert,
                     1,
                     3,
                     Duration::from_secs(5),

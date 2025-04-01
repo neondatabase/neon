@@ -6,13 +6,13 @@ use std::task::{Context, Poll};
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
 use futures_util::{Sink, Stream, ready};
-use log::{info, trace};
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio_util::codec::Framed;
 use tokio_util::sync::PollSender;
+use tracing::{info, trace};
 
 use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, PostgresCodec};
 use crate::error::DbError;

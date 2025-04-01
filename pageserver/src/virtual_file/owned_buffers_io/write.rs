@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 pub(crate) use flush::FlushControl;
 use flush::FlushHandle;
+pub(crate) use flush::FlushTaskError;
 use tokio_epoll_uring::IoBuf;
+use tokio_util::sync::CancellationToken;
 
 use super::io_buf_aligned::IoBufAligned;
 use super::io_buf_ext::{FullSlice, IoBufExt};
@@ -40,11 +42,19 @@ pub trait OwnedAsyncWriter {
 // since we would avoid copying majority of the data into the internal buffer.
 pub struct BufferedWriter<B: Buffer, W> {
     writer: Arc<W>,
-    /// invariant: always remains Some(buf) except
-    /// - while IO is ongoing => goes back to Some() once the IO completed successfully
-    /// - after an IO error => stays `None` forever
-    ///
-    /// In these exceptional cases, it's `None`.
+    /// Clone of the buffer that was last submitted to the flush loop.
+    /// `None` if no flush request has been submitted, Some forever after.
+    pub(super) maybe_flushed: Option<FullSlice<B::IoBuf>>,
+    /// New writes are accumulated here.
+    /// `None` only during submission while we wait for flush loop to accept
+    /// the full dirty buffer in exchange for a clean buffer.
+    /// If that exchange fails with an [`FlushTaskError`], the write path
+    /// bails and leaves this as `None`.
+    /// Subsequent writes will panic if attempted.
+    /// The read path continues to work without error because [`Self::maybe_flushed`]
+    /// and [`Self::bytes_submitted`] are advanced before the flush loop exchange starts,
+    /// so, they will never try to read from [`Self::mutable`] anyway, because it's past
+    /// the [`Self::maybe_flushed`] point.
     mutable: Option<B>,
     /// A handle to the background flush task for writting data to disk.
     flush_handle: FlushHandle<B::IoBuf, W>,
@@ -65,16 +75,19 @@ where
         writer: Arc<W>,
         buf_new: impl Fn() -> B,
         gate_guard: utils::sync::gate::GateGuard,
+        cancel: CancellationToken,
         ctx: &RequestContext,
         flush_task_span: tracing::Span,
     ) -> Self {
         Self {
             writer: writer.clone(),
             mutable: Some(buf_new()),
+            maybe_flushed: None,
             flush_handle: FlushHandle::spawn_new(
                 writer,
                 buf_new(),
                 gate_guard,
+                cancel,
                 ctx.attached_child(),
                 flush_task_span,
             ),
@@ -92,25 +105,26 @@ where
     }
 
     /// Panics if used after any of the write paths returned an error
-    pub fn inspect_mutable(&self) -> &B {
-        self.mutable()
+    pub fn inspect_mutable(&self) -> Option<&B> {
+        self.mutable.as_ref()
     }
 
     /// Gets a reference to the maybe flushed read-only buffer.
     /// Returns `None` if the writer has not submitted any flush request.
     pub fn inspect_maybe_flushed(&self) -> Option<&FullSlice<Buf>> {
-        self.flush_handle.maybe_flushed.as_ref()
+        self.maybe_flushed.as_ref()
     }
 
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub async fn flush_and_into_inner(
         mut self,
         ctx: &RequestContext,
-    ) -> std::io::Result<(u64, Arc<W>)> {
+    ) -> Result<(u64, Arc<W>), FlushTaskError> {
         self.flush(ctx).await?;
 
         let Self {
             mutable: buf,
+            maybe_flushed: _,
             writer,
             mut flush_handle,
             bytes_submitted: bytes_amount,
@@ -120,12 +134,9 @@ where
         Ok((bytes_amount, writer))
     }
 
-    /// Gets a reference to the mutable in-memory buffer.
-    #[inline(always)]
-    fn mutable(&self) -> &B {
-        self.mutable
-            .as_ref()
-            .expect("must not use after we returned an error")
+    #[cfg(test)]
+    pub(crate) fn mutable(&self) -> &B {
+        self.mutable.as_ref().expect("must not use after an error")
     }
 
     #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -133,7 +144,7 @@ where
         &mut self,
         chunk: &[u8],
         ctx: &RequestContext,
-    ) -> std::io::Result<usize> {
+    ) -> Result<usize, FlushTaskError> {
         let (len, control) = self.write_buffered_borrowed_controlled(chunk, ctx).await?;
         if let Some(control) = control {
             control.release().await;
@@ -146,7 +157,7 @@ where
         &mut self,
         mut chunk: &[u8],
         ctx: &RequestContext,
-    ) -> std::io::Result<(usize, Option<FlushControl>)> {
+    ) -> Result<(usize, Option<FlushControl>), FlushTaskError> {
         let chunk_len = chunk.len();
         let mut control: Option<FlushControl> = None;
         while !chunk.is_empty() {
@@ -167,17 +178,47 @@ where
         Ok((chunk_len, control))
     }
 
+    /// This function can only error if the flush task got cancelled.
+    /// In that case, we leave [`Self::mutable`] intentionally as `None`.
+    ///
+    /// The read path continues to function correctly; it can read up to the
+    /// point where it could read before, i.e., including what was in [`Self::mutable`]
+    /// before the call to this function, because that's now stored in [`Self::maybe_flushed`].
+    ///
+    /// The write path becomes unavailable and will panic if used.
+    /// The only correct solution to retry writes is to discard the entire [`BufferedWriter`],
+    /// which upper layers of pageserver write path currently do not support.
+    /// It is in fact quite hard to reason about what exactly happens in today's code.
+    /// Best case we accumulate junk in the EphemeralFile, worst case is data corruption.
     #[must_use = "caller must explcitly check the flush control"]
-    async fn flush(&mut self, _ctx: &RequestContext) -> std::io::Result<Option<FlushControl>> {
+    async fn flush(
+        &mut self,
+        _ctx: &RequestContext,
+    ) -> Result<Option<FlushControl>, FlushTaskError> {
         let buf = self.mutable.take().expect("must not use after an error");
         let buf_len = buf.pending();
         if buf_len == 0 {
             self.mutable = Some(buf);
             return Ok(None);
         }
-        let (recycled, flush_control) = self.flush_handle.flush(buf, self.bytes_submitted).await?;
+        // Prepare the buffer for read while flushing.
+        let slice = buf.flush();
+        // NB: this assignment also drops thereference to the old buffer, allowing us to re-own & make it mutable below.
+        self.maybe_flushed = Some(slice.cheap_clone());
+        let offset = self.bytes_submitted;
         self.bytes_submitted += u64::try_from(buf_len).unwrap();
+
+        // If we return/panic here or later, we'll leave mutable = None, breaking further
+        // writers, but the read path should still work.
+        let (recycled, flush_control) = self.flush_handle.flush(slice, offset).await?;
+
+        // The only other place that could hold a reference to the recycled buffer
+        // is in `Self::maybe_flushed`, but we have already replace it with the new buffer.
+        let recycled = Buffer::reuse_after_flush(recycled.into_raw_slice().into_inner());
+
+        // We got back some recycled buffer, can open up for more writes again.
         self.mutable = Some(recycled);
+
         Ok(Some(flush_control))
     }
 }
@@ -290,10 +331,12 @@ mod tests {
         let ctx = &ctx;
         let recorder = Arc::new(RecorderWriter::default());
         let gate = utils::sync::gate::Gate::default();
+        let cancel = CancellationToken::new();
         let mut writer = BufferedWriter::<_, RecorderWriter>::new(
             recorder,
             || IoBufferMut::with_capacity(2),
             gate.enter()?,
+            cancel,
             ctx,
             tracing::Span::none(),
         );

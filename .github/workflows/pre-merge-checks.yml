@@ -19,13 +19,20 @@ permissions: {}
 jobs:
   meta:
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
     outputs:
       python-changed: ${{ steps.python-src.outputs.any_changed }}
       rust-changed: ${{ steps.rust-src.outputs.any_changed }}
       branch: ${{ steps.group-metadata.outputs.branch }}
       pr-number: ${{ steps.group-metadata.outputs.pr-number }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - uses: step-security/changed-files@3dbe17c78367e7d60f00d78ae6781a35be47b4a1 # v45.0.1
         id: python-src
@@ -72,6 +79,9 @@ jobs:
       || needs.meta.outputs.python-changed == 'true'
       || needs.meta.outputs.rust-changed == 'true'
     needs: [ meta ]
+    permissions:
+      contents: read
+      packages: write
     uses: ./.github/workflows/build-build-tools-image.yml
     with:
       # Build only one combination to save time
@@ -82,6 +92,9 @@ jobs:
   check-codestyle-python:
     if: needs.meta.outputs.python-changed == 'true'
     needs: [ meta, build-build-tools-image ]
+    permissions:
+      contents: read
+      packages: read
     uses: ./.github/workflows/_check-codestyle-python.yml
     with:
       # `-bookworm-x64` suffix should match the combination in `build-build-tools-image`
@@ -91,6 +104,9 @@ jobs:
   check-codestyle-rust:
     if: needs.meta.outputs.rust-changed == 'true'
     needs: [ meta, build-build-tools-image ]
+    permissions:
+      contents: read
+      packages: read
     uses: ./.github/workflows/_check-codestyle-rust.yml
     with:
       # `-bookworm-x64` suffix should match the combination in `build-build-tools-image`
@@ -114,8 +130,13 @@ jobs:
       - check-codestyle-rust
     runs-on: ubuntu-22.04
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
       - name: Create fake `neon-cloud-e2e` check
-        uses: actions/github-script@v7
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         with:
           # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
           retries: 5
@@ -148,7 +169,7 @@ jobs:
           ${{
             always()
             && github.event_name == 'merge_group'
-            && contains(fromJson('["release", "release-proxy", "release-compute"]'), needs.meta.outputs.branch)
+            && contains(fromJSON('["release", "release-proxy", "release-compute"]'), needs.meta.outputs.branch)
           }}
         env:
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}

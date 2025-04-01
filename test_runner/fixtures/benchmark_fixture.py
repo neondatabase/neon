@@ -15,17 +15,19 @@ from typing import TYPE_CHECKING
 
 import allure
 import pytest
-from _pytest.config import Config
-from _pytest.config.argparsing import Parser
-from _pytest.fixtures import FixtureRequest
-from _pytest.terminal import TerminalReporter
 
-from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonPageserver
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
+
+    from _pytest.config import Config
+    from _pytest.config.argparsing import Parser
+    from _pytest.fixtures import FixtureRequest
+    from _pytest.terminal import TerminalReporter
+
+    from fixtures.common_types import TenantId, TimelineId
+    from fixtures.neon_fixtures import NeonPageserver
 
 
 """

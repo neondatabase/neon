@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from contextlib import closing
+from typing import TYPE_CHECKING
 
 import pytest
-from fixtures.compare_fixtures import NeonCompare
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import wait_for_last_flush_lsn
+
+if TYPE_CHECKING:
+    from fixtures.compare_fixtures import NeonCompare
 
 
 #

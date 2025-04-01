@@ -37,8 +37,8 @@ use pageserver_api::models::{
     TenantShardSplitResponse, TenantSorting, TenantState, TenantWaitLsnRequest,
     TimelineArchivalConfigRequest, TimelineCreateRequest, TimelineCreateRequestMode,
     TimelineCreateRequestModeImportPgdata, TimelineGcRequest, TimelineInfo,
-    TimelinePatchIndexPartRequest, TimelinesInfoAndOffloaded, TopTenantShardItem,
-    TopTenantShardsRequest, TopTenantShardsResponse,
+    TimelinePatchIndexPartRequest, TimelineVisibilityState, TimelinesInfoAndOffloaded,
+    TopTenantShardItem, TopTenantShardsRequest, TopTenantShardsResponse,
 };
 use pageserver_api::shard::{ShardCount, TenantShardId};
 use remote_storage::{DownloadError, GenericRemoteStorage, TimeTravelError};
@@ -60,7 +60,7 @@ use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
-use crate::tenant::config::{LocationConf, TenantConfOpt};
+use crate::tenant::config::LocationConf;
 use crate::tenant::mgr::{
     GetActiveTenantError, GetTenantError, TenantManager, TenantMapError, TenantMapInsertError,
     TenantSlot, TenantSlotError, TenantSlotUpsertError, TenantStateError, UpsertLocationError,
@@ -439,6 +439,7 @@ async fn build_timeline_info_common(
     let remote_consistent_lsn_visible = timeline
         .get_remote_consistent_lsn_visible()
         .unwrap_or(Lsn(0));
+    let is_invisible = timeline.remote_client.is_invisible().unwrap_or(false);
 
     let walreceiver_status = timeline.walreceiver_status();
 
@@ -482,6 +483,7 @@ async fn build_timeline_info_common(
         state,
         is_archived: Some(is_archived),
         rel_size_migration: Some(timeline.get_rel_size_v2_status()),
+        is_invisible: Some(is_invisible),
 
         walreceiver_status,
     };
@@ -1849,8 +1851,7 @@ async fn update_tenant_config_handler(
     let tenant_id = request_data.tenant_id;
     check_permission(&request, Some(tenant_id))?;
 
-    let new_tenant_conf =
-        TenantConfOpt::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
+    let new_tenant_conf = request_data.config;
 
     let state = get_state(&request);
 
@@ -1899,7 +1900,10 @@ async fn patch_tenant_config_handler(
     tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
     let updated = tenant
-        .update_tenant_config(|crnt| crnt.apply_patch(request_data.config.clone()))
+        .update_tenant_config(|crnt| {
+            crnt.apply_patch(request_data.config.clone())
+                .map_err(anyhow::Error::new)
+        })
         .map_err(ApiError::BadRequest)?;
 
     // This is a legacy API that only operates on attached tenants: the preferred
@@ -2252,7 +2256,6 @@ async fn timeline_compact_handler(
     let state = get_state(&request);
 
     let mut flags = EnumSet::empty();
-    flags |= CompactFlags::NoYield; // run compaction to completion
 
     if Some(true) == parse_query_param::<_, bool>(&request, "force_l0_compaction")? {
         flags |= CompactFlags::ForceL0Compaction;
@@ -2331,6 +2334,28 @@ async fn timeline_compact_handler(
     .await
 }
 
+async fn timeline_mark_invisible_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let state = get_state(&request);
+
+    async {
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id)?;
+        let timeline = tenant.get_timeline(timeline_id, true)?;
+        timeline.remote_client.schedule_index_upload_for_timeline_invisible_state(TimelineVisibilityState::Invisible).map_err(ApiError::InternalServerError)?;
+        json_response(StatusCode::OK, ())
+    }
+    .instrument(info_span!("manual_timeline_mark_invisible", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
+    .await
+}
+
 // Run offload immediately on given timeline.
 async fn timeline_offload_handler(
     request: Request<Body>,
@@ -2391,7 +2416,6 @@ async fn timeline_checkpoint_handler(
     let state = get_state(&request);
 
     let mut flags = EnumSet::empty();
-    flags |= CompactFlags::NoYield; // run compaction to completion
     if Some(true) == parse_query_param::<_, bool>(&request, "force_l0_compaction")? {
         flags |= CompactFlags::ForceL0Compaction;
     }
@@ -3747,6 +3771,10 @@ pub fn make_router(
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/offload",
             |r| testing_api_handler("attempt timeline offload", r, timeline_offload_handler),
+        )
+        .put(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/mark_invisible",
+            |r| testing_api_handler("mark timeline invisible", r, timeline_mark_invisible_handler),
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/checkpoint",

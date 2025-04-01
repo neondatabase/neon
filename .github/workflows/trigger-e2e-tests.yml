@@ -9,6 +9,9 @@ on:
       github-event-name:
         type: string
         required: true
+      github-event-json:
+        type: string
+        required: true
 
 defaults:
   run:
@@ -31,6 +34,11 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
       - name: Cancel previous e2e-tests runs for this PR
         env:
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
@@ -43,6 +51,7 @@ jobs:
     uses: ./.github/workflows/_meta.yml
     with:
       github-event-name: ${{ inputs.github-event-name || github.event_name }}
+      github-event-json: ${{ inputs.github-event-json || toJSON(github.event) }}
 
   trigger-e2e-tests:
     needs: [ meta ]
@@ -63,6 +72,11 @@ jobs:
           || needs.meta.outputs.build-tag
         }}
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
       - name: Wait for `push-{neon,compute}-image-dev` job to finish
         # It's important to have a timeout here, the script in the step can run infinitely
         timeout-minutes: 60

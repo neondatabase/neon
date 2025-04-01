@@ -131,7 +131,8 @@ async fn get_holes(path: &Utf8Path, max_holes: usize, ctx: &RequestContext) -> R
 pub(crate) async fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
     let storage_path = &cmd.path;
     let max_holes = cmd.max_holes.unwrap_or(DEFAULT_MAX_HOLES);
-    let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
+    let ctx =
+        RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error).with_scope_debug_tools();
 
     // Initialize virtual_file (file desriptor cache) and page cache which are needed to access layer persistent B-Tree.
     pageserver::virtual_file::init(
