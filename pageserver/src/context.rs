@@ -142,6 +142,9 @@ pub(crate) enum Scope {
     UnitTest {
         io_size_metrics: &'static crate::metrics::StorageIoSizeMetrics,
     },
+    DebugTools {
+        io_size_metrics: &'static crate::metrics::StorageIoSizeMetrics,
+    },
 }
 
 static GLOBAL_IO_SIZE_METRICS: Lazy<crate::metrics::StorageIoSizeMetrics> =
@@ -200,6 +203,12 @@ impl Scope {
     #[cfg(test)]
     pub(crate) fn new_unit_test() -> Self {
         Scope::UnitTest {
+            io_size_metrics: &GLOBAL_IO_SIZE_METRICS,
+        }
+    }
+
+    pub(crate) fn new_debug_tools() -> Self {
+        Scope::DebugTools {
             io_size_metrics: &GLOBAL_IO_SIZE_METRICS,
         }
     }
@@ -495,6 +504,12 @@ impl RequestContext {
             .attached_child()
     }
 
+    pub fn with_scope_debug_tools(&self) -> Self {
+        RequestContextBuilder::new(TaskKind::DebugTool)
+            .scope(Scope::new_debug_tools())
+            .build()
+    }
+
     pub fn task_kind(&self) -> TaskKind {
         self.task_kind
     }
@@ -546,6 +561,7 @@ impl RequestContext {
             Scope::SecondaryTenant { io_size_metrics } => io_size_metrics,
             #[cfg(test)]
             Scope::UnitTest { io_size_metrics } => io_size_metrics,
+            Scope::DebugTools { io_size_metrics } => io_size_metrics,
         }
     }
 

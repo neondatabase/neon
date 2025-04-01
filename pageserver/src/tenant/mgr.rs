@@ -14,7 +14,7 @@ use futures::StreamExt;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use pageserver_api::key::Key;
-use pageserver_api::models::LocationConfigMode;
+use pageserver_api::models::{DetachBehavior, LocationConfigMode};
 use pageserver_api::shard::{
     ShardCount, ShardIdentity, ShardIndex, ShardNumber, ShardStripeSize, TenantShardId,
 };
@@ -40,7 +40,7 @@ use super::{GlobalShutDown, TenantSharedResources};
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::controller_upcall_client::{
-    ControlPlaneGenerationsApi, ControllerUpcallClient, RetryForeverError,
+    RetryForeverError, StorageControllerUpcallApi, StorageControllerUpcallClient,
 };
 use crate::deletion_queue::DeletionQueueClient;
 use crate::http::routes::ACTIVE_TENANT_TIMEOUT;
@@ -344,7 +344,7 @@ async fn init_load_generations(
             "Emergency mode!  Tenants will be attached unsafely using their last known generation"
         );
         emergency_generations(tenant_confs)
-    } else if let Some(client) = ControllerUpcallClient::new(conf, cancel) {
+    } else if let Some(client) = StorageControllerUpcallClient::new(conf, cancel)? {
         info!("Calling {} API to re-attach tenants", client.base_url());
         // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
         match client.re_attach(conf).await {
@@ -1914,6 +1914,7 @@ impl TenantManager {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         prepared: PreparedTimelineDetach,
+        behavior: DetachBehavior,
         mut attempt: detach_ancestor::Attempt,
         ctx: &RequestContext,
     ) -> Result<HashSet<TimelineId>, detach_ancestor::Error> {
@@ -1957,7 +1958,14 @@ impl TenantManager {
             .map_err(Error::NotFound)?;
 
         let resp = timeline
-            .detach_from_ancestor_and_reparent(&tenant, prepared, ctx)
+            .detach_from_ancestor_and_reparent(
+                &tenant,
+                prepared,
+                attempt.ancestor_timeline_id,
+                attempt.ancestor_lsn,
+                behavior,
+                ctx,
+            )
             .await?;
 
         let mut slot_guard = slot_guard;

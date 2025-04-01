@@ -5,14 +5,11 @@ import shutil
 import threading
 import time
 from contextlib import closing, contextmanager
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import Endpoint, NeonEnvBuilder, NeonPageserver
-from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
     assert_tenant_state,
     wait_for_last_record_lsn,
@@ -28,7 +25,11 @@ from fixtures.utils import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from typing import Any
+
+    from fixtures.neon_fixtures import Endpoint, NeonEnvBuilder, NeonPageserver
+    from fixtures.pageserver.http import PageserverHttpClient
 
 
 def assert_abs_margin_ratio(a: float, b: float, margin_ratio: float):
@@ -158,9 +159,9 @@ def switch_pg_to_new_pageserver(
 
     timeline_to_detach_local_path = origin_ps.timeline_dir(tenant_id, timeline_id)
     files_before_detach = os.listdir(timeline_to_detach_local_path)
-    assert (
-        len(files_before_detach) >= 1
-    ), f"Regular timeline {timeline_to_detach_local_path} should have at least one layer file, but got {files_before_detach}"
+    assert len(files_before_detach) >= 1, (
+        f"Regular timeline {timeline_to_detach_local_path} should have at least one layer file, but got {files_before_detach}"
+    )
 
     return timeline_to_detach_local_path
 
@@ -175,9 +176,9 @@ def post_migration_check(endpoint: Endpoint, sum_before_migration: int, old_loca
         cur.execute("SELECT sum(key) FROM t")
         assert cur.fetchone() == (sum_before_migration + 1500500,)
 
-    assert not os.path.exists(
-        old_local_path
-    ), f"After detach, local timeline dir {old_local_path} should be removed"
+    assert not os.path.exists(old_local_path), (
+        f"After detach, local timeline dir {old_local_path} should be removed"
+    )
 
 
 @pytest.mark.parametrize(

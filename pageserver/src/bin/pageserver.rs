@@ -12,11 +12,12 @@ use std::time::Duration;
 use anyhow::{Context, anyhow};
 use camino::Utf8Path;
 use clap::{Arg, ArgAction, Command};
+use http_utils::tls_certs::ReloadingCertificateResolver;
 use metrics::launch_timestamp::{LaunchTimestamp, set_launch_timestamp_metric};
 use metrics::set_build_info_metric;
 use nix::sys::socket::{setsockopt, sockopt};
 use pageserver::config::{PageServerConf, PageserverIdentity};
-use pageserver::controller_upcall_client::ControllerUpcallClient;
+use pageserver::controller_upcall_client::StorageControllerUpcallClient;
 use pageserver::deletion_queue::DeletionQueue;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
@@ -31,7 +32,6 @@ use pageserver::{
 };
 use postgres_backend::AuthType;
 use remote_storage::GenericRemoteStorage;
-use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::signal::unix::SignalKind;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -252,6 +252,7 @@ fn initialize_config(
             .context("build toml deserializer")?,
     )
     .context("deserialize config toml")?;
+
     let conf = PageServerConf::parse_and_validate(identity.id, config_toml, workdir)
         .context("runtime-validation of config toml")?;
 
@@ -446,7 +447,7 @@ fn start_pageserver(
     // Set up deletion queue
     let (deletion_queue, deletion_workers) = DeletionQueue::new(
         remote_storage.clone(),
-        ControllerUpcallClient::new(conf, &shutdown_pageserver),
+        StorageControllerUpcallClient::new(conf, &shutdown_pageserver)?,
         conf,
     );
     deletion_workers.spawn_with(BACKGROUND_RUNTIME.handle());
@@ -640,12 +641,15 @@ fn start_pageserver(
 
         let https_task = match https_listener {
             Some(https_listener) => {
-                let certs = load_certs(&conf.ssl_cert_file)?;
-                let key = load_private_key(&conf.ssl_key_file)?;
+                let resolver = MGMT_REQUEST_RUNTIME.block_on(ReloadingCertificateResolver::new(
+                    &conf.ssl_key_file,
+                    &conf.ssl_cert_file,
+                    conf.ssl_cert_reload_period,
+                ))?;
 
                 let server_config = rustls::ServerConfig::builder()
                     .with_no_client_auth()
-                    .with_single_cert(certs, key)?;
+                    .with_cert_resolver(resolver);
 
                 let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
 
@@ -759,25 +763,6 @@ fn start_pageserver(
         .await;
         unreachable!();
     })
-}
-
-fn load_certs(filename: &Utf8Path) -> std::io::Result<Vec<CertificateDer<'static>>> {
-    let file = std::fs::File::open(filename)?;
-    let mut reader = std::io::BufReader::new(file);
-
-    rustls_pemfile::certs(&mut reader).collect()
-}
-
-fn load_private_key(filename: &Utf8Path) -> anyhow::Result<PrivateKeyDer<'static>> {
-    let file = std::fs::File::open(filename)?;
-    let mut reader = std::io::BufReader::new(file);
-
-    let key = rustls_pemfile::private_key(&mut reader)?;
-
-    key.ok_or(anyhow::anyhow!(
-        "no private key found in {}",
-        filename.as_str(),
-    ))
 }
 
 async fn create_remote_storage_client(

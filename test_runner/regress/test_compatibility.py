@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import fixtures.utils
 import pytest
@@ -26,6 +27,9 @@ from fixtures.pageserver.utils import (
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, S3Storage, s3_storage
 from fixtures.workload import Workload
+
+if TYPE_CHECKING:
+    from fixtures.compute_reconfigure import ComputeReconfigure
 
 #
 # A test suite that help to prevent unintentionally breaking backward or forward compatibility between Neon releases.
@@ -231,7 +235,9 @@ def test_backward_compatibility(
         else:
             raise
 
-    assert not breaking_changes_allowed, "Breaking changes are allowed by ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE, but the test has passed without any breakage"
+    assert not breaking_changes_allowed, (
+        "Breaking changes are allowed by ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE, but the test has passed without any breakage"
+    )
 
 
 @check_ondisk_data_compatibility_if_enabled
@@ -259,12 +265,12 @@ def test_forward_compatibility(
         # Use previous version's production binaries (pageserver, safekeeper, pg_distrib_dir, etc.).
         # But always use the current version's neon_local binary.
         # This is because we want to test the compatibility of the data format, not the compatibility of the neon_local CLI.
-        assert (
-            neon_env_builder.compatibility_neon_binpath is not None
-        ), "the environment variable COMPATIBILITY_NEON_BIN is required"
-        assert (
-            neon_env_builder.compatibility_pg_distrib_dir is not None
-        ), "the environment variable COMPATIBILITY_POSTGRES_DISTRIB_DIR is required"
+        assert neon_env_builder.compatibility_neon_binpath is not None, (
+            "the environment variable COMPATIBILITY_NEON_BIN is required"
+        )
+        assert neon_env_builder.compatibility_pg_distrib_dir is not None, (
+            "the environment variable COMPATIBILITY_POSTGRES_DISTRIB_DIR is required"
+        )
         neon_env_builder.neon_binpath = neon_env_builder.compatibility_neon_binpath
         neon_env_builder.pg_distrib_dir = neon_env_builder.compatibility_pg_distrib_dir
 
@@ -310,7 +316,9 @@ def test_forward_compatibility(
         else:
             raise
 
-    assert not breaking_changes_allowed, "Breaking changes are allowed by ALLOW_FORWARD_COMPATIBILITY_BREAKAGE, but the test has passed without any breakage"
+    assert not breaking_changes_allowed, (
+        "Breaking changes are allowed by ALLOW_FORWARD_COMPATIBILITY_BREAKAGE, but the test has passed without any breakage"
+    )
 
 
 def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, repo_dir: Path):
@@ -592,17 +600,22 @@ def test_historic_storage_formats(
 
 @check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
-@pytest.mark.parametrize(**fixtures.utils.allpairs_versions())
+@pytest.mark.parametrize(
+    **fixtures.utils.allpairs_versions(),
+)
 def test_versions_mismatch(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
     pg_version: PgVersion,
     compatibility_snapshot_dir,
+    compute_reconfigure_listener: ComputeReconfigure,
     combination,
 ):
     """
     Checks compatibility of different combinations of versions of the components
     """
+    neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
+
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.from_repo_dir(
         compatibility_snapshot_dir / "repo",

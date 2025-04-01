@@ -7,6 +7,7 @@ use std::time::Duration;
 use camino::Utf8PathBuf;
 use once_cell::sync::Lazy;
 use remote_storage::RemoteStorageConfig;
+use reqwest::Certificate;
 use storage_broker::Uri;
 use tokio::runtime::Runtime;
 use utils::auth::SwappableJwtAuth;
@@ -69,6 +70,10 @@ pub mod defaults {
     // before uploading a partial segment, so that in normal operation the eviction can happen
     // as soon as we have done the partial segment upload.
     pub const DEFAULT_EVICTION_MIN_RESIDENT: &str = DEFAULT_PARTIAL_BACKUP_TIMEOUT;
+
+    pub const DEFAULT_SSL_KEY_FILE: &str = "server.key";
+    pub const DEFAULT_SSL_CERT_FILE: &str = "server.crt";
+    pub const DEFAULT_SSL_CERT_RELOAD_PERIOD: &str = "60s";
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +89,7 @@ pub struct SafeKeeperConf {
     pub listen_pg_addr: String,
     pub listen_pg_addr_tenant_only: Option<String>,
     pub listen_http_addr: String,
+    pub listen_https_addr: Option<String>,
     pub advertise_pg_addr: Option<String>,
     pub availability_zone: Option<String>,
     pub no_sync: bool,
@@ -111,6 +117,10 @@ pub struct SafeKeeperConf {
     pub eviction_min_resident: Duration,
     pub wal_reader_fanout: bool,
     pub max_delta_for_fanout: Option<u64>,
+    pub ssl_key_file: Utf8PathBuf,
+    pub ssl_cert_file: Utf8PathBuf,
+    pub ssl_cert_reload_period: Duration,
+    pub ssl_ca_certs: Vec<Certificate>,
 }
 
 impl SafeKeeperConf {
@@ -127,6 +137,7 @@ impl SafeKeeperConf {
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
             listen_pg_addr_tenant_only: None,
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
+            listen_https_addr: None,
             advertise_pg_addr: None,
             availability_zone: None,
             remote_storage: None,
@@ -155,6 +166,10 @@ impl SafeKeeperConf {
             eviction_min_resident: Duration::ZERO,
             wal_reader_fanout: false,
             max_delta_for_fanout: None,
+            ssl_key_file: Utf8PathBuf::from(defaults::DEFAULT_SSL_KEY_FILE),
+            ssl_cert_file: Utf8PathBuf::from(defaults::DEFAULT_SSL_CERT_FILE),
+            ssl_cert_reload_period: Duration::from_secs(60),
+            ssl_ca_certs: Vec::new(),
         }
     }
 }

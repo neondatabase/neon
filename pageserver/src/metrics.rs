@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use enum_map::{Enum as _, EnumMap};
 use futures::Future;
 use metrics::{
-    Counter, CounterVec, Gauge, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPair,
+    Counter, CounterVec, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPair,
     IntCounterPairVec, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
     register_int_counter, register_int_counter_pair_vec, register_int_counter_vec,
@@ -465,17 +465,36 @@ pub(crate) fn page_cache_errors_inc(error_kind: PageCacheErrorKind) {
 pub(crate) static WAIT_LSN_TIME: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_wait_lsn_seconds",
-        "Time spent waiting for WAL to arrive",
+        "Time spent waiting for WAL to arrive. Updated on completion of the wait_lsn operation.",
         CRITICAL_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric")
 });
 
-static FLUSH_WAIT_UPLOAD_TIME: Lazy<GaugeVec> = Lazy::new(|| {
-    register_gauge_vec!(
-        "pageserver_flush_wait_upload_seconds",
-        "Time spent waiting for preceding uploads during layer flush",
-        &["tenant_id", "shard_id", "timeline_id"]
+pub(crate) static WAIT_LSN_START_FINISH_COUNTERPAIR: Lazy<IntCounterPairVec> = Lazy::new(|| {
+    register_int_counter_pair_vec!(
+        "pageserver_wait_lsn_started_count",
+        "Number of wait_lsn operations started.",
+        "pageserver_wait_lsn_finished_count",
+        "Number of wait_lsn operations finished.",
+        &["tenant_id", "shard_id", "timeline_id"],
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static WAIT_LSN_IN_PROGRESS_MICROS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_wait_lsn_in_progress_micros",
+        "Time spent waiting for WAL to arrive, by timeline_id. Updated periodically while waiting.",
+        &["tenant_id", "shard_id", "timeline_id"],
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static WAIT_LSN_IN_PROGRESS_GLOBAL_MICROS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_wait_lsn_in_progress_micros_global",
+        "Time spent waiting for WAL to arrive, globally. Updated periodically while waiting."
     )
     .expect("failed to define a metric")
 });
@@ -2830,14 +2849,12 @@ impl StorageTimeMetrics {
     }
 }
 
-#[derive(Debug)]
 pub(crate) struct TimelineMetrics {
     tenant_id: String,
     shard_id: String,
     timeline_id: String,
     pub flush_time_histo: StorageTimeMetrics,
     pub flush_delay_histo: StorageTimeMetrics,
-    pub flush_wait_upload_time_gauge: Gauge,
     pub compact_time_histo: StorageTimeMetrics,
     pub create_images_time_histo: StorageTimeMetrics,
     pub logical_size_histo: StorageTimeMetrics,
@@ -2863,6 +2880,8 @@ pub(crate) struct TimelineMetrics {
     pub valid_lsn_lease_count_gauge: UIntGauge,
     pub wal_records_received: IntCounter,
     pub storage_io_size: StorageIoSizeMetrics,
+    pub wait_lsn_in_progress_micros: GlobalAndPerTenantIntCounter,
+    pub wait_lsn_start_finish_counterpair: IntCounterPair,
     shutdown: std::sync::atomic::AtomicBool,
 }
 
@@ -2887,9 +2906,6 @@ impl TimelineMetrics {
             &shard_id,
             &timeline_id,
         );
-        let flush_wait_upload_time_gauge = FLUSH_WAIT_UPLOAD_TIME
-            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-            .unwrap();
         let compact_time_histo = StorageTimeMetrics::new(
             StorageTimeOperation::Compact,
             &tenant_id,
@@ -3000,13 +3016,23 @@ impl TimelineMetrics {
 
         let storage_io_size = StorageIoSizeMetrics::new(&tenant_id, &shard_id, &timeline_id);
 
+        let wait_lsn_in_progress_micros = GlobalAndPerTenantIntCounter {
+            global: WAIT_LSN_IN_PROGRESS_GLOBAL_MICROS.clone(),
+            per_tenant: WAIT_LSN_IN_PROGRESS_MICROS
+                .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+                .unwrap(),
+        };
+
+        let wait_lsn_start_finish_counterpair = WAIT_LSN_START_FINISH_COUNTERPAIR
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+            .unwrap();
+
         TimelineMetrics {
             tenant_id,
             shard_id,
             timeline_id,
             flush_time_histo,
             flush_delay_histo,
-            flush_wait_upload_time_gauge,
             compact_time_histo,
             create_images_time_histo,
             logical_size_histo,
@@ -3032,6 +3058,8 @@ impl TimelineMetrics {
             storage_io_size,
             valid_lsn_lease_count_gauge,
             wal_records_received,
+            wait_lsn_in_progress_micros,
+            wait_lsn_start_finish_counterpair,
             shutdown: std::sync::atomic::AtomicBool::default(),
         }
     }
@@ -3052,14 +3080,6 @@ impl TimelineMetrics {
 
     pub(crate) fn resident_physical_size_get(&self) -> u64 {
         self.resident_physical_size_gauge.get()
-    }
-
-    pub(crate) fn flush_wait_upload_time_gauge_add(&self, duration: f64) {
-        self.flush_wait_upload_time_gauge.add(duration);
-        crate::metrics::FLUSH_WAIT_UPLOAD_TIME
-            .get_metric_with_label_values(&[&self.tenant_id, &self.shard_id, &self.timeline_id])
-            .unwrap()
-            .add(duration);
     }
 
     /// Generates TIMELINE_LAYER labels for a persistent layer.
@@ -3165,7 +3185,6 @@ impl TimelineMetrics {
         let shard_id = &self.shard_id;
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = DISK_CONSISTENT_LSN.remove_label_values(&[tenant_id, shard_id, timeline_id]);
-        let _ = FLUSH_WAIT_UPLOAD_TIME.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = STANDBY_HORIZON.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         {
             RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(self.resident_physical_size_get());
@@ -3222,6 +3241,15 @@ impl TimelineMetrics {
 
         for op in StorageIoSizeOperation::VARIANTS {
             let _ = STORAGE_IO_SIZE.remove_label_values(&[op, tenant_id, shard_id, timeline_id]);
+        }
+
+        let _ =
+            WAIT_LSN_IN_PROGRESS_MICROS.remove_label_values(&[tenant_id, shard_id, timeline_id]);
+
+        {
+            let mut res = [Ok(()), Ok(())];
+            WAIT_LSN_START_FINISH_COUNTERPAIR
+                .remove_label_values(&mut res, &[tenant_id, shard_id, timeline_id]);
         }
 
         let _ = SMGR_QUERY_STARTED_PER_TENANT_TIMELINE.remove_label_values(&[
@@ -3836,27 +3864,29 @@ pub mod tokio_epoll_uring {
     });
 }
 
+pub(crate) struct GlobalAndPerTenantIntCounter {
+    global: IntCounter,
+    per_tenant: IntCounter,
+}
+
+impl GlobalAndPerTenantIntCounter {
+    #[inline(always)]
+    pub(crate) fn inc(&self) {
+        self.inc_by(1)
+    }
+    #[inline(always)]
+    pub(crate) fn inc_by(&self, n: u64) {
+        self.global.inc_by(n);
+        self.per_tenant.inc_by(n);
+    }
+}
+
 pub(crate) mod tenant_throttling {
-    use metrics::{IntCounter, register_int_counter_vec};
+    use metrics::register_int_counter_vec;
     use once_cell::sync::Lazy;
     use utils::shard::TenantShardId;
 
-    pub(crate) struct GlobalAndPerTenantIntCounter {
-        global: IntCounter,
-        per_tenant: IntCounter,
-    }
-
-    impl GlobalAndPerTenantIntCounter {
-        #[inline(always)]
-        pub(crate) fn inc(&self) {
-            self.inc_by(1)
-        }
-        #[inline(always)]
-        pub(crate) fn inc_by(&self, n: u64) {
-            self.global.inc_by(n);
-            self.per_tenant.inc_by(n);
-        }
-    }
+    use super::GlobalAndPerTenantIntCounter;
 
     pub(crate) struct Metrics<const KIND: usize> {
         pub(super) count_accounted_start: GlobalAndPerTenantIntCounter,
@@ -4102,6 +4132,7 @@ pub fn preinitialize_metrics(conf: &'static PageServerConf) {
         &CIRCUIT_BREAKERS_BROKEN,
         &CIRCUIT_BREAKERS_UNBROKEN,
         &PAGE_SERVICE_SMGR_FLUSH_INPROGRESS_MICROS_GLOBAL,
+        &WAIT_LSN_IN_PROGRESS_GLOBAL_MICROS,
     ]
     .into_iter()
     .for_each(|c| {

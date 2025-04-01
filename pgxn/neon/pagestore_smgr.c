@@ -69,6 +69,7 @@
 
 #include "bitmap.h"
 #include "neon.h"
+#include "neon_lwlsncache.h"
 #include "neon_perf_counters.h"
 #include "pagestore_client.h"
 
@@ -98,7 +99,7 @@ static char *hexdump_page(char *page);
 
 #define IS_LOCAL_REL(reln) (\
 	NInfoGetDbOid(InfoFromSMgrRel(reln)) != 0 && \
-		NInfoGetRelNumber(InfoFromSMgrRel(reln)) > FirstNormalObjectId \
+		NInfoGetRelNumber(InfoFromSMgrRel(reln)) >= FirstNormalObjectId \
 )
 
 const int	SmgrTrace = DEBUG5;
@@ -340,11 +341,6 @@ static void prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_
 static bool prefetch_wait_for(uint64 ring_index);
 static void prefetch_cleanup_trailing_unused(void);
 static inline void prefetch_set_unused(uint64 ring_index);
-#if PG_MAJORVERSION_NUM < 17
-static void
-GetLastWrittenLSNv(NRelFileInfo relfilenode, ForkNumber forknum,
-				   BlockNumber blkno, int nblocks, XLogRecPtr *lsns);
-#endif
 
 static void
 neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum,
@@ -864,7 +860,7 @@ prefetch_on_ps_disconnect(void)
 
 	/*
 	 * We can have gone into retry due to network error, so update stats with
-	 * the latest available 
+	 * the latest available
 	 */
 	MyNeonCounters->pageserver_open_requests =
 		MyPState->n_requests_inflight;
@@ -1044,6 +1040,16 @@ prefetch_lookupv(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blocknum, n
 				continue;
 			}
 			memcpy(buffers[i], ((NeonGetPageResponse*)slot->response)->page, BLCKSZ);
+
+
+			/*
+			 * With lfc_store_prefetch_result=true prefetch result is stored in LFC in prefetch_pump_state when response is received
+			 * from page server. But if lfc_store_prefetch_result=false then it is not yet stored in LFC and we have to do it here
+			 * under buffer lock.
+			 */
+			if (!lfc_store_prefetch_result)
+				lfc_write(rinfo, forknum, blocknum + i, buffers[i]);
+
 			prefetch_set_unused(ring_index);
 			BITMAP_SET(mask, i);
 
@@ -1075,6 +1081,9 @@ prefetch_lookup(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkn, neon_r
  * pageserver. If NULL, we utilize the lastWrittenLsn -infrastructure
  * to calculate the LSNs to send.
  *
+ * Bits set in *mask (if present) indicate pages already read; i.e. pages we
+ * can skip in this process.
+ *
  * When performing a prefetch rather than a synchronous request,
  * is_prefetch==true. Currently, it only affects how the request is accounted
  * in the perf counters.
@@ -1105,7 +1114,7 @@ prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frlsns,
 Retry:
 	/*
 	 * We can have gone into retry due to network error, so update stats with
-	 * the latest available 
+	 * the latest available
 	 */
 	MyNeonCounters->pageserver_open_requests =
 		MyPState->ring_unused - MyPState->ring_receive;
@@ -1120,7 +1129,7 @@ Retry:
 		uint64		ring_index;
 		neon_request_lsns *lsns;
 
-		if (PointerIsValid(mask) && !BITMAP_ISSET(mask, i))
+		if (PointerIsValid(mask) && BITMAP_ISSET(mask, i))
 			continue;
 
 		if (frlsns)
@@ -1997,7 +2006,7 @@ neon_wallog_pagev(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 
 		if (batch_size >= BLOCK_BATCH_SIZE)
 		{
-			SetLastWrittenLSNForBlockv(lsns, InfoFromSMgrRel(reln), forknum,
+			neon_set_lwlsn_block_v(lsns, InfoFromSMgrRel(reln), forknum,
 									   batch_blockno,
 									   batch_size);
 			batch_blockno += batch_size;
@@ -2007,7 +2016,7 @@ neon_wallog_pagev(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 
 	if (batch_size != 0)
 	{
-		SetLastWrittenLSNForBlockv(lsns, InfoFromSMgrRel(reln), forknum,
+		neon_set_lwlsn_block_v(lsns, InfoFromSMgrRel(reln), forknum,
 								   batch_blockno,
 								   batch_size);
 	}
@@ -2134,7 +2143,7 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 	 * Remember the LSN on this page. When we read the page again, we must
 	 * read the same or newer version of it.
 	 */
-	SetLastWrittenLSNForBlock(lsn, InfoFromSMgrRel(reln), forknum, blocknum);
+	neon_set_lwlsn_block(lsn, InfoFromSMgrRel(reln), forknum, blocknum);
 }
 
 /*
@@ -2218,19 +2227,6 @@ nm_adjust_lsn(XLogRecPtr lsn)
 
 
 /*
- * Since PG17 we use vetorized version,
- * so add compatibility function for older versions
- */
-#if PG_MAJORVERSION_NUM < 17
-static void
-GetLastWrittenLSNv(NRelFileInfo relfilenode, ForkNumber forknum,
-				   BlockNumber blkno, int nblocks, XLogRecPtr *lsns)
-{
-	lsns[0] = GetLastWrittenLSN(relfilenode, forknum, blkno);
-}
-#endif
-
-/*
  * Return LSN for requesting pages and number of blocks from page server
  */
 static void
@@ -2241,7 +2237,7 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 
 	Assert(nblocks <= PG_IOV_MAX);
 
-	GetLastWrittenLSNv(rinfo, forknum, blkno, (int) nblocks, last_written_lsns);
+	neon_get_lwlsn_v(rinfo, forknum, blkno, (int) nblocks, last_written_lsns);
 
 	for (int i = 0; i < nblocks; i++)
 	{
@@ -2778,6 +2774,9 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
 			mdextend(reln, forkNum, blkno, buffer, skipFsync);
+			/* Update LFC in case of unlogged index build */
+			if (reln == unlogged_build_rel && unlogged_build_phase == UNLOGGED_BUILD_PHASE_2)
+				lfc_write(InfoFromSMgrRel(reln), forkNum, blkno, buffer);
 			return;
 
 		default:
@@ -2841,9 +2840,9 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 	if (lsn == InvalidXLogRecPtr)
 	{
 		lsn = GetXLogInsertRecPtr();
-		SetLastWrittenLSNForBlock(lsn, InfoFromSMgrRel(reln), forkNum, blkno);
+		neon_set_lwlsn_block(lsn, InfoFromSMgrRel(reln), forkNum, blkno);
 	}
-	SetLastWrittenLSNForRelation(lsn, InfoFromSMgrRel(reln), forkNum);
+	neon_set_lwlsn_relation(lsn, InfoFromSMgrRel(reln), forkNum);
 }
 
 #if PG_MAJORVERSION_NUM >= 16
@@ -2866,6 +2865,14 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
 			mdzeroextend(reln, forkNum, blocknum, nblocks, skipFsync);
+			/* Update LFC in case of unlogged index build */
+			if (reln == unlogged_build_rel && unlogged_build_phase == UNLOGGED_BUILD_PHASE_2)
+			{
+				for (int i = 0; i < nblocks; i++)
+				{
+					lfc_write(InfoFromSMgrRel(reln), forkNum, blocknum + i, buffer.data);
+				}
+			}
 			return;
 
 		default:
@@ -2898,6 +2905,11 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 						relpath(reln->smgr_rlocator, forkNum),
 						InvalidBlockNumber)));
 
+#ifdef DEBUG_COMPARE_LOCAL
+	if (IS_LOCAL_REL(reln))
+		mdzeroextend(reln, forkNum, blocknum, nblocks, skipFsync);
+#endif
+
 	/* Don't log any pages if we're not allowed to do so. */
 	if (!XLogInsertAllowed())
 		return;
@@ -2925,7 +2937,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 		for (int i = 0; i < count; i++)
 		{
 			lfc_write(InfoFromSMgrRel(reln), forkNum, blocknum + i, buffer.data);
-			SetLastWrittenLSNForBlock(lsn, InfoFromSMgrRel(reln), forkNum,
+			neon_set_lwlsn_block(lsn, InfoFromSMgrRel(reln), forkNum,
 									  blocknum + i);
 		}
 
@@ -2935,7 +2947,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 
 	Assert(lsn != 0);
 
-	SetLastWrittenLSNForRelation(lsn, InfoFromSMgrRel(reln), forkNum);
+	neon_set_lwlsn_relation(lsn, InfoFromSMgrRel(reln), forkNum);
 	set_cached_relsize(InfoFromSMgrRel(reln), forkNum, blocknum);
 }
 #endif
@@ -3016,9 +3028,6 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		}
 
 		tag.blockNum = blocknum;
-
-		for (int i = 0; i < PG_IOV_MAX / 8; i++)
-			lfc_present[i] = ~(lfc_present[i]);
 
 		ring_index = prefetch_register_bufferv(tag, NULL, iterblocks,
 											   lfc_present, true);
@@ -3125,6 +3134,15 @@ neon_writeback(SMgrRelation reln, ForkNumber forknum,
 #endif
 }
 
+/*
+ * Read N pages at a specific LSN.
+ *
+ * *mask is set for pages read at a previous point in time, and which we
+ * should not touch, nor overwrite.
+ * New bits should be set in *mask for the pages we'successfully read.
+ *
+ * The offsets in request_lsns, buffers, and mask are linked.
+ */
 static void
 #if PG_MAJORVERSION_NUM < 16
 neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber base_blockno, neon_request_lsns *request_lsns,
@@ -3177,7 +3195,7 @@ neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber base_block
 		neon_request_lsns *reqlsns = &request_lsns[i];
 		TimestampTz		start_ts, end_ts;
 
-		if (PointerIsValid(mask) && !BITMAP_ISSET(mask, i))
+		if (PointerIsValid(mask) && BITMAP_ISSET(mask, i))
 			continue;
 
 		start_ts = GetCurrentTimestamp();
@@ -3278,6 +3296,12 @@ Retry:
 					}
 				}
 				memcpy(buffer, getpage_resp->page, BLCKSZ);
+
+				/*
+				 * With lfc_store_prefetch_result=true prefetch result is stored in LFC in prefetch_pump_state when response is received
+				 * from page server. But if lfc_store_prefetch_result=false then it is not yet stored in LFC and we have to do it here
+				 * under buffer lock.
+				 */
 				if (!lfc_store_prefetch_result)
 					lfc_write(rinfo, forkNum, blockno, buffer);
 				break;
@@ -3470,9 +3494,7 @@ static void
 neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		   void **buffers, BlockNumber nblocks)
 {
-	bits8		prefetch_hits[PG_IOV_MAX / 8] = {0};
-	bits8		lfc_hits[PG_IOV_MAX / 8];
-	bits8		read[PG_IOV_MAX / 8];
+	bits8		read_pages[PG_IOV_MAX / 8];
 	neon_request_lsns request_lsns[PG_IOV_MAX];
 	int			lfc_result;
 	int			prefetch_result;
@@ -3504,19 +3526,18 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	neon_get_request_lsns(InfoFromSMgrRel(reln), forknum, blocknum,
 						  request_lsns, nblocks);
 
+	memset(read_pages, 0, sizeof(read_pages));
 
-	prefetch_result = prefetch_lookupv(InfoFromSMgrRel(reln), forknum, blocknum, request_lsns, nblocks, buffers, prefetch_hits);
+	prefetch_result = prefetch_lookupv(InfoFromSMgrRel(reln), forknum,
+									   blocknum, request_lsns, nblocks,
+									   buffers, read_pages);
 
 	if (prefetch_result == nblocks)
 		return;
 
-	/* invert the result: exclude prefetched blocks */
-	for (int i = 0; i < PG_IOV_MAX / 8; i++)
-		lfc_hits[i] = ~prefetch_hits[i];
-
 	/* Try to read from local file cache */
 	lfc_result = lfc_readv_select(InfoFromSMgrRel(reln), forknum, blocknum, buffers,
-								  nblocks, lfc_hits);
+								  nblocks, read_pages);
 
 	if (lfc_result > 0)
 		MyNeonCounters->file_cache_hits_total += lfc_result;
@@ -3525,21 +3546,8 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	if (prefetch_result + lfc_result == nblocks)
 		return;
 
-	if (lfc_result <= 0)
-	{
-		/* can't use the LFC result, so read all blocks from PS */
-		for (int i = 0; i < PG_IOV_MAX / 8; i++)
-			read[i] = ~prefetch_hits[i];
-	}
-	else
-	{
-		/* invert the result: exclude blocks read from lfc */
-		for (int i = 0; i < PG_IOV_MAX / 8; i++)
-			read[i] = ~(prefetch_hits[i] | lfc_hits[i]);
-	}
-
 	neon_read_at_lsnv(InfoFromSMgrRel(reln), forknum, blocknum, request_lsns,
-					  buffers, nblocks, read);
+					  buffers, nblocks, read_pages);
 
 	/*
 	 * Try to receive prefetch results once again just to make sure we don't leave the smgr code while the OS might still have buffered bytes.
@@ -3709,6 +3717,9 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 			#else
 			mdwrite(reln, forknum, blocknum, buffer, skipFsync);
 			#endif
+			/* Update LFC in case of unlogged index build */
+			if (reln == unlogged_build_rel && unlogged_build_phase == UNLOGGED_BUILD_PHASE_2)
+				lfc_write(InfoFromSMgrRel(reln), forknum, blocknum, buffer);
 			return;
 		default:
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
@@ -3772,6 +3783,9 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
 			mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
+			/* Update LFC in case of unlogged index build */
+			if (reln == unlogged_build_rel && unlogged_build_phase == UNLOGGED_BUILD_PHASE_2)
+				lfc_writev(InfoFromSMgrRel(reln), forknum, blkno, buffers, nblocks);
 			return;
 		default:
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
@@ -4030,7 +4044,7 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber old_blocks, Blo
 	 * for the extended pages, so there's no harm in leaving behind obsolete
 	 * entries for the truncated chunks.
 	 */
-	SetLastWrittenLSNForRelation(lsn, InfoFromSMgrRel(reln), forknum);
+	neon_set_lwlsn_relation(lsn, InfoFromSMgrRel(reln), forknum);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -4171,8 +4185,10 @@ neon_start_unlogged_build(SMgrRelation reln)
 	 * FIXME: should we pass isRedo true to create the tablespace dir if it
 	 * doesn't exist? Is it needed?
 	 */
-	if (!IsParallelWorker())
+#ifndef DEBUG_COMPARE_LOCAL
+ 	if (!IsParallelWorker())
 		mdcreate(reln, MAIN_FORKNUM, false);
+#endif
 }
 
 /*
@@ -4247,8 +4263,10 @@ neon_end_unlogged_build(SMgrRelation reln)
 
 			forget_cached_relsize(InfoFromNInfoB(rinfob), forknum);
 			mdclose(reln, forknum);
+#ifndef DEBUG_COMPARE_LOCAL
 			/* use isRedo == true, so that we drop it immediately */
 			mdunlink(rinfob, forknum, true);
+#endif
 		}
 	}
 
@@ -4484,7 +4502,7 @@ neon_extend_rel_size(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno, 
 		if (relsize < blkno + 1)
 		{
 			update_cached_relsize(rinfo, forknum, blkno + 1);
-			SetLastWrittenLSNForRelation(end_recptr, rinfo, forknum);
+			neon_set_lwlsn_relation(end_recptr, rinfo, forknum);
 		}
 	}
 	else
@@ -4517,7 +4535,7 @@ neon_extend_rel_size(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno, 
 		relsize = Max(nbresponse->n_blocks, blkno + 1);
 
 		set_cached_relsize(rinfo, forknum, relsize);
-		SetLastWrittenLSNForRelation(end_recptr, rinfo, forknum);
+		neon_set_lwlsn_relation(end_recptr, rinfo, forknum);
 
 		neon_log(SmgrTrace, "Set length to %d", relsize);
 	}
@@ -4648,7 +4666,7 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	 */
 	if (no_redo_needed)
 	{
-		SetLastWrittenLSNForBlock(end_recptr, rinfo, forknum, blkno);
+		neon_set_lwlsn_block(end_recptr, rinfo, forknum, blkno);
 		/*
 		 * Redo changes if page exists in LFC.
 		 * We should perform this check after assigning LwLSN to prevent

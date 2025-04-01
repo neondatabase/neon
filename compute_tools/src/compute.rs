@@ -20,6 +20,7 @@ use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
+use once_cell::sync::Lazy;
 use postgres;
 use postgres::NoTls;
 use postgres::error::SqlState;
@@ -35,16 +36,32 @@ use crate::disk_quota::set_disk_quota;
 use crate::installed_extensions::get_installed_extensions;
 use crate::logger::startup_context_from_env;
 use crate::lsn_lease::launch_lsn_lease_bg_task_for_static;
+use crate::metrics::COMPUTE_CTL_UP;
 use crate::monitor::launch_monitor;
 use crate::pg_helpers::*;
-use crate::rsyslog::configure_audit_rsyslog;
+use crate::rsyslog::{
+    PostgresLogsRsyslogConfig, configure_audit_rsyslog, configure_postgres_logs_export,
+    launch_pgaudit_gc,
+};
 use crate::spec::*;
 use crate::swap::resize_swap;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
+use crate::tls::watch_cert_for_changes;
 use crate::{config, extension_server, local_proxy};
 
 pub static SYNC_SAFEKEEPERS_PID: AtomicU32 = AtomicU32::new(0);
 pub static PG_PID: AtomicU32 = AtomicU32::new(0);
+// This is an arbitrary build tag. Fine as a default / for testing purposes
+// in-case of not-set environment var
+const BUILD_TAG_DEFAULT: &str = "latest";
+/// Build tag/version of the compute node binaries/image. It's tricky and ugly
+/// to pass it everywhere as a part of `ComputeNodeParams`, so we use a
+/// global static variable.
+pub static BUILD_TAG: Lazy<String> = Lazy::new(|| {
+    option_env!("BUILD_TAG")
+        .unwrap_or(BUILD_TAG_DEFAULT)
+        .to_string()
+});
 
 /// Static configuration params that don't change after startup. These mostly
 /// come from the CLI args, or are derived from them.
@@ -68,7 +85,6 @@ pub struct ComputeNodeParams {
     pub pgdata: String,
     pub pgbin: String,
     pub pgversion: String,
-    pub build_tag: String,
 
     /// The port that the compute's external HTTP server listens on
     pub external_http_port: u16,
@@ -112,6 +128,7 @@ pub struct ComputeNode {
 
     // key: ext_archive_name, value: started download time, download_completed?
     pub ext_download_progress: RwLock<HashMap<String, (DateTime<Utc>, bool)>>,
+    pub compute_ctl_config: ComputeCtlConfig,
 }
 
 // store some metrics about download size that might impact startup time
@@ -134,8 +151,6 @@ pub struct ComputeState {
     /// Compute spec. This can be received from the CLI or - more likely -
     /// passed by the control plane with a /configure HTTP request.
     pub pspec: Option<ParsedSpec>,
-
-    pub compute_ctl_config: ComputeCtlConfig,
 
     /// If the spec is passed by a /configure request, 'startup_span' is the
     /// /configure request's tracing span. The main thread enters it when it
@@ -160,7 +175,6 @@ impl ComputeState {
             last_active: None,
             error: None,
             pspec: None,
-            compute_ctl_config: ComputeCtlConfig::default(),
             startup_span: None,
             metrics: ComputeMetrics::default(),
         }
@@ -171,6 +185,11 @@ impl ComputeState {
         info!("Changing compute status from {} to {}", prev, status);
         self.status = status;
         state_changed.notify_all();
+
+        COMPUTE_CTL_UP.reset();
+        COMPUTE_CTL_UP
+            .with_label_values(&[&BUILD_TAG, format!("{}", status).as_str()])
+            .set(1);
     }
 
     pub fn set_failed_status(&mut self, err: anyhow::Error, state_changed: &Condvar) {
@@ -314,7 +333,6 @@ impl ComputeNode {
             let pspec = ParsedSpec::try_from(cli_spec).map_err(|msg| anyhow::anyhow!(msg))?;
             new_state.pspec = Some(pspec);
         }
-        new_state.compute_ctl_config = compute_ctl_config;
 
         Ok(ComputeNode {
             params,
@@ -323,6 +341,7 @@ impl ComputeNode {
             state: Mutex::new(new_state),
             state_changed: Condvar::new(),
             ext_download_progress: RwLock::new(HashMap::new()),
+            compute_ctl_config,
         })
     }
 
@@ -345,17 +364,23 @@ impl ComputeNode {
         // requests while configuration is still in progress.
         crate::http::server::Server::External {
             port: this.params.external_http_port,
-            jwks: this.state.lock().unwrap().compute_ctl_config.jwks.clone(),
+            config: this.compute_ctl_config.clone(),
             compute_id: this.params.compute_id.clone(),
         }
         .launch(&this);
 
-        // The internal HTTP server could be launched later, but there isn't much
-        // sense in waiting.
+        // The internal HTTP server is needed for a further activation by control plane
+        // if compute was started for a pool, so we have to start server before hanging
+        // waiting for a spec.
         crate::http::server::Server::Internal {
             port: this.params.internal_http_port,
         }
         .launch(&this);
+
+        // HTTP server is running, so we can officially declare compute_ctl as 'up'
+        COMPUTE_CTL_UP
+            .with_label_values(&[&BUILD_TAG, ComputeStatus::Empty.to_string().as_str()])
+            .set(1);
 
         // If we got a spec from the CLI already, use that. Otherwise wait for the
         // control plane to pass it to us with a /configure HTTP request
@@ -524,6 +549,16 @@ impl ComputeNode {
         // Collect all the tasks that must finish here
         let mut pre_tasks = tokio::task::JoinSet::new();
 
+        // Make sure TLS certificates are properly loaded and in the right place.
+        if self.compute_ctl_config.tls.is_some() {
+            let this = self.clone();
+            pre_tasks.spawn(async move {
+                this.watch_cert_for_changes().await;
+
+                Ok::<(), anyhow::Error>(())
+            });
+        }
+
         // If there are any remote extensions in shared_preload_libraries, start downloading them
         if pspec.spec.remote_extensions.is_some() {
             let (this, spec) = (self.clone(), pspec.spec.clone());
@@ -579,11 +614,13 @@ impl ComputeNode {
         if let Some(pgbouncer_settings) = &pspec.spec.pgbouncer_settings {
             info!("tuning pgbouncer");
 
+            let pgbouncer_settings = pgbouncer_settings.clone();
+            let tls_config = self.compute_ctl_config.tls.clone();
+
             // Spawn a background task to do the tuning,
             // so that we don't block the main thread that starts Postgres.
-            let pgbouncer_settings = pgbouncer_settings.clone();
             let _handle = tokio::spawn(async move {
-                let res = tune_pgbouncer(pgbouncer_settings).await;
+                let res = tune_pgbouncer(pgbouncer_settings, tls_config).await;
                 if let Err(err) = res {
                     error!("error while tuning pgbouncer: {err:?}");
                     // Continue with the startup anyway
@@ -606,7 +643,7 @@ impl ComputeNode {
             });
         }
 
-        // Configure and start rsyslog if necessary
+        // Configure and start rsyslog for HIPAA if necessary
         if let ComputeAudit::Hipaa = pspec.spec.audit_log_level {
             let remote_endpoint = std::env::var("AUDIT_LOGGING_ENDPOINT").unwrap_or("".to_string());
             if remote_endpoint.is_empty() {
@@ -614,13 +651,22 @@ impl ComputeNode {
             }
 
             let log_directory_path = Path::new(&self.params.pgdata).join("log");
-            // TODO: make this more robust
-            // now rsyslog starts once and there is no monitoring or restart if it fails
-            configure_audit_rsyslog(
-                log_directory_path.to_str().unwrap(),
-                "hipaa",
-                &remote_endpoint,
-            )?;
+            let log_directory_path = log_directory_path.to_string_lossy().to_string();
+            configure_audit_rsyslog(log_directory_path.clone(), "hipaa", &remote_endpoint)?;
+
+            // Launch a background task to clean up the audit logs
+            launch_pgaudit_gc(log_directory_path);
+        }
+
+        // Configure and start rsyslog for Postgres logs export
+        if self.has_feature(ComputeFeature::PostgresLogsExport) {
+            if let Some(ref project_id) = pspec.spec.cluster.cluster_id {
+                let host = PostgresLogsRsyslogConfig::default_host(project_id);
+                let conf = PostgresLogsRsyslogConfig::new(Some(&host));
+                configure_postgres_logs_export(conf)?;
+            } else {
+                warn!("not configuring rsyslog for Postgres logs export: project ID is missing")
+            }
         }
 
         // Launch remaining service threads
@@ -645,9 +691,9 @@ impl ComputeNode {
         if pspec.spec.mode == ComputeMode::Primary {
             self.configure_as_primary(&compute_state)?;
 
-            let conf = self.get_conn_conf(None);
-            tokio::task::spawn_blocking(|| {
-                let res = get_installed_extensions(conf);
+            let conf = self.get_tokio_conn_conf(None);
+            tokio::task::spawn(async {
+                let res = get_installed_extensions(conf).await;
                 match res {
                     Ok(extensions) => {
                         info!(
@@ -853,6 +899,14 @@ impl ComputeNode {
             config.password(storage_auth_token);
         } else {
             info!("Storage auth token not set");
+        }
+
+        config.application_name("compute_ctl");
+        if let Some(spec) = &compute_state.pspec {
+            config.options(&format!(
+                "-c neon.compute_mode={}",
+                spec.spec.mode.to_type_str()
+            ));
         }
 
         // Connect to pageserver
@@ -1105,9 +1159,10 @@ impl ComputeNode {
         // Remove/create an empty pgdata directory and put configuration there.
         self.create_pgdata()?;
         config::write_postgres_conf(
-            &pgdata_path.join("postgresql.conf"),
+            pgdata_path,
             &pspec.spec,
             self.params.internal_http_port,
+            &self.compute_ctl_config.tls,
         )?;
 
         // Syncing safekeepers is only safe with primary nodes: if a primary
@@ -1489,11 +1544,13 @@ impl ComputeNode {
         if let Some(ref pgbouncer_settings) = spec.pgbouncer_settings {
             info!("tuning pgbouncer");
 
+            let pgbouncer_settings = pgbouncer_settings.clone();
+            let tls_config = self.compute_ctl_config.tls.clone();
+
             // Spawn a background task to do the tuning,
             // so that we don't block the main thread that starts Postgres.
-            let pgbouncer_settings = pgbouncer_settings.clone();
             tokio::spawn(async move {
-                let res = tune_pgbouncer(pgbouncer_settings).await;
+                let res = tune_pgbouncer(pgbouncer_settings, tls_config).await;
                 if let Err(err) = res {
                     error!("error while tuning pgbouncer: {err:?}");
                 }
@@ -1505,7 +1562,8 @@ impl ComputeNode {
 
             // Spawn a background task to do the configuration,
             // so that we don't block the main thread that starts Postgres.
-            let local_proxy = local_proxy.clone();
+            let mut local_proxy = local_proxy.clone();
+            local_proxy.tls = self.compute_ctl_config.tls.clone();
             tokio::spawn(async move {
                 if let Err(err) = local_proxy::configure(&local_proxy) {
                     error!("error while configuring local_proxy: {err:?}");
@@ -1515,8 +1573,12 @@ impl ComputeNode {
 
         // Write new config
         let pgdata_path = Path::new(&self.params.pgdata);
-        let postgresql_conf_path = pgdata_path.join("postgresql.conf");
-        config::write_postgres_conf(&postgresql_conf_path, &spec, self.params.internal_http_port)?;
+        config::write_postgres_conf(
+            pgdata_path,
+            &spec,
+            self.params.internal_http_port,
+            &self.compute_ctl_config.tls,
+        )?;
 
         if !spec.skip_pg_catalog_updates {
             let max_concurrent_connections = spec.reconfigure_concurrency;
@@ -1585,6 +1647,56 @@ impl ComputeNode {
         self.post_apply_config()?;
 
         Ok(())
+    }
+
+    pub async fn watch_cert_for_changes(self: Arc<Self>) {
+        // update status on cert renewal
+        if let Some(tls_config) = &self.compute_ctl_config.tls {
+            let tls_config = tls_config.clone();
+
+            // wait until the cert exists.
+            let mut cert_watch = watch_cert_for_changes(tls_config.cert_path.clone()).await;
+
+            tokio::task::spawn_blocking(move || {
+                let handle = tokio::runtime::Handle::current();
+                'cert_update: loop {
+                    // let postgres/pgbouncer/local_proxy know the new cert/key exists.
+                    // we need to wait until it's configurable first.
+
+                    let mut state = self.state.lock().unwrap();
+                    'status_update: loop {
+                        match state.status {
+                            // let's update the state to config pending
+                            ComputeStatus::ConfigurationPending | ComputeStatus::Running => {
+                                state.set_status(
+                                    ComputeStatus::ConfigurationPending,
+                                    &self.state_changed,
+                                );
+                                break 'status_update;
+                            }
+
+                            // exit loop
+                            ComputeStatus::Failed
+                            | ComputeStatus::TerminationPending
+                            | ComputeStatus::Terminated => break 'cert_update,
+
+                            // wait
+                            ComputeStatus::Init
+                            | ComputeStatus::Configuration
+                            | ComputeStatus::Empty => {
+                                state = self.state_changed.wait(state).unwrap();
+                            }
+                        }
+                    }
+                    drop(state);
+
+                    // wait for a new certificate update
+                    if handle.block_on(cert_watch.changed()).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
     }
 
     /// Update the `last_active` in the shared state, but ensure that it's a more recent one.
@@ -1943,12 +2055,8 @@ LIMIT 100",
 
         let mut download_tasks = Vec::new();
         for library in &libs_vec {
-            let (ext_name, ext_path) = remote_extensions.get_ext(
-                library,
-                true,
-                &self.params.build_tag,
-                &self.params.pgversion,
-            )?;
+            let (ext_name, ext_path) =
+                remote_extensions.get_ext(library, true, &BUILD_TAG, &self.params.pgversion)?;
             download_tasks.push(self.download_extension(ext_name, ext_path));
         }
         let results = join_all(download_tasks).await;

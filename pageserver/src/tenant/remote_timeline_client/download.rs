@@ -18,7 +18,7 @@ use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
-use tracing::{info_span, warn};
+use tracing::warn;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
 use utils::{backoff, pausable_failpoint};
@@ -205,6 +205,7 @@ async fn download_object(
         }
         #[cfg(target_os = "linux")]
         crate::virtual_file::io_engine::IoEngine::TokioEpollUring => {
+            use crate::virtual_file::owned_buffers_io::write::FlushTaskError;
             use std::sync::Arc;
 
             use crate::virtual_file::{IoBufferMut, owned_buffers_io};
@@ -228,8 +229,9 @@ async fn download_object(
                     destination_file,
                     || IoBufferMut::with_capacity(super::BUFFER_SIZE),
                     gate.enter().map_err(|_| DownloadError::Cancelled)?,
+                    cancel.child_token(),
                     ctx,
-                    info_span!(parent: None, "download_object_buffered_writer", %dst_path),
+                    tracing::info_span!(parent: None, "download_object_buffered_writer", %dst_path),
                 );
 
                 // TODO: use vectored write (writev) once supported by tokio-epoll-uring.
@@ -240,11 +242,21 @@ async fn download_object(
                     {
                         let chunk = match res {
                             Ok(chunk) => chunk,
-                            Err(e) => return Err(e),
+                            Err(e) => return Err(DownloadError::from(e)),
                         };
-                        buffered.write_buffered_borrowed(&chunk, ctx).await?;
+                        buffered
+                            .write_buffered_borrowed(&chunk, ctx)
+                            .await
+                            .map_err(|e| match e {
+                                FlushTaskError::Cancelled => DownloadError::Cancelled,
+                            })?;
                     }
-                    let inner = buffered.flush_and_into_inner(ctx).await?;
+                    let inner = buffered
+                        .flush_and_into_inner(ctx)
+                        .await
+                        .map_err(|e| match e {
+                            FlushTaskError::Cancelled => DownloadError::Cancelled,
+                        })?;
                     Ok(inner)
                 }
                 .await?;

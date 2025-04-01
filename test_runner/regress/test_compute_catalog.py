@@ -16,6 +16,9 @@ TEST_ROLE_NAMES = [
     {"name": "role \";with ';injections $$ $x$ $ %I !/\\&#@"},
     {"name": '"role in double quotes"'},
     {"name": "'role in single quotes'"},
+    {"name": "role$"},
+    {"name": "role$$"},
+    {"name": "role$x$"},
 ]
 
 TEST_DB_NAMES = [
@@ -59,6 +62,18 @@ TEST_DB_NAMES = [
         "name": "'db in single quotes'",
         "owner": "'role in single quotes'",
     },
+    {
+        "name": "db name$",
+        "owner": "role$",
+    },
+    {
+        "name": "db name$$",
+        "owner": "role$$",
+    },
+    {
+        "name": "db name$x$",
+        "owner": "role$x$",
+    },
 ]
 
 
@@ -88,22 +103,22 @@ def test_compute_catalog(neon_simple_env: NeonEnv):
     objects = client.dbs_and_roles()
 
     # Assert that 'cloud_admin' role exists in the 'roles' list
-    assert any(
-        role["name"] == "cloud_admin" for role in objects["roles"]
-    ), "The 'cloud_admin' role is missing"
+    assert any(role["name"] == "cloud_admin" for role in objects["roles"]), (
+        "The 'cloud_admin' role is missing"
+    )
 
     # Assert that 'postgres' database exists in the 'databases' list
-    assert any(
-        db["name"] == "postgres" for db in objects["databases"]
-    ), "The 'postgres' database is missing"
+    assert any(db["name"] == "postgres" for db in objects["databases"]), (
+        "The 'postgres' database is missing"
+    )
 
     # Check other databases
     for test_db in TEST_DB_NAMES:
         db = next((db for db in objects["databases"] if db["name"] == test_db["name"]), None)
         assert db is not None, f"The '{test_db['name']}' database is missing"
-        assert (
-            db["owner"] == test_db["owner"]
-        ), f"The '{test_db['name']}' database has incorrect owner"
+        assert db["owner"] == test_db["owner"], (
+            f"The '{test_db['name']}' database has incorrect owner"
+        )
 
         ddl = client.database_schema(database=test_db["name"])
 
@@ -120,9 +135,9 @@ def test_compute_catalog(neon_simple_env: NeonEnv):
         client.database_schema(database="nonexistentdb")
         raise AssertionError("Expected HTTPError was not raised")
     except requests.exceptions.HTTPError as e:
-        assert (
-            e.response.status_code == 404
-        ), f"Expected 404 status code, but got {e.response.status_code}"
+        assert e.response.status_code == 404, (
+            f"Expected 404 status code, but got {e.response.status_code}"
+        )
 
 
 def test_compute_create_drop_dbs_and_roles(neon_simple_env: NeonEnv):

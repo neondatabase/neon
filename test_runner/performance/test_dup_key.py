@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from contextlib import closing
+from typing import TYPE_CHECKING
 
 import pytest
-from fixtures.compare_fixtures import PgCompare
 from pytest_lazyfixture import lazy_fixture
+
+if TYPE_CHECKING:
+    from fixtures.compare_fixtures import PgCompare
 
 
 @pytest.mark.parametrize(

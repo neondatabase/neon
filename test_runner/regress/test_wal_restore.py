@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import tarfile
 import tempfile
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 import zstandard
@@ -19,11 +19,15 @@ from fixtures.pageserver.utils import (
     remote_storage_delete_key,
     timeline_delete_wait_completed,
 )
-from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import LocalFsStorage, S3Storage, s3_storage
-from mypy_boto3_s3.type_defs import (
-    ObjectTypeDef,
-)
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from fixtures.port_distributor import PortDistributor
+    from mypy_boto3_s3.type_defs import (
+        ObjectTypeDef,
+    )
 
 
 @pytest.mark.skipif(

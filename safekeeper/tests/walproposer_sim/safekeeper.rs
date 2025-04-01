@@ -152,6 +152,7 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
         my_id: NodeId(os.id() as u64),
         listen_pg_addr: String::new(),
         listen_http_addr: String::new(),
+        listen_https_addr: None,
         no_sync: false,
         broker_endpoint: "/".parse::<Uri>().unwrap(),
         broker_keepalive_interval: Duration::from_secs(0),
@@ -179,6 +180,10 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
         eviction_min_resident: Duration::ZERO,
         wal_reader_fanout: false,
         max_delta_for_fanout: None,
+        ssl_key_file: Utf8PathBuf::from(""),
+        ssl_cert_file: Utf8PathBuf::from(""),
+        ssl_cert_reload_period: Duration::ZERO,
+        ssl_ca_certs: Vec::new(),
     };
 
     let mut global = GlobalMap::new(disk, conf.clone())?;

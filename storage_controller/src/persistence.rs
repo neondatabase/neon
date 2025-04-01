@@ -967,10 +967,26 @@ impl Persistence {
         &self,
         split_tenant_id: TenantId,
         old_shard_count: ShardCount,
+        new_shard_count: ShardCount,
     ) -> DatabaseResult<()> {
         use crate::schema::tenant_shards::dsl::*;
         self.with_measured_conn(DatabaseOperation::CompleteShardSplit, move |conn| {
             Box::pin(async move {
+                // Sanity: child shards must still exist, as we're deleting parent shards
+                let child_shards_query = tenant_shards
+                    .filter(tenant_id.eq(split_tenant_id.to_string()))
+                    .filter(shard_count.eq(new_shard_count.literal() as i32));
+                let child_shards = child_shards_query
+                    .load::<TenantShardPersistence>(conn)
+                    .await?;
+                if child_shards.len() != new_shard_count.count() as usize {
+                    return Err(DatabaseError::Logical(format!(
+                        "Unexpected child shard count {} while completing split to \
+                            count {new_shard_count:?} on tenant {split_tenant_id}",
+                        child_shards.len()
+                    )));
+                }
+
                 // Drop parent shards
                 diesel::delete(tenant_shards)
                     .filter(tenant_id.eq(split_tenant_id.to_string()))
@@ -981,10 +997,11 @@ impl Persistence {
                 // Clear sharding flag
                 let updated = diesel::update(tenant_shards)
                     .filter(tenant_id.eq(split_tenant_id.to_string()))
+                    .filter(shard_count.eq(new_shard_count.literal() as i32))
                     .set((splitting.eq(0),))
                     .execute(conn)
                     .await?;
-                debug_assert!(updated > 0);
+                assert!(updated == new_shard_count.count() as usize);
 
                 Ok(())
             })
@@ -1351,6 +1368,34 @@ impl Persistence {
 
         Ok(timeline_from_db)
     }
+
+    /// Loads a list of all timelines from database.
+    pub(crate) async fn list_timelines_for_tenant(
+        &self,
+        tenant_id: TenantId,
+    ) -> DatabaseResult<Vec<TimelinePersistence>> {
+        use crate::schema::timelines::dsl;
+
+        let tenant_id = &tenant_id;
+        let timelines = self
+            .with_measured_conn(DatabaseOperation::GetTimeline, move |conn| {
+                Box::pin(async move {
+                    let timelines: Vec<TimelineFromDb> = dsl::timelines
+                        .filter(dsl::tenant_id.eq(&tenant_id.to_string()))
+                        .load(conn)
+                        .await?;
+                    Ok(timelines)
+                })
+            })
+            .await?;
+
+        let timelines = timelines
+            .into_iter()
+            .map(TimelineFromDb::into_persistence)
+            .collect();
+        Ok(timelines)
+    }
+
     /// Persist pending op. Returns if it was newly inserted. If it wasn't, we haven't done any writes.
     pub(crate) async fn insert_pending_op(
         &self,
@@ -1393,7 +1438,7 @@ impl Persistence {
     pub(crate) async fn remove_pending_op(
         &self,
         tenant_id: TenantId,
-        timeline_id: TimelineId,
+        timeline_id: Option<TimelineId>,
         sk_id: NodeId,
         generation: u32,
     ) -> DatabaseResult<()> {
@@ -1402,10 +1447,11 @@ impl Persistence {
         let tenant_id = &tenant_id;
         let timeline_id = &timeline_id;
         self.with_measured_conn(DatabaseOperation::RemoveTimelineReconcile, move |conn| {
+            let timeline_id_str = timeline_id.map(|tid| tid.to_string()).unwrap_or_default();
             Box::pin(async move {
                 diesel::delete(dsl::safekeeper_timeline_pending_ops)
                     .filter(dsl::tenant_id.eq(tenant_id.to_string()))
-                    .filter(dsl::timeline_id.eq(timeline_id.to_string()))
+                    .filter(dsl::timeline_id.eq(timeline_id_str))
                     .filter(dsl::sk_id.eq(sk_id.0 as i64))
                     .filter(dsl::generation.eq(generation as i32))
                     .execute(conn)
@@ -1444,6 +1490,34 @@ impl Persistence {
             .await?;
 
         Ok(timeline_from_db)
+    }
+
+    /// Delete all pending ops for the given timeline.
+    ///
+    /// Use this only at timeline deletion, otherwise use generation based APIs
+    pub(crate) async fn remove_pending_ops_for_timeline(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: Option<TimelineId>,
+    ) -> DatabaseResult<()> {
+        use crate::schema::safekeeper_timeline_pending_ops::dsl;
+
+        let tenant_id = &tenant_id;
+        let timeline_id = &timeline_id;
+        self.with_measured_conn(DatabaseOperation::ListTimelineReconcile, move |conn| {
+            let timeline_id_str = timeline_id.map(|tid| tid.to_string()).unwrap_or_default();
+            Box::pin(async move {
+                diesel::delete(dsl::safekeeper_timeline_pending_ops)
+                    .filter(dsl::tenant_id.eq(tenant_id.to_string()))
+                    .filter(dsl::timeline_id.eq(timeline_id_str))
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .await?;
+
+        Ok(())
     }
 }
 
@@ -1613,23 +1687,49 @@ pub(crate) struct TenantShardPersistence {
 }
 
 impl TenantShardPersistence {
+    fn get_shard_count(&self) -> Result<ShardCount, ShardConfigError> {
+        self.shard_count
+            .try_into()
+            .map(ShardCount)
+            .map_err(|_| ShardConfigError::InvalidCount)
+    }
+
+    fn get_shard_number(&self) -> Result<ShardNumber, ShardConfigError> {
+        self.shard_number
+            .try_into()
+            .map(ShardNumber)
+            .map_err(|_| ShardConfigError::InvalidNumber)
+    }
+
+    fn get_stripe_size(&self) -> Result<ShardStripeSize, ShardConfigError> {
+        self.shard_stripe_size
+            .try_into()
+            .map(ShardStripeSize)
+            .map_err(|_| ShardConfigError::InvalidStripeSize)
+    }
+
     pub(crate) fn get_shard_identity(&self) -> Result<ShardIdentity, ShardConfigError> {
         if self.shard_count == 0 {
-            Ok(ShardIdentity::unsharded())
+            // NB: carry over the stripe size from the persisted record, to avoid consistency check
+            // failures if the persisted value differs from the default stripe size. The stripe size
+            // doesn't really matter for unsharded tenants anyway.
+            Ok(ShardIdentity::unsharded_with_stripe_size(
+                self.get_stripe_size()?,
+            ))
         } else {
             Ok(ShardIdentity::new(
-                ShardNumber(self.shard_number as u8),
-                ShardCount::new(self.shard_count as u8),
-                ShardStripeSize(self.shard_stripe_size as u32),
+                self.get_shard_number()?,
+                self.get_shard_count()?,
+                self.get_stripe_size()?,
             )?)
         }
     }
 
-    pub(crate) fn get_tenant_shard_id(&self) -> Result<TenantShardId, hex::FromHexError> {
+    pub(crate) fn get_tenant_shard_id(&self) -> anyhow::Result<TenantShardId> {
         Ok(TenantShardId {
             tenant_id: TenantId::from_str(self.tenant_id.as_str())?,
-            shard_number: ShardNumber(self.shard_number as u8),
-            shard_count: ShardCount::new(self.shard_count as u8),
+            shard_number: self.get_shard_number()?,
+            shard_count: self.get_shard_count()?,
         })
     }
 }

@@ -42,7 +42,7 @@ use crate::metrics::{HttpDirection, Metrics};
 use crate::proxy::{NeonOptions, run_until_cancelled};
 use crate::serverless::backend::HttpConnError;
 use crate::types::{DbName, RoleName};
-use crate::usage_metrics::{MetricCounter, MetricCounterRecorder, TrafficDirection};
+use crate::usage_metrics::{MetricCounter, MetricCounterRecorder};
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -614,7 +614,9 @@ async fn handle_inner(
         &config.authentication_config,
         ctx,
         request.headers(),
-        config.tls_config.as_ref(),
+        // todo: race condition?
+        // we're unlikely to change the common names.
+        config.tls_config.load().as_deref(),
     )?;
     info!(
         user = conn_info.conn_info.user_info.user.as_str(),
@@ -661,6 +663,7 @@ async fn handle_db_inner(
 
     let parsed_headers = HttpHeaders::try_parse(headers)?;
 
+    let mut request_len = 0;
     let fetch_and_process_request = Box::pin(
         async {
             let body = read_body_with_limit(
@@ -668,6 +671,8 @@ async fn handle_db_inner(
                 config.http_config.max_request_size_bytes,
             )
             .await?;
+
+            request_len = body.len();
 
             Metrics::get()
                 .proxy
@@ -763,7 +768,7 @@ async fn handle_db_inner(
         }
     };
 
-    let metrics = client.metrics(TrafficDirection::Egress, ctx);
+    let metrics = client.metrics(ctx);
 
     let len = json_output.len();
     let response = response
@@ -779,6 +784,8 @@ async fn handle_db_inner(
     // count the egress bytes - we miss the TLS and header overhead but oh well...
     // moving this later in the stack is going to be a lot of effort and ehhhh
     metrics.record_egress(len as u64);
+    metrics.record_ingress(request_len as u64);
+
     Metrics::get()
         .proxy
         .http_conn_content_length_bytes
@@ -836,7 +843,7 @@ async fn handle_auth_broker_inner(
         .expect("all headers and params received via hyper should be valid for request");
 
     // todo: map body to count egress
-    let _metrics = client.metrics(TrafficDirection::Egress, ctx);
+    let _metrics = client.metrics(ctx);
 
     Ok(client
         .inner
@@ -859,8 +866,14 @@ impl QueryData {
         let (inner, mut discard) = client.inner();
         let cancel_token = inner.cancel_token();
 
-        let res = match select(
-            pin!(query_to_json(config, &*inner, self, &mut 0, parsed_headers)),
+        match select(
+            pin!(query_to_json(
+                config,
+                &mut *inner,
+                self,
+                &mut 0,
+                parsed_headers
+            )),
             pin!(cancel.cancelled()),
         )
         .await
@@ -876,7 +889,7 @@ impl QueryData {
             // The query failed with an error
             Either::Left((Err(e), __not_yet_cancelled)) => {
                 discard.discard();
-                return Err(e);
+                Err(e)
             }
             // The query was cancelled.
             Either::Right((_cancelled, query)) => {
@@ -917,8 +930,7 @@ impl QueryData {
                     }
                 }
             }
-        };
-        res
+        }
     }
 }
 
@@ -944,7 +956,7 @@ impl BatchQueryData {
             builder = builder.deferrable(true);
         }
 
-        let transaction = builder
+        let mut transaction = builder
             .start()
             .await
             .inspect_err(|_| {
@@ -957,7 +969,7 @@ impl BatchQueryData {
         let json_output = match query_batch(
             config,
             cancel.child_token(),
-            &transaction,
+            &mut transaction,
             self,
             parsed_headers,
         )
@@ -1009,7 +1021,7 @@ impl BatchQueryData {
 async fn query_batch(
     config: &'static HttpConfig,
     cancel: CancellationToken,
-    transaction: &Transaction<'_>,
+    transaction: &mut Transaction<'_>,
     queries: BatchQueryData,
     parsed_headers: HttpHeaders,
 ) -> Result<String, SqlOverHttpError> {
@@ -1047,7 +1059,7 @@ async fn query_batch(
 
 async fn query_to_json<T: GenericClient>(
     config: &'static HttpConfig,
-    client: &T,
+    client: &mut T,
     data: QueryData,
     current_size: &mut usize,
     parsed_headers: HttpHeaders,
@@ -1160,10 +1172,10 @@ enum Discard<'a> {
 }
 
 impl Client {
-    fn metrics(&self, direction: TrafficDirection, ctx: &RequestContext) -> Arc<MetricCounter> {
+    fn metrics(&self, ctx: &RequestContext) -> Arc<MetricCounter> {
         match self {
-            Client::Remote(client) => client.metrics(direction, ctx),
-            Client::Local(local_client) => local_client.metrics(direction, ctx),
+            Client::Remote(client) => client.metrics(ctx),
+            Client::Local(local_client) => local_client.metrics(ctx),
         }
     }
 

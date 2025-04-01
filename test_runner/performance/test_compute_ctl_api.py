@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import datetime
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
-from fixtures.neon_fixtures import NeonEnv
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv
 
 
 @pytest.mark.timeout(120)
@@ -41,24 +44,24 @@ def test_compute_ctl_api_latencies(
     zenbenchmark.record(
         "status_response_latency_p50_us",
         status_response_latency_us[len(status_response_latency_us) // 2],
-        "microseconds",
+        "μs",
         MetricReport.LOWER_IS_BETTER,
     )
     zenbenchmark.record(
         "metrics_response_latency_p50_us",
         metrics_response_latency_us[len(metrics_response_latency_us) // 2],
-        "microseconds",
+        "μs",
         MetricReport.LOWER_IS_BETTER,
     )
     zenbenchmark.record(
         "status_response_latency_p99_us",
         status_response_latency_us[len(status_response_latency_us) * 99 // 100],
-        "microseconds",
+        "μs",
         MetricReport.LOWER_IS_BETTER,
     )
     zenbenchmark.record(
         "metrics_response_latency_p99_us",
         metrics_response_latency_us[len(metrics_response_latency_us) * 99 // 100],
-        "microseconds",
+        "μs",
         MetricReport.LOWER_IS_BETTER,
     )

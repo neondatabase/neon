@@ -51,10 +51,18 @@ impl PageServerNode {
             parse_host_port(&conf.listen_pg_addr).expect("Unable to parse listen_pg_addr");
         let port = port.unwrap_or(5432);
 
-        let ssl_ca_cert = env.ssl_ca_cert_path().map(|ssl_ca_file| {
+        let ssl_ca_certs = env.ssl_ca_cert_path().map(|ssl_ca_file| {
             let buf = std::fs::read(ssl_ca_file).expect("SSL root CA file should exist");
-            Certificate::from_pem(&buf).expect("CA certificate should be valid")
+            Certificate::from_pem_bundle(&buf).expect("SSL CA file should be valid")
         });
+
+        let mut http_client = reqwest::Client::builder();
+        for ssl_ca_cert in ssl_ca_certs.unwrap_or_default() {
+            http_client = http_client.add_root_certificate(ssl_ca_cert);
+        }
+        let http_client = http_client
+            .build()
+            .expect("Client constructs with no errors");
 
         let endpoint = if env.storage_controller.use_https_pageserver_api {
             format!(
@@ -72,6 +80,7 @@ impl PageServerNode {
             conf: conf.clone(),
             env: env.clone(),
             http_client: mgmt_api::Client::new(
+                http_client,
                 endpoint,
                 {
                     match conf.http_auth_type {
@@ -83,9 +92,7 @@ impl PageServerNode {
                     }
                 }
                 .as_deref(),
-                ssl_ca_cert,
-            )
-            .expect("Client constructs with no errors"),
+            ),
         }
     }
 
@@ -140,6 +147,10 @@ impl PageServerNode {
             // Keys are generated in the toplevel repo dir, pageservers' workdirs
             // are one level below that, so refer to keys with ../
             overrides.push("auth_validation_public_key_path='../auth_public_key.pem'".to_owned());
+        }
+
+        if let Some(ssl_ca_file) = self.env.ssl_ca_cert_path() {
+            overrides.push(format!("ssl_ca_file='{}'", ssl_ca_file.to_str().unwrap()));
         }
 
         // Apply the user-provided overrides
@@ -417,11 +428,6 @@ impl PageServerNode {
                 .map(|x| x.parse::<usize>())
                 .transpose()
                 .context("Failed to parse 'l0_flush_delay_threshold' as an integer")?,
-            l0_flush_wait_upload: settings
-                .remove("l0_flush_wait_upload")
-                .map(|x| x.parse::<bool>())
-                .transpose()
-                .context("Failed to parse 'l0_flush_wait_upload' as a boolean")?,
             l0_flush_stall_threshold: settings
                 .remove("l0_flush_stall_threshold")
                 .map(|x| x.parse::<usize>())

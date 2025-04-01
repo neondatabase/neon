@@ -4,8 +4,6 @@ import concurrent.futures
 from typing import TYPE_CHECKING
 
 import pytest
-from pytest_httpserver import HTTPServer
-from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 from fixtures.common_types import TenantId
@@ -15,11 +13,14 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import Any
 
+    from pytest_httpserver import HTTPServer
+    from werkzeug.wrappers.request import Request
+
 
 class ComputeReconfigure:
     def __init__(self, server: HTTPServer):
         self.server = server
-        self.control_plane_compute_hook_api = f"http://{server.host}:{server.port}/notify-attach"
+        self.control_plane_hooks_api = f"http://{server.host}:{server.port}/"
         self.workloads: dict[TenantId, Any] = {}
         self.on_notify: Callable[[Any], None] | None = None
 

@@ -3,13 +3,6 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from mypy_boto3_s3.type_defs import (
-    DeleteObjectOutputTypeDef,
-    EmptyResponseMetadataTypeDef,
-    ListObjectsV2OutputTypeDef,
-    ObjectTypeDef,
-)
-
 from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
@@ -18,6 +11,13 @@ from fixtures.utils import wait_until
 
 if TYPE_CHECKING:
     from typing import Any
+
+    from mypy_boto3_s3.type_defs import (
+        DeleteObjectOutputTypeDef,
+        EmptyResponseMetadataTypeDef,
+        ListObjectsV2OutputTypeDef,
+        ObjectTypeDef,
+    )
 
 
 def assert_tenant_state(
@@ -241,9 +241,9 @@ def wait_for_upload_queue_empty(
             found = False
             for f in finished:
                 if all([s.labels[label] == f.labels[label] for label in remaining_labels]):
-                    assert (
-                        not found
-                    ), "duplicate match, remaining_labels don't uniquely identify sample"
+                    assert not found, (
+                        "duplicate match, remaining_labels don't uniquely identify sample"
+                    )
                     tl.append((s.labels, int(s.value) - int(f.value)))
                     found = True
             if not found:

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use pageserver_api::controller_api::{SafekeeperDescribeResponse, SkSchedulingPolicy};
-use reqwest::{Certificate, StatusCode};
+use reqwest::StatusCode;
 use safekeeper_client::mgmt_api;
 use tokio_util::sync::CancellationToken;
 use utils::backoff;
@@ -94,8 +94,8 @@ impl Safekeeper {
     pub(crate) async fn with_client_retries<T, O, F>(
         &self,
         mut op: O,
+        http_client: &reqwest::Client,
         jwt: &Option<SecretString>,
-        ssl_ca_cert: &Option<Certificate>,
         warn_threshold: u32,
         max_retries: u32,
         timeout: Duration,
@@ -114,16 +114,9 @@ impl Safekeeper {
                 | ApiError(StatusCode::REQUEST_TIMEOUT, _) => false,
                 ApiError(_, _) => true,
                 Cancelled => true,
-                CreateClient(_) => true,
+                Timeout(_) => false,
             }
         }
-
-        // TODO: refactor SafekeeperClient and with_client_retires (#11113).
-        let mut http_client = reqwest::Client::builder().timeout(timeout);
-        if let Some(ssl_ca_cert) = ssl_ca_cert.as_ref() {
-            http_client = http_client.add_root_certificate(ssl_ca_cert.clone());
-        }
-        let http_client = http_client.build().map_err(mgmt_api::Error::CreateClient)?;
 
         backoff::retry(
             || {
@@ -136,11 +129,14 @@ impl Safekeeper {
 
                 let node_cancel_fut = self.cancel.cancelled();
 
-                let op_fut = op(client);
+                let op_fut = tokio::time::timeout(timeout, op(client));
 
                 async {
                     tokio::select! {
-                        r = op_fut=> {r},
+                        r = op_fut => match r {
+                            Ok(r) => r,
+                            Err(e) => Err(mgmt_api::Error::Timeout(format!("{e}"))),
+                        },
                         _ = node_cancel_fut => {
                         Err(mgmt_api::Error::Cancelled)
                     }}

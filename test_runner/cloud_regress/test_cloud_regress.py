@@ -4,11 +4,15 @@ Run the regression tests on the cloud instance of Neon
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
-from fixtures.neon_fixtures import RemotePostgres
-from fixtures.pg_version import PgVersion
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from fixtures.neon_fixtures import RemotePostgres
+    from fixtures.pg_version import PgVersion
 
 
 @pytest.mark.timeout(7200)

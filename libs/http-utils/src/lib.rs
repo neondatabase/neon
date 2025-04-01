@@ -4,6 +4,7 @@ pub mod failpoints;
 pub mod json;
 pub mod request;
 pub mod server;
+pub mod tls_certs;
 
 extern crate hyper0 as hyper;
 

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import timeit
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport
-from fixtures.neon_fixtures import NeonEnvBuilder
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnvBuilder
 
 # Run bulk tenant creation test.
 #

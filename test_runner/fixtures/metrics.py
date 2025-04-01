@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from typing import TYPE_CHECKING
 
 from prometheus_client.parser import text_string_to_metric_families
-from prometheus_client.samples import Sample
 
 from fixtures.log_helper import log
+
+if TYPE_CHECKING:
+    from prometheus_client.samples import Sample
 
 
 class Metrics:
@@ -168,13 +171,15 @@ PAGESERVER_PER_TENANT_METRICS: tuple[str, ...] = (
     "pageserver_evictions_with_low_residence_duration_total",
     "pageserver_aux_file_estimated_size",
     "pageserver_valid_lsn_lease_count",
-    "pageserver_flush_wait_upload_seconds",
     counter("pageserver_tenant_throttling_count_accounted_start"),
     counter("pageserver_tenant_throttling_count_accounted_finish"),
     counter("pageserver_tenant_throttling_wait_usecs_sum"),
     counter("pageserver_tenant_throttling_count"),
     counter("pageserver_timeline_wal_records_received"),
     counter("pageserver_page_service_pagestream_flush_in_progress_micros"),
+    counter("pageserver_wait_lsn_in_progress_micros"),
+    counter("pageserver_wait_lsn_started_count"),
+    counter("pageserver_wait_lsn_finished_count"),
     *histogram("pageserver_page_service_batch_size"),
     *histogram("pageserver_page_service_pagestream_batch_wait_time_seconds"),
     *PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS,

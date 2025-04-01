@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import os
+from typing import TYPE_CHECKING
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.utils import query_scalar, wait_until
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 #

@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import threading
+from typing import TYPE_CHECKING
 
 import pytest
-from fixtures.compare_fixtures import PgCompare
-from fixtures.neon_fixtures import PgProtocol
 
 from performance.test_perf_pgbench import get_scales_matrix
 from performance.test_wal_backpressure import record_read_latency
 
+if TYPE_CHECKING:
+    from fixtures.compare_fixtures import PgCompare
+    from fixtures.neon_fixtures import PgProtocol
+
 
 def start_write_workload(pg: PgProtocol, scale: int = 10):
     with pg.connect().cursor() as cur:
-        cur.execute(f"create table big as select generate_series(1,{scale*100_000})")
+        cur.execute(f"create table big as select generate_series(1,{scale * 100_000})")
 
 
 # Measure latency of reads on one table, while lots of writes are happening on another table.
@@ -24,7 +27,7 @@ def test_measure_read_latency_heavy_write_workload(neon_with_baseline: PgCompare
     pg = env.pg
 
     with pg.connect().cursor() as cur:
-        cur.execute(f"create table small as select generate_series(1,{scale*100_000})")
+        cur.execute(f"create table small as select generate_series(1,{scale * 100_000})")
 
     write_thread = threading.Thread(target=start_write_workload, args=(pg, scale * 100))
     write_thread.start()

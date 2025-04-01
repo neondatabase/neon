@@ -5,11 +5,14 @@
 //! and connect it to the storage nodes.
 use std::collections::HashMap;
 
+use indexmap::IndexMap;
 use regex::Regex;
 use remote_storage::RemotePath;
 use serde::{Deserialize, Serialize};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
+
+use crate::responses::TlsConfig;
 
 /// String type alias representing Postgres identifier and
 /// intended to be used for DB / role names.
@@ -125,7 +128,7 @@ pub struct ComputeSpec {
     // information about available remote extensions
     pub remote_extensions: Option<RemoteExtSpec>,
 
-    pub pgbouncer_settings: Option<HashMap<String, String>>,
+    pub pgbouncer_settings: Option<IndexMap<String, String>>,
 
     // Stripe size for pageserver sharding, in pages
     #[serde(default)]
@@ -176,8 +179,8 @@ pub enum ComputeFeature {
     /// track short-lived connections as user activity.
     ActivityMonitorExperimental,
 
-    /// Pre-install and initialize anon extension for every database in the cluster
-    AnonExtension,
+    /// Allow to configure rsyslog for Postgres logs export
+    PostgresLogsExport,
 
     /// This is a special feature flag that is used to represent unknown feature flags.
     /// Basically all unknown to enum flags are represented as this one. See unit test
@@ -272,6 +275,18 @@ pub enum ComputeMode {
     Replica,
 }
 
+impl ComputeMode {
+    /// Convert the compute mode to a string that can be used to identify the type of compute,
+    /// which means that if it's a static compute, the LSN will not be included.
+    pub fn to_type_str(&self) -> &'static str {
+        match self {
+            ComputeMode::Primary => "primary",
+            ComputeMode::Static(_) => "static",
+            ComputeMode::Replica => "replica",
+        }
+    }
+}
+
 /// Log level for audit logging
 /// Disabled, log, hipaa
 /// Default is Disabled
@@ -357,6 +372,9 @@ pub struct LocalProxySpec {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jwks: Option<Vec<JwksSettings>>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
