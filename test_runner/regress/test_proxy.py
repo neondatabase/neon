@@ -648,6 +648,6 @@ def test_sql_over_http_connection_cancel(static_proxy: NeonProxy):
     assert res["rowCount"] == 1, "HTTP query should insert"
 
     res = static_proxy.http_query(query, [0, 1], user="http", password="http", expected_code=400)
-    assert (
-        "duplicate key value violates unique constraint" in res["message"]
-    ), "HTTP query should conflict"
+    assert "duplicate key value violates unique constraint" in res["message"], (
+        "HTTP query should conflict"
+    )

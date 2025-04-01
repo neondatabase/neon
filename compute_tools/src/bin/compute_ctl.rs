@@ -45,7 +45,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use compute_api::responses::ComputeCtlConfig;
 use compute_api::spec::ComputeSpec;
-use compute_tools::compute::{ComputeNode, ComputeNodeParams, forward_termination_signal};
+use compute_tools::compute::{
+    BUILD_TAG, ComputeNode, ComputeNodeParams, forward_termination_signal,
+};
 use compute_tools::extension_server::get_pg_version_string;
 use compute_tools::logger::*;
 use compute_tools::params::*;
@@ -56,10 +58,6 @@ use signal_hook::iterator::Signals;
 use tracing::{error, info};
 use url::Url;
 use utils::failpoint_support;
-
-// this is an arbitrary build tag. Fine as a default / for testing purposes
-// in-case of not-set environment var
-const BUILD_TAG_DEFAULT: &str = "latest";
 
 // Compatibility hack: if the control plane specified any remote-ext-config
 // use the default value for extension storage proxy gateway.
@@ -147,7 +145,7 @@ fn main() -> Result<()> {
         .build()?;
     let _rt_guard = runtime.enter();
 
-    let build_tag = runtime.block_on(init())?;
+    runtime.block_on(init())?;
 
     // enable core dumping for all child processes
     setrlimit(Resource::CORE, rlimit::INFINITY, rlimit::INFINITY)?;
@@ -174,8 +172,6 @@ fn main() -> Result<()> {
             cgroup: cli.cgroup,
             #[cfg(target_os = "linux")]
             vm_monitor_addr: cli.vm_monitor_addr,
-            build_tag,
-
             live_config_allowed: cli_spec.live_config_allowed,
         },
         cli_spec.spec,
@@ -189,7 +185,7 @@ fn main() -> Result<()> {
     deinit_and_exit(exit_code);
 }
 
-async fn init() -> Result<String> {
+async fn init() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL).await?;
 
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGQUIT])?;
@@ -199,12 +195,9 @@ async fn init() -> Result<String> {
         }
     });
 
-    let build_tag = option_env!("BUILD_TAG")
-        .unwrap_or(BUILD_TAG_DEFAULT)
-        .to_string();
-    info!("build_tag: {build_tag}");
+    info!("compute build_tag: {}", &BUILD_TAG.to_string());
 
-    Ok(build_tag)
+    Ok(())
 }
 
 fn try_spec_from_cli(cli: &Cli) -> Result<CliSpecParams> {

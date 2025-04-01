@@ -6,11 +6,14 @@ import os
 import timeit
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, PgBenchInitResult, PgBenchRunResult
-from fixtures.compare_fixtures import PgCompare
 from fixtures.utils import get_scale_for_db
+
+if TYPE_CHECKING:
+    from fixtures.compare_fixtures import PgCompare
 
 
 @enum.unique

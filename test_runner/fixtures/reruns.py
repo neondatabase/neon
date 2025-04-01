@@ -3,12 +3,11 @@ from __future__ import annotations
 from collections.abc import MutableMapping
 from typing import TYPE_CHECKING, cast
 
-import pytest
-
 if TYPE_CHECKING:
     from collections.abc import MutableMapping
     from typing import Any
 
+    import pytest
     from _pytest.config import Config
 
 

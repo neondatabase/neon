@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from typing import TYPE_CHECKING
 
 import psutil
 import pytest
@@ -12,9 +13,11 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     tenant_get_shards,
 )
-from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
 from fixtures.utils import skip_in_debug_build, wait_until
+
+if TYPE_CHECKING:
+    from fixtures.pageserver.http import PageserverHttpClient
 
 TIMELINE_COUNT = 10
 ENTRIES_PER_TIMELINE = 10_000
@@ -130,7 +133,7 @@ def test_pageserver_small_inmemory_layers(
     tenant_conf = {
         # Large `checkpoint_distance` effectively disables size
         # based checkpointing.
-        "checkpoint_distance": f"{2 * 1024 ** 3}",
+        "checkpoint_distance": f"{2 * 1024**3}",
         "checkpoint_timeout": f"{CHECKPOINT_TIMEOUT_SECONDS}s",
         "compaction_period": "1s",
     }
@@ -179,7 +182,7 @@ def test_idle_checkpoints(neon_env_builder: NeonEnvBuilder):
     tenant_conf = {
         # Large `checkpoint_distance` effectively disables size
         # based checkpointing.
-        "checkpoint_distance": f"{2 * 1024 ** 3}",
+        "checkpoint_distance": f"{2 * 1024**3}",
         "checkpoint_timeout": f"{CHECKPOINT_TIMEOUT_SECONDS}s",
         "compaction_period": "1s",
     }
@@ -279,9 +282,9 @@ def test_total_size_limit(neon_env_builder: NeonEnvBuilder):
         http_client = env.pageserver.http_client()
         initdb_lsn = Lsn(http_client.timeline_detail(tenant, timeline)["initdb_lsn"])
         this_timeline_ingested = last_flush_lsn - initdb_lsn
-        assert (
-            this_timeline_ingested < checkpoint_distance * 0.8
-        ), "this test is supposed to fill InMemoryLayer"
+        assert this_timeline_ingested < checkpoint_distance * 0.8, (
+            "this test is supposed to fill InMemoryLayer"
+        )
         total_bytes_ingested += this_timeline_ingested
 
     log.info(f"Ingested {total_bytes_ingested} bytes since initdb (vs max dirty {max_dirty_data})")

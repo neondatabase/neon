@@ -315,7 +315,7 @@ static inline bool
 lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		 void *buffer)
 {
-	bits8		rv = 1;
+	bits8		rv = 0;
 	return lfc_readv_select(rinfo, forkNum, blkno, &buffer, 1, &rv) == 1;
 }
 

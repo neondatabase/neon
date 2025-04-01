@@ -14,8 +14,10 @@
 from __future__ import annotations
 
 from contextlib import closing
+from typing import TYPE_CHECKING
 
-from fixtures.compare_fixtures import PgCompare
+if TYPE_CHECKING:
+    from fixtures.compare_fixtures import PgCompare
 
 
 def test_write_amplification(neon_with_baseline: PgCompare):

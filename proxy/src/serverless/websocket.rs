@@ -15,7 +15,7 @@ use tracing::warn;
 use crate::cancellation::CancellationHandler;
 use crate::config::ProxyConfig;
 use crate::context::RequestContext;
-use crate::error::{ReportableError, io_error};
+use crate::error::ReportableError;
 use crate::metrics::Metrics;
 use crate::proxy::{ClientMode, ErrorSource, handle_client};
 use crate::rate_limiter::EndpointRateLimiter;
@@ -50,23 +50,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WebSocketRw<S> {
         let this = self.project();
         let mut stream = this.stream;
 
-        ready!(stream.as_mut().poll_ready(cx).map_err(io_error))?;
+        ready!(stream.as_mut().poll_ready(cx).map_err(io::Error::other))?;
 
         this.send.put(buf);
         match stream.as_mut().start_send(Frame::binary(this.send.split())) {
             Ok(()) => Poll::Ready(Ok(buf.len())),
-            Err(e) => Poll::Ready(Err(io_error(e))),
+            Err(e) => Poll::Ready(Err(io::Error::other(e))),
         }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let stream = self.project().stream;
-        stream.poll_flush(cx).map_err(io_error)
+        stream.poll_flush(cx).map_err(io::Error::other)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let stream = self.project().stream;
-        stream.poll_close(cx).map_err(io_error)
+        stream.poll_close(cx).map_err(io::Error::other)
     }
 }
 
@@ -97,7 +97,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
             }
 
             let res = ready!(this.stream.as_mut().poll_next(cx));
-            match res.transpose().map_err(io_error)? {
+            match res.transpose().map_err(io::Error::other)? {
                 Some(message) => match message.opcode {
                     OpCode::Ping => {}
                     OpCode::Pong => {}
@@ -105,7 +105,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
                         // We expect to see only binary messages.
                         let error = "unexpected text message in the websocket";
                         warn!(length = message.payload.len(), error);
-                        return Poll::Ready(Err(io_error(error)));
+                        return Poll::Ready(Err(io::Error::other(error)));
                     }
                     OpCode::Binary | OpCode::Continuation => {
                         debug_assert!(this.recv.is_empty());

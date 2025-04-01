@@ -5,10 +5,16 @@ on:
       github-event-name:
         type: string
         required: true
+      github-event-json:
+        type: string
+        required: true
     outputs:
       build-tag:
         description: "Tag for the current workflow run"
         value: ${{ jobs.tags.outputs.build-tag }}
+      release-tag:
+        description: "Tag for the release if this is an RC PR run"
+        value: ${{ jobs.tags.outputs.release-tag }}
       previous-storage-release:
         description: "Tag of the last storage release"
         value: ${{ jobs.tags.outputs.storage }}
@@ -24,6 +30,9 @@ on:
       release-pr-run-id:
         description: "Only available if `run-kind in [storage-release, proxy-release, compute-release]`. Contains the run ID of the `Build and Test` workflow, assuming one with the current commit can be found."
         value: ${{ jobs.tags.outputs.release-pr-run-id }}
+      sha:
+        description: "github.event.pull_request.head.sha on release PRs, github.sha otherwise"
+        value: ${{ jobs.tags.outputs.sha }}
 
 permissions: {}
 
@@ -35,19 +44,22 @@ jobs:
   tags:
     runs-on: ubuntu-22.04
     outputs:
-      build-tag: ${{ steps.build-tag.outputs.tag }}
+      build-tag: ${{ steps.build-tag.outputs.build-tag }}
+      release-tag: ${{ steps.build-tag.outputs.release-tag }}
       compute: ${{ steps.previous-releases.outputs.compute }}
       proxy: ${{ steps.previous-releases.outputs.proxy }}
       storage: ${{ steps.previous-releases.outputs.storage }}
       run-kind: ${{ steps.run-kind.outputs.run-kind }}
       release-pr-run-id: ${{ steps.release-pr-run-id.outputs.release-pr-run-id }}
+      sha: ${{ steps.sha.outputs.sha }}
     permissions:
       contents: read
     steps:
       # Need `fetch-depth: 0` to count the number of commits in the branch
-      - uses: actions/checkout@v4
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
         with:
-          fetch-depth: 0
+          egress-policy: audit
 
       - name: Get run kind
         id: run-kind
@@ -69,6 +81,23 @@ jobs:
         run: |
           echo "run-kind=$RUN_KIND" | tee -a $GITHUB_OUTPUT
 
+      - name: Get the right SHA
+        id: sha
+        env:
+          SHA: >
+            ${{
+              contains(fromJSON('["storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), steps.run-kind.outputs.run-kind)
+              && fromJSON(inputs.github-event-json).pull_request.head.sha
+              || github.sha
+            }}
+        run: |
+          echo "sha=$SHA" | tee -a $GITHUB_OUTPUT
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.sha.outputs.sha }}
+
       - name: Get build tag
         id: build-tag
         env:
@@ -79,16 +108,16 @@ jobs:
         run: |
           case $RUN_KIND in
           push-main)
-            echo "tag=$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
+            echo "build-tag=$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
             ;;
           storage-release)
-            echo "tag=release-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
+            echo "build-tag=release-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
             ;;
           proxy-release)
-            echo "tag=release-proxy-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
+            echo "build-tag=release-proxy-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
             ;;
           compute-release)
-            echo "tag=release-compute-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
+            echo "build-tag=release-compute-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
             ;;
           pr|storage-rc-pr|compute-rc-pr|proxy-rc-pr)
             BUILD_AND_TEST_RUN_ID=$(gh api --paginate \
@@ -96,10 +125,21 @@ jobs:
               -H "X-GitHub-Api-Version: 2022-11-28" \
               "/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${CURRENT_SHA}&branch=${CURRENT_BRANCH}" \
               | jq '[.workflow_runs[] | select(.name == "Build and Test")][0].id // ("Error: No matching workflow run found." | halt_error(1))')
-            echo "tag=$BUILD_AND_TEST_RUN_ID" | tee -a $GITHUB_OUTPUT
+            echo "build-tag=$BUILD_AND_TEST_RUN_ID" | tee -a $GITHUB_OUTPUT
+            case $RUN_KIND in
+            storage-rc-pr)
+              echo "release-tag=release-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
+              ;;
+            proxy-rc-pr)
+              echo "release-tag=release-proxy-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
+              ;;
+            compute-rc-pr)
+              echo "release-tag=release-compute-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
+              ;;
+            esac
             ;;
           workflow-dispatch)
-            echo "tag=$GITHUB_RUN_ID" | tee -a $GITHUB_OUTPUT
+            echo "build-tag=$GITHUB_RUN_ID" | tee -a $GITHUB_OUTPUT
             ;;
           *)
             echo "Unexpected RUN_KIND ('${RUN_KIND}'), failing to assign build-tag!"
@@ -120,10 +160,10 @@ jobs:
 
       - name: Get the release PR run ID
         id: release-pr-run-id
-        if: ${{ contains(fromJson('["storage-release", "compute-release", "proxy-release"]'), steps.run-kind.outputs.run-kind) }}
+        if: ${{ contains(fromJSON('["storage-release", "compute-release", "proxy-release"]'), steps.run-kind.outputs.run-kind) }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CURRENT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          CURRENT_SHA: ${{ github.sha }}
         run: |
           RELEASE_PR_RUN_ID=$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=$CURRENT_SHA" | jq '[.workflow_runs[] | select(.name == "Build and Test") | select(.head_branch | test("^rc/release(-(proxy|compute))?/[0-9]{4}-[0-9]{2}-[0-9]{2}$"; "s"))] | first | .id // ("Failed to find Build and Test run from  RC PR!" | halt_error(1))')
           echo "release-pr-run-id=$RELEASE_PR_RUN_ID" | tee -a $GITHUB_OUTPUT

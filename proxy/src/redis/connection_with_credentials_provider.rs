@@ -143,6 +143,8 @@ impl ConnectionWithCredentialsProvider {
                         db: 0,
                         username: Some(username),
                         password: Some(password.clone()),
+                        // TODO: switch to RESP3 after testing new client version.
+                        protocol: redis::ProtocolVersion::RESP2,
                     },
                 })
             }

@@ -9,6 +9,9 @@ on:
   schedule:
     - cron: '0 10 * * *'
 
+permissions:
+  contents: read
+
 jobs:
   cargo-deny:
     strategy:
@@ -24,16 +27,24 @@ jobs:
 
     runs-on: [self-hosted, small]
 
+    permissions:
+      packages: read
+
     container:
-      image: ${{ inputs.build-tools-image || 'neondatabase/build-tools:pinned' }}
+      image: ${{ inputs.build-tools-image || 'ghcr.io/neondatabase/build-tools:pinned' }}
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       options: --init
 
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ matrix.ref }}
 
@@ -45,7 +56,7 @@ jobs:
 
       - name: Post to a Slack channel
         if: ${{ github.event_name == 'schedule' && failure() }}
-        uses: slackapi/slack-github-action@v2
+        uses: slackapi/slack-github-action@485a9d42d3a73031f12ec201c457e2162c45d02d # v2.0.0
         with:
           method: chat.postMessage
           token: ${{ secrets.SLACK_BOT_TOKEN }}

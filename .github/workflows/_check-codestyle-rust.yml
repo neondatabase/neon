@@ -23,25 +23,38 @@ jobs:
   check-codestyle-rust:
     strategy:
       matrix:
-        arch: ${{ fromJson(inputs.archs) }}
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
+        arch: ${{ fromJSON(inputs.archs) }}
+    runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
+
+    permissions:
+      packages: read
 
     container:
       image: ${{ inputs.build-tools-image }}
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       options: --init
 
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: true
 
       - name: Cache cargo deps
-        uses: actions/cache@v4
+        uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
         with:
+          endpoint: ${{ vars.HETZNER_CACHE_REGION }}.${{ vars.HETZNER_CACHE_ENDPOINT }}
+          bucket: ${{ vars.HETZNER_CACHE_BUCKET }}
+          accessKey: ${{ secrets.HETZNER_CACHE_ACCESS_KEY }}
+          secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
+          use-fallback: false
           path: |
             ~/.cargo/registry
             !~/.cargo/registry/src

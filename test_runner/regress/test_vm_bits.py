@@ -163,9 +163,9 @@ def test_vm_bit_clear_on_heap_lock_whitebox(neon_env_builder: NeonEnvBuilder):
     relfrozenxid = int(
         query_scalar(cur, "SELECT relfrozenxid FROM pg_class WHERE relname='vmtest_lock'")
     )
-    assert (
-        relfrozenxid > xid
-    ), f"Inserted rows were not frozen. This can be caused by concurrent activity in the database. (XID {xid}, relfrozenxid {relfrozenxid}"
+    assert relfrozenxid > xid, (
+        f"Inserted rows were not frozen. This can be caused by concurrent activity in the database. (XID {xid}, relfrozenxid {relfrozenxid}"
+    )
 
     # Lock a row. This clears the all-frozen VM bit for that page.
     cur.execute("BEGIN")
@@ -324,7 +324,7 @@ def test_check_visibility_map(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     # Run pgbench in 4 different databases, to exercise different shards.
     dbnames = [f"pgbench{i}" for i in range(PGBENCH_RUNS)]
     for i, dbname in enumerate(dbnames):
-        log.info(f"pgbench run {i+1}/{PGBENCH_RUNS}")
+        log.info(f"pgbench run {i + 1}/{PGBENCH_RUNS}")
         endpoint.safe_psql(f"create database {dbname}")
         connstr = endpoint.connstr(dbname=dbname)
         # Initialize the data set, but don't vacuum yet.

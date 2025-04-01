@@ -6,9 +6,12 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import TYPE_CHECKING
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, PgBin
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv, PgBin
 
 
 # Test restarting page server, while safekeeper and compute node keep

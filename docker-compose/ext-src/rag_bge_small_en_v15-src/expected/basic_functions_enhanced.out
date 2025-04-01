@@ -1,0 +1,31 @@
+-- Basic function tests for chunks_by_token_count
+SELECT rag_bge_small_en_v15.chunks_by_token_count('the cat sat on the mat', 3, 2);
+                 chunks_by_token_count                  
+--------------------------------------------------------
+ {"the cat sat","cat sat on","sat on the","on the mat"}
+(1 row)
+
+SELECT rag_bge_small_en_v15.chunks_by_token_count('Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.', 5, 2);
+                                                                              chunks_by_token_count                                                                              
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"Lorem ipsum","ipsum dolor sit","sit amet,",consectetur,"adipiscing elit",elit.,"Sed do","do eiusmod",tempor,"incididunt ut","ut labore et","et dolore magna","magna aliqua."}
+(1 row)
+
+SELECT (rag_bge_small_en_v15.chunks_by_token_count('the cat', 5, 0))[1];
+ chunks_by_token_count 
+-----------------------
+ the cat
+(1 row)
+
+SELECT rag_bge_small_en_v15.chunks_by_token_count('', 5, 2);
+ chunks_by_token_count 
+-----------------------
+ {}
+(1 row)
+
+SELECT rag_bge_small_en_v15.chunks_by_token_count('a b c d e f g h i j k l m n o p', 3, 1);
+                      chunks_by_token_count                      
+-----------------------------------------------------------------
+ {"a b c","c d e","e f g","g h i","i j k","k l m","m n o","o p"}
+(1 row)
+

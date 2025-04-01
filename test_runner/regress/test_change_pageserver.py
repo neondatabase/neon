@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.remote_storage import RemoteStorageKind
-from werkzeug.wrappers.request import Request
-from werkzeug.wrappers.response import Response
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnvBuilder
 
 
-def test_change_pageserver(neon_env_builder: NeonEnvBuilder, make_httpserver):
+def test_change_pageserver(neon_env_builder: NeonEnvBuilder):
     """
     A relatively low level test of reconfiguring a compute's pageserver at runtime.  Usually this
     is all done via the storage controller, but this test will disable the storage controller's compute
@@ -22,19 +23,6 @@ def test_change_pageserver(neon_env_builder: NeonEnvBuilder, make_httpserver):
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
     )
     env = neon_env_builder.init_start()
-
-    neon_env_builder.control_plane_hooks_api = (
-        f"http://{make_httpserver.host}:{make_httpserver.port}/"
-    )
-
-    def ignore_notify(request: Request):
-        # This test does direct updates to compute configuration: disable the storage controller's notification
-        log.info(f"Ignoring storage controller compute notification: {request.json}")
-        return Response(status=200)
-
-    make_httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(
-        ignore_notify
-    )
 
     env.create_branch("test_change_pageserver")
     endpoint = env.endpoints.create_start("test_change_pageserver")

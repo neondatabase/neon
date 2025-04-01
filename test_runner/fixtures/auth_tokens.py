@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import jwt
 
-from fixtures.common_types import TenantId
+if TYPE_CHECKING:
+    from fixtures.common_types import TenantId
 
 
 @dataclass

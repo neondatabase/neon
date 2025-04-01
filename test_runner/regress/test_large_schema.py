@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import os
 import time
+from typing import TYPE_CHECKING
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 # This test creates large number of tables which cause large catalog.

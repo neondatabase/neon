@@ -7,13 +7,13 @@ import logging
 import signal
 import sys
 from collections import defaultdict
-from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import aiohttp
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable
     from typing import Any
 
 

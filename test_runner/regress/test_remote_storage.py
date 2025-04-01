@@ -180,9 +180,9 @@ def test_remote_storage_backup_and_restore(
     # The initiated attach operation should survive the restart, and continue from where it was.
     env.pageserver.stop()
     layer_download_failed_regex = r"Failed to download a remote file: simulated failure of remote operation Download.*[0-9A-F]+-[0-9A-F]+"
-    assert not env.pageserver.log_contains(
-        layer_download_failed_regex
-    ), "we shouldn't have tried any layer downloads yet since list remote timelines has a failpoint"
+    assert not env.pageserver.log_contains(layer_download_failed_regex), (
+        "we shouldn't have tried any layer downloads yet since list remote timelines has a failpoint"
+    )
     env.pageserver.start()
 
     # The attach should have got far enough that it recovers on restart (i.e. tenant's
@@ -197,9 +197,9 @@ def test_remote_storage_backup_and_restore(
 
     detail = client.timeline_detail(tenant_id, timeline_id)
     log.info("Timeline detail after attach completed: %s", detail)
-    assert (
-        Lsn(detail["last_record_lsn"]) >= current_lsn
-    ), "current db Lsn should should not be less than the one stored on remote storage"
+    assert Lsn(detail["last_record_lsn"]) >= current_lsn, (
+        "current db Lsn should should not be less than the one stored on remote storage"
+    )
 
     log.info("select some data, this will cause layers to be downloaded")
     endpoint = env.endpoints.create_start("main")
@@ -456,9 +456,9 @@ def test_remote_timeline_client_calls_started_metric(
     def ensure_calls_started_grew():
         for (file_kind, op_kind), observations in calls_started.items():
             log.info(f"ensure_calls_started_grew: {file_kind} {op_kind}: {observations}")
-            assert all(
-                x < y for x, y in zip(observations, observations[1:], strict=False)
-            ), f"observations for {file_kind} {op_kind} did not grow monotonically: {observations}"
+            assert all(x < y for x, y in zip(observations, observations[1:], strict=False)), (
+                f"observations for {file_kind} {op_kind} did not grow monotonically: {observations}"
+            )
 
     def churn(data_pass1, data_pass2):
         # overwrite the same data in place, vacuum inbetween, and
@@ -540,7 +540,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
             "l0_flush_stall_threshold": "0",
             "compaction_target_size": f"{64 * 1024}",
             # large horizon to avoid automatic GC (our assert on gc_result below relies on that)
-            "gc_horizon": f"{1024 ** 4}",
+            "gc_horizon": f"{1024**4}",
             "gc_period": "1h",
             # disable PITR so that GC considers just gc_horizon
             "pitr_interval": "0s",
@@ -574,9 +574,9 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
         try:
             client.timeline_checkpoint(tenant_id, timeline_id)
         except PageserverApiException:
-            assert (
-                checkpoint_allowed_to_fail.is_set()
-            ), "checkpoint op should only fail in response to timeline deletion"
+            assert checkpoint_allowed_to_fail.is_set(), (
+                "checkpoint op should only fail in response to timeline deletion"
+            )
 
     checkpoint_thread = threading.Thread(target=checkpoint_thread_fn)
     checkpoint_thread.start()
@@ -662,9 +662,9 @@ def test_empty_branch_remote_storage_upload(neon_env_builder: NeonEnvBuilder):
         )
     )
     expected_timelines = set([env.initial_timeline, new_branch_timeline_id])
-    assert (
-        timelines_before_detach == expected_timelines
-    ), f"Expected to have an initial timeline and the branch timeline only, but got {timelines_before_detach}"
+    assert timelines_before_detach == expected_timelines, (
+        f"Expected to have an initial timeline and the branch timeline only, but got {timelines_before_detach}"
+    )
 
     client.tenant_detach(env.initial_tenant)
     env.pageserver.tenant_attach(env.initial_tenant)
@@ -677,9 +677,9 @@ def test_empty_branch_remote_storage_upload(neon_env_builder: NeonEnvBuilder):
         )
     )
 
-    assert (
-        timelines_before_detach == timelines_after_detach
-    ), f"Expected to have same timelines after reattach, but got {timelines_after_detach}"
+    assert timelines_before_detach == timelines_after_detach, (
+        f"Expected to have same timelines after reattach, but got {timelines_after_detach}"
+    )
 
 
 def test_empty_branch_remote_storage_upload_on_restart(neon_env_builder: NeonEnvBuilder):
@@ -724,9 +724,9 @@ def test_empty_branch_remote_storage_upload_on_restart(neon_env_builder: NeonEnv
     new_branch_on_remote_storage = env.pageserver_remote_storage.timeline_path(
         env.initial_tenant, new_branch_timeline_id
     )
-    assert (
-        not new_branch_on_remote_storage.exists()
-    ), "failpoint should had prohibited index_part.json upload"
+    assert not new_branch_on_remote_storage.exists(), (
+        "failpoint should had prohibited index_part.json upload"
+    )
 
     # during reconciliation we should had scheduled the uploads and on the
     # retried create_timeline, we will await for those to complete on next
@@ -768,9 +768,9 @@ def test_empty_branch_remote_storage_upload_on_restart(neon_env_builder: NeonEnv
         client.configure_failpoints(("before-upload-index", "off"))
         exception = q.get()
 
-        assert (
-            exception is None
-        ), "create_timeline should have succeeded, because we deleted unuploaded local state"
+        assert exception is None, (
+            "create_timeline should have succeeded, because we deleted unuploaded local state"
+        )
 
         # this is because creating a timeline always awaits for the uploads to complete
         assert_nothing_to_upload(client, env.initial_tenant, new_branch_timeline_id)

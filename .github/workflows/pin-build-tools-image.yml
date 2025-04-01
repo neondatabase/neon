@@ -40,14 +40,19 @@ jobs:
       skip: ${{ steps.check-manifests.outputs.skip }}
 
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
       - name: Check if we really need to pin the image
         id: check-manifests
         env:
           FROM_TAG: ${{ inputs.from-tag }}
           TO_TAG: pinned
         run: |
-          docker manifest inspect "docker.io/neondatabase/build-tools:${FROM_TAG}" > "${FROM_TAG}.json"
-          docker manifest inspect "docker.io/neondatabase/build-tools:${TO_TAG}"   > "${TO_TAG}.json"
+          docker manifest inspect "ghcr.io/neondatabase/build-tools:${FROM_TAG}" > "${FROM_TAG}.json"
+          docker manifest inspect "ghcr.io/neondatabase/build-tools:${TO_TAG}"   > "${TO_TAG}.json"
 
           if diff "${FROM_TAG}.json" "${TO_TAG}.json"; then
             skip=true
@@ -71,13 +76,13 @@ jobs:
     with:
       image-map: |
         {
-          "docker.io/neondatabase/build-tools:${{ inputs.from-tag }}-bullseye": [
+          "ghcr.io/neondatabase/build-tools:${{ inputs.from-tag }}-bullseye": [
             "docker.io/neondatabase/build-tools:pinned-bullseye",
             "ghcr.io/neondatabase/build-tools:pinned-bullseye",
             "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/build-tools:pinned-bullseye",
             "${{ vars.AZURE_DEV_REGISTRY_NAME }}.azurecr.io/neondatabase/build-tools:pinned-bullseye"
           ],
-          "docker.io/neondatabase/build-tools:${{ inputs.from-tag }}-bookworm": [
+          "ghcr.io/neondatabase/build-tools:${{ inputs.from-tag }}-bookworm": [
             "docker.io/neondatabase/build-tools:pinned-bookworm",
             "docker.io/neondatabase/build-tools:pinned",
             "ghcr.io/neondatabase/build-tools:pinned-bookworm",

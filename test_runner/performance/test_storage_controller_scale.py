@@ -5,10 +5,10 @@ import random
 import time
 from collections import defaultdict
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineArchivalState, TimelineId
-from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -21,6 +21,9 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pg_version import PgVersion
 from fixtures.utils import wait_until
+
+if TYPE_CHECKING:
+    from fixtures.compute_reconfigure import ComputeReconfigure
 
 
 def get_consistent_node_shard_counts(env: NeonEnv, total_shards) -> defaultdict[str, int]:
@@ -82,6 +85,7 @@ def test_storage_controller_many_tenants(
         # guard against regressions in restart time.
         "max_offline": "30s",
         "max_warming_up": "300s",
+        "use_local_compute_notifications": False,
     }
     neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
 
@@ -170,7 +174,7 @@ def test_storage_controller_many_tenants(
 
         rss = env.storage_controller.get_metric_value("process_resident_memory_bytes")
         assert rss is not None
-        log.info(f"Resident memory: {rss} ({ rss / total_shards} per shard)")
+        log.info(f"Resident memory: {rss} ({rss / total_shards} per shard)")
         assert rss < expect_memory_per_shard * total_shards
 
     def assert_all_tenants_scheduled_in_home_az():
@@ -185,15 +189,15 @@ def test_storage_controller_many_tenants(
                     assert preferred_az == shard["preferred_az_id"]
 
                 # Attachment should be in the preferred AZ
-                assert shard["preferred_az_id"] == az_selector(
-                    shard["node_attached"]
-                ), f"Shard {shard['tenant_shard_id']} not in {shard['preferred_az_id']}"
+                assert shard["preferred_az_id"] == az_selector(shard["node_attached"]), (
+                    f"Shard {shard['tenant_shard_id']} not in {shard['preferred_az_id']}"
+                )
 
                 # Secondary locations should not be in the preferred AZ
                 for node_secondary in shard["node_secondary"]:
-                    assert (
-                        shard["preferred_az_id"] != az_selector(node_secondary)
-                    ), f"Shard {shard['tenant_shard_id']} secondary should be in {shard['preferred_az_id']}"
+                    assert shard["preferred_az_id"] != az_selector(node_secondary), (
+                        f"Shard {shard['tenant_shard_id']} secondary should be in {shard['preferred_az_id']}"
+                    )
 
                 # There should only be one secondary location (i.e. no migrations in flight)
                 assert len(shard["node_secondary"]) == 1
@@ -530,9 +534,9 @@ def test_storage_controller_many_tenants(
         for node in nodes:
             if node["id"] in node_ids:
                 checked_any = True
-                assert (
-                    node["availability"] == expected_availability
-                ), f"Node {node['id']} is not {expected_availability} yet: {node['availability']}"
+                assert node["availability"] == expected_availability, (
+                    f"Node {node['id']} is not {expected_availability} yet: {node['availability']}"
+                )
 
         assert checked_any
 
@@ -549,9 +553,9 @@ def test_storage_controller_many_tenants(
         desc = env.storage_controller.tenant_describe(tenant_id)
         for shard in desc["shards"]:
             # Attachment should be outside the AZ where we killed the pageservers
-            assert (
-                az_selector(shard["node_attached"]) != victim_az
-            ), f"Shard {shard['tenant_shard_id']} still in {victim_az} (node {shard['node_attached']})"
+            assert az_selector(shard["node_attached"]) != victim_az, (
+                f"Shard {shard['tenant_shard_id']} still in {victim_az} (node {shard['node_attached']})"
+            )
 
     # Bring back the pageservers
     for ps in killed_pageservers:

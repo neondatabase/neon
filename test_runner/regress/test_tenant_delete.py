@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
@@ -23,8 +24,10 @@ from fixtures.remote_storage import RemoteStorageKind, s3_storage
 from fixtures.utils import run_pg_bench_small, wait_until
 from fixtures.workload import Workload
 from requests.exceptions import ReadTimeout
-from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
+
+if TYPE_CHECKING:
+    from werkzeug.wrappers.request import Request
 
 
 def error_tolerant_delete(ps_http, tenant_id):

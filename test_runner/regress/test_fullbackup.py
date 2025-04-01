@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from fixtures.common_types import Lsn
 from fixtures.log_helper import log
@@ -10,8 +10,12 @@ from fixtures.neon_fixtures import (
     PgBin,
     VanillaPostgres,
 )
-from fixtures.port_distributor import PortDistributor
 from fixtures.utils import query_scalar, subprocess_capture
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from fixtures.port_distributor import PortDistributor
 
 num_rows = 1000
 

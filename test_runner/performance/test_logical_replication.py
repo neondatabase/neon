@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, cast
 
@@ -14,6 +13,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import logical_replication_sync
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from subprocess import Popen
     from typing import AnyStr
 

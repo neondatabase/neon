@@ -4,18 +4,21 @@ import threading
 import time
 from contextlib import closing
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 import pytest
 import requests
 from fixtures.common_types import Lsn, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    Endpoint,
-    NeonEnvBuilder,
-)
 from fixtures.remote_storage import S3Storage, s3_storage
 from fixtures.safekeeper_utils import is_segment_offloaded
 from fixtures.utils import wait_until
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import (
+        Endpoint,
+        NeonEnvBuilder,
+    )
 
 
 @pytest.mark.parametrize("auth_enabled", [False, True])

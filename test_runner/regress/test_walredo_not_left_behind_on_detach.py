@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING
 
 import psutil
 import pytest
 from fixtures.common_types import TenantId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.pageserver.http import PageserverApiException
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 def assert_child_processes(pageserver_pid, wal_redo_present=False, defunct_present=False):

@@ -4,8 +4,6 @@ import concurrent.futures
 from typing import TYPE_CHECKING
 
 import pytest
-from pytest_httpserver import HTTPServer
-from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 from fixtures.common_types import TenantId
@@ -14,6 +12,9 @@ from fixtures.log_helper import log
 if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import Any
+
+    from pytest_httpserver import HTTPServer
+    from werkzeug.wrappers.request import Request
 
 
 class ComputeReconfigure:

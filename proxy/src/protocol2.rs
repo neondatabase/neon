@@ -163,8 +163,7 @@ fn process_proxy_payload(
         // other values are unassigned and must not be emitted by senders. Receivers
         // must drop connections presenting unexpected values here.
         #[rustfmt::skip] // https://github.com/rust-lang/rustfmt/issues/6384
-        _ => return Err(io::Error::new(
-            io::ErrorKind::Other,
+        _ => return Err(io::Error::other(
             format!(
                 "invalid proxy protocol command 0x{:02X}. expected local (0x20) or proxy (0x21)",
                 header.version_and_command
@@ -178,21 +177,20 @@ fn process_proxy_payload(
         TCP_OVER_IPV4 | UDP_OVER_IPV4 => {
             let addr = payload
                 .try_get::<ProxyProtocolV2HeaderV4>()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::Other, size_err))?;
+                .ok_or_else(|| io::Error::other(size_err))?;
 
             SocketAddr::from((addr.src_addr.get(), addr.src_port.get()))
         }
         TCP_OVER_IPV6 | UDP_OVER_IPV6 => {
             let addr = payload
                 .try_get::<ProxyProtocolV2HeaderV6>()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::Other, size_err))?;
+                .ok_or_else(|| io::Error::other(size_err))?;
 
             SocketAddr::from((addr.src_addr.get(), addr.src_port.get()))
         }
         // unspecified or unix stream. ignore the addresses
         _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 "invalid proxy protocol address family/transport protocol.",
             ));
         }

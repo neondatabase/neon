@@ -1,14 +1,8 @@
-use std::error::Error as StdError;
-use std::{fmt, io};
+use std::fmt;
 
 use anyhow::Context;
 use measured::FixedCardinalityLabel;
 use tokio::task::JoinError;
-
-/// Upcast (almost) any error into an opaque [`io::Error`].
-pub(crate) fn io_error(e: impl Into<Box<dyn StdError + Send + Sync>>) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, e)
-}
 
 /// Marks errors that may be safely shown to a client.
 /// This trait can be seen as a specialized version of [`ToString`].

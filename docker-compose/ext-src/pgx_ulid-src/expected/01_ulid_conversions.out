@@ -1,0 +1,55 @@
+-- Create a test ULID value
+CREATE TEMP TABLE test_ulids AS
+SELECT '01GV5PA9EQG7D82Q3Y4PKBZSYV'::ulid as test_ulid;
+-- Test conversion to text
+SELECT 'ulid to text conversion' as test_name,
+       test_ulid::text = '01GV5PA9EQG7D82Q3Y4PKBZSYV' as result
+FROM test_ulids;
+        test_name        | result 
+-------------------------+--------
+ ulid to text conversion | t
+(1 row)
+
+-- Test conversion to UUID
+SELECT 'ulid to UUID conversion' as test_name,
+       test_ulid::uuid::text = '0186cb65-25d7-81da-815c-7e25a6bfe7db' as result
+FROM test_ulids;
+        test_name        | result 
+-------------------------+--------
+ ulid to UUID conversion | t
+(1 row)
+
+-- Test conversion to bytea
+SELECT 'ulid to bytea conversion' as test_name,
+       length(test_ulid::bytea) = 16 as result
+FROM test_ulids;
+        test_name         | result 
+--------------------------+--------
+ ulid to bytea conversion | t
+(1 row)
+
+-- Test conversion to timestamp
+SELECT 'ulid to timestamp conversion' as test_name,
+       to_char(test_ulid::timestamp, 'YYYY-MM-DD HH24:MI:SS.MS') = '2023-03-10 04:00:49.111' as result
+FROM test_ulids;
+          test_name           | result 
+------------------------------+--------
+ ulid to timestamp conversion | t
+(1 row)
+
+-- Test conversion from UUID
+SELECT 'UUID to ulid conversion' as test_name,
+       '0186cb65-25d7-81da-815c-7e25a6bfe7db'::uuid::ulid::text = '01GV5PA9EQG7D82Q3Y4PKBZSYV' as result;
+        test_name        | result 
+-------------------------+--------
+ UUID to ulid conversion | t
+(1 row)
+
+-- Test conversion from timestamp
+SELECT 'timestamp to ulid conversion' as test_name,
+       '2023-03-10 12:00:49.111'::timestamp::ulid::text = '01GV5PA9EQ0000000000000000' as result;
+          test_name           | result 
+------------------------------+--------
+ timestamp to ulid conversion | t
+(1 row)
+

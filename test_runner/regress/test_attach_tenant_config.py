@@ -1,17 +1,22 @@
 from __future__ import annotations
 
-from collections.abc import Generator
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import TenantId
-from fixtures.neon_fixtures import (
-    NeonEnv,
-    NeonEnvBuilder,
-)
-from fixtures.pageserver.http import TenantConfig
+from fixtures.log_helper import log
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.utils import wait_until
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
+
+    from fixtures.neon_fixtures import (
+        NeonEnv,
+        NeonEnvBuilder,
+    )
+    from fixtures.pageserver.http import PageserverHttpClient, TenantConfig
 
 
 @pytest.fixture
@@ -52,9 +57,9 @@ def negative_env(neon_env_builder: NeonEnvBuilder) -> Generator[NegativeTests, N
 
     yield NegativeTests(env, tenant_id, config_pre_detach)
 
-    assert tenant_id not in [
-        TenantId(t["id"]) for t in ps_http.tenant_list()
-    ], "tenant should not be attached after negative test"
+    assert tenant_id not in [TenantId(t["id"]) for t in ps_http.tenant_list()], (
+        "tenant should not be attached after negative test"
+    )
 
     env.pageserver.allowed_errors.extend(
         [
@@ -144,7 +149,6 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "compaction_l0_semaphore": False,
         "l0_flush_delay_threshold": 25,
         "l0_flush_stall_threshold": 42,
-        "l0_flush_wait_upload": True,
         "compaction_target_size": 1048576,
         "checkpoint_distance": 10000,
         "checkpoint_timeout": "13m",
@@ -159,7 +163,6 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "evictions_low_residence_duration_metric_threshold": "2days",
         "gc_horizon": 23 * (1024 * 1024),
         "gc_period": "2h 13m",
-        "heatmap_period": "10m",
         "image_creation_threshold": 7,
         "pitr_interval": "1m",
         "lagging_wal_timeout": "23m",
@@ -182,7 +185,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
             "type": "interpreted",
             "args": {"format": "bincode", "compression": {"zstd": {"level": 1}}},
         },
-        "rel_size_v2_enabled": True,
+        "rel_size_v2_enabled": False,  # test suite enables it by default as of https://github.com/neondatabase/neon/issues/11081, so, custom config means disabling it
         "gc_compaction_enabled": True,
         "gc_compaction_initial_threshold_kb": 1024000,
         "gc_compaction_ratio_percent": 200,
@@ -190,36 +193,64 @@ def test_fully_custom_config(positive_env: NeonEnv):
     }
 
     vps_http = env.storage_controller.pageserver_api()
+    ps_http = env.pageserver.http_client()
 
-    initial_tenant_config = vps_http.tenant_config(env.initial_tenant)
-    assert [
-        (key, val)
-        for key, val in initial_tenant_config.tenant_specific_overrides.items()
-        if val is not None
-    ] == []
-    assert set(initial_tenant_config.effective_config.keys()) == set(
-        fully_custom_config.keys()
-    ), "ensure we cover all config options"
+    def get_config(client: PageserverHttpClient, tenant_id):
+        ignored_fields = [
+            # storcon overrides this during reconciles, and
+            # this test triggers reconciles when we change the
+            # tenant config via vps_http
+            "heatmap_period"
+        ]
+        config = client.tenant_config(tenant_id)
+        for field in ignored_fields:
+            config.effective_config.pop(field, None)
+            config.tenant_specific_overrides.pop(field, None)
+        return config
 
+    # storcon returns its db state in GET tenant_config in both fields
+    # https://github.com/neondatabase/neon/issues/9621
+    initial_tenant_config = get_config(vps_http, env.initial_tenant)
+    assert initial_tenant_config.tenant_specific_overrides == {}
+    assert initial_tenant_config.tenant_specific_overrides == initial_tenant_config.effective_config
+
+    # pageserver has built-in defaults for all config options
+    # also self-test that our fully_custom_config covers all of them
+    initial_tenant_config = get_config(ps_http, env.initial_tenant)
+    assert initial_tenant_config.tenant_specific_overrides == {}
+    assert set(initial_tenant_config.effective_config.keys()) == set(fully_custom_config.keys()), (
+        "ensure we cover all config options"
+    )
+
+    # create a new tenant to test overrides
     (tenant_id, _) = env.create_tenant()
     vps_http.set_tenant_config(tenant_id, fully_custom_config)
-    our_tenant_config = vps_http.tenant_config(tenant_id)
-    assert our_tenant_config.tenant_specific_overrides == fully_custom_config
-    assert set(our_tenant_config.effective_config.keys()) == set(
-        fully_custom_config.keys()
-    ), "ensure we cover all config options"
-    assert (
-        {
+
+    for iteration in ["first", "after-reattach"]:
+        log.info(f"iteration: {iteration}")
+
+        # validate that overrides for all fields are returned by storcon
+        our_tenant_config = get_config(vps_http, tenant_id)
+        assert our_tenant_config.tenant_specific_overrides == fully_custom_config
+        assert our_tenant_config.tenant_specific_overrides == our_tenant_config.effective_config
+
+        # validate that overrides for all fields reached pageserver
+        our_tenant_config = get_config(ps_http, tenant_id)
+        assert our_tenant_config.tenant_specific_overrides == fully_custom_config
+        assert our_tenant_config.tenant_specific_overrides == our_tenant_config.effective_config
+
+        # some more self-validation: assert that none of the values in our
+        # fully custom config are the same as the default values
+        assert set(our_tenant_config.effective_config.keys()) == set(fully_custom_config.keys()), (
+            "ensure we cover all config options"
+        )
+        assert {
             k: initial_tenant_config.effective_config[k] != our_tenant_config.effective_config[k]
             for k in fully_custom_config.keys()
-        }
-        == {k: True for k in fully_custom_config.keys()}
-    ), "ensure our custom config has different values than the default config for all config options, so we know we overrode everything"
+        } == {k: True for k in fully_custom_config.keys()}, (
+            "ensure our custom config has different values than the default config for all config options, so we know we overrode everything"
+        )
 
-    env.pageserver.tenant_detach(tenant_id)
-    env.pageserver.tenant_attach(tenant_id, config=fully_custom_config)
-
-    assert vps_http.tenant_config(tenant_id).tenant_specific_overrides == fully_custom_config
-    assert set(vps_http.tenant_config(tenant_id).effective_config.keys()) == set(
-        fully_custom_config.keys()
-    ), "ensure we cover all config options"
+        # ensure customizations survive reattach
+        env.pageserver.tenant_detach(tenant_id)
+        env.pageserver.tenant_attach(tenant_id, config=fully_custom_config)

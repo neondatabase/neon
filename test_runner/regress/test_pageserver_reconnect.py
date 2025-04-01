@@ -3,10 +3,13 @@ from __future__ import annotations
 import threading
 import time
 from contextlib import closing
+from typing import TYPE_CHECKING
 
 import psycopg2.errors
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, PgBin
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv, PgBin
 
 
 # Test updating neon.pageserver_connstring setting on the fly.
@@ -25,7 +28,7 @@ def test_pageserver_reconnect(neon_simple_env: NeonEnv, pg_bin: PgBin):
     def run_pgbench(connstr: str):
         log.info(f"Start a pgbench workload on pg {connstr}")
         pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", f"-s{scale}", connstr])
-        pg_bin.run_capture(["pgbench", f"-T{int(n_reconnects*timeout)}", connstr])
+        pg_bin.run_capture(["pgbench", f"-T{int(n_reconnects * timeout)}", connstr])
 
     thread = threading.Thread(target=run_pgbench, args=(endpoint.connstr(),), daemon=True)
     thread.start()
