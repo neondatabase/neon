@@ -42,7 +42,7 @@ jobs:
 
     runs-on: [self-hosted, small]
     container:
-      image: ghcr.io/neondatabase/neon-test-extensions-v${{ matrix.pg-version }}:latest
+      image: ghcr.io/neondatabase/neon-test-extensions-v${{ matrix.pg-version }}:14192004730
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -66,8 +66,6 @@ jobs:
 
       - name: Run the regression tests
         run: /run-tests.sh
-        env:
-          BENCHMARK_CONNSTR: ${{steps.create-branch.outputs.dsn}}
 
       - name: Delete Neon Project
         if: ${{ always() }}
