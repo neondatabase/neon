@@ -17,7 +17,6 @@ from fixtures.log_helper import log
 from fixtures.neon_api import NeonAPI
 from fixtures.neon_fixtures import PgBin
 from fixtures.pg_version import PgVersion
-from requests import HTTPError
 
 
 class NeonEndpoint:
@@ -169,13 +168,13 @@ class NeonBranch:
             ep.terminate_benchmark()
         self.terminate_benchmark()
         res: dict[str, Any] | None = self.neon_api.restore_branch(
-                    self.project_id,
-                    self.id,
-                    source_branch_id,
-                    source_lsn,
-                    source_timestamp,
-                    preserve_under_name,
-                )
+            self.project_id,
+            self.id,
+            source_branch_id,
+            source_lsn,
+            source_timestamp,
+            preserve_under_name,
+        )
         if res is None:
             log.info("Branches limit exceeded, skipping")
             return None
@@ -217,6 +216,7 @@ class NeonProject:
         self.neon_api.wait_for_operation_to_finish(self.id)
         self.benchmarks: dict[str, subprocess.Popen[Any]] = {}
         self.restore_num: int = 0
+        self.restart_pgbench_on_console_errors: bool = False
 
     def delete(self):
         self.neon_api.delete_project(self.id)
@@ -302,7 +302,7 @@ class NeonProject:
             log.error("STDERR: %s", err)
             # if the benchmark failed due to irresponsible Control plane,
             # just restart it
-            if (
+            if self.restart_pgbench_on_console_errors and (
                 "ERROR:  Couldn't connect to compute node" in err
                 or "ERROR:  Console request failed" in err
             ):
@@ -346,6 +346,10 @@ def setup_class(
     yield pg_bin, project
     log.info("Retried 524 errors: %s", neon_api.retries524)
     log.info("Retried 4xx errors: %s", neon_api.retries4xx)
+    if neon_api.retries524 > 0:
+        print(f"::warning::Retried on 524 error {neon_api.retries524} times")
+    if neon_api.retries4xx > 0:
+        print(f"::warning::Retried on 4xx error {neon_api.retries4xx} times")
     log.info("Removing the project")
     project.delete()
 

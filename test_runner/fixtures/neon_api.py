@@ -34,7 +34,9 @@ class NeonAPI:
         self.retries524 = 0
         self.retries4xx = 0
 
-    def __request(self, method: str | bytes, endpoint: str, **kwargs: Any) -> requests.Response | None:
+    def __request(
+        self, method: str | bytes, endpoint: str, **kwargs: Any
+    ) -> requests.Response | None:
         kwargs["headers"] = kwargs.get("headers", {})
         kwargs["headers"]["Authorization"] = f"Bearer {self.__neon_api_key}"
 
@@ -61,7 +63,10 @@ class NeonAPI:
                     if resp.json()["message"] == "branch not ready yet":
                         retry = True
                         self.retries4xx += 1
-                elif resp.status_code == 423 and resp.json()["message"] in {"endpoint is in some transitive state, could not suspend", "project already has running conflicting operations, scheduling of new ones is prohibited"}:
+                elif resp.status_code == 423 and resp.json()["message"] in {
+                    "endpoint is in some transitive state, could not suspend",
+                    "project already has running conflicting operations, scheduling of new ones is prohibited",
+                }:
                     retry = True
                     self.retries4xx += 1
                 elif resp.status_code == 524:
@@ -69,7 +74,7 @@ class NeonAPI:
                     retry = True
                     self.retries524 += 1
             if retry:
-                log.info("Retrying, attempt %s/%s", attempt+1, self.attempts)
+                log.info("Retrying, attempt %s/%s", attempt + 1, self.attempts)
                 time.sleep(self.sleep_before_retry)
                 continue
             else:
