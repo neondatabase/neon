@@ -3774,7 +3774,7 @@ pub fn make_router(
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/mark_invisible",
-            |r| testing_api_handler("mark timeline invisible", r, timeline_mark_invisible_handler),
+            |r| api_handler( r, timeline_mark_invisible_handler),
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/checkpoint",

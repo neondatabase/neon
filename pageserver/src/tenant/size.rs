@@ -33,7 +33,7 @@ pub struct ModelInputs {
 }
 
 /// A [`Segment`], with some extra information for display purposes
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct SegmentMeta {
     pub segment: Segment,
     pub timeline_id: TimelineId,
@@ -248,6 +248,8 @@ pub(super) async fn gather_inputs(
             None
         };
 
+        let branch_is_invisible = timeline.is_invisible() == Some(true);
+
         let lease_points = gc_info
             .leases
             .keys()
@@ -271,7 +273,10 @@ pub(super) async fn gather_inputs(
             .map(|(lsn, _child_id, _is_offloaded)| (lsn, LsnKind::BranchPoint))
             .collect::<Vec<_>>();
 
-        lsns.extend(lease_points.iter().map(|&lsn| (lsn, LsnKind::LeasePoint)));
+        if !branch_is_invisible {
+            // Do not count lease points for invisible branches.
+            lsns.extend(lease_points.iter().map(|&lsn| (lsn, LsnKind::LeasePoint)));
+        }
 
         drop(gc_info);
 
@@ -287,7 +292,9 @@ pub(super) async fn gather_inputs(
 
         // Add a point for the PITR cutoff
         let branch_start_needed = next_pitr_cutoff <= branch_start_lsn;
-        if !branch_start_needed {
+        if !branch_start_needed && !branch_is_invisible {
+            // Only add the GcCutOff point when the timeline is visible; otherwise, do not compute the size for the LSN
+            // range from the last branch point to the latest data.
             lsns.push((next_pitr_cutoff, LsnKind::GcCutOff));
         }
 
@@ -373,11 +380,19 @@ pub(super) async fn gather_inputs(
             }
         }
 
+        let branch_end_lsn = if branch_is_invisible {
+            // If the branch is invisible, the branch end is the last requested LSN (likely a branch cutoff point).
+            segments.last().unwrap().segment.lsn
+        } else {
+            // Otherwise, the branch end is the last record LSN.
+            last_record_lsn.0
+        };
+
         // Current end of the timeline
         segments.push(SegmentMeta {
             segment: Segment {
                 parent: Some(parent),
-                lsn: last_record_lsn.0,
+                lsn: branch_end_lsn,
                 size: None, // Filled in later, if necessary
                 needed: true,
             },
@@ -609,6 +624,7 @@ async fn calculate_logical_size(
     Ok(TimelineAtLsnSizeResult(timeline, lsn, size_res))
 }
 
+#[cfg(test)]
 #[test]
 fn verify_size_for_multiple_branches() {
     // this is generated from integration test test_tenant_size_with_multiple_branches, but this way
@@ -766,6 +782,7 @@ fn verify_size_for_multiple_branches() {
     assert_eq!(inputs.calculate(), 37_851_408);
 }
 
+#[cfg(test)]
 #[test]
 fn verify_size_for_one_branch() {
     let doc = r#"
