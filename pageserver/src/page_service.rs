@@ -987,11 +987,21 @@ impl PageServerHandler {
                     }
                 };
 
-                // Now that we know the shard, set the scope accordingly.
+                // This ctx travels as part of the BatchedFeMessage through
+                // batching into the request handler.
+                // The request handler needs to do some per-request work
+                // (relsize check) before dispatching the batch as a single
+                // get_vectored call to the Timeline.
+                // This ctx will be used for the reslize check, whereas the
+                // get_vectored call will be a different ctx with separate
+                // perf span.
                 let ctx = ctx.with_scope_page_service_pagestream(&shard);
 
+                // Similar game for this `span`: we funnel it through so that
+                // request handler log messages contain the request-specific fields.
                 let span = mkspan!(shard.tenant_shard_id.shard_slug());
 
+                // Enrich the perf span with shard_id now that shard routing is done.
                 ctx.perf_span_record(
                     "shard_id",
                     tracing::field::display(shard.get_shard_identity().shard_slug()),
