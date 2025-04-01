@@ -12,7 +12,7 @@ use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
 use context_iterator::TenantShardContextIterator;
@@ -34,7 +34,7 @@ use pageserver_api::controller_api::{
     TenantShardMigrateRequest, TenantShardMigrateResponse,
 };
 use pageserver_api::models::{
-    self, DetachBehavior, LocationConfig, LocationConfigListResponse, LocationConfigMode,
+    self, DetachBehavior, LocationConfig, LocationConfigListResponse, LocationConfigMode, LsnLease,
     PageserverUtilization, SecondaryProgress, ShardParameters, TenantConfig,
     TenantConfigPatchRequest, TenantConfigRequest, TenantLocationConfigRequest,
     TenantLocationConfigResponse, TenantShardLocation, TenantShardSplitRequest,
@@ -60,6 +60,7 @@ use tracing::{Instrument, debug, error, info, info_span, instrument, warn};
 use utils::completion::Barrier;
 use utils::generation::Generation;
 use utils::id::{NodeId, TenantId, TimelineId};
+use utils::lsn::Lsn;
 use utils::sync::gate::Gate;
 use utils::{failpoint_support, pausable_failpoint};
 
@@ -152,6 +153,7 @@ enum TenantOperations {
     TimelineGcBlockUnblock,
     DropDetached,
     DownloadHeatmapLayers,
+    TimelineLsnLease,
 }
 
 #[derive(Clone, strum_macros::Display)]
@@ -3985,6 +3987,75 @@ impl Service {
         })
         .await??;
         Ok(())
+    }
+
+    pub(crate) async fn tenant_timeline_lsn_lease(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        lsn: Lsn,
+    ) -> Result<LsnLease, ApiError> {
+        let _tenant_lock = trace_shared_lock(
+            &self.tenant_op_locks,
+            tenant_id,
+            TenantOperations::TimelineLsnLease,
+        )
+        .await;
+
+        let targets = {
+            let locked = self.inner.read().unwrap();
+            let mut targets = Vec::new();
+
+            // If the request got an unsharded tenant id, then apply
+            // the operation to all shards. Otherwise, apply it to a specific shard.
+            let shards_range = TenantShardId::tenant_range(tenant_id);
+
+            for (tenant_shard_id, shard) in locked.tenants.range(shards_range) {
+                if let Some(node_id) = shard.intent.get_attached() {
+                    let node = locked
+                        .nodes
+                        .get(node_id)
+                        .expect("Pageservers may not be deleted while referenced");
+
+                    targets.push((*tenant_shard_id, node.clone()));
+                }
+            }
+            targets
+        };
+
+        let res = self
+            .tenant_for_shards_api(
+                targets,
+                |tenant_shard_id, client| async move {
+                    client
+                        .timeline_lease_lsn(tenant_shard_id, timeline_id, lsn)
+                        .await
+                },
+                1,
+                1,
+                SHORT_RECONCILE_TIMEOUT,
+                &self.cancel,
+            )
+            .await;
+
+        let mut valid_until = None;
+        for r in res {
+            match r {
+                Ok(lease) => {
+                    if let Some(ref mut valid_until) = valid_until {
+                        *valid_until = std::cmp::min(*valid_until, lease.valid_until);
+                    } else {
+                        valid_until = Some(lease.valid_until);
+                    }
+                }
+                Err(e) => {
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(e)));
+                }
+            }
+        }
+        Ok(LsnLease {
+            valid_until: valid_until.unwrap_or_else(SystemTime::now),
+        })
     }
 
     pub(crate) async fn tenant_timeline_download_heatmap_layers(

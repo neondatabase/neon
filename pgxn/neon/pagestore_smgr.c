@@ -99,7 +99,7 @@ static char *hexdump_page(char *page);
 
 #define IS_LOCAL_REL(reln) (\
 	NInfoGetDbOid(InfoFromSMgrRel(reln)) != 0 && \
-		NInfoGetRelNumber(InfoFromSMgrRel(reln)) > FirstNormalObjectId \
+		NInfoGetRelNumber(InfoFromSMgrRel(reln)) >= FirstNormalObjectId \
 )
 
 const int	SmgrTrace = DEBUG5;
@@ -1081,6 +1081,9 @@ prefetch_lookup(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkn, neon_r
  * pageserver. If NULL, we utilize the lastWrittenLsn -infrastructure
  * to calculate the LSNs to send.
  *
+ * Bits set in *mask (if present) indicate pages already read; i.e. pages we
+ * can skip in this process.
+ *
  * When performing a prefetch rather than a synchronous request,
  * is_prefetch==true. Currently, it only affects how the request is accounted
  * in the perf counters.
@@ -1126,7 +1129,7 @@ Retry:
 		uint64		ring_index;
 		neon_request_lsns *lsns;
 
-		if (PointerIsValid(mask) && !BITMAP_ISSET(mask, i))
+		if (PointerIsValid(mask) && BITMAP_ISSET(mask, i))
 			continue;
 
 		if (frlsns)
@@ -3026,9 +3029,6 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 
 		tag.blockNum = blocknum;
 
-		for (int i = 0; i < PG_IOV_MAX / 8; i++)
-			lfc_present[i] = ~(lfc_present[i]);
-
 		ring_index = prefetch_register_bufferv(tag, NULL, iterblocks,
 											   lfc_present, true);
 
@@ -3134,6 +3134,15 @@ neon_writeback(SMgrRelation reln, ForkNumber forknum,
 #endif
 }
 
+/*
+ * Read N pages at a specific LSN.
+ *
+ * *mask is set for pages read at a previous point in time, and which we
+ * should not touch, nor overwrite.
+ * New bits should be set in *mask for the pages we'successfully read.
+ *
+ * The offsets in request_lsns, buffers, and mask are linked.
+ */
 static void
 #if PG_MAJORVERSION_NUM < 16
 neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber base_blockno, neon_request_lsns *request_lsns,
@@ -3186,7 +3195,7 @@ neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber base_block
 		neon_request_lsns *reqlsns = &request_lsns[i];
 		TimestampTz		start_ts, end_ts;
 
-		if (PointerIsValid(mask) && !BITMAP_ISSET(mask, i))
+		if (PointerIsValid(mask) && BITMAP_ISSET(mask, i))
 			continue;
 
 		start_ts = GetCurrentTimestamp();
@@ -3485,9 +3494,7 @@ static void
 neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		   void **buffers, BlockNumber nblocks)
 {
-	bits8		prefetch_hits[PG_IOV_MAX / 8] = {0};
-	bits8		lfc_hits[PG_IOV_MAX / 8];
-	bits8		read[PG_IOV_MAX / 8];
+	bits8		read_pages[PG_IOV_MAX / 8];
 	neon_request_lsns request_lsns[PG_IOV_MAX];
 	int			lfc_result;
 	int			prefetch_result;
@@ -3519,19 +3526,18 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	neon_get_request_lsns(InfoFromSMgrRel(reln), forknum, blocknum,
 						  request_lsns, nblocks);
 
+	memset(read_pages, 0, sizeof(read_pages));
 
-	prefetch_result = prefetch_lookupv(InfoFromSMgrRel(reln), forknum, blocknum, request_lsns, nblocks, buffers, prefetch_hits);
+	prefetch_result = prefetch_lookupv(InfoFromSMgrRel(reln), forknum,
+									   blocknum, request_lsns, nblocks,
+									   buffers, read_pages);
 
 	if (prefetch_result == nblocks)
 		return;
 
-	/* invert the result: exclude prefetched blocks */
-	for (int i = 0; i < PG_IOV_MAX / 8; i++)
-		lfc_hits[i] = ~prefetch_hits[i];
-
 	/* Try to read from local file cache */
 	lfc_result = lfc_readv_select(InfoFromSMgrRel(reln), forknum, blocknum, buffers,
-								  nblocks, lfc_hits);
+								  nblocks, read_pages);
 
 	if (lfc_result > 0)
 		MyNeonCounters->file_cache_hits_total += lfc_result;
@@ -3540,21 +3546,8 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	if (prefetch_result + lfc_result == nblocks)
 		return;
 
-	if (lfc_result <= 0)
-	{
-		/* can't use the LFC result, so read all blocks from PS */
-		for (int i = 0; i < PG_IOV_MAX / 8; i++)
-			read[i] = ~prefetch_hits[i];
-	}
-	else
-	{
-		/* invert the result: exclude blocks read from lfc */
-		for (int i = 0; i < PG_IOV_MAX / 8; i++)
-			read[i] = ~(prefetch_hits[i] | lfc_hits[i]);
-	}
-
 	neon_read_at_lsnv(InfoFromSMgrRel(reln), forknum, blocknum, request_lsns,
-					  buffers, nblocks, read);
+					  buffers, nblocks, read_pages);
 
 	/*
 	 * Try to receive prefetch results once again just to make sure we don't leave the smgr code while the OS might still have buffered bytes.
