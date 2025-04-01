@@ -40,7 +40,7 @@ jobs:
       matrix:
         pg-version: [16, 17]
 
-    runs-on: us-east-2
+    runs-on: [self-hosted, small]
     container:
       image: ghcr.io/neondatabase/neon-test-extensions-v${{ matrix.pg-versions }}:latest
       credentials:
