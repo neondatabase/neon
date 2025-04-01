@@ -2635,7 +2635,7 @@ impl Timeline {
     ) -> Result<CompactionOutcome, CompactionError> {
         let sub_compaction = options.sub_compaction;
         let job = GcCompactJob::from_compact_options(options.clone());
-        let yield_for_l0 = !options.flags.contains(CompactFlags::YieldForL0);
+        let yield_for_l0 = options.flags.contains(CompactFlags::YieldForL0);
         if sub_compaction {
             info!(
                 "running enhanced gc bottom-most compaction with sub-compaction, splitting compaction jobs"
