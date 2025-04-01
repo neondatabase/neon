@@ -65,7 +65,9 @@ jobs:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
       - name: Run the regression tests
-        run: /run-tests.sh
+        run: /run-tests.sh /ext-src
+        env:
+          BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
 
       - name: Delete Neon Project
         if: ${{ always() }}
