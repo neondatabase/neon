@@ -193,14 +193,12 @@ pub enum GetVectoredConcurrentIo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
 pub struct Ratio {
     pub numerator: usize,
     pub denominator: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
 pub struct OtelExporterConfig {
     pub endpoint: String,
     pub protocol: OtelExporterProtocol,
@@ -217,8 +215,6 @@ pub enum OtelExporterProtocol {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-#[serde(rename_all = "kebab-case")]
 pub struct Tracing {
     pub sampling_ratio: Ratio,
     pub export_config: OtelExporterConfig,
