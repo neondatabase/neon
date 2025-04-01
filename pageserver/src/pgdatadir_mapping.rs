@@ -378,8 +378,9 @@ impl Timeline {
                         };
 
                         result_slots[slot].write(clone);
-                        // Link the individual requsest context with the batched execution context
-                        // with a follows_from relation.
+                        // There is no standardized way to express that the batched span followed from N request spans.
+                        // So, abuse the system and mark the request contexts as follows_from the batch span, so we get
+                        // some linkage in our trace viewer. It allows us to answer: which GET_VECTORED did this GET_PAGE wait for.
                         req_ctx.perf_follows_from(&ctx);
                         slots_filled += 1;
                     }
