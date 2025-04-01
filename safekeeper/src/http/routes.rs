@@ -16,9 +16,9 @@ use http_utils::{RequestExt, RouterBuilder};
 use hyper::{Body, Request, Response, StatusCode};
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use safekeeper_api::models::{
-    AcceptorStateStatus, PullTimelineRequest, SafekeeperStatus, SkTimelineInfo, TermSwitchApiEntry,
-    TimelineCopyRequest, TimelineCreateRequest, TimelineDeleteResult, TimelineStatus,
-    TimelineTermBumpRequest,
+    AcceptorStateStatus, PullTimelineRequest, SafekeeperStatus, SkTimelineInfo, TenantDeleteResult,
+    TermSwitchApiEntry, TimelineCopyRequest, TimelineCreateRequest, TimelineDeleteResult,
+    TimelineStatus, TimelineTermBumpRequest,
 };
 use safekeeper_api::{ServerInfo, membership, models};
 use storage_broker::proto::{SafekeeperTimelineInfo, TenantTimelineId as ProtoTenantTimelineId};
@@ -83,13 +83,11 @@ async fn tenant_delete_handler(mut request: Request<Body>) -> Result<Response<Bo
         .delete_all_for_tenant(&tenant_id, action)
         .await
         .map_err(ApiError::InternalServerError)?;
-    json_response(
-        StatusCode::OK,
-        delete_info
-            .iter()
-            .map(|(ttid, resp)| (format!("{}", ttid.timeline_id), *resp))
-            .collect::<HashMap<String, TimelineDeleteResult>>(),
-    )
+    let response_body: TenantDeleteResult = delete_info
+        .iter()
+        .map(|(ttid, resp)| (format!("{}", ttid.timeline_id), *resp))
+        .collect::<HashMap<String, TimelineDeleteResult>>();
+    json_response(StatusCode::OK, response_body)
 }
 
 async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
