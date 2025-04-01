@@ -34,9 +34,7 @@ class NeonAPI:
         self.retries524 = 0
         self.retries4xx = 0
 
-    def __request(
-        self, method: str | bytes, endpoint: str, **kwargs: Any
-    ) -> requests.Response | None:
+    def __request(self, method: str | bytes, endpoint: str, **kwargs: Any) -> requests.Response:
         kwargs["headers"] = kwargs.get("headers", {})
         kwargs["headers"]["Authorization"] = f"Bearer {self.__neon_api_key}"
 
@@ -58,8 +56,6 @@ class NeonAPI:
                 break
             elif resp.status_code >= 400:
                 if resp.status_code == 422:
-                    if resp.json()["code"] == "BRANCHES_LIMIT_EXCEEDED":
-                        return None
                     if resp.json()["message"] == "branch not ready yet":
                         retry = True
                         self.retries4xx += 1

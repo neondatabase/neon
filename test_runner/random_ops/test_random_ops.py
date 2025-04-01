@@ -17,6 +17,7 @@ from fixtures.log_helper import log
 from fixtures.neon_api import NeonAPI
 from fixtures.neon_fixtures import PgBin
 from fixtures.pg_version import PgVersion
+from requests import HTTPError
 
 
 class NeonEndpoint:
@@ -167,17 +168,24 @@ class NeonBranch:
         for ep in endpoints:
             ep.terminate_benchmark()
         self.terminate_benchmark()
-        res: dict[str, Any] | None = self.neon_api.restore_branch(
-            self.project_id,
-            self.id,
-            source_branch_id,
-            source_lsn,
-            source_timestamp,
-            preserve_under_name,
-        )
-        if res is None:
-            log.info("Branches limit exceeded, skipping")
-            return None
+        try:
+            res: dict[str, Any] = self.neon_api.restore_branch(
+                self.project_id,
+                self.id,
+                source_branch_id,
+                source_lsn,
+                source_timestamp,
+                preserve_under_name,
+            )
+        except HTTPError as he:
+            if (
+                he.response.status_code == 422
+                and he.response.json()["code"] == "BRANCHES_LIMIT_EXCEEDED"
+            ):
+                log.info("Branch limit exceeded, skipping")
+                return None
+            else:
+                raise HTTPError(he) from he
         self.project.wait()
         self.start_benchmark()
         for ep in endpoints:
@@ -223,10 +231,17 @@ class NeonProject:
 
     def create_branch(self, parent_id: str | None = None) -> NeonBranch | None:
         self.wait()
-        branch_def = self.neon_api.create_branch(self.id, parent_id=parent_id)
-        if branch_def is None:
-            log.info("Branch limit exceeded, skipping")
-            return None
+        try:
+            branch_def = self.neon_api.create_branch(self.id, parent_id=parent_id)
+        except HTTPError as he:
+            if (
+                he.response.status_code == 422
+                and he.response.json()["code"] == "BRANCHES_LIMIT_EXCEEDED"
+            ):
+                log.info("Branch limit exceeded, skipping")
+                return None
+            else:
+                raise HTTPError(he) from he
         new_branch = NeonBranch(self, branch_def)
         self.wait()
         return new_branch
