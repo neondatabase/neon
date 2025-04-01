@@ -168,17 +168,24 @@ class NeonBranch:
         for ep in endpoints:
             ep.terminate_benchmark()
         self.terminate_benchmark()
-        res: dict[str, Any] | None = self.neon_api.restore_branch(
-                    self.project_id,
-                    self.id,
-                    source_branch_id,
-                    source_lsn,
-                    source_timestamp,
-                    preserve_under_name,
-                )
-        if res is None:
-            log.info("Branches limit exceeded, skipping")
-            return None
+        try:
+            res: dict[str, Any] = self.neon_api.restore_branch(
+                self.project_id,
+                self.id,
+                source_branch_id,
+                source_lsn,
+                source_timestamp,
+                preserve_under_name,
+            )
+        except HTTPError as he:
+            if (
+                he.response.status_code == 422
+                and he.response.json()["code"] == "BRANCHES_LIMIT_EXCEEDED"
+            ):
+                log.info("Branch limit exceeded, skipping")
+                return None
+            else:
+                raise HTTPError(he) from he
         self.project.wait()
         self.start_benchmark()
         for ep in endpoints:
@@ -217,16 +224,24 @@ class NeonProject:
         self.neon_api.wait_for_operation_to_finish(self.id)
         self.benchmarks: dict[str, subprocess.Popen[Any]] = {}
         self.restore_num: int = 0
+        self.restart_pgbench_on_console_errors: bool = False
 
     def delete(self):
         self.neon_api.delete_project(self.id)
 
     def create_branch(self, parent_id: str | None = None) -> NeonBranch | None:
         self.wait()
-        branch_def = self.neon_api.create_branch(self.id, parent_id=parent_id)
-        if branch_def is None:
-            log.info("Branch limit exceeded, skipping")
-            return None
+        try:
+            branch_def = self.neon_api.create_branch(self.id, parent_id=parent_id)
+        except HTTPError as he:
+            if (
+                he.response.status_code == 422
+                and he.response.json()["code"] == "BRANCHES_LIMIT_EXCEEDED"
+            ):
+                log.info("Branch limit exceeded, skipping")
+                return None
+            else:
+                raise HTTPError(he) from he
         new_branch = NeonBranch(self, branch_def)
         self.wait()
         return new_branch
@@ -302,7 +317,7 @@ class NeonProject:
             log.error("STDERR: %s", err)
             # if the benchmark failed due to irresponsible Control plane,
             # just restart it
-            if (
+            if self.restart_pgbench_on_console_errors and (
                 "ERROR:  Couldn't connect to compute node" in err
                 or "ERROR:  Console request failed" in err
             ):
@@ -346,6 +361,10 @@ def setup_class(
     yield pg_bin, project
     log.info("Retried 524 errors: %s", neon_api.retries524)
     log.info("Retried 4xx errors: %s", neon_api.retries4xx)
+    if neon_api.retries524 > 0:
+        print(f"::warning::Retried on 524 error {neon_api.retries524} times")
+    if neon_api.retries4xx > 0:
+        print(f"::warning::Retried on 4xx error {neon_api.retries4xx} times")
     log.info("Removing the project")
     project.delete()
 
