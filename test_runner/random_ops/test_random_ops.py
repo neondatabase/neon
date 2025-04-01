@@ -9,15 +9,18 @@ import random
 import subprocess
 import time
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_api import NeonAPI
-from fixtures.neon_fixtures import PgBin
-from fixtures.pg_version import PgVersion
 from requests import HTTPError
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from fixtures.neon_api import NeonAPI
+    from fixtures.neon_fixtures import PgBin
+    from fixtures.pg_version import PgVersion
 
 
 class NeonEndpoint:
