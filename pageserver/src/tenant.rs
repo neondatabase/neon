@@ -3080,7 +3080,7 @@ impl Tenant {
             let mut has_pending_l0 = false;
             for timeline in compact_l0 {
                 let ctx = &ctx.with_scope_timeline(&timeline);
-                // NB: don't YieldForL0 here, since this is an L0-only compaction pass.
+                // NB: don't set CompactFlags::YieldForL0, since this is an L0-only compaction pass.
                 let outcome = timeline
                     .compact(cancel, CompactFlags::OnlyL0Compaction.into(), ctx)
                     .instrument(info_span!("compact_timeline", timeline_id = %timeline.timeline_id))
@@ -3098,13 +3098,9 @@ impl Tenant {
             }
         }
 
-        // Pass 2: image compaction and timeline offloading. If any timelines have accumulated
-        // more L0 layers, they may also be compacted here. L0 compaction will yield if there is
-        // pending L0 compaction.
-        //
-        // TODO: it will only yield if there is pending L0 compaction on the same timeline. If a
-        // different timeline needs compaction, it won't. It should check `l0_compaction_trigger`.
-        // We leave this for a later PR.
+        // Pass 2: image compaction and timeline offloading. If any timelines have accumulated more
+        // L0 layers, they may also be compacted here. Image compaction will yield if there is
+        // pending L0 compaction on any tenant timeline.
         //
         // TODO: consider ordering timelines by some priority, e.g. time since last full compaction,
         // amount of L1 delta debt or garbage, offload-eligible timelines first, etc.

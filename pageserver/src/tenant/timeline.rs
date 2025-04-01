@@ -870,9 +870,13 @@ pub(crate) enum CompactFlags {
     OnlyL0Compaction,
     EnhancedGcBottomMostCompaction,
     DryRun,
-    /// Makes image compaction yield if there's pending L0 compaction. Should always be used in the
-    /// background compaction task, since we want to aggressively compact down L0. Only makes sense
-    /// with `compaction_l0_first` without `OnlyL0Compaction` (i.e. the L0 compaction pass).
+    /// Makes image compaction yield if there's pending L0 compaction. This should always be used in
+    /// the background compaction task, since we want to aggressively compact down L0 to bound
+    /// read amplification.
+    ///
+    /// It only makes sense to use this when `compaction_l0_first` is enabled (such that we yield to
+    /// an L0 compaction pass), and without `OnlyL0Compaction` (L0 compaction shouldn't yield for L0
+    /// compaction).
     YieldForL0,
 }
 
@@ -1892,9 +1896,7 @@ impl Timeline {
         // out by other background tasks (including image compaction). We request this via
         // `BackgroundLoopKind::L0Compaction`.
         //
-        // Yield for immediate L0 compaction if necessary while waiting for the background task
-        // semaphore. The caller should only set this if `compaction_l0_first` is enabled, since
-        // we'd otherwise just end up right back here, and not if this is already an L0 pass.
+        // Yield for pending L0 compaction while waiting for the semaphore.
         let is_l0_only = options.flags.contains(CompactFlags::OnlyL0Compaction);
         let semaphore_kind = match is_l0_only && self.get_compaction_l0_semaphore() {
             true => BackgroundLoopKind::L0Compaction,
@@ -1902,7 +1904,9 @@ impl Timeline {
         };
         let yield_for_l0 = options.flags.contains(CompactFlags::YieldForL0);
         if yield_for_l0 {
+            // If this is an L0 pass, it doesn't make sense to yield for L0.
             debug_assert!(!is_l0_only, "YieldForL0 during L0 pass");
+            // If `compaction_l0_first` is disabled, there's no point yielding.
             debug_assert!(self.get_compaction_l0_first(), "YieldForL0 without L0 pass");
         }
 
