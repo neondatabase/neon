@@ -24,9 +24,9 @@ use futures::FutureExt;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use pageserver_api::config::tenant_conf_defaults::DEFAULT_CHECKPOINT_DISTANCE;
-use pageserver_api::key::{KEY_SIZE, Key};
+use pageserver_api::key::{CompactKey, KEY_SIZE, Key};
 use pageserver_api::keyspace::{KeySpace, ShardedRange};
-use pageserver_api::models::CompactInfoResponse;
+use pageserver_api::models::{CompactInfoResponse, CompactKeyRange};
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::shard::{ShardCount, ShardIdentity, TenantShardId};
 use pageserver_api::value::Value;
@@ -319,7 +319,12 @@ impl GcCompactionQueue {
                         flags
                     },
                     sub_compaction: true,
-                    compact_key_range: None,
+                    // Only auto-trigger gc-compaction over the data keyspace due to concerns in
+                    // https://github.com/neondatabase/neon/issues/11318.
+                    compact_key_range: Some(CompactKeyRange {
+                        start: Key::MIN,
+                        end: Key::metadata_key_range().start,
+                    }),
                     compact_lsn_range: None,
                     sub_compaction_max_job_size_mb: None,
                 },
