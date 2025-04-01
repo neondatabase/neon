@@ -1,6 +1,14 @@
 #!/bin/bash
 set -x
 
+if [[ -v BENCHMARK_CONNSTR ]] && [[ ${BENCHMARK_CONNSTR} =~ ^postgres(ql)?:\/\/([^:]+):([^@]+)@([^:/]+):?([0-9]*)\/(.+)$ ]]; then
+  export PGUSER="${BASH_REMATCH[2]}"
+  export PGPASSWORD="${BASH_REMATCH[3]}"
+  export PGHOST="${BASH_REMATCH[4]}"
+  export PGPORT="${BASH_REMATCH[5]:-5432}"
+  export PGDATABASE="${BASH_REMATCH[6]}"
+fi
+
 extdir=${1}
 
 cd "${extdir}" || exit 2
