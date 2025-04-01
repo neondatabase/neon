@@ -505,9 +505,10 @@ impl RequestContext {
     }
 
     pub fn with_scope_debug_tools(&self) -> Self {
-        RequestContextBuilder::new(TaskKind::DebugTool)
+        RequestContextBuilder::from(self)
+            .task_kind(TaskKind::DebugTool)
             .scope(Scope::new_debug_tools())
-            .build()
+            .attached_child()
     }
 
     pub fn task_kind(&self) -> TaskKind {
