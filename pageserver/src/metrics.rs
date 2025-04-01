@@ -2311,10 +2311,10 @@ impl RemoteOpFileKind {
     }
 }
 
-pub(crate) static REMOTE_OPERATION_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+pub(crate) static REMOTE_TIMELINE_CLIENT_COMPLETION_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
-        "pageserver_remote_operation_seconds",
-        "Time spent on remote storage operations. \
+        "pageserver_remote_timeline_client_seconds_global",
+        "Time spent on remote timeline client operations. \
         Grouped by task_kind, file_kind, operation_kind and status. \
         The task_kind is \
           - for layer downloads, populated from RequestContext (primary objective of having the label) \
@@ -3380,7 +3380,7 @@ impl RemoteTimelineClientMetrics {
         op_kind: &RemoteOpKind,
         status: &'static str,
     ) -> Histogram {
-        REMOTE_OPERATION_TIME
+        REMOTE_TIMELINE_CLIENT_COMPLETION_LATENCY
             .get_metric_with_label_values(&[
                 task_kind.as_ref().map(|tk| tk.into()).unwrap_or("*"),
                 file_kind.as_str(),
