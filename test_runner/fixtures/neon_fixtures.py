@@ -4209,7 +4209,7 @@ class Endpoint(PgProtocol, LogUtils):
 
         # Write it back updated
         with open(config_path, "w") as file:
-            log.info(json.dumps(dict(data_dict, **kwargs)))
+            log.debug(json.dumps(dict(data_dict, **kwargs)))
             json.dump(dict(data_dict, **kwargs), file, indent=4)
 
     def respec_deep(self, **kwargs: Any) -> None:
@@ -4226,7 +4226,7 @@ class Endpoint(PgProtocol, LogUtils):
         with open(config_path) as f:
             data_dict: dict[str, Any] = json.load(f)
 
-        log.info("Current compute spec: %s", json.dumps(data_dict, indent=4))
+        log.debug("Current compute spec: %s", json.dumps(data_dict, indent=4))
 
         for key, value in kwargs.items():
             if isinstance(value, dict):
@@ -4238,7 +4238,7 @@ class Endpoint(PgProtocol, LogUtils):
                 data_dict[key] = value
 
         with open(config_path, "w") as file:
-            log.info("Updating compute spec to: %s", json.dumps(data_dict, indent=4))
+            log.debug("Updating compute spec to: %s", json.dumps(data_dict, indent=4))
             json.dump(data_dict, file, indent=4)
 
     def wait_for_migrations(self, wait_for: int = NUM_COMPUTE_MIGRATIONS) -> None:

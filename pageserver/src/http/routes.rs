@@ -2256,7 +2256,6 @@ async fn timeline_compact_handler(
     let state = get_state(&request);
 
     let mut flags = EnumSet::empty();
-    flags |= CompactFlags::NoYield; // run compaction to completion
 
     if Some(true) == parse_query_param::<_, bool>(&request, "force_l0_compaction")? {
         flags |= CompactFlags::ForceL0Compaction;
@@ -2417,7 +2416,6 @@ async fn timeline_checkpoint_handler(
     let state = get_state(&request);
 
     let mut flags = EnumSet::empty();
-    flags |= CompactFlags::NoYield; // run compaction to completion
     if Some(true) == parse_query_param::<_, bool>(&request, "force_l0_compaction")? {
         flags |= CompactFlags::ForceL0Compaction;
     }
