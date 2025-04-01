@@ -2249,6 +2249,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ce7134b9999ecaf8bcd65542e436736ef32ddca1b3e06094cb6ec5755203b80"
 
 [[package]]
+name = "flag-bearer"
+version = "0.1.0-rc.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8feaa1b7a5ad6e6dd7791d42d36c1a25004f1c25eae9ab7b904c864109d8260"
+dependencies = [
+ "parking_lot 0.12.1",
+ "pin-list",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "flagset"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4555,6 +4566,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pin-list"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a3c0987a7464afc0d593f13429732ef87e9a6c8e7909a1a22faeff7e1d2159d"
+dependencies = [
+ "pin-project-lite",
+ "pinned-aliasable",
+]
+
+[[package]]
 name = "pin-project"
 version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4585,6 +4606,12 @@ name = "pin-utils"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
+
+[[package]]
+name = "pinned-aliasable"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d0f9ae89bf0ed03b69ac1f3f7ea2e6e09b4fa5448011df2e67d581c2b850b7b"
 
 [[package]]
 name = "pkcs1"
@@ -5079,6 +5106,7 @@ dependencies = [
  "ed25519-dalek",
  "env_logger",
  "fallible-iterator",
+ "flag-bearer",
  "flate2",
  "framed-websockets",
  "futures",

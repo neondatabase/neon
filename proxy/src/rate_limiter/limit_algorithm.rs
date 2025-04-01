@@ -1,10 +1,8 @@
 //! Algorithms for controlling concurrency limits.
-use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use parking_lot::Mutex;
-use tokio::sync::Notify;
+use flag_bearer::{Semaphore, SemaphoreState, Uncloseable};
 use tokio::time::Instant;
 use tokio::time::error::Elapsed;
 
@@ -82,19 +80,25 @@ impl<L: ?Sized + LimitAlgorithm> LimiterInner<L> {
             self.limit = self.alg.update(self.limit, sample);
         }
     }
+}
 
-    fn take(&mut self, ready: &Notify) -> Option<()> {
+impl<L: ?Sized> SemaphoreState for LimiterInner<L> {
+    type Params = ();
+    type Permit = ();
+    type Closeable = Uncloseable;
+
+    fn acquire(&mut self, p: Self::Params) -> Result<Self::Permit, Self::Params> {
         if self.in_flight < self.limit {
             self.in_flight += 1;
 
-            if self.in_flight < self.limit {
-                ready.notify_one();
-            }
-
-            Some(())
+            Ok(p)
         } else {
-            None
+            Err(p)
         }
+    }
+
+    fn release(&mut self, _p: Self::Permit) {
+        self.in_flight -= 1;
     }
 }
 
@@ -107,9 +111,7 @@ impl<L: ?Sized + LimitAlgorithm> LimiterInner<L> {
 /// caused by overload (loss).
 pub(crate) struct DynamicLimiter<L: ?Sized = dyn LimitAlgorithm> {
     disabled: bool,
-    // to notify when a token is available
-    ready: Notify,
-    inner: Mutex<LimiterInner<L>>,
+    sem: Semaphore<LimiterInner<L>>,
 }
 
 /// A concurrency token, required to run a job.
@@ -131,17 +133,13 @@ struct LimiterState {
 
 impl<L> DynamicLimiter<L> {
     pub(crate) fn new_inner(initial_limit: usize, alg: L) -> Arc<Self> {
-        let ready = Notify::new();
-        ready.notify_one();
-
         Arc::new(Self {
             disabled: initial_limit == 0,
-            inner: Mutex::new(LimiterInner {
+            sem: Semaphore::new_fifo(LimiterInner {
                 limit: initial_limit,
                 in_flight: 0,
                 alg,
             }),
-            ready,
         })
     }
 }
@@ -170,18 +168,12 @@ impl DynamicLimiter {
             // If the rate limiter is disabled, we can always acquire a token.
             Token::disabled()
         } else {
-            let mut notified = pin!(self.ready.notified());
-            let mut ready = notified.as_mut().enable();
-            loop {
-                if ready {
-                    let mut inner = self.inner.lock();
-                    if inner.take(&self.ready).is_some() {
-                        break Token::new(self.clone());
-                    }
-                    notified.set(self.ready.notified());
+            match self.sem.acquire(()).await {
+                Err(close) => close.never(),
+                Ok(permit) => {
+                    permit.take();
+                    Token::new(self.clone())
                 }
-                notified.as_mut().await;
-                ready = true;
             }
         }
     }
@@ -202,22 +194,16 @@ impl DynamicLimiter {
             return;
         }
 
-        let mut inner = self.inner.lock();
-
-        inner.update_limit(start.elapsed(), outcome);
-
-        inner.in_flight -= 1;
-        if inner.in_flight < inner.limit {
-            // At least 1 permit is now available
-            self.ready.notify_one();
-        }
+        self.sem.with_state(|s| {
+            s.update_limit(start.elapsed(), outcome);
+            s.release(());
+        });
     }
 
     /// The current state of the limiter.
     #[cfg(test)]
     fn state(&self) -> LimiterState {
-        let inner = self.inner.lock();
-        LimiterState { limit: inner.limit }
+        self.sem.with_state(|s| LimiterState { limit: s.limit })
     }
 }
 

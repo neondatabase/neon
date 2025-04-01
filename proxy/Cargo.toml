@@ -103,6 +103,7 @@ uuid.workspace = true
 x509-cert.workspace = true
 redis.workspace = true
 zerocopy.workspace = true
+flag-bearer = { version = "0.1.0-rc.4" }
 
 # jwt stuff
 jose-jwa = "0.1.2"
