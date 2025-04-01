@@ -667,6 +667,10 @@ async fn get_operations<'a>(
         ApplySpecPhase::CreateAndAlterRoles => {
             let mut ctx = ctx.write().await;
 
+            let db_owners = spec.cluster.databases.iter().map(|db| {
+                return db.owner.clone();
+            }).collect::<Vec<String>>();
+
             let operations = spec.cluster.roles
                 .iter()
                 .filter_map(move |role| {
@@ -703,9 +707,10 @@ async fn get_operations<'a>(
                                 )
                             } else {
                                 format!(
-                                    "CREATE ROLE {} {}",
+                                    "CREATE ROLE {} {} ROLE {}",
                                     role.name.pg_quote(),
                                     role.to_pg_options(),
+                                    db_owners.join(","),
                                 )
                             };
                             Some(Operation {
