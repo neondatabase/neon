@@ -936,11 +936,12 @@ impl PageServerHandler {
                             target: PERF_TRACE_TARGET,
                             "GET_PAGE",
                             tenant_id = %tenant_id,
+                            shard_id = field::Empty,
                             timeline_id = %timeline_id,
                             lsn = %req.hdr.request_lsn,
                             request_id = %req.hdr.reqid,
                             key = %key,
-                            shard = field::Empty,)
+                            )
                         })
                         .attached_child()
                 } else {
@@ -954,10 +955,6 @@ impl PageServerHandler {
                             target: PERF_TRACE_TARGET,
                             parent: current_perf_span,
                             "SHARD_SELECTION",
-                            tenant_id = %tenant_id,
-                            timeline_id = %timeline_id,
-                            lsn = %req.hdr.request_lsn,
-                            request_id = %req.hdr.reqid,
                         )
                     })
                     .await;
@@ -996,7 +993,7 @@ impl PageServerHandler {
                 let span = mkspan!(shard.tenant_shard_id.shard_slug());
 
                 ctx.perf_span_record(
-                    "shard",
+                    "shard_id",
                     tracing::field::display(shard.get_shard_identity().shard_slug()),
                 );
 
@@ -1010,10 +1007,6 @@ impl PageServerHandler {
                         target: PERF_TRACE_TARGET,
                         parent: current_perf_span,
                         "THROTTLE",
-                        tenant_id = %tenant_id,
-                        timeline_id = %timeline_id,
-                        lsn = %req.hdr.request_lsn,
-                        request_id = %req.hdr.reqid
                     )
                 })
                 .await?;
@@ -1032,10 +1025,6 @@ impl PageServerHandler {
                         target: PERF_TRACE_TARGET,
                         parent: current_perf_span,
                         "WAIT_LSN",
-                        tenant_id = %tenant_id,
-                        timeline_id = %timeline_id,
-                        lsn = %req.hdr.request_lsn,
-                        request_id = %req.hdr.reqid
                     )
                 })
                 .await;
