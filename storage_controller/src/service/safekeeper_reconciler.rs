@@ -74,7 +74,7 @@ pub(crate) async fn load_schedule_requests(
     service: &Arc<Service>,
     safekeepers: &HashMap<NodeId, Safekeeper>,
 ) -> anyhow::Result<Vec<ScheduleRequest>> {
-    let pending_ops = service.persistence.list_pending_ops(None).await?;
+    let pending_ops = service.persistence.list_pending_ops().await?;
     let mut res = Vec::with_capacity(pending_ops.len());
     for op_persist in pending_ops {
         let node_id = NodeId(op_persist.sk_id as u64);
