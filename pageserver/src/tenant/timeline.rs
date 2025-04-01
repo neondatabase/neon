@@ -1344,7 +1344,7 @@ impl Timeline {
                             info_span!(
                                 target: PERF_TRACE_TARGET,
                                 parent: crnt_perf_span,
-                                "EXECUTE_IO",
+                                "WAIT_FOR_IO_COMPLETIONS",
                             )
                         })
                         .await;
