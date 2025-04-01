@@ -397,24 +397,39 @@ impl Service {
                 .await?;
         }
 
-        let mut locked = self.inner.write().unwrap();
-
         // The list of safekeepers that have any of the timelines
         let mut sk_list = HashSet::new();
 
         // List all pending ops for all timelines, cancel them
-        for (timeline_id, timeline) in timeline_list.iter() {
+        for (_timeline_id, timeline) in timeline_list.iter() {
             let sk_iter = timeline
                 .sk_set
                 .iter()
                 .chain(timeline.new_sk_set.iter().flatten())
                 .map(|id| NodeId(*id as u64));
-            for sk_id in sk_iter.clone() {
+            sk_list.extend(sk_iter);
+        }
+
+        for &sk_id in sk_list.iter() {
+            let pending_op = TimelinePendingOpPersistence {
+                tenant_id: tenant_id.to_string(),
+                timeline_id: String::new(),
+                generation: i32::MAX,
+                op_kind: SafekeeperTimelineOpKind::Delete,
+                sk_id: sk_id.0 as i64,
+            };
+            tracing::info!("writing pending op for sk id {sk_id}");
+            self.persistence.insert_pending_op(pending_op).await?;
+        }
+
+        let mut locked = self.inner.write().unwrap();
+
+        for (timeline_id, _timeline) in timeline_list.iter() {
+            for sk_id in sk_list.iter() {
                 locked
                     .safekeeper_reconcilers
-                    .cancel_reconciles_for_timeline(sk_id, tenant_id, Some(*timeline_id));
+                    .cancel_reconciles_for_timeline(*sk_id, tenant_id, Some(*timeline_id));
             }
-            sk_list.extend(sk_iter);
         }
 
         // unwrap is safe: we return above for an empty timeline list
