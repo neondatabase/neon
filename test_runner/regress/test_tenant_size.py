@@ -782,6 +782,21 @@ def test_lsn_lease_storcon(neon_env_builder: NeonEnvBuilder):
     )
 
 
+def test_mark_invisible_storcon(neon_env_builder: NeonEnvBuilder):
+    conf = {
+        "pitr_interval": "0s",
+        "gc_period": "0s",
+        "compaction_period": "0s",
+    }
+    env = neon_env_builder.init_start(initial_tenant_conf=conf)
+    env.storage_controller.pageserver_api().timeline_mark_invisible(
+        env.initial_tenant, env.initial_timeline
+    )
+    env.storage_controller.pageserver_api().timeline_mark_invisible(
+        env.initial_tenant, env.initial_timeline, True
+    )
+
+
 def insert_with_action(
     env: NeonEnv,
     tenant: TenantId,

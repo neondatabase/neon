@@ -895,6 +895,12 @@ pub(crate) struct CompactRequest {
     pub sub_compaction_max_job_size_mb: Option<u64>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct MarkInvisibleRequest {
+    #[serde(default)]
+    pub is_visible: Option<bool>
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CompactOptions {
     pub flags: EnumSet<CompactFlags>,
