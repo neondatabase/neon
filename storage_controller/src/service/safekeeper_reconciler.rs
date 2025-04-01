@@ -35,6 +35,7 @@ impl SafekeeperReconcilers {
         service: &Arc<Service>,
         reqs: Vec<ScheduleRequest>,
     ) {
+        tracing::info!("Scheduling {} pending safekeeper ops loaded from db", reqs.len());
         for req in reqs {
             self.schedule_request(service, req);
         }
@@ -232,12 +233,14 @@ impl SafekeeperReconciler {
             let kind = req.kind;
             let tenant_id = req.tenant_id;
             let timeline_id = req.timeline_id;
+            let node_id = req.safekeeper.skp.id;
             self.reconcile_one(req, req_cancel)
                 .instrument(tracing::info_span!(
                     "reconcile_one",
                     ?kind,
                     %tenant_id,
-                    ?timeline_id
+                    ?timeline_id,
+                    %node_id,
                 ))
                 .await;
         }
