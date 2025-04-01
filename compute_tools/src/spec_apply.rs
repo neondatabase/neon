@@ -667,9 +667,14 @@ async fn get_operations<'a>(
         ApplySpecPhase::CreateAndAlterRoles => {
             let mut ctx = ctx.write().await;
 
-            let db_owners = spec.cluster.databases.iter().map(|db| {
-                return db.owner.clone();
-            }).collect::<Vec<String>>();
+            let db_owners = spec
+                .cluster
+                .databases
+                .iter()
+                .map(|db| {
+                    return db.owner.clone();
+                })
+                .collect::<Vec<String>>();
 
             let operations = spec.cluster.roles
                 .iter()
