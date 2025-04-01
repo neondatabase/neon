@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::os::fd::RawFd;
-use std::pin::Pin;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use enum_map::{Enum as _, EnumMap};
@@ -23,7 +21,6 @@ use pageserver_api::config::{
 };
 use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
-use pin_project_lite::pin_project;
 use postgres_backend::{QueryError, is_expected_io_error};
 use pq_proto::framed::ConnectionError;
 use strum::{EnumCount, IntoEnumIterator as _, VariantNames};
@@ -3624,54 +3621,25 @@ impl Drop for RemoteTimelineClientMetrics {
 
 /// Wrapper future that measures the time spent by a remote storage operation,
 /// and records the time and success/failure as a prometheus metric.
-pub(crate) trait MeasureRemoteOp: Sized {
-    fn measure_remote_op(
+pub(crate) trait MeasureRemoteOp<O, E>: Sized + Future<Output = Result<O, E>> {
+    async fn measure_remote_op(
         self,
         file_kind: RemoteOpFileKind,
         op: RemoteOpKind,
         metrics: Arc<RemoteTimelineClientMetrics>,
-    ) -> MeasuredRemoteOp<Self> {
+    ) -> Result<O, E> {
         let start = Instant::now();
-        MeasuredRemoteOp {
-            inner: self,
-            file_kind,
-            op,
-            start,
-            metrics,
-        }
+        let res = self.await;
+        let duration = start.elapsed();
+        let status = if res.is_ok() { &"success" } else { &"failure" };
+        metrics
+            .remote_operation_time(&file_kind, &op, status)
+            .observe(duration.as_secs_f64());
+        res
     }
 }
 
-impl<T: Sized> MeasureRemoteOp for T {}
-
-pin_project! {
-    pub(crate) struct MeasuredRemoteOp<F>
-    {
-        #[pin]
-        inner: F,
-        file_kind: RemoteOpFileKind,
-        op: RemoteOpKind,
-        start: Instant,
-        metrics: Arc<RemoteTimelineClientMetrics>,
-    }
-}
-
-impl<F: Future<Output = Result<O, E>>, O, E> Future for MeasuredRemoteOp<F> {
-    type Output = Result<O, E>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
-        let poll_result = this.inner.poll(cx);
-        if let Poll::Ready(ref res) = poll_result {
-            let duration = this.start.elapsed();
-            let status = if res.is_ok() { &"success" } else { &"failure" };
-            this.metrics
-                .remote_operation_time(this.file_kind, this.op, status)
-                .observe(duration.as_secs_f64());
-        }
-        poll_result
-    }
-}
+impl<Fut, O, E> MeasureRemoteOp<O, E> for Fut where Fut: Sized + Future<Output = Result<O, E>> {}
 
 pub mod tokio_epoll_uring {
     use std::collections::HashMap;
