@@ -2315,9 +2315,14 @@ pub(crate) static REMOTE_OPERATION_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_remote_operation_seconds",
         "Time spent on remote storage operations. \
-        Grouped by tenant, timeline, operation_kind and status. \
+        Grouped by task_kind, file_kind, operation_kind and status. \
+        The task_kind is \
+          - for layer downloads, populated from RequestContext (primary objective of having the label) \
+          - for index downloads, set to 'unknown' \
+          - for any upload operation, set to 'RemoteUploadTask' \
+        This keeps dimensionality at bay. \
         Does not account for time spent waiting in remote timeline client's queues.",
-        &["file_kind", "op_kind", "status"]
+        &["task_kind", "file_kind", "op_kind", "status"]
     )
     .expect("failed to define a metric")
 });
@@ -3370,13 +3375,18 @@ impl RemoteTimelineClientMetrics {
 
     pub fn remote_operation_time(
         &self,
+        task_kind: Option<TaskKind>,
         file_kind: &RemoteOpFileKind,
         op_kind: &RemoteOpKind,
         status: &'static str,
     ) -> Histogram {
-        let key = (file_kind.as_str(), op_kind.as_str(), status);
         REMOTE_OPERATION_TIME
-            .get_metric_with_label_values(&[key.0, key.1, key.2])
+            .get_metric_with_label_values(&[
+                task_kind.as_ref().map(|tk| tk.into()).unwrap_or("*"),
+                file_kind.as_str(),
+                op_kind.as_str(),
+                status,
+            ])
             .unwrap()
     }
 
@@ -3624,6 +3634,7 @@ impl Drop for RemoteTimelineClientMetrics {
 pub(crate) trait MeasureRemoteOp<O, E>: Sized + Future<Output = Result<O, E>> {
     async fn measure_remote_op(
         self,
+        task_kind: Option<TaskKind>, // not all caller contexts have a RequestContext / TaskKind handy
         file_kind: RemoteOpFileKind,
         op: RemoteOpKind,
         metrics: Arc<RemoteTimelineClientMetrics>,
@@ -3633,7 +3644,7 @@ pub(crate) trait MeasureRemoteOp<O, E>: Sized + Future<Output = Result<O, E>> {
         let duration = start.elapsed();
         let status = if res.is_ok() { &"success" } else { &"failure" };
         metrics
-            .remote_operation_time(&file_kind, &op, status)
+            .remote_operation_time(task_kind, &file_kind, &op, status)
             .observe(duration.as_secs_f64());
         res
     }
