@@ -4073,6 +4073,94 @@ def test_storage_controller_location_conf_equivalence(neon_env_builder: NeonEnvB
     assert reconciles_after_restart == 0
 
 
+@pytest.mark.parametrize("restart_storcon", [True, False])
+def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart_storcon: bool):
+    """
+    Test that the storcon can create and delete tenants and timelines with a safekeeper being down.
+    """
+
+    neon_env_builder.num_safekeepers = 3
+    neon_env_builder.storage_controller_config = {
+        "timelines_onto_safekeepers": True,
+    }
+    env = neon_env_builder.init_start()
+
+    env.safekeepers[0].stop()
+
+    # Wait for heartbeater to pick up that the safekeeper is gone
+    # This isn't really neccessary
+    def logged_offline():
+        env.storage_controller.assert_log_contains(
+            "Heartbeat round complete for 3 safekeepers, 1 offline"
+        )
+
+    wait_until(logged_offline)
+
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+    env.create_tenant(tenant_id, timeline_id)
+
+    env.safekeepers[1].assert_log_contains(f"creating new timeline {tenant_id}/{timeline_id}")
+    env.safekeepers[2].assert_log_contains(f"creating new timeline {tenant_id}/{timeline_id}")
+
+    env.storage_controller.allowed_errors.extend([
+        ".*Call to safekeeper.* management API still failed after.*",
+        ".*reconcile_one.*tenant_id={tenant_id}.*Call to safekeeper.* management API still failed after.*",
+    ])
+
+    if restart_storcon:
+        # Restart the storcon to check that we persist operations
+        env.storage_controller.stop()
+        env.storage_controller.start()
+
+    config_lines = [
+        "neon.safekeeper_proto_version = 3",
+    ]
+    with env.endpoints.create("main", tenant_id=tenant_id, config_lines=config_lines) as ep:
+        # endpoint should start.
+        ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
+        ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
+
+    env.storage_controller.assert_log_contains("writing pending op for sk id 0")
+    env.safekeepers[0].start()
+
+    # ensure that we applied the operation also for the safekeeper we just brought down
+    def logged_contains_on_sk():
+        env.safekeepers[0].assert_log_contains(f"pulling timeline {tenant_id}/{timeline_id} from safekeeper")
+
+    wait_until(logged_contains_on_sk)
+
+    env.safekeepers[1].stop()
+
+    env.storage_controller.pageserver_api().tenant_delete(tenant_id)
+
+    # ensure log msgs in safekeeper ensure the tenant is gone
+    def logged_deleted_on_first_sks():
+        env.safekeepers[0].assert_log_contains(
+            f"deleting timeline {tenant_id}/{timeline_id} from disk"
+        )
+        env.safekeepers[2].assert_log_contains(
+            f"deleting timeline {tenant_id}/{timeline_id} from disk"
+        )
+
+    wait_until(logged_deleted_on_first_sks)
+
+    if restart_storcon:
+        # Restart the storcon to check that we persist operations
+        env.storage_controller.stop()
+        env.storage_controller.start()
+
+    env.safekeepers[1].start()
+
+    # ensure that there is log msgs for the third safekeeper too
+    def logged_deleted_on_sk():
+        env.safekeepers[1].assert_log_contains(
+            f"deleting timeline {tenant_id}/{timeline_id} from disk"
+        )
+
+    wait_until(logged_deleted_on_sk)
+
+
 @pytest.mark.parametrize("wrong_az", [True, False])
 def test_storage_controller_graceful_migration(neon_env_builder: NeonEnvBuilder, wrong_az: bool):
     """
