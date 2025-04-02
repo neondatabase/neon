@@ -166,6 +166,9 @@ typedef struct
 	WaitEventSet   *wes_read;
 } PageServer;
 
+static uint32 local_request_counter;
+#define GENERATE_REQUEST_ID() (((NeonRequestId)MyProcPid << 32) | ++local_request_counter)
+
 static PageServer page_servers[MAX_SHARDS];
 
 static bool pageserver_flush(shardno_t shard_no);

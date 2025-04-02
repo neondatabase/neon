@@ -1,6 +1,6 @@
 \echo Use "ALTER EXTENSION neon UPDATE TO '1.6'" to load this file. \quit
 
-CREATE FUNCTION get_prewarm_info(out total_chunks integer, out curr_chunk integer, out prewarmed_pages integer, out skipped_pages integer)
+CREATE FUNCTION get_prewarm_info(worker_id integer default 0, out total_chunks integer, out curr_chunk integer, out prewarmed_pages integer, out skipped_pages integer)
 RETURNS record
 AS 'MODULE_PATHNAME', 'get_prewarm_info'
 LANGUAGE C STRICT
@@ -12,7 +12,7 @@ AS 'MODULE_PATHNAME', 'get_local_cache_state'
 LANGUAGE C
 PARALLEL UNSAFE;
 
-CREATE FUNCTION prewarm_local_cache(state bytea)
+CREATE FUNCTION prewarm_local_cache(state bytea, worker_id integer default 0, n_workers integer default 1)
 RETURNS void
 AS 'MODULE_PATHNAME', 'prewarm_local_cache'
 LANGUAGE C STRICT
