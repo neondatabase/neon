@@ -609,7 +609,9 @@ async def quorum_sanity_single(
     from 1 and sequentially assigned to env.safekeepers.
     """
     members_sks = [env.safekeepers[i - 1] for i in members_sks_ids]
-    new_members_sks = [env.safekeepers[i - 1] for i in new_members_sks_ids] if new_members_sks_ids else None
+    new_members_sks = (
+        [env.safekeepers[i - 1] for i in new_members_sks_ids] if new_members_sks_ids else None
+    )
     sks_to_stop = [env.safekeepers[i - 1] for i in sks_to_stop_ids]
 
     mconf = MembershipConfiguration(
