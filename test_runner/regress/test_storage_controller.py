@@ -4074,7 +4074,10 @@ def test_storage_controller_location_conf_equivalence(neon_env_builder: NeonEnvB
 
 
 @pytest.mark.parametrize("restart_storcon", [True, False])
-def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart_storcon: bool):
+@pytest.mark.parametrize("delete_only_timeline", [True, False])
+def test_storcon_create_delete_sk_down(
+    neon_env_builder: NeonEnvBuilder, restart_storcon: bool, delete_only_timeline: bool
+):
     """
     Test that the storcon can create and delete tenants and timelines with a safekeeper being down.
     """
@@ -4099,16 +4102,22 @@ def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
     env.create_tenant(tenant_id, timeline_id)
+    branch_timeline_id = env.create_branch("child_of_main", tenant_id)
 
-    env.safekeepers[1].assert_log_contains(f"creating new timeline {tenant_id}/{timeline_id}")
-    env.safekeepers[2].assert_log_contains(f"creating new timeline {tenant_id}/{timeline_id}")
+    log.info(
+        f"Creating tenant {tenant_id} with main timeline {timeline_id} and branch {branch_timeline_id}"
+    )
 
     env.storage_controller.allowed_errors.extend(
         [
             ".*Call to safekeeper.* management API still failed after.*",
-            ".*reconcile_one.*tenant_id={tenant_id}.*Call to safekeeper.* management API still failed after.*",
+            f".*reconcile_one.*tenant_id={tenant_id}.*Call to safekeeper.* management API failed, will retry.*",
+            f".*reconcile_one.*tenant_id={tenant_id}.*Call to safekeeper.* management API still failed after.*",
         ]
     )
+
+    env.safekeepers[1].assert_log_contains(f"creating new timeline {tenant_id}/{timeline_id}")
+    env.safekeepers[2].assert_log_contains(f"creating new timeline {tenant_id}/{timeline_id}")
 
     if restart_storcon:
         # Restart the storcon to check that we persist operations
@@ -4136,18 +4145,37 @@ def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart
 
     env.safekeepers[1].stop()
 
-    env.storage_controller.pageserver_api().tenant_delete(tenant_id)
+    if delete_only_timeline:
+        env.storage_controller.pageserver_api().timeline_delete(tenant_id, branch_timeline_id)
+    else:
+        env.storage_controller.pageserver_api().tenant_delete(tenant_id)
 
-    # ensure log msgs in safekeeper ensure the tenant is gone
-    def logged_deleted_on_first_sks():
-        env.safekeepers[0].assert_log_contains(
-            f"deleting timeline {tenant_id}/{timeline_id} from disk"
-        )
-        env.safekeepers[2].assert_log_contains(
-            f"deleting timeline {tenant_id}/{timeline_id} from disk"
-        )
+    def logged_delete_finished():
+        env.safekeepers[0].assert_log_contains(f"method=DELETE.*{tenant_id}.*Request handled")
+        env.safekeepers[2].assert_log_contains(f"method=DELETE.*{tenant_id}.*Request handled")
 
-    wait_until(logged_deleted_on_first_sks)
+    wait_until(logged_delete_finished)
+
+    env.safekeepers[0].assert_log_contains(
+        f"deleting timeline {tenant_id}/{branch_timeline_id} from disk"
+    )
+    env.safekeepers[2].assert_log_contains(
+        f"deleting timeline {tenant_id}/{branch_timeline_id} from disk"
+    )
+
+    root_was_deleted_on_0 = env.safekeepers[0].log_contains(
+        f"deleting timeline {tenant_id}/{timeline_id} from disk"
+    )
+    root_was_deleted_on_2 = env.safekeepers[2].log_contains(
+        f"deleting timeline {tenant_id}/{timeline_id} from disk"
+    )
+    assert root_was_deleted_on_0 == root_was_deleted_on_2
+
+    # We only delete the root timeline iff the tenant delete was requested
+    if delete_only_timeline:
+        assert not root_was_deleted_on_0
+    else:
+        assert root_was_deleted_on_0
 
     if restart_storcon:
         # Restart the storcon to check that we persist operations
