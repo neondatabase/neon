@@ -4103,10 +4103,12 @@ def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart
     env.safekeepers[1].assert_log_contains(f"creating new timeline {tenant_id}/{timeline_id}")
     env.safekeepers[2].assert_log_contains(f"creating new timeline {tenant_id}/{timeline_id}")
 
-    env.storage_controller.allowed_errors.extend([
-        ".*Call to safekeeper.* management API still failed after.*",
-        ".*reconcile_one.*tenant_id={tenant_id}.*Call to safekeeper.* management API still failed after.*",
-    ])
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*Call to safekeeper.* management API still failed after.*",
+            ".*reconcile_one.*tenant_id={tenant_id}.*Call to safekeeper.* management API still failed after.*",
+        ]
+    )
 
     if restart_storcon:
         # Restart the storcon to check that we persist operations
@@ -4126,7 +4128,9 @@ def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart
 
     # ensure that we applied the operation also for the safekeeper we just brought down
     def logged_contains_on_sk():
-        env.safekeepers[0].assert_log_contains(f"pulling timeline {tenant_id}/{timeline_id} from safekeeper")
+        env.safekeepers[0].assert_log_contains(
+            f"pulling timeline {tenant_id}/{timeline_id} from safekeeper"
+        )
 
     wait_until(logged_contains_on_sk)
 
