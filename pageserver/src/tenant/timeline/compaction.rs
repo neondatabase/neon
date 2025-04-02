@@ -24,7 +24,7 @@ use futures::FutureExt;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use pageserver_api::config::tenant_conf_defaults::DEFAULT_CHECKPOINT_DISTANCE;
-use pageserver_api::key::{CompactKey, KEY_SIZE, Key};
+use pageserver_api::key::{KEY_SIZE, Key};
 use pageserver_api::keyspace::{KeySpace, ShardedRange};
 use pageserver_api::models::{CompactInfoResponse, CompactKeyRange};
 use pageserver_api::record::NeonWalRecord;
