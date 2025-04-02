@@ -596,7 +596,6 @@ def test_wal_truncation(neon_env_builder: NeonEnvBuilder, safekeeper_proto_versi
     asyncio.run(run_wal_truncation(env, safekeeper_proto_version))
 
 
-# todo: add should_start when all up; check and exit early if not
 async def quorum_sanity_single(
     env: NeonEnv,
     compute_sks_ids: list[int],
@@ -649,6 +648,10 @@ async def quorum_sanity_single(
     if should_work_when_stopped:
         log.info("checking that writes still work")
         ep.safe_psql("insert into t select generate_series(1, 100), 'Papaya'")
+        # restarting ep should also be fine
+        ep.stop()
+        ep.start()
+        ep.safe_psql("insert into t select generate_series(1, 100), 'plum'")
         bg_query = None
     else:
         log.info("checking that writes hang")
@@ -668,41 +671,41 @@ async def quorum_sanity_single(
 async def run_quorum_sanity(env: NeonEnv):
     # 3 members, all up, should work
     await quorum_sanity_single(env, [1, 2, 3], [1, 2, 3], None, [], True)
-    # # 3 members, 2/3 up, should work
+    # 3 members, 2/3 up, should work
     await quorum_sanity_single(env, [1, 2, 3], [1, 2, 3], None, [3], True)
-    # # 3 members, 1/3 up, should not work
+    # 3 members, 1/3 up, should not work
     await quorum_sanity_single(env, [1, 2, 3], [1, 2, 3], None, [2, 3], False)
 
-    # # 3 members, all up, should work; wp redundantly talks to 4th.
+    # 3 members, all up, should work; wp redundantly talks to 4th.
     await quorum_sanity_single(env, [1, 2, 3, 4], [1, 2, 3], None, [], True)
-    # # 3 members, all up, should work with wp talking to 2 of these 3 + plus one redundant
+    # 3 members, all up, should work with wp talking to 2 of these 3 + plus one redundant
     await quorum_sanity_single(env, [2, 3, 4], [1, 2, 3], None, [], True)
-    # # 3 members, 2/3 up, could work but wp talks to different 3s, so it shouldn't
+    # 3 members, 2/3 up, could work but wp talks to different 3s, so it shouldn't
     await quorum_sanity_single(env, [2, 3, 4], [1, 2, 3], None, [3], False)
 
-    # # joint conf of 1-2-3 and 4, all up, should work
+    # joint conf of 1-2-3 and 4, all up, should work
     await quorum_sanity_single(env, [1, 2, 3, 4], [1, 2, 3], [4], [], True)
-    # # joint conf of 1-2-3 and 4, 4 down, shouldn't work
+    # joint conf of 1-2-3 and 4, 4 down, shouldn't work
     await quorum_sanity_single(env, [1, 2, 3, 4], [1, 2, 3], [4], [4], False)
 
-    # # joint conf of 1-2-3 and 2-3-4, all up, should work
+    # joint conf of 1-2-3 and 2-3-4, all up, should work
     await quorum_sanity_single(env, [1, 2, 3, 4], [1, 2, 3], [2, 3, 4], [], True)
-    # # joint conf of 1-2-3 and 2-3-4, 1 and 4 down, should work
+    # joint conf of 1-2-3 and 2-3-4, 1 and 4 down, should work
     await quorum_sanity_single(env, [1, 2, 3, 4], [1, 2, 3], [2, 3, 4], [1, 4], True)
-    # # joint conf of 1-2-3 and 2-3-4, 2 down, should work
+    # joint conf of 1-2-3 and 2-3-4, 2 down, should work
     await quorum_sanity_single(env, [1, 2, 3, 4], [1, 2, 3], [2, 3, 4], [2], True)
-    # # joint conf of 1-2-3 and 2-3-4, 3 down, should work
+    # joint conf of 1-2-3 and 2-3-4, 3 down, should work
     await quorum_sanity_single(env, [1, 2, 3, 4], [1, 2, 3], [2, 3, 4], [3], True)
-    # # joint conf of 1-2-3 and 2-3-4, 1 and 2 down, shouldn't work
+    # joint conf of 1-2-3 and 2-3-4, 1 and 2 down, shouldn't work
     await quorum_sanity_single(env, [1, 2, 3, 4], [1, 2, 3], [2, 3, 4], [1, 2], False)
-    # # joint conf of 1-2-3 and 2-3-4, 2 and 4 down, shouldn't work
+    # joint conf of 1-2-3 and 2-3-4, 2 and 4 down, shouldn't work
     await quorum_sanity_single(env, [1, 2, 3, 4], [1, 2, 3], [2, 3, 4], [2, 4], False)
 
-    # # joint conf of 1-2-3 and 2-3-4 with wp talking to 2-3-4 only.
+    # joint conf of 1-2-3 and 2-3-4 with wp talking to 2-3-4 only.
     await quorum_sanity_single(env, [2, 3, 4], [1, 2, 3], [2, 3, 4], [], True)
-    # # with 1 down should still be ok
+    # with 1 down should still be ok
     await quorum_sanity_single(env, [2, 3, 4], [1, 2, 3], [2, 3, 4], [1], True)
-    # # but with 2 down not ok
+    # but with 2 down not ok
     await quorum_sanity_single(env, [2, 3, 4], [1, 2, 3], [2, 3, 4], [2], False)
 
 
