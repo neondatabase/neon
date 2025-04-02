@@ -3248,17 +3248,23 @@ impl Tenant {
     async fn housekeeping(&self) {
         // Call through to all timelines to freeze ephemeral layers as needed. This usually happens
         // during ingest, but we don't want idle timelines to hold open layers for too long.
-        let timelines = self
-            .timelines
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|tli| tli.is_active())
-            .cloned()
-            .collect_vec();
+        //
+        // We don't do this if the tenant can't upload layers (i.e. it's in stale attachment mode).
+        // We don't run compaction in this case either, and don't want to keep flushing tiny L0
+        // layers that won't be compacted down.
+        if self.tenant_conf.load().location.may_upload_layers_hint() {
+            let timelines = self
+                .timelines
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|tli| tli.is_active())
+                .cloned()
+                .collect_vec();
 
-        for timeline in timelines {
-            timeline.maybe_freeze_ephemeral_layer().await;
+            for timeline in timelines {
+                timeline.maybe_freeze_ephemeral_layer().await;
+            }
         }
 
         // Shut down walredo if idle.

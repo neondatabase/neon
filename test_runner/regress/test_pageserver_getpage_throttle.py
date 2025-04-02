@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from fixtures.neon_fixtures import NeonEnvBuilder, PgBin
 
 
+@pytest.mark.skip("See https://github.com/neondatabase/neon/issues/11395")
 def test_pageserver_getpage_throttle(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     env = neon_env_builder.init_start()
 
