@@ -50,6 +50,7 @@ fn peer_info_from_sk_info(sk_info: &SafekeeperTimelineInfo, ts: Instant) -> Peer
         local_start_lsn: Lsn(sk_info.local_start_lsn),
         pg_connstr: sk_info.safekeeper_connstr.clone(),
         http_connstr: sk_info.http_connstr.clone(),
+        https_connstr: sk_info.https_connstr.clone(),
         ts,
     }
 }
@@ -363,6 +364,7 @@ impl SharedState {
                 .to_owned()
                 .unwrap_or(conf.listen_pg_addr.clone()),
             http_connstr: conf.listen_http_addr.to_owned(),
+            https_connstr: conf.listen_https_addr.to_owned(),
             backup_lsn: self.sk.state().inmem.backup_lsn.0,
             local_start_lsn: self.sk.state().local_start_lsn.0,
             availability_zone: conf.availability_zone.clone(),

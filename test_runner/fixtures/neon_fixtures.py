@@ -1284,6 +1284,7 @@ class NeonEnv:
                 "http_port": port.http,
                 "https_port": port.https,
                 "sync": config.safekeepers_enable_fsync,
+                "use_https_safekeeper_api": config.use_https_safekeeper_api,
             }
             if config.auth_enabled:
                 sk_cfg["auth_enabled"] = True

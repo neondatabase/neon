@@ -538,6 +538,7 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
         peer_horizon_lsn: sk_info.peer_horizon_lsn.0,
         safekeeper_connstr: sk_info.safekeeper_connstr.unwrap_or_else(|| "".to_owned()),
         http_connstr: sk_info.http_connstr.unwrap_or_else(|| "".to_owned()),
+        https_connstr: sk_info.https_connstr,
         backup_lsn: sk_info.backup_lsn.0,
         local_start_lsn: sk_info.local_start_lsn.0,
         availability_zone: None,
