@@ -39,6 +39,13 @@ commands:
     user: nobody
     sysvInitAction: respawn
     shell: '/bin/sql_exporter -config.file=/etc/sql_exporter_autoscaling.yml -web.listen-address=:9499'
+  # Rsyslog by default creates a unix socket under /dev/log . That's where Postgres sends logs also.
+  # We run syslog with postgres user so it can't create /dev/log. Instead we configure rsyslog to
+  # use a different path for the socket. The symlink actually points to our custom path.
+  - name: rsyslogd-socket-symlink
+    user: root
+    sysvInitAction: sysinit
+    shell: "ln -s /var/db/postgres/rsyslogpipe /dev/log"
   - name: rsyslogd
     user: postgres
     sysvInitAction: respawn
@@ -77,6 +84,9 @@ files:
 # compute_ctl will rewrite this file with the actual configuration, if needed.
   - filename: compute_rsyslog.conf
     content: |
+      # Syslock.Name specifies a non-default pipe location that is writeable for the postgres user.
+      module(load="imuxsock" SysSock.Name="/var/db/postgres/rsyslogpipe") # provides support for local system logging
+
       *.*    /dev/null
       $IncludeConfig /etc/rsyslog.d/*.conf
 build: |
@@ -140,7 +150,7 @@ merge: |
 
   COPY compute_rsyslog.conf /etc/compute_rsyslog.conf
   RUN chmod 0666 /etc/compute_rsyslog.conf
-  RUN chmod 0666 /var/log/
+  RUN mkdir /var/log/rsyslog && chown -R postgres /var/log/rsyslog
 
 
   COPY --from=libcgroup-builder /libcgroup-install/bin/*  /usr/bin/

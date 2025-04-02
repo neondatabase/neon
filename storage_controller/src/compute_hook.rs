@@ -624,7 +624,19 @@ impl ComputeHook {
             MaybeSendResult::Transmit((request, lock)) => (request, lock),
         };
 
-        let result = if let Some(notify_url) = &self.config.compute_hook_url {
+        let result = if !self.config.use_local_compute_notifications {
+            let compute_hook_url = if let Some(control_plane_url) = &self.config.control_plane_url {
+                Some(if control_plane_url.ends_with('/') {
+                    format!("{control_plane_url}notify-attach")
+                } else {
+                    format!("{control_plane_url}/notify-attach")
+                })
+            } else {
+                self.config.compute_hook_url.clone()
+            };
+
+            // We validate this at startup
+            let notify_url = compute_hook_url.as_ref().unwrap();
             self.do_notify(notify_url, &request, cancel).await
         } else {
             self.do_notify_local(&request).await.map_err(|e| {

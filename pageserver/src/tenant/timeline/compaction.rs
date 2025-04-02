@@ -56,6 +56,7 @@ use crate::tenant::storage_layer::merge_iterator::MergeIterator;
 use crate::tenant::storage_layer::{
     AsLayerDesc, PersistentLayerDesc, PersistentLayerKey, ValueReconstructState,
 };
+use crate::tenant::tasks::log_compaction_error;
 use crate::tenant::timeline::{
     DeltaLayerWriter, ImageLayerCreationOutcome, ImageLayerWriter, IoConcurrency, Layer,
     ResidentLayer, drop_rlock,
@@ -393,6 +394,9 @@ impl GcCompactionQueue {
                 if job.dry_run {
                     flags |= CompactFlags::DryRun;
                 }
+                if options.flags.contains(CompactFlags::YieldForL0) {
+                    flags |= CompactFlags::YieldForL0;
+                }
                 let options = CompactOptions {
                     flags,
                     sub_compaction: false,
@@ -432,6 +436,20 @@ impl GcCompactionQueue {
 
     /// Take a job from the queue and process it. Returns if there are still pending tasks.
     pub async fn iteration(
+        &self,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
+        gc_block: &GcBlock,
+        timeline: &Arc<Timeline>,
+    ) -> Result<CompactionOutcome, CompactionError> {
+        let res = self.iteration_inner(cancel, ctx, gc_block, timeline).await;
+        if let Err(err) = &res {
+            log_compaction_error(err, None, cancel.is_cancelled());
+        }
+        res
+    }
+
+    async fn iteration_inner(
         &self,
         cancel: &CancellationToken,
         ctx: &RequestContext,
@@ -965,7 +983,7 @@ impl Timeline {
 
         // Yield if we have pending L0 compaction. The scheduler will do another pass.
         if (l0_outcome == CompactionOutcome::Pending || l0_outcome == CompactionOutcome::YieldForL0)
-            && !options.flags.contains(CompactFlags::NoYield)
+            && options.flags.contains(CompactFlags::YieldForL0)
         {
             info!("image/ancestor compaction yielding for L0 compaction");
             return Ok(CompactionOutcome::YieldForL0);
@@ -1010,7 +1028,7 @@ impl Timeline {
                             .load()
                             .as_ref()
                             .clone(),
-                        !options.flags.contains(CompactFlags::NoYield),
+                        options.flags.contains(CompactFlags::YieldForL0),
                     )
                     .await
                     .inspect_err(|err| {
@@ -2617,6 +2635,7 @@ impl Timeline {
     ) -> Result<CompactionOutcome, CompactionError> {
         let sub_compaction = options.sub_compaction;
         let job = GcCompactJob::from_compact_options(options.clone());
+        let yield_for_l0 = options.flags.contains(CompactFlags::YieldForL0);
         if sub_compaction {
             info!(
                 "running enhanced gc bottom-most compaction with sub-compaction, splitting compaction jobs"
@@ -2631,14 +2650,16 @@ impl Timeline {
                     idx + 1,
                     jobs_len
                 );
-                self.compact_with_gc_inner(cancel, job, ctx).await?;
+                self.compact_with_gc_inner(cancel, job, ctx, yield_for_l0)
+                    .await?;
             }
             if jobs_len == 0 {
                 info!("no jobs to run, skipping gc bottom-most compaction");
             }
             return Ok(CompactionOutcome::Done);
         }
-        self.compact_with_gc_inner(cancel, job, ctx).await
+        self.compact_with_gc_inner(cancel, job, ctx, yield_for_l0)
+            .await
     }
 
     async fn compact_with_gc_inner(
@@ -2646,6 +2667,7 @@ impl Timeline {
         cancel: &CancellationToken,
         job: GcCompactJob,
         ctx: &RequestContext,
+        yield_for_l0: bool,
     ) -> Result<CompactionOutcome, CompactionError> {
         // Block other compaction/GC tasks from running for now. GC-compaction could run along
         // with legacy compaction tasks in the future. Always ensure the lock order is compaction -> gc.
@@ -2915,11 +2937,12 @@ impl Timeline {
             if cancel.is_cancelled() {
                 return Err(CompactionError::ShuttingDown);
             }
-            let should_yield = self
-                .l0_compaction_trigger
-                .notified()
-                .now_or_never()
-                .is_some();
+            let should_yield = yield_for_l0
+                && self
+                    .l0_compaction_trigger
+                    .notified()
+                    .now_or_never()
+                    .is_some();
             if should_yield {
                 tracing::info!("preempt gc-compaction when downloading layers: too many L0 layers");
                 return Ok(CompactionOutcome::YieldForL0);
@@ -3055,17 +3078,18 @@ impl Timeline {
             if cancel.is_cancelled() {
                 return Err(CompactionError::ShuttingDown);
             }
+
             keys_processed += 1;
-            if keys_processed % 1000 == 0 {
-                let should_yield = self
+            let should_yield = yield_for_l0
+                && keys_processed % 1000 == 0
+                && self
                     .l0_compaction_trigger
                     .notified()
                     .now_or_never()
                     .is_some();
-                if should_yield {
-                    tracing::info!("preempt gc-compaction in the main loop: too many L0 layers");
-                    return Ok(CompactionOutcome::YieldForL0);
-                }
+            if should_yield {
+                tracing::info!("preempt gc-compaction in the main loop: too many L0 layers");
+                return Ok(CompactionOutcome::YieldForL0);
             }
             if self.shard_identity.is_key_disposable(&key) {
                 // If this shard does not need to store this key, simply skip it.
@@ -3174,7 +3198,11 @@ impl Timeline {
         }
 
         // TODO: move the below part to the loop body
-        let last_key = last_key.expect("no keys produced during compaction");
+        let Some(last_key) = last_key else {
+            return Err(CompactionError::Other(anyhow!(
+                "no keys produced during compaction"
+            )));
+        };
         stat.on_unique_key_visited();
 
         let retention = self

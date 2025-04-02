@@ -17,6 +17,12 @@
 ({};
  .[$entry.component] |= (if . == null or $entry.version > .version then $entry else . end))
 
+# Ensure that each component exists, or fail
+| (["storage", "compute", "proxy"] - (keys)) as $missing
+| if ($missing | length) > 0 then
+    "Error: Found no release for \($missing | join(", "))!\n" | halt_error(1)
+  else . end
+
 # Convert the resulting object into an array of formatted strings
 | to_entries
 | map("\(.key)=\(.value.full)")

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 import requests
@@ -13,8 +12,12 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     parse_project_git_version_output,
 )
-from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.utils import run_only_on_default_postgres, skip_in_debug_build
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from fixtures.pageserver.http import PageserverHttpClient
 
 
 def helper_compare_timeline_list(
@@ -65,7 +68,7 @@ def test_cli_timeline_list(neon_simple_env: NeonEnv):
 
 def helper_compare_tenant_list(pageserver_http_client: PageserverHttpClient, env: NeonEnv):
     tenants = pageserver_http_client.tenant_list()
-    tenants_api = sorted(map(lambda t: cast(str, t["id"]), tenants))
+    tenants_api = sorted(map(lambda t: cast("str", t["id"]), tenants))
 
     res = env.neon_cli.tenant_list()
     tenants_cli = sorted(map(lambda t: t.split()[0], res.stdout.splitlines()))

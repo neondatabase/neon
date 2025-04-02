@@ -7,13 +7,16 @@ from __future__ import annotations
 import json
 import os
 import time
+from typing import TYPE_CHECKING
 
 import psycopg2
 import pytest
 import requests
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import RemotePostgres
 from fixtures.utils import wait_until
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import RemotePostgres
 
 
 class DebeziumAPI:

@@ -14,13 +14,13 @@ use pageserver_api::controller_api::{
     TenantShardMigrateRequest, TenantShardMigrateResponse,
 };
 use pageserver_api::models::{
-    EvictionPolicy, EvictionPolicyLayerAccessThreshold, LocationConfigSecondary, ShardParameters,
-    TenantConfig, TenantConfigPatchRequest, TenantConfigRequest, TenantShardSplitRequest,
+    EvictionPolicy, EvictionPolicyLayerAccessThreshold, ShardParameters, TenantConfig,
+    TenantConfigPatchRequest, TenantConfigRequest, TenantShardSplitRequest,
     TenantShardSplitResponse,
 };
 use pageserver_api::shard::{ShardStripeSize, TenantShardId};
 use pageserver_client::mgmt_api::{self};
-use reqwest::{Method, StatusCode, Url};
+use reqwest::{Certificate, Method, StatusCode, Url};
 use storage_controller_client::control_api::Client;
 use utils::id::{NodeId, TenantId, TimelineId};
 
@@ -158,12 +158,6 @@ enum Command {
         #[arg(long)]
         tenant_id: TenantId,
     },
-    /// For a tenant which hasn't been onboarded to the storage controller yet, add it in secondary
-    /// mode so that it can warm up content on a pageserver.
-    TenantWarmup {
-        #[arg(long)]
-        tenant_id: TenantId,
-    },
     TenantSetPreferredAz {
         #[arg(long)]
         tenant_id: TenantId,
@@ -280,7 +274,7 @@ struct Cli {
     jwt: Option<String>,
 
     #[arg(long)]
-    /// Trusted root CA certificate to use in https APIs.
+    /// Trusted root CA certificates to use in https APIs.
     ssl_ca_file: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -393,17 +387,23 @@ async fn main() -> anyhow::Result<()> {
 
     let storcon_client = Client::new(cli.api.clone(), cli.jwt.clone());
 
-    let ssl_ca_cert = match &cli.ssl_ca_file {
+    let ssl_ca_certs = match &cli.ssl_ca_file {
         Some(ssl_ca_file) => {
             let buf = tokio::fs::read(ssl_ca_file).await?;
-            Some(reqwest::Certificate::from_pem(&buf)?)
+            Certificate::from_pem_bundle(&buf)?
         }
-        None => None,
+        None => Vec::new(),
     };
+
+    let mut http_client = reqwest::Client::builder();
+    for ssl_ca_cert in ssl_ca_certs {
+        http_client = http_client.add_root_certificate(ssl_ca_cert);
+    }
+    let http_client = http_client.build()?;
 
     let mut trimmed = cli.api.to_string();
     trimmed.pop();
-    let vps_client = mgmt_api::Client::new(trimmed, cli.jwt.as_deref(), ssl_ca_cert)?;
+    let vps_client = mgmt_api::Client::new(http_client, trimmed, cli.jwt.as_deref());
 
     match cli.command {
         Command::NodeRegister {
@@ -870,94 +870,6 @@ async fn main() -> anyhow::Result<()> {
                     Some(req),
                 )
                 .await?;
-        }
-        Command::TenantWarmup { tenant_id } => {
-            let describe_response = storcon_client
-                .dispatch::<(), TenantDescribeResponse>(
-                    Method::GET,
-                    format!("control/v1/tenant/{tenant_id}"),
-                    None,
-                )
-                .await;
-            match describe_response {
-                Ok(describe) => {
-                    if matches!(describe.policy, PlacementPolicy::Secondary) {
-                        // Fine: it's already known to controller in secondary mode: calling
-                        // again to put it into secondary mode won't cause problems.
-                    } else {
-                        anyhow::bail!("Tenant already present with policy {:?}", describe.policy);
-                    }
-                }
-                Err(mgmt_api::Error::ApiError(StatusCode::NOT_FOUND, _)) => {
-                    // Fine: this tenant isn't know to the storage controller yet.
-                }
-                Err(e) => {
-                    // Unexpected API error
-                    return Err(e.into());
-                }
-            }
-
-            vps_client
-                .location_config(
-                    TenantShardId::unsharded(tenant_id),
-                    pageserver_api::models::LocationConfig {
-                        mode: pageserver_api::models::LocationConfigMode::Secondary,
-                        generation: None,
-                        secondary_conf: Some(LocationConfigSecondary { warm: true }),
-                        shard_number: 0,
-                        shard_count: 0,
-                        shard_stripe_size: ShardParameters::DEFAULT_STRIPE_SIZE.0,
-                        tenant_conf: TenantConfig::default(),
-                    },
-                    None,
-                    true,
-                )
-                .await?;
-
-            let describe_response = storcon_client
-                .dispatch::<(), TenantDescribeResponse>(
-                    Method::GET,
-                    format!("control/v1/tenant/{tenant_id}"),
-                    None,
-                )
-                .await?;
-
-            let secondary_ps_id = describe_response
-                .shards
-                .first()
-                .unwrap()
-                .node_secondary
-                .first()
-                .unwrap();
-
-            println!("Tenant {tenant_id} warming up on pageserver {secondary_ps_id}");
-            loop {
-                let (status, progress) = vps_client
-                    .tenant_secondary_download(
-                        TenantShardId::unsharded(tenant_id),
-                        Some(Duration::from_secs(10)),
-                    )
-                    .await?;
-                println!(
-                    "Progress: {}/{} layers, {}/{} bytes",
-                    progress.layers_downloaded,
-                    progress.layers_total,
-                    progress.bytes_downloaded,
-                    progress.bytes_total
-                );
-                match status {
-                    StatusCode::OK => {
-                        println!("Download complete");
-                        break;
-                    }
-                    StatusCode::ACCEPTED => {
-                        // Loop
-                    }
-                    _ => {
-                        anyhow::bail!("Unexpected download status: {status}");
-                    }
-                }
-            }
         }
         Command::TenantDrop { tenant_id, unclean } => {
             if !unclean {

@@ -8,6 +8,7 @@ use camino::Utf8PathBuf;
 use chrono::{DateTime, Utc};
 use futures::{SinkExt, StreamExt, TryStreamExt};
 use postgres_ffi::{PG_TLI, XLogFileName, XLogSegNo};
+use reqwest::Certificate;
 use safekeeper_api::Term;
 use safekeeper_api::models::{PullTimelineRequest, PullTimelineResponse, TimelineStatus};
 use safekeeper_client::mgmt_api;
@@ -392,6 +393,7 @@ pub struct DebugDumpResponse {
 pub async fn handle_request(
     request: PullTimelineRequest,
     sk_auth_token: Option<SecretString>,
+    ssl_ca_certs: Vec<Certificate>,
     global_timelines: Arc<GlobalTimelines>,
 ) -> Result<PullTimelineResponse> {
     let existing_tli = global_timelines.get(TenantTimelineId::new(
@@ -402,9 +404,11 @@ pub async fn handle_request(
         bail!("Timeline {} already exists", request.timeline_id);
     }
 
-    // TODO(DimasKovas): add ssl root CA certificate when implementing safekeeper's
-    // part of https support (#24836).
-    let http_client = reqwest::Client::new();
+    let mut http_client = reqwest::Client::builder();
+    for ssl_ca_cert in ssl_ca_certs {
+        http_client = http_client.add_root_certificate(ssl_ca_cert);
+    }
+    let http_client = http_client.build()?;
 
     let http_hosts = request.http_hosts.clone();
 
@@ -441,13 +445,21 @@ pub async fn handle_request(
     assert!(status.tenant_id == request.tenant_id);
     assert!(status.timeline_id == request.timeline_id);
 
-    pull_timeline(status, safekeeper_host, sk_auth_token, global_timelines).await
+    pull_timeline(
+        status,
+        safekeeper_host,
+        sk_auth_token,
+        http_client,
+        global_timelines,
+    )
+    .await
 }
 
 async fn pull_timeline(
     status: TimelineStatus,
     host: String,
     sk_auth_token: Option<SecretString>,
+    http_client: reqwest::Client,
     global_timelines: Arc<GlobalTimelines>,
 ) -> Result<PullTimelineResponse> {
     let ttid = TenantTimelineId::new(status.tenant_id, status.timeline_id);
@@ -464,9 +476,6 @@ async fn pull_timeline(
     let conf = &global_timelines.get_global_config();
 
     let (_tmp_dir, tli_dir_path) = create_temp_timeline_dir(conf, ttid).await?;
-    // TODO(DimasKovas): add ssl root CA certificate when implementing safekeeper's
-    // part of https support (#24836).
-    let http_client = reqwest::Client::new();
     let client = Client::new(http_client, host.clone(), sk_auth_token.clone());
     // Request stream with basebackup archive.
     let bb_resp = client

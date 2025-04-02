@@ -45,8 +45,9 @@ use pageserver_api::key::{
 use pageserver_api::keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning};
 use pageserver_api::models::{
     CompactKeyRange, CompactLsnRange, CompactionAlgorithm, CompactionAlgorithmSettings,
-    DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
-    InMemoryLayerInfo, LayerMapInfo, LsnLease, PageTraceEvent, RelSizeMigration, TimelineState,
+    DetachBehavior, DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
+    EvictionPolicy, InMemoryLayerInfo, LayerMapInfo, LsnLease, PageTraceEvent, RelSizeMigration,
+    TimelineState,
 };
 use pageserver_api::reltag::{BlockNumber, RelTag};
 use pageserver_api::shard::{ShardIdentity, ShardIndex, ShardNumber, TenantShardId};
@@ -67,6 +68,7 @@ use tracing::*;
 use utils::generation::Generation;
 use utils::guard_arc_swap::GuardArcSwap;
 use utils::id::TimelineId;
+use utils::logging::{MonitorSlowFutureCallback, monitor_slow_future};
 use utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use utils::postgres_client::PostgresClientProtocol;
 use utils::rate_limit::RateLimit;
@@ -82,11 +84,11 @@ use self::eviction_task::EvictionTaskTimelineState;
 use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
-use super::config::TenantConf;
+use super::remote_timeline_client::RemoteTimelineClient;
 use super::remote_timeline_client::index::{GcCompactionState, IndexPart};
-use super::remote_timeline_client::{RemoteTimelineClient, WaitCompletionError};
 use super::secondary::heatmap::HeatMapLayer;
 use super::storage_layer::{LayerFringe, LayerVisibilityHint, ReadableLayer};
+use super::tasks::log_compaction_error;
 use super::upload_queue::NotInitialized;
 use super::{
     AttachedTenantConf, GcError, HeatMapTimeline, MaybeOffloaded,
@@ -108,7 +110,7 @@ use crate::pgdatadir_mapping::{
     MAX_AUX_FILE_V2_DELTAS, MetricsUpdate,
 };
 use crate::task_mgr::TaskKind;
-use crate::tenant::config::{AttachmentMode, TenantConfOpt};
+use crate::tenant::config::AttachmentMode;
 use crate::tenant::gc_result::GcResult;
 use crate::tenant::layer_map::{LayerMap, SearchResult};
 use crate::tenant::metadata::TimelineMetadata;
@@ -439,6 +441,8 @@ pub struct Timeline {
     heatmap_layers_downloader: Mutex<Option<heatmap_layers_downloader::HeatmapLayersDownloader>>,
 
     pub(crate) rel_size_v2_status: ArcSwapOption<RelSizeMigration>,
+
+    wait_lsn_log_slow: tokio::sync::Semaphore,
 }
 
 pub(crate) enum PreviousHeatmap {
@@ -531,11 +535,11 @@ impl GcInfo {
 /// between time-based and space-based retention for observability and consumption metrics purposes.
 #[derive(Debug, Clone)]
 pub(crate) struct GcCutoffs {
-    /// Calculated from the [`TenantConf::gc_horizon`], this LSN indicates how much
+    /// Calculated from the [`pageserver_api::models::TenantConfig::gc_horizon`], this LSN indicates how much
     /// history we must keep to retain a specified number of bytes of WAL.
     pub(crate) space: Lsn,
 
-    /// Calculated from [`TenantConf::pitr_interval`], this LSN indicates how much
+    /// Calculated from [`pageserver_api::models::TenantConfig::pitr_interval`], this LSN indicates how much
     /// history we must keep to enable reading back at least the PITR interval duration.
     pub(crate) time: Lsn,
 }
@@ -866,9 +870,14 @@ pub(crate) enum CompactFlags {
     OnlyL0Compaction,
     EnhancedGcBottomMostCompaction,
     DryRun,
-    /// Disables compaction yielding e.g. due to high L0 count. This is set e.g. when requesting
-    /// compaction via HTTP API.
-    NoYield,
+    /// Makes image compaction yield if there's pending L0 compaction. This should always be used in
+    /// the background compaction task, since we want to aggressively compact down L0 to bound
+    /// read amplification.
+    ///
+    /// It only makes sense to use this when `compaction_l0_first` is enabled (such that we yield to
+    /// an L0 compaction pass), and without `OnlyL0Compaction` (L0 compaction shouldn't yield for L0
+    /// compaction).
+    YieldForL0,
 }
 
 #[serde_with::serde_as]
@@ -1479,17 +1488,67 @@ impl Timeline {
             WaitLsnTimeout::Default => self.conf.wait_lsn_timeout,
         };
 
-        let _timer = crate::metrics::WAIT_LSN_TIME.start_timer();
+        let timer = crate::metrics::WAIT_LSN_TIME.start_timer();
+        let start_finish_counterpair_guard = self.metrics.wait_lsn_start_finish_counterpair.guard();
 
-        match self.last_record_lsn.wait_for_timeout(lsn, timeout).await {
+        let wait_for_timeout = self.last_record_lsn.wait_for_timeout(lsn, timeout);
+        let wait_for_timeout = std::pin::pin!(wait_for_timeout);
+        // Use threshold of 1 because even 1 second of wait for ingest is very much abnormal.
+        let log_slow_threshold = Duration::from_secs(1);
+        // Use period of 10 to avoid flooding logs during an outage that affects all timelines.
+        let log_slow_period = Duration::from_secs(10);
+        let mut logging_permit = None;
+        let wait_for_timeout = monitor_slow_future(
+            log_slow_threshold,
+            log_slow_period,
+            wait_for_timeout,
+            |MonitorSlowFutureCallback {
+                 ready,
+                 is_slow,
+                 elapsed_total,
+                 elapsed_since_last_callback,
+             }| {
+                self.metrics
+                    .wait_lsn_in_progress_micros
+                    .inc_by(u64::try_from(elapsed_since_last_callback.as_micros()).unwrap());
+                if !is_slow {
+                    return;
+                }
+                // It's slow, see if we should log it.
+                // (We limit the logging to one per invocation per timeline to avoid excessive
+                // logging during an extended broker / networking outage that affects all timelines.)
+                if logging_permit.is_none() {
+                    logging_permit = self.wait_lsn_log_slow.try_acquire().ok();
+                }
+                if logging_permit.is_none() {
+                    return;
+                }
+                // We log it.
+                if ready {
+                    info!(
+                        "slow wait_lsn completed after {:.3}s",
+                        elapsed_total.as_secs_f64()
+                    );
+                } else {
+                    info!(
+                        "slow wait_lsn still running for {:.3}s",
+                        elapsed_total.as_secs_f64()
+                    );
+                }
+            },
+        );
+        let res = wait_for_timeout.await;
+        // don't count the time spent waiting for lock below, and also in walreceiver.status(), towards the wait_lsn_time_histo
+        drop(logging_permit);
+        drop(start_finish_counterpair_guard);
+        drop(timer);
+        match res {
             Ok(()) => Ok(()),
             Err(e) => {
                 use utils::seqwait::SeqWaitError::*;
                 match e {
                     Shutdown => Err(WaitLsnError::Shutdown),
                     Timeout => {
-                        // don't count the time spent waiting for lock below, and also in walreceiver.status(), towards the wait_lsn_time_histo
-                        drop(_timer);
                         let walreceiver_status = self.walreceiver_status();
                         Err(WaitLsnError::Timeout(format!(
                             "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}, WalReceiver status: {}",
@@ -1802,18 +1861,23 @@ impl Timeline {
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> Result<CompactionOutcome, CompactionError> {
-        self.compact_with_options(
-            cancel,
-            CompactOptions {
-                flags,
-                compact_key_range: None,
-                compact_lsn_range: None,
-                sub_compaction: false,
-                sub_compaction_max_job_size_mb: None,
-            },
-            ctx,
-        )
-        .await
+        let res = self
+            .compact_with_options(
+                cancel,
+                CompactOptions {
+                    flags,
+                    compact_key_range: None,
+                    compact_lsn_range: None,
+                    sub_compaction: false,
+                    sub_compaction_max_job_size_mb: None,
+                },
+                ctx,
+            )
+            .await;
+        if let Err(err) = &res {
+            log_compaction_error(err, None, cancel.is_cancelled());
+        }
+        res
     }
 
     /// Outermost timeline compaction operation; downloads needed layers.
@@ -1832,18 +1896,19 @@ impl Timeline {
         // out by other background tasks (including image compaction). We request this via
         // `BackgroundLoopKind::L0Compaction`.
         //
-        // If this is a regular compaction pass, and L0-only compaction is enabled in the config,
-        // then we should yield for immediate L0 compaction if necessary while we're waiting for the
-        // background task semaphore. There's no point yielding otherwise, since we'd just end up
-        // right back here.
+        // Yield for pending L0 compaction while waiting for the semaphore.
         let is_l0_only = options.flags.contains(CompactFlags::OnlyL0Compaction);
         let semaphore_kind = match is_l0_only && self.get_compaction_l0_semaphore() {
             true => BackgroundLoopKind::L0Compaction,
             false => BackgroundLoopKind::Compaction,
         };
-        let yield_for_l0 = !is_l0_only
-            && self.get_compaction_l0_first()
-            && !options.flags.contains(CompactFlags::NoYield);
+        let yield_for_l0 = options.flags.contains(CompactFlags::YieldForL0);
+        if yield_for_l0 {
+            // If this is an L0 pass, it doesn't make sense to yield for L0.
+            debug_assert!(!is_l0_only, "YieldForL0 during L0 pass");
+            // If `compaction_l0_first` is disabled, there's no point yielding.
+            debug_assert!(self.get_compaction_l0_first(), "YieldForL0 without L0 pass");
+        }
 
         let acquire = async move {
             let guard = self.compaction_lock.lock().await;
@@ -2150,6 +2215,10 @@ impl Timeline {
         self.remote_client.is_archived()
     }
 
+    pub(crate) fn is_invisible(&self) -> Option<bool> {
+        self.remote_client.is_invisible()
+    }
+
     pub(crate) fn is_stopping(&self) -> bool {
         self.current_state() == TimelineState::Stopping
     }
@@ -2423,8 +2492,9 @@ impl Timeline {
     }
 
     fn get_l0_flush_delay_threshold(&self) -> Option<usize> {
-        // Disable L0 flushes by default. This and compaction needs further tuning.
-        const DEFAULT_L0_FLUSH_DELAY_FACTOR: usize = 0; // TODO: default to e.g. 3
+        // By default, delay L0 flushes at 3x the compaction threshold. The compaction threshold
+        // defaults to 10, and L0 compaction is generally able to keep L0 counts below 30.
+        const DEFAULT_L0_FLUSH_DELAY_FACTOR: usize = 3;
 
         // If compaction is disabled, don't delay.
         if self.get_compaction_period() == Duration::ZERO {
@@ -2452,8 +2522,9 @@ impl Timeline {
     }
 
     fn get_l0_flush_stall_threshold(&self) -> Option<usize> {
-        // Disable L0 stalls by default. In ingest benchmarks, we see image compaction take >10
-        // minutes, blocking L0 compaction, and we can't stall L0 flushes for that long.
+        // Disable L0 stalls by default. Stalling can cause unavailability if L0 compaction isn't
+        // responsive, and it can e.g. block on other compaction via the compaction semaphore or
+        // sibling timelines. We need more confidence before enabling this.
         const DEFAULT_L0_FLUSH_STALL_FACTOR: usize = 0; // TODO: default to e.g. 5
 
         // If compaction is disabled, don't stall.
@@ -2501,14 +2572,6 @@ impl Timeline {
         Some(max(l0_flush_stall_threshold, compaction_threshold))
     }
 
-    fn get_l0_flush_wait_upload(&self) -> bool {
-        let tenant_conf = self.tenant_conf.load();
-        tenant_conf
-            .tenant_conf
-            .l0_flush_wait_upload
-            .unwrap_or(self.conf.default_tenant_conf.l0_flush_wait_upload)
-    }
-
     fn get_image_creation_threshold(&self) -> usize {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -2536,8 +2599,8 @@ impl Timeline {
     }
 
     fn get_evictions_low_residence_duration_metric_threshold(
-        tenant_conf: &TenantConfOpt,
-        default_tenant_conf: &TenantConf,
+        tenant_conf: &pageserver_api::models::TenantConfig,
+        default_tenant_conf: &pageserver_api::config::TenantConfigToml,
     ) -> Duration {
         tenant_conf
             .evictions_low_residence_duration_metric_threshold
@@ -2821,6 +2884,8 @@ impl Timeline {
                 heatmap_layers_downloader: Mutex::new(None),
 
                 rel_size_v2_status: ArcSwapOption::from_pointee(rel_size_v2_status),
+
+                wait_lsn_log_slow: tokio::sync::Semaphore::new(1),
             };
 
             result.repartition_threshold =
@@ -4122,6 +4187,7 @@ impl Timeline {
                 self.timeline_id,
                 self.tenant_shard_id,
                 &self.gate,
+                &self.cancel,
                 ctx,
             )
             .await?;
@@ -4526,27 +4592,6 @@ impl Timeline {
             }
             // release lock on 'layers'
         };
-
-        // Backpressure mechanism: wait with continuation of the flush loop until we have uploaded all layer files.
-        // This makes us refuse ingest until the new layers have been persisted to the remote
-        // TODO: remove this, and rely on l0_flush_{delay,stall}_threshold instead.
-        if self.get_l0_flush_wait_upload() {
-            let start = Instant::now();
-            self.remote_client
-                .wait_completion()
-                .await
-                .map_err(|e| match e {
-                    WaitCompletionError::UploadQueueShutDownOrStopped
-                    | WaitCompletionError::NotInitialized(
-                        NotInitialized::ShuttingDown | NotInitialized::Stopped,
-                    ) => FlushLayerError::Cancelled,
-                    WaitCompletionError::NotInitialized(NotInitialized::Uninitialized) => {
-                        FlushLayerError::Other(anyhow!(e).into())
-                    }
-                })?;
-            let duration = start.elapsed().as_secs_f64();
-            self.metrics.flush_wait_upload_time_gauge_add(duration);
-        }
 
         // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
         // a compaction can delete the file and then it won't be available for uploads any more.
@@ -5388,9 +5433,10 @@ impl Timeline {
         self: &Arc<Timeline>,
         tenant: &crate::tenant::Tenant,
         options: detach_ancestor::Options,
+        behavior: DetachBehavior,
         ctx: &RequestContext,
     ) -> Result<detach_ancestor::Progress, detach_ancestor::Error> {
-        detach_ancestor::prepare(self, tenant, options, ctx).await
+        detach_ancestor::prepare(self, tenant, behavior, options, ctx).await
     }
 
     /// Second step of detach from ancestor; detaches the `self` from it's current ancestor and
@@ -5406,9 +5452,21 @@ impl Timeline {
         self: &Arc<Timeline>,
         tenant: &crate::tenant::Tenant,
         prepared: detach_ancestor::PreparedTimelineDetach,
+        ancestor_timeline_id: TimelineId,
+        ancestor_lsn: Lsn,
+        behavior: DetachBehavior,
         ctx: &RequestContext,
     ) -> Result<detach_ancestor::DetachingAndReparenting, detach_ancestor::Error> {
-        detach_ancestor::detach_and_reparent(self, tenant, prepared, ctx).await
+        detach_ancestor::detach_and_reparent(
+            self,
+            tenant,
+            prepared,
+            ancestor_timeline_id,
+            ancestor_lsn,
+            behavior,
+            ctx,
+        )
+        .await
     }
 
     /// Final step which unblocks the GC.
@@ -6665,6 +6723,8 @@ impl Timeline {
             self.tenant_shard_id,
             in_memory.lsn_range.start,
             &self.gate,
+            // TODO: if we ever use this function in production code, we need to pass the real cancellation token
+            &CancellationToken::new(),
             ctx,
         )
         .await

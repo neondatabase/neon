@@ -76,7 +76,8 @@ async fn read_image_file(path: impl AsRef<Path>, ctx: &RequestContext) -> Result
 }
 
 pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
-    let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
+    let ctx =
+        RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error).with_scope_debug_tools();
     match cmd {
         LayerCmd::List { path } => {
             for tenant in fs::read_dir(path.join(TENANTS_SEGMENT_NAME))? {
@@ -176,7 +177,8 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             );
             pageserver::page_cache::init(100);
 
-            let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
+            let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error)
+                .with_scope_debug_tools();
 
             macro_rules! rewrite_closure {
                 ($($summary_ty:tt)*) => {{

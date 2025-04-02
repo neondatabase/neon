@@ -30,7 +30,16 @@ pub struct Metrics {
 static SELF: OnceLock<Metrics> = OnceLock::new();
 impl Metrics {
     pub fn install(thread_pool: Arc<ThreadPoolMetrics>) {
-        SELF.set(Metrics::new(thread_pool))
+        let mut metrics = Metrics::new(thread_pool);
+
+        metrics.proxy.errors_total.init_all_dense();
+        metrics.proxy.redis_errors_total.init_all_dense();
+        metrics.proxy.redis_events_count.init_all_dense();
+        metrics.proxy.retries_metric.init_all_dense();
+        metrics.proxy.invalid_endpoints_total.init_all_dense();
+        metrics.proxy.connection_failures_total.init_all_dense();
+
+        SELF.set(metrics)
             .ok()
             .expect("proxy metrics must not be installed more than once");
     }

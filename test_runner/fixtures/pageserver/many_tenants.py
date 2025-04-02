@@ -4,17 +4,18 @@ import concurrent.futures
 from typing import TYPE_CHECKING
 
 import fixtures.pageserver.remote_storage
-from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    NeonEnv,
-    NeonEnvBuilder,
-)
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import Any
+
+    from fixtures.common_types import TenantId, TimelineId
+    from fixtures.neon_fixtures import (
+        NeonEnv,
+        NeonEnvBuilder,
+    )
 
 
 def single_timeline(

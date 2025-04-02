@@ -38,6 +38,7 @@ use std::panic::AssertUnwindSafe;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use futures::FutureExt;
 use once_cell::sync::Lazy;
@@ -584,18 +585,25 @@ pub async fn shutdown_tasks(
                 // warn to catch these in tests; there shouldn't be any
                 warn!(name = task.name, tenant_shard_id = ?tenant_shard_id, timeline_id = ?timeline_id, kind = ?task_kind, "stopping left-over");
             }
-            if tokio::time::timeout(std::time::Duration::from_secs(1), &mut join_handle)
+            const INITIAL_COMPLAIN_TIMEOUT: Duration = Duration::from_secs(1);
+            const PERIODIC_COMPLAIN_TIMEOUT: Duration = Duration::from_secs(60);
+            if tokio::time::timeout(INITIAL_COMPLAIN_TIMEOUT, &mut join_handle)
                 .await
                 .is_err()
             {
                 // allow some time to elapse before logging to cut down the number of log
                 // lines.
                 info!("waiting for task {} to shut down", task.name);
-                // we never handled this return value, but:
-                // - we don't deschedule which would lead to is_cancelled
-                // - panics are already logged (is_panicked)
-                // - task errors are already logged in the wrapper
-                let _ = join_handle.await;
+                loop {
+                    tokio::select! {
+                        // we never handled this return value, but:
+                        // - we don't deschedule which would lead to is_cancelled
+                        // - panics are already logged (is_panicked)
+                        // - task errors are already logged in the wrapper
+                        _ = &mut join_handle => break,
+                        _ = tokio::time::sleep(PERIODIC_COMPLAIN_TIMEOUT) => info!("still waiting for task {} to shut down", task.name),
+                    }
+                }
                 info!("task {} completed", task.name);
             }
         } else {

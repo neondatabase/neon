@@ -181,13 +181,13 @@ def test_tenants_attached_after_download(neon_env_builder: NeonEnvBuilder):
     wait_until(lambda: assert_tenant_state(client, tenant_id, "Active"))
 
     restored_timelines = client.timeline_list(tenant_id)
-    assert (
-        len(restored_timelines) == 1
-    ), f"Tenant {tenant_id} should have its timeline reattached after its layer is downloaded from the remote storage"
+    assert len(restored_timelines) == 1, (
+        f"Tenant {tenant_id} should have its timeline reattached after its layer is downloaded from the remote storage"
+    )
     restored_timeline = restored_timelines[0]
-    assert (
-        restored_timeline["timeline_id"] == str(timeline_id)
-    ), f"Tenant {tenant_id} should have its old timeline {timeline_id} restored from the remote storage"
+    assert restored_timeline["timeline_id"] == str(timeline_id), (
+        f"Tenant {tenant_id} should have its old timeline {timeline_id} restored from the remote storage"
+    )
 
     # Check that we had to retry the downloads
     assert env.pageserver.log_contains(".*download .* succeeded after 1 retries.*")
@@ -235,9 +235,9 @@ def test_tenant_redownloads_truncated_file_on_startup(
             os.truncate(path, 0)
             local_layer_truncated = (path, correct_size)
             break
-    assert (
-        local_layer_truncated is not None
-    ), f"Found no local layer files to delete in directory {timeline_dir}"
+    assert local_layer_truncated is not None, (
+        f"Found no local layer files to delete in directory {timeline_dir}"
+    )
 
     (path, expected_size) = local_layer_truncated
 
@@ -256,13 +256,13 @@ def test_tenant_redownloads_truncated_file_on_startup(
     wait_until(lambda: assert_tenant_state(client, tenant_id, "Active"))
 
     restored_timelines = client.timeline_list(tenant_id)
-    assert (
-        len(restored_timelines) == 1
-    ), f"Tenant {tenant_id} should have its timeline reattached after its layer is downloaded from the remote storage"
+    assert len(restored_timelines) == 1, (
+        f"Tenant {tenant_id} should have its timeline reattached after its layer is downloaded from the remote storage"
+    )
     retored_timeline = restored_timelines[0]
-    assert (
-        retored_timeline["timeline_id"] == str(timeline_id)
-    ), f"Tenant {tenant_id} should have its old timeline {timeline_id} restored from the remote storage"
+    assert retored_timeline["timeline_id"] == str(timeline_id), (
+        f"Tenant {tenant_id} should have its old timeline {timeline_id} restored from the remote storage"
+    )
 
     # Request non-incremental logical size. Calculating it needs the layer file that
     # we corrupted, forcing it to be redownloaded.
@@ -277,9 +277,9 @@ def test_tenant_redownloads_truncated_file_on_startup(
 
     # if the upload ever was ongoing, this check would be racy, but at least one
     # extra http request has been made in between so assume it's enough delay
-    assert (
-        os.stat(remote_layer_path).st_size == expected_size
-    ), "truncated file should not had been uploaded around re-download"
+    assert os.stat(remote_layer_path).st_size == expected_size, (
+        "truncated file should not had been uploaded around re-download"
+    )
 
     endpoint = env.endpoints.create_start("main")
 
@@ -295,6 +295,6 @@ def test_tenant_redownloads_truncated_file_on_startup(
     # re-uploaded truncated. this is a rather bogus check given the current
     # implementation, but it's critical it doesn't happen so wasting a few
     # lines of python to do this.
-    assert (
-        os.stat(remote_layer_path).st_size == expected_size
-    ), "truncated file should not had been uploaded after next checkpoint"
+    assert os.stat(remote_layer_path).st_size == expected_size, (
+        "truncated file should not had been uploaded after next checkpoint"
+    )

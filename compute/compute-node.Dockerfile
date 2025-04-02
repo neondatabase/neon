@@ -77,7 +77,7 @@
 # build_and_test.yml github workflow for how that's done.
 
 ARG PG_VERSION
-ARG REPOSITORY=neondatabase
+ARG REPOSITORY=ghcr.io/neondatabase
 ARG IMAGE=build-tools
 ARG TAG=pinned
 ARG BUILD_TAG
@@ -1735,6 +1735,8 @@ RUN set -e \
         libevent-dev \
         libtool \
         pkg-config \
+        libcurl4-openssl-dev \
+        libssl-dev \
     && apt clean && rm -rf /var/lib/apt/lists/*
 
 # Use `dist_man_MANS=` to skip manpage generation (which requires python3/pandoc)
@@ -1743,7 +1745,7 @@ RUN set -e \
     && git clone --recurse-submodules --depth 1 --branch ${PGBOUNCER_TAG} https://github.com/pgbouncer/pgbouncer.git pgbouncer \
     && cd pgbouncer \
     && ./autogen.sh \
-    && ./configure --prefix=/usr/local/pgbouncer --without-openssl \
+    && ./configure --prefix=/usr/local/pgbouncer \
     && make -j $(nproc) dist_man_MANS= \
     && make install dist_man_MANS=
 
@@ -1914,26 +1916,30 @@ RUN apt update && \
       ;; \
     esac && \
     apt install --no-install-recommends -y \
+        ca-certificates \
         gdb \
-        liblz4-1 \
-        libreadline8 \
+        iproute2 \
         libboost-iostreams1.74.0 \
         libboost-regex1.74.0 \
         libboost-serialization1.74.0 \
         libboost-system1.74.0 \
-        libossp-uuid16 \
+        libcurl4 \
+        libevent-2.1-7 \
         libgeos-c1v5 \
+        liblz4-1 \
+        libossp-uuid16 \
         libprotobuf-c1 \
+        libreadline8 \
         libsfcgal1 \
         libxml2 \
         libxslt1.1 \
         libzstd1 \
-        libcurl4 \
-        libevent-2.1-7 \
         locales \
+        lsof \
         procps \
-        ca-certificates \
         rsyslog \
+        screen \
+        tcpdump \
         $VERSION_INSTALLS && \
     apt clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8

@@ -7,8 +7,7 @@ import string
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -25,6 +24,9 @@ from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pg_version import PgVersion
 from fixtures.utils import EnhancedJSONEncoder, Fn
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 
 class PageserverApiException(Exception):
@@ -1070,11 +1072,14 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         tenant_id: TenantId | TenantShardId,
         timeline_id: TimelineId,
         batch_size: int | None = None,
+        detach_behavior: str | None = None,
         **kwargs,
     ) -> set[TimelineId]:
-        params = {}
+        params: dict[str, Any] = {}
         if batch_size is not None:
             params["batch_size"] = batch_size
+        if detach_behavior:
+            params["detach_behavior"] = detach_behavior
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/detach_ancestor",
             params=params,

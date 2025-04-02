@@ -177,7 +177,7 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder, with_b
         "compaction_period": "5s",
         # No PiTR interval and small GC horizon
         "pitr_interval": "0s",
-        "gc_horizon": f"{1024 ** 2}",
+        "gc_horizon": f"{1024**2}",
         "lsn_lease_length": "0s",
     }
 
@@ -524,6 +524,42 @@ def test_pageserver_gc_compaction_trigger(neon_env_builder: NeonEnvBuilder):
     workload.validate(env.pageserver.id)
 
 
+def test_pageserver_small_tenant_compaction(neon_env_builder: NeonEnvBuilder):
+    """
+    Create a small tenant that rarely needs compaction and ensure that everything works.
+    """
+    SMOKE_CONF = {
+        # Run both gc and gc-compaction.
+        "gc_period": "5s",
+        "compaction_period": "5s",
+        # No PiTR interval and small GC horizon
+        "pitr_interval": "0s",
+        "gc_horizon": 1024,
+        "lsn_lease_length": "0s",
+    }
+
+    env = neon_env_builder.init_start(initial_tenant_conf=SMOKE_CONF)
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    ps_http = env.pageserver.http_client()
+
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init(env.pageserver.id)
+
+    log.info("Writing initial data ...")
+    workload.write_rows(10000, env.pageserver.id)
+
+    for _ in range(100):
+        workload.churn_rows(10, env.pageserver.id, upload=False, ingest=False)
+        ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
+        ps_http.timeline_compact(tenant_id, timeline_id)
+        ps_http.timeline_gc(tenant_id, timeline_id, None)
+
+    log.info("Validating at workload end ...")
+    workload.validate(env.pageserver.id)
+
+
 # Stripe sizes in number of pages.
 TINY_STRIPES = 16
 LARGE_STRIPES = 32768
@@ -831,7 +867,7 @@ def test_image_layer_compression(neon_env_builder: NeonEnvBuilder, enabled: bool
     )
     assert bytes_in is not None
     assert bytes_out is not None
-    log.info(f"Compression ratio: {bytes_out/bytes_in} ({bytes_out} in, {bytes_out} out)")
+    log.info(f"Compression ratio: {bytes_out / bytes_in} ({bytes_out} in, {bytes_out} out)")
 
     if enabled:
         # We are writing high compressible repetitive plain text, expect excellent compression
