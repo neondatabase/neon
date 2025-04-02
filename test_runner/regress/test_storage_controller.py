@@ -4132,6 +4132,11 @@ def test_storcon_create_delete_sk_down(
         ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
         ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
 
+    with env.endpoints.create("child_of_main", tenant_id=tenant_id, config_lines=config_lines) as ep:
+        # endpoint should start.
+        ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
+        ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
+
     env.storage_controller.assert_log_contains("writing pending op for sk id 0")
     env.safekeepers[0].start()
 
@@ -4139,6 +4144,9 @@ def test_storcon_create_delete_sk_down(
     def logged_contains_on_sk():
         env.safekeepers[0].assert_log_contains(
             f"pulling timeline {tenant_id}/{timeline_id} from safekeeper"
+        )
+        env.safekeepers[0].assert_log_contains(
+            f"pulling timeline {tenant_id}/{branch_timeline_id} from safekeeper"
         )
 
     wait_until(logged_contains_on_sk)
@@ -4169,7 +4177,7 @@ def test_storcon_create_delete_sk_down(
     root_was_deleted_on_2 = env.safekeepers[2].log_contains(
         f"deleting timeline {tenant_id}/{timeline_id} from disk"
     )
-    assert root_was_deleted_on_0 == root_was_deleted_on_2
+    assert (root_was_deleted_on_0 is None) == (root_was_deleted_on_2 is None)
 
     # We only delete the root timeline iff the tenant delete was requested
     if delete_only_timeline:
@@ -4187,7 +4195,7 @@ def test_storcon_create_delete_sk_down(
     # ensure that there is log msgs for the third safekeeper too
     def logged_deleted_on_sk():
         env.safekeepers[1].assert_log_contains(
-            f"deleting timeline {tenant_id}/{timeline_id} from disk"
+            f"deleting timeline {tenant_id}/{branch_timeline_id} from disk"
         )
 
     wait_until(logged_deleted_on_sk)
