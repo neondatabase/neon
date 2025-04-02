@@ -1344,6 +1344,8 @@ class NeonEnv:
             and self.storage_controller_config.get("timelines_onto_safekeepers") is True
         ):
             for sk_id, sk in enumerate(self.safekeepers):
+                # 0 is an invalid safekeeper id
+                sk_id = sk_id + 1
                 body = {
                     "id": sk_id,
                     "created_at": "2023-10-25T09:11:25Z",
