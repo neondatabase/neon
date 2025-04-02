@@ -1838,7 +1838,7 @@ def test_timeline_detach_with_aux_files_with_detach_v1(
     wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, branch_timeline_id)
     assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn2).keys()) == set(
         ["pg_replslot/test_slot_parent_1/state", "pg_replslot/test_slot_parent_2/state"]
-    )
+    ), "main branch unaffected"
     assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn3).keys()) == set(
         ["pg_replslot/test_slot_restore/state"]
     )
