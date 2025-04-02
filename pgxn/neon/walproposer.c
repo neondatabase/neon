@@ -930,7 +930,23 @@ RecvAcceptorGreeting(Safekeeper *sk)
 		{
 			wp_log(FATAL, "mconf %u has zero members", sk->greetResponse.mconf.generation);
 		}
-		/* TODO: put mconf to shmem to immediately pick it up on start */
+		/*
+		 * If we at least started campaign, restart wp to get elected in the new
+		 * mconf. Note: in principle once wp is already elected re-election is
+		 * not required, but being conservative here is not bad.
+		 *
+		 * TODO: put mconf to shmem to immediately pick it up on start,
+		 * otherwise if some safekeeper(s) misses latest mconf and gets
+		 * connected the first, it may cause redundant restarts here.
+		 *
+		 * More generally, it would be nice to restart walproposer (wiping
+		 * election state) without restarting the process. In particular, that
+		 * would allow sync-safekeepers not to die here if it intersected with
+		 * sk migration (as well as remove 1s delay).
+		 *
+		 * Note that assign_neon_safekeepers also currently restarts the
+		 * process, so during normal migration walproposer may restart twice.
+		 */
 		if (wp->state >= WPS_CAMPAIGN)
 		{
 			wp_log(FATAL, "restarting to adopt mconf generation %d", sk->greetResponse.mconf.generation);
@@ -1010,8 +1026,8 @@ SendVoteRequest(Safekeeper *sk)
 					   &sk->outbuf, wp->config->proto_version);
 
 	/* We have quorum for voting, send our vote request */
-	wp_log(LOG, "requesting vote from %s:%s for generation %u term " UINT64_FORMAT, sk->host, sk->port,
-		   wp->voteRequest.generation, wp->voteRequest.term);
+	wp_log(LOG, "requesting vote from sk {id = %lu, ep = %s:%s} for generation %u term " UINT64_FORMAT,
+		   sk->greetResponse.nodeId, sk->host, sk->port, wp->voteRequest.generation, wp->voteRequest.term);
 	/* On failure, logging & resetting is handled */
 	BlockingWrite(sk, sk->outbuf.data, sk->outbuf.len, SS_WAIT_VERDICT);
 	/* If successful, wait for read-ready with SS_WAIT_VERDICT */
@@ -1029,8 +1045,8 @@ RecvVoteResponse(Safekeeper *sk)
 		return;
 
 	wp_log(LOG,
-		   "got VoteResponse from acceptor %s:%s, generation=%u, term=%lu, voteGiven=%u, last_log_term=" UINT64_FORMAT ", flushLsn=%X/%X, truncateLsn=%X/%X",
-		   sk->host, sk->port, sk->voteResponse.generation, sk->voteResponse.term,
+		   "got VoteResponse from sk {id = %lu, ep = %s:%s}, generation=%u, term=%lu, voteGiven=%u, last_log_term=" UINT64_FORMAT ", flushLsn=%X/%X, truncateLsn=%X/%X",
+		   sk->greetResponse.nodeId, sk->host, sk->port, sk->voteResponse.generation, sk->voteResponse.term,
 		   sk->voteResponse.voteGiven,
 		   GetHighestTerm(&sk->voteResponse.termHistory),
 		   LSN_FORMAT_ARGS(sk->voteResponse.flushLsn),
@@ -1094,6 +1110,7 @@ VotesCollectedMset(WalProposer *wp, MemberSet *mset, Safekeeper **msk, StringInf
 
 		if (sk != NULL && sk->state == SS_WAIT_ELECTED)
 		{
+			Assert(sk->voteResponse.voteGiven);
 			if (GetLastLogTerm(sk) > wp->donorLastLogTerm ||
 				(GetLastLogTerm(sk) == wp->donorLastLogTerm &&
 				 sk->voteResponse.flushLsn > wp->propTermStartLsn))
@@ -1173,12 +1190,12 @@ VotesCollected(WalProposer *wp)
 	 * We must get votes from both msets if both are present.
 	 */
 	initStringInfo(&s);
-	appendStringInfoString(&s, "mset votes: ");
+	appendStringInfoString(&s, "mset voters: ");
 	if (!VotesCollectedMset(wp, &wp->mconf.members, wp->members_safekeepers, &s))
 		goto res;
 	if (wp->mconf.new_members.len > 0)
 	{
-		appendStringInfoString(&s, ", new_mset votes: ");
+		appendStringInfoString(&s, ", new_mset voters: ");
 		if (!VotesCollectedMset(wp, &wp->mconf.new_members, wp->new_members_safekeepers, &s))
 			goto res;
 	}
@@ -1992,7 +2009,7 @@ UpdateDonorShmem(WalProposer *wp)
 	int			i;
 	XLogRecPtr	donor_lsn = InvalidXLogRecPtr;
 
-	if (wp->n_votes < wp->quorum)
+	if (wp->state < WPS_ELECTED)
 	{
 		wp_log(WARNING, "UpdateDonorShmem called before elections are won");
 		return;
@@ -2076,8 +2093,8 @@ HandleSafekeeperResponse(WalProposer *wp, Safekeeper *fromsk)
 	}
 
 	/*
-	 * Generally sync is done when majority switched the epoch so we committed
-	 * epochStartLsn and made the majority aware of it, ensuring they are
+	 * Generally sync is done when majority reached propTermStartLsn so we committed
+	 * it and made the majority aware of it, ensuring they are
 	 * ready to give all WAL to pageserver. It would mean whichever majority
 	 * is alive, there will be at least one safekeeper who is able to stream
 	 * WAL to pageserver to make basebackup possible. However, since at the
@@ -2104,7 +2121,7 @@ HandleSafekeeperResponse(WalProposer *wp, Safekeeper *fromsk)
 				n_synced++;
 		}
 
-		if (n_synced >= wp->quorum)
+		if (newCommitLsn >= wp->propTermStartLsn)
 		{
 			/* A quorum of safekeepers has been synced! */
 
