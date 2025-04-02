@@ -173,7 +173,7 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 
 	if (wp->config->proto_version != 2 && wp->config->proto_version != 3)
 		wp_log(FATAL, "unsupported safekeeper protocol version %d", wp->config->proto_version);
-	if (wp->safekeepers_generation > 0 && wp->config->proto_version < 3)
+	if (wp->safekeepers_generation > INVALID_GENERATION && wp->config->proto_version < 3)
 		wp_log(FATAL, "enabling generations requires protocol version 3");
 	wp_log(LOG, "using safekeeper protocol version %d", wp->config->proto_version);
 
