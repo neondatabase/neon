@@ -224,11 +224,11 @@ x509-cert = { version = "0.2.5" }
 env_logger = "0.11"
 log = "0.4"
 
-## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed
-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch = "neon" }
-postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", branch = "neon" }
-postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", branch = "neon" }
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch = "neon" }
+## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed (branch = "neon")
+postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "1f21e7959a96a34dcfbfce1b14b73286cdadffe9" }
+postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "1f21e7959a96a34dcfbfce1b14b73286cdadffe9" }
+postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "1f21e7959a96a34dcfbfce1b14b73286cdadffe9" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "1f21e7959a96a34dcfbfce1b14b73286cdadffe9" }
 
 ## Azure SDK crates
 azure_core = { git = "https://github.com/neondatabase/azure-sdk-for-rust.git", branch = "neon", default-features = false, features = ["enable_reqwest_rustls", "hmac_rust"] }
@@ -273,10 +273,10 @@ rstest = "0.18"
 camino-tempfile = "1.0.2"
 tonic-build = "0.12"
 
-[patch.crates-io]
-
 # Needed to get `tokio-postgres-rustls` to depend on our fork.
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch = "neon" }
+[patch.crates-io.tokio-postgres]
+git = "https://github.com/neondatabase/rust-postgres.git"
+rev = "1f21e7959a96a34dcfbfce1b14b73286cdadffe9"
 
 ################# Binary contents sections
 
