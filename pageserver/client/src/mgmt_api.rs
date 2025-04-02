@@ -86,7 +86,7 @@ impl Client {
         resp.json().await.map_err(Error::ReceiveBody)
     }
 
-    /// Send HTTP request to an arbitrary path with a desired HTTP method and returning a streaming
+    /// Send an HTTP request to an arbitrary path with a desired HTTP method and returning a streaming
     /// Response.  This function is suitable for pass-through/proxy use cases where we don't care
     /// what the response content looks like.
     ///
