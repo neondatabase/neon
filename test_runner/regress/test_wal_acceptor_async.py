@@ -656,6 +656,8 @@ async def quorum_sanity_single(
         await bg_query
 
 
+# It's a bit tempting to iterate over all possible combinations, but let's stick
+# with this for now.
 async def run_quorum_sanity(env: NeonEnv):
     sks = env.safekeepers  # shorter typing
     # 3 members, all up, should work
@@ -672,12 +674,30 @@ async def run_quorum_sanity(env: NeonEnv):
     # 3 members, 2/3 up, could work but wp talks to different 3s, so it shouldn't
     await quorum_sanity_single(env, sks[1:4], sks[:3], None, sks[2:3], False)
 
-    # joint conf of 1-2-3 and 2-3-4, all up, should work
-    await quorum_sanity_single(env, sks[:], sks[:3], sks[1:4], [], True)
     # joint conf of 1-2-3 and 4, all up, should work
     await quorum_sanity_single(env, sks[:], sks[:3], sks[3:4], [], True)
     # joint conf of 1-2-3 and 4, 4 down, shouldn't work
     await quorum_sanity_single(env, sks[:], sks[:3], sks[3:4], sks[3:4], False)
+
+    # joint conf of 1-2-3 and 2-3-4, all up, should work
+    await quorum_sanity_single(env, sks[:], sks[:3], sks[1:4], [], True)
+    # joint conf of 1-2-3 and 2-3-4, 1 and 4 down, should work
+    await quorum_sanity_single(env, sks[:], sks[:3], sks[1:4], [sks[0], sks[3]], True)
+    # joint conf of 1-2-3 and 2-3-4, 2 down, should work
+    await quorum_sanity_single(env, sks[:], sks[:3], sks[1:4], [sks[1]], True)
+    # joint conf of 1-2-3 and 2-3-4, 3 down, should work
+    await quorum_sanity_single(env, sks[:], sks[:3], sks[1:4], [sks[2]], True)
+    # joint conf of 1-2-3 and 2-3-4, 1 and 2 down, shouldn't work
+    await quorum_sanity_single(env, sks[:], sks[:3], sks[1:4], [sks[0], sks[1]], False)
+    # joint conf of 1-2-3 and 2-3-4, 2 and 4 down, shouldn't work
+    await quorum_sanity_single(env, sks[:], sks[:3], sks[1:4], [sks[1], sks[3]], False)
+
+    # joint conf of 1-2-3 and 2-3-4 with wp talking to 2-3-4 only.
+    await quorum_sanity_single(env, sks[1:4], sks[:3], sks[1:4], [], True)
+    # with 1 down should still be ok
+    await quorum_sanity_single(env, sks[1:4], sks[:3], sks[1:4], [sks[0]], True)
+    # but with 2 down not ok
+    await quorum_sanity_single(env, sks[1:4], sks[:3], sks[1:4], [sks[1]], False)
 
 
 # Test various combinations of membership configurations / neon.safekeepers
