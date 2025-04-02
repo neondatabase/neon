@@ -1416,6 +1416,12 @@ async fn handle_upsert_safekeeper(mut req: Request<Body>) -> Result<Response<Bod
         )));
     }
 
+    if id <= 0 {
+        return Err(ApiError::BadRequest(anyhow::anyhow!(
+            "id not allowed to be zero or negative: {id}"
+        )));
+    }
+
     let req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
             return res;
