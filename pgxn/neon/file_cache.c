@@ -95,8 +95,8 @@
 #define SIZE_MB_TO_CHUNKS(size) ((uint32)((size) * MB / BLCKSZ >> lfc_chunk_size_log))
 #define CHUNK_BITMAP_SIZE ((MAX_BLOCKS_PER_CHUNK + 31) / 32)
 
-#define BLOCK_TO_CHUNK_NUN(blkno) (blkno >> lfc_chunk_size_log)
-#define BLOCK_TO_CHUNK_OFF(blkno) (blkno & (lfc_blocks_per_chunk-1))
+#define BLOCK_TO_CHUNK_NUN(blkno) ((blkno) >> lfc_chunk_size_log)
+#define BLOCK_TO_CHUNK_OFF(blkno) ((blkno) & (lfc_blocks_per_chunk-1))
 
 /*
  * Blocks are read or written to LFC file outside LFC critical section.
