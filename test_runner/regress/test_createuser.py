@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-from fixtures.neon_fixtures import NeonEnv
+from typing import TYPE_CHECKING
+
 from fixtures.utils import query_scalar
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv
 
 
 #

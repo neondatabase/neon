@@ -9,6 +9,9 @@ on:
       github-event-name:
         type: string
         required: true
+      github-event-json:
+        type: string
+        required: true
 
 defaults:
   run:
@@ -48,6 +51,7 @@ jobs:
     uses: ./.github/workflows/_meta.yml
     with:
       github-event-name: ${{ inputs.github-event-name || github.event_name }}
+      github-event-json: ${{ inputs.github-event-json || toJSON(github.event) }}
 
   trigger-e2e-tests:
     needs: [ meta ]

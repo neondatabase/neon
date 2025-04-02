@@ -10,7 +10,6 @@ import asyncio
 import collections
 import io
 import json
-from collections.abc import AsyncIterable
 from typing import TYPE_CHECKING, final
 
 import pytest_asyncio
@@ -31,6 +30,7 @@ from h2.settings import SettingCodes
 from typing_extensions import override
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterable
     from typing import Any
 
 

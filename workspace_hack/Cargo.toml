@@ -61,7 +61,7 @@ memchr = { version = "2" }
 nix = { version = "0.26" }
 nom = { version = "7" }
 num = { version = "0.4" }
-num-bigint = { version = "0.4", default-features = false, features = ["std"] }
+num-bigint = { version = "0.4" }
 num-complex = { version = "0.4", default-features = false, features = ["std"] }
 num-integer = { version = "0.1", features = ["i128"] }
 num-iter = { version = "0.1", default-features = false, features = ["i128", "std"] }
@@ -127,7 +127,7 @@ log = { version = "0.4", default-features = false, features = ["std"] }
 memchr = { version = "2" }
 nom = { version = "7" }
 num = { version = "0.4" }
-num-bigint = { version = "0.4", default-features = false, features = ["std"] }
+num-bigint = { version = "0.4" }
 num-complex = { version = "0.4", default-features = false, features = ["std"] }
 num-integer = { version = "0.1", features = ["i128"] }
 num-iter = { version = "0.1", default-features = false, features = ["i128", "std"] }

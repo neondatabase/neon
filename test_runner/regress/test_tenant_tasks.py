@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.pageserver.utils import (
     assert_tenant_state,
     timeline_delete_wait_completed,
     wait_until_tenant_active,
 )
 from fixtures.utils import wait_until
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 def get_only_element(l):  # noqa: E741

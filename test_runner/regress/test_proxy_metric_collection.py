@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -11,13 +9,16 @@ from fixtures.neon_fixtures import (
     NeonProxy,
     VanillaPostgres,
 )
-from fixtures.port_distributor import PortDistributor
-from pytest_httpserver import HTTPServer
-from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
     from fixtures.httpserver import ListenAddress
+    from fixtures.port_distributor import PortDistributor
+    from pytest_httpserver import HTTPServer
+    from werkzeug.wrappers.request import Request
 
 
 def proxy_metrics_handler(request: Request) -> Response:

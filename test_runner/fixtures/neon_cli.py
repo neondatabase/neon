@@ -7,7 +7,6 @@ import subprocess
 import tempfile
 import textwrap
 from itertools import chain, product
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import toml
@@ -15,13 +14,14 @@ import toml
 from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.pageserver.common_types import IndexPartDump
-from fixtures.pg_version import PgVersion
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from typing import (
         Any,
-        cast,
     )
+
+    from fixtures.pg_version import PgVersion
 
 
 # Used to be an ABC. abc.ABC removed due to linter without name change.
@@ -36,7 +36,7 @@ class AbstractNeonCli:
         self.extra_env = extra_env
         self.binpath = binpath
 
-    COMMAND: str = cast(str, None)  # To be overwritten by the derived class.
+    COMMAND: str = cast("str", None)  # To be overwritten by the derived class.
 
     def raw_cli(
         self,

@@ -5,6 +5,8 @@ import urllib.parse
 import requests
 from requests.adapters import HTTPAdapter
 
+from fixtures.log_helper import log
+
 
 class EndpointHttpClient(requests.Session):
     def __init__(
@@ -51,6 +53,7 @@ class EndpointHttpClient(requests.Session):
     def metrics(self) -> str:
         res = self.get(f"http://localhost:{self.external_port}/metrics")
         res.raise_for_status()
+        log.debug("raw compute metrics: %s", res.text)
         return res.text
 
     # Current compute status.

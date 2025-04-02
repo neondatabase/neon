@@ -5,7 +5,10 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from collections.abc import Iterable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 
 def scan_pageserver_log_for_errors(

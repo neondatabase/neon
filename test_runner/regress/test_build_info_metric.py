@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from fixtures.metrics import parse_metrics
-from fixtures.neon_fixtures import NeonEnvBuilder, NeonProxy
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnvBuilder, NeonProxy
 
 
 def test_build_info_metric(neon_env_builder: NeonEnvBuilder, link_proxy: NeonProxy):

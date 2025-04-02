@@ -3,17 +3,16 @@ from __future__ import annotations
 import os
 import shutil
 import tarfile
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 import zstandard
 from fixtures.log_helper import log
 from fixtures.metrics import parse_metrics
-from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.response import Response
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from typing import Any
 
     from fixtures.httpserver import ListenAddress
@@ -21,6 +20,7 @@ if TYPE_CHECKING:
         NeonEnvBuilder,
     )
     from fixtures.pg_version import PgVersion
+    from pytest_httpserver import HTTPServer
     from werkzeug.wrappers.request import Request
 
 

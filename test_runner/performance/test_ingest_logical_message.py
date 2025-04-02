@@ -12,7 +12,7 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.utils import wait_for_last_record_lsn
 
 
-@pytest.mark.timeout(600)
+@pytest.mark.timeout(1200)
 @pytest.mark.parametrize("size", [1024, 8192, 131072])
 @pytest.mark.parametrize("fsync", [True, False], ids=["fsync", "nofsync"])
 def test_ingest_logical_message(

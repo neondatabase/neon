@@ -6,23 +6,27 @@ import re
 import shutil
 import tarfile
 from contextlib import closing
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    Endpoint,
-    NeonEnv,
-    NeonEnvBuilder,
-    PgBin,
-)
 from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
     wait_for_last_record_lsn,
 )
 from fixtures.remote_storage import RemoteStorageKind
 from fixtures.utils import assert_pageserver_backups_equal, subprocess_capture
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from fixtures.neon_fixtures import (
+        Endpoint,
+        NeonEnv,
+        NeonEnvBuilder,
+        PgBin,
+    )
 
 
 def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_builder):
@@ -179,7 +183,7 @@ def test_import_from_pageserver_multisegment(
     logical_size = env.pageserver.http_client().timeline_detail(env.initial_tenant, timeline)[
         "current_logical_size"
     ]
-    log.info(f"timeline logical size = {logical_size / (1024 ** 2)}MB")
+    log.info(f"timeline logical size = {logical_size / (1024**2)}MB")
     assert logical_size > 1024**3  # = 1GB
 
     tar_output_file = _import(num_rows, lsn, env, pg_bin, timeline, test_output_dir)

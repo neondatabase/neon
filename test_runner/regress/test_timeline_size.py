@@ -6,7 +6,7 @@ import random
 import time
 from collections import defaultdict
 from contextlib import closing
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import psycopg2.errors
 import psycopg2.extras
@@ -22,17 +22,21 @@ from fixtures.neon_fixtures import (
     VanillaPostgres,
     wait_for_last_flush_lsn,
 )
-from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
     assert_tenant_state,
     timeline_delete_wait_completed,
     wait_for_upload_queue_empty,
     wait_until_tenant_active,
 )
-from fixtures.pg_version import PgVersion
-from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind
 from fixtures.utils import get_timeline_dir_size, wait_until
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from fixtures.pageserver.http import PageserverHttpClient
+    from fixtures.pg_version import PgVersion
+    from fixtures.port_distributor import PortDistributor
 
 
 def test_timeline_size(neon_simple_env: NeonEnv):
@@ -310,9 +314,9 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
     new_res = client.timeline_detail(
         env.initial_tenant, new_timeline_id, include_non_incremental_logical_size=True
     )
-    assert (
-        new_res["current_logical_size"] == new_res["current_logical_size_non_incremental"]
-    ), "after the WAL is streamed, current_logical_size is expected to be calculated and to be equal its non-incremental value"
+    assert new_res["current_logical_size"] == new_res["current_logical_size_non_incremental"], (
+        "after the WAL is streamed, current_logical_size is expected to be calculated and to be equal its non-incremental value"
+    )
 
 
 @pytest.mark.parametrize("deletion_method", ["tenant_detach", "timeline_delete"])

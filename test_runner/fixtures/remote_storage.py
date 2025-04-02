@@ -7,21 +7,23 @@ import os
 import re
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import boto3
 import toml
 from moto.server import ThreadedMotoServer
-from mypy_boto3_s3 import S3Client
 from typing_extensions import override
 
-from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 from fixtures.pageserver.common_types import IndexPartDump
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from typing import Any
+
+    from mypy_boto3_s3 import S3Client
+
+    from fixtures.common_types import TenantId, TenantShardId, TimelineId
 
 
 TIMELINE_INDEX_PART_FILE_NAME = "index_part.json"
@@ -448,9 +450,9 @@ class RemoteStorageKind(StrEnum):
         env_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
         env_access_token = os.getenv("AWS_SESSION_TOKEN")
         env_profile = os.getenv("AWS_PROFILE")
-        assert (
-            env_access_key and env_secret_key and env_access_token
-        ) or env_profile, "need to specify either access key and secret access key or profile"
+        assert (env_access_key and env_secret_key and env_access_token) or env_profile, (
+            "need to specify either access key and secret access key or profile"
+        )
 
         bucket_name = bucket_name or os.getenv("REMOTE_STORAGE_S3_BUCKET")
         assert bucket_name is not None, "no remote storage bucket name provided"

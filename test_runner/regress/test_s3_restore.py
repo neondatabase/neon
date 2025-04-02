@@ -2,13 +2,10 @@ from __future__ import annotations
 
 import time
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from fixtures.common_types import Lsn
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    NeonEnvBuilder,
-    PgBin,
-)
 from fixtures.pageserver.utils import (
     assert_prefix_empty,
     enable_remote_storage_versioning,
@@ -17,6 +14,12 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
 from fixtures.utils import run_pg_bench_small
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import (
+        NeonEnvBuilder,
+        PgBin,
+    )
 
 
 def test_tenant_s3_restore(
@@ -80,14 +83,14 @@ def test_tenant_s3_restore(
     ts_before_deletion = datetime.now(tz=UTC).replace(tzinfo=None)
     time.sleep(4)
 
-    assert (
-        ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 1
-    ), "tenant removed before we deletion was issued"
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 1, (
+        "tenant removed before we deletion was issued"
+    )
     ps_http.tenant_delete(tenant_id)
     ps_http.deletion_queue_flush(execute=True)
-    assert (
-        ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 0
-    ), "tenant removed before we deletion was issued"
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 0, (
+        "tenant removed before we deletion was issued"
+    )
     env.storage_controller.attach_hook_drop(tenant_id)
 
     tenant_path = env.pageserver.tenant_dir(tenant_id)

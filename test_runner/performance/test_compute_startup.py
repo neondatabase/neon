@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 import requests
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
-from fixtures.neon_fixtures import NeonEnvBuilder, PgBin
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnvBuilder, PgBin
 
 
 # Just start and measure duration.

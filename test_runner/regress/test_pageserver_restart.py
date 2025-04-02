@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import random
 from contextlib import closing
+from typing import TYPE_CHECKING
 
 import psycopg2.errors as pgerr
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.remote_storage import s3_storage
 from fixtures.utils import skip_in_debug_build, wait_until
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 # Test restarting page server, while safekeeper and compute node keep
@@ -135,9 +138,9 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     for phase, expectation in expectations:
         assert phase in values, f"No data for phase {phase}"
         sample = values[phase]
-        assert expectation(
-            sample.value, prev_value
-        ), f"Unexpected value for {phase}: {sample.value}"
+        assert expectation(sample.value, prev_value), (
+            f"Unexpected value for {phase}: {sample.value}"
+        )
         prev_value = sample.value
 
     # Startup is complete, this metric should exist but be zero

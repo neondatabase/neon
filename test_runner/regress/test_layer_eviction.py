@@ -59,70 +59,72 @@ def test_basic_eviction(neon_env_builder: NeonEnvBuilder):
         (parse_layer_file_name(path.name), path)
         for path in env.pageserver.list_layers(tenant_id, timeline_id)
     )
-    assert (
-        len(initial_local_layers) > 1
-    ), f"Should create multiple layers for timeline, but got {initial_local_layers}"
+    assert len(initial_local_layers) > 1, (
+        f"Should create multiple layers for timeline, but got {initial_local_layers}"
+    )
 
     # Compare layer map dump with the local layers, ensure everything's present locally and matches
     initial_layer_map_info = client.layer_map_info(tenant_id=tenant_id, timeline_id=timeline_id)
-    assert (
-        not initial_layer_map_info.in_memory_layers
-    ), "Should have no in memory layers after flushing"
-    assert len(initial_local_layers) == len(
-        initial_layer_map_info.historic_layers
-    ), "Should have the same layers in memory and on disk"
+    assert not initial_layer_map_info.in_memory_layers, (
+        "Should have no in memory layers after flushing"
+    )
+    assert len(initial_local_layers) == len(initial_layer_map_info.historic_layers), (
+        "Should have the same layers in memory and on disk"
+    )
 
     for returned_layer in initial_layer_map_info.historic_layers:
-        assert (
-            returned_layer.kind == "Delta"
-        ), f"Did not create and expect image layers, but got {returned_layer}"
-        assert (
-            not returned_layer.remote
-        ), f"All created layers should be present locally, but got {returned_layer}"
+        assert returned_layer.kind == "Delta", (
+            f"Did not create and expect image layers, but got {returned_layer}"
+        )
+        assert not returned_layer.remote, (
+            f"All created layers should be present locally, but got {returned_layer}"
+        )
 
         returned_layer_name = parse_layer_file_name(returned_layer.layer_file_name)
-        assert (
-            returned_layer_name in initial_local_layers
-        ), f"Did not find returned layer {returned_layer_name} in local layers {list(initial_local_layers.keys())}"
+        assert returned_layer_name in initial_local_layers, (
+            f"Did not find returned layer {returned_layer_name} in local layers {list(initial_local_layers.keys())}"
+        )
 
         local_layer_path = (
             env.pageserver.timeline_dir(tenant_id, timeline_id)
             / initial_local_layers[returned_layer_name]
         )
-        assert (
-            returned_layer.layer_file_size == local_layer_path.stat().st_size
-        ), f"Returned layer {returned_layer} has a different file size than local layer {local_layer_path}"
+        assert returned_layer.layer_file_size == local_layer_path.stat().st_size, (
+            f"Returned layer {returned_layer} has a different file size than local layer {local_layer_path}"
+        )
 
     # Detach all layers, ensre they are not in the local FS, but are still dumped as part of the layer map
     for local_layer_name, local_layer_path in initial_local_layers.items():
         client.evict_layer(
             tenant_id=tenant_id, timeline_id=timeline_id, layer_name=local_layer_path.name
         )
-        assert not env.pageserver.layer_exists(
-            tenant_id, timeline_id, local_layer_name
-        ), f"Did not expect to find {local_layer_name} layer after evicting"
+        assert not env.pageserver.layer_exists(tenant_id, timeline_id, local_layer_name), (
+            f"Did not expect to find {local_layer_name} layer after evicting"
+        )
 
     empty_layers = env.pageserver.list_layers(tenant_id, timeline_id)
-    assert not empty_layers, f"After evicting all layers, timeline {tenant_id}/{timeline_id} should have no layers locally, but got: {empty_layers}"
+    assert not empty_layers, (
+        f"After evicting all layers, timeline {tenant_id}/{timeline_id} should have no layers locally, but got: {empty_layers}"
+    )
 
     evicted_layer_map_info = client.layer_map_info(tenant_id=tenant_id, timeline_id=timeline_id)
-    assert (
-        not evicted_layer_map_info.in_memory_layers
-    ), "Should have no in memory layers after flushing and evicting"
-    assert len(initial_local_layers) == len(
-        evicted_layer_map_info.historic_layers
-    ), "Should have the same layers in memory and on disk initially"
+    assert not evicted_layer_map_info.in_memory_layers, (
+        "Should have no in memory layers after flushing and evicting"
+    )
+    assert len(initial_local_layers) == len(evicted_layer_map_info.historic_layers), (
+        "Should have the same layers in memory and on disk initially"
+    )
     for returned_layer in evicted_layer_map_info.historic_layers:
-        assert (
-            returned_layer.kind == "Delta"
-        ), f"Did not create and expect image layers, but got {returned_layer}"
-        assert (
-            returned_layer.remote
-        ), f"All layers should be evicted and not present locally, but got {returned_layer}"
+        assert returned_layer.kind == "Delta", (
+            f"Did not create and expect image layers, but got {returned_layer}"
+        )
+        assert returned_layer.remote, (
+            f"All layers should be evicted and not present locally, but got {returned_layer}"
+        )
         returned_layer_name = parse_layer_file_name(returned_layer.layer_file_name)
-        assert (
-            returned_layer_name in initial_local_layers
-        ), f"Did not find returned layer {returned_layer} in local layers {initial_local_layers}"
+        assert returned_layer_name in initial_local_layers, (
+            f"Did not find returned layer {returned_layer} in local layers {initial_local_layers}"
+        )
 
     # redownload all evicted layers and ensure the initial state is restored
     for local_layer_name, _local_layer_path in initial_local_layers.items():
@@ -142,15 +144,15 @@ def test_basic_eviction(neon_env_builder: NeonEnvBuilder):
         (parse_layer_file_name(path.name), path)
         for path in env.pageserver.list_layers(tenant_id, timeline_id)
     )
-    assert (
-        redownloaded_layers == initial_local_layers
-    ), "Should have the same layers locally after redownloading the evicted layers"
+    assert redownloaded_layers == initial_local_layers, (
+        "Should have the same layers locally after redownloading the evicted layers"
+    )
     redownloaded_layer_map_info = client.layer_map_info(
         tenant_id=tenant_id, timeline_id=timeline_id
     )
-    assert (
-        redownloaded_layer_map_info == initial_layer_map_info
-    ), "Should have the same layer map after redownloading the evicted layers"
+    assert redownloaded_layer_map_info == initial_layer_map_info, (
+        "Should have the same layer map after redownloading the evicted layers"
+    )
 
 
 def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
@@ -266,9 +268,9 @@ def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
         resident_physical_size_metric = ps_http.get_timeline_metric(
             tenant_id, timeline_id, "pageserver_resident_physical_size"
         )
-        assert (
-            resident_physical_size_metric == 0
-        ), "ensure that resident_physical_size metric is zero"
+        assert resident_physical_size_metric == 0, (
+            "ensure that resident_physical_size metric is zero"
+        )
         assert resident_physical_size_metric == sum(
             layer.layer_file_size for layer in info.historic_layers if not layer.remote
         ), "ensure that resident_physical_size metric corresponds to layer map dump"

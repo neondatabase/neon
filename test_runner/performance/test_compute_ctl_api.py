@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import datetime
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
-from fixtures.neon_fixtures import NeonEnv
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv
 
 
 @pytest.mark.timeout(120)

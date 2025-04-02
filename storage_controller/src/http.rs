@@ -24,9 +24,9 @@ use pageserver_api::controller_api::{
     ShardsPreferredAzsRequest, TenantCreateRequest, TenantPolicyRequest, TenantShardMigrateRequest,
 };
 use pageserver_api::models::{
-    DetachBehavior, TenantConfigPatchRequest, TenantConfigRequest, TenantLocationConfigRequest,
-    TenantShardSplitRequest, TenantTimeTravelRequest, TimelineArchivalConfigRequest,
-    TimelineCreateRequest,
+    DetachBehavior, LsnLeaseRequest, TenantConfigPatchRequest, TenantConfigRequest,
+    TenantLocationConfigRequest, TenantShardSplitRequest, TenantTimeTravelRequest,
+    TimelineArchivalConfigRequest, TimelineCreateRequest,
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_api::upcall_api::{ReAttachRequest, ValidateRequest};
@@ -577,6 +577,32 @@ async fn handle_tenant_timeline_download_heatmap_layers(
 
     service
         .tenant_timeline_download_heatmap_layers(tenant_shard_id, timeline_id, concurrency, recurse)
+        .await?;
+
+    json_response(StatusCode::OK, ())
+}
+
+async fn handle_tenant_timeline_lsn_lease(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+
+    check_permissions(&req, Scope::PageServerApi)?;
+    maybe_rate_limit(&req, tenant_id).await;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let lsn_lease_request = json_request::<LsnLeaseRequest>(&mut req).await?;
+
+    service
+        .tenant_timeline_lsn_lease(tenant_id, timeline_id, lsn_lease_request.lsn)
         .await?;
 
     json_response(StatusCode::OK, ())
@@ -2189,6 +2215,17 @@ pub fn make_router(
                     r,
                     handle_tenant_timeline_download_heatmap_layers,
                     RequestName("v1_tenant_timeline_download_heatmap_layers"),
+                )
+            },
+        )
+        // LSN lease passthrough to all shards
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/lsn_lease",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_timeline_lsn_lease,
+                    RequestName("v1_tenant_timeline_lsn_lease"),
                 )
             },
         )

@@ -6,12 +6,13 @@ from typing import TYPE_CHECKING
 import allure
 import pytest
 import toml
-from _pytest.python import Metafunc
 
 from fixtures.pg_version import PgVersion
 
 if TYPE_CHECKING:
     from typing import Any
+
+    from _pytest.python import Metafunc
 
 
 """

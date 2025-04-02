@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 def gc_feedback_impl(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchmarker, mode: str):
@@ -18,9 +21,9 @@ def gc_feedback_impl(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
             # disable default GC and compaction
             "gc_period": "1000 m",
             "compaction_period": "0 s",
-            "gc_horizon": f"{1024 ** 2}",
-            "checkpoint_distance": f"{1024 ** 2}",
-            "compaction_target_size": f"{1024 ** 2}",
+            "gc_horizon": f"{1024**2}",
+            "checkpoint_distance": f"{1024**2}",
+            "compaction_target_size": f"{1024**2}",
             # set PITR interval to be small, so we can do GC
             "pitr_interval": "10 s",
             # "compaction_threshold": "3",

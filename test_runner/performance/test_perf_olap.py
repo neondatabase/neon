@@ -3,11 +3,14 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
-from _pytest.mark import ParameterSet
-from fixtures.compare_fixtures import RemoteCompare
 from fixtures.log_helper import log
+
+if TYPE_CHECKING:
+    from _pytest.mark import ParameterSet
+    from fixtures.compare_fixtures import RemoteCompare
 
 
 @dataclass

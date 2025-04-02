@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import USE_LFC
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv
 
 
 @pytest.mark.timeout(600)
@@ -97,5 +100,5 @@ def test_lfc_prefetch(neon_simple_env: NeonEnv):
     prefetch_expired = cur.fetchall()[0][0][0]["Plan"]["Prefetch Expired Requests"]
     log.info(f"Unused prefetches: {prefetch_expired}")
 
-    # No redundant prefethc requrests if prefetch results are stored in LFC
+    # No redundant prefetch requests if prefetch results are stored in LFC
     assert prefetch_expired == 0

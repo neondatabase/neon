@@ -173,7 +173,7 @@ impl CertResolver {
     }
 
     pub fn get_common_names(&self) -> HashSet<String> {
-        self.certs.keys().map(|s| s.to_string()).collect()
+        self.certs.keys().cloned().collect()
     }
 }
 

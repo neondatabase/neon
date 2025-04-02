@@ -3,15 +3,18 @@ from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    LogCursor,
-    NeonEnvBuilder,
-    NeonPageserver,
-)
 from fixtures.pageserver.utils import wait_timeline_detail_404
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import (
+        LogCursor,
+        NeonEnvBuilder,
+        NeonPageserver,
+    )
 
 
 @pytest.mark.parametrize("sharded", [True, False])

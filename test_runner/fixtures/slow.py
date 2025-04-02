@@ -3,11 +3,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from _pytest.config import Config
-from _pytest.config.argparsing import Parser
 
 if TYPE_CHECKING:
     from typing import Any
+
+    from _pytest.config import Config
+    from _pytest.config.argparsing import Parser
 
 
 """
