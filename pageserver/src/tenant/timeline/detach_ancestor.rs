@@ -182,7 +182,9 @@ async fn generate_tombstone_image_layer(
     ancestor_lsn: Lsn,
     ctx: &RequestContext,
 ) -> Result<Option<ResidentLayer>, Error> {
-    tracing::info!("removing non-inherited keys by writing an image layer at the detach LSN");
+    tracing::info!(
+        "removing non-inherited keys by writing an image layer with tombstones at the detach LSN"
+    );
     let io_concurrency = IoConcurrency::spawn_from_conf(
         detached.conf,
         detached.gate.enter().map_err(|_| Error::ShuttingDown)?,
