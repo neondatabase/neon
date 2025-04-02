@@ -430,7 +430,11 @@ pub(super) async fn prepare(
     let mut new_layers: Vec<Layer> =
         Vec::with_capacity(straddling_branchpoint.len() + rest_of_historic.len() + 1);
 
-    generate_tombstone_image_layer(detached, &ancestor, ancestor_lsn, ctx).await?;
+    if let Some(tombstone_layer) =
+        generate_tombstone_image_layer(detached, &ancestor, ancestor_lsn, ctx).await?
+    {
+        new_layers.push(tombstone_layer.into());
+    }
 
     {
         tracing::info!(to_rewrite = %straddling_branchpoint.len(), "copying prefix of delta layers");
