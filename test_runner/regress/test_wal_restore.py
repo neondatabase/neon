@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import tarfile
 import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -198,3 +199,91 @@ def test_wal_restore_http(neon_env_builder: NeonEnvBuilder, broken_tenant: bool)
     # the table is back now!
     restored = env.endpoints.create_start("main")
     assert restored.safe_psql("select count(*) from t", user="cloud_admin") == [(300000,)]
+
+
+# BEGIN_HADRON
+# def clear_directory(directory):
+#     for item in os.listdir(directory):
+#         item_path = os.path.join(directory, item)
+#         if os.path.isdir(item_path):
+#             log.info(f"removing SK directory: {item_path}")
+#             shutil.rmtree(item_path)
+#         else:
+#             log.info(f"removing SK file: {item_path}")
+#             os.remove(item_path)
+
+
+# @pytest.mark.skip(reason="SK pull timeline does not work.")
+# def test_sk_pull_timelines(
+#     neon_env_builder: NeonEnvBuilder,
+# ):
+#     DBNAME = "regression"
+#     superuser_name = "databricks_superuser"
+#     neon_env_builder.num_safekeepers = 3
+#     neon_env_builder.num_pageservers = 4
+#     neon_env_builder.safekeeper_extra_opts = ["--enable-pull-timeline-on-startup"]
+#     neon_env_builder.enable_safekeeper_remote_storage(s3_storage())
+
+#     env = neon_env_builder.init_start(initial_tenant_shard_count=4)
+
+#     # Create an endpoint that populates the metapg. It does NOT create PG.
+#     test_metastore_id = uuid4()
+#     test_endpoint_id = uuid4()
+#     response = env.storage_controller.hcc_create_endpoint(
+#         f"{test_metastore_id}",
+#         f"{test_endpoint_id}",
+#         env.initial_tenant,
+#         env.initial_timeline,
+#         config={
+#             "resources": {"requests": {"cpu": "1000m", "memory": "256Mi"}},
+#             "extra_pg_conf": "shared_buffers = 500MB\nmax_connections = 100",
+#         },
+#     )
+#     log.info(f"Tenant: {env.initial_tenant} Timeline: {env.initial_timeline}")
+#     log.info(f"Created endpoint: {response}")
+
+#     # Create a few more endpoints with random timeline ids.
+#     # These timelines do NOT exist on the SKs so that pull timeline will fail.
+#     for _i in range(10):
+#         response = env.storage_controller.hcc_create_endpoint(
+#             f"{test_metastore_id}",
+#             f"{test_endpoint_id}",
+#             config={
+#                 "resources": {"requests": {"cpu": "1000m", "memory": "256Mi"}},
+#                 "extra_pg_conf": "shared_buffers = 500MB\nmax_connections = 100",
+#             },
+#         )
+
+#     # Connect to postgres and create a database called "regression".
+#     endpoint = env.endpoints.create_start("main")
+#     endpoint.safe_psql(f"CREATE ROLE {superuser_name}")
+#     endpoint.safe_psql(f"CREATE DATABASE {DBNAME}")
+
+#     endpoint.safe_psql("CREATE TABLE usertable ( YCSB_KEY INT, FIELD0 TEXT);")
+#     # Write some data. ~20 MB.
+#     num_rows = 0
+#     for _i in range(0, 20000):
+#         endpoint.safe_psql(
+#             "INSERT INTO usertable SELECT random(), repeat('a', 1000);", log_query=False
+#         )
+#         num_rows += 1
+
+#     log.info(f"SKs {env.storage_controller.hcc_sk_node_list()}")
+
+#     env.safekeepers[0].stop(immediate=True)
+#     clear_directory(env.safekeepers[0].data_dir)
+#     env.safekeepers[0].start()
+
+#     # PG can still write data. ~20 MB.
+#     for _i in range(0, 20000):
+#         endpoint.safe_psql(
+#             "INSERT INTO usertable SELECT random(), repeat('a', 1000);", log_query=False
+#         )
+#         num_rows += 1
+
+#     tuples = endpoint.safe_psql("SELECT COUNT(*) FROM usertable;")
+#     assert tuples[0][0] == num_rows
+#     endpoint.stop_and_destroy()
+
+
+# END_HADRON

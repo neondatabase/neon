@@ -23,6 +23,7 @@ use safekeeper::defaults::{
     DEFAULT_PARTIAL_BACKUP_CONCURRENCY, DEFAULT_PARTIAL_BACKUP_TIMEOUT, DEFAULT_PG_LISTEN_ADDR,
     DEFAULT_SSL_CERT_FILE, DEFAULT_SSL_CERT_RELOAD_PERIOD, DEFAULT_SSL_KEY_FILE,
 };
+use safekeeper::hadron;
 use safekeeper::wal_backup::WalBackup;
 use safekeeper::{
     BACKGROUND_RUNTIME, BROKER_RUNTIME, GlobalTimelines, HTTP_RUNTIME, SafeKeeperConf,
@@ -252,6 +253,10 @@ struct Args {
     /// Run in development mode (disables security checks)
     #[arg(long, help = "Run in development mode (disables security checks)")]
     dev: bool,
+    /* BEGIN_HADRON */
+    #[arg(long)]
+    enable_pull_timeline_on_startup: bool,
+    /* END_HADRON */
 }
 
 // Like PathBufValueParser, but allows empty string.
@@ -435,6 +440,11 @@ async fn main() -> anyhow::Result<()> {
         use_https_safekeeper_api: args.use_https_safekeeper_api,
         enable_tls_wal_service_api: args.enable_tls_wal_service_api,
         force_metric_collection_on_scrape: args.force_metric_collection_on_scrape,
+        /* BEGIN_HADRON */
+        advertise_pg_addr_tenant_only: None,
+        enable_pull_timeline_on_startup: args.enable_pull_timeline_on_startup,
+        hcc_base_url: None,
+        /* END_HADRON */
     });
 
     // initialize sentry if SENTRY_DSN is provided
@@ -528,6 +538,19 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
 
     // Load all timelines from disk to memory.
     global_timelines.init().await?;
+
+    /* BEGIN_HADRON */
+    if conf.enable_pull_timeline_on_startup && global_timelines.timelines_count() == 0 {
+        match hadron::hcc_pull_timelines(&conf, global_timelines.clone()).await {
+            Ok(_) => {
+                info!("Successfully pulled all timelines from peer safekeepers");
+            }
+            Err(e) => {
+                error!("Failed to pull timelines from peer safekeepers: {:?}", e);
+            }
+        }
+    }
+    /* END_HADRON */
 
     // Run everything in current thread rt, if asked.
     if conf.current_thread_runtime {
