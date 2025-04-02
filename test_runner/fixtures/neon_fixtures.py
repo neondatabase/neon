@@ -1177,6 +1177,7 @@ class NeonEnv:
             },
             "safekeepers": [],
             "pageservers": [],
+            "s3proxy": {"port": self.port_distributor.get_port()},
             "generate_local_ssl_certs": self.generate_local_ssl_certs,
         }
 
