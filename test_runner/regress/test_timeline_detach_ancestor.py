@@ -1772,7 +1772,11 @@ def test_timeline_detach_with_aux_files_with_detach_v1(
     neon_env_builder: NeonEnvBuilder,
 ):
     """
-    Make sure inherited/non-inherited keyspaces are handled correctly during detach, with the detach v1 restore workflow.
+    Validate that "branches do not inherit their parent" is invariant over detach_ancestor.
+
+    Branches hide parent branch aux files etc by stopping lookup of non-inherited keyspace at the parent-child boundary.
+    We had a bug where detach_ancestor running on a child branch would copy aux files key range from child to parent,
+    thereby making parent aux files reappear.
     """
     env = neon_env_builder.init_start(
         initial_tenant_conf={
