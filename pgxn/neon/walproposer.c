@@ -1113,9 +1113,17 @@ VotesCollectedMset(WalProposer *wp, MemberSet *mset, Safekeeper **msk, StringInf
 		if (sk != NULL && sk->state == SS_WAIT_ELECTED)
 		{
 			Assert(sk->voteResponse.voteGiven);
+
+			/*
+			 * Find the highest vote. NULL check is for the legacy case where
+			 * safekeeper might be not initialized with LSN at all and return
+			 * 0 LSN in the vote response; we still want to set donor to
+			 * something in this case.
+			 */
 			if (GetLastLogTerm(sk) > wp->donorLastLogTerm ||
 				(GetLastLogTerm(sk) == wp->donorLastLogTerm &&
-				 sk->voteResponse.flushLsn > wp->propTermStartLsn))
+				 sk->voteResponse.flushLsn > wp->propTermStartLsn) ||
+				wp->donor == NULL)
 			{
 				wp->donorLastLogTerm = GetLastLogTerm(sk);
 				wp->propTermStartLsn = sk->voteResponse.flushLsn;
@@ -1165,7 +1173,8 @@ VotesCollected(WalProposer *wp)
 
 				if (GetLastLogTerm(&wp->safekeeper[i]) > wp->donorLastLogTerm ||
 					(GetLastLogTerm(&wp->safekeeper[i]) == wp->donorLastLogTerm &&
-					 wp->safekeeper[i].voteResponse.flushLsn > wp->propTermStartLsn))
+					 wp->safekeeper[i].voteResponse.flushLsn > wp->propTermStartLsn) ||
+					wp->donor == NULL)
 				{
 					wp->donorLastLogTerm = GetLastLogTerm(&wp->safekeeper[i]);
 					wp->propTermStartLsn = wp->safekeeper[i].voteResponse.flushLsn;
