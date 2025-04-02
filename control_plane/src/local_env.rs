@@ -70,6 +70,8 @@ pub struct LocalEnv {
 
     pub safekeepers: Vec<SafekeeperConf>,
 
+    pub s3proxy: S3ProxyConf,
+
     // Control plane upcall API for pageserver: if None, we will not run storage_controller  If set, this will
     // be propagated into each pageserver's configuration.
     pub control_plane_api: Url,
@@ -106,6 +108,7 @@ pub struct OnDiskConfig {
     )]
     pub pageservers: Vec<PageServerConf>,
     pub safekeepers: Vec<SafekeeperConf>,
+    pub s3proxy: S3ProxyConf,
     pub control_plane_api: Option<Url>,
     pub control_plane_hooks_api: Option<Url>,
     pub control_plane_compute_hook_api: Option<Url>,
@@ -139,9 +142,22 @@ pub struct NeonLocalInitConf {
     pub storage_controller: Option<NeonStorageControllerConf>,
     pub pageservers: Vec<NeonLocalInitPageserverConf>,
     pub safekeepers: Vec<SafekeeperConf>,
+    pub s3proxy: S3ProxyConf,
     pub control_plane_api: Option<Url>,
     pub control_plane_hooks_api: Option<Url>,
     pub generate_local_ssl_certs: bool,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
+#[serde(default)]
+pub struct S3ProxyConf {
+    pub port: u16,
+}
+
+impl Default for S3ProxyConf {
+    fn default() -> Self {
+        Self { port: 0 }
+    }
 }
 
 /// Broker config for cluster internal communication.
@@ -603,6 +619,7 @@ impl LocalEnv {
                 control_plane_compute_hook_api: _,
                 branch_name_mappings,
                 generate_local_ssl_certs,
+                s3proxy,
             } = on_disk_config;
             LocalEnv {
                 base_data_dir: repopath.to_owned(),
@@ -619,6 +636,7 @@ impl LocalEnv {
                 control_plane_hooks_api,
                 branch_name_mappings,
                 generate_local_ssl_certs,
+                s3proxy,
             }
         };
 
@@ -728,6 +746,7 @@ impl LocalEnv {
                 control_plane_compute_hook_api: None,
                 branch_name_mappings: self.branch_name_mappings.clone(),
                 generate_local_ssl_certs: self.generate_local_ssl_certs,
+                s3proxy: self.s3proxy.clone(),
             },
         )
     }
@@ -811,6 +830,7 @@ impl LocalEnv {
             control_plane_api,
             generate_local_ssl_certs,
             control_plane_hooks_api,
+            s3proxy,
         } = conf;
 
         // Find postgres binaries.
@@ -862,6 +882,7 @@ impl LocalEnv {
             control_plane_hooks_api,
             branch_name_mappings: Default::default(),
             generate_local_ssl_certs,
+            s3proxy,
         };
 
         if generate_local_ssl_certs {
