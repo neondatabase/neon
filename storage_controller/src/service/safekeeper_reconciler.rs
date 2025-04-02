@@ -35,7 +35,10 @@ impl SafekeeperReconcilers {
         service: &Arc<Service>,
         reqs: Vec<ScheduleRequest>,
     ) {
-        tracing::info!("Scheduling {} pending safekeeper ops loaded from db", reqs.len());
+        tracing::info!(
+            "Scheduling {} pending safekeeper ops loaded from db",
+            reqs.len()
+        );
         for req in reqs {
             self.schedule_request(service, req);
         }

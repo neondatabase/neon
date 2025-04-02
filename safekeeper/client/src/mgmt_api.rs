@@ -115,13 +115,17 @@ impl Client {
             "{}/v1/tenant/{}/timeline/{}",
             self.mgmt_api_endpoint, tenant_id, timeline_id
         );
-        let resp = self.request_maybe_body(Method::DELETE, &uri, None::<()>).await?;
+        let resp = self
+            .request_maybe_body(Method::DELETE, &uri, None::<()>)
+            .await?;
         resp.json().await.map_err(Error::ReceiveBody)
     }
 
     pub async fn delete_tenant(&self, tenant_id: TenantId) -> Result<models::TenantDeleteResult> {
         let uri = format!("{}/v1/tenant/{}", self.mgmt_api_endpoint, tenant_id);
-        let resp = self.request_maybe_body(Method::DELETE, &uri, None::<()>).await?;
+        let resp = self
+            .request_maybe_body(Method::DELETE, &uri, None::<()>)
+            .await?;
         resp.json().await.map_err(Error::ReceiveBody)
     }
 
