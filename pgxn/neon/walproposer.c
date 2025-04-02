@@ -930,10 +930,12 @@ RecvAcceptorGreeting(Safekeeper *sk)
 		{
 			wp_log(FATAL, "mconf %u has zero members", sk->greetResponse.mconf.generation);
 		}
+
 		/*
-		 * If we at least started campaign, restart wp to get elected in the new
-		 * mconf. Note: in principle once wp is already elected re-election is
-		 * not required, but being conservative here is not bad.
+		 * If we at least started campaign, restart wp to get elected in the
+		 * new mconf. Note: in principle once wp is already elected
+		 * re-election is not required, but being conservative here is not
+		 * bad.
 		 *
 		 * TODO: put mconf to shmem to immediately pick it up on start,
 		 * otherwise if some safekeeper(s) misses latest mconf and gets
@@ -1971,7 +1973,8 @@ GetAcknowledgedByQuorumWALPosition(WalProposer *wp)
 		{
 			/*
 			 * Like in Raft, we aren't allowed to commit entries from previous
-			 * terms, so ignore reported LSN until it gets to propTermStartLsn.
+			 * terms, so ignore reported LSN until it gets to
+			 * propTermStartLsn.
 			 *
 			 * Note: we ignore sk state, which is ok: before first ack
 			 * flushLsn is 0, and later we just preserve value across
@@ -2093,13 +2096,13 @@ HandleSafekeeperResponse(WalProposer *wp, Safekeeper *fromsk)
 	}
 
 	/*
-	 * Generally sync is done when majority reached propTermStartLsn so we committed
-	 * it and made the majority aware of it, ensuring they are
-	 * ready to give all WAL to pageserver. It would mean whichever majority
-	 * is alive, there will be at least one safekeeper who is able to stream
-	 * WAL to pageserver to make basebackup possible. However, since at the
-	 * moment we don't have any good mechanism of defining the healthy and
-	 * most advanced safekeeper who should push the wal into pageserver and
+	 * Generally sync is done when majority reached propTermStartLsn so we
+	 * committed it and made the majority aware of it, ensuring they are ready
+	 * to give all WAL to pageserver. It would mean whichever majority is
+	 * alive, there will be at least one safekeeper who is able to stream WAL
+	 * to pageserver to make basebackup possible. However, since at the moment
+	 * we don't have any good mechanism of defining the healthy and most
+	 * advanced safekeeper who should push the wal into pageserver and
 	 * basically the random one gets connected, to prevent hanging basebackup
 	 * (due to pageserver connecting to not-synced-safekeeper) we currently
 	 * wait for all seemingly alive safekeepers to get synced.
