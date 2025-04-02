@@ -176,6 +176,74 @@ impl Attempt {
     }
 }
 
+async fn generate_tombstone_image_layer(
+    detached: &Arc<Timeline>,
+    ancestor: &Arc<Timeline>,
+    ancestor_lsn: Lsn,
+    ctx: &RequestContext,
+) -> Result<Option<ResidentLayer>, Error> {
+    tracing::info!("removing non-inherited keys by writing an image layer at the detach LSN");
+    let io_concurrency = IoConcurrency::spawn_from_conf(
+        detached.conf,
+        detached.gate.enter().map_err(|_| Error::ShuttingDown)?,
+    );
+    let mut reconstruct_state = ValuesReconstructState::new(io_concurrency);
+    // Directly use `get_vectored_impl` to skip the max_vectored_read_key limit check. Note that the keyspace should
+    // not contain too many keys, otherwise this takes a lot of memory.
+    let key_range = Key::sparse_non_inherited_keyspace();
+    // avoid generating a "future layer" which will then be removed
+    let image_lsn = ancestor_lsn;
+    let data = ancestor
+        .get_vectored_impl(
+            KeySpace::single(key_range.clone()),
+            image_lsn,
+            &mut reconstruct_state,
+            ctx,
+        )
+        .await
+        .context("failed to retrieve aux keys")
+        .map_err(|e| Error::launder(e, Error::Prepare))?;
+    if !data.is_empty() {
+        // TODO: is it possible that we can have an image at `image_lsn`? Unlikely because image layers are only generated
+        // upon compaction but theoretically possible.
+        let mut image_layer_writer = ImageLayerWriter::new(
+            detached.conf,
+            detached.timeline_id,
+            detached.tenant_shard_id,
+            &key_range,
+            image_lsn,
+            ctx,
+        )
+        .await
+        .context("failed to create image layer writer")
+        .map_err(Error::Prepare)?;
+        for key in data.keys() {
+            image_layer_writer
+                .put_image(*key, Bytes::new(), ctx)
+                .await
+                .context("failed to write key")
+                .map_err(|e| Error::launder(e, Error::Prepare))?;
+        }
+        let (desc, path) = image_layer_writer
+            .finish(ctx)
+            .await
+            .context("failed to finish image layer writer for removing the metadata keys")
+            .map_err(|e| Error::launder(e, Error::Prepare))?;
+        let generated = Layer::finish_creating(detached.conf, detached, desc, &path)
+            .map_err(|e| Error::launder(e, Error::Prepare))?;
+        detached
+            .remote_client
+            .upload_layer_file(&generated, &detached.cancel)
+            .await
+            .map_err(|e| Error::launder(e, Error::Prepare))?;
+        tracing::info!(layer=%generated, "wrote image layer");
+        Ok(Some(generated))
+    } else {
+        tracing::info!("no aux keys found in ancestor");
+        Ok(None)
+    }
+}
+
 /// See [`Timeline::prepare_to_detach_from_ancestor`]
 pub(super) async fn prepare(
     detached: &Arc<Timeline>,
@@ -360,67 +428,7 @@ pub(super) async fn prepare(
     let mut new_layers: Vec<Layer> =
         Vec::with_capacity(straddling_branchpoint.len() + rest_of_historic.len() + 1);
 
-    {
-        tracing::info!("removing non-inherited keys by writing an image layer at the detach LSN");
-        let io_concurrency = IoConcurrency::spawn_from_conf(
-            detached.conf,
-            detached.gate.enter().map_err(|_| Error::ShuttingDown)?,
-        );
-        let mut reconstruct_state = ValuesReconstructState::new(io_concurrency);
-        // Directly use `get_vectored_impl` to skip the max_vectored_read_key limit check. Note that the keyspace should
-        // not contain too many keys, otherwise this takes a lot of memory.
-        let key_range = Key::sparse_non_inherited_keyspace();
-        // avoid generating a "future layer" which will then be removed
-        let image_lsn = ancestor_lsn;
-        let data = ancestor
-            .get_vectored_impl(
-                KeySpace::single(key_range.clone()),
-                image_lsn,
-                &mut reconstruct_state,
-                ctx,
-            )
-            .await
-            .context("failed to retrieve aux keys")
-            .map_err(|e| Error::launder(e, Error::Prepare))?;
-        if !data.is_empty() {
-            // TODO: is it possible that we can have an image at `image_lsn`? Unlikely because image layers are only generated
-            // upon compaction but theoretically possible.
-            let mut image_layer_writer = ImageLayerWriter::new(
-                detached.conf,
-                detached.timeline_id,
-                detached.tenant_shard_id,
-                &key_range,
-                image_lsn,
-                ctx,
-            )
-            .await
-            .context("failed to create image layer writer")
-            .map_err(Error::Prepare)?;
-            for key in data.keys() {
-                image_layer_writer
-                    .put_image(*key, Bytes::new(), ctx)
-                    .await
-                    .context("failed to write key")
-                    .map_err(|e| Error::launder(e, Error::Prepare))?;
-            }
-            let (desc, path) = image_layer_writer
-                .finish(ctx)
-                .await
-                .context("failed to finish image layer writer")
-                .map_err(|e| Error::launder(e, Error::Prepare))?;
-            let generated = Layer::finish_creating(detached.conf, detached, desc, &path)
-                .map_err(|e| Error::launder(e, Error::Prepare))?;
-            detached
-                .remote_client
-                .upload_layer_file(&generated, &detached.cancel)
-                .await
-                .map_err(|e| Error::launder(e, Error::Prepare))?;
-            tracing::info!(layer=%generated, "wrote image layer");
-            new_layers.push(generated.into());
-        } else {
-            tracing::info!("no aux keys found in ancestor");
-        }
-    }
+    generate_tombstone_image_layer(detached, &ancestor, ancestor_lsn, ctx).await?;
 
     {
         tracing::info!(to_rewrite = %straddling_branchpoint.len(), "copying prefix of delta layers");
