@@ -4,7 +4,6 @@ import json
 import os
 import random
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -24,11 +23,13 @@ from fixtures.pageserver.utils import (
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind, S3Storage, s3_storage
 from fixtures.utils import run_only_on_default_postgres, skip_in_debug_build, wait_until
 from fixtures.workload import Workload
-from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from typing import Any
+
+    from werkzeug.wrappers.request import Request
 
 
 # A tenant configuration that is convenient for generating uploads and deletions
@@ -90,6 +91,8 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
     neon_env_builder.control_plane_hooks_api = (
         f"http://{make_httpserver.host}:{make_httpserver.port}/"
     )
+
+    neon_env_builder.storage_controller_config = {"use_local_compute_notifications": False}
 
     def ignore_notify(request: Request):
         # This test does all its own compute configuration (by passing explicit pageserver ID to Workload functions),
@@ -626,7 +629,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     except:
         # On assertion failures, log some details to help with debugging
         heatmap = env.pageserver_remote_storage.heatmap_content(tenant_id)
-        log.warn(f"heatmap contents: {json.dumps(heatmap,indent=2)}")
+        log.warn(f"heatmap contents: {json.dumps(heatmap, indent=2)}")
         raise
 
     # Scrub the remote storage

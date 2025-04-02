@@ -7,17 +7,18 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import fixtures.pageserver.many_tenants as many_tenants
-from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    NeonEnv,
-    NeonEnvBuilder,
-)
 from fixtures.pageserver.utils import wait_until_all_tenants_state
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import Any
+
+    from fixtures.common_types import TenantId, TimelineId
+    from fixtures.neon_fixtures import (
+        NeonEnv,
+        NeonEnvBuilder,
+    )
 
 
 def ensure_pageserver_ready_for_benchmarking(env: NeonEnv, n_tenants: int):

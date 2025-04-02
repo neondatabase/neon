@@ -73,6 +73,7 @@ pub mod defaults {
 
     pub const DEFAULT_SSL_KEY_FILE: &str = "server.key";
     pub const DEFAULT_SSL_CERT_FILE: &str = "server.crt";
+    pub const DEFAULT_SSL_CERT_RELOAD_PERIOD: &str = "60s";
 }
 
 #[derive(Debug, Clone)]
@@ -118,7 +119,8 @@ pub struct SafeKeeperConf {
     pub max_delta_for_fanout: Option<u64>,
     pub ssl_key_file: Utf8PathBuf,
     pub ssl_cert_file: Utf8PathBuf,
-    pub ssl_ca_cert: Option<Certificate>,
+    pub ssl_cert_reload_period: Duration,
+    pub ssl_ca_certs: Vec<Certificate>,
 }
 
 impl SafeKeeperConf {
@@ -166,7 +168,8 @@ impl SafeKeeperConf {
             max_delta_for_fanout: None,
             ssl_key_file: Utf8PathBuf::from(defaults::DEFAULT_SSL_KEY_FILE),
             ssl_cert_file: Utf8PathBuf::from(defaults::DEFAULT_SSL_CERT_FILE),
-            ssl_ca_cert: None,
+            ssl_cert_reload_period: Duration::from_secs(60),
+            ssl_ca_certs: Vec::new(),
         }
     }
 }

@@ -3,7 +3,6 @@ from __future__ import annotations
 import threading
 from typing import TYPE_CHECKING
 
-from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
@@ -16,6 +15,8 @@ from fixtures.pageserver.utils import wait_for_last_record_lsn
 
 if TYPE_CHECKING:
     from typing import Any
+
+    from fixtures.common_types import TenantId, TimelineId
 
 # neon_local doesn't handle creating/modifying endpoints concurrently, so we use a mutex
 # to ensure we don't do that: this enables running lots of Workloads in parallel safely.

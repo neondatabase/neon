@@ -17,7 +17,7 @@ use pageserver_api::models::{TenantConfigRequest, TimelineCreateRequest, Timelin
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
-use reqwest::Method;
+use reqwest::{Certificate, Method};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
@@ -143,11 +143,14 @@ impl StorageController {
             }
         };
 
-        let mut http_client = reqwest::Client::builder();
-        if let Some(ssl_ca_file) = env.ssl_ca_cert_path() {
+        let ssl_ca_certs = env.ssl_ca_cert_path().map(|ssl_ca_file| {
             let buf = std::fs::read(ssl_ca_file).expect("SSL CA file should exist");
-            let cert = reqwest::Certificate::from_pem(&buf).expect("SSL CA file should be valid");
-            http_client = http_client.add_root_certificate(cert);
+            Certificate::from_pem_bundle(&buf).expect("SSL CA file should be valid")
+        });
+
+        let mut http_client = reqwest::Client::builder();
+        for ssl_ca_cert in ssl_ca_certs.unwrap_or_default() {
+            http_client = http_client.add_root_certificate(ssl_ca_cert);
         }
         let http_client = http_client
             .build()
@@ -550,6 +553,10 @@ impl StorageController {
 
         if self.config.use_https_safekeeper_api {
             args.push("--use-https-safekeeper-api".to_string());
+        }
+
+        if self.config.use_local_compute_notifications {
+            args.push("--use-local-compute-notifications".to_string());
         }
 
         if let Some(ssl_ca_file) = self.env.ssl_ca_cert_path() {

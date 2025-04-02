@@ -3,12 +3,15 @@ from __future__ import annotations
 import os
 import threading
 import time
+from typing import TYPE_CHECKING
 
 import pytest
-from fixtures.compare_fixtures import PgCompare
-from fixtures.pg_stats import PgStatTable
 
 from performance.test_perf_pgbench import get_durations_matrix, get_scales_matrix
+
+if TYPE_CHECKING:
+    from fixtures.compare_fixtures import PgCompare
+    from fixtures.pg_stats import PgStatTable
 
 
 def get_seeds_matrix(default: int = 100):

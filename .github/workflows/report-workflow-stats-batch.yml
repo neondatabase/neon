@@ -23,7 +23,7 @@ jobs:
         egress-policy: audit
 
     - name: Export Workflow Run for the past 2 hours
-      uses: neondatabase/gh-workflow-stats-action@4c998b25ab5cc6588b52a610b749531f6a566b6b # v0.2.1
+      uses: neondatabase/gh-workflow-stats-action@701b1f202666d0b82e67b4d387e909af2b920127 # v0.2.2
       with:
         db_uri: ${{ secrets.GH_REPORT_STATS_DB_RW_CONNSTR }}
         db_table: "gh_workflow_stats_neon"
@@ -43,7 +43,7 @@ jobs:
         egress-policy: audit
 
     - name: Export Workflow Run for the past 48 hours
-      uses: neondatabase/gh-workflow-stats-action@4c998b25ab5cc6588b52a610b749531f6a566b6b # v0.2.1
+      uses: neondatabase/gh-workflow-stats-action@701b1f202666d0b82e67b4d387e909af2b920127 # v0.2.2
       with:
         db_uri: ${{ secrets.GH_REPORT_STATS_DB_RW_CONNSTR }}
         db_table: "gh_workflow_stats_neon"
@@ -63,7 +63,7 @@ jobs:
         egress-policy: audit
 
     - name: Export Workflow Run for the past 30 days
-      uses: neondatabase/gh-workflow-stats-action@4c998b25ab5cc6588b52a610b749531f6a566b6b # v0.2.1
+      uses: neondatabase/gh-workflow-stats-action@701b1f202666d0b82e67b4d387e909af2b920127 # v0.2.2
       with:
         db_uri: ${{ secrets.GH_REPORT_STATS_DB_RW_CONNSTR }}
         db_table: "gh_workflow_stats_neon"

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
-from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.pg_version import PgVersion
 from fixtures.utils import WITH_SANITIZERS, run_only_on_postgres
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 @pytest.mark.parametrize(

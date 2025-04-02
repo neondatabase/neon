@@ -48,9 +48,9 @@ def test_nbtree_pagesplit_cycleid(neon_simple_env: NeonEnv):
 
     ses1.execute(BTREE_NUM_CYCLEID_PAGES)
     pages = ses1.fetchall()
-    assert (
-        len(pages) == 0
-    ), f"0 back splits with cycle ID expected, real {len(pages)} first {pages[0]}"
+    assert len(pages) == 0, (
+        f"0 back splits with cycle ID expected, real {len(pages)} first {pages[0]}"
+    )
     # Delete enough tuples to clear the first index page.
     # (there are up to 407 rows per 8KiB page; 406 for non-rightmost leafs.
     ses1.execute("DELETE FROM t WHERE id <= 406;")
@@ -119,9 +119,9 @@ def test_nbtree_pagesplit_cycleid(neon_simple_env: NeonEnv):
     # check that our expectations are correct
     ses1.execute(BTREE_NUM_CYCLEID_PAGES)
     pages = ses1.fetchall()
-    assert (
-        len(pages) == 1 and pages[0][0] == 3
-    ), f"3 page splits with cycle ID expected; actual {pages}"
+    assert len(pages) == 1 and pages[0][0] == 3, (
+        f"3 page splits with cycle ID expected; actual {pages}"
+    )
 
     # final cleanup
     ses3t.join()

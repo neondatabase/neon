@@ -82,7 +82,8 @@ static int	max_reconnect_attempts = 60;
 static int	stripe_size;
 
 static int pageserver_response_log_timeout = 10000;
-static int pageserver_response_disconnect_timeout = 120000; /* 2 minutes */
+/* 2.5 minutes. A bit higher than highest default TCP retransmission timeout */
+static int pageserver_response_disconnect_timeout = 150000;
 
 typedef struct
 {
@@ -1141,37 +1142,23 @@ pageserver_try_receive(shardno_t shard_no)
 	NeonResponse *resp;
 	PageServer *shard = &page_servers[shard_no];
 	PGconn	   *pageserver_conn = shard->conn;
-	/* read response */
-	int			rc;
+	int	rc;
 
 	if (shard->state != PS_Connected)
 		return NULL;
 
 	Assert(pageserver_conn);
 
-	while (true)
+	rc = PQgetCopyData(shard->conn, &resp_buff.data, 1 /* async */);
+	if (rc == 0)
 	{
-		if (PQisBusy(shard->conn))
+		if (!PQconsumeInput(shard->conn))
 		{
-			WaitEvent	event;
-			if (WaitEventSetWait(shard->wes_read, 0, &event, 1,
-								 WAIT_EVENT_NEON_PS_READ) != 1
-				|| (event.events & WL_SOCKET_READABLE) == 0)
-			{
-				return NULL;
-			}
+			return NULL;
 		}
 		rc = PQgetCopyData(shard->conn, &resp_buff.data, 1 /* async */);
-		if (rc == 0)
-		{
-			if (!PQconsumeInput(shard->conn))
-			{
-				return NULL;
-			}
-		}
-		else
-			break;
 	}
+
 	if (rc == 0)
 		return NULL;
 	else if (rc > 0)
@@ -1450,7 +1437,7 @@ pg_init_libpagestore(void)
 							"If the pageserver doesn't respond to a request within this timeout, "
 							"disconnect and reconnect.",
 							&pageserver_response_disconnect_timeout,
-							120000, 100, INT_MAX,
+							150000, 100, INT_MAX,
 							PGC_SUSET,
 							GUC_UNIT_MS,
 							NULL, NULL, NULL);

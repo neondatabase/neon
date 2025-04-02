@@ -7,6 +7,7 @@ use anyhow::{Context, anyhow};
 use camino::Utf8PathBuf;
 use clap::Parser;
 use futures::future::OptionFuture;
+use http_utils::tls_certs::ReloadingCertificateResolver;
 use hyper0::Uri;
 use metrics::BuildInfo;
 use metrics::launch_timestamp::LaunchTimestamp;
@@ -43,6 +44,7 @@ pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:21\0
 
 const DEFAULT_SSL_KEY_FILE: &str = "server.key";
 const DEFAULT_SSL_CERT_FILE: &str = "server.crt";
+const DEFAULT_SSL_CERT_RELOAD_PERIOD: &str = "60s";
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -193,9 +195,17 @@ struct Cli {
     /// Path to a file with a X509 certificate for https API.
     #[arg(long, default_value = DEFAULT_SSL_CERT_FILE)]
     ssl_cert_file: Utf8PathBuf,
-    /// Trusted root CA certificate to use in https APIs.
+    /// Period to reload certificate and private key from files.
+    #[arg(long, default_value = DEFAULT_SSL_CERT_RELOAD_PERIOD)]
+    ssl_cert_reload_period: humantime::Duration,
+    /// Trusted root CA certificates to use in https APIs.
     #[arg(long)]
     ssl_ca_file: Option<PathBuf>,
+
+    /// Neon local specific flag. When set, ignore [`Cli::control_plane_url`] and deliver
+    /// the compute notification directly (instead of via control plane).
+    #[arg(long, default_value = "false")]
+    use_local_compute_notifications: bool,
 }
 
 enum StrictMode {
@@ -361,6 +371,9 @@ async fn async_main() -> anyhow::Result<()> {
                 "neither `--compute-hook-url` nor `--control-plane-url` are set: this is only permitted in `--dev` mode"
             );
         }
+        StrictMode::Strict if args.use_local_compute_notifications => {
+            anyhow::bail!("`--use-local-compute-notifications` is only permitted in `--dev` mode");
+        }
         StrictMode::Strict => {
             tracing::info!("Starting in strict mode: configuration is OK.")
         }
@@ -369,13 +382,13 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
-    let ssl_ca_cert = match args.ssl_ca_file.as_ref() {
+    let ssl_ca_certs = match args.ssl_ca_file.as_ref() {
         Some(ssl_ca_file) => {
             tracing::info!("Using ssl root CA file: {ssl_ca_file:?}");
             let buf = tokio::fs::read(ssl_ca_file).await?;
-            Some(Certificate::from_pem(&buf)?)
+            Certificate::from_pem_bundle(&buf)?
         }
-        None => None,
+        None => Vec::new(),
     };
 
     let config = Config {
@@ -418,8 +431,9 @@ async fn async_main() -> anyhow::Result<()> {
         start_as_candidate: args.start_as_candidate,
         use_https_pageserver_api: args.use_https_pageserver_api,
         use_https_safekeeper_api: args.use_https_safekeeper_api,
-        ssl_ca_cert,
+        ssl_ca_certs,
         timelines_onto_safekeepers: args.timelines_onto_safekeepers,
+        use_local_compute_notifications: args.use_local_compute_notifications,
     };
 
     // Validate that we can connect to the database
@@ -458,12 +472,17 @@ async fn async_main() -> anyhow::Result<()> {
     let https_server_task: OptionFuture<_> = match args.listen_https {
         Some(https_addr) => {
             let https_listener = tcp_listener::bind(https_addr)?;
-            let certs = http_utils::tls_certs::load_cert_chain(args.ssl_cert_file.as_path())?;
-            let key = http_utils::tls_certs::load_private_key(args.ssl_key_file.as_path())?;
+
+            let resolver = ReloadingCertificateResolver::new(
+                &args.ssl_key_file,
+                &args.ssl_cert_file,
+                *args.ssl_cert_reload_period,
+            )
+            .await?;
 
             let server_config = rustls::ServerConfig::builder()
                 .with_no_client_auth()
-                .with_single_cert(certs, key)?;
+                .with_cert_resolver(resolver);
 
             let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
             let https_server =
