@@ -48,12 +48,12 @@ impl TenantManifest {
     /// Returns true if the manifests are equal, ignoring the version number. This avoids
     /// re-uploading all manifests just because the version number is bumped.
     pub fn eq_ignoring_version(&self, other: &Self) -> bool {
-        // Fast path: the version is equal, so just compare directly.
+        // Fast path: if the version is equal, just compare directly.
         if self.version == other.version {
             return self == other;
         }
 
-        // We could alernatively just clone and modify the version here.
+        // We could alternatively just clone and modify the version here.
         let Self {
             version: _, // ignore version
             offloaded_timelines,
