@@ -143,6 +143,7 @@ PAGESERVER_GLOBAL_METRICS: tuple[str, ...] = (
     counter("pageserver_tenant_throttling_wait_usecs_sum_global"),
     counter("pageserver_tenant_throttling_count_global"),
     *histogram("pageserver_tokio_epoll_uring_slots_submission_queue_depth"),
+    *histogram("pageserver_wait_ondemand_download_seconds_global"),
 )
 
 PAGESERVER_PER_TENANT_METRICS: tuple[str, ...] = (
@@ -180,6 +181,7 @@ PAGESERVER_PER_TENANT_METRICS: tuple[str, ...] = (
     counter("pageserver_wait_lsn_in_progress_micros"),
     counter("pageserver_wait_lsn_started_count"),
     counter("pageserver_wait_lsn_finished_count"),
+    counter("pageserver_wait_ondemand_download_seconds_sum"),
     *histogram("pageserver_page_service_batch_size"),
     *histogram("pageserver_page_service_pagestream_batch_wait_time_seconds"),
     *PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS,

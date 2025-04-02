@@ -950,6 +950,10 @@ impl LayerInner {
         allow_download: bool,
         ctx: &RequestContext,
     ) -> Result<Arc<DownloadedLayer>, DownloadError> {
+        let mut wait_for_download_recorder =
+            scopeguard::guard(utils::elapsed_accum::ElapsedAccum::default(), |accum| {
+                ctx.ondemand_download_wait_observe(accum.get());
+            });
         let (weak, permit) = {
             // get_or_init_detached can:
             // - be fast (mutex lock) OR uncontested semaphore permit acquire
@@ -958,7 +962,7 @@ impl LayerInner {
 
             let locked = self
                 .inner
-                .get_or_init_detached()
+                .get_or_init_detached2(Some(&mut wait_for_download_recorder))
                 .await
                 .map(|mut guard| guard.get_and_upgrade().ok_or(guard));
 
@@ -988,6 +992,7 @@ impl LayerInner {
                 Err(permit) => (None, permit),
             }
         };
+        let _guard = wait_for_download_recorder.guard();
 
         if let Some(weak) = weak {
             // only drop the weak after dropping the heavier_once_cell guard

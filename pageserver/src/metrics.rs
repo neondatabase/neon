@@ -496,6 +496,98 @@ pub(crate) static WAIT_LSN_IN_PROGRESS_GLOBAL_MICROS: Lazy<IntCounter> = Lazy::n
     .expect("failed to define a metric")
 });
 
+pub(crate) mod wait_ondemand_download_time {
+    use super::*;
+    const WAIT_ONDEMAND_DOWNLOAD_TIME_BUCKETS: &[f64] = &[
+        0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, // 10 ms - 100ms
+        0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, // 100ms to 1s
+        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, // 1s to 10s
+        10.0, 20.0, 30.0, 40.0, 50.0, 60.0, // 10s to 1m
+    ];
+
+    pub(crate) const WAIT_ONDEMAND_DOWNLOAD_METRIC_TASK_KINDS: [TaskKind; 2] = [
+        TaskKind::PageRequestHandler,
+        TaskKind::WalReceiverConnectionHandler,
+    ];
+
+    pub(crate) static WAIT_ONDEMAND_DOWNLOAD_TIME_GLOBAL: Lazy<Vec<Histogram>> = Lazy::new(|| {
+        let histo = register_histogram_vec!(
+            "pageserver_wait_ondemand_download_seconds_global",
+            "Observations are individual tasks' wait times for on-demand downloads. \
+         If N tasks coalesce on an on-demand download, and it takes 10s, than we observe N * 10s.",
+            &["task_kind"],
+            WAIT_ONDEMAND_DOWNLOAD_TIME_BUCKETS.into(),
+        )
+        .expect("failed to define a metric");
+        WAIT_ONDEMAND_DOWNLOAD_METRIC_TASK_KINDS
+            .iter()
+            .map(|task_kind| histo.with_label_values(&[task_kind.into()]))
+            .collect::<Vec<_>>()
+    });
+
+    pub(crate) static WAIT_ONDEMAND_DOWNLOAD_TIME_SUM: Lazy<CounterVec> = Lazy::new(|| {
+        register_counter_vec!(
+            // use a name that _could_ be evolved into a per-timeline histogram later
+            "pageserver_wait_ondemand_download_seconds_sum",
+            "Like `pageserver_wait_ondemand_download_seconds_global` but per timeline",
+            &["tenant_id", "shard_id", "timeline_id", "task_kind"],
+        )
+        .unwrap()
+    });
+
+    pub struct WaitOndemandDownloadTimeSum {
+        counters: [Counter; WAIT_ONDEMAND_DOWNLOAD_METRIC_TASK_KINDS.len()],
+    }
+
+    impl WaitOndemandDownloadTimeSum {
+        pub fn new(tenant_id: &str, shard_id: &str, timeline_id: &str) -> Self {
+            let counters = WAIT_ONDEMAND_DOWNLOAD_METRIC_TASK_KINDS
+                .iter()
+                .map(|task_kind| {
+                    WAIT_ONDEMAND_DOWNLOAD_TIME_SUM
+                        .get_metric_with_label_values(&[
+                            tenant_id,
+                            shard_id,
+                            timeline_id,
+                            task_kind.into(),
+                        ])
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            Self {
+                counters: counters.try_into().unwrap(),
+            }
+        }
+        pub fn observe(&self, task_kind: TaskKind, duration: Duration) {
+            let maybe = WAIT_ONDEMAND_DOWNLOAD_METRIC_TASK_KINDS
+                .iter()
+                .enumerate()
+                .find(|(_, kind)| **kind == task_kind);
+            let Some((idx, _)) = maybe else {
+                return;
+            };
+            WAIT_ONDEMAND_DOWNLOAD_TIME_GLOBAL[idx].observe(duration.as_secs_f64());
+            let counter = &self.counters[idx];
+            counter.inc_by(duration.as_secs_f64());
+        }
+    }
+
+    pub fn shutdown_timeline(tenant_id: &str, shard_id: &str, timeline_id: &str) {
+        for task_kind in WAIT_ONDEMAND_DOWNLOAD_METRIC_TASK_KINDS {
+            let _ = WAIT_ONDEMAND_DOWNLOAD_TIME_SUM.remove_label_values(&[
+                tenant_id,
+                shard_id,
+                timeline_id,
+                task_kind.into(),
+            ]);
+        }
+    }
+
+    pub fn preinitialize_global_metrics() {
+        Lazy::force(&WAIT_ONDEMAND_DOWNLOAD_TIME_GLOBAL);
+    }
+}
+
 static LAST_RECORD_LSN: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
         "pageserver_last_record_lsn",
@@ -2884,6 +2976,7 @@ pub(crate) struct TimelineMetrics {
     pub storage_io_size: StorageIoSizeMetrics,
     pub wait_lsn_in_progress_micros: GlobalAndPerTenantIntCounter,
     pub wait_lsn_start_finish_counterpair: IntCounterPair,
+    pub wait_ondemand_download_time: wait_ondemand_download_time::WaitOndemandDownloadTimeSum,
     shutdown: std::sync::atomic::AtomicBool,
 }
 
@@ -3029,6 +3122,13 @@ impl TimelineMetrics {
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
 
+        let wait_ondemand_download_time =
+            wait_ondemand_download_time::WaitOndemandDownloadTimeSum::new(
+                &tenant_id,
+                &shard_id,
+                &timeline_id,
+            );
+
         TimelineMetrics {
             tenant_id,
             shard_id,
@@ -3062,6 +3162,7 @@ impl TimelineMetrics {
             wal_records_received,
             wait_lsn_in_progress_micros,
             wait_lsn_start_finish_counterpair,
+            wait_ondemand_download_time,
             shutdown: std::sync::atomic::AtomicBool::default(),
         }
     }
@@ -3253,6 +3354,8 @@ impl TimelineMetrics {
             WAIT_LSN_START_FINISH_COUNTERPAIR
                 .remove_label_values(&mut res, &[tenant_id, shard_id, timeline_id]);
         }
+
+        wait_ondemand_download_time::shutdown_timeline(tenant_id, shard_id, timeline_id);
 
         let _ = SMGR_QUERY_STARTED_PER_TENANT_TIMELINE.remove_label_values(&[
             SmgrQueryType::GetPageAtLsn.into(),
@@ -4174,4 +4277,5 @@ pub fn preinitialize_metrics(conf: &'static PageServerConf) {
     Lazy::force(&tokio_epoll_uring::THREAD_LOCAL_METRICS_STORAGE);
 
     tenant_throttling::preinitialize_global_metrics();
+    wait_ondemand_download_time::preinitialize_global_metrics();
 }
