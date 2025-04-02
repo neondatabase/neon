@@ -9,6 +9,7 @@ use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::DetachBehavior;
 use pageserver_api::models::detach_ancestor::AncestorDetached;
 use pageserver_api::shard::ShardIdentity;
+use pageserver_compaction::helpers::overlaps_with;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -195,6 +196,22 @@ async fn generate_tombstone_image_layer(
     let key_range = Key::sparse_non_inherited_keyspace();
     // avoid generating a "future layer" which will then be removed
     let image_lsn = ancestor_lsn;
+
+    {
+        let layers = detached.layers.read().await;
+        for layer in layers.all_persistent_layers() {
+            if !layer.is_delta
+                && layer.lsn_range.start == image_lsn
+                && overlaps_with(&key_range, &layer.key_range)
+            {
+                tracing::warn!(
+                    layer=%layer, "image layer at the detach LSN already exists, skipping removing aux files"
+                );
+                return Ok(None);
+            }
+        }
+    }
+
     let data = ancestor
         .get_vectored_impl(
             KeySpace::single(key_range.clone()),
