@@ -853,6 +853,25 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res_json = res.json()
         return res_json
 
+    def timeline_mark_invisible(
+        self,
+        tenant_id: TenantId | TenantShardId,
+        timeline_id: TimelineId,
+        is_visible: bool | None = None,
+    ):
+        data = {
+            "is_visible": is_visible,
+        }
+
+        log.info(
+            f"Requesting marking timeline invisible for {is_visible=}, {tenant_id=}, {timeline_id=}"
+        )
+        res = self.put(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/mark_invisible",
+            json=data,
+        )
+        self.verbose_error(res)
+
     def timeline_get_timestamp_of_lsn(
         self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId, lsn: Lsn
     ):

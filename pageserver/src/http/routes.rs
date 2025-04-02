@@ -74,8 +74,8 @@ use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::{IoConcurrency, LayerAccessStatsReset, LayerName};
 use crate::tenant::timeline::offload::{OffloadError, offload_timeline};
 use crate::tenant::timeline::{
-    CompactFlags, CompactOptions, CompactRequest, CompactionError, Timeline, WaitLsnTimeout,
-    WaitLsnWaiter, import_pgdata,
+    CompactFlags, CompactOptions, CompactRequest, CompactionError, MarkInvisibleRequest, Timeline,
+    WaitLsnTimeout, WaitLsnWaiter, import_pgdata,
 };
 use crate::tenant::{
     GetTimelineError, LogicalSizeCalculationCause, OffloadedTimeline, PageReconstructError,
@@ -2337,21 +2337,31 @@ async fn timeline_compact_handler(
 }
 
 async fn timeline_mark_invisible_handler(
-    request: Request<Body>,
+    mut request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
+    let compact_request = json_request_maybe::<Option<MarkInvisibleRequest>>(&mut request).await?;
+
     let state = get_state(&request);
+
+    let visibility = match compact_request {
+        Some(req) => match req.is_visible {
+            Some(true) => TimelineVisibilityState::Visible,
+            Some(false) | None => TimelineVisibilityState::Invisible,
+        },
+        None => TimelineVisibilityState::Invisible,
+    };
 
     async {
         let tenant = state
             .tenant_manager
             .get_attached_tenant_shard(tenant_shard_id)?;
         let timeline = tenant.get_timeline(timeline_id, true)?;
-        timeline.remote_client.schedule_index_upload_for_timeline_invisible_state(TimelineVisibilityState::Invisible).map_err(ApiError::InternalServerError)?;
+        timeline.remote_client.schedule_index_upload_for_timeline_invisible_state(visibility).map_err(ApiError::InternalServerError)?;
         json_response(StatusCode::OK, ())
     }
     .instrument(info_span!("manual_timeline_mark_invisible", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
