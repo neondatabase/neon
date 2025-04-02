@@ -14,6 +14,7 @@ pub struct S3ProxyNode {
     pub bin: Utf8PathBuf,
     pub data_dir: Utf8PathBuf,
     pub pemfile: Utf8PathBuf,
+    pub port: u16,
 }
 
 impl S3ProxyNode {
@@ -22,6 +23,7 @@ impl S3ProxyNode {
             bin: Utf8PathBuf::from_path_buf(env.s3proxy_bin()).unwrap(),
             data_dir: Utf8PathBuf::from_path_buf(env.s3proxy_data_dir()).unwrap(),
             pemfile: Utf8PathBuf::from_path_buf(env.public_key_path.clone()).unwrap(),
+            port: env.s3proxy.port,
         }
     }
 
@@ -30,7 +32,7 @@ impl S3ProxyNode {
     }
 
     fn listen_addr(&self) -> Utf8PathBuf {
-        format!("127.0.0.1:{S3PROXY_DEFAULT_PORT}").into()
+        format!("127.0.0.1:{}", self.port).into()
     }
 
     pub fn init(&self) -> Result<()> {
