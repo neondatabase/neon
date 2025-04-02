@@ -20,16 +20,16 @@ use compute_api::spec::ComputeMode;
 use control_plane::endpoint::ComputeControlPlane;
 use control_plane::local_env::{
     InitForceMode, LocalEnv, NeonBroker, NeonLocalInitConf, NeonLocalInitPageserverConf,
-    SafekeeperConf, S3ProxyConf
+    S3ProxyConf, SafekeeperConf,
 };
 use control_plane::pageserver::PageServerNode;
+use control_plane::s3proxy::S3PROXY_DEFAULT_PORT as DEFAULT_S3PROXY_PORT;
 use control_plane::s3proxy::S3ProxyNode;
 use control_plane::safekeeper::SafekeeperNode;
 use control_plane::storage_controller::{
     NeonStorageControllerStartArgs, NeonStorageControllerStopArgs, StorageController,
 };
 use control_plane::{broker, local_env};
-use control_plane::s3proxy::S3PROXY_DEFAULT_PORT as DEFAULT_S3PROXY_PORT;
 use nix::fcntl::{FlockArg, flock};
 use pageserver_api::config::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
