@@ -170,8 +170,8 @@ typedef struct FileCacheControl
 typedef struct FileCacheState
 {
 	uint32		magic;
-	uint32		chunk_size_log;
-	size_t		n_chunks;
+	uint32		n_chunks;
+	uint16		chunk_size_log;
 	BufferTag	chunks[FLEXIBLE_ARRAY_MEMBER];
 	/* followed by bitmap */
 } FileCacheState;
