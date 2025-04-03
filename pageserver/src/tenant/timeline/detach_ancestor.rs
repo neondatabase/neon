@@ -192,7 +192,7 @@ async fn generate_tombstone_image_layer(
     );
     let mut reconstruct_state = ValuesReconstructState::new(io_concurrency);
     // Directly use `get_vectored_impl` to skip the max_vectored_read_key limit check. Note that the keyspace should
-    // not contain too many keys, otherwise this takes a lot of memory.
+    // not contain too many keys, otherwise this takes a lot of memory. Currently we limit it to 10k keys in the compute.
     let key_range = Key::sparse_non_inherited_keyspace();
     // avoid generating a "future layer" which will then be removed
     let image_lsn = ancestor_lsn;
