@@ -220,6 +220,9 @@ struct Args {
     /// Trusted root CA certificates to use in https APIs.
     #[arg(long)]
     ssl_ca_file: Option<Utf8PathBuf>,
+    /// Path to the JWT auth token used to authenticate with other safekeepers.
+    #[arg(long)]
+    auth_token_path: Option<Utf8PathBuf>,
 }
 
 // Like PathBufValueParser, but allows empty string.
@@ -344,8 +347,16 @@ async fn main() -> anyhow::Result<()> {
             Some(SecretString::from(v))
         }
         Err(VarError::NotPresent) => {
-            info!("no JWT token for authentication with safekeepers detected");
-            None
+            if let Some(auth_token_path) = args.auth_token_path.as_ref() {
+                info!(
+                    "loading JWT token for authenticatiun with safekeepers from {auth_token_path}"
+                );
+                let auth_token = tokio::fs::read_to_string(auth_token_path).await?;
+                Some(SecretString::from(auth_token.trim().to_owned()))
+            } else {
+                info!("no JWT token for authentication with safekeepers detected");
+                None
+            }
         }
         Err(_) => {
             warn!("JWT token for authentication with safekeepers is not unicode");
