@@ -1855,34 +1855,6 @@ index a8e01a6220..5a9cef4ede 100644
  CREATE TABLE seclabel_tbl1 (a int, b text);
  CREATE TABLE seclabel_tbl2 (x int, y text);
  CREATE VIEW seclabel_view1 AS SELECT * FROM seclabel_tbl2;
-@@ -19,21 +19,21 @@ ALTER TABLE seclabel_tbl2 OWNER TO regress_seclabel_user2;
- -- Test of SECURITY LABEL statement without a plugin
- --
- SECURITY LABEL ON TABLE seclabel_tbl1 IS 'classified';			-- fail
--ERROR:  no security label providers have been loaded
-+ERROR:  must specify provider when multiple security label providers have been loaded
- SECURITY LABEL FOR 'dummy' ON TABLE seclabel_tbl1 IS 'classified';		-- fail
- ERROR:  security label provider "dummy" is not loaded
- SECURITY LABEL ON TABLE seclabel_tbl1 IS '...invalid label...';		-- fail
--ERROR:  no security label providers have been loaded
-+ERROR:  must specify provider when multiple security label providers have been loaded
- SECURITY LABEL ON TABLE seclabel_tbl3 IS 'unclassified';			-- fail
--ERROR:  no security label providers have been loaded
-+ERROR:  must specify provider when multiple security label providers have been loaded
- SECURITY LABEL ON ROLE regress_seclabel_user1 IS 'classified';			-- fail
--ERROR:  no security label providers have been loaded
-+ERROR:  must specify provider when multiple security label providers have been loaded
- SECURITY LABEL FOR 'dummy' ON ROLE regress_seclabel_user1 IS 'classified';		-- fail
- ERROR:  security label provider "dummy" is not loaded
- SECURITY LABEL ON ROLE regress_seclabel_user1 IS '...invalid label...';		-- fail
--ERROR:  no security label providers have been loaded
-+ERROR:  must specify provider when multiple security label providers have been loaded
- SECURITY LABEL ON ROLE regress_seclabel_user3 IS 'unclassified';			-- fail
--ERROR:  no security label providers have been loaded
-+ERROR:  must specify provider when multiple security label providers have been loaded
- -- clean up objects
- DROP FUNCTION seclabel_four();
- DROP DOMAIN seclabel_domain;
 diff --git a/src/test/regress/expected/select_into.out b/src/test/regress/expected/select_into.out
 index b79fe9a1c0..e29fab88ab 100644
 --- a/src/test/regress/expected/select_into.out
