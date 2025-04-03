@@ -39,18 +39,18 @@ registries = {
     ],
 }
 
+release_branches = ["release", "release-proxy", "release-compute"]
+
 outputs: dict[str, dict[str, list[str]]] = {}
 
 target_tags = (
     [target_tag, "latest"]
     if branch == "main"
     else [target_tag, "released"]
-    if branch in ["release", "release-proxy", "release-compute"]
+    if branch in release_branches
     else [target_tag]
 )
-target_stages = (
-    ["dev", "prod"] if branch in ["release", "release-proxy", "release-compute"] else ["dev"]
-)
+target_stages = ["dev", "prod"] if branch in release_branches else ["dev"]
 
 for component_name, component_images in components.items():
     for stage in target_stages:
