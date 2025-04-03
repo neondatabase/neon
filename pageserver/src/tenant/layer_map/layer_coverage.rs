@@ -53,7 +53,7 @@ impl<Value: Clone> LayerCoverage<Value> {
     ///
     /// Complexity: O(log N)
     fn add_node(&mut self, key: i128) {
-        let value = match self.nodes.range(..=key).last() {
+        let value = match self.nodes.range(..=key).next_back() {
             Some((_, Some(v))) => Some(v.clone()),
             Some((_, None)) => None,
             None => None,
