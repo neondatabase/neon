@@ -228,7 +228,7 @@ impl HeartBeat<Node, PageserverState> for HeartbeaterTask<Node, PageserverState>
 
                     Some((*node_id, status))
                 }
-                .instrument(tracing::info_span!("heartbeat_ps", %node_id, base_url=node.base_url()))
+                .instrument(tracing::info_span!("heartbeat_ps", %node_id))
             });
         }
 
@@ -371,7 +371,7 @@ impl HeartBeat<Safekeeper, SafekeeperState> for HeartbeaterTask<Safekeeper, Safe
 
                     Some((*node_id, status))
                 }
-                .instrument(tracing::info_span!("heartbeat_sk", %node_id, base_url=sk.base_url()))
+                .instrument(tracing::info_span!("heartbeat_sk", %node_id))
             });
         }
 
