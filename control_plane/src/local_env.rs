@@ -4,7 +4,7 @@
 //! script which will use local paths.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -151,10 +151,10 @@ pub struct NeonLocalInitConf {
     pub generate_local_ssl_certs: bool,
 }
 
-#[derive(Serialize, Default, Deserialize, PartialEq, Eq, Clone, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 #[serde(default)]
 pub struct EndpointStorageConf {
-    pub port: u16,
+    pub listen_addr: SocketAddr,
 }
 
 /// Broker config for cluster internal communication.
@@ -237,6 +237,14 @@ impl Default for NeonStorageControllerConf {
             timelines_onto_safekeepers: false,
             use_https_safekeeper_api: false,
             use_local_compute_notifications: true,
+        }
+    }
+}
+
+impl Default for EndpointStorageConf {
+    fn default() -> Self {
+        Self {
+            listen_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0),
         }
     }
 }

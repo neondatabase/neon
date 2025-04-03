@@ -20,7 +20,7 @@ use compute_api::requests::ComputeClaimsScope;
 use compute_api::spec::ComputeMode;
 use control_plane::broker::StorageBroker;
 use control_plane::endpoint::ComputeControlPlane;
-use control_plane::endpoint_storage::{ENDPOINT_STORAGE_DEFAULT_PORT, EndpointStorage};
+use control_plane::endpoint_storage::{ENDPOINT_STORAGE_DEFAULT_ADDR, EndpointStorage};
 use control_plane::local_env;
 use control_plane::local_env::{
     EndpointStorageConf, InitForceMode, LocalEnv, NeonBroker, NeonLocalInitConf,
@@ -1022,7 +1022,7 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
                 })
                 .collect(),
             endpoint_storage: EndpointStorageConf {
-                port: ENDPOINT_STORAGE_DEFAULT_PORT,
+                listen_addr: ENDPOINT_STORAGE_DEFAULT_ADDR,
             },
             pg_distrib_dir: None,
             neon_distrib_dir: None,
@@ -1488,10 +1488,34 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 None
             };
 
+            #[derive(serde::Serialize)]
+            struct EndpointStorageAuthClaims {
+                tenant_id: TenantId,
+                timeline_id: TimelineId,
+                endpoint_id: String,
+                exp: u64,
+            }
+            let exp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs()
+                + 86400;
+            let claims = EndpointStorageAuthClaims {
+                tenant_id: endpoint.tenant_id,
+                timeline_id: endpoint.timeline_id,
+                endpoint_id: endpoint_id.to_string(),
+                exp,
+            };
+
+            let endpoint_storage_auth_token = env.generate_auth_token(&claims)?;
+            let addr = env.endpoint_storage.listen_addr;
+            let endpoint_storage_addr = format!("http://{}:{}", addr.ip(), addr.port());
+
             println!("Starting existing endpoint {endpoint_id}...");
             endpoint
                 .start(
                     &auth_token,
+                    endpoint_storage_auth_token,
+                    endpoint_storage_addr,
                     safekeepers_generation,
                     safekeepers,
                     pageservers,

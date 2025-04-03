@@ -650,6 +650,8 @@ impl Endpoint {
     pub async fn start(
         &self,
         auth_token: &Option<String>,
+        endpoint_storage_auth_token: String,
+        endpoint_storage_addr: String,
         safekeepers_generation: Option<SafekeeperGeneration>,
         safekeepers: Vec<NodeId>,
         pageservers: Vec<(Host, u16)>,
@@ -743,6 +745,8 @@ impl Endpoint {
                 drop_subscriptions_before_start: self.drop_subscriptions_before_start,
                 audit_log_level: ComputeAudit::Disabled,
                 logs_export_host: None::<String>,
+                endpoint_storage_addr: Some(endpoint_storage_addr),
+                endpoint_storage_token: Some(endpoint_storage_auth_token),
             };
 
             // this strange code is needed to support respec() in tests

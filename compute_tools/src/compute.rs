@@ -150,6 +150,8 @@ pub struct ComputeState {
     /// set up the span relationship ourselves.
     pub startup_span: Option<tracing::span::Span>,
 
+    pub prewarm_state: compute_api::responses::PrewarmState,
+
     pub metrics: ComputeMetrics,
 }
 
@@ -163,6 +165,7 @@ impl ComputeState {
             pspec: None,
             startup_span: None,
             metrics: ComputeMetrics::default(),
+            prewarm_state: compute_api::responses::PrewarmState::default(),
         }
     }
 
@@ -198,6 +201,10 @@ pub struct ParsedSpec {
     pub pageserver_connstr: String,
     pub safekeeper_connstrings: Vec<String>,
     pub storage_auth_token: Option<String>,
+
+    // Address and token for accessing src/endpoint_storage service
+    pub endpoint_storage_addr: String,
+    pub endpoint_storage_token: String,
 }
 
 impl TryFrom<ComputeSpec> for ParsedSpec {
@@ -251,6 +258,24 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
                 .or(Err("invalid timeline id"))?
         };
 
+        // TODO do we need backward compatibility on new fields?
+        let endpoint_storage_addr: String = if let Some(ref addr) = spec.endpoint_storage_addr {
+            addr.clone()
+        } else {
+            spec.cluster
+                .settings
+                .find("neon.endpoint_storage_addr")
+                .ok_or("endpoint_storage_addr should be provided")?
+        };
+        let endpoint_storage_token: String = if let Some(ref token) = spec.endpoint_storage_token {
+            token.clone()
+        } else {
+            spec.cluster
+                .settings
+                .find("neon.endpoint_storage_token")
+                .ok_or("endpoint_storage_token should be provided")?
+        };
+
         Ok(ParsedSpec {
             spec,
             pageserver_connstr,
@@ -258,6 +283,8 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             storage_auth_token,
             tenant_id,
             timeline_id,
+            endpoint_storage_addr,
+            endpoint_storage_token,
         })
     }
 }
@@ -338,6 +365,7 @@ impl ComputeNode {
         // available for binding. Prewarming helps Postgres start quicker later,
         // because QEMU will already have its memory allocated from the host, and
         // the necessary binaries will already be cached.
+        // TODO(myrrc): name clash, so prewarm_lfc / prewarm_lfc_offload
         if cli_spec.is_none() {
             this.prewarm_postgres()?;
         }
@@ -561,6 +589,10 @@ impl ComputeNode {
             let (this, cs) = (self.clone(), compute_state.clone());
             pre_tasks.spawn_blocking_child(move || this.prepare_pgdata(&cs));
         }
+
+        // TODO(myrrc): download LFC cache files from s3 proxy if compute flag is set
+        // see download_preload_extensions / prepare_preload_libraries
+        // download_tasks.push / download_extension
 
         // Resize swap to the desired size if the compute spec says so
         if let (Some(size_bytes), true) =
