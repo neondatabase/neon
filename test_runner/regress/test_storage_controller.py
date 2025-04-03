@@ -9,8 +9,6 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from requests import HTTPError
-
 import fixtures.utils
 import pytest
 from fixtures.auth_tokens import TokenScope
@@ -4073,6 +4071,7 @@ def test_storage_controller_location_conf_equivalence(neon_env_builder: NeonEnvB
     )
 
     assert reconciles_after_restart == 0
+
 
 @run_only_on_default_postgres("PG version is not interesting here")
 @pytest.mark.parametrize("restart_storcon", [True, False])
