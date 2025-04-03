@@ -1733,9 +1733,9 @@ async fn maybe_forward(req: Request<Body>) -> ForwardOutcome {
         };
 
         if *self_addr == leader_addr {
-            return ForwardOutcome::Forwarded(Err(ApiError::InternalServerError(anyhow::anyhow!(
-                "Leader is stepped down instance"
-            ))));
+            return ForwardOutcome::Forwarded(Err(ApiError::ResourceUnavailable(
+                "Leader is stepped down instance".into(),
+            )));
         }
     }
 
