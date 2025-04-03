@@ -1,26 +1,37 @@
 //! Check for fields in the on-disk config file that were ignored when deserializing [`ConfigToml`].
 
+use std::collections::HashSet;
+
+use itertools::Itertools;
+
 /// Pass in the user-specified config and the re-serialized [`super::ConfigToml`].
 /// The returned [`Paths`] contains the paths to the fields that were ignored by deserialization
 /// of the [`super::ConfigToml`].
 pub fn find(user_specified: toml_edit::DocumentMut, reserialized: toml_edit::DocumentMut) -> Paths {
     let user_specified = paths(user_specified);
     let reserialized = paths(reserialized);
-    fn paths(doc: toml_edit::DocumentMut) -> Vec<String> {
+    fn paths(doc: toml_edit::DocumentMut) -> HashSet<String> {
         let mut paths = Vec::new();
         visit_table_like(doc.as_table(), &mut Vec::new(), &mut paths);
-        paths
+        HashSet::from_iter(paths)
     }
 
-    // XXX: this is O(n^2)
-    let mut ignored = Vec::new();
+    let mut ignored = HashSet::new();
+
+    // O(n) because of HashSet
     for path in user_specified {
         if !reserialized.contains(&path) {
-            ignored.push(path);
+            ignored.insert(path);
         }
     }
 
-    Paths { paths: ignored }
+    Paths {
+        paths: ignored
+            .into_iter()
+            // sort lexicographically for deterministic output
+            .sorted()
+            .collect(),
+    }
 }
 
 pub struct Paths {
