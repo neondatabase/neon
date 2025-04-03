@@ -37,21 +37,24 @@ impl S3ProxyNode {
 
     pub fn init(&self) -> Result<()> {
         println!("Initializing s3proxy in {:?}", self.data_dir);
-        let config = format!(
-            r#"
-            {{
-                "listen": "{}",
-                "pemfile": "{}",
-                "type": "LocalFs",
-                "local_path": "{}"
-            }}
-        "#,
-            self.listen_addr(),
-            self.data_dir.join("..").join(self.pemfile.clone()),
-            self.data_dir.join("..").join(S3PROXY_REMOTE_STORAGE_DIR)
-        );
+        let parent = self.data_dir.parent().unwrap();
+
+        #[derive(serde::Serialize)]
+        struct Cfg {
+            listen: Utf8PathBuf,
+            pemfile: Utf8PathBuf,
+            local_path: Utf8PathBuf,
+            r#type: String,
+        }
+        let cfg = Cfg {
+            listen: self.listen_addr(),
+            pemfile: parent.join(self.pemfile.clone()),
+            local_path: parent.join(S3PROXY_REMOTE_STORAGE_DIR),
+            r#type: "LocalFs".to_string(),
+        };
         std::fs::create_dir_all(self.config_path().parent().unwrap())?;
-        std::fs::write(self.config_path(), config.as_bytes()).context("write s3proxy config")?;
+        std::fs::write(self.config_path(), serde_json::to_string(&cfg)?)
+            .context("write s3proxy config")?;
         Ok(())
     }
 
