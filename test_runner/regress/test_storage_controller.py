@@ -4126,7 +4126,7 @@ def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart
         ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
         ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
 
-    env.storage_controller.assert_log_contains("writing pending op for sk id 0")
+    env.storage_controller.assert_log_contains("writing pending op for sk id 1")
     env.safekeepers[0].start()
 
     # ensure that we applied the operation also for the safekeeper we just brought down
