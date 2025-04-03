@@ -278,7 +278,7 @@ impl GcCompactionQueue {
             gc_compaction_ratio_percent: u64,
         ) -> bool {
             const AUTO_TRIGGER_LIMIT: u64 = 150 * 1024 * 1024 * 1024; // 150GB
-            if l1_size >= AUTO_TRIGGER_LIMIT || l2_size >= AUTO_TRIGGER_LIMIT {
+            if l1_size + l2_size >= AUTO_TRIGGER_LIMIT {
                 // Do not auto-trigger when physical size >= 150GB
                 return false;
             }
@@ -353,6 +353,11 @@ impl GcCompactionQueue {
         }
     }
 
+    fn clear_running_job(&self) {
+        let mut guard = self.inner.lock().unwrap();
+        guard.running = None;
+    }
+
     async fn handle_sub_compaction(
         &self,
         id: GcCompactionJobId,
@@ -363,12 +368,20 @@ impl GcCompactionQueue {
         info!(
             "running scheduled enhanced gc bottom-most compaction with sub-compaction, splitting compaction jobs"
         );
-        let jobs = timeline
+        let res = timeline
             .gc_compaction_split_jobs(
                 GcCompactJob::from_compact_options(options.clone()),
                 options.sub_compaction_max_job_size_mb,
             )
-            .await?;
+            .await;
+        let jobs = match res {
+            Ok(jobs) => jobs,
+            Err(err) => {
+                warn!("cannot split gc-compaction jobs: {}, unblocked gc", err);
+                self.notify_and_unblock(id);
+                return Err(err);
+            }
+        };
         if jobs.is_empty() {
             info!("no jobs to run, skipping scheduled compaction task");
             self.notify_and_unblock(id);
@@ -437,7 +450,18 @@ impl GcCompactionQueue {
         if let Err(err) = &res {
             log_compaction_error(err, None, cancel.is_cancelled());
         }
-        res
+        match res {
+            Ok(res) => Ok(res),
+            Err(CompactionError::ShuttingDown) => Err(CompactionError::ShuttingDown),
+            Err(_) => {
+                // There are some cases where traditional gc might collect some layer
+                // files causing gc-compaction cannot read the full history of the key.
+                // This needs to be resolved in the long-term by improving the compaction
+                // process. For now, let's simply avoid such errors triggering the
+                // circuit breaker.
+                Ok(CompactionOutcome::Skipped)
+            }
+        }
     }
 
     async fn iteration_inner(
@@ -493,15 +517,24 @@ impl GcCompactionQueue {
                     let _gc_guard = match gc_block.start().await {
                         Ok(guard) => guard,
                         Err(e) => {
+                            self.notify_and_unblock(id);
+                            self.clear_running_job();
                             return Err(CompactionError::Other(anyhow!(
                                 "cannot run gc-compaction because gc is blocked: {}",
                                 e
                             )));
                         }
                     };
-                    let compaction_result =
-                        timeline.compact_with_options(cancel, options, ctx).await?;
-                    self.notify_and_unblock(id);
+                    let res = timeline.compact_with_options(cancel, options, ctx).await;
+                    let compaction_result = match res {
+                        Ok(res) => res,
+                        Err(err) => {
+                            warn!(%err, "failed to run gc-compaction");
+                            self.notify_and_unblock(id);
+                            self.clear_running_job();
+                            return Err(err);
+                        }
+                    };
                     if compaction_result == CompactionOutcome::YieldForL0 {
                         yield_for_l0 = true;
                     }
@@ -512,13 +545,22 @@ impl GcCompactionQueue {
                 let _gc_guard = match gc_block.start().await {
                     Ok(guard) => guard,
                     Err(e) => {
+                        self.clear_running_job();
                         return Err(CompactionError::Other(anyhow!(
                             "cannot run gc-compaction because gc is blocked: {}",
                             e
                         )));
                     }
                 };
-                let compaction_result = timeline.compact_with_options(cancel, options, ctx).await?;
+                let res = timeline.compact_with_options(cancel, options, ctx).await;
+                let compaction_result = match res {
+                    Ok(res) => res,
+                    Err(err) => {
+                        warn!(%err, "failed to run gc-compaction subcompaction job");
+                        self.clear_running_job();
+                        return Err(err);
+                    }
+                };
                 if compaction_result == CompactionOutcome::YieldForL0 {
                     // We will permenantly give up a task if we yield for L0 compaction: the preempted subcompaction job won't be running
                     // again. This ensures that we don't keep doing duplicated work within gc-compaction. Not directly returning here because
@@ -549,10 +591,7 @@ impl GcCompactionQueue {
                 }
             }
         }
-        {
-            let mut guard = self.inner.lock().unwrap();
-            guard.running = None;
-        }
+        self.clear_running_job();
         Ok(if yield_for_l0 {
             tracing::info!("give up gc-compaction: yield for L0 compaction");
             CompactionOutcome::YieldForL0
@@ -997,9 +1036,9 @@ impl Timeline {
         {
             Ok(((dense_partitioning, sparse_partitioning), lsn)) => {
                 // Disables access_stats updates, so that the files we read remain candidates for eviction after we're done with them
-                let image_ctx = RequestContextBuilder::extend(ctx)
+                let image_ctx = RequestContextBuilder::from(ctx)
                     .access_stats_behavior(AccessStatsBehavior::Skip)
-                    .build();
+                    .attached_child();
 
                 let mut partitioning = dense_partitioning;
                 partitioning
