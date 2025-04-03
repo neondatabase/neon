@@ -8,9 +8,12 @@
 from __future__ import annotations
 
 import argparse
+from typing import TYPE_CHECKING
 
 import psycopg2
-from psycopg2.extensions import connection as PgConnection
+
+if TYPE_CHECKING:
+    from psycopg2.extensions import connection as PgConnection
 
 
 def main(args: argparse.Namespace):

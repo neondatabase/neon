@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import csv
 import os
-import subprocess
 import time
 import traceback
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import psycopg2
@@ -15,14 +13,16 @@ from fixtures.benchmark_fixture import MetricReport
 from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_api import connection_parameters_to_env
-from fixtures.pg_version import PgVersion
 
 if TYPE_CHECKING:
+    import subprocess
+    from pathlib import Path
     from typing import Any
 
     from fixtures.benchmark_fixture import NeonBenchmarker
     from fixtures.neon_api import NeonAPI
     from fixtures.neon_fixtures import PgBin
+    from fixtures.pg_version import PgVersion
 
 
 # Granularity of ~0.5 sec
@@ -186,7 +186,7 @@ def test_replication_start_stop(
     prefix = "pgbench_agg"
     num_replicas = 2
     configuration_test_time_sec = 10 * 60
-    pgbench_duration = f"-T{2 ** num_replicas * configuration_test_time_sec}"
+    pgbench_duration = f"-T{2**num_replicas * configuration_test_time_sec}"
     error_occurred = False
 
     project = neon_api.create_project(pg_version)

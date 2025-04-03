@@ -7,8 +7,7 @@ import string
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -25,6 +24,9 @@ from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pg_version import PgVersion
 from fixtures.utils import EnhancedJSONEncoder, Fn
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 
 class PageserverApiException(Exception):
@@ -850,6 +852,25 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         self.verbose_error(res)
         res_json = res.json()
         return res_json
+
+    def timeline_mark_invisible(
+        self,
+        tenant_id: TenantId | TenantShardId,
+        timeline_id: TimelineId,
+        is_visible: bool | None = None,
+    ):
+        data = {
+            "is_visible": is_visible,
+        }
+
+        log.info(
+            f"Requesting marking timeline invisible for {is_visible=}, {tenant_id=}, {timeline_id=}"
+        )
+        res = self.put(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/mark_invisible",
+            json=data,
+        )
+        self.verbose_error(res)
 
     def timeline_get_timestamp_of_lsn(
         self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId, lsn: Lsn

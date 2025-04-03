@@ -26,6 +26,10 @@ impl<S: Send, R: Send> Duplex<S, R> {
         self.tx.send(x).await
     }
 
+    pub fn try_send(&self, x: S) -> Result<(), mpsc::error::TrySendError<S>> {
+        self.tx.try_send(x)
+    }
+
     /// Receives the next value for this receiver.
     ///
     /// This method returns `None` if the channel has been closed and there are

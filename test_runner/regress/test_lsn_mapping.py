@@ -39,9 +39,9 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder, with_lease: bool):
             # disable default GC and compaction
             "gc_period": "1000 m",
             "compaction_period": "0 s",
-            "gc_horizon": f"{1024 ** 2}",
-            "checkpoint_distance": f"{1024 ** 2}",
-            "compaction_target_size": f"{1024 ** 2}",
+            "gc_horizon": f"{1024**2}",
+            "checkpoint_distance": f"{1024**2}",
+            "compaction_target_size": f"{1024**2}",
         }
     )
 

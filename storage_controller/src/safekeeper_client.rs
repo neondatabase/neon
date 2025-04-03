@@ -1,6 +1,5 @@
 use safekeeper_api::models::{
     self, PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization, TimelineCreateRequest,
-    TimelineStatus,
 };
 use safekeeper_client::mgmt_api::{Client, Result};
 use utils::id::{NodeId, TenantId, TimelineId};
@@ -60,7 +59,7 @@ impl SafekeeperClient {
     pub(crate) async fn create_timeline(
         &self,
         req: &TimelineCreateRequest,
-    ) -> Result<TimelineStatus> {
+    ) -> Result<reqwest::Response> {
         measured_request!(
             "create_timeline",
             crate::metrics::Method::Post,
@@ -96,6 +95,18 @@ impl SafekeeperClient {
             crate::metrics::Method::Delete,
             &self.node_id_label,
             self.inner.delete_timeline(tenant_id, timeline_id).await
+        )
+    }
+
+    pub(crate) async fn delete_tenant(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<models::TimelineDeleteResult> {
+        measured_request!(
+            "delete_tenant",
+            crate::metrics::Method::Delete,
+            &self.node_id_label,
+            self.inner.delete_tenant(tenant_id).await
         )
     }
 

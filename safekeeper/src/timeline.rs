@@ -699,7 +699,7 @@ impl Timeline {
     }
 
     /// Take a writing mutual exclusive lock on timeline shared_state.
-    pub async fn write_shared_state<'a>(self: &'a Arc<Self>) -> WriteGuardSharedState<'a> {
+    pub async fn write_shared_state(self: &Arc<Self>) -> WriteGuardSharedState<'_> {
         WriteGuardSharedState::new(self.clone(), self.mutex.write().await)
     }
 

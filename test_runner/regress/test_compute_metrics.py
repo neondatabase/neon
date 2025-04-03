@@ -13,21 +13,21 @@ import _jsonnet
 import pytest
 import requests
 import yaml
-from fixtures.endpoint.http import EndpointHttpClient
 from fixtures.log_helper import log
 from fixtures.metrics import parse_metrics
 from fixtures.paths import BASE_DIR, COMPUTE_CONFIG_DIR
 from fixtures.utils import wait_until
-from prometheus_client.samples import Sample
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from types import TracebackType
     from typing import Self, TypedDict
 
+    from fixtures.endpoint.http import EndpointHttpClient
     from fixtures.neon_fixtures import NeonEnv
     from fixtures.pg_version import PgVersion
     from fixtures.port_distributor import PortDistributor
+    from prometheus_client.samples import Sample
 
     class Metric(TypedDict):
         metric_name: str

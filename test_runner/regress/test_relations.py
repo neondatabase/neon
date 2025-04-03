@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from fixtures.neon_fixtures import (
-    NeonEnvBuilder,
-)
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import (
+        NeonEnvBuilder,
+    )
 
 
 def test_pageserver_reldir_v2(

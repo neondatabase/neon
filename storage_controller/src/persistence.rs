@@ -967,10 +967,26 @@ impl Persistence {
         &self,
         split_tenant_id: TenantId,
         old_shard_count: ShardCount,
+        new_shard_count: ShardCount,
     ) -> DatabaseResult<()> {
         use crate::schema::tenant_shards::dsl::*;
         self.with_measured_conn(DatabaseOperation::CompleteShardSplit, move |conn| {
             Box::pin(async move {
+                // Sanity: child shards must still exist, as we're deleting parent shards
+                let child_shards_query = tenant_shards
+                    .filter(tenant_id.eq(split_tenant_id.to_string()))
+                    .filter(shard_count.eq(new_shard_count.literal() as i32));
+                let child_shards = child_shards_query
+                    .load::<TenantShardPersistence>(conn)
+                    .await?;
+                if child_shards.len() != new_shard_count.count() as usize {
+                    return Err(DatabaseError::Logical(format!(
+                        "Unexpected child shard count {} while completing split to \
+                            count {new_shard_count:?} on tenant {split_tenant_id}",
+                        child_shards.len()
+                    )));
+                }
+
                 // Drop parent shards
                 diesel::delete(tenant_shards)
                     .filter(tenant_id.eq(split_tenant_id.to_string()))
@@ -981,10 +997,11 @@ impl Persistence {
                 // Clear sharding flag
                 let updated = diesel::update(tenant_shards)
                     .filter(tenant_id.eq(split_tenant_id.to_string()))
+                    .filter(shard_count.eq(new_shard_count.literal() as i32))
                     .set((splitting.eq(0),))
                     .execute(conn)
                     .await?;
-                debug_assert!(updated > 0);
+                assert!(updated == new_shard_count.count() as usize);
 
                 Ok(())
             })
@@ -1351,6 +1368,93 @@ impl Persistence {
 
         Ok(timeline_from_db)
     }
+
+    /// Set `delete_at` for the given timeline
+    pub(crate) async fn timeline_set_deleted_at(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> DatabaseResult<()> {
+        use crate::schema::timelines;
+
+        let deletion_time = chrono::Local::now().to_utc();
+        self.with_measured_conn(DatabaseOperation::InsertTimeline, move |conn| {
+            Box::pin(async move {
+                let updated = diesel::update(timelines::table)
+                    .filter(timelines::tenant_id.eq(tenant_id.to_string()))
+                    .filter(timelines::timeline_id.eq(timeline_id.to_string()))
+                    .set(timelines::deleted_at.eq(Some(deletion_time)))
+                    .execute(conn)
+                    .await?;
+
+                match updated {
+                    0 => Ok(()),
+                    1 => Ok(()),
+                    _ => Err(DatabaseError::Logical(format!(
+                        "unexpected number of rows ({})",
+                        updated
+                    ))),
+                }
+            })
+        })
+        .await
+    }
+
+    /// Load timeline from db. Returns `None` if not present.
+    ///
+    /// Only works if `deleted_at` is set, so you should call [`Self::timeline_set_deleted_at`] before.
+    pub(crate) async fn delete_timeline(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> DatabaseResult<()> {
+        use crate::schema::timelines::dsl;
+
+        let tenant_id = &tenant_id;
+        let timeline_id = &timeline_id;
+        self.with_measured_conn(DatabaseOperation::GetTimeline, move |conn| {
+            Box::pin(async move {
+                diesel::delete(dsl::timelines)
+                    .filter(dsl::tenant_id.eq(&tenant_id.to_string()))
+                    .filter(dsl::timeline_id.eq(&timeline_id.to_string()))
+                    .filter(dsl::deleted_at.is_not_null())
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .await?;
+
+        Ok(())
+    }
+
+    /// Loads a list of all timelines from database.
+    pub(crate) async fn list_timelines_for_tenant(
+        &self,
+        tenant_id: TenantId,
+    ) -> DatabaseResult<Vec<TimelinePersistence>> {
+        use crate::schema::timelines::dsl;
+
+        let tenant_id = &tenant_id;
+        let timelines = self
+            .with_measured_conn(DatabaseOperation::GetTimeline, move |conn| {
+                Box::pin(async move {
+                    let timelines: Vec<TimelineFromDb> = dsl::timelines
+                        .filter(dsl::tenant_id.eq(&tenant_id.to_string()))
+                        .load(conn)
+                        .await?;
+                    Ok(timelines)
+                })
+            })
+            .await?;
+
+        let timelines = timelines
+            .into_iter()
+            .map(TimelineFromDb::into_persistence)
+            .collect();
+        Ok(timelines)
+    }
+
     /// Persist pending op. Returns if it was newly inserted. If it wasn't, we haven't done any writes.
     pub(crate) async fn insert_pending_op(
         &self,
@@ -1393,7 +1497,7 @@ impl Persistence {
     pub(crate) async fn remove_pending_op(
         &self,
         tenant_id: TenantId,
-        timeline_id: TimelineId,
+        timeline_id: Option<TimelineId>,
         sk_id: NodeId,
         generation: u32,
     ) -> DatabaseResult<()> {
@@ -1402,10 +1506,11 @@ impl Persistence {
         let tenant_id = &tenant_id;
         let timeline_id = &timeline_id;
         self.with_measured_conn(DatabaseOperation::RemoveTimelineReconcile, move |conn| {
+            let timeline_id_str = timeline_id.map(|tid| tid.to_string()).unwrap_or_default();
             Box::pin(async move {
                 diesel::delete(dsl::safekeeper_timeline_pending_ops)
                     .filter(dsl::tenant_id.eq(tenant_id.to_string()))
-                    .filter(dsl::timeline_id.eq(timeline_id.to_string()))
+                    .filter(dsl::timeline_id.eq(timeline_id_str))
                     .filter(dsl::sk_id.eq(sk_id.0 as i64))
                     .filter(dsl::generation.eq(generation as i32))
                     .execute(conn)
@@ -1444,6 +1549,62 @@ impl Persistence {
             .await?;
 
         Ok(timeline_from_db)
+    }
+    /// List pending operations for a given timeline (including tenant-global ones)
+    pub(crate) async fn list_pending_ops_for_timeline(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> DatabaseResult<Vec<TimelinePendingOpPersistence>> {
+        use crate::schema::safekeeper_timeline_pending_ops::dsl;
+
+        let timelines_from_db = self
+            .with_measured_conn(DatabaseOperation::ListTimelineReconcile, move |conn| {
+                Box::pin(async move {
+                    let from_db: Vec<TimelinePendingOpPersistence> =
+                        dsl::safekeeper_timeline_pending_ops
+                            .filter(dsl::tenant_id.eq(tenant_id.to_string()))
+                            .filter(
+                                dsl::timeline_id
+                                    .eq(timeline_id.to_string())
+                                    .or(dsl::timeline_id.eq("")),
+                            )
+                            .load(conn)
+                            .await?;
+                    Ok(from_db)
+                })
+            })
+            .await?;
+
+        Ok(timelines_from_db)
+    }
+
+    /// Delete all pending ops for the given timeline.
+    ///
+    /// Use this only at timeline deletion, otherwise use generation based APIs
+    pub(crate) async fn remove_pending_ops_for_timeline(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: Option<TimelineId>,
+    ) -> DatabaseResult<()> {
+        use crate::schema::safekeeper_timeline_pending_ops::dsl;
+
+        let tenant_id = &tenant_id;
+        let timeline_id = &timeline_id;
+        self.with_measured_conn(DatabaseOperation::ListTimelineReconcile, move |conn| {
+            let timeline_id_str = timeline_id.map(|tid| tid.to_string()).unwrap_or_default();
+            Box::pin(async move {
+                diesel::delete(dsl::safekeeper_timeline_pending_ops)
+                    .filter(dsl::tenant_id.eq(tenant_id.to_string()))
+                    .filter(dsl::timeline_id.eq(timeline_id_str))
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .await?;
+
+        Ok(())
     }
 }
 
@@ -1900,7 +2061,7 @@ impl ToSql<crate::schema::sql_types::PgLsn, Pg> for LsnWrapper {
     }
 }
 
-#[derive(Insertable, AsChangeset, Queryable, Selectable, Clone)]
+#[derive(Insertable, AsChangeset, Clone)]
 #[diesel(table_name = crate::schema::timelines)]
 pub(crate) struct TimelinePersistence {
     pub(crate) tenant_id: String,

@@ -3,11 +3,14 @@ from __future__ import annotations
 import threading
 import time
 from contextlib import closing, contextmanager
+from typing import TYPE_CHECKING
 
 import psycopg2.extras
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import Endpoint, NeonEnvBuilder
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import Endpoint, NeonEnvBuilder
 
 pytest_plugins = "fixtures.neon_fixtures"
 

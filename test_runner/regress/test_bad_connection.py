@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import random
 import time
+from typing import TYPE_CHECKING
 
 import psycopg2.errors
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.utils import USE_LFC
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 @pytest.mark.timeout(600)

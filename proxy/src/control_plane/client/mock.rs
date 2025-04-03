@@ -1,5 +1,6 @@
 //! Mock console backend which relies on a user-provided postgres instance.
 
+use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -22,7 +23,6 @@ use crate::control_plane::errors::{
 };
 use crate::control_plane::messages::MetricsAuxInfo;
 use crate::control_plane::{AccessBlockerFlags, AuthInfo, AuthSecret, CachedNodeInfo, NodeInfo};
-use crate::error::io_error;
 use crate::intern::RoleNameInt;
 use crate::types::{BranchId, EndpointId, ProjectId, RoleName};
 use crate::url::ApiUrl;
@@ -36,13 +36,13 @@ enum MockApiError {
 
 impl From<MockApiError> for ControlPlaneError {
     fn from(e: MockApiError) -> Self {
-        io_error(e).into()
+        io::Error::other(e).into()
     }
 }
 
 impl From<tokio_postgres::Error> for ControlPlaneError {
     fn from(e: tokio_postgres::Error) -> Self {
-        io_error(e).into()
+        io::Error::other(e).into()
     }
 }
 

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import wait_replica_caughtup
+from fixtures.utils import shared_buffers_for_max_cu
 
 if TYPE_CHECKING:
     from fixtures.neon_fixtures import NeonEnv
@@ -180,7 +181,8 @@ def test_physical_replication_config_mismatch_too_many_known_xids(neon_simple_en
         endpoint_id="primary",
         config_lines=[
             "max_connections=1000",
-            "shared_buffers=128MB",  # prevent "no unpinned buffers available" error
+            # use shared_buffers size like in production for 2 CU compute
+            f"shared_buffers={shared_buffers_for_max_cu(2.0)}",  # prevent "no unpinned buffers available" error
         ],
     )
     secondary = env.endpoints.new_replica_start(

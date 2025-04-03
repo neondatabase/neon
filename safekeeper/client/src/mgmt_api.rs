@@ -38,9 +38,8 @@ pub enum Error {
     #[error("Cancelled")]
     Cancelled,
 
-    /// Failed to create client.
-    #[error("create client: {0}{}", .0.source().map(|e| format!(": {e}")).unwrap_or_default())]
-    CreateClient(reqwest::Error),
+    #[error("request timed out: {0}")]
+    Timeout(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -81,13 +80,10 @@ impl Client {
         }
     }
 
-    pub async fn create_timeline(&self, req: &TimelineCreateRequest) -> Result<TimelineStatus> {
-        let uri = format!(
-            "{}/v1/tenant/{}/timeline/{}",
-            self.mgmt_api_endpoint, req.tenant_id, req.timeline_id
-        );
+    pub async fn create_timeline(&self, req: &TimelineCreateRequest) -> Result<reqwest::Response> {
+        let uri = format!("{}/v1/tenant/timeline", self.mgmt_api_endpoint);
         let resp = self.post(&uri, req).await?;
-        resp.json().await.map_err(Error::ReceiveBody)
+        Ok(resp)
     }
 
     pub async fn pull_timeline(&self, req: &PullTimelineRequest) -> Result<PullTimelineResponse> {
@@ -119,6 +115,12 @@ impl Client {
             "{}/v1/tenant/{}/timeline/{}",
             self.mgmt_api_endpoint, tenant_id, timeline_id
         );
+        let resp = self.request(Method::DELETE, &uri, ()).await?;
+        resp.json().await.map_err(Error::ReceiveBody)
+    }
+
+    pub async fn delete_tenant(&self, tenant_id: TenantId) -> Result<models::TimelineDeleteResult> {
+        let uri = format!("{}/v1/tenant/{}", self.mgmt_api_endpoint, tenant_id);
         let resp = self.request(Method::DELETE, &uri, ()).await?;
         resp.json().await.map_err(Error::ReceiveBody)
     }

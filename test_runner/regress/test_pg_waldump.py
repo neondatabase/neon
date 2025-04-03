@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import os
 import shutil
+from typing import TYPE_CHECKING
 
-from fixtures.neon_fixtures import NeonEnv, PgBin
 from fixtures.utils import subprocess_capture
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv, PgBin
 
 
 def check_wal_segment(pg_waldump_path: str, segment_path: str, test_output_dir):

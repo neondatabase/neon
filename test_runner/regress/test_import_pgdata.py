@@ -19,6 +19,7 @@ from fixtures.pageserver.http import (
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import MockS3Server, RemoteStorageKind
+from fixtures.utils import shared_buffers_for_max_cu
 from mypy_boto3_kms import KMSClient
 from mypy_boto3_kms.type_defs import EncryptResponseTypeDef
 from mypy_boto3_s3 import S3Client
@@ -80,7 +81,8 @@ def test_pgdata_import_smoke(
     # doesn't allow any prefetching on v17 and above, where the new streaming
     # read machinery keeps buffers pinned while prefetching them.  Use a higher
     # setting to enable prefetching and speed up the tests
-    ep_config = ["shared_buffers=64MB"]
+    # use shared_buffers size like in production for 8 CU compute
+    ep_config = [f"shared_buffers={shared_buffers_for_max_cu(8.0)}"]
 
     #
     # Put data in vanilla pg
@@ -158,6 +160,7 @@ def test_pgdata_import_smoke(
     statusdir = importbucket / "status"
     statusdir.mkdir()
     (statusdir / "pgdata").write_text(json.dumps({"done": True}))
+    (statusdir / "fast_import").write_text(json.dumps({"command": "pgdata", "done": True}))
 
     #
     # Do the import
@@ -286,9 +289,9 @@ def test_pgdata_import_smoke(
         shard_ps = env.get_pageserver(shard["node_id"])
         result = shard_ps.timeline_scan_no_disposable_keys(shard["shard_id"], timeline_id)
         assert result.tally.disposable_count == 0
-        assert (
-            result.tally.not_disposable_count > 0
-        ), "sanity check, each shard should have some data"
+        assert result.tally.not_disposable_count > 0, (
+            "sanity check, each shard should have some data"
+        )
 
     #
     # validate that we can write
@@ -439,16 +442,23 @@ def test_fast_import_with_pageserver_ingest(
     env.neon_cli.mappings_map_branch(import_branch_name, tenant_id, timeline_id)
 
     # Run fast_import
-    if fast_import.extra_env is None:
-        fast_import.extra_env = {}
-    fast_import.extra_env["AWS_ACCESS_KEY_ID"] = mock_s3_server.access_key()
-    fast_import.extra_env["AWS_SECRET_ACCESS_KEY"] = mock_s3_server.secret_key()
-    fast_import.extra_env["AWS_SESSION_TOKEN"] = mock_s3_server.session_token()
-    fast_import.extra_env["AWS_REGION"] = mock_s3_server.region()
-    fast_import.extra_env["AWS_ENDPOINT_URL"] = mock_s3_server.endpoint()
-    fast_import.extra_env["RUST_LOG"] = "aws_config=debug,aws_sdk_kms=debug"
+    fast_import.set_aws_creds(mock_s3_server, {"RUST_LOG": "aws_config=debug,aws_sdk_kms=debug"})
     pg_port = port_distributor.get_port()
     fast_import.run_pgdata(pg_port=pg_port, s3prefix=f"s3://{bucket}/{key_prefix}")
+
+    pgdata_status_obj = mock_s3_client.get_object(Bucket=bucket, Key=f"{key_prefix}/status/pgdata")
+    pgdata_status = pgdata_status_obj["Body"].read().decode("utf-8")
+    assert json.loads(pgdata_status) == {"done": True}, f"got status: {pgdata_status}"
+
+    job_status_obj = mock_s3_client.get_object(
+        Bucket=bucket, Key=f"{key_prefix}/status/fast_import"
+    )
+    job_status = job_status_obj["Body"].read().decode("utf-8")
+    assert json.loads(job_status) == {
+        "command": "pgdata",
+        "done": True,
+    }, f"got status: {job_status}"
+
     vanilla_pg.stop()
 
     def validate_vanilla_equivalence(ep):
@@ -674,21 +684,27 @@ def test_fast_import_restore_to_connstring_from_s3_spec(
             ).decode("utf-8"),
         }
 
-        mock_s3_client.create_bucket(Bucket="test-bucket")
+        bucket = "test-bucket"
+        key_prefix = "test-prefix"
+        mock_s3_client.create_bucket(Bucket=bucket)
         mock_s3_client.put_object(
-            Bucket="test-bucket", Key="test-prefix/spec.json", Body=json.dumps(spec)
+            Bucket=bucket, Key=f"{key_prefix}/spec.json", Body=json.dumps(spec)
         )
 
         # Run fast_import
-        if fast_import.extra_env is None:
-            fast_import.extra_env = {}
-        fast_import.extra_env["AWS_ACCESS_KEY_ID"] = mock_s3_server.access_key()
-        fast_import.extra_env["AWS_SECRET_ACCESS_KEY"] = mock_s3_server.secret_key()
-        fast_import.extra_env["AWS_SESSION_TOKEN"] = mock_s3_server.session_token()
-        fast_import.extra_env["AWS_REGION"] = mock_s3_server.region()
-        fast_import.extra_env["AWS_ENDPOINT_URL"] = mock_s3_server.endpoint()
-        fast_import.extra_env["RUST_LOG"] = "aws_config=debug,aws_sdk_kms=debug"
-        fast_import.run_dump_restore(s3prefix="s3://test-bucket/test-prefix")
+        fast_import.set_aws_creds(
+            mock_s3_server, {"RUST_LOG": "aws_config=debug,aws_sdk_kms=debug"}
+        )
+        fast_import.run_dump_restore(s3prefix=f"s3://{bucket}/{key_prefix}")
+
+        job_status_obj = mock_s3_client.get_object(
+            Bucket=bucket, Key=f"{key_prefix}/status/fast_import"
+        )
+        job_status = job_status_obj["Body"].read().decode("utf-8")
+        assert json.loads(job_status) == {
+            "done": True,
+            "command": "dump-restore",
+        }, f"got status: {job_status}"
         vanilla_pg.stop()
 
         res = destination_vanilla_pg.safe_psql("SELECT count(*) FROM foo;")
@@ -696,9 +712,110 @@ def test_fast_import_restore_to_connstring_from_s3_spec(
         assert res[0][0] == 10
 
 
-# TODO: Maybe test with pageserver?
-# 1. run whole neon env
-# 2. create timeline with some s3 path???
-# 3. run fast_import with s3 prefix
-# 4. ??? mock http where pageserver will report progress
-# 5. run compute on this timeline and check if data is there
+def test_fast_import_restore_to_connstring_error_to_s3_bad_destination(
+    test_output_dir,
+    vanilla_pg: VanillaPostgres,
+    port_distributor: PortDistributor,
+    fast_import: FastImport,
+    pg_distrib_dir: Path,
+    pg_version: PgVersion,
+    mock_s3_server: MockS3Server,
+    mock_kms: KMSClient,
+    mock_s3_client: S3Client,
+):
+    # Prepare KMS and S3
+    key_response = mock_kms.create_key(
+        Description="Test key",
+        KeyUsage="ENCRYPT_DECRYPT",
+        Origin="AWS_KMS",
+    )
+    key_id = key_response["KeyMetadata"]["KeyId"]
+
+    def encrypt(x: str) -> EncryptResponseTypeDef:
+        return mock_kms.encrypt(KeyId=key_id, Plaintext=x)
+
+    # Start source postgres and ingest data
+    vanilla_pg.start()
+    vanilla_pg.safe_psql("CREATE TABLE foo (a int); INSERT INTO foo SELECT generate_series(1, 10);")
+
+    # Encrypt connstrings and put spec into S3
+    source_connstring_encrypted = encrypt(vanilla_pg.connstr())
+    destination_connstring_encrypted = encrypt("postgres://random:connection@string:5432/neondb")
+    spec = {
+        "encryption_secret": {"KMS": {"key_id": key_id}},
+        "source_connstring_ciphertext_base64": base64.b64encode(
+            source_connstring_encrypted["CiphertextBlob"]
+        ).decode("utf-8"),
+        "destination_connstring_ciphertext_base64": base64.b64encode(
+            destination_connstring_encrypted["CiphertextBlob"]
+        ).decode("utf-8"),
+    }
+
+    bucket = "test-bucket"
+    key_prefix = "test-prefix"
+    mock_s3_client.create_bucket(Bucket=bucket)
+    mock_s3_client.put_object(Bucket=bucket, Key=f"{key_prefix}/spec.json", Body=json.dumps(spec))
+
+    # Run fast_import
+    fast_import.set_aws_creds(mock_s3_server, {"RUST_LOG": "aws_config=debug,aws_sdk_kms=debug"})
+    fast_import.run_dump_restore(s3prefix=f"s3://{bucket}/{key_prefix}")
+
+    job_status_obj = mock_s3_client.get_object(
+        Bucket=bucket, Key=f"{key_prefix}/status/fast_import"
+    )
+    job_status = job_status_obj["Body"].read().decode("utf-8")
+    assert json.loads(job_status) == {
+        "command": "dump-restore",
+        "done": False,
+        "error": "pg_restore failed",
+    }, f"got status: {job_status}"
+    vanilla_pg.stop()
+
+
+def test_fast_import_restore_to_connstring_error_to_s3_kms_error(
+    test_output_dir,
+    port_distributor: PortDistributor,
+    fast_import: FastImport,
+    pg_distrib_dir: Path,
+    pg_version: PgVersion,
+    mock_s3_server: MockS3Server,
+    mock_kms: KMSClient,
+    mock_s3_client: S3Client,
+):
+    # Prepare KMS and S3
+    key_response = mock_kms.create_key(
+        Description="Test key",
+        KeyUsage="ENCRYPT_DECRYPT",
+        Origin="AWS_KMS",
+    )
+    key_id = key_response["KeyMetadata"]["KeyId"]
+
+    def encrypt(x: str) -> EncryptResponseTypeDef:
+        return mock_kms.encrypt(KeyId=key_id, Plaintext=x)
+
+    # Encrypt connstrings and put spec into S3
+    spec = {
+        "encryption_secret": {"KMS": {"key_id": key_id}},
+        "source_connstring_ciphertext_base64": base64.b64encode(b"invalid encrypted string").decode(
+            "utf-8"
+        ),
+    }
+
+    bucket = "test-bucket"
+    key_prefix = "test-prefix"
+    mock_s3_client.create_bucket(Bucket=bucket)
+    mock_s3_client.put_object(Bucket=bucket, Key=f"{key_prefix}/spec.json", Body=json.dumps(spec))
+
+    # Run fast_import
+    fast_import.set_aws_creds(mock_s3_server, {"RUST_LOG": "aws_config=debug,aws_sdk_kms=debug"})
+    fast_import.run_dump_restore(s3prefix=f"s3://{bucket}/{key_prefix}")
+
+    job_status_obj = mock_s3_client.get_object(
+        Bucket=bucket, Key=f"{key_prefix}/status/fast_import"
+    )
+    job_status = job_status_obj["Body"].read().decode("utf-8")
+    assert json.loads(job_status) == {
+        "command": "dump-restore",
+        "done": False,
+        "error": "decrypt source connection string",
+    }, f"got status: {job_status}"
