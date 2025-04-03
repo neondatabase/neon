@@ -46,6 +46,24 @@ pub struct ExtensionInstallResponse {
     pub version: ExtVersion,
 }
 
+#[derive(Serialize, Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrewarmStatus {
+    #[default]
+    NotPrewarmed,
+    // TODO wait for comment on RFC -- we may need Downloading status
+    // (ends when we invoke postgres function)
+    Prewarming,
+    Completed,
+    Failed,
+}
+
+#[derive(Serialize, Default, Debug, Deserialize, Clone)]
+pub struct PrewarmState {
+    pub status: PrewarmStatus,
+    pub error: String,
+}
+
 /// Response of the /status API
 #[derive(Serialize, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]

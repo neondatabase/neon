@@ -13,6 +13,7 @@ pub(in crate::http) mod grants;
 pub(in crate::http) mod insights;
 pub(in crate::http) mod metrics;
 pub(in crate::http) mod metrics_json;
+pub(in crate::http) mod prewarm_lfc;
 pub(in crate::http) mod status;
 pub(in crate::http) mod terminate;
 
