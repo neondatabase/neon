@@ -30,6 +30,20 @@ static SERVE_METRICS_COUNT: Lazy<IntCounter> = Lazy::new(|| {
     )
     .expect("failed to define a metric")
 });
+static SERVE_METRICS_COUNT_2: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "libmetrics_metric_handler_requests_2_total",
+        "Number of metric requests made"
+    )
+    .expect("failed to define a metric")
+});
+static SERVE_METRICS_COUNT_3: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "libmetrics_metric_handler_requests_total_3",
+        "Number of metric requests made"
+    )
+    .expect("failed to define a metric")
+});
 
 static X_REQUEST_ID_HEADER_STR: &str = "x-request-id";
 
@@ -251,6 +265,8 @@ impl std::io::Write for ChannelWriter {
 
 pub async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
     SERVE_METRICS_COUNT.inc();
+    SERVE_METRICS_COUNT_2.inc();
+    SERVE_METRICS_COUNT_3.inc();
 
     let started_at = std::time::Instant::now();
 

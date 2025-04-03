@@ -1,10 +1,12 @@
 import os
 import ssl
+import time
 
 import pytest
 import requests
 from fixtures.neon_fixtures import NeonEnvBuilder, StorageControllerApiException
 from fixtures.utils import wait_until
+from fixtures.log_helper import log
 
 
 def test_pageserver_https_api(neon_env_builder: NeonEnvBuilder):
@@ -151,3 +153,29 @@ def test_certificate_rotation(neon_env_builder: NeonEnvBuilder):
     requests.get(addr, verify=str(env.ssl_ca_file)).raise_for_status()
     cur_cert = ssl.get_server_certificate(("localhost", port))
     assert cur_cert == sk_cert
+
+def test_metrics(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+
+    ps_metrics = env.pageserver.http_client().get_metrics();
+
+    h_count = int(
+        ps_metrics.query_one(
+            "libmetrics_metric_handler_requests_total"
+        ).value
+    )
+    log.info(f"h_count: {h_count}")
+
+    h2_count = int(
+        ps_metrics.query_one(
+            "libmetrics_metric_handler_requests_2_total"
+        ).value
+    )
+    log.info(f"h2_count: {h2_count}")
+
+    h3_count = int(
+        ps_metrics.query_one(
+            "libmetrics_metric_handler_requests_total_3"
+        ).value
+    )
+    log.info(f"h2_count: {h3_count}")
