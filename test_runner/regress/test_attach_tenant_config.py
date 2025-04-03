@@ -193,7 +193,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "sampling_ratio": {
             "numerator": 0,
             "denominator": 10,
-        }
+        },
     }
 
     vps_http = env.storage_controller.pageserver_api()
