@@ -74,8 +74,8 @@ use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::{IoConcurrency, LayerAccessStatsReset, LayerName};
 use crate::tenant::timeline::offload::{OffloadError, offload_timeline};
 use crate::tenant::timeline::{
-    CompactFlags, CompactOptions, CompactRequest, CompactionError, Timeline, WaitLsnTimeout,
-    WaitLsnWaiter, import_pgdata,
+    CompactFlags, CompactOptions, CompactRequest, CompactionError, MarkInvisibleRequest, Timeline,
+    WaitLsnTimeout, WaitLsnWaiter, import_pgdata,
 };
 use crate::tenant::{
     GetTimelineError, LogicalSizeCalculationCause, OffloadedTimeline, PageReconstructError,
@@ -445,6 +445,9 @@ async fn build_timeline_info_common(
 
     let (pitr_history_size, within_ancestor_pitr) = timeline.get_pitr_history_stats();
 
+    // Externally, expose the lowest LSN that can be used to create a branch.
+    // Internally we distinguish between the planned GC cutoff (PITR point) and the "applied" GC cutoff (where we
+    // actually trimmed data to), which can pass each other when PITR is changed.
     let min_readable_lsn = std::cmp::max(
         timeline.get_gc_cutoff_lsn(),
         *timeline.get_applied_gc_cutoff_lsn(),
@@ -461,7 +464,6 @@ async fn build_timeline_info_common(
         initdb_lsn,
         last_record_lsn,
         prev_record_lsn: Some(timeline.get_prev_record_lsn()),
-        _unused: Default::default(), // Unused, for legacy decode only
         min_readable_lsn,
         applied_gc_cutoff_lsn: *timeline.get_applied_gc_cutoff_lsn(),
         current_logical_size: current_logical_size.size_dont_care_about_accuracy(),
@@ -2256,7 +2258,6 @@ async fn timeline_compact_handler(
     let state = get_state(&request);
 
     let mut flags = EnumSet::empty();
-    flags |= CompactFlags::NoYield; // run compaction to completion
 
     if Some(true) == parse_query_param::<_, bool>(&request, "force_l0_compaction")? {
         flags |= CompactFlags::ForceL0Compaction;
@@ -2336,21 +2337,31 @@ async fn timeline_compact_handler(
 }
 
 async fn timeline_mark_invisible_handler(
-    request: Request<Body>,
+    mut request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
+    let compact_request = json_request_maybe::<Option<MarkInvisibleRequest>>(&mut request).await?;
+
     let state = get_state(&request);
+
+    let visibility = match compact_request {
+        Some(req) => match req.is_visible {
+            Some(true) => TimelineVisibilityState::Visible,
+            Some(false) | None => TimelineVisibilityState::Invisible,
+        },
+        None => TimelineVisibilityState::Invisible,
+    };
 
     async {
         let tenant = state
             .tenant_manager
             .get_attached_tenant_shard(tenant_shard_id)?;
         let timeline = tenant.get_timeline(timeline_id, true)?;
-        timeline.remote_client.schedule_index_upload_for_timeline_invisible_state(TimelineVisibilityState::Invisible).map_err(ApiError::InternalServerError)?;
+        timeline.remote_client.schedule_index_upload_for_timeline_invisible_state(visibility).map_err(ApiError::InternalServerError)?;
         json_response(StatusCode::OK, ())
     }
     .instrument(info_span!("manual_timeline_mark_invisible", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
@@ -2417,7 +2428,6 @@ async fn timeline_checkpoint_handler(
     let state = get_state(&request);
 
     let mut flags = EnumSet::empty();
-    flags |= CompactFlags::NoYield; // run compaction to completion
     if Some(true) == parse_query_param::<_, bool>(&request, "force_l0_compaction")? {
         flags |= CompactFlags::ForceL0Compaction;
     }
@@ -3777,7 +3787,7 @@ pub fn make_router(
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/mark_invisible",
-            |r| testing_api_handler("mark timeline invisible", r, timeline_mark_invisible_handler),
+            |r| api_handler( r, timeline_mark_invisible_handler),
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/checkpoint",

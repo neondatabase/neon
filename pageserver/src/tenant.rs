@@ -3080,6 +3080,7 @@ impl Tenant {
             let mut has_pending_l0 = false;
             for timeline in compact_l0 {
                 let ctx = &ctx.with_scope_timeline(&timeline);
+                // NB: don't set CompactFlags::YieldForL0, since this is an L0-only compaction pass.
                 let outcome = timeline
                     .compact(cancel, CompactFlags::OnlyL0Compaction.into(), ctx)
                     .instrument(info_span!("compact_timeline", timeline_id = %timeline.timeline_id))
@@ -3097,14 +3098,9 @@ impl Tenant {
             }
         }
 
-        // Pass 2: image compaction and timeline offloading. If any timelines have accumulated
-        // more L0 layers, they may also be compacted here.
-        //
-        // NB: image compaction may yield if there is pending L0 compaction.
-        //
-        // TODO: it will only yield if there is pending L0 compaction on the same timeline. If a
-        // different timeline needs compaction, it won't. It should check `l0_compaction_trigger`.
-        // We leave this for a later PR.
+        // Pass 2: image compaction and timeline offloading. If any timelines have accumulated more
+        // L0 layers, they may also be compacted here. Image compaction will yield if there is
+        // pending L0 compaction on any tenant timeline.
         //
         // TODO: consider ordering timelines by some priority, e.g. time since last full compaction,
         // amount of L1 delta debt or garbage, offload-eligible timelines first, etc.
@@ -3115,8 +3111,14 @@ impl Tenant {
             }
             let ctx = &ctx.with_scope_timeline(&timeline);
 
+            // Yield for L0 if the separate L0 pass is enabled (otherwise there's no point).
+            let mut flags = EnumSet::default();
+            if self.get_compaction_l0_first() {
+                flags |= CompactFlags::YieldForL0;
+            }
+
             let mut outcome = timeline
-                .compact(cancel, EnumSet::default(), ctx)
+                .compact(cancel, flags, ctx)
                 .instrument(info_span!("compact_timeline", timeline_id = %timeline.timeline_id))
                 .await
                 .inspect_err(|err| self.maybe_trip_compaction_breaker(err))?;
@@ -3246,17 +3248,23 @@ impl Tenant {
     async fn housekeeping(&self) {
         // Call through to all timelines to freeze ephemeral layers as needed. This usually happens
         // during ingest, but we don't want idle timelines to hold open layers for too long.
-        let timelines = self
-            .timelines
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|tli| tli.is_active())
-            .cloned()
-            .collect_vec();
+        //
+        // We don't do this if the tenant can't upload layers (i.e. it's in stale attachment mode).
+        // We don't run compaction in this case either, and don't want to keep flushing tiny L0
+        // layers that won't be compacted down.
+        if self.tenant_conf.load().location.may_upload_layers_hint() {
+            let timelines = self
+                .timelines
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|tli| tli.is_active())
+                .cloned()
+                .collect_vec();
 
-        for timeline in timelines {
-            timeline.maybe_freeze_ephemeral_layer().await;
+            for timeline in timelines {
+                timeline.maybe_freeze_ephemeral_layer().await;
+            }
         }
 
         // Shut down walredo if idle.
@@ -6516,11 +6524,7 @@ mod tests {
 
         tline.freeze_and_flush().await?;
         tline
-            .compact(
-                &CancellationToken::new(),
-                CompactFlags::NoYield.into(),
-                &ctx,
-            )
+            .compact(&CancellationToken::new(), EnumSet::default(), &ctx)
             .await?;
 
         let mut writer = tline.writer().await;
@@ -6537,11 +6541,7 @@ mod tests {
 
         tline.freeze_and_flush().await?;
         tline
-            .compact(
-                &CancellationToken::new(),
-                CompactFlags::NoYield.into(),
-                &ctx,
-            )
+            .compact(&CancellationToken::new(), EnumSet::default(), &ctx)
             .await?;
 
         let mut writer = tline.writer().await;
@@ -6558,11 +6558,7 @@ mod tests {
 
         tline.freeze_and_flush().await?;
         tline
-            .compact(
-                &CancellationToken::new(),
-                CompactFlags::NoYield.into(),
-                &ctx,
-            )
+            .compact(&CancellationToken::new(), EnumSet::default(), &ctx)
             .await?;
 
         let mut writer = tline.writer().await;
@@ -6579,11 +6575,7 @@ mod tests {
 
         tline.freeze_and_flush().await?;
         tline
-            .compact(
-                &CancellationToken::new(),
-                CompactFlags::NoYield.into(),
-                &ctx,
-            )
+            .compact(&CancellationToken::new(), EnumSet::default(), &ctx)
             .await?;
 
         assert_eq!(
@@ -6666,9 +6658,7 @@ mod tests {
             timeline.freeze_and_flush().await?;
             if compact {
                 // this requires timeline to be &Arc<Timeline>
-                timeline
-                    .compact(&cancel, CompactFlags::NoYield.into(), ctx)
-                    .await?;
+                timeline.compact(&cancel, EnumSet::default(), ctx).await?;
             }
 
             // this doesn't really need to use the timeline_id target, but it is closer to what it
@@ -6995,7 +6985,6 @@ mod tests {
         child_timeline.freeze_and_flush().await?;
         let mut flags = EnumSet::new();
         flags.insert(CompactFlags::ForceRepartition);
-        flags.insert(CompactFlags::NoYield);
         child_timeline
             .compact(&CancellationToken::new(), flags, &ctx)
             .await?;
@@ -7374,9 +7363,7 @@ mod tests {
 
             // Perform a cycle of flush, compact, and GC
             tline.freeze_and_flush().await?;
-            tline
-                .compact(&cancel, CompactFlags::NoYield.into(), &ctx)
-                .await?;
+            tline.compact(&cancel, EnumSet::default(), &ctx).await?;
             tenant
                 .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
                 .await?;
@@ -7705,7 +7692,6 @@ mod tests {
                             let mut flags = EnumSet::new();
                             flags.insert(CompactFlags::ForceImageLayerCreation);
                             flags.insert(CompactFlags::ForceRepartition);
-                            flags.insert(CompactFlags::NoYield);
                             flags
                         } else {
                             EnumSet::empty()
@@ -7756,9 +7742,7 @@ mod tests {
         let before_num_l0_delta_files =
             tline.layers.read().await.layer_map()?.level0_deltas().len();
 
-        tline
-            .compact(&cancel, CompactFlags::NoYield.into(), &ctx)
-            .await?;
+        tline.compact(&cancel, EnumSet::default(), &ctx).await?;
 
         let after_num_l0_delta_files = tline.layers.read().await.layer_map()?.level0_deltas().len();
 
@@ -7923,7 +7907,6 @@ mod tests {
                             let mut flags = EnumSet::new();
                             flags.insert(CompactFlags::ForceImageLayerCreation);
                             flags.insert(CompactFlags::ForceRepartition);
-                            flags.insert(CompactFlags::NoYield);
                             flags
                         },
                         &ctx,
@@ -8386,7 +8369,6 @@ mod tests {
                     let mut flags = EnumSet::new();
                     flags.insert(CompactFlags::ForceImageLayerCreation);
                     flags.insert(CompactFlags::ForceRepartition);
-                    flags.insert(CompactFlags::NoYield);
                     flags
                 },
                 &ctx,
@@ -8454,7 +8436,6 @@ mod tests {
                     let mut flags = EnumSet::new();
                     flags.insert(CompactFlags::ForceImageLayerCreation);
                     flags.insert(CompactFlags::ForceRepartition);
-                    flags.insert(CompactFlags::NoYield);
                     flags
                 },
                 &ctx,
@@ -11549,6 +11530,257 @@ mod tests {
             ],
         );
 
+        Ok(())
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn test_synthetic_size_calculation_with_invisible_branches() -> anyhow::Result<()> {
+        use pageserver_api::models::TimelineVisibilityState;
+
+        use crate::tenant::size::gather_inputs;
+
+        let tenant_conf = pageserver_api::models::TenantConfig {
+            // Ensure that we don't compute gc_cutoffs (which needs reading the layer files)
+            pitr_interval: Some(Duration::ZERO),
+            ..Default::default()
+        };
+        let harness = TenantHarness::create_custom(
+            "test_synthetic_size_calculation_with_invisible_branches",
+            tenant_conf,
+            TenantId::generate(),
+            ShardIdentity::unsharded(),
+            Generation::new(0xdeadbeef),
+        )
+        .await?;
+        let (tenant, ctx) = harness.load().await;
+        let main_tline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                vec![],
+                vec![],
+                vec![],
+                Lsn(0x100),
+            )
+            .await?;
+
+        let snapshot1 = TimelineId::from_array(hex!("11223344556677881122334455667790"));
+        tenant
+            .branch_timeline_test_with_layers(
+                &main_tline,
+                snapshot1,
+                Some(Lsn(0x20)),
+                &ctx,
+                vec![],
+                vec![],
+                Lsn(0x50),
+            )
+            .await?;
+        let snapshot2 = TimelineId::from_array(hex!("11223344556677881122334455667791"));
+        tenant
+            .branch_timeline_test_with_layers(
+                &main_tline,
+                snapshot2,
+                Some(Lsn(0x30)),
+                &ctx,
+                vec![],
+                vec![],
+                Lsn(0x50),
+            )
+            .await?;
+        let snapshot3 = TimelineId::from_array(hex!("11223344556677881122334455667792"));
+        tenant
+            .branch_timeline_test_with_layers(
+                &main_tline,
+                snapshot3,
+                Some(Lsn(0x40)),
+                &ctx,
+                vec![],
+                vec![],
+                Lsn(0x50),
+            )
+            .await?;
+        let limit = Arc::new(Semaphore::new(1));
+        let max_retention_period = None;
+        let mut logical_size_cache = HashMap::new();
+        let cause = LogicalSizeCalculationCause::EvictionTaskImitation;
+        let cancel = CancellationToken::new();
+
+        let inputs = gather_inputs(
+            &tenant,
+            &limit,
+            max_retention_period,
+            &mut logical_size_cache,
+            cause,
+            &cancel,
+            &ctx,
+        )
+        .instrument(info_span!(
+            "gather_inputs",
+            tenant_id = "unknown",
+            shard_id = "unknown",
+        ))
+        .await?;
+        use crate::tenant::size::{LsnKind, ModelInputs, SegmentMeta};
+        use LsnKind::*;
+        use tenant_size_model::Segment;
+        let ModelInputs { mut segments, .. } = inputs;
+        segments.retain(|s| s.timeline_id == TIMELINE_ID);
+        for segment in segments.iter_mut() {
+            segment.segment.parent = None; // We don't care about the parent for the test
+            segment.segment.size = None; // We don't care about the size for the test
+        }
+        assert_eq!(
+            segments,
+            [
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x10,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchStart,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x20,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchPoint,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x30,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchPoint,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x40,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchPoint,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x100,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: GcCutOff,
+                }, // we need to retain everything above the last branch point
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x100,
+                        size: None,
+                        needed: true,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchEnd,
+                },
+            ]
+        );
+
+        main_tline
+            .remote_client
+            .schedule_index_upload_for_timeline_invisible_state(
+                TimelineVisibilityState::Invisible,
+            )?;
+        main_tline.remote_client.wait_completion().await?;
+        let inputs = gather_inputs(
+            &tenant,
+            &limit,
+            max_retention_period,
+            &mut logical_size_cache,
+            cause,
+            &cancel,
+            &ctx,
+        )
+        .instrument(info_span!(
+            "gather_inputs",
+            tenant_id = "unknown",
+            shard_id = "unknown",
+        ))
+        .await?;
+        let ModelInputs { mut segments, .. } = inputs;
+        segments.retain(|s| s.timeline_id == TIMELINE_ID);
+        for segment in segments.iter_mut() {
+            segment.segment.parent = None; // We don't care about the parent for the test
+            segment.segment.size = None; // We don't care about the size for the test
+        }
+        assert_eq!(
+            segments,
+            [
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x10,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchStart,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x20,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchPoint,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x30,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchPoint,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x40,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchPoint,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x40, // Branch end LSN == last branch point LSN
+                        size: None,
+                        needed: true,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchEnd,
+                },
+            ]
+        );
         Ok(())
     }
 }

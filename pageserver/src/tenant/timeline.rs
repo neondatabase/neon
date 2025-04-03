@@ -870,9 +870,14 @@ pub(crate) enum CompactFlags {
     OnlyL0Compaction,
     EnhancedGcBottomMostCompaction,
     DryRun,
-    /// Disables compaction yielding e.g. due to high L0 count. This is set e.g. when requesting
-    /// compaction via HTTP API.
-    NoYield,
+    /// Makes image compaction yield if there's pending L0 compaction. This should always be used in
+    /// the background compaction task, since we want to aggressively compact down L0 to bound
+    /// read amplification.
+    ///
+    /// It only makes sense to use this when `compaction_l0_first` is enabled (such that we yield to
+    /// an L0 compaction pass), and without `OnlyL0Compaction` (L0 compaction shouldn't yield for L0
+    /// compaction).
+    YieldForL0,
 }
 
 #[serde_with::serde_as]
@@ -888,6 +893,12 @@ pub(crate) struct CompactRequest {
     pub sub_compaction: bool,
     /// Max job size for each subcompaction job.
     pub sub_compaction_max_job_size_mb: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct MarkInvisibleRequest {
+    #[serde(default)]
+    pub is_visible: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1891,18 +1902,19 @@ impl Timeline {
         // out by other background tasks (including image compaction). We request this via
         // `BackgroundLoopKind::L0Compaction`.
         //
-        // If this is a regular compaction pass, and L0-only compaction is enabled in the config,
-        // then we should yield for immediate L0 compaction if necessary while we're waiting for the
-        // background task semaphore. There's no point yielding otherwise, since we'd just end up
-        // right back here.
+        // Yield for pending L0 compaction while waiting for the semaphore.
         let is_l0_only = options.flags.contains(CompactFlags::OnlyL0Compaction);
         let semaphore_kind = match is_l0_only && self.get_compaction_l0_semaphore() {
             true => BackgroundLoopKind::L0Compaction,
             false => BackgroundLoopKind::Compaction,
         };
-        let yield_for_l0 = !is_l0_only
-            && self.get_compaction_l0_first()
-            && !options.flags.contains(CompactFlags::NoYield);
+        let yield_for_l0 = options.flags.contains(CompactFlags::YieldForL0);
+        if yield_for_l0 {
+            // If this is an L0 pass, it doesn't make sense to yield for L0.
+            debug_assert!(!is_l0_only, "YieldForL0 during L0 pass");
+            // If `compaction_l0_first` is disabled, there's no point yielding.
+            debug_assert!(self.get_compaction_l0_first(), "YieldForL0 without L0 pass");
+        }
 
         let acquire = async move {
             let guard = self.compaction_lock.lock().await;
@@ -2207,6 +2219,10 @@ impl Timeline {
 
     pub(crate) fn is_archived(&self) -> Option<bool> {
         self.remote_client.is_archived()
+    }
+
+    pub(crate) fn is_invisible(&self) -> Option<bool> {
+        self.remote_client.is_invisible()
     }
 
     pub(crate) fn is_stopping(&self) -> bool {

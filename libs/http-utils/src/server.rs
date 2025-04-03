@@ -91,14 +91,14 @@ impl Server {
                                         Ok(tls_stream) => tls_stream,
                                         Err(err) => {
                                             if !suppress_io_error(&err) {
-                                                info!("Failed to accept TLS connection: {err:#}");
+                                                info!(%remote_addr, "Failed to accept TLS connection: {err:#}");
                                             }
                                             return;
                                         }
                                     };
                                     if let Err(err) = Self::serve_connection(tls_stream, service, cancel).await {
                                         if !suppress_hyper_error(&err) {
-                                            info!("Failed to serve HTTPS connection: {err:#}");
+                                            info!(%remote_addr, "Failed to serve HTTPS connection: {err:#}");
                                         }
                                     }
                                 }
@@ -106,7 +106,7 @@ impl Server {
                                     // Handle HTTP connection.
                                     if let Err(err) = Self::serve_connection(tcp_stream, service, cancel).await {
                                         if !suppress_hyper_error(&err) {
-                                            info!("Failed to serve HTTP connection: {err:#}");
+                                            info!(%remote_addr, "Failed to serve HTTP connection: {err:#}");
                                         }
                                     }
                                 }

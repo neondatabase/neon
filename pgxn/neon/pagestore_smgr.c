@@ -2384,7 +2384,6 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 						 LSN_FORMAT_ARGS(last_written_lsn),
 						 LSN_FORMAT_ARGS(flushlsn));
 				XLogFlush(last_written_lsn);
-				flushlsn = last_written_lsn;
 			}
 
 			/*
@@ -2400,18 +2399,35 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 			 * requesting the latest page, by setting request LSN to
 			 * UINT64_MAX.
 			 *
-			 * Remember the current LSN, however, so that we can later
-			 * correctly determine if the response to the request is still
-			 * valid. The most up-to-date LSN we could use for that purpose
-			 * would be the current insert LSN, but to avoid the overhead of
-			 * looking it up, use 'flushlsn' instead. This relies on the
-			 * assumption that if the page was modified since the last WAL
-			 * flush, it should still be in the buffer cache, and we
-			 * wouldn't be requesting it.
+			 * effective_request_lsn is used to check that received response is still valid.
+			 * In case of primary node it is last written LSN. Originally we used flush_lsn here,
+			 * but it is not correct. Consider the following scenario:
+			 * 1. Backend A wants to prefetch block X
+			 * 2. Backend A checks that block X is not present in the shared buffer cache
+			 * 3. Backend A calls prefetch_do_request, which calls neon_get_request_lsns
+			 * 4. neon_get_request_lsns obtains LwLSN=11 for the block
+			 * 5. Backend B downloads block X, updates and wallogs it with LSN=13
+			 * 6. Block X is once again evicted from shared buffers, its LwLSN is set to LSN=13
+			 * 7. Backend A is still executing in neon_get_request_lsns(). It calls 'flushlsn = GetFlushRecPtr();'.
+			 *    Let's say that it is LSN=14
+			 * 8. Backend A uses LSN=14 as effective_lsn in the prefetch slot. The request stored in the slot is
+			 *    [not_modified_since=11, effective_request_lsn=14]
+			 * 9. Backend A sends the prefetch request, pageserver processes it, and sends response.
+			 *    The last LSN that the pageserver had processed was LSN=12, so the page image in the response is valid at LSN=12.
+			 * 10. Backend A calls smgrread() for page X with LwLSN=13
+			 * 11. Backend A finds in prefetch ring the response for the prefetch request with [not_modified_since=11, effective_lsn=Lsn14],
+			 * so it satisfies neon_prefetch_response_usable condition.
+			 *
+			 * Things go wrong in step 7-8, when [not_modified_since=11, effective_request_lsn=14] is determined for the request.
+			 * That is incorrect, because the page has in fact been modified at LSN=13. The invariant is that for any request,
+			 * there should not be any modifications to a page between its not_modified_since and (effective_)request_lsn values.
+			 *
+			 * The problem can be fixed by callingGetFlushRecPtr() before checking if the page is in the buffer cache.
+			 * But you can't do that within smgrprefetch(), would need to modify the caller.
 			 */
 			result->request_lsn = UINT64_MAX;
 			result->not_modified_since = last_written_lsn;
-			result->effective_request_lsn = flushlsn;
+			result->effective_request_lsn = last_written_lsn;
 		}
 	}
 }
@@ -2470,11 +2486,8 @@ neon_prefetch_response_usable(neon_request_lsns *request_lsns,
 	 * `not_modified_since` and `request_lsn` are sent to the pageserver, but
 	 * in the primary node, we always use UINT64_MAX as the `request_lsn`, so
 	 * we remember `effective_request_lsn` separately. In a primary,
-	 * `effective_request_lsn` is the last flush WAL position when the request
-	 * was sent to the pageserver. That's logically the LSN that we are
-	 * requesting the page at, but we send UINT64_MAX to the pageserver so
-	 * that if the GC horizon advances past that position, we still get a
-	 * valid response instead of an error.
+	 * `effective_request_lsn` is the same as  `not_modified_since`.
+	 * See comments in neon_get_request_lsns why we can not use last flush WAL position here.
 	 *
 	 * To determine whether a response to a GetPage request issued earlier is
 	 * still valid to satisfy a new page read, we look at the

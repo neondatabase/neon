@@ -24,9 +24,9 @@ use pageserver_api::controller_api::{
     ShardsPreferredAzsRequest, TenantCreateRequest, TenantPolicyRequest, TenantShardMigrateRequest,
 };
 use pageserver_api::models::{
-    DetachBehavior, TenantConfigPatchRequest, TenantConfigRequest, TenantLocationConfigRequest,
-    TenantShardSplitRequest, TenantTimeTravelRequest, TimelineArchivalConfigRequest,
-    TimelineCreateRequest,
+    DetachBehavior, LsnLeaseRequest, TenantConfigPatchRequest, TenantConfigRequest,
+    TenantLocationConfigRequest, TenantShardSplitRequest, TenantTimeTravelRequest,
+    TimelineArchivalConfigRequest, TimelineCreateRequest,
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_api::upcall_api::{ReAttachRequest, ValidateRequest};
@@ -582,6 +582,32 @@ async fn handle_tenant_timeline_download_heatmap_layers(
     json_response(StatusCode::OK, ())
 }
 
+async fn handle_tenant_timeline_lsn_lease(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+
+    check_permissions(&req, Scope::PageServerApi)?;
+    maybe_rate_limit(&req, tenant_id).await;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let lsn_lease_request = json_request::<LsnLeaseRequest>(&mut req).await?;
+
+    service
+        .tenant_timeline_lsn_lease(tenant_id, timeline_id, lsn_lease_request.lsn)
+        .await?;
+
+    json_response(StatusCode::OK, ())
+}
+
 // For metric labels where we would like to include the approximate path, but exclude high-cardinality fields like query parameters
 // and tenant/timeline IDs.  Since we are proxying to arbitrary paths, we don't have routing templates to
 // compare to, so we can just filter out our well known ID format with regexes.
@@ -611,6 +637,15 @@ async fn handle_tenant_timeline_passthrough(
     let Some(path) = req.uri().path_and_query() else {
         // This should never happen, our request router only calls us if there is a path
         return Err(ApiError::BadRequest(anyhow::anyhow!("Missing path")));
+    };
+
+    let method = match *req.method() {
+        hyper::Method::GET => reqwest::Method::GET,
+        hyper::Method::POST => reqwest::Method::POST,
+        hyper::Method::PUT => reqwest::Method::PUT,
+        hyper::Method::DELETE => reqwest::Method::DELETE,
+        hyper::Method::PATCH => reqwest::Method::PATCH,
+        _ => return Err(ApiError::BadRequest(anyhow::anyhow!("Unsupported method"))),
     };
 
     tracing::info!(
@@ -660,7 +695,7 @@ async fn handle_tenant_timeline_passthrough(
         node.base_url(),
         service.get_config().pageserver_jwt_token.as_deref(),
     );
-    let resp = client.get_raw(path).await.map_err(|e|
+    let resp = client.op_raw(method, path).await.map_err(|e|
         // We return 503 here because if we can't successfully send a request to the pageserver,
         // either we aren't available or the pageserver is unavailable.
         ApiError::ResourceUnavailable(format!("Error sending pageserver API request to {node}: {e}").into()))?;
@@ -1378,6 +1413,12 @@ async fn handle_upsert_safekeeper(mut req: Request<Body>) -> Result<Response<Bod
         return Err(ApiError::BadRequest(anyhow::anyhow!(
             "id mismatch: url={id:?}, body={:?}",
             body.id
+        )));
+    }
+
+    if id <= 0 {
+        return Err(ApiError::BadRequest(anyhow::anyhow!(
+            "id not allowed to be zero or negative: {id}"
         )));
     }
 
@@ -2192,6 +2233,17 @@ pub fn make_router(
                 )
             },
         )
+        // LSN lease passthrough to all shards
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/lsn_lease",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_timeline_lsn_lease,
+                    RequestName("v1_tenant_timeline_lsn_lease"),
+                )
+            },
+        )
         // Tenant detail GET passthrough to shard zero:
         .get("/v1/tenant/:tenant_id", |r| {
             tenant_service_handler(
@@ -2210,6 +2262,17 @@ pub fn make_router(
                 RequestName("v1_tenant_passthrough"),
             )
         })
+        // Tenant timeline mark_invisible passthrough to shard zero
+        .put(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/mark_invisible",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_timeline_passthrough,
+                    RequestName("v1_tenant_timeline_mark_invisible_passthrough"),
+                )
+            },
+        )
 }
 
 #[cfg(test)]
