@@ -22,8 +22,7 @@ use pageserver::deletion_queue::DeletionQueue;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
 use pageserver::task_mgr::{
-    BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, OTEL_RUNTIME,
-    WALRECEIVER_RUNTIME,
+    BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
 };
 use pageserver::tenant::{TenantSharedResources, mgr, secondary};
 use pageserver::{
@@ -124,7 +123,7 @@ fn main() -> anyhow::Result<()> {
         Some(cfg) => tracing_utils::OtelEnablement::Enabled {
             service_name: "pageserver".to_string(),
             export_config: (&cfg.export_config).into(),
-            runtime: *OTEL_RUNTIME,
+            runtime: *COMPUTE_REQUEST_RUNTIME,
         },
         None => tracing_utils::OtelEnablement::Disabled,
     };
