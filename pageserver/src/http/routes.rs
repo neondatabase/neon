@@ -3188,7 +3188,8 @@ async fn list_aux_files(
         timeline.gate.enter().map_err(|_| ApiError::Cancelled)?,
     );
 
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download)
+        .with_scope_timeline(&timeline);
     let files = timeline
         .list_aux_files(body.lsn, &ctx, io_concurrency)
         .await?;
