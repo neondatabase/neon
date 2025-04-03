@@ -385,11 +385,11 @@ class PageserverTracingConfig:
 
     def to_config_key_value(self) -> tuple[str, dict[str, Any]]:
         value = {
-            "sampling-ratio": {
+            "sampling_ratio": {
                 "numerator": self.sampling_ratio[0],
                 "denominator": self.sampling_ratio[1],
             },
-            "export-config": {
+            "export_config": {
                 "endpoint": self.endpoint,
                 "protocol": self.protocol,
                 "timeout": self.timeout,
