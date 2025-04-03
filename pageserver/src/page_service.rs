@@ -18,7 +18,7 @@ use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pageserver_api::config::{
     PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
-    PageServiceProtocolPipelinedExecutionStrategy, Tracing,
+    PageServiceProtocolPipelinedExecutionStrategy,
 };
 use pageserver_api::key::rel_block_to_key;
 use pageserver_api::models::{
@@ -754,7 +754,6 @@ impl PageServerHandler {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         timeline_handles: &mut TimelineHandles,
-        tracing_config: Option<&Tracing>,
         cancel: &CancellationToken,
         ctx: &RequestContext,
         protocol_version: PagestreamProtocolVersion,
@@ -1575,7 +1574,6 @@ impl PageServerHandler {
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
     {
         let cancel = self.cancel.clone();
-        let tracing_config = self.conf.tracing.clone();
 
         let err = loop {
             let msg = Self::pagestream_read_message(
@@ -1583,7 +1581,6 @@ impl PageServerHandler {
                 tenant_id,
                 timeline_id,
                 &mut timeline_handles,
-                tracing_config.as_ref(),
                 &cancel,
                 ctx,
                 protocol_version,
@@ -1717,8 +1714,6 @@ impl PageServerHandler {
         // Batcher
         //
 
-        let tracing_config = self.conf.tracing.clone();
-
         let cancel_batcher = self.cancel.child_token();
         let (mut batch_tx, mut batch_rx) = spsc_fold::channel();
         let batcher = pipeline_stage!("batcher", cancel_batcher.clone(), move |cancel_batcher| {
@@ -1732,7 +1727,6 @@ impl PageServerHandler {
                         tenant_id,
                         timeline_id,
                         &mut timeline_handles,
-                        tracing_config.as_ref(),
                         &cancel_batcher,
                         &ctx,
                         protocol_version,
