@@ -21,7 +21,6 @@
 #include "access/xlog.h"
 #include "funcapi.h"
 #include "miscadmin.h"
-#include "pagestore_client.h"
 #include "common/hashfn.h"
 #include "pgstat.h"
 #include "port/pg_iovec.h"
@@ -43,6 +42,7 @@
 
 #include "hll.h"
 #include "bitmap.h"
+#include "file_cache.h"
 #include "neon.h"
 #include "neon_lwlsncache.h"
 #include "neon_perf_counters.h"
