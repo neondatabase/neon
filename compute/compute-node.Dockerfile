@@ -369,7 +369,7 @@ FROM build-deps AS plv8-src
 ARG PG_VERSION
 WORKDIR /ext-src
 
-COPY compute/patches/plv8-3.1.10.patch .
+COPY compute/patches/plv8* .
 
 # plv8 3.2.3 supports v17
 # last release v3.2.3 - Sep 7, 2024
@@ -393,7 +393,7 @@ RUN case "${PG_VERSION:?}" in \
     git clone --recurse-submodules --depth 1 --branch ${PLV8_TAG} https://github.com/plv8/plv8.git plv8-src && \
     tar -czf plv8.tar.gz --exclude .git plv8-src && \
     cd plv8-src && \
-    if [[ "${PG_VERSION:?}" < "v17" ]]; then patch -p1 < /ext-src/plv8-3.1.10.patch; fi
+    if [[ "${PG_VERSION:?}" < "v17" ]]; then patch -p1 < /ext-src/plv8_v3.1.10.patch; else patch -p1 < /ext-src/plv8_v3.2.3.patch; fi
 
 # Step 1: Build the vendored V8 engine. It doesn't depend on PostgreSQL, so use
 # 'build-deps' as the base. This enables caching and avoids unnecessary rebuilds.
