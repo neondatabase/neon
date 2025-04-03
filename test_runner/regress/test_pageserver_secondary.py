@@ -1099,7 +1099,10 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
 
 
 @run_only_on_default_postgres("PG version is not interesting here")
-def test_io_metrics_match_secondary_timeline_lifecycle(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("action", ["delete_timeline", "detach"])
+def test_io_metrics_match_secondary_timeline_lifecycle(
+    neon_env_builder: NeonEnvBuilder, action: str
+):
     """
     Check that IO metrics for secondary timelines are de-registered when the timeline
     is removed
@@ -1141,11 +1144,16 @@ def test_io_metrics_match_secondary_timeline_lifecycle(neon_env_builder: NeonEnv
 
     assert bytes_written == 0
 
-    env.storage_controller.pageserver_api().timeline_delete(tenant_id, child_timeline_id)
-
-    ps_attached.http_client().tenant_heatmap_upload(tenant_id)
-    status, _ = ps_secondary.http_client().tenant_secondary_download(tenant_id, wait_ms=5000)
-    assert status == 200
+    if action == "delete_timeline":
+        env.storage_controller.pageserver_api().timeline_delete(tenant_id, child_timeline_id)
+        ps_attached.http_client().tenant_heatmap_upload(tenant_id)
+        status, _ = ps_secondary.http_client().tenant_secondary_download(tenant_id, wait_ms=5000)
+        assert status == 200
+    elif action == "detach":
+        env.storage_controller.tenant_policy_update(tenant_id, {"placement": {"Attached": 0}})
+        env.storage_controller.reconcile_until_idle()
+    else:
+        raise Exception("Unexpected action")
 
     assert (
         len(

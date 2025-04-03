@@ -303,25 +303,44 @@ impl SecondaryDetail {
     ) {
         let removed = self.timelines.remove(timeline_id);
         if let Some(removed) = removed {
-            resident_metric.sub(
-                removed
-                    .on_disk_layers
-                    .values()
-                    .map(|l| l.metadata.file_size)
-                    .sum(),
-            );
+            Self::clear_timeline_metrics(tenant_shard_id, &timeline_id, removed, resident_metric);
+        }
+    }
 
-            let shard_id = format!("{}", tenant_shard_id.shard_slug());
-            let tenant_id = tenant_shard_id.tenant_id.to_string();
-            let timeline_id = timeline_id.to_string();
-            for op in StorageIoSizeOperation::VARIANTS {
-                let _ = STORAGE_IO_SIZE.remove_label_values(&[
-                    op,
-                    tenant_id.as_str(),
-                    shard_id.as_str(),
-                    timeline_id.as_str(),
-                ]);
-            }
+    pub(super) fn drain_timelines(
+        &mut self,
+        tenant_shard_id: &TenantShardId,
+        resident_metric: &UIntGauge,
+    ) {
+        for (timeline_id, removed) in self.timelines.drain() {
+            Self::clear_timeline_metrics(tenant_shard_id, &timeline_id, removed, resident_metric);
+        }
+    }
+
+    fn clear_timeline_metrics(
+        tenant_shard_id: &TenantShardId,
+        timeline_id: &TimelineId,
+        detail: SecondaryDetailTimeline,
+        resident_metric: &UIntGauge,
+    ) {
+        resident_metric.sub(
+            detail
+                .on_disk_layers
+                .values()
+                .map(|l| l.metadata.file_size)
+                .sum(),
+        );
+
+        let shard_id = format!("{}", tenant_shard_id.shard_slug());
+        let tenant_id = tenant_shard_id.tenant_id.to_string();
+        let timeline_id = timeline_id.to_string();
+        for op in StorageIoSizeOperation::VARIANTS {
+            let _ = STORAGE_IO_SIZE.remove_label_values(&[
+                op,
+                tenant_id.as_str(),
+                shard_id.as_str(),
+                timeline_id.as_str(),
+            ]);
         }
     }
 
