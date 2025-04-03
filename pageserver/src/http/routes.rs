@@ -74,8 +74,8 @@ use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::{IoConcurrency, LayerAccessStatsReset, LayerName};
 use crate::tenant::timeline::offload::{OffloadError, offload_timeline};
 use crate::tenant::timeline::{
-    CompactFlags, CompactOptions, CompactRequest, CompactionError, Timeline, WaitLsnTimeout,
-    WaitLsnWaiter, import_pgdata,
+    CompactFlags, CompactOptions, CompactRequest, CompactionError, MarkInvisibleRequest, Timeline,
+    WaitLsnTimeout, WaitLsnWaiter, import_pgdata,
 };
 use crate::tenant::{
     GetTimelineError, LogicalSizeCalculationCause, OffloadedTimeline, PageReconstructError,
@@ -445,6 +445,9 @@ async fn build_timeline_info_common(
 
     let (pitr_history_size, within_ancestor_pitr) = timeline.get_pitr_history_stats();
 
+    // Externally, expose the lowest LSN that can be used to create a branch.
+    // Internally we distinguish between the planned GC cutoff (PITR point) and the "applied" GC cutoff (where we
+    // actually trimmed data to), which can pass each other when PITR is changed.
     let min_readable_lsn = std::cmp::max(
         timeline.get_gc_cutoff_lsn(),
         *timeline.get_applied_gc_cutoff_lsn(),
@@ -461,7 +464,6 @@ async fn build_timeline_info_common(
         initdb_lsn,
         last_record_lsn,
         prev_record_lsn: Some(timeline.get_prev_record_lsn()),
-        _unused: Default::default(), // Unused, for legacy decode only
         min_readable_lsn,
         applied_gc_cutoff_lsn: *timeline.get_applied_gc_cutoff_lsn(),
         current_logical_size: current_logical_size.size_dont_care_about_accuracy(),
@@ -2335,21 +2337,31 @@ async fn timeline_compact_handler(
 }
 
 async fn timeline_mark_invisible_handler(
-    request: Request<Body>,
+    mut request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
+    let compact_request = json_request_maybe::<Option<MarkInvisibleRequest>>(&mut request).await?;
+
     let state = get_state(&request);
+
+    let visibility = match compact_request {
+        Some(req) => match req.is_visible {
+            Some(true) => TimelineVisibilityState::Visible,
+            Some(false) | None => TimelineVisibilityState::Invisible,
+        },
+        None => TimelineVisibilityState::Invisible,
+    };
 
     async {
         let tenant = state
             .tenant_manager
             .get_attached_tenant_shard(tenant_shard_id)?;
         let timeline = tenant.get_timeline(timeline_id, true)?;
-        timeline.remote_client.schedule_index_upload_for_timeline_invisible_state(TimelineVisibilityState::Invisible).map_err(ApiError::InternalServerError)?;
+        timeline.remote_client.schedule_index_upload_for_timeline_invisible_state(visibility).map_err(ApiError::InternalServerError)?;
         json_response(StatusCode::OK, ())
     }
     .instrument(info_span!("manual_timeline_mark_invisible", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
@@ -2685,11 +2697,12 @@ async fn getpage_at_lsn_handler_inner(
     let lsn: Option<Lsn> = parse_query_param(&request, "lsn")?;
 
     async {
-        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-        // Enable read path debugging
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
-        let ctx = RequestContextBuilder::extend(&ctx).read_path_debug(true)
-        .scope(context::Scope::new_timeline(&timeline)).build();
+        let ctx = RequestContextBuilder::new(TaskKind::MgmtRequest)
+            .download_behavior(DownloadBehavior::Download)
+            .scope(context::Scope::new_timeline(&timeline))
+            .read_path_debug(true)
+            .root();
 
         // Use last_record_lsn if no lsn is provided
         let lsn = lsn.unwrap_or_else(|| timeline.get_last_record_lsn());
@@ -3176,7 +3189,8 @@ async fn list_aux_files(
         timeline.gate.enter().map_err(|_| ApiError::Cancelled)?,
     );
 
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download)
+        .with_scope_timeline(&timeline);
     let files = timeline
         .list_aux_files(body.lsn, &ctx, io_concurrency)
         .await?;
@@ -3420,14 +3434,15 @@ async fn put_tenant_timeline_import_wal(
 
     check_permission(&request, Some(tenant_id))?;
 
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
-
     let span = info_span!("import_wal", tenant_id=%tenant_id, timeline_id=%timeline_id, start_lsn=%start_lsn, end_lsn=%end_lsn);
     async move {
         let state = get_state(&request);
 
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, TenantShardId::unsharded(tenant_id), timeline_id).await?;
-        let ctx = RequestContextBuilder::extend(&ctx).scope(context::Scope::new_timeline(&timeline)).build();
+        let ctx = RequestContextBuilder::new(TaskKind::MgmtRequest)
+            .download_behavior(DownloadBehavior::Warn)
+            .scope(context::Scope::new_timeline(&timeline))
+            .root();
 
         let mut body = StreamReader::new(request.into_body().map(|res| {
             res.map_err(|error| {
@@ -3774,7 +3789,7 @@ pub fn make_router(
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/mark_invisible",
-            |r| testing_api_handler("mark timeline invisible", r, timeline_mark_invisible_handler),
+            |r| api_handler( r, timeline_mark_invisible_handler),
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/checkpoint",

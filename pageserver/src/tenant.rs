@@ -3248,17 +3248,23 @@ impl Tenant {
     async fn housekeeping(&self) {
         // Call through to all timelines to freeze ephemeral layers as needed. This usually happens
         // during ingest, but we don't want idle timelines to hold open layers for too long.
-        let timelines = self
-            .timelines
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|tli| tli.is_active())
-            .cloned()
-            .collect_vec();
+        //
+        // We don't do this if the tenant can't upload layers (i.e. it's in stale attachment mode).
+        // We don't run compaction in this case either, and don't want to keep flushing tiny L0
+        // layers that won't be compacted down.
+        if self.tenant_conf.load().location.may_upload_layers_hint() {
+            let timelines = self
+                .timelines
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|tli| tli.is_active())
+                .cloned()
+                .collect_vec();
 
-        for timeline in timelines {
-            timeline.maybe_freeze_ephemeral_layer().await;
+            for timeline in timelines {
+                timeline.maybe_freeze_ephemeral_layer().await;
+            }
         }
 
         // Shut down walredo if idle.
@@ -3683,7 +3689,7 @@ impl Tenant {
                         }
                     }
                 }
-                TenantState::Active { .. } => {
+                TenantState::Active => {
                     return Ok(());
                 }
                 TenantState::Broken { reason, .. } => {
@@ -4199,9 +4205,9 @@ impl Tenant {
             self.cancel.child_token(),
         );
 
-        let timeline_ctx = RequestContextBuilder::extend(ctx)
+        let timeline_ctx = RequestContextBuilder::from(ctx)
             .scope(context::Scope::new_timeline(&timeline))
-            .build();
+            .detached_child();
 
         Ok((timeline, timeline_ctx))
     }
@@ -11524,6 +11530,257 @@ mod tests {
             ],
         );
 
+        Ok(())
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn test_synthetic_size_calculation_with_invisible_branches() -> anyhow::Result<()> {
+        use pageserver_api::models::TimelineVisibilityState;
+
+        use crate::tenant::size::gather_inputs;
+
+        let tenant_conf = pageserver_api::models::TenantConfig {
+            // Ensure that we don't compute gc_cutoffs (which needs reading the layer files)
+            pitr_interval: Some(Duration::ZERO),
+            ..Default::default()
+        };
+        let harness = TenantHarness::create_custom(
+            "test_synthetic_size_calculation_with_invisible_branches",
+            tenant_conf,
+            TenantId::generate(),
+            ShardIdentity::unsharded(),
+            Generation::new(0xdeadbeef),
+        )
+        .await?;
+        let (tenant, ctx) = harness.load().await;
+        let main_tline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                vec![],
+                vec![],
+                vec![],
+                Lsn(0x100),
+            )
+            .await?;
+
+        let snapshot1 = TimelineId::from_array(hex!("11223344556677881122334455667790"));
+        tenant
+            .branch_timeline_test_with_layers(
+                &main_tline,
+                snapshot1,
+                Some(Lsn(0x20)),
+                &ctx,
+                vec![],
+                vec![],
+                Lsn(0x50),
+            )
+            .await?;
+        let snapshot2 = TimelineId::from_array(hex!("11223344556677881122334455667791"));
+        tenant
+            .branch_timeline_test_with_layers(
+                &main_tline,
+                snapshot2,
+                Some(Lsn(0x30)),
+                &ctx,
+                vec![],
+                vec![],
+                Lsn(0x50),
+            )
+            .await?;
+        let snapshot3 = TimelineId::from_array(hex!("11223344556677881122334455667792"));
+        tenant
+            .branch_timeline_test_with_layers(
+                &main_tline,
+                snapshot3,
+                Some(Lsn(0x40)),
+                &ctx,
+                vec![],
+                vec![],
+                Lsn(0x50),
+            )
+            .await?;
+        let limit = Arc::new(Semaphore::new(1));
+        let max_retention_period = None;
+        let mut logical_size_cache = HashMap::new();
+        let cause = LogicalSizeCalculationCause::EvictionTaskImitation;
+        let cancel = CancellationToken::new();
+
+        let inputs = gather_inputs(
+            &tenant,
+            &limit,
+            max_retention_period,
+            &mut logical_size_cache,
+            cause,
+            &cancel,
+            &ctx,
+        )
+        .instrument(info_span!(
+            "gather_inputs",
+            tenant_id = "unknown",
+            shard_id = "unknown",
+        ))
+        .await?;
+        use crate::tenant::size::{LsnKind, ModelInputs, SegmentMeta};
+        use LsnKind::*;
+        use tenant_size_model::Segment;
+        let ModelInputs { mut segments, .. } = inputs;
+        segments.retain(|s| s.timeline_id == TIMELINE_ID);
+        for segment in segments.iter_mut() {
+            segment.segment.parent = None; // We don't care about the parent for the test
+            segment.segment.size = None; // We don't care about the size for the test
+        }
+        assert_eq!(
+            segments,
+            [
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x10,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchStart,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x20,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchPoint,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x30,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchPoint,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x40,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchPoint,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x100,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: GcCutOff,
+                }, // we need to retain everything above the last branch point
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x100,
+                        size: None,
+                        needed: true,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchEnd,
+                },
+            ]
+        );
+
+        main_tline
+            .remote_client
+            .schedule_index_upload_for_timeline_invisible_state(
+                TimelineVisibilityState::Invisible,
+            )?;
+        main_tline.remote_client.wait_completion().await?;
+        let inputs = gather_inputs(
+            &tenant,
+            &limit,
+            max_retention_period,
+            &mut logical_size_cache,
+            cause,
+            &cancel,
+            &ctx,
+        )
+        .instrument(info_span!(
+            "gather_inputs",
+            tenant_id = "unknown",
+            shard_id = "unknown",
+        ))
+        .await?;
+        let ModelInputs { mut segments, .. } = inputs;
+        segments.retain(|s| s.timeline_id == TIMELINE_ID);
+        for segment in segments.iter_mut() {
+            segment.segment.parent = None; // We don't care about the parent for the test
+            segment.segment.size = None; // We don't care about the size for the test
+        }
+        assert_eq!(
+            segments,
+            [
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x10,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchStart,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x20,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchPoint,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x30,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchPoint,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x40,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchPoint,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x40, // Branch end LSN == last branch point LSN
+                        size: None,
+                        needed: true,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchEnd,
+                },
+            ]
+        );
         Ok(())
     }
 }

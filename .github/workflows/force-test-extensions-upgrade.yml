@@ -55,7 +55,7 @@ jobs:
           echo tag=${tag} >> ${GITHUB_OUTPUT}
 
       - name: Test extension upgrade
-        timeout-minutes: 20
+        timeout-minutes: 60
         env:
           NEW_COMPUTE_TAG: latest
           OLD_COMPUTE_TAG: ${{ steps.get-last-compute-release-tag.outputs.tag }}

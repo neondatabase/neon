@@ -419,7 +419,7 @@ impl ComputeNode {
                 .iter()
                 .filter_map(|val| val.parse::<usize>().ok())
                 .map(|val| if val > 1 { val - 1 } else { 1 })
-                .last()
+                .next_back()
                 .unwrap_or(3)
         }
     }
