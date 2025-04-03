@@ -4,6 +4,10 @@ from fixtures.neon_fixtures import NeonEnv
 
 @pytest.mark.parametrize("what", ["default", "top_level", "nested"])
 def test_unknown_config_items_handling(neon_simple_env: NeonEnv, what: str):
+    """
+    Ensure we log unknown config fields.
+    There are more unit tests in the Rust code for other TOML items.
+    """
     env = neon_simple_env
 
     def edit_fn(config) -> str | None:

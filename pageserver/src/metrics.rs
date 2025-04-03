@@ -30,7 +30,8 @@ use strum::{EnumCount, IntoEnumIterator as _, VariantNames};
 use strum_macros::{IntoStaticStr, VariantNames};
 use utils::id::TimelineId;
 
-use crate::config::{IgnoredConfigItems, PageServerConf};
+use crate::config;
+use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext};
 use crate::pgdatadir_mapping::DatadirModificationStats;
 use crate::task_mgr::TaskKind;
@@ -4142,7 +4143,10 @@ static PAGESERVER_CONFIG_IGNORED_ITEMS: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .unwrap()
 });
 
-pub fn preinitialize_metrics(conf: &'static PageServerConf, ignored: IgnoredConfigItems) {
+pub fn preinitialize_metrics(
+    conf: &'static PageServerConf,
+    ignored: config::ignored_fields::Paths,
+) {
     set_page_service_config_max_batch_size(&conf.page_service_pipelining);
 
     PAGESERVER_CONFIG_IGNORED_ITEMS

@@ -15,7 +15,7 @@ use clap::{Arg, ArgAction, Command};
 use metrics::launch_timestamp::{LaunchTimestamp, set_launch_timestamp_metric};
 use metrics::set_build_info_metric;
 use nix::sys::socket::{setsockopt, sockopt};
-use pageserver::config::{IgnoredConfigItems, PageServerConf, PageserverIdentity};
+use pageserver::config::{PageServerConf, PageserverIdentity, ignored_fields};
 use pageserver::controller_upcall_client::StorageControllerUpcallClient;
 use pageserver::deletion_queue::DeletionQueue;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
@@ -130,7 +130,7 @@ fn main() -> anyhow::Result<()> {
     // Warn about ignored config items; see pageserver_api::config::ConfigToml
     // doc comment for rationale why we prefer this over serde(deny_unknown_fields).
     {
-        let IgnoredConfigItems { paths } = &ignored;
+        let ignored_fields::Paths { paths } = &ignored;
         for path in paths {
             warn!(?path, "ignoring unknown configuration item");
         }
@@ -210,7 +210,7 @@ fn initialize_config(
     identity_file_path: &Utf8Path,
     cfg_file_path: &Utf8Path,
     workdir: &Utf8Path,
-) -> anyhow::Result<(&'static PageServerConf, IgnoredConfigItems)> {
+) -> anyhow::Result<(&'static PageServerConf, ignored_fields::Paths)> {
     // The deployment orchestrator writes out an indentity file containing the node id
     // for all pageservers. This file is the source of truth for the node id. In order
     // to allow for rolling back pageserver releases, the node id is also included in
@@ -260,10 +260,7 @@ fn initialize_config(
             .context("parse original config as toml document")?;
         let parsed_toml = toml_edit::ser::to_document(&config_toml)
             .context("re-serialize config to toml document")?;
-
-        IgnoredConfigItems {
-            paths: find_ignored_fields(ondisk_toml, parsed_toml),
-        }
+        pageserver::config::ignored_fields::find(ondisk_toml, parsed_toml)
     };
 
     // Construct the runtime god object (it's called PageServerConf but actually is just global shared state).
@@ -272,85 +269,6 @@ fn initialize_config(
     let conf = Box::leak(Box::new(conf));
 
     Ok((conf, ignored))
-}
-
-fn find_ignored_fields(
-    ondisk_toml: toml_edit::DocumentMut,
-    parsed_toml: toml_edit::DocumentMut,
-) -> Vec<String> {
-    let mut ignored = Vec::new();
-
-    let mut ondisk_toml_paths = Vec::new();
-    visit_table_like(
-        ondisk_toml.as_table(),
-        &mut Vec::new(),
-        &mut ondisk_toml_paths,
-    );
-
-    let mut parsed_toml_paths = Vec::new();
-    visit_table_like(
-        parsed_toml.as_table(),
-        &mut Vec::new(),
-        &mut parsed_toml_paths,
-    );
-
-    // XXX: this is O(n^2)
-    for path in ondisk_toml_paths {
-        if !parsed_toml_paths.contains(&path) {
-            ignored.push(path);
-        }
-    }
-
-    return ignored;
-
-    fn visit_table_like(
-        table_like: &dyn toml_edit::TableLike,
-        path: &mut Vec<String>,
-        paths: &mut Vec<String>,
-    ) {
-        for (entry, item) in table_like.iter() {
-            path.push(entry.to_string());
-            visit_item(item, path, paths);
-            path.pop();
-        }
-    }
-
-    fn visit_item(item: &toml_edit::Item, path: &mut Vec<String>, paths: &mut Vec<String>) {
-        match item {
-            toml_edit::Item::None => (),
-            toml_edit::Item::Value(value) => visit_value(value, path, paths),
-            toml_edit::Item::Table(table) => {
-                visit_table_like(table, path, paths);
-            }
-            toml_edit::Item::ArrayOfTables(array_of_tables) => {
-                for (i, table) in array_of_tables.iter().enumerate() {
-                    path.push(format!("[{i}]"));
-                    visit_table_like(table, path, paths);
-                    path.pop();
-                }
-            }
-        }
-    }
-
-    fn visit_value(value: &toml_edit::Value, path: &mut Vec<String>, paths: &mut Vec<String>) {
-        match value {
-            toml_edit::Value::String(_)
-            | toml_edit::Value::Integer(_)
-            | toml_edit::Value::Float(_)
-            | toml_edit::Value::Boolean(_)
-            | toml_edit::Value::Datetime(_) => paths.push(path.join(".")),
-            toml_edit::Value::Array(array) => {
-                for (i, value) in array.iter().enumerate() {
-                    path.push(format!("[{i}]"));
-                    visit_value(value, path, paths);
-                    path.pop();
-                }
-            }
-            toml_edit::Value::InlineTable(inline_table) => {
-                visit_table_like(inline_table, path, paths)
-            }
-        }
-    }
 }
 
 struct WaitForPhaseResult<F: std::future::Future + Unpin> {
@@ -401,7 +319,7 @@ fn startup_checkpoint(started_at: Instant, phase: &str, human_phase: &str) {
 fn start_pageserver(
     launch_ts: &'static LaunchTimestamp,
     conf: &'static PageServerConf,
-    ignored: IgnoredConfigItems,
+    ignored: ignored_fields::Paths,
 ) -> anyhow::Result<()> {
     // Monotonic time for later calculating startup duration
     let started_startup_at = Instant::now();
@@ -900,80 +818,4 @@ fn cli() -> Command {
 #[test]
 fn verify_cli() {
     cli().debug_assert();
-}
-
-#[cfg(test)]
-mod find_ignored_fields_tests {
-
-    fn test_impl(original: &str, parsed: &str, expect: [&str; 1]) {
-        let original: toml_edit::DocumentMut = original.parse().expect("parse original config");
-        let parsed: toml_edit::DocumentMut = parsed.parse().expect("parse re-serialized config");
-
-        let ignored = super::find_ignored_fields(original, parsed);
-        assert_eq!(ignored, &expect);
-    }
-
-    #[test]
-    fn top_level() {
-        test_impl(
-            r#"
-                [a]
-                b = 1
-                c = 2
-                d = 3
-            "#,
-            r#"
-                [a]
-                b = 1
-                c = 2
-            "#,
-            ["a.d"],
-        );
-    }
-
-    #[test]
-    fn nested() {
-        test_impl(
-            r#"
-                [a.b.c]
-                d = 23
-            "#,
-            r#"
-                [a]
-                e = 42
-            "#,
-            ["a.b.c.d"],
-        );
-    }
-
-    #[test]
-    fn array_of_tables() {
-        test_impl(
-            r#"
-                [[a]]
-                b = 1
-                c = 2
-                d = 3
-            "#,
-            r#"
-                [[a]]
-                b = 1
-                c = 2
-            "#,
-            ["a.[0].d"],
-        );
-    }
-
-    #[test]
-    fn array() {
-        test_impl(
-            r#"
-            foo = [ {bar = 23} ]
-            "#,
-            r#"
-            foo = [ { blup = 42 }]
-            "#,
-            ["foo.[0].bar"],
-        );
-    }
 }
