@@ -21,6 +21,7 @@ in this repository.
     - [WAL Redo](./pageserver-walredo.md)
     - [Page cache](./pageserver-pagecache.md)
     - [Storage](./pageserver-storage.md)
+    - [Compaction](./pageserver-compaction.md)
     - [Processing a GetPage request](./pageserver-processing-getpage.md)
     - [Processing WAL](./pageserver-processing-wal.md)
 
