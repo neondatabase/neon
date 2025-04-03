@@ -280,47 +280,15 @@ fn find_ignored_fields(
 ) -> Vec<String> {
     let mut ignored = Vec::new();
 
-    fn visit_table(
-        table: &dyn toml_edit::TableLike,
-        path: &mut Vec<String>,
-        paths: &mut Vec<String>,
-    ) {
-        for (key, value) in table.iter() {
-            path.push(key.to_string());
-            if let Some(subtable) = value.as_table_like() {
-                visit_table(subtable, path, paths);
-            } else if let Some(array_of_tables) = value.as_array_of_tables() {
-                for (i, table) in array_of_tables.iter().enumerate() {
-                    path.push(format!("[{i}]"));
-                    visit_table(table, path, paths);
-                    path.pop();
-                }
-            } else if let Some(array) = value.as_array() {
-                for (i, item) in array.iter().enumerate() {
-                    path.push(format!("[{i}]"));
-                    if let Some(subtable) = item.as_inline_table() {
-                        visit_table(subtable, path, paths);
-                    } else {
-                        paths.push(path.join("."));
-                    }
-                    path.pop();
-                }
-            } else {
-                paths.push(path.join("."));
-            }
-            path.pop();
-        }
-    }
-
     let mut ondisk_toml_paths = Vec::new();
-    visit_table(
+    visit_table_like(
         ondisk_toml.as_table(),
         &mut Vec::new(),
         &mut ondisk_toml_paths,
     );
 
     let mut parsed_toml_paths = Vec::new();
-    visit_table(
+    visit_table_like(
         parsed_toml.as_table(),
         &mut Vec::new(),
         &mut parsed_toml_paths,
@@ -332,7 +300,57 @@ fn find_ignored_fields(
             ignored.push(path);
         }
     }
-    ignored
+
+    return ignored;
+
+    fn visit_table_like(
+        table_like: &dyn toml_edit::TableLike,
+        path: &mut Vec<String>,
+        paths: &mut Vec<String>,
+    ) {
+        for (entry, item) in table_like.iter() {
+            path.push(entry.to_string());
+            visit_item(item, path, paths);
+            path.pop();
+        }
+    }
+
+    fn visit_item(item: &toml_edit::Item, path: &mut Vec<String>, paths: &mut Vec<String>) {
+        match item {
+            toml_edit::Item::None => (),
+            toml_edit::Item::Value(value) => visit_value(value, path, paths),
+            toml_edit::Item::Table(table) => {
+                visit_table_like(table, path, paths);
+            }
+            toml_edit::Item::ArrayOfTables(array_of_tables) => {
+                for (i, table) in array_of_tables.iter().enumerate() {
+                    path.push(format!("[{i}]"));
+                    visit_table_like(table, path, paths);
+                    path.pop();
+                }
+            }
+        }
+    }
+
+    fn visit_value(value: &toml_edit::Value, path: &mut Vec<String>, paths: &mut Vec<String>) {
+        match value {
+            toml_edit::Value::String(_)
+            | toml_edit::Value::Integer(_)
+            | toml_edit::Value::Float(_)
+            | toml_edit::Value::Boolean(_)
+            | toml_edit::Value::Datetime(_) => paths.push(path.join(".")),
+            toml_edit::Value::Array(array) => {
+                for (i, value) in array.iter().enumerate() {
+                    path.push(format!("[{i}]"));
+                    visit_value(value, path, paths);
+                    path.pop();
+                }
+            }
+            toml_edit::Value::InlineTable(inline_table) => {
+                visit_table_like(inline_table, path, paths)
+            }
+        }
+    }
 }
 
 struct WaitForPhaseResult<F: std::future::Future + Unpin> {
