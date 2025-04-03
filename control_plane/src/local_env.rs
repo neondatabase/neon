@@ -148,16 +148,10 @@ pub struct NeonLocalInitConf {
     pub generate_local_ssl_certs: bool,
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
+#[derive(Serialize, Default, Deserialize, PartialEq, Eq, Clone, Debug)]
 #[serde(default)]
 pub struct S3ProxyConf {
     pub port: u16,
-}
-
-impl Default for S3ProxyConf {
-    fn default() -> Self {
-        Self { port: 0 }
-    }
 }
 
 /// Broker config for cluster internal communication.
