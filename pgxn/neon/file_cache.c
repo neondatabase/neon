@@ -176,8 +176,8 @@ typedef struct FileCacheState
 	/* followed by bitmap */
 } FileCacheState;
 
-#define FILE_CACHE_STATE_BITMAP(fcs) ((uint8*)&(fcs)->chunks[(fcs)->n_chunks])
-#define FILE_CACHE_STATE_SIZE(n_chunks)   (sizeof(FileCacheState) + (n_chunks)*sizeof(BufferTag) + ((n_chunks)+7)/8)
+#define FILE_CACHE_STATE_BITMAP(fcs)	((uint8*)&(fcs)->chunks[(fcs)->n_chunks])
+#define FILE_CACHE_STATE_SIZE(n_chunks)	(sizeof(FileCacheState) + (n_chunks)*sizeof(BufferTag) + (((n_chunks) * lfc_blocks_per_chunk)+7)/8)
 
 static HTAB	*lfc_hash;
 static int	lfc_desc = -1;
