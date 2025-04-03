@@ -25,8 +25,8 @@ impl<const A: usize> AlignedBufferMut<ConstAlign<A>> {
     /// * `align` must be a power of two,
     ///
     /// * `capacity`, when rounded up to the nearest multiple of `align`,
-    ///    must not overflow isize (i.e., the rounded value must be
-    ///    less than or equal to `isize::MAX`).
+    ///   must not overflow isize (i.e., the rounded value must be
+    ///   less than or equal to `isize::MAX`).
     pub fn with_capacity(capacity: usize) -> Self {
         AlignedBufferMut {
             raw: RawAlignedBuffer::with_capacity(capacity),
