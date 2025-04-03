@@ -243,69 +243,75 @@ fn initialize_config(
 
     let config_file_contents =
         std::fs::read_to_string(cfg_file_path).context("read config file from filesystem")?;
-    let deserializer = toml_edit::de::Deserializer::from_str(&config_file_contents)
-        .context("build toml deserializer")?;
-    let mut path_to_error_track = serde_path_to_error::Track::new();
-    let deserializer =
-        serde_path_to_error::Deserializer::new(deserializer, &mut path_to_error_track);
-    let config_toml: pageserver_api::config::ConfigToml =
-        serde::Deserialize::deserialize(deserializer).context("deserialize config toml")?;
 
-    // Compare original and re-serialized TOML to detect unknown fields
-    let ignored = {
-        let original_doc = config_file_contents
-            .parse::<toml_edit::Document>()
-            .context("parse original config as toml document")?;
-        let reserialized_doc = toml_edit::ser::to_document(&config_toml)
-            .context("re-serialize config to toml document")?;
-
-        // Collect paths to all keys in both documents
-        let mut ignored_paths = Vec::new();
-
-        fn visit_table(
-            table: &dyn toml_edit::TableLike,
-            path: &mut Vec<String>,
-            paths: &mut Vec<String>,
-        ) {
-            for (key, value) in table.iter() {
-                path.push(key.to_string());
-                if let Some(subtable) = value.as_table_like() {
-                    visit_table(subtable, path, paths);
-                } else {
-                    paths.push(path.join("."));
-                }
-                path.pop();
-            }
-        }
-
-        let mut original_paths = Vec::new();
-        visit_table(
-            original_doc.as_table(),
-            &mut Vec::new(),
-            &mut original_paths,
-        );
-
-        let mut reserialized_paths = Vec::new();
-        visit_table(
-            reserialized_doc.as_table(),
-            &mut Vec::new(),
-            &mut reserialized_paths,
-        );
-
-        // Find paths that exist in original but not in reserialized
-        for path in original_paths {
-            if !reserialized_paths.contains(&path) {
-                ignored_paths.push(path);
-            }
-        }
-        ignored_paths
+    // Deserialize the config file contents into a ConfigToml.
+    let config_toml: pageserver_api::config::ConfigToml = {
+        let deserializer = toml_edit::de::Deserializer::from_str(&config_file_contents)
+            .context("build toml deserializer")?;
+        let mut path_to_error_track = serde_path_to_error::Track::new();
+        let deserializer =
+            serde_path_to_error::Deserializer::new(deserializer, &mut path_to_error_track);
+        serde::Deserialize::deserialize(deserializer).context("deserialize config toml")?
     };
 
+    // Find unknown fields by re-serializing the parsed ConfigToml and comparing it to the on-disk file.
+    // Any fields that are only in the on-disk version are unknown.
+    // (The assumption here is that the ConfigToml doesn't to skip_serializing_if.)
+    // (Make sure to read the ConfigToml doc comment on why we only want to warn about, but not fail startup, on unknown fields).
+    let ignored = {
+        let ondisk_toml = config_file_contents
+            .parse::<toml_edit::DocumentMut>()
+            .context("parse original config as toml document")?;
+        let parsed_toml = toml_edit::ser::to_document(&config_toml)
+            .context("re-serialize config to toml document")?;
+
+        IgnoredConfigItems {
+            paths: find_ignored_fields(ondisk_toml, parsed_toml),
+        }
+    };
+
+    // Construct the runtime god object (it's called PageServerConf but actually is just global shared state).
     let conf = PageServerConf::parse_and_validate(identity.id, config_toml, workdir)
         .context("runtime-validation of config toml")?;
     let conf = Box::leak(Box::new(conf));
-    let ignored = IgnoredConfigItems { paths: ignored };
+
     Ok((conf, ignored))
+}
+
+fn find_ignored_fields(
+    ondisk_toml: toml_edit::DocumentMut,
+    parsed_toml: toml_edit::DocumentMut,
+) -> Vec<String> {
+    let mut ignored = Vec::new();
+
+    fn visit(table: &dyn toml_edit::TableLike, path: &mut Vec<String>, paths: &mut Vec<String>) {
+        for (key, value) in table.iter() {
+            path.push(key.to_string());
+            if let Some(subtable) = value.as_table_like() {
+                visit(subtable, path, paths);
+            } else {
+                paths.push(path.join("."));
+            }
+            path.pop();
+        }
+    }
+
+    let mut original_paths = Vec::new();
+    visit(ondisk_toml.as_table(), &mut Vec::new(), &mut original_paths);
+
+    let mut reserialized_paths = Vec::new();
+    visit(
+        parsed_toml.as_table(),
+        &mut Vec::new(),
+        &mut reserialized_paths,
+    );
+
+    for path in original_paths {
+        if !reserialized_paths.contains(&path) {
+            ignored.push(path);
+        }
+    }
+    ignored
 }
 
 struct WaitForPhaseResult<F: std::future::Future + Unpin> {
