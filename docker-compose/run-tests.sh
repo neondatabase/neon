@@ -25,6 +25,17 @@ if [[ -v BENCHMARK_CONNSTR ]]; then
     exit 1
   fi
 fi
+REGULAR_USER=false
+while getopts r arg; do
+  case $arg in
+  r)
+    REGULAR_USER=true
+    shift $((OPTIND-1))
+    ;;
+  *) :
+    ;;
+  esac
+done
 
 extdir=${1}
 
@@ -37,6 +48,11 @@ for d in ${LIST}; do
       FAILED="${d} ${FAILED}"
       break
     fi
+    if [[ ${REGULAR_USER} = true ]] && [ -f "${d}"/regular-test.sh ]; then
+       "${d}/regular-test.sh" || FAILED="${d} ${FAILED}"
+       continue
+    fi
+
     if [ -f "${d}/neon-test.sh" ]; then
        "${d}/neon-test.sh" || FAILED="${d} ${FAILED}"
     else
