@@ -280,11 +280,31 @@ fn find_ignored_fields(
 ) -> Vec<String> {
     let mut ignored = Vec::new();
 
-    fn visit(table: &dyn toml_edit::TableLike, path: &mut Vec<String>, paths: &mut Vec<String>) {
+    fn visit_table(
+        table: &dyn toml_edit::TableLike,
+        path: &mut Vec<String>,
+        paths: &mut Vec<String>,
+    ) {
         for (key, value) in table.iter() {
             path.push(key.to_string());
             if let Some(subtable) = value.as_table_like() {
-                visit(subtable, path, paths);
+                visit_table(subtable, path, paths);
+            } else if let Some(array_of_tables) = value.as_array_of_tables() {
+                for (i, table) in array_of_tables.iter().enumerate() {
+                    path.push(format!("[{i}]"));
+                    visit_table(table, path, paths);
+                    path.pop();
+                }
+            } else if let Some(array) = value.as_array() {
+                for (i, item) in array.iter().enumerate() {
+                    path.push(format!("[{i}]"));
+                    if let Some(subtable) = item.as_inline_table() {
+                        visit_table(subtable, path, paths);
+                    } else {
+                        paths.push(path.join("."));
+                    }
+                    path.pop();
+                }
             } else {
                 paths.push(path.join("."));
             }
@@ -292,18 +312,23 @@ fn find_ignored_fields(
         }
     }
 
-    let mut original_paths = Vec::new();
-    visit(ondisk_toml.as_table(), &mut Vec::new(), &mut original_paths);
-
-    let mut reserialized_paths = Vec::new();
-    visit(
-        parsed_toml.as_table(),
+    let mut ondisk_toml_paths = Vec::new();
+    visit_table(
+        ondisk_toml.as_table(),
         &mut Vec::new(),
-        &mut reserialized_paths,
+        &mut ondisk_toml_paths,
     );
 
-    for path in original_paths {
-        if !reserialized_paths.contains(&path) {
+    let mut parsed_toml_paths = Vec::new();
+    visit_table(
+        parsed_toml.as_table(),
+        &mut Vec::new(),
+        &mut parsed_toml_paths,
+    );
+
+    // XXX: this is O(n^2)
+    for path in ondisk_toml_paths {
+        if !parsed_toml_paths.contains(&path) {
             ignored.push(path);
         }
     }
@@ -857,4 +882,80 @@ fn cli() -> Command {
 #[test]
 fn verify_cli() {
     cli().debug_assert();
+}
+
+#[cfg(test)]
+mod find_ignored_fields_tests {
+
+    fn test_impl(original: &str, parsed: &str, expect: [&str; 1]) {
+        let original: toml_edit::DocumentMut = original.parse().expect("parse original config");
+        let parsed: toml_edit::DocumentMut = parsed.parse().expect("parse re-serialized config");
+
+        let ignored = super::find_ignored_fields(original, parsed);
+        assert_eq!(ignored, &expect);
+    }
+
+    #[test]
+    fn top_level() {
+        test_impl(
+            r#"
+                [a]
+                b = 1
+                c = 2
+                d = 3
+            "#,
+            r#"
+                [a]
+                b = 1
+                c = 2
+            "#,
+            ["a.d"],
+        );
+    }
+
+    #[test]
+    fn nested() {
+        test_impl(
+            r#"
+                [a.b.c]
+                d = 23
+            "#,
+            r#"
+                [a]
+                e = 42
+            "#,
+            ["a.b.c.d"],
+        );
+    }
+
+    #[test]
+    fn array_of_tables() {
+        test_impl(
+            r#"
+                [[a]]
+                b = 1
+                c = 2
+                d = 3
+            "#,
+            r#"
+                [[a]]
+                b = 1
+                c = 2
+            "#,
+            ["a.[0].d"],
+        );
+    }
+
+    #[test]
+    fn array() {
+        test_impl(
+            r#"
+            foo = [ {bar = 23} ]
+            "#,
+            r#"
+            foo = [ { blup = 42 }]
+            "#,
+            ["foo.[0].bar"],
+        );
+    }
 }
