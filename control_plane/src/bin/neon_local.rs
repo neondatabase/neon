@@ -1720,11 +1720,10 @@ async fn handle_safekeeper(subcmd: &SafekeeperCmd, env: &local_env::LocalEnv) ->
 async fn handle_s3proxy(subcmd: &S3ProxyCmd, env: &local_env::LocalEnv) -> Result<()> {
     use S3ProxyCmd::*;
     let proxy = S3ProxyNode::from_env(env);
-    let read_log = || std::fs::read_to_string(proxy.log_file());
     match subcmd {
         Start(S3ProxyStartCmd { start_timeout }) => {
             if let Err(e) = proxy.start(start_timeout).await {
-                eprintln!("s3proxy start failed: {e}\n{}", read_log()?);
+                eprintln!("s3proxy start failed: {e}");
                 exit(1);
             }
         }
@@ -1734,7 +1733,7 @@ async fn handle_s3proxy(subcmd: &S3ProxyCmd, env: &local_env::LocalEnv) -> Resul
                 StopMode::Immediate => true,
             };
             if let Err(e) = proxy.stop(immediate) {
-                eprintln!("proxy stop failed: {e}\n{}", read_log()?);
+                eprintln!("proxy stop failed: {e}");
                 exit(1);
             }
         }

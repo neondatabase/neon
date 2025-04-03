@@ -59,11 +59,7 @@ impl S3ProxyNode {
     }
 
     pub async fn start(&self, retry_timeout: &Duration) -> Result<()> {
-        println!(
-            "Starting s3 proxy at {}, data dir {}",
-            self.listen_addr(),
-            self.data_dir
-        );
+        println!("Starting s3 proxy at {}", self.listen_addr());
         std::io::stdout().flush().context("flush stdout")?;
 
         let process_status_check = || async {
@@ -79,7 +75,7 @@ impl S3ProxyNode {
             }
         };
 
-        start_process(
+        let res = start_process(
             "s3proxy",
             &self.data_dir.clone().into_std_path_buf(),
             &self.bin.clone().into_std_path_buf(),
@@ -89,14 +85,19 @@ impl S3ProxyNode {
             retry_timeout,
             process_status_check,
         )
-        .await
+        .await;
+        if res.is_err() {
+            eprintln!("{}", std::fs::read_to_string(self.log_file())?);
+        }
+
+        res
     }
 
     pub fn stop(&self, immediate: bool) -> anyhow::Result<()> {
         stop_process(immediate, "s3proxy", &self.pid_file())
     }
 
-    pub fn log_file(&self) -> Utf8PathBuf {
+    fn log_file(&self) -> Utf8PathBuf {
         self.data_dir.join("s3proxy.log")
     }
 
