@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from requests import HTTPError
+
 import fixtures.utils
 import pytest
 from fixtures.auth_tokens import TokenScope
@@ -4072,11 +4074,13 @@ def test_storage_controller_location_conf_equivalence(neon_env_builder: NeonEnvB
 
     assert reconciles_after_restart == 0
 
-
+@run_only_on_default_postgres("PG version is not interesting here")
 @pytest.mark.parametrize("restart_storcon", [True, False])
 def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart_storcon: bool):
     """
     Test that the storcon can create and delete tenants and timelines with a safekeeper being down.
+      - restart_storcon: tests whether the pending ops are persisted.
+        if we don't restart, we test that we don't require it to come from the db.
     """
 
     neon_env_builder.num_safekeepers = 3
@@ -4138,16 +4142,14 @@ def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart
 
     env.storage_controller.pageserver_api().tenant_delete(tenant_id)
 
-    # ensure log msgs in safekeeper ensure the tenant is gone
-    def logged_deleted_on_first_sks():
-        env.safekeepers[0].assert_log_contains(
-            f"deleting timeline {tenant_id}/{timeline_id} from disk"
-        )
-        env.safekeepers[2].assert_log_contains(
-            f"deleting timeline {tenant_id}/{timeline_id} from disk"
-        )
+    # ensure the safekeeper deleted the timeline
+    def timeline_deleted_on_active_sks():
+        with pytest.raises(HTTPError, match="Not Found"):
+            env.safekeepers[0].http_client().timeline_status(tenant_id, timeline_id)
+        with pytest.raises(HTTPError, match="Not Found"):
+            env.safekeepers[2].http_client().timeline_status(tenant_id, timeline_id)
 
-    wait_until(logged_deleted_on_first_sks)
+    wait_until(timeline_deleted_on_active_sks)
 
     if restart_storcon:
         # Restart the storcon to check that we persist operations
@@ -4157,12 +4159,11 @@ def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart
     env.safekeepers[1].start()
 
     # ensure that there is log msgs for the third safekeeper too
-    def logged_deleted_on_sk():
-        env.safekeepers[1].assert_log_contains(
-            f"deleting timeline {tenant_id}/{timeline_id} from disk"
-        )
+    def timeline_deleted_on_sk():
+        with pytest.raises(HTTPError, match="Not Found"):
+            env.safekeepers[1].http_client().timeline_status(tenant_id, timeline_id)
 
-    wait_until(logged_deleted_on_sk)
+    wait_until(timeline_deleted_on_sk)
 
 
 @pytest.mark.parametrize("wrong_az", [True, False])
