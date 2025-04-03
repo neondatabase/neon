@@ -15,7 +15,7 @@ use clap::{Arg, ArgAction, Command};
 use metrics::launch_timestamp::{LaunchTimestamp, set_launch_timestamp_metric};
 use metrics::set_build_info_metric;
 use nix::sys::socket::{setsockopt, sockopt};
-use pageserver::config::{PageServerConf, PageserverIdentity};
+use pageserver::config::{IgnoredConfigItems, PageServerConf, PageserverIdentity};
 use pageserver::controller_upcall_client::StorageControllerUpcallClient;
 use pageserver::deletion_queue::DeletionQueue;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
@@ -130,7 +130,7 @@ fn main() -> anyhow::Result<()> {
     // Warn about ignored config items; see pageserver_api::config::ConfigToml
     // doc comment for rationale why we prefer this over serde(deny_unknown_fields).
     {
-        let IgnoredConfigItems { paths } = ignored;
+        let IgnoredConfigItems { paths } = &ignored;
         for path in paths {
             warn!(?path, "ignoring unknown configuration item");
         }
@@ -200,14 +200,10 @@ fn main() -> anyhow::Result<()> {
     tracing::info!("Initializing page_cache...");
     page_cache::init(conf.page_cache_size);
 
-    start_pageserver(launch_ts, conf).context("Failed to start pageserver")?;
+    start_pageserver(launch_ts, conf, ignored).context("Failed to start pageserver")?;
 
     scenario.teardown();
     Ok(())
-}
-
-struct IgnoredConfigItems {
-    paths: Vec<String>,
 }
 
 fn initialize_config(
@@ -362,6 +358,7 @@ fn startup_checkpoint(started_at: Instant, phase: &str, human_phase: &str) {
 fn start_pageserver(
     launch_ts: &'static LaunchTimestamp,
     conf: &'static PageServerConf,
+    ignored: IgnoredConfigItems,
 ) -> anyhow::Result<()> {
     // Monotonic time for later calculating startup duration
     let started_startup_at = Instant::now();
@@ -384,7 +381,7 @@ fn start_pageserver(
         pageserver::metrics::tokio_epoll_uring::Collector::new(),
     ))
     .unwrap();
-    pageserver::preinitialize_metrics(conf);
+    pageserver::preinitialize_metrics(conf, ignored);
 
     // If any failpoints were set from FAILPOINTS environment variable,
     // print them to the log for debugging purposes

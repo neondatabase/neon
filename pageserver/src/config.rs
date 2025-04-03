@@ -208,6 +208,12 @@ pub struct PageServerConf {
     pub generate_unarchival_heatmap: bool,
 }
 
+/// List of items in the on-disk config file that we ignored when deserializing into
+/// [`pageserver_api::config::ConfigToml`].
+pub struct IgnoredConfigItems {
+    pub paths: Vec<String>,
+}
+
 /// Token for authentication to safekeepers
 ///
 /// We do not want to store this in a PageServerConf because the latter may be logged
