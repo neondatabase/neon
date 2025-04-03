@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::PERF_TRACE_TARGET;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use bytes::Bytes;
@@ -96,7 +97,9 @@ use super::{
 };
 use crate::aux_file::AuxFileSizeEstimator;
 use crate::config::PageServerConf;
-use crate::context::{DownloadBehavior, RequestContext};
+use crate::context::{
+    DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
+};
 use crate::disk_usage_eviction_task::{DiskUsageEvictionInfo, EvictionCandidate, finite_f32};
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::l0_flush::{self, L0FlushGlobalState};
@@ -870,9 +873,14 @@ pub(crate) enum CompactFlags {
     OnlyL0Compaction,
     EnhancedGcBottomMostCompaction,
     DryRun,
-    /// Disables compaction yielding e.g. due to high L0 count. This is set e.g. when requesting
-    /// compaction via HTTP API.
-    NoYield,
+    /// Makes image compaction yield if there's pending L0 compaction. This should always be used in
+    /// the background compaction task, since we want to aggressively compact down L0 to bound
+    /// read amplification.
+    ///
+    /// It only makes sense to use this when `compaction_l0_first` is enabled (such that we yield to
+    /// an L0 compaction pass), and without `OnlyL0Compaction` (L0 compaction shouldn't yield for L0
+    /// compaction).
+    YieldForL0,
 }
 
 #[serde_with::serde_as]
@@ -888,6 +896,12 @@ pub(crate) struct CompactRequest {
     pub sub_compaction: bool,
     /// Max job size for each subcompaction job.
     pub sub_compaction_max_job_size_mb: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct MarkInvisibleRequest {
+    #[serde(default)]
+    pub is_visible: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1278,9 +1292,22 @@ impl Timeline {
         };
         reconstruct_state.read_path = read_path;
 
-        let traversal_res: Result<(), _> = self
-            .get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, ctx)
-            .await;
+        let traversal_res: Result<(), _> = {
+            let ctx = RequestContextBuilder::from(ctx)
+                .perf_span(|crnt_perf_span| {
+                    info_span!(
+                        target: PERF_TRACE_TARGET,
+                        parent: crnt_perf_span,
+                        "PLAN_IO",
+                    )
+                })
+                .attached_child();
+
+            self.get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, &ctx)
+                .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
+                .await
+        };
+
         if let Err(err) = traversal_res {
             // Wait for all the spawned IOs to complete.
             // See comments on `spawn_io` inside `storage_layer` for more details.
@@ -1294,14 +1321,46 @@ impl Timeline {
 
         let layers_visited = reconstruct_state.get_layers_visited();
 
+        let ctx = RequestContextBuilder::from(ctx)
+            .perf_span(|crnt_perf_span| {
+                info_span!(
+                    target: PERF_TRACE_TARGET,
+                    parent: crnt_perf_span,
+                    "RECONSTRUCT",
+                )
+            })
+            .attached_child();
+
         let futs = FuturesUnordered::new();
         for (key, state) in std::mem::take(&mut reconstruct_state.keys) {
             futs.push({
                 let walredo_self = self.myself.upgrade().expect("&self method holds the arc");
+                let ctx = RequestContextBuilder::from(&ctx)
+                    .perf_span(|crnt_perf_span| {
+                        info_span!(
+                            target: PERF_TRACE_TARGET,
+                            parent: crnt_perf_span,
+                            "RECONSTRUCT_KEY",
+                            key = %key,
+                        )
+                    })
+                    .attached_child();
+
                 async move {
                     assert_eq!(state.situation, ValueReconstructSituation::Complete);
 
-                    let converted = match state.collect_pending_ios().await {
+                    let res = state
+                        .collect_pending_ios()
+                        .maybe_perf_instrument(&ctx, |crnt_perf_span| {
+                            info_span!(
+                                target: PERF_TRACE_TARGET,
+                                parent: crnt_perf_span,
+                                "WAIT_FOR_IO_COMPLETIONS",
+                            )
+                        })
+                        .await;
+
+                    let converted = match res {
                         Ok(ok) => ok,
                         Err(err) => {
                             return (key, Err(err));
@@ -1318,16 +1377,27 @@ impl Timeline {
                         "{converted:?}"
                     );
 
-                    (
-                        key,
-                        walredo_self.reconstruct_value(key, lsn, converted).await,
-                    )
+                    let walredo_deltas = converted.num_deltas();
+                    let walredo_res = walredo_self
+                        .reconstruct_value(key, lsn, converted)
+                        .maybe_perf_instrument(&ctx, |crnt_perf_span| {
+                            info_span!(
+                                target: PERF_TRACE_TARGET,
+                                parent: crnt_perf_span,
+                                "WALREDO",
+                                deltas = %walredo_deltas,
+                            )
+                        })
+                        .await;
+
+                    (key, walredo_res)
                 }
             });
         }
 
         let results = futs
             .collect::<BTreeMap<Key, Result<Bytes, PageReconstructError>>>()
+            .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
             .await;
 
         // For aux file keys (v1 or v2) the vectored read path does not return an error
@@ -1891,18 +1961,19 @@ impl Timeline {
         // out by other background tasks (including image compaction). We request this via
         // `BackgroundLoopKind::L0Compaction`.
         //
-        // If this is a regular compaction pass, and L0-only compaction is enabled in the config,
-        // then we should yield for immediate L0 compaction if necessary while we're waiting for the
-        // background task semaphore. There's no point yielding otherwise, since we'd just end up
-        // right back here.
+        // Yield for pending L0 compaction while waiting for the semaphore.
         let is_l0_only = options.flags.contains(CompactFlags::OnlyL0Compaction);
         let semaphore_kind = match is_l0_only && self.get_compaction_l0_semaphore() {
             true => BackgroundLoopKind::L0Compaction,
             false => BackgroundLoopKind::Compaction,
         };
-        let yield_for_l0 = !is_l0_only
-            && self.get_compaction_l0_first()
-            && !options.flags.contains(CompactFlags::NoYield);
+        let yield_for_l0 = options.flags.contains(CompactFlags::YieldForL0);
+        if yield_for_l0 {
+            // If this is an L0 pass, it doesn't make sense to yield for L0.
+            debug_assert!(!is_l0_only, "YieldForL0 during L0 pass");
+            // If `compaction_l0_first` is disabled, there's no point yielding.
+            debug_assert!(self.get_compaction_l0_first(), "YieldForL0 without L0 pass");
+        }
 
         let acquire = async move {
             let guard = self.compaction_lock.lock().await;
@@ -2209,6 +2280,10 @@ impl Timeline {
         self.remote_client.is_archived()
     }
 
+    pub(crate) fn is_invisible(&self) -> Option<bool> {
+        self.remote_client.is_invisible()
+    }
+
     pub(crate) fn is_stopping(&self) -> bool {
         self.current_state() == TimelineState::Stopping
     }
@@ -2231,7 +2306,7 @@ impl Timeline {
                         .await
                         .expect("holding a reference to self");
                 }
-                TimelineState::Active { .. } => {
+                TimelineState::Active => {
                     return Ok(());
                 }
                 TimelineState::Broken { .. } | TimelineState::Stopping => {
@@ -3859,15 +3934,30 @@ impl Timeline {
             let TimelineVisitOutcome {
                 completed_keyspace: completed,
                 image_covered_keyspace,
-            } = Self::get_vectored_reconstruct_data_timeline(
-                timeline,
-                keyspace.clone(),
-                cont_lsn,
-                reconstruct_state,
-                &self.cancel,
-                ctx,
-            )
-            .await?;
+            } = {
+                let ctx = RequestContextBuilder::from(ctx)
+                    .perf_span(|crnt_perf_span| {
+                        info_span!(
+                            target: PERF_TRACE_TARGET,
+                            parent: crnt_perf_span,
+                            "PLAN_IO_TIMELINE",
+                            timeline = %timeline.timeline_id,
+                            lsn = %cont_lsn,
+                        )
+                    })
+                    .attached_child();
+
+                Self::get_vectored_reconstruct_data_timeline(
+                    timeline,
+                    keyspace.clone(),
+                    cont_lsn,
+                    reconstruct_state,
+                    &self.cancel,
+                    &ctx,
+                )
+                .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
+                .await?
+            };
 
             keyspace.remove_overlapping_with(&completed);
 
@@ -3911,8 +4001,24 @@ impl Timeline {
 
             // Take the min to avoid reconstructing a page with data newer than request Lsn.
             cont_lsn = std::cmp::min(Lsn(request_lsn.0 + 1), Lsn(timeline.ancestor_lsn.0 + 1));
+
+            let ctx = RequestContextBuilder::from(ctx)
+                .perf_span(|crnt_perf_span| {
+                    info_span!(
+                        target: PERF_TRACE_TARGET,
+                        parent: crnt_perf_span,
+                        "GET_ANCESTOR",
+                        timeline = %timeline.timeline_id,
+                        lsn = %cont_lsn,
+                        ancestor = %ancestor_timeline.timeline_id,
+                        ancestor_lsn = %timeline.ancestor_lsn
+                    )
+                })
+                .attached_child();
+
             timeline_owned = timeline
-                .get_ready_ancestor_timeline(ancestor_timeline, ctx)
+                .get_ready_ancestor_timeline(ancestor_timeline, &ctx)
+                .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
                 .await?;
             timeline = &*timeline_owned;
         };
@@ -7243,9 +7349,9 @@ mod tests {
 
             eprintln!("Downloading {layer} and re-generating heatmap");
 
-            let ctx = &RequestContextBuilder::extend(ctx)
+            let ctx = &RequestContextBuilder::from(ctx)
                 .download_behavior(crate::context::DownloadBehavior::Download)
-                .build();
+                .attached_child();
 
             let _resident = layer
                 .download_and_keep_resident(ctx)

@@ -639,6 +639,15 @@ async fn handle_tenant_timeline_passthrough(
         return Err(ApiError::BadRequest(anyhow::anyhow!("Missing path")));
     };
 
+    let method = match *req.method() {
+        hyper::Method::GET => reqwest::Method::GET,
+        hyper::Method::POST => reqwest::Method::POST,
+        hyper::Method::PUT => reqwest::Method::PUT,
+        hyper::Method::DELETE => reqwest::Method::DELETE,
+        hyper::Method::PATCH => reqwest::Method::PATCH,
+        _ => return Err(ApiError::BadRequest(anyhow::anyhow!("Unsupported method"))),
+    };
+
     tracing::info!(
         "Proxying request for tenant {} ({})",
         tenant_or_shard_id.tenant_id,
@@ -686,7 +695,7 @@ async fn handle_tenant_timeline_passthrough(
         node.base_url(),
         service.get_config().pageserver_jwt_token.as_deref(),
     );
-    let resp = client.get_raw(path).await.map_err(|e|
+    let resp = client.op_raw(method, path).await.map_err(|e|
         // We return 503 here because if we can't successfully send a request to the pageserver,
         // either we aren't available or the pageserver is unavailable.
         ApiError::ResourceUnavailable(format!("Error sending pageserver API request to {node}: {e}").into()))?;
@@ -1407,6 +1416,12 @@ async fn handle_upsert_safekeeper(mut req: Request<Body>) -> Result<Response<Bod
         )));
     }
 
+    if id <= 0 {
+        return Err(ApiError::BadRequest(anyhow::anyhow!(
+            "id not allowed to be zero or negative: {id}"
+        )));
+    }
+
     let req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
             return res;
@@ -1718,9 +1733,9 @@ async fn maybe_forward(req: Request<Body>) -> ForwardOutcome {
         };
 
         if *self_addr == leader_addr {
-            return ForwardOutcome::Forwarded(Err(ApiError::InternalServerError(anyhow::anyhow!(
-                "Leader is stepped down instance"
-            ))));
+            return ForwardOutcome::Forwarded(Err(ApiError::ResourceUnavailable(
+                "Leader is stepped down instance".into(),
+            )));
         }
     }
 
@@ -2247,6 +2262,17 @@ pub fn make_router(
                 RequestName("v1_tenant_passthrough"),
             )
         })
+        // Tenant timeline mark_invisible passthrough to shard zero
+        .put(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/mark_invisible",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_timeline_passthrough,
+                    RequestName("v1_tenant_timeline_mark_invisible_passthrough"),
+                )
+            },
+        )
 }
 
 #[cfg(test)]
