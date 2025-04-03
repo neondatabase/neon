@@ -4144,10 +4144,12 @@ def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart
 
     # ensure the safekeeper deleted the timeline
     def timeline_deleted_on_active_sks():
-        with pytest.raises(HTTPError, match="Not Found"):
-            env.safekeepers[0].http_client().timeline_status(tenant_id, timeline_id)
-        with pytest.raises(HTTPError, match="Not Found"):
-            env.safekeepers[2].http_client().timeline_status(tenant_id, timeline_id)
+        env.safekeepers[0].assert_log_contains(
+            f"deleting timeline {tenant_id}/{timeline_id} from disk"
+        )
+        env.safekeepers[2].assert_log_contains(
+            f"deleting timeline {tenant_id}/{timeline_id} from disk"
+        )
 
     wait_until(timeline_deleted_on_active_sks)
 
@@ -4160,8 +4162,9 @@ def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart
 
     # ensure that there is log msgs for the third safekeeper too
     def timeline_deleted_on_sk():
-        with pytest.raises(HTTPError, match="Not Found"):
-            env.safekeepers[1].http_client().timeline_status(tenant_id, timeline_id)
+        env.safekeepers[1].assert_log_contains(
+            f"deleting timeline {tenant_id}/{timeline_id} from disk"
+        )
 
     wait_until(timeline_deleted_on_sk)
 
