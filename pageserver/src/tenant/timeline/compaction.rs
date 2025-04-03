@@ -26,7 +26,7 @@ use once_cell::sync::Lazy;
 use pageserver_api::config::tenant_conf_defaults::DEFAULT_CHECKPOINT_DISTANCE;
 use pageserver_api::key::{KEY_SIZE, Key};
 use pageserver_api::keyspace::{KeySpace, ShardedRange};
-use pageserver_api::models::CompactInfoResponse;
+use pageserver_api::models::{CompactInfoResponse, CompactKeyRange};
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::shard::{ShardCount, ShardIdentity, TenantShardId};
 use pageserver_api::value::Value;
@@ -61,7 +61,7 @@ use crate::tenant::timeline::{
     DeltaLayerWriter, ImageLayerCreationOutcome, ImageLayerWriter, IoConcurrency, Layer,
     ResidentLayer, drop_rlock,
 };
-use crate::tenant::{DeltaLayer, MaybeOffloaded, gc_block};
+use crate::tenant::{DeltaLayer, MaybeOffloaded};
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 
 /// Maximum number of deltas before generating an image layer in bottom-most compaction.
@@ -123,7 +123,6 @@ impl GcCompactionQueueItem {
 #[derive(Default)]
 struct GcCompactionGuardItems {
     notify: Option<tokio::sync::oneshot::Sender<()>>,
-    gc_guard: Option<gc_block::Guard>,
     permit: Option<OwnedSemaphorePermit>,
 }
 
@@ -319,7 +318,12 @@ impl GcCompactionQueue {
                         flags
                     },
                     sub_compaction: true,
-                    compact_key_range: None,
+                    // Only auto-trigger gc-compaction over the data keyspace due to concerns in
+                    // https://github.com/neondatabase/neon/issues/11318.
+                    compact_key_range: Some(CompactKeyRange {
+                        start: Key::MIN,
+                        end: Key::metadata_key_range().start,
+                    }),
                     compact_lsn_range: None,
                     sub_compaction_max_job_size_mb: None,
                 },
@@ -343,7 +347,6 @@ impl GcCompactionQueue {
         info!("compaction job id={} finished", id);
         let mut guard = self.inner.lock().unwrap();
         if let Some(items) = guard.guards.remove(&id) {
-            drop(items.gc_guard);
             if let Some(tx) = items.notify {
                 let _ = tx.send(());
             }
@@ -360,7 +363,6 @@ impl GcCompactionQueue {
         id: GcCompactionJobId,
         options: CompactOptions,
         timeline: &Arc<Timeline>,
-        gc_block: &GcBlock,
         auto: bool,
     ) -> Result<(), CompactionError> {
         info!(
@@ -384,16 +386,6 @@ impl GcCompactionQueue {
             info!("no jobs to run, skipping scheduled compaction task");
             self.notify_and_unblock(id);
         } else {
-            let gc_guard = match gc_block.start().await {
-                Ok(guard) => guard,
-                Err(e) => {
-                    return Err(CompactionError::Other(anyhow!(
-                        "cannot run gc-compaction because gc is blocked: {}",
-                        e
-                    )));
-                }
-            };
-
             let jobs_len = jobs.len();
             let mut pending_tasks = Vec::new();
             // gc-compaction might pick more layers or fewer layers to compact. The L2 LSN does not need to be accurate.
@@ -428,7 +420,6 @@ impl GcCompactionQueue {
 
             {
                 let mut guard = self.inner.lock().unwrap();
-                guard.guards.entry(id).or_default().gc_guard = Some(gc_guard);
                 let mut tasks = Vec::new();
                 for task in pending_tasks {
                     let id = guard.next_id();
@@ -518,29 +509,27 @@ impl GcCompactionQueue {
                     info!(
                         "running scheduled enhanced gc bottom-most compaction with sub-compaction, splitting compaction jobs"
                     );
-                    self.handle_sub_compaction(id, options, timeline, gc_block, auto)
+                    self.handle_sub_compaction(id, options, timeline, auto)
                         .await?;
                 } else {
                     // Auto compaction always enables sub-compaction so we don't need to handle update_l2_lsn
                     // in this branch.
-                    let gc_guard = match gc_block.start().await {
+                    let _gc_guard = match gc_block.start().await {
                         Ok(guard) => guard,
                         Err(e) => {
+                            self.notify_and_unblock(id);
+                            self.clear_running_job();
                             return Err(CompactionError::Other(anyhow!(
                                 "cannot run gc-compaction because gc is blocked: {}",
                                 e
                             )));
                         }
                     };
-                    {
-                        let mut guard = self.inner.lock().unwrap();
-                        guard.guards.entry(id).or_default().gc_guard = Some(gc_guard);
-                    }
                     let res = timeline.compact_with_options(cancel, options, ctx).await;
                     let compaction_result = match res {
                         Ok(res) => res,
                         Err(err) => {
-                            warn!(%err, "failed to run gc-compaction, gc unblocked");
+                            warn!(%err, "failed to run gc-compaction");
                             self.notify_and_unblock(id);
                             self.clear_running_job();
                             return Err(err);
@@ -553,7 +542,25 @@ impl GcCompactionQueue {
             }
             GcCompactionQueueItem::SubCompactionJob(options) => {
                 // TODO: error handling, clear the queue if any task fails?
-                let compaction_result = timeline.compact_with_options(cancel, options, ctx).await?;
+                let _gc_guard = match gc_block.start().await {
+                    Ok(guard) => guard,
+                    Err(e) => {
+                        self.clear_running_job();
+                        return Err(CompactionError::Other(anyhow!(
+                            "cannot run gc-compaction because gc is blocked: {}",
+                            e
+                        )));
+                    }
+                };
+                let res = timeline.compact_with_options(cancel, options, ctx).await;
+                let compaction_result = match res {
+                    Ok(res) => res,
+                    Err(err) => {
+                        warn!(%err, "failed to run gc-compaction subcompaction job");
+                        self.clear_running_job();
+                        return Err(err);
+                    }
+                };
                 if compaction_result == CompactionOutcome::YieldForL0 {
                     // We will permenantly give up a task if we yield for L0 compaction: the preempted subcompaction job won't be running
                     // again. This ensures that we don't keep doing duplicated work within gc-compaction. Not directly returning here because
