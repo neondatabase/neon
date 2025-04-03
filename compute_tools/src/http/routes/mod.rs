@@ -3,6 +3,7 @@ use compute_api::responses::ComputeStatusResponse;
 use crate::compute::ComputeState;
 
 pub(in crate::http) mod check_writability;
+pub(in crate::http) mod prewarm_lfc;
 pub(in crate::http) mod configure;
 pub(in crate::http) mod database_schema;
 pub(in crate::http) mod dbs_and_roles;

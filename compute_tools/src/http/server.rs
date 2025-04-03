@@ -23,7 +23,7 @@ use super::{
     middleware::authorize::Authorize,
     routes::{
         check_writability, configure, database_schema, dbs_and_roles, extension_server, extensions,
-        grants, insights, metrics, metrics_json, status, terminate,
+        prewarm_lfc, grants, insights, metrics, metrics_json, status, terminate,
     },
 };
 use crate::compute::ComputeNode;
@@ -85,6 +85,8 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                     Router::<Arc<ComputeNode>>::new().route("/metrics", get(metrics::get_metrics));
 
                 let authenticated_router = Router::<Arc<ComputeNode>>::new()
+                    .route("/prewarm_lfc", post(prewarm_lfc::prewarm_lfc))
+                    .route("/prewarm_lfc_offload", post(prewarm_lfc::prewarm_lfc_offload))
                     .route("/check_writability", post(check_writability::is_writable))
                     .route("/configure", post(configure::configure))
                     .route("/database_schema", get(database_schema::get_schema_dump))

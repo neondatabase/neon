@@ -1,8 +1,7 @@
 use metrics::core::{AtomicF64, Collector, GenericGauge};
 use metrics::proto::MetricFamily;
 use metrics::{
-    IntCounterVec, IntGaugeVec, UIntGaugeVec, register_gauge, register_int_counter_vec,
-    register_int_gauge_vec, register_uint_gauge_vec,
+    register_gauge, register_int_counter, register_int_counter_vec, register_int_gauge_vec, register_uint_gauge_vec, IntCounter, IntCounterVec, IntGaugeVec, UIntGaugeVec
 };
 use once_cell::sync::Lazy;
 
@@ -81,6 +80,26 @@ pub(crate) static COMPUTE_CTL_UP: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+/// Should be either 0 or 1 per compute. Needed as neon.file_cache_prewarm_batch == 0
+/// doesn't mean we never tried to prewarm. On the other hand, smth. like
+/// LFC_PREWARMED_PAGES is excessive as we can query this directly from extension
+pub(crate) static LFC_PREWARM_REQUESTS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "compute_ctl_lfc_prewarm_requests_total",
+        "Total number of LFC prewarm requests made by compute_ctl",
+    )
+    .expect("failed to define a metric")
+});
+
+/// Should be either 0 or 1 per compute.
+pub(crate) static LFC_PREWARM_OFFLOAD_REQUESTS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "compute_ctl_lfc_prewarm_offload_requests_total",
+        "Total number of LFC prewarm offload requests made by compute_ctl",
+    )
+    .expect("failed to define a metric")
+});
+
 pub fn collect() -> Vec<MetricFamily> {
     let mut metrics = COMPUTE_CTL_UP.collect();
     metrics.extend(INSTALLED_EXTENSIONS.collect());
@@ -88,5 +107,7 @@ pub fn collect() -> Vec<MetricFamily> {
     metrics.extend(REMOTE_EXT_REQUESTS_TOTAL.collect());
     metrics.extend(DB_MIGRATION_FAILED.collect());
     metrics.extend(AUDIT_LOG_DIR_SIZE.collect());
+    metrics.extend(LFC_PREWARM_REQUESTS.collect());
+    metrics.extend(LFC_PREWARM_OFFLOAD_REQUESTS.collect());
     metrics
 }
