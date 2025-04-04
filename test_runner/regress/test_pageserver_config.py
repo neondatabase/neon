@@ -1,8 +1,10 @@
 import pytest
 from fixtures.neon_fixtures import NeonEnv
+from fixtures.utils import run_only_on_default_postgres
 
 
 @pytest.mark.parametrize("what", ["default", "top_level", "nested"])
+@run_only_on_default_postgres(reason="does not use postgres")
 def test_unknown_config_items_handling(neon_simple_env: NeonEnv, what: str):
     """
     Ensure we log unknown config fields.
