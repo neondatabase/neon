@@ -1,4 +1,5 @@
 import re
+
 import pytest
 from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import run_only_on_default_postgres
@@ -28,7 +29,7 @@ def test_unknown_config_items_handling(neon_simple_env: NeonEnv, what: str):
     def get_metric() -> str:
         metrics = env.pageserver.http_client().get_metrics()
         samples = metrics.query_all("pageserver_config_ignored_items")
-        by_item = { sample.labels["item"]: sample.value for sample in samples }
+        by_item = {sample.labels["item"]: sample.value for sample in samples}
         assert by_item[""] == 0, "must always contain the empty item with value 0"
         del by_item[""]
         return by_item
@@ -36,7 +37,9 @@ def test_unknown_config_items_handling(neon_simple_env: NeonEnv, what: str):
     expected_ignored_item = env.pageserver.edit_config_toml(edit_fn)
 
     if expected_ignored_item is not None:
-        expected_ignored_item_log_line_re = r".*ignoring unknown configuration item.*" + re.escape(expected_ignored_item)
+        expected_ignored_item_log_line_re = r".*ignoring unknown configuration item.*" + re.escape(
+            expected_ignored_item
+        )
         env.pageserver.allowed_errors.append(expected_ignored_item_log_line_re)
 
     if expected_ignored_item is not None:
