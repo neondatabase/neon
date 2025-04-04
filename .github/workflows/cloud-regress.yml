@@ -60,10 +60,8 @@ jobs:
             ULID=pgx_ulid
           fi
           LIBS=timescaledb:rag_bge_small_en_v15,rag_jina_reranker_v1_tiny_en:$ULID
-          ( 
-          echo -n settings=; 
-          jq -c -n --arg libs $LIBS '{preload_libraries:{use_defaults:false,enabled_libraries:($libs| split(":"))}}'
-          ) >> $GITHUB_OUTPUT
+          settings=$(jq -c -n --arg libs $LIBS '{preload_libraries:{use_defaults:false,enabled_libraries:($libs| split(":"))}}')
+          echo settings=$settings >> $GITHUB_OUTPUT
           
 
       - name: Create Neon Project
