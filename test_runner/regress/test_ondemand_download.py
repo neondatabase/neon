@@ -38,7 +38,7 @@ def get_num_downloaded_layers(client: PageserverHttpClient):
     This assumes that the pageserver only has a single tenant.
     """
     value = client.get_metric_value(
-        "pageserver_remote_operation_seconds_count",
+        "pageserver_remote_timeline_client_seconds_global_count",
         {
             "file_kind": "layer",
             "op_kind": "download",

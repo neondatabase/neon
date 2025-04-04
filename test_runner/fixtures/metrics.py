@@ -132,7 +132,7 @@ PAGESERVER_GLOBAL_METRICS: tuple[str, ...] = (
     *[f"pageserver_basebackup_query_seconds_{x}" for x in ["bucket", "count", "sum"]],
     *histogram("pageserver_smgr_query_seconds_global"),
     *histogram("pageserver_wait_lsn_seconds"),
-    *histogram("pageserver_remote_operation_seconds"),
+    *histogram("pageserver_remote_timeline_client_seconds_global"),
     *histogram("pageserver_io_operations_seconds"),
     "pageserver_smgr_query_started_global_count_total",
     "pageserver_tenant_states_count",
