@@ -298,8 +298,8 @@ impl ProjectInfoCacheImpl {
         endpoint_id: &EndpointId,
         role_name: &RoleName,
     ) -> Option<Cached<&Self, Option<AuthSecret>>> {
-        let endpoint_id = EndpointIdInt::get(endpoint_id)?;
-        let role_name = RoleNameInt::get(role_name)?;
+        let endpoint_id = EndpointIdInt::try_from_str(endpoint_id)?;
+        let role_name = RoleNameInt::try_from_str(role_name)?;
         let (valid_since, ignore_cache_since) = self.get_cache_times();
         let endpoint_info = self.cache.get(&endpoint_id)?;
         let (value, ignore_cache) =
@@ -320,7 +320,7 @@ impl ProjectInfoCacheImpl {
         &self,
         endpoint_id: &EndpointId,
     ) -> Option<Cached<&Self, Arc<Vec<IpPattern>>>> {
-        let endpoint_id = EndpointIdInt::get(endpoint_id)?;
+        let endpoint_id = EndpointIdInt::try_from_str(endpoint_id)?;
         let (valid_since, ignore_cache_since) = self.get_cache_times();
         let endpoint_info = self.cache.get(&endpoint_id)?;
         let value = endpoint_info.get_allowed_ips(valid_since, ignore_cache_since);
@@ -338,7 +338,7 @@ impl ProjectInfoCacheImpl {
         &self,
         endpoint_id: &EndpointId,
     ) -> Option<Cached<&Self, Arc<Vec<String>>>> {
-        let endpoint_id = EndpointIdInt::get(endpoint_id)?;
+        let endpoint_id = EndpointIdInt::try_from_str(endpoint_id)?;
         let (valid_since, ignore_cache_since) = self.get_cache_times();
         let endpoint_info = self.cache.get(&endpoint_id)?;
         let value = endpoint_info.get_allowed_vpc_endpoint_ids(valid_since, ignore_cache_since);
@@ -359,7 +359,7 @@ impl ProjectInfoCacheImpl {
         &self,
         endpoint_id: &EndpointId,
     ) -> Option<Cached<&Self, AccessBlockerFlags>> {
-        let endpoint_id = EndpointIdInt::get(endpoint_id)?;
+        let endpoint_id = EndpointIdInt::try_from_str(endpoint_id)?;
         let (valid_since, ignore_cache_since) = self.get_cache_times();
         let endpoint_info = self.cache.get(&endpoint_id)?;
         let value = endpoint_info.get_block_public_or_vpc_access(valid_since, ignore_cache_since);
