@@ -1797,7 +1797,11 @@ impl Tenant {
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
         }
         let needs_manifest_upload =
-            offloaded_timelines_list.len() != preload.tenant_manifest.offloaded_timelines.len();
+            // Upload a new manifest if the stripe size changes. This typically happens when the
+            // stripe size is None because there was no existing manifest, but can also happen
+            // across shard splits.
+            preload.tenant_manifest.stripe_size != Some(self.get_shard_stripe_size())
+            || offloaded_timelines_list.len() != preload.tenant_manifest.offloaded_timelines.len();
         {
             let mut offloaded_timelines_accessor = self.timelines_offloaded.lock().unwrap();
             offloaded_timelines_accessor.extend(offloaded_timelines_list.into_iter());
@@ -4076,6 +4080,7 @@ impl Tenant {
 
         TenantManifest {
             version: LATEST_TENANT_MANIFEST_VERSION,
+            stripe_size: Some(self.get_shard_stripe_size()),
             offloaded_timelines: timeline_manifests,
         }
     }

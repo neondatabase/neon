@@ -6014,9 +6014,21 @@ impl Service {
             .max()
             .expect("We already validated >0 shards");
 
-        // FIXME: we have no way to recover the shard stripe size from contents of remote storage: this will
-        // only work if they were using the default stripe size.
-        let stripe_size = ShardParameters::DEFAULT_STRIPE_SIZE;
+        // Find the tenant's stripe size. This wasn't always persisted in the tenant manifest, so
+        // fall back to the original default stripe size of 32768 (256 MB) if it's not specified.
+        const ORIGINAL_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(32768);
+        let stripe_size = scan_result
+            .shards
+            .iter()
+            .find(|s| s.tenant_shard_id.shard_count == shard_count && s.generation == generation)
+            .expect("we validated >0 shards above")
+            .stripe_size
+            .unwrap_or_else(|| {
+                if shard_count.count() > 1 {
+                    warn!("unknown stripe size, assuming {ORIGINAL_STRIPE_SIZE}");
+                }
+                ORIGINAL_STRIPE_SIZE
+            });
 
         let (response, waiters) = self
             .do_tenant_create(TenantCreateRequest {
