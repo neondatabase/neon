@@ -84,8 +84,7 @@ runs:
               \"provisioner\": \"k8s-neonvm\",
               \"autoscaling_limit_min_cu\": ${MIN_CU},
               \"autoscaling_limit_max_cu\": ${MAX_CU},
-              \"settings\": ${PROJECT_SETTINGS},
-              \"default_endpoint_settings\": ${DEFAULT_ENDPOINT_SETTINGS}
+              \"settings\": ${PROJECT_SETTINGS}
             }
           }"
         project=$(curl \
