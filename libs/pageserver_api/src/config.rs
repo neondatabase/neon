@@ -51,9 +51,54 @@ pub struct NodeMetadata {
 /// If there cannot be a static default value because we need to make runtime
 /// checks to determine the default, make it an `Option` (which defaults to None).
 /// The runtime check should be done in the consuming crate, i.e., `pageserver`.
+///
+/// Unknown fields are silently ignored during deserialization.
+/// The alternative, which we used in the past, was to set `deny_unknown_fields`,
+/// which fails deserialization, and hence pageserver startup, if there is an unknown field.
+/// The reason we don't do that anymore is that it complicates
+/// usage of config fields for feature flagging, which we commonly do for
+/// region-by-region rollouts.
+/// The complications mainly arise because the `pageserver.toml` contents on a
+/// prod server have a separate lifecycle from the pageserver binary.
+/// For instance, `pageserver.toml` contents today are defined in the internal
+/// infra repo, and thus introducing a new config field to pageserver and
+/// rolling it out to prod servers are separate commits in separate repos
+/// that can't be made or rolled back atomically.
+/// Rollbacks in particular pose a risk with deny_unknown_fields because
+/// the old pageserver binary may reject a new config field, resulting in
+/// an outage unless the person doing the pageserver rollback remembers
+/// to also revert the commit that added the config field in to the
+/// `pageserver.toml` templates in the internal infra repo.
+/// (A pre-deploy config check would eliminate this risk during rollbacks,
+///  cf [here](https://github.com/neondatabase/cloud/issues/24349).)
+/// In addition to this compatibility problem during emergency rollbacks,
+/// deny_unknown_fields adds further complications when decomissioning a feature
+/// flag: with deny_unknown_fields, we can't remove a flag from the [`ConfigToml`]
+/// until all prod servers' `pageserver.toml` files have been updated to a version
+/// that doesn't specify the flag. Otherwise new software would fail to start up.
+/// This adds the requirement for an intermediate step where the new config field
+/// is accepted but ignored, prolonging the decomissioning process by an entire
+/// release cycle.
+/// By contrast  with unknown fields silently ignored, decomissioning a feature
+/// flag is a one-step process: we can skip the intermediate step and straight
+/// remove the field from the [`ConfigToml`]. We leave the field in the
+/// `pageserver.toml` files on prod servers until we reach certainty that we
+/// will not roll back to old software whose behavior was dependent on config.
+/// Then we can remove the field from the templates in the internal infra repo.
+/// This process is [documented internally](
+/// https://docs.neon.build/storage/pageserver_configuration.html).
+///
+/// Note that above relaxed compatbility for the config format does NOT APPLY
+/// TO THE STORAGE FORMAT. As general guidance, when introducing storage format
+/// changes, ensure that the potential rollback target version will be compatible
+/// with the new format. This must hold regardless of what flags are set in in the `pageserver.toml`:
+/// any format version that exists in an environment must be compatible with the software that runs there.
+/// Use a pageserver.toml flag only to gate whether software _writes_ the new format.
+/// For more compatibility considerations, refer to [internal docs](
+/// https://docs.neon.build/storage/compat.html?highlight=compat#format-versions--compatibility)
 #[serde_as]
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct ConfigToml {
     // types mapped 1:1 into the runtime PageServerConfig type
     pub listen_pg_addr: String,
@@ -138,7 +183,6 @@ pub struct ConfigToml {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DiskUsageEvictionTaskConfig {
     pub max_usage_pct: utils::serde_percent::Percent,
     pub min_avail_bytes: u64,
@@ -153,13 +197,11 @@ pub struct DiskUsageEvictionTaskConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case")]
-#[serde(deny_unknown_fields)]
 pub enum PageServicePipeliningConfig {
     Serial,
     Pipelined(PageServicePipeliningConfigPipelined),
 }
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PageServicePipeliningConfigPipelined {
     /// Causes runtime errors if larger than max get_vectored batch size.
     pub max_batch_size: NonZeroUsize,
@@ -175,7 +217,6 @@ pub enum PageServiceProtocolPipelinedExecutionStrategy {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case")]
-#[serde(deny_unknown_fields)]
 pub enum GetVectoredConcurrentIo {
     /// The read path is fully sequential: layers are visited
     /// one after the other and IOs are issued and waited upon
@@ -294,7 +335,7 @@ pub struct MaxVectoredReadBytes(pub NonZeroUsize);
 
 /// Tenant-level configuration values, used for various purposes.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[serde(default)]
 pub struct TenantConfigToml {
     // Flush out an inmemory layer, if it's holding WAL older than this
     // This puts a backstop on how much WAL needs to be re-digested if the

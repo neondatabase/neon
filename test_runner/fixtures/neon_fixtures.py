@@ -1297,9 +1297,20 @@ class NeonEnv:
                 ps_cfg[key] = value
 
             # Create a corresponding NeonPageserver object
-            self.pageservers.append(
-                NeonPageserver(self, ps_id, port=pageserver_port, az_id=ps_cfg["availability_zone"])
+            ps = NeonPageserver(
+                self, ps_id, port=pageserver_port, az_id=ps_cfg["availability_zone"]
             )
+
+            if config.test_may_use_compatibility_snapshot_binaries:
+                # New features gated by pageserver config usually get rolled out in the
+                # test suite first, by enabling it in the `ps_cfg` abve.
+                # Compatibility tests run with old binaries that predate feature code & config.
+                # So, old binaries will warn about the flag's presence.
+                # Silence those warnings categorically.
+                log.info("test may use old binaries, ignoring warnings about unknown config items")
+                ps.allowed_errors.append(".*ignoring unknown configuration item.*")
+
+            self.pageservers.append(ps)
             cfg["pageservers"].append(ps_cfg)
 
         # Create config and a Safekeeper object for each safekeeper

@@ -101,7 +101,7 @@ if TYPE_CHECKING:
 #    export CHECK_ONDISK_DATA_COMPATIBILITY=true
 #    export COMPATIBILITY_NEON_BIN=neon_previous/target/${BUILD_TYPE}
 #    export COMPATIBILITY_POSTGRES_DISTRIB_DIR=neon_previous/pg_install
-#    export NEON_BIN=target/release
+#    export NEON_BIN=target/${BUILD_TYPE}
 #    export POSTGRES_DISTRIB_DIR=pg_install
 #
 #    # Build previous version of binaries and store them somewhere:

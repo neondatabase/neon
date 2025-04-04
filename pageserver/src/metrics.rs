@@ -30,6 +30,7 @@ use strum::{EnumCount, IntoEnumIterator as _, VariantNames};
 use strum_macros::{IntoStaticStr, VariantNames};
 use utils::id::TimelineId;
 
+use crate::config;
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext};
 use crate::pgdatadir_mapping::DatadirModificationStats;
@@ -4107,8 +4108,32 @@ pub(crate) fn set_tokio_runtime_setup(setup: &str, num_threads: NonZeroUsize) {
         .set(u64::try_from(num_threads.get()).unwrap());
 }
 
-pub fn preinitialize_metrics(conf: &'static PageServerConf) {
+static PAGESERVER_CONFIG_IGNORED_ITEMS: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_config_ignored_items",
+        "TOML items present in the on-disk configuration file but ignored by the pageserver config parser.\
+         The `item` label is the dot-separated path of the ignored item in the on-disk configuration file.\
+         The value for an unknown config item is always 1.\
+         There is a special label value \"\", which is 0, so that there is always a metric exposed (simplifies dashboards).",
+        &["item"]
+    )
+    .unwrap()
+});
+
+pub fn preinitialize_metrics(
+    conf: &'static PageServerConf,
+    ignored: config::ignored_fields::Paths,
+) {
     set_page_service_config_max_batch_size(&conf.page_service_pipelining);
+
+    PAGESERVER_CONFIG_IGNORED_ITEMS
+        .with_label_values(&[""])
+        .set(0);
+    for path in &ignored.paths {
+        PAGESERVER_CONFIG_IGNORED_ITEMS
+            .with_label_values(&[path])
+            .set(1);
+    }
 
     // Python tests need these and on some we do alerting.
     //
