@@ -7,7 +7,7 @@ use std::io::prelude::*;
 use std::path::Path;
 
 use compute_api::responses::TlsConfig;
-use compute_api::spec::{ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, GenericOption};
+use compute_api::spec::{ComputeAudit, ComputeMode, ComputeSpec, GenericOption};
 
 use crate::pg_helpers::{
     GenericOptionExt, GenericOptionsSearch, PgOptionsSerialize, escape_conf_value,
@@ -255,7 +255,7 @@ pub fn write_postgres_conf(
 
     // We need Postgres to send logs to rsyslog so that we can forward them
     // further to customers' log aggregation systems.
-    if spec.features.contains(&ComputeFeature::PostgresLogsExport) {
+    if spec.logs_export_host.is_some() {
         writeln!(file, "log_destination='stderr,syslog'")?;
     }
 

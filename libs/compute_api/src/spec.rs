@@ -168,6 +168,10 @@ pub struct ComputeSpec {
     /// Extensions should be present in shared_preload_libraries
     #[serde(default)]
     pub audit_log_level: ComputeAudit,
+
+    /// Hostname and the port of the otel collector. Leave empty to disable Postgres logs forwarding.
+    /// Example: config-shy-breeze-123-collector-monitoring.neon-telemetry.svc.cluster.local:10514
+    pub logs_export_host: Option<String>,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
@@ -178,9 +182,6 @@ pub enum ComputeFeature {
     /// Enable the experimental activity monitor logic, which uses `pg_stat_database` to
     /// track short-lived connections as user activity.
     ActivityMonitorExperimental,
-
-    /// Allow to configure rsyslog for Postgres logs export
-    PostgresLogsExport,
 
     /// This is a special feature flag that is used to represent unknown feature flags.
     /// Basically all unknown to enum flags are represented as this one. See unit test
