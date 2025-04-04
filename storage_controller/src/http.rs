@@ -1235,8 +1235,18 @@ async fn handle_step_down(req: Request<Body>) -> Result<Response<Body>, ApiError
         ForwardOutcome::NotForwarded(req) => req,
     };
 
-    let state = get_state(&req);
-    json_response(StatusCode::OK, state.service.step_down().await)
+    // Spawn a background task: once we start stepping down, we must finish: if the client drops
+    // their request we should avoid stopping in some part-stepped-down state.
+    let handle = tokio::spawn(async move {
+        let state = get_state(&req);
+        state.service.step_down().await
+    });
+
+    let result = handle
+        .await
+        .map_err(|e| ApiError::InternalServerError(e.into()))?;
+
+    json_response(StatusCode::OK, result)
 }
 
 async fn handle_tenant_drop(req: Request<Body>) -> Result<Response<Body>, ApiError> {
