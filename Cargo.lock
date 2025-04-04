@@ -2837,6 +2837,7 @@ dependencies = [
  "utils",
  "uuid",
  "workspace_hack",
+ "x509-cert",
 ]
 
 [[package]]
