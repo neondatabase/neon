@@ -106,6 +106,9 @@ pub struct ConfigToml {
     pub listen_https_addr: Option<String>,
     pub ssl_key_file: Utf8PathBuf,
     pub ssl_cert_file: Utf8PathBuf,
+    #[serde(with = "humantime_serde")]
+    pub ssl_cert_reload_period: Duration,
+    pub ssl_ca_file: Option<Utf8PathBuf>,
     pub availability_zone: Option<String>,
     #[serde(with = "humantime_serde")]
     pub wait_lsn_timeout: Duration,
@@ -176,6 +179,7 @@ pub struct ConfigToml {
     pub load_previous_heatmap: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generate_unarchival_heatmap: Option<bool>,
+    pub tracing: Option<Tracing>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -227,6 +231,54 @@ pub enum GetVectoredConcurrentIo {
     /// If the PS PageCache miss rate is low, this improves
     /// throughput dramatically.
     SidecarTask,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Ratio {
+    pub numerator: usize,
+    pub denominator: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OtelExporterConfig {
+    pub endpoint: String,
+    pub protocol: OtelExporterProtocol,
+    #[serde(with = "humantime_serde")]
+    pub timeout: Duration,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OtelExporterProtocol {
+    Grpc,
+    HttpBinary,
+    HttpJson,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Tracing {
+    pub sampling_ratio: Ratio,
+    pub export_config: OtelExporterConfig,
+}
+
+impl From<&OtelExporterConfig> for tracing_utils::ExportConfig {
+    fn from(val: &OtelExporterConfig) -> Self {
+        tracing_utils::ExportConfig {
+            endpoint: Some(val.endpoint.clone()),
+            protocol: val.protocol.into(),
+            timeout: val.timeout,
+        }
+    }
+}
+
+impl From<OtelExporterProtocol> for tracing_utils::Protocol {
+    fn from(val: OtelExporterProtocol) -> Self {
+        match val {
+            OtelExporterProtocol::Grpc => tracing_utils::Protocol::Grpc,
+            OtelExporterProtocol::HttpJson => tracing_utils::Protocol::HttpJson,
+            OtelExporterProtocol::HttpBinary => tracing_utils::Protocol::HttpBinary,
+        }
+    }
 }
 
 pub mod statvfs {
@@ -323,12 +375,6 @@ pub struct TenantConfigToml {
     /// Level0 delta layer threshold at which to stall layer flushes. Must be >compaction_threshold
     /// to avoid deadlock. 0 to disable. Disabled by default.
     pub l0_flush_stall_threshold: Option<usize>,
-    /// If true, Level0 delta layer flushes will wait for S3 upload before flushing the next
-    /// layer. This is a temporary backpressure mechanism which should be removed once
-    /// l0_flush_{delay,stall}_threshold is fully enabled.
-    ///
-    /// TODO: this is no longer enabled, remove it when the config option is no longer set.
-    pub l0_flush_wait_upload: bool,
     // Determines how much history is retained, to allow
     // branching and read replicas at an older point in time.
     // The unit is #of bytes of WAL.
@@ -480,6 +526,8 @@ impl Default for ConfigToml {
             listen_https_addr: (None),
             ssl_key_file: Utf8PathBuf::from(DEFAULT_SSL_KEY_FILE),
             ssl_cert_file: Utf8PathBuf::from(DEFAULT_SSL_CERT_FILE),
+            ssl_cert_reload_period: Duration::from_secs(60),
+            ssl_ca_file: None,
             availability_zone: (None),
             wait_lsn_timeout: (humantime::parse_duration(DEFAULT_WAIT_LSN_TIMEOUT)
                 .expect("cannot parse default wait lsn timeout")),
@@ -579,6 +627,7 @@ impl Default for ConfigToml {
             validate_wal_contiguity: None,
             load_previous_heatmap: None,
             generate_unarchival_heatmap: None,
+            tracing: None,
         }
     }
 }
@@ -614,8 +663,6 @@ pub mod tenant_conf_defaults {
 
     pub const DEFAULT_COMPACTION_ALGORITHM: crate::models::CompactionAlgorithm =
         crate::models::CompactionAlgorithm::Legacy;
-
-    pub const DEFAULT_L0_FLUSH_WAIT_UPLOAD: bool = false;
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
 
@@ -663,7 +710,6 @@ impl Default for TenantConfigToml {
             compaction_l0_semaphore: DEFAULT_COMPACTION_L0_SEMAPHORE,
             l0_flush_delay_threshold: None,
             l0_flush_stall_threshold: None,
-            l0_flush_wait_upload: DEFAULT_L0_FLUSH_WAIT_UPLOAD,
             gc_horizon: DEFAULT_GC_HORIZON,
             gc_period: humantime::parse_duration(DEFAULT_GC_PERIOD)
                 .expect("cannot parse default gc period"),

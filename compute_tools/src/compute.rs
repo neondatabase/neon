@@ -20,6 +20,7 @@ use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
+use once_cell::sync::Lazy;
 use postgres;
 use postgres::NoTls;
 use postgres::error::SqlState;
@@ -35,6 +36,7 @@ use crate::disk_quota::set_disk_quota;
 use crate::installed_extensions::get_installed_extensions;
 use crate::logger::startup_context_from_env;
 use crate::lsn_lease::launch_lsn_lease_bg_task_for_static;
+use crate::metrics::COMPUTE_CTL_UP;
 use crate::monitor::launch_monitor;
 use crate::pg_helpers::*;
 use crate::rsyslog::{
@@ -49,6 +51,17 @@ use crate::{config, extension_server, local_proxy};
 
 pub static SYNC_SAFEKEEPERS_PID: AtomicU32 = AtomicU32::new(0);
 pub static PG_PID: AtomicU32 = AtomicU32::new(0);
+// This is an arbitrary build tag. Fine as a default / for testing purposes
+// in-case of not-set environment var
+const BUILD_TAG_DEFAULT: &str = "latest";
+/// Build tag/version of the compute node binaries/image. It's tricky and ugly
+/// to pass it everywhere as a part of `ComputeNodeParams`, so we use a
+/// global static variable.
+pub static BUILD_TAG: Lazy<String> = Lazy::new(|| {
+    option_env!("BUILD_TAG")
+        .unwrap_or(BUILD_TAG_DEFAULT)
+        .to_string()
+});
 
 /// Static configuration params that don't change after startup. These mostly
 /// come from the CLI args, or are derived from them.
@@ -72,7 +85,6 @@ pub struct ComputeNodeParams {
     pub pgdata: String,
     pub pgbin: String,
     pub pgversion: String,
-    pub build_tag: String,
 
     /// The port that the compute's external HTTP server listens on
     pub external_http_port: u16,
@@ -173,6 +185,11 @@ impl ComputeState {
         info!("Changing compute status from {} to {}", prev, status);
         self.status = status;
         state_changed.notify_all();
+
+        COMPUTE_CTL_UP.reset();
+        COMPUTE_CTL_UP
+            .with_label_values(&[&BUILD_TAG, status.to_string().as_str()])
+            .set(1);
     }
 
     pub fn set_failed_status(&mut self, err: anyhow::Error, state_changed: &Condvar) {
@@ -342,6 +359,14 @@ impl ComputeNode {
         if cli_spec.is_none() {
             this.prewarm_postgres()?;
         }
+
+        // Set the up metric with Empty status before starting the HTTP server.
+        // That way on the first metric scrape, an external observer will see us
+        // as 'up' and 'empty' (unless the compute was started with a spec or
+        // already configured by control plane).
+        COMPUTE_CTL_UP
+            .with_label_values(&[&BUILD_TAG, ComputeStatus::Empty.to_string().as_str()])
+            .set(1);
 
         // Launch the external HTTP server first, so that we can serve control plane
         // requests while configuration is still in progress.
@@ -876,6 +901,14 @@ impl ComputeNode {
             config.password(storage_auth_token);
         } else {
             info!("Storage auth token not set");
+        }
+
+        config.application_name("compute_ctl");
+        if let Some(spec) = &compute_state.pspec {
+            config.options(&format!(
+                "-c neon.compute_mode={}",
+                spec.spec.mode.to_type_str()
+            ));
         }
 
         // Connect to pageserver
@@ -2024,12 +2057,8 @@ LIMIT 100",
 
         let mut download_tasks = Vec::new();
         for library in &libs_vec {
-            let (ext_name, ext_path) = remote_extensions.get_ext(
-                library,
-                true,
-                &self.params.build_tag,
-                &self.params.pgversion,
-            )?;
+            let (ext_name, ext_path) =
+                remote_extensions.get_ext(library, true, &BUILD_TAG, &self.params.pgversion)?;
             download_tasks.push(self.download_extension(ext_name, ext_path));
         }
         let results = join_all(download_tasks).await;

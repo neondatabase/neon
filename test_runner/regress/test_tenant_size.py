@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
-from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
@@ -19,8 +18,13 @@ from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
     wait_until_tenant_active,
 )
-from fixtures.pg_version import PgVersion
 from fixtures.utils import skip_in_debug_build, wait_until
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from fixtures.common_types import Lsn, TenantId, TimelineId
+    from fixtures.pg_version import PgVersion
 
 
 def test_empty_tenant_size(neon_env_builder: NeonEnvBuilder):
@@ -578,9 +582,9 @@ def test_get_tenant_size_with_multiple_branches(
 
     wait_for_last_flush_lsn(env, second_branch_endpoint, tenant_id, second_branch_timeline_id)
     size_after_thinning_branch = http_client.tenant_size(tenant_id)
-    assert (
-        size_after_thinning_branch > size_after_growing_second_branch
-    ), "tenant_size should grow with dropped tables and full vacuum"
+    assert size_after_thinning_branch > size_after_growing_second_branch, (
+        "tenant_size should grow with dropped tables and full vacuum"
+    )
 
     first_branch_endpoint.stop_and_destroy()
     second_branch_endpoint.stop_and_destroy()
@@ -751,6 +755,47 @@ def test_lsn_lease_size(neon_env_builder: NeonEnvBuilder, test_output_dir: Path,
 
     # we are writing a lot, and flushing all of that to disk is not important for this test
     env.stop(immediate=True)
+
+
+def test_lsn_lease_storcon(neon_env_builder: NeonEnvBuilder):
+    conf = {
+        "pitr_interval": "0s",
+        "gc_period": "0s",
+        "compaction_period": "0s",
+    }
+    env = neon_env_builder.init_start(initial_tenant_conf=conf)
+    with env.endpoints.create_start(
+        "main",
+    ) as ep:
+        with ep.cursor() as cur:
+            cur.execute(
+                "CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, 1000000) s(i)"
+            )
+        last_flush_lsn = wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
+    env.storage_controller.pageserver_api().timeline_lsn_lease(
+        env.initial_tenant, env.initial_timeline, last_flush_lsn
+    )
+    env.storage_controller.tenant_shard_split(env.initial_tenant, 8)
+    env.storage_controller.reconcile_until_idle(timeout_secs=120)
+    # TODO: do we preserve LSN leases across shard splits?
+    env.storage_controller.pageserver_api().timeline_lsn_lease(
+        env.initial_tenant, env.initial_timeline, last_flush_lsn
+    )
+
+
+def test_mark_invisible_storcon(neon_env_builder: NeonEnvBuilder):
+    conf = {
+        "pitr_interval": "0s",
+        "gc_period": "0s",
+        "compaction_period": "0s",
+    }
+    env = neon_env_builder.init_start(initial_tenant_conf=conf)
+    env.storage_controller.pageserver_api().timeline_mark_invisible(
+        env.initial_tenant, env.initial_timeline
+    )
+    env.storage_controller.pageserver_api().timeline_mark_invisible(
+        env.initial_tenant, env.initial_timeline, True
+    )
 
 
 def insert_with_action(

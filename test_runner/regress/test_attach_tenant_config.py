@@ -1,18 +1,22 @@
 from __future__ import annotations
 
-from collections.abc import Generator
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import TenantId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    NeonEnv,
-    NeonEnvBuilder,
-)
-from fixtures.pageserver.http import PageserverHttpClient, TenantConfig
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.utils import wait_until
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
+
+    from fixtures.neon_fixtures import (
+        NeonEnv,
+        NeonEnvBuilder,
+    )
+    from fixtures.pageserver.http import PageserverHttpClient, TenantConfig
 
 
 @pytest.fixture
@@ -53,9 +57,9 @@ def negative_env(neon_env_builder: NeonEnvBuilder) -> Generator[NegativeTests, N
 
     yield NegativeTests(env, tenant_id, config_pre_detach)
 
-    assert tenant_id not in [
-        TenantId(t["id"]) for t in ps_http.tenant_list()
-    ], "tenant should not be attached after negative test"
+    assert tenant_id not in [TenantId(t["id"]) for t in ps_http.tenant_list()], (
+        "tenant should not be attached after negative test"
+    )
 
     env.pageserver.allowed_errors.extend(
         [
@@ -145,7 +149,6 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "compaction_l0_semaphore": False,
         "l0_flush_delay_threshold": 25,
         "l0_flush_stall_threshold": 42,
-        "l0_flush_wait_upload": True,
         "compaction_target_size": 1048576,
         "checkpoint_distance": 10000,
         "checkpoint_timeout": "13m",
@@ -215,9 +218,9 @@ def test_fully_custom_config(positive_env: NeonEnv):
     # also self-test that our fully_custom_config covers all of them
     initial_tenant_config = get_config(ps_http, env.initial_tenant)
     assert initial_tenant_config.tenant_specific_overrides == {}
-    assert set(initial_tenant_config.effective_config.keys()) == set(
-        fully_custom_config.keys()
-    ), "ensure we cover all config options"
+    assert set(initial_tenant_config.effective_config.keys()) == set(fully_custom_config.keys()), (
+        "ensure we cover all config options"
+    )
 
     # create a new tenant to test overrides
     (tenant_id, _) = env.create_tenant()
@@ -238,17 +241,15 @@ def test_fully_custom_config(positive_env: NeonEnv):
 
         # some more self-validation: assert that none of the values in our
         # fully custom config are the same as the default values
-        assert set(our_tenant_config.effective_config.keys()) == set(
-            fully_custom_config.keys()
-        ), "ensure we cover all config options"
-        assert (
-            {
-                k: initial_tenant_config.effective_config[k]
-                != our_tenant_config.effective_config[k]
-                for k in fully_custom_config.keys()
-            }
-            == {k: True for k in fully_custom_config.keys()}
-        ), "ensure our custom config has different values than the default config for all config options, so we know we overrode everything"
+        assert set(our_tenant_config.effective_config.keys()) == set(fully_custom_config.keys()), (
+            "ensure we cover all config options"
+        )
+        assert {
+            k: initial_tenant_config.effective_config[k] != our_tenant_config.effective_config[k]
+            for k in fully_custom_config.keys()
+        } == {k: True for k in fully_custom_config.keys()}, (
+            "ensure our custom config has different values than the default config for all config options, so we know we overrode everything"
+        )
 
         # ensure customizations survive reattach
         env.pageserver.tenant_detach(tenant_id)
