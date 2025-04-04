@@ -1248,13 +1248,13 @@ pub(crate) static STORAGE_IO_TIME_METRIC: Lazy<StorageIoTime> = Lazy::new(Storag
 
 #[derive(Clone, Copy)]
 #[repr(usize)]
-enum StorageIoSizeOperation {
+pub(crate) enum StorageIoSizeOperation {
     Read,
     Write,
 }
 
 impl StorageIoSizeOperation {
-    const VARIANTS: &'static [&'static str] = &["read", "write"];
+    pub(crate) const VARIANTS: &'static [&'static str] = &["read", "write"];
 
     fn as_str(&self) -> &'static str {
         Self::VARIANTS[*self as usize]
@@ -1262,7 +1262,7 @@ impl StorageIoSizeOperation {
 }
 
 // Needed for the https://neonprod.grafana.net/d/5uK9tHL4k/picking-tenant-for-relocation?orgId=1
-static STORAGE_IO_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
+pub(crate) static STORAGE_IO_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_io_operations_bytes_total",
         "Total amount of bytes read/written in IO operations",
