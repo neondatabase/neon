@@ -90,7 +90,7 @@ async fn load_and_parse_certified_key(
     })
 }
 
-static CERT_EXPIRATION_TIMESTAMP: Lazy<UIntGaugeVec> = Lazy::new(|| {
+static CERT_EXPIRATION_TIME: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "tls_certs_expiration_time_seconds",
         "Expiration time of the loaded certificate since unix epoch in seconds",
@@ -144,8 +144,7 @@ impl ReloadingCertificateResolver {
         reload_period: Duration,
     ) -> anyhow::Result<Arc<Self>> {
         // Create metrics for current resolver.
-        let cert_expiration_timestamp =
-            CERT_EXPIRATION_TIMESTAMP.with_label_values(&[resolver_name]);
+        let cert_expiration_time = CERT_EXPIRATION_TIME.with_label_values(&[resolver_name]);
         let cert_reload_started_counter =
             CERT_RELOAD_STARTED_COUNTER.with_label_values(&[resolver_name]);
         let cert_reload_updated_counter =
@@ -158,7 +157,7 @@ impl ReloadingCertificateResolver {
         let this = Arc::new(Self {
             certified_key: ArcSwap::from_pointee(parsed_key.certified_key),
         });
-        cert_expiration_timestamp.set(parsed_key.expiration_time.as_secs());
+        cert_expiration_time.set(parsed_key.expiration_time.as_secs());
 
         tokio::spawn({
             let weak_this = Arc::downgrade(&this);
@@ -183,7 +182,7 @@ impl ReloadingCertificateResolver {
                             } else {
                                 tracing::info!("Certificate has been reloaded");
                                 this.certified_key.store(Arc::new(parsed_key.certified_key));
-                                cert_expiration_timestamp.set(parsed_key.expiration_time.as_secs());
+                                cert_expiration_time.set(parsed_key.expiration_time.as_secs());
                                 cert_reload_updated_counter.inc();
                             }
                             last_reload_failed = false;
