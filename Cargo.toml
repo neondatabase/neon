@@ -40,6 +40,7 @@ members = [
     "libs/proxy/postgres-protocol2",
     "libs/proxy/postgres-types2",
     "libs/proxy/tokio-postgres2",
+    "lambda/aztraffic",
     "lambda/pod_info_dumper",
 ]
 
