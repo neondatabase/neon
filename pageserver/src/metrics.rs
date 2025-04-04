@@ -505,6 +505,8 @@ pub(crate) mod wait_ondemand_download_time {
         10.0, 20.0, 30.0, 40.0, 50.0, 60.0, // 10s to 1m
     ];
 
+    /// The task kinds for which we want to track wait times for on-demand downloads.
+    /// Other task kinds' wait times are accumulated in label value `unknown`.
     pub(crate) const WAIT_ONDEMAND_DOWNLOAD_METRIC_TASK_KINDS: [TaskKind; 2] = [
         TaskKind::PageRequestHandler,
         TaskKind::WalReceiverConnectionHandler,
