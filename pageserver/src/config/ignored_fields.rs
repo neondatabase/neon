@@ -17,9 +17,10 @@ pub fn find(user_specified: toml_edit::DocumentMut, reserialized: toml_edit::Doc
     let user_specified = paths(user_specified);
     let reserialized = paths(reserialized);
     fn paths(doc: toml_edit::DocumentMut) -> HashSet<String> {
-        let mut paths = Vec::new();
-        visit_table_like(doc.as_table(), &mut Vec::new(), &mut paths);
-        HashSet::from_iter(paths)
+        let mut out = Vec::new();
+        let mut visitor = PathsVisitor::new(&mut out);
+        visitor.visit_table_like(doc.as_table());
+        HashSet::from_iter(out)
     }
 
     let mut ignored = HashSet::new();
@@ -44,50 +45,60 @@ pub struct Paths {
     pub paths: Vec<String>,
 }
 
-fn visit_table_like(
-    table_like: &dyn toml_edit::TableLike,
-    path: &mut Vec<String>,
-    paths: &mut Vec<String>,
-) {
-    for (entry, item) in table_like.iter() {
-        path.push(entry.to_string());
-        visit_item(item, path, paths);
-        path.pop();
-    }
+struct PathsVisitor<'a> {
+    stack: Vec<String>,
+    out: &'a mut Vec<String>,
 }
 
-fn visit_item(item: &toml_edit::Item, path: &mut Vec<String>, paths: &mut Vec<String>) {
-    match item {
-        toml_edit::Item::None => (),
-        toml_edit::Item::Value(value) => visit_value(value, path, paths),
-        toml_edit::Item::Table(table) => {
-            visit_table_like(table, path, paths);
+impl<'a> PathsVisitor<'a> {
+    fn new(out: &'a mut Vec<String>) -> Self {
+        Self {
+            stack: Vec::new(),
+            out,
         }
-        toml_edit::Item::ArrayOfTables(array_of_tables) => {
-            for (i, table) in array_of_tables.iter().enumerate() {
-                path.push(format!("[{i}]"));
-                visit_table_like(table, path, paths);
-                path.pop();
+    }
+
+    fn visit_table_like(&mut self, table_like: &dyn toml_edit::TableLike) {
+        for (entry, item) in table_like.iter() {
+            self.stack.push(entry.to_string());
+            self.visit_item(item);
+            self.stack.pop();
+        }
+    }
+
+    fn visit_item(&mut self, item: &toml_edit::Item) {
+        match item {
+            toml_edit::Item::None => (),
+            toml_edit::Item::Value(value) => self.visit_value(value),
+            toml_edit::Item::Table(table) => {
+                self.visit_table_like(table);
+            }
+            toml_edit::Item::ArrayOfTables(array_of_tables) => {
+                for (i, table) in array_of_tables.iter().enumerate() {
+                    self.stack.push(format!("[{i}]"));
+                    self.visit_table_like(table);
+                    self.stack.pop();
+                }
             }
         }
     }
-}
 
-fn visit_value(value: &toml_edit::Value, path: &mut Vec<String>, paths: &mut Vec<String>) {
-    match value {
-        toml_edit::Value::String(_)
-        | toml_edit::Value::Integer(_)
-        | toml_edit::Value::Float(_)
-        | toml_edit::Value::Boolean(_)
-        | toml_edit::Value::Datetime(_) => paths.push(path.join(".")),
-        toml_edit::Value::Array(array) => {
-            for (i, value) in array.iter().enumerate() {
-                path.push(format!("[{i}]"));
-                visit_value(value, path, paths);
-                path.pop();
+    fn visit_value(&mut self, value: &toml_edit::Value) {
+        match value {
+            toml_edit::Value::String(_)
+            | toml_edit::Value::Integer(_)
+            | toml_edit::Value::Float(_)
+            | toml_edit::Value::Boolean(_)
+            | toml_edit::Value::Datetime(_) => self.out.push(self.stack.join(".")),
+            toml_edit::Value::Array(array) => {
+                for (i, value) in array.iter().enumerate() {
+                    self.stack.push(format!("[{i}]"));
+                    self.visit_value(value);
+                    self.stack.pop();
+                }
             }
+            toml_edit::Value::InlineTable(inline_table) => self.visit_table_like(inline_table),
         }
-        toml_edit::Value::InlineTable(inline_table) => visit_table_like(inline_table, path, paths),
     }
 }
 
