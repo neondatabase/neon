@@ -227,6 +227,8 @@ pub struct TimelineDeleteResult {
     pub dir_existed: bool,
 }
 
+pub type TenantDeleteResult = std::collections::HashMap<String, TimelineDeleteResult>;
+
 fn lsn_invalid() -> Lsn {
     Lsn::INVALID
 }
