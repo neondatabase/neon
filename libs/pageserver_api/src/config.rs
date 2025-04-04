@@ -192,7 +192,7 @@ pub enum GetVectoredConcurrentIo {
     SidecarTask,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Ratio {
     pub numerator: usize,
     pub denominator: usize,
@@ -416,6 +416,9 @@ pub struct TenantConfigToml {
     /// The ratio that triggers the auto gc-compaction. If (the total size of layers between L2 LSN and gc-horizon) / (size below the L2 LSN)
     /// is above this ratio, gc-compaction will be triggered.
     pub gc_compaction_ratio_percent: u64,
+    /// Tenant level performance sampling ratio override. Controls the ratio of get page requests
+    /// that will get perf sampling for the tenant.
+    pub sampling_ratio: Option<Ratio>,
 }
 
 pub mod defaults {
@@ -702,6 +705,7 @@ impl Default for TenantConfigToml {
             gc_compaction_enabled: DEFAULT_GC_COMPACTION_ENABLED,
             gc_compaction_initial_threshold_kb: DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB,
             gc_compaction_ratio_percent: DEFAULT_GC_COMPACTION_RATIO_PERCENT,
+            sampling_ratio: None,
         }
     }
 }

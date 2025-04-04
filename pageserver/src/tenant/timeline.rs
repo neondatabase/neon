@@ -2476,6 +2476,31 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.lazy_slru_download)
     }
 
+    /// Checks if a get page request should get perf tracing
+    ///
+    /// The configuration priority is: tenant config override, default tenant config,
+    /// pageserver config.
+    pub(crate) fn is_get_page_request_sampled(&self) -> bool {
+        let tenant_conf = self.tenant_conf.load();
+        let ratio = tenant_conf
+            .tenant_conf
+            .sampling_ratio
+            .flatten()
+            .or(self.conf.default_tenant_conf.sampling_ratio)
+            .or(self.conf.tracing.as_ref().map(|t| t.sampling_ratio));
+
+        match ratio {
+            Some(r) => {
+                if r.numerator == 0 {
+                    false
+                } else {
+                    rand::thread_rng().gen_range(0..r.denominator) < r.numerator
+                }
+            }
+            None => false,
+        }
+    }
+
     fn get_checkpoint_distance(&self) -> u64 {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf

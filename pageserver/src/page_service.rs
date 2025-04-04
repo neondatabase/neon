@@ -18,7 +18,7 @@ use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pageserver_api::config::{
     PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
-    PageServiceProtocolPipelinedExecutionStrategy, Tracing,
+    PageServiceProtocolPipelinedExecutionStrategy,
 };
 use pageserver_api::key::rel_block_to_key;
 use pageserver_api::models::{
@@ -37,7 +37,6 @@ use postgres_ffi::BLCKSZ;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use pq_proto::framed::ConnectionError;
 use pq_proto::{BeMessage, FeMessage, FeStartupPacket, RowDescriptor};
-use rand::Rng;
 use strum_macros::IntoStaticStr;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter};
 use tokio::task::JoinHandle;
@@ -755,7 +754,6 @@ impl PageServerHandler {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         timeline_handles: &mut TimelineHandles,
-        tracing_config: Option<&Tracing>,
         cancel: &CancellationToken,
         ctx: &RequestContext,
         protocol_version: PagestreamProtocolVersion,
@@ -916,47 +914,8 @@ impl PageServerHandler {
 
                 let key = rel_block_to_key(req.rel, req.blkno);
 
-                let sampled = match tracing_config {
-                    Some(conf) => {
-                        let ratio = &conf.sampling_ratio;
-
-                        if ratio.numerator == 0 {
-                            false
-                        } else {
-                            rand::thread_rng().gen_range(0..ratio.denominator) < ratio.numerator
-                        }
-                    }
-                    None => false,
-                };
-
-                let ctx = if sampled {
-                    RequestContextBuilder::from(ctx)
-                        .root_perf_span(|| {
-                            info_span!(
-                            target: PERF_TRACE_TARGET,
-                            "GET_PAGE",
-                            tenant_id = %tenant_id,
-                            shard_id = field::Empty,
-                            timeline_id = %timeline_id,
-                            lsn = %req.hdr.request_lsn,
-                            request_id = %req.hdr.reqid,
-                            key = %key,
-                            )
-                        })
-                        .attached_child()
-                } else {
-                    ctx.attached_child()
-                };
-
                 let res = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Page(key))
-                    .maybe_perf_instrument(&ctx, |current_perf_span| {
-                        info_span!(
-                            target: PERF_TRACE_TARGET,
-                            parent: current_perf_span,
-                            "SHARD_SELECTION",
-                        )
-                    })
                     .await;
 
                 let shard = match res {
@@ -987,6 +946,25 @@ impl PageServerHandler {
                     }
                 };
 
+                let ctx = if shard.is_get_page_request_sampled() {
+                    RequestContextBuilder::from(ctx)
+                        .root_perf_span(|| {
+                            info_span!(
+                            target: PERF_TRACE_TARGET,
+                            "GET_PAGE",
+                            tenant_id = %tenant_id,
+                            shard_id = %shard.get_shard_identity().shard_slug(),
+                            timeline_id = %timeline_id,
+                            lsn = %req.hdr.request_lsn,
+                            request_id = %req.hdr.reqid,
+                            key = %key,
+                            )
+                        })
+                        .attached_child()
+                } else {
+                    ctx.attached_child()
+                };
+
                 // This ctx travels as part of the BatchedFeMessage through
                 // batching into the request handler.
                 // The request handler needs to do some per-request work
@@ -1000,12 +978,6 @@ impl PageServerHandler {
                 // Similar game for this `span`: we funnel it through so that
                 // request handler log messages contain the request-specific fields.
                 let span = mkspan!(shard.tenant_shard_id.shard_slug());
-
-                // Enrich the perf span with shard_id now that shard routing is done.
-                ctx.perf_span_record(
-                    "shard_id",
-                    tracing::field::display(shard.get_shard_identity().shard_slug()),
-                );
 
                 let timer = record_op_start_and_throttle(
                     &shard,
@@ -1602,7 +1574,6 @@ impl PageServerHandler {
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
     {
         let cancel = self.cancel.clone();
-        let tracing_config = self.conf.tracing.clone();
 
         let err = loop {
             let msg = Self::pagestream_read_message(
@@ -1610,7 +1581,6 @@ impl PageServerHandler {
                 tenant_id,
                 timeline_id,
                 &mut timeline_handles,
-                tracing_config.as_ref(),
                 &cancel,
                 ctx,
                 protocol_version,
@@ -1744,8 +1714,6 @@ impl PageServerHandler {
         // Batcher
         //
 
-        let tracing_config = self.conf.tracing.clone();
-
         let cancel_batcher = self.cancel.child_token();
         let (mut batch_tx, mut batch_rx) = spsc_fold::channel();
         let batcher = pipeline_stage!("batcher", cancel_batcher.clone(), move |cancel_batcher| {
@@ -1759,7 +1727,6 @@ impl PageServerHandler {
                         tenant_id,
                         timeline_id,
                         &mut timeline_handles,
-                        tracing_config.as_ref(),
                         &cancel_batcher,
                         &ctx,
                         protocol_version,

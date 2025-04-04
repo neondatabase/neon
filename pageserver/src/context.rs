@@ -572,19 +572,6 @@ impl RequestContext {
         }
     }
 
-    pub(crate) fn perf_span_record<
-        Q: tracing::field::AsField + ?Sized,
-        V: tracing::field::Value,
-    >(
-        &self,
-        field: &Q,
-        value: V,
-    ) {
-        if let Some(span) = &self.perf_span {
-            span.record(field, value);
-        }
-    }
-
     pub(crate) fn has_perf_span(&self) -> bool {
         self.perf_span.is_some()
     }
