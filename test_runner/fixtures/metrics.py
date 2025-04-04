@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from prometheus_client.parser import text_string_to_metric_families
 
@@ -46,14 +46,26 @@ class MetricsGetter:
     def get_metrics(self) -> Metrics:
         raise NotImplementedError()
 
-    def get_metric_value(self, name: str, filter: dict[str, str] | None = None) -> float | None:
+    def get_metric_value(
+        self,
+        name: str,
+        filter: dict[str, str] | None = None,
+        aggregate: Literal["sum"] | None = None,
+    ) -> float | None:
         metrics = self.get_metrics()
         results = metrics.query_all(name, filter=filter)
         if not results:
             log.info(f'could not find metric "{name}"')
             return None
-        assert len(results) == 1, f"metric {name} with given filters is not unique, got: {results}"
-        return results[0].value
+        if aggregate is None:
+            assert len(results) == 1, (
+                f"metric {name} with given filters is not unique, got: {results}"
+            )
+            return results[0].value
+        elif aggregate == "sum":
+            return sum(sample.value for sample in results)
+        else:
+            raise RuntimeError(f"unknown aggregate function {aggregate}")
 
     def get_metrics_values(
         self, names: list[str], filter: dict[str, str] | None = None, absence_ok: bool = False

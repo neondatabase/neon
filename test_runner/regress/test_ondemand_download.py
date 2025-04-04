@@ -44,6 +44,7 @@ def get_num_downloaded_layers(client: PageserverHttpClient):
             "op_kind": "download",
             "status": "success",
         },
+        "sum",
     )
     if value is None:
         return 0
