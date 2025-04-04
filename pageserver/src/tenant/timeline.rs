@@ -2485,6 +2485,7 @@ impl Timeline {
         let ratio = tenant_conf
             .tenant_conf
             .sampling_ratio
+            .flatten()
             .or(self.conf.default_tenant_conf.sampling_ratio)
             .or(self.conf.tracing.as_ref().map(|t| t.sampling_ratio));
 

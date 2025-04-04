@@ -570,7 +570,7 @@ pub struct TenantConfigPatch {
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_compaction_ratio_percent: FieldPatch<u64>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
-    pub sampling_ratio: FieldPatch<Ratio>,
+    pub sampling_ratio: FieldPatch<Option<Ratio>>,
 }
 
 /// Like [`crate::config::TenantConfigToml`], but preserves the information
@@ -693,7 +693,7 @@ pub struct TenantConfig {
     pub gc_compaction_ratio_percent: Option<u64>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sampling_ratio: Option<Ratio>,
+    pub sampling_ratio: Option<Option<Ratio>>,
 }
 
 impl TenantConfig {
@@ -970,7 +970,7 @@ impl TenantConfig {
             gc_compaction_ratio_percent: self
                 .gc_compaction_ratio_percent
                 .unwrap_or(global_conf.gc_compaction_ratio_percent),
-            sampling_ratio: self.sampling_ratio.or(global_conf.sampling_ratio),
+            sampling_ratio: self.sampling_ratio.unwrap_or(global_conf.sampling_ratio),
         }
     }
 }
