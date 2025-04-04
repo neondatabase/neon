@@ -4,6 +4,7 @@ use std::error::Error as _;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use control_plane::endpoint::{ComputeControlPlane, EndpointStatus};
 use control_plane::local_env::LocalEnv;
 use futures::StreamExt;
@@ -364,25 +365,28 @@ pub(crate) struct ShardUpdate<'a> {
 }
 
 impl ComputeHook {
-    pub(super) fn new(config: Config) -> Self {
+    pub(super) fn new(config: Config) -> anyhow::Result<Self> {
         let authorization_header = config
             .control_plane_jwt_token
             .clone()
             .map(|jwt| format!("Bearer {}", jwt));
 
-        let client = reqwest::ClientBuilder::new()
-            .timeout(NOTIFY_REQUEST_TIMEOUT)
+        let mut client = reqwest::ClientBuilder::new().timeout(NOTIFY_REQUEST_TIMEOUT);
+        for cert in &config.ssl_ca_certs {
+            client = client.add_root_certificate(cert.clone());
+        }
+        let client = client
             .build()
-            .expect("Failed to construct HTTP client");
+            .context("Failed to build http client for compute hook")?;
 
-        Self {
+        Ok(Self {
             state: Default::default(),
             config,
             authorization_header,
             neon_local_lock: Default::default(),
             api_concurrency: tokio::sync::Semaphore::new(API_CONCURRENCY),
             client,
-        }
+        })
     }
 
     /// For test environments: use neon_local's LocalEnv to update compute

@@ -1744,19 +1744,17 @@ async fn maybe_forward(req: Request<Body>) -> ForwardOutcome {
     // Use [`RECONCILE_TIMEOUT`] as the max amount of time a request should block for and
     // include some leeway to get the timeout for proxied requests.
     const PROXIED_REQUEST_TIMEOUT: Duration = Duration::from_secs(RECONCILE_TIMEOUT.as_secs() + 10);
-    let client = reqwest::ClientBuilder::new()
-        .timeout(PROXIED_REQUEST_TIMEOUT)
-        .build();
-    let client = match client {
-        Ok(client) => client,
-        Err(err) => {
-            return ForwardOutcome::Forwarded(Err(ApiError::InternalServerError(anyhow::anyhow!(
-                "Failed to build leader client for forwarding while in stepped down state: {err}"
-            ))));
-        }
-    };
 
-    let request: reqwest::Request = match convert_request(req, &client, leader.address).await {
+    let client = state.service.get_http_client().clone();
+
+    let request: reqwest::Request = match convert_request(
+        req,
+        &client,
+        leader.address,
+        PROXIED_REQUEST_TIMEOUT,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(err) => {
             return ForwardOutcome::Forwarded(Err(ApiError::InternalServerError(anyhow::anyhow!(
@@ -1814,6 +1812,7 @@ async fn convert_request(
     req: hyper::Request<Body>,
     client: &reqwest::Client,
     to_address: String,
+    timeout: Duration,
 ) -> Result<reqwest::Request, ApiError> {
     use std::str::FromStr;
 
@@ -1868,6 +1867,7 @@ async fn convert_request(
         .request(method, uri)
         .headers(headers)
         .body(body)
+        .timeout(timeout)
         .build()
         .map_err(|err| {
             ApiError::InternalServerError(anyhow::anyhow!("Request conversion failed: {err}"))
