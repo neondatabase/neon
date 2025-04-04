@@ -70,7 +70,6 @@ jobs:
         with:
           region_id: ${{ inputs.region_id }}
           postgres_version: ${{ matrix.pg-version }}
-          project_settings: ${{ steps.project-settings.outputs.settings }}
           default_endpoint_settings: '{"pg_settings":{"DateStyle":"Postgres,MDY","TimeZone":"America/Los_Angeles","neon.allow_unstable_extensions":"on"}}'
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
