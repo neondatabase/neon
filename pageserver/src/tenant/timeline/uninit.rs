@@ -1,18 +1,21 @@
-use std::{collections::hash_map::Entry, fs, future::Future, sync::Arc};
+use std::collections::hash_map::Entry;
+use std::fs;
+use std::future::Future;
+use std::sync::Arc;
 
 use anyhow::Context;
 use camino::Utf8PathBuf;
 use tracing::{error, info, info_span};
-use utils::{fs_ext, id::TimelineId, lsn::Lsn, sync::gate::GateGuard};
-
-use crate::{
-    context::RequestContext,
-    import_datadir,
-    span::debug_assert_current_span_has_tenant_and_timeline_id,
-    tenant::{CreateTimelineError, CreateTimelineIdempotency, Tenant, TimelineOrOffloaded},
-};
+use utils::fs_ext;
+use utils::id::TimelineId;
+use utils::lsn::Lsn;
+use utils::sync::gate::GateGuard;
 
 use super::Timeline;
+use crate::context::RequestContext;
+use crate::import_datadir;
+use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
+use crate::tenant::{CreateTimelineError, CreateTimelineIdempotency, Tenant, TimelineOrOffloaded};
 
 /// A timeline with some of its files on disk, being initialized.
 /// This struct ensures the atomicity of the timeline init: it's either properly created and inserted into pageserver's memory, or
@@ -128,7 +131,7 @@ impl<'t> UninitializedTimeline<'t> {
                 // We do not call Self::abort here.  Because we don't cleanly shut down our Timeline, [`Self::drop`] should
                 // skip trying to delete the timeline directory too.
                 anyhow::bail!(
-                "Found freshly initialized timeline {tenant_shard_id}/{timeline_id} in the tenant map"
+                    "Found freshly initialized timeline {tenant_shard_id}/{timeline_id} in the tenant map"
                 )
             }
             Entry::Vacant(v) => {

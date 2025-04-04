@@ -2,17 +2,18 @@ from __future__ import annotations
 
 import socket
 import subprocess
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import backoff
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import PgProtocol, VanillaPostgres
-from fixtures.port_distributor import PortDistributor
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from types import TracebackType
     from typing import Self
+
+    from fixtures.port_distributor import PortDistributor
 
 
 def generate_tls_cert(cn, certout, keyout):

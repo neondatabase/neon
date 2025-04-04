@@ -1,6 +1,8 @@
-use crate::pageserver_client::PageserverClient;
-use crate::persistence::Persistence;
-use crate::{compute_hook, service};
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use json_structural_diff::JsonDiff;
 use pageserver_api::controller_api::{AvailabilityZone, MigrationConfig, PlacementPolicy};
 use pageserver_api::models::{
@@ -9,10 +11,6 @@ use pageserver_api::models::{
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use pageserver_client::mgmt_api;
 use reqwest::StatusCode;
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use utils::backoff::exponential_backoff;
 use utils::generation::Generation;
@@ -23,7 +21,10 @@ use utils::sync::gate::GateGuard;
 
 use crate::compute_hook::{ComputeHook, NotifyError};
 use crate::node::Node;
+use crate::pageserver_client::PageserverClient;
+use crate::persistence::Persistence;
 use crate::tenant_shard::{IntentState, ObservedState, ObservedStateDelta, ObservedStateLocation};
+use crate::{compute_hook, service};
 
 const DEFAULT_HEATMAP_PERIOD: Duration = Duration::from_secs(60);
 
@@ -85,6 +86,9 @@ pub(super) struct Reconciler {
 
     /// Access to persistent storage for updating generation numbers
     pub(crate) persistence: Arc<Persistence>,
+
+    /// HTTP client with proper CA certs.
+    pub(crate) http_client: reqwest::Client,
 }
 
 pub(crate) struct ReconcilerConfigBuilder {
@@ -297,6 +301,7 @@ impl Reconciler {
                         .location_config(tenant_shard_id, config.clone(), flush_ms, lazy)
                         .await
                 },
+                &self.http_client,
                 &self.service_config.pageserver_jwt_token,
                 1,
                 3,
@@ -417,6 +422,7 @@ impl Reconciler {
 
         let client = PageserverClient::new(
             node.get_id(),
+            self.http_client.clone(),
             node.base_url(),
             self.service_config.pageserver_jwt_token.as_deref(),
         );
@@ -440,6 +446,7 @@ impl Reconciler {
     ) -> anyhow::Result<HashMap<TimelineId, Lsn>> {
         let client = PageserverClient::new(
             node.get_id(),
+            self.http_client.clone(),
             node.base_url(),
             self.service_config.pageserver_jwt_token.as_deref(),
         );
@@ -479,6 +486,7 @@ impl Reconciler {
                             )
                             .await
                     },
+                    &self.http_client,
                     &self.service_config.pageserver_jwt_token,
                     1,
                     3,
@@ -511,7 +519,8 @@ impl Reconciler {
             } else if status == StatusCode::ACCEPTED {
                 let total_runtime = started_at.elapsed();
                 if total_runtime > total_download_timeout {
-                    tracing::warn!("Timed out after {}ms downloading layers to {node}.  Progress so far: {}/{} layers, {}/{} bytes",
+                    tracing::warn!(
+                        "Timed out after {}ms downloading layers to {node}.  Progress so far: {}/{} layers, {}/{} bytes",
                         total_runtime.as_millis(),
                         progress.layers_downloaded,
                         progress.layers_total,
@@ -677,6 +686,8 @@ impl Reconciler {
                 .await?,
         );
 
+        pausable_failpoint!("reconciler-live-migrate-post-generation-inc");
+
         let dest_conf = build_location_config(
             &self.shard,
             &self.config,
@@ -751,7 +762,9 @@ impl Reconciler {
         Ok(())
     }
 
-    async fn maybe_refresh_observed(&mut self) -> Result<(), ReconcileError> {
+    /// Returns true if the observed state of the attached location was refreshed
+    /// and false otherwise.
+    async fn maybe_refresh_observed(&mut self) -> Result<bool, ReconcileError> {
         // If the attached node has uncertain state, read it from the pageserver before proceeding: this
         // is important to avoid spurious generation increments.
         //
@@ -761,7 +774,7 @@ impl Reconciler {
 
         let Some(attached_node) = self.intent.attached.as_ref() else {
             // Nothing to do
-            return Ok(());
+            return Ok(false);
         };
 
         if matches!(
@@ -772,6 +785,7 @@ impl Reconciler {
             let observed_conf = match attached_node
                 .with_client_retries(
                     |client| async move { client.get_location_config(tenant_shard_id).await },
+                    &self.http_client,
                     &self.service_config.pageserver_jwt_token,
                     1,
                     1,
@@ -805,7 +819,7 @@ impl Reconciler {
             }
         }
 
-        Ok(())
+        Ok(true)
     }
 
     /// Reconciling a tenant makes API calls to pageservers until the observed state
@@ -821,7 +835,7 @@ impl Reconciler {
     /// state where it still requires later reconciliation.
     pub(crate) async fn reconcile(&mut self) -> Result<(), ReconcileError> {
         // Prepare: if we have uncertain `observed` state for our would-be attachement location, then refresh it
-        self.maybe_refresh_observed().await?;
+        let refreshed = self.maybe_refresh_observed().await?;
 
         // Special case: live migration
         self.maybe_live_migrate().await?;
@@ -845,8 +859,14 @@ impl Reconciler {
             );
             match self.observed.locations.get(&node.get_id()) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {
-                    // Nothing to do
-                    tracing::info!(node_id=%node.get_id(), "Observed configuration already correct.")
+                    if refreshed {
+                        tracing::info!(
+                            node_id=%node.get_id(), "Observed configuration correct after refresh. Notifying compute.");
+                        self.compute_notify().await?;
+                    } else {
+                        // Nothing to do
+                        tracing::info!(node_id=%node.get_id(), "Observed configuration already correct.");
+                    }
                 }
                 observed => {
                     // In all cases other than a matching observed configuration, we will
@@ -1120,6 +1140,7 @@ impl Reconciler {
             match origin
                 .with_client_retries(
                     |client| async move { client.get_location_config(tenant_shard_id).await },
+                    &self.http_client,
                     &self.service_config.pageserver_jwt_token,
                     1,
                     3,

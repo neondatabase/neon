@@ -13,7 +13,6 @@ import fixtures.utils
 import pytest
 from fixtures.auth_tokens import TokenScope
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
-from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     DEFAULT_AZ_ID,
@@ -26,6 +25,7 @@ from fixtures.neon_fixtures import (
     PgBin,
     StorageControllerApiException,
     StorageControllerLeadershipStatus,
+    StorageControllerMigrationConfig,
     last_flush_lsn_upload,
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
@@ -39,9 +39,7 @@ from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
 )
 from fixtures.pg_version import PgVersion
-from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
-from fixtures.storage_controller_proxy import StorageControllerProxy
 from fixtures.utils import (
     run_only_on_default_postgres,
     run_pg_bench_small,
@@ -49,18 +47,21 @@ from fixtures.utils import (
     wait_until,
 )
 from fixtures.workload import Workload
-from mypy_boto3_s3.type_defs import (
-    ObjectTypeDef,
-)
-from pytest_httpserver import HTTPServer
 from urllib3 import Retry
-from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 if TYPE_CHECKING:
     from typing import Any
 
+    from fixtures.compute_reconfigure import ComputeReconfigure
     from fixtures.httpserver import ListenAddress
+    from fixtures.port_distributor import PortDistributor
+    from fixtures.storage_controller_proxy import StorageControllerProxy
+    from mypy_boto3_s3.type_defs import (
+        ObjectTypeDef,
+    )
+    from pytest_httpserver import HTTPServer
+    from werkzeug.wrappers.request import Request
 
 
 def get_node_shard_counts(env: NeonEnv, tenant_ids):
@@ -72,7 +73,9 @@ def get_node_shard_counts(env: NeonEnv, tenant_ids):
 
 
 @pytest.mark.parametrize(**fixtures.utils.allpairs_versions())
-def test_storage_controller_smoke(neon_env_builder: NeonEnvBuilder, combination):
+def test_storage_controller_smoke(
+    neon_env_builder: NeonEnvBuilder, compute_reconfigure_listener: ComputeReconfigure, combination
+):
     """
     Test the basic lifecycle of a storage controller:
     - Restarting
@@ -82,6 +85,7 @@ def test_storage_controller_smoke(neon_env_builder: NeonEnvBuilder, combination)
     """
 
     neon_env_builder.num_pageservers = 3
+    neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
     env = neon_env_builder.init_configs()
 
     # Start services by hand so that we can skip a pageserver (this will start + register later)
@@ -143,9 +147,9 @@ def test_storage_controller_smoke(neon_env_builder: NeonEnvBuilder, combination)
     for node_id, count in get_node_shard_counts(env, tenant_ids).items():
         # we used a multiple of pagservers for the total shard count,
         # so expect equal number on all pageservers
-        assert count == tenant_shard_count / len(
-            env.pageservers
-        ), f"Node {node_id} has bad count {count}"
+        assert count == tenant_shard_count / len(env.pageservers), (
+            f"Node {node_id} has bad count {count}"
+        )
 
     # Creating and deleting timelines should work, using identical API to pageserver
     timeline_crud_tenant = next(iter(tenant_ids))
@@ -604,7 +608,7 @@ def test_storage_controller_compute_hook(
     # when migrating.
     neon_env_builder.num_pageservers = 2
     (host, port) = httpserver_listen_address
-    neon_env_builder.control_plane_compute_hook_api = f"http://{host}:{port}/notify"
+    neon_env_builder.control_plane_hooks_api = f"http://{host}:{port}"
 
     # Set up fake HTTP notify endpoint
     notifications = []
@@ -617,7 +621,9 @@ def test_storage_controller_compute_hook(
         notifications.append(request.json)
         return Response(status=status)
 
-    httpserver.expect_request("/notify", method="PUT").respond_with_handler(handler)
+    httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(handler)
+
+    neon_env_builder.storage_controller_config = {"use_local_compute_notifications": False}
 
     # Start running
     env = neon_env_builder.init_start(initial_tenant_conf={"lsn_lease_length": "0s"})
@@ -723,7 +729,7 @@ def test_storage_controller_stuck_compute_hook(
 
     neon_env_builder.num_pageservers = 2
     (host, port) = httpserver_listen_address
-    neon_env_builder.control_plane_compute_hook_api = f"http://{host}:{port}/notify"
+    neon_env_builder.control_plane_hooks_api = f"http://{host}:{port}"
 
     handle_params = {"status": 200}
 
@@ -735,7 +741,9 @@ def test_storage_controller_stuck_compute_hook(
         notifications.append(request.json)
         return Response(status=status)
 
-    httpserver.expect_request("/notify", method="PUT").respond_with_handler(handler)
+    httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(handler)
+
+    neon_env_builder.storage_controller_config = {"use_local_compute_notifications": False}
 
     # Start running
     env = neon_env_builder.init_start(initial_tenant_conf={"lsn_lease_length": "0s"})
@@ -765,7 +773,10 @@ def test_storage_controller_stuck_compute_hook(
         # status is cleared.
         handle_params["status"] = 423
         migrate_fut = executor.submit(
-            env.storage_controller.tenant_shard_migrate, shard_0_id, dest_ps_id
+            env.storage_controller.tenant_shard_migrate,
+            shard_0_id,
+            dest_ps_id,
+            config=StorageControllerMigrationConfig(prewarm=False, override_scheduler=True),
         )
 
         def logged_stuck():
@@ -793,7 +804,10 @@ def test_storage_controller_stuck_compute_hook(
         # Now, do a migration in the opposite direction
         handle_params["status"] = 423
         migrate_fut = executor.submit(
-            env.storage_controller.tenant_shard_migrate, shard_0_id, origin_pageserver.id
+            env.storage_controller.tenant_shard_migrate,
+            shard_0_id,
+            origin_pageserver.id,
+            config=StorageControllerMigrationConfig(prewarm=False, override_scheduler=True),
         )
 
         def logged_stuck_again():
@@ -864,7 +878,7 @@ def test_storage_controller_compute_hook_retry(
 
     neon_env_builder.num_pageservers = 2
     (host, port) = httpserver_listen_address
-    neon_env_builder.control_plane_compute_hook_api = f"http://{host}:{port}/notify"
+    neon_env_builder.control_plane_hooks_api = f"http://{host}:{port}"
 
     handle_params = {"status": 200}
 
@@ -876,7 +890,9 @@ def test_storage_controller_compute_hook_retry(
         notifications.append(request.json)
         return Response(status=status)
 
-    httpserver.expect_request("/notify", method="PUT").respond_with_handler(handler)
+    httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(handler)
+
+    neon_env_builder.storage_controller_config = {"use_local_compute_notifications": False}
 
     # Start running
     env = neon_env_builder.init_configs()
@@ -986,7 +1002,7 @@ def test_storage_controller_compute_hook_revert(
     # when migrating.
     neon_env_builder.num_pageservers = 2
     (host, port) = httpserver_listen_address
-    neon_env_builder.control_plane_compute_hook_api = f"http://{host}:{port}/notify"
+    neon_env_builder.control_plane_hooks_api = f"http://{host}:{port}"
 
     # Set up fake HTTP notify endpoint
     notifications = []
@@ -999,7 +1015,9 @@ def test_storage_controller_compute_hook_revert(
         notifications.append(request.json)
         return Response(status=status)
 
-    httpserver.expect_request("/notify", method="PUT").respond_with_handler(handler)
+    httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(handler)
+
+    neon_env_builder.storage_controller_config = {"use_local_compute_notifications": False}
 
     # Start running
     env = neon_env_builder.init_start(initial_tenant_conf={"lsn_lease_length": "0s"})
@@ -1027,7 +1045,11 @@ def test_storage_controller_compute_hook_revert(
     with pytest.raises(StorageControllerApiException, match="Timeout waiting for shard"):
         # We expect the controller to give us an error because its reconciliation timed out
         # waiting for the compute hook.
-        env.storage_controller.tenant_shard_migrate(tenant_shard_id, pageserver_b.id)
+        env.storage_controller.tenant_shard_migrate(
+            tenant_shard_id,
+            pageserver_b.id,
+            config=StorageControllerMigrationConfig(prewarm=False, override_scheduler=True),
+        )
 
     # Although the migration API failed, the hook should still see pageserver B (it remembers what
     # was posted even when returning an error code)
@@ -1068,7 +1090,11 @@ def test_storage_controller_compute_hook_revert(
     # Migrate B -> A, with a working compute hook: the controller should notify the hook because the
     # last update it made that was acked (423) by the compute was for node B.
     handle_params["status"] = 200
-    env.storage_controller.tenant_shard_migrate(tenant_shard_id, pageserver_a.id)
+    env.storage_controller.tenant_shard_migrate(
+        tenant_shard_id,
+        pageserver_a.id,
+        config=StorageControllerMigrationConfig(prewarm=False, override_scheduler=True),
+    )
 
     wait_until(lambda: notified_ps(pageserver_a.id))
 
@@ -1359,8 +1385,9 @@ def test_storage_controller_tenant_conf(neon_env_builder: NeonEnvBuilder):
     # vs. pageserver API calls, because pageserver has defaults.
     http.set_tenant_config(tenant_id, {})
     readback_controller = http.tenant_config(tenant_id)
-    assert readback_controller.effective_config["pitr_interval"] is None
-    assert readback_controller.tenant_specific_overrides["pitr_interval"] is None
+
+    assert "pitr_interval" not in readback_controller.effective_config.keys()
+    assert "pitr_interval" not in readback_controller.tenant_specific_overrides.keys()
     readback_ps = env.pageservers[0].http_client().tenant_config(tenant_id)
     assert readback_ps.effective_config["pitr_interval"] == default_value
     assert "pitr_interval" not in readback_ps.tenant_specific_overrides
@@ -1380,9 +1407,12 @@ def test_storage_controller_tenant_deletion(
     """
     neon_env_builder.num_pageservers = 4
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
-    neon_env_builder.control_plane_compute_hook_api = (
-        compute_reconfigure_listener.control_plane_compute_hook_api
-    )
+    neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
+
+    neon_env_builder.storage_controller_config = {
+        # Route to `compute_reconfigure_listener` instead
+        "use_local_compute_notifications": False,
+    }
 
     env = neon_env_builder.init_configs()
     env.start()
@@ -1585,6 +1615,12 @@ def test_storage_controller_heartbeats(
     env.storage_controller.allowed_errors.append(
         ".*Call to node.*management API.*failed.*failpoint.*"
     )
+    # The server starts listening to the socket before sending re-attach request,
+    # but it starts serving HTTP only when re-attach is completed.
+    # If re-attach is slow (last scenario), storcon's heartbeat requests will time out.
+    env.storage_controller.allowed_errors.append(
+        ".*Call to node.*management API.*failed.* Timeout.*"
+    )
 
     # Initially we have two online pageservers
     nodes = env.storage_controller.node_list()
@@ -1734,18 +1770,23 @@ def test_storage_controller_re_attach(neon_env_builder: NeonEnvBuilder):
     # Restart the failed pageserver
     victim_ps.start()
 
+    env.storage_controller.reconcile_until_idle()
+
     # We expect that the re-attach call correctly tipped off the pageserver that its locations
     # are all secondaries now.
     locations = victim_ps.http_client().tenant_list_locations()["tenant_shards"]
     assert len(locations) == 2
     assert all(loc[1]["mode"] == "Secondary" for loc in locations)
 
-    # We expect that this situation resulted from the re_attach call, and not any explicit
-    # Reconciler runs: assert that the reconciliation count has not gone up since we restarted.
+    # We expect that this situation resulted from background reconciliations
+    # Reconciler runs: assert that the reconciliation count has gone up by exactly
+    # one for each shard
     reconciles_after_restart = env.storage_controller.get_metric_value(
         "storage_controller_reconcile_complete_total", filter={"status": "ok"}
     )
-    assert reconciles_after_restart == reconciles_before_restart
+
+    assert reconciles_before_restart is not None
+    assert reconciles_after_restart == reconciles_before_restart + 2
 
 
 def test_storage_controller_shard_scheduling_policy(neon_env_builder: NeonEnvBuilder):
@@ -1949,6 +1990,9 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
                     env.storage_controller.tenant_describe(tenant_id)["shards"][0]["node_attached"]
                 )
             ),
+            # A simple migration where we will ignore scheduling (force=true) and do it immediately (prewarm=false)
+            "--prewarm=false",
+            "--override-scheduler=true",
         ]
     )
 
@@ -2148,7 +2192,12 @@ def test_tenant_import(neon_env_builder: NeonEnvBuilder, shard_count, remote_sto
 
 @pytest.mark.parametrize(**fixtures.utils.allpairs_versions())
 @pytest.mark.parametrize("num_azs", [1, 2])
-def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder, num_azs: int, combination):
+def test_graceful_cluster_restart(
+    neon_env_builder: NeonEnvBuilder,
+    num_azs: int,
+    compute_reconfigure_listener: ComputeReconfigure,
+    combination,
+):
     """
     Graceful reststart of storage controller clusters use the drain and
     fill hooks in order to migrate attachments away from pageservers before
@@ -2160,6 +2209,7 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder, num_azs: int
     """
     neon_env_builder.num_azs = num_azs
     neon_env_builder.num_pageservers = 2
+    neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
     env = neon_env_builder.init_configs()
     env.start()
 
@@ -2415,7 +2465,6 @@ def test_background_operation_cancellation(neon_env_builder: NeonEnvBuilder):
 @pytest.mark.parametrize("while_offline", [True, False])
 def test_storage_controller_node_deletion(
     neon_env_builder: NeonEnvBuilder,
-    compute_reconfigure_listener: ComputeReconfigure,
     while_offline: bool,
 ):
     """
@@ -2841,6 +2890,143 @@ def test_storage_controller_leadership_transfer(
         )
 
 
+def test_storage_controller_leadership_transfer_during_split(
+    neon_env_builder: NeonEnvBuilder,
+    storage_controller_proxy: StorageControllerProxy,
+    port_distributor: PortDistributor,
+):
+    """
+    Exercise a race between shard splitting and graceful leadership transfer.  This is
+    a reproducer for https://github.com/neondatabase/neon/issues/11254
+    """
+    neon_env_builder.auth_enabled = True
+
+    neon_env_builder.num_pageservers = 3
+
+    neon_env_builder.storage_controller_config = {
+        "database_url": f"127.0.0.1:{port_distributor.get_port()}",
+        "start_as_candidate": True,
+    }
+
+    neon_env_builder.storage_controller_port_override = storage_controller_proxy.port()
+
+    storage_controller_1_port = port_distributor.get_port()
+    storage_controller_2_port = port_distributor.get_port()
+
+    storage_controller_proxy.route_to(f"http://127.0.0.1:{storage_controller_1_port}")
+
+    env = neon_env_builder.init_configs()
+    start_env(env, storage_controller_1_port)
+
+    assert (
+        env.storage_controller.get_leadership_status() == StorageControllerLeadershipStatus.LEADER
+    )
+    leader = env.storage_controller.get_leader()
+    assert leader["address"] == f"http://127.0.0.1:{storage_controller_1_port}/"
+
+    tenant_count = 2
+    shard_count = 4
+    tenants = set(TenantId.generate() for _ in range(0, tenant_count))
+
+    for tid in tenants:
+        env.storage_controller.tenant_create(
+            tid, shard_count=shard_count, placement_policy={"Attached": 1}
+        )
+    env.storage_controller.reconcile_until_idle()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        # Start a shard split
+        env.storage_controller.allowed_errors.extend(
+            [".*Unexpected child shard count.*", ".*Enqueuing background abort.*"]
+        )
+        pause_failpoint = "shard-split-pre-complete"
+        env.storage_controller.configure_failpoints((pause_failpoint, "pause"))
+        split_fut = executor.submit(
+            env.storage_controller.tenant_shard_split, list(tenants)[0], shard_count * 2
+        )
+
+        def hit_failpoint():
+            log.info("Checking log for pattern...")
+            try:
+                assert env.storage_controller.log_contains(f".*at failpoint {pause_failpoint}.*")
+            except Exception:
+                log.exception("Failed to find pattern in log")
+                raise
+
+        wait_until(hit_failpoint, interval=0.1, status_interval=1.0)
+
+        env.storage_controller.start(
+            timeout_in_seconds=30, instance_id=2, base_port=storage_controller_2_port
+        )
+
+        def passed_split_abort():
+            try:
+                log.info("Checking log for pattern...")
+                assert env.storage_controller.log_contains(
+                    ".*Using observed state received from leader.*"
+                )
+            except Exception:
+                log.exception("Failed to find pattern in log")
+                raise
+
+        log.info("Awaiting split abort")
+        wait_until(passed_split_abort, interval=0.1, status_interval=1.0)
+        assert env.storage_controller.log_contains(".*Aborting shard split.*")
+
+        # Proxy is still talking to original controller here: disable its pause failpoint so
+        # that its shard split can run to completion.
+        log.info("Disabling failpoint")
+        # Bypass the proxy: the python test HTTPServer is single threaded and still blocked
+        # on handling the shard split request.
+        env.storage_controller.request(
+            "PUT",
+            f"http://127.0.0.1:{storage_controller_1_port}/debug/v1/failpoints",
+            json=[{"name": "shard-split-pre-complete", "actions": "off"}],
+            headers=env.storage_controller.headers(TokenScope.ADMIN),
+        )
+
+        def previous_stepped_down():
+            assert (
+                env.storage_controller.get_leadership_status()
+                == StorageControllerLeadershipStatus.STEPPED_DOWN
+            )
+
+        log.info("Awaiting step down")
+        wait_until(previous_stepped_down)
+
+        # Let the shard split complete: this may happen _after_ the replacement has come up
+        # and tried to clean up the databases
+        log.info("Unblocking & awaiting shard split")
+        with pytest.raises(Exception, match="Unexpected child shard count"):
+            # This split fails when it tries to persist results, because it encounters
+            # changes already made by the new controller's abort-on-startup
+            split_fut.result()
+
+        log.info("Routing to new leader")
+        storage_controller_proxy.route_to(f"http://127.0.0.1:{storage_controller_2_port}")
+
+        def new_becomes_leader():
+            assert (
+                env.storage_controller.get_leadership_status()
+                == StorageControllerLeadershipStatus.LEADER
+            )
+
+        wait_until(new_becomes_leader)
+        leader = env.storage_controller.get_leader()
+        assert leader["address"] == f"http://127.0.0.1:{storage_controller_2_port}/"
+
+    env.storage_controller.wait_until_ready()
+    env.storage_controller.consistency_check()
+
+    # Check that the stepped down instance forwards requests
+    # to the new leader while it's still running.
+    storage_controller_proxy.route_to(f"http://127.0.0.1:{storage_controller_1_port}")
+    env.storage_controller.tenant_shard_dump()
+    env.storage_controller.node_configure(env.pageservers[0].id, {"scheduling": "Pause"})
+    status = env.storage_controller.node_status(env.pageservers[0].id)
+    assert status["scheduling"] == "Pause"
+
+
 def test_storage_controller_ps_restarted_during_drain(neon_env_builder: NeonEnvBuilder):
     # single unsharded tenant, two locations
     neon_env_builder.num_pageservers = 2
@@ -3208,6 +3394,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
         "host": "localhost",
         "port": sk_0.port.pg,
         "http_port": sk_0.port.http,
+        "https_port": None,
         "version": 5957,
         "availability_zone_id": "us-east-2b",
     }
@@ -3241,6 +3428,24 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     assert inserted_now is not None
 
     assert eq_safekeeper_records(body, inserted_now)
+
+    # https_port appears during migration
+    body["https_port"] = 123
+    target.on_safekeeper_deploy(fake_id, body)
+    inserted_now = target.get_safekeeper(fake_id)
+    assert target.get_safekeepers() == [inserted_now]
+    assert inserted_now is not None
+    assert eq_safekeeper_records(body, inserted_now)
+    env.storage_controller.consistency_check()
+
+    # https_port rollback
+    body["https_port"] = None
+    target.on_safekeeper_deploy(fake_id, body)
+    inserted_now = target.get_safekeeper(fake_id)
+    assert target.get_safekeepers() == [inserted_now]
+    assert inserted_now is not None
+    assert eq_safekeeper_records(body, inserted_now)
+    env.storage_controller.consistency_check()
 
     # some small tests for the scheduling policy querying and returning APIs
     newest_info = target.get_safekeeper(inserted["id"])
@@ -3774,6 +3979,7 @@ def test_storage_controller_node_flap_detach_race(
     wait_until(validate_locations, timeout=10)
 
 
+@run_only_on_default_postgres("this is like a 'unit test' against storcon db")
 def test_update_node_on_registration(neon_env_builder: NeonEnvBuilder):
     """
     Check that storage controller handles node_register requests with updated fields correctly.
@@ -3865,3 +4071,321 @@ def test_storage_controller_location_conf_equivalence(neon_env_builder: NeonEnvB
     )
 
     assert reconciles_after_restart == 0
+
+
+@run_only_on_default_postgres("PG version is not interesting here")
+@pytest.mark.parametrize("restart_storcon", [True, False])
+def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart_storcon: bool):
+    """
+    Test that the storcon can create and delete tenants and timelines with a safekeeper being down.
+      - restart_storcon: tests whether the pending ops are persisted.
+        if we don't restart, we test that we don't require it to come from the db.
+    """
+
+    neon_env_builder.num_safekeepers = 3
+    neon_env_builder.storage_controller_config = {
+        "timelines_onto_safekeepers": True,
+    }
+    env = neon_env_builder.init_start()
+
+    env.safekeepers[0].stop()
+
+    # Wait for heartbeater to pick up that the safekeeper is gone
+    # This isn't really neccessary
+    def logged_offline():
+        env.storage_controller.assert_log_contains(
+            "Heartbeat round complete for 3 safekeepers, 1 offline"
+        )
+
+    wait_until(logged_offline)
+
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+    env.create_tenant(tenant_id, timeline_id)
+
+    env.safekeepers[1].assert_log_contains(f"creating new timeline {tenant_id}/{timeline_id}")
+    env.safekeepers[2].assert_log_contains(f"creating new timeline {tenant_id}/{timeline_id}")
+
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*Call to safekeeper.* management API still failed after.*",
+            ".*reconcile_one.*tenant_id={tenant_id}.*Call to safekeeper.* management API still failed after.*",
+        ]
+    )
+
+    if restart_storcon:
+        # Restart the storcon to check that we persist operations
+        env.storage_controller.stop()
+        env.storage_controller.start()
+
+    config_lines = [
+        "neon.safekeeper_proto_version = 3",
+    ]
+    with env.endpoints.create("main", tenant_id=tenant_id, config_lines=config_lines) as ep:
+        # endpoint should start.
+        ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
+        ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
+
+    env.storage_controller.assert_log_contains("writing pending op for sk id 1")
+    env.safekeepers[0].start()
+
+    # ensure that we applied the operation also for the safekeeper we just brought down
+    def logged_contains_on_sk():
+        env.safekeepers[0].assert_log_contains(
+            f"pulling timeline {tenant_id}/{timeline_id} from safekeeper"
+        )
+
+    wait_until(logged_contains_on_sk)
+
+    env.safekeepers[1].stop()
+
+    env.storage_controller.pageserver_api().tenant_delete(tenant_id)
+
+    # ensure the safekeeper deleted the timeline
+    def timeline_deleted_on_active_sks():
+        env.safekeepers[0].assert_log_contains(
+            f"deleting timeline {tenant_id}/{timeline_id} from disk"
+        )
+        env.safekeepers[2].assert_log_contains(
+            f"deleting timeline {tenant_id}/{timeline_id} from disk"
+        )
+
+    wait_until(timeline_deleted_on_active_sks)
+
+    if restart_storcon:
+        # Restart the storcon to check that we persist operations
+        env.storage_controller.stop()
+        env.storage_controller.start()
+
+    env.safekeepers[1].start()
+
+    # ensure that there is log msgs for the third safekeeper too
+    def timeline_deleted_on_sk():
+        env.safekeepers[1].assert_log_contains(
+            f"deleting timeline {tenant_id}/{timeline_id} from disk"
+        )
+
+    wait_until(timeline_deleted_on_sk)
+
+
+@pytest.mark.parametrize("wrong_az", [True, False])
+def test_storage_controller_graceful_migration(neon_env_builder: NeonEnvBuilder, wrong_az: bool):
+    """
+    Test that the graceful migration API goes through the process of
+    creating a secondary & waiting for it to warm up before cutting over, when
+    we use the prewarm=True flag to the API.
+    """
+
+    # 2 pageservers in 2 AZs, so that each AZ has a pageserver we can migrate to
+    neon_env_builder.num_pageservers = 4
+    neon_env_builder.num_azs = 2
+
+    env = neon_env_builder.init_start()
+
+    # Enable secondary location (neon_local disables by default)
+    env.storage_controller.tenant_policy_update(env.initial_tenant, {"placement": {"Attached": 1}})
+    env.storage_controller.reconcile_until_idle()
+
+    initial_desc = env.storage_controller.tenant_describe(env.initial_tenant)["shards"][0]
+    initial_ps_id = initial_desc["node_attached"]
+    initial_secondary_id = initial_desc["node_secondary"][0]
+    initial_ps_az = initial_desc["preferred_az_id"]
+    initial_ps = [ps for ps in env.pageservers if ps.id == initial_ps_id][0]
+
+    if wrong_az:
+        dest_ps = [
+            ps
+            for ps in env.pageservers
+            if ps.id != initial_ps_id
+            and ps.az_id != initial_ps_az
+            and ps.id != initial_secondary_id
+        ][0]
+    else:
+        dest_ps = [
+            ps
+            for ps in env.pageservers
+            if ps.id != initial_ps_id
+            and ps.az_id == initial_ps_az
+            and ps.id != initial_secondary_id
+        ][0]
+
+    log.info(
+        f"Migrating to {dest_ps.id} in AZ {dest_ps.az_id} (from {initial_ps_id} in AZ {initial_ps_az})"
+    )
+    dest_ps_id = dest_ps.id
+
+    # Set a failpoint so that the migration will block at the point it has a secondary location
+    for ps in env.pageservers:
+        ps.http_client().configure_failpoints(("secondary-layer-download-pausable", "pause"))
+
+    # Before migration, our destination has no locations.  Guaranteed because any secondary for our
+    # tenant will be in another AZ.
+    assert dest_ps.http_client().tenant_list_locations()["tenant_shards"] == []
+
+    if wrong_az:
+        # If migrating to the wrong AZ, first check that omitting force flag results in rejection
+        with pytest.raises(StorageControllerApiException, match="worse-scoring node"):
+            env.storage_controller.tenant_shard_migrate(
+                TenantShardId(env.initial_tenant, 0, 0),
+                dest_ps_id,
+                config=StorageControllerMigrationConfig(prewarm=True, override_scheduler=False),
+            )
+
+        # Turn off ordinary optimisations so that our migration will stay put once complete
+        env.storage_controller.tenant_policy_update(env.initial_tenant, {"scheduling": "Essential"})
+
+    # We expect this API call to succeed, and result in a new secondary location on the destination
+    env.storage_controller.tenant_shard_migrate(
+        TenantShardId(env.initial_tenant, 0, 0),
+        dest_ps_id,
+        config=StorageControllerMigrationConfig(prewarm=True, override_scheduler=wrong_az),
+    )
+
+    def secondary_at_dest():
+        locs = dest_ps.http_client().tenant_list_locations()["tenant_shards"]
+        assert len(locs) == 1
+        assert locs[0][0] == str(env.initial_tenant)
+        assert locs[0][1]["mode"] == "Secondary"
+
+    wait_until(secondary_at_dest)
+
+    # Unblock secondary downloads
+    for ps in env.pageservers:
+        ps.http_client().configure_failpoints(("secondary-layer-download-pausable", "off"))
+
+    # Pump the reconciler to avoid waiting for background reconciles
+    env.storage_controller.reconcile_until_idle()
+
+    # We should be attached at the destination
+    locs = dest_ps.http_client().tenant_list_locations()["tenant_shards"]
+    assert len(locs) == 1
+    assert locs[0][1]["mode"] == "AttachedSingle"
+
+    # Nothing left behind at the origin
+    if wrong_az:
+        # We're in essential scheduling mode, so the end state should be attached in the migration
+        # destination and a secondary in the original location
+        assert (
+            initial_ps.http_client().tenant_list_locations()["tenant_shards"][0][1]["mode"]
+            == "Secondary"
+        )
+    else:
+        assert initial_ps.http_client().tenant_list_locations()["tenant_shards"] == []
+
+
+@run_only_on_default_postgres("this is like a 'unit test' against storcon db")
+def test_storage_controller_migrate_with_pageserver_restart(
+    neon_env_builder: NeonEnvBuilder, make_httpserver
+):
+    """
+    Test that live migrations which fail right after incrementing the generation
+    due to the destination going offline eventually send a compute notification
+    after the destination re-attaches.
+    """
+    neon_env_builder.num_pageservers = 2
+
+    neon_env_builder.storage_controller_config = {
+        # Disable transitions to offline
+        "max_offline": "600s",
+        "use_local_compute_notifications": False,
+    }
+
+    neon_env_builder.control_plane_hooks_api = (
+        f"http://{make_httpserver.host}:{make_httpserver.port}/"
+    )
+
+    notifications = []
+
+    def notify(request: Request):
+        log.info(f"Received notify-attach: {request}")
+        notifications.append(request.json)
+
+    make_httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(notify)
+
+    env = neon_env_builder.init_start()
+
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*Call to node.*management API failed.*",
+            ".*Call to node.*management API still failed.*",
+            ".*Reconcile error.*",
+            ".*request.*PUT.*migrate.*",
+        ]
+    )
+
+    env.storage_controller.tenant_policy_update(env.initial_tenant, {"placement": {"Attached": 1}})
+    env.storage_controller.reconcile_until_idle()
+
+    initial_desc = env.storage_controller.tenant_describe(env.initial_tenant)["shards"][0]
+    log.info(f"{initial_desc=}")
+    primary = env.get_pageserver(initial_desc["node_attached"])
+    secondary = env.get_pageserver(initial_desc["node_secondary"][0])
+
+    # Pause the migration after incrementing the generation in the database
+    env.storage_controller.configure_failpoints(
+        ("reconciler-live-migrate-post-generation-inc", "pause")
+    )
+
+    tenant_shard_id = TenantShardId(env.initial_tenant, 0, 0)
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            migrate_fut = executor.submit(
+                env.storage_controller.tenant_shard_migrate,
+                tenant_shard_id,
+                secondary.id,
+                config=StorageControllerMigrationConfig(prewarm=False, override_scheduler=True),
+            )
+
+            def has_hit_migration_failpoint():
+                expr = "at failpoint reconciler-live-migrate-post-generation-inc"
+                log.info(expr)
+                assert env.storage_controller.log_contains(expr)
+
+            wait_until(has_hit_migration_failpoint)
+
+            secondary.stop()
+
+            # Eventually migration completes
+            env.storage_controller.configure_failpoints(
+                ("reconciler-live-migrate-post-generation-inc", "off")
+            )
+            try:
+                migrate_fut.result()
+            except StorageControllerApiException as err:
+                log.info(f"Migration failed: {err}")
+    except:
+        env.storage_controller.configure_failpoints(
+            ("reconciler-live-migrate-post-generation-inc", "off")
+        )
+        raise
+
+    def process_migration_result():
+        dump = env.storage_controller.tenant_shard_dump()
+        observed = dump[0]["observed"]["locations"]
+
+        log.info(f"{observed=} primary={primary.id} secondary={secondary.id}")
+
+        assert observed[str(primary.id)]["conf"]["mode"] == "AttachedStale"
+        assert observed[str(secondary.id)]["conf"] is None
+
+    wait_until(process_migration_result)
+
+    # Start and wait for re-attach to be processed
+    secondary.start()
+    env.storage_controller.poll_node_status(
+        secondary.id,
+        desired_availability=PageserverAvailability.ACTIVE,
+        desired_scheduling_policy=None,
+        max_attempts=10,
+        backoff=1,
+    )
+
+    env.storage_controller.reconcile_until_idle()
+
+    assert notifications[-1] == {
+        "tenant_id": str(env.initial_tenant),
+        "stripe_size": None,
+        "shards": [{"node_id": int(secondary.id), "shard_number": 0}],
+        "preferred_az": DEFAULT_AZ_ID,
+    }

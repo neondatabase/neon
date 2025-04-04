@@ -166,6 +166,7 @@ def test_pageserver_compaction_preempt(
 
 
 @skip_in_debug_build("only run with release build")
+@pytest.mark.timeout(900)  # This test is slow with sanitizers enabled, especially on ARM
 @pytest.mark.parametrize(
     "with_branches",
     ["with_branches", "no_branches"],
@@ -177,7 +178,7 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder, with_b
         "compaction_period": "5s",
         # No PiTR interval and small GC horizon
         "pitr_interval": "0s",
-        "gc_horizon": f"{1024 ** 2}",
+        "gc_horizon": f"{1024**2}",
         "lsn_lease_length": "0s",
     }
 
@@ -319,8 +320,12 @@ def test_pageserver_gc_compaction_idempotent(
             },
         )
         wait_until(compaction_finished, timeout=60)
+        workload.validate(env.pageserver.id)
+        # Ensure all data are uploaded so that the duplicated layer gets into index_part.json
+        ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_flushed=True)
     if compaction_mode == "after_restart":
         env.pageserver.restart(True)
+        workload.validate(env.pageserver.id)
         ps_http.timeline_gc(
             tenant_id, timeline_id, None
         )  # Force refresh gc info to have gc_cutoff generated
@@ -335,6 +340,7 @@ def test_pageserver_gc_compaction_idempotent(
                     "sub_compaction_max_job_size_mb": 16,
                 },
             )
+            workload.validate(env.pageserver.id)
             wait_until(compaction_finished, timeout=60)
 
     # ensure gc_compaction is scheduled and it's actually running (instead of skipping due to no layers picked)
@@ -464,6 +470,95 @@ def test_pageserver_gc_compaction_interrupt(neon_env_builder: NeonEnvBuilder):
     # Run a legacy compaction+gc to ensure gc-compaction can coexist with legacy compaction.
     ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
     ps_http.timeline_gc(tenant_id, timeline_id, None)
+
+
+@skip_in_debug_build("only run with release build")
+def test_pageserver_gc_compaction_trigger(neon_env_builder: NeonEnvBuilder):
+    SMOKE_CONF = {
+        # Run both gc and gc-compaction.
+        "gc_period": "5s",
+        "compaction_period": "5s",
+        # No PiTR interval and small GC horizon
+        "pitr_interval": "0s",
+        "gc_horizon": f"{1024 * 16}",
+        "lsn_lease_length": "0s",
+        "gc_compaction_enabled": "true",
+        "gc_compaction_initial_threshold_kb": "16",
+        "gc_compaction_ratio_percent": "50",
+        # Do not generate image layers with create_image_layers
+        "image_layer_creation_check_threshold": "100",
+    }
+
+    env = neon_env_builder.init_start(initial_tenant_conf=SMOKE_CONF)
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    row_count = 10000
+    churn_rounds = 20
+
+    ps_http = env.pageserver.http_client()
+
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init(env.pageserver.id)
+
+    log.info("Writing initial data ...")
+    workload.write_rows(row_count, env.pageserver.id)
+
+    ps_http.timeline_gc(
+        tenant_id, timeline_id, None
+    )  # Force refresh gc info to have gc_cutoff generated
+
+    def compaction_finished():
+        queue_depth = len(ps_http.timeline_compact_info(tenant_id, timeline_id))
+        assert queue_depth == 0
+
+    for i in range(1, churn_rounds + 1):
+        log.info(f"Running churn round {i}/{churn_rounds} ...")
+        workload.churn_rows(row_count, env.pageserver.id, upload=True)
+        wait_until(compaction_finished, timeout=60)
+        workload.validate(env.pageserver.id)
+
+    # ensure gc_compaction is scheduled and it's actually running (instead of skipping due to no layers picked)
+    env.pageserver.assert_log_contains("gc_compact_timeline.*picked .* layers for compaction")
+
+    log.info("Validating at workload end ...")
+    workload.validate(env.pageserver.id)
+
+
+def test_pageserver_small_tenant_compaction(neon_env_builder: NeonEnvBuilder):
+    """
+    Create a small tenant that rarely needs compaction and ensure that everything works.
+    """
+    SMOKE_CONF = {
+        # Run both gc and gc-compaction.
+        "gc_period": "5s",
+        "compaction_period": "5s",
+        # No PiTR interval and small GC horizon
+        "pitr_interval": "0s",
+        "gc_horizon": 1024,
+        "lsn_lease_length": "0s",
+    }
+
+    env = neon_env_builder.init_start(initial_tenant_conf=SMOKE_CONF)
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    ps_http = env.pageserver.http_client()
+
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init(env.pageserver.id)
+
+    log.info("Writing initial data ...")
+    workload.write_rows(10000, env.pageserver.id)
+
+    for _ in range(100):
+        workload.churn_rows(10, env.pageserver.id, upload=False, ingest=False)
+        ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
+        ps_http.timeline_compact(tenant_id, timeline_id)
+        ps_http.timeline_gc(tenant_id, timeline_id, None)
+
+    log.info("Validating at workload end ...")
+    workload.validate(env.pageserver.id)
 
 
 # Stripe sizes in number of pages.
@@ -773,7 +868,7 @@ def test_image_layer_compression(neon_env_builder: NeonEnvBuilder, enabled: bool
     )
     assert bytes_in is not None
     assert bytes_out is not None
-    log.info(f"Compression ratio: {bytes_out/bytes_in} ({bytes_out} in, {bytes_out} out)")
+    log.info(f"Compression ratio: {bytes_out / bytes_in} ({bytes_out} in, {bytes_out} out)")
 
     if enabled:
         # We are writing high compressible repetitive plain text, expect excellent compression

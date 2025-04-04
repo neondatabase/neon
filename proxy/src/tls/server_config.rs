@@ -5,19 +5,17 @@ use anyhow::{Context, bail};
 use itertools::Itertools;
 use rustls::crypto::ring::{self, sign};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use x509_cert::der::{Reader, SliceReader};
 
 use super::{PG_ALPN_PROTOCOL, TlsServerEndPoint};
 
 pub struct TlsConfig {
-    pub config: Arc<rustls::ServerConfig>,
+    // unfortunate split since we cannot change the ALPN on demand.
+    // <https://github.com/rustls/rustls/issues/2260>
+    pub http_config: Arc<rustls::ServerConfig>,
+    pub pg_config: Arc<rustls::ServerConfig>,
     pub common_names: HashSet<String>,
     pub cert_resolver: Arc<CertResolver>,
-}
-
-impl TlsConfig {
-    pub fn to_server_config(&self) -> Arc<rustls::ServerConfig> {
-        self.config.clone()
-    }
 }
 
 /// Configure TLS for the main endpoint.
@@ -71,8 +69,15 @@ pub fn configure_tls(
         config.key_log = Arc::new(rustls::KeyLogFile::new());
     }
 
+    let mut http_config = config.clone();
+    let mut pg_config = config;
+
+    http_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    pg_config.alpn_protocols = vec![b"postgresql".to_vec()];
+
     Ok(TlsConfig {
-        config: Arc::new(config),
+        http_config: Arc::new(http_config),
+        pg_config: Arc::new(pg_config),
         common_names,
         cert_resolver,
     })
@@ -127,11 +132,13 @@ impl CertResolver {
 
         let first_cert = &cert_chain[0];
         let tls_server_end_point = TlsServerEndPoint::new(first_cert)?;
-        let pem = x509_parser::parse_x509_certificate(first_cert)
-            .context("Failed to parse PEM object from cerficiate")?
-            .1;
 
-        let common_name = pem.subject().to_string();
+        let certificate = SliceReader::new(first_cert)
+            .context("Failed to parse cerficiate")?
+            .decode::<x509_cert::Certificate>()
+            .context("Failed to parse cerficiate")?;
+
+        let common_name = certificate.tbs_certificate.subject.to_string();
 
         // We need to get the canonical name for this certificate so we can match them against any domain names
         // seen within the proxy codebase.
@@ -166,7 +173,7 @@ impl CertResolver {
     }
 
     pub fn get_common_names(&self) -> HashSet<String> {
-        self.certs.keys().map(|s| s.to_string()).collect()
+        self.certs.keys().cloned().collect()
     }
 }
 

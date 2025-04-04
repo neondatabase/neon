@@ -1,7 +1,4 @@
-use tokio_epoll_uring::BoundedBuf;
-use tokio_epoll_uring::BoundedBufMut;
-use tokio_epoll_uring::IoBufMut;
-use tokio_epoll_uring::Slice;
+use tokio_epoll_uring::{BoundedBuf, BoundedBufMut, IoBufMut, Slice};
 
 pub(crate) trait SliceMutExt {
     /// Get a `&mut[0..self.bytes_total()`] slice, for when you need to do borrow-based IO.
@@ -35,9 +32,10 @@ where
 mod tests {
     use std::io::Read;
 
-    use super::*;
     use bytes::Buf;
     use tokio_epoll_uring::Slice;
+
+    use super::*;
 
     #[test]
     fn test_slice_full_zeroed() {

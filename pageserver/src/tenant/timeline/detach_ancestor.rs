@@ -1,25 +1,36 @@
-use std::{collections::HashSet, sync::Arc};
+use std::collections::HashSet;
+use std::sync::Arc;
 
-use super::{layer_manager::LayerManager, FlushLayerError, Timeline};
-use crate::{
-    context::{DownloadBehavior, RequestContext},
-    task_mgr::TaskKind,
-    tenant::{
-        remote_timeline_client::index::GcBlockingReason::DetachAncestor,
-        storage_layer::{
-            layer::local_layer_path, AsLayerDesc as _, DeltaLayerWriter, Layer, ResidentLayer,
-        },
-        Tenant,
-    },
-    virtual_file::{MaybeFatalIo, VirtualFile},
-};
 use anyhow::Context;
+use bytes::Bytes;
 use http_utils::error::ApiError;
-use pageserver_api::{models::detach_ancestor::AncestorDetached, shard::ShardIdentity};
+use pageserver_api::key::Key;
+use pageserver_api::keyspace::KeySpace;
+use pageserver_api::models::DetachBehavior;
+use pageserver_api::models::detach_ancestor::AncestorDetached;
+use pageserver_api::shard::ShardIdentity;
+use pageserver_compaction::helpers::overlaps_with;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
-use utils::{completion, generation::Generation, id::TimelineId, lsn::Lsn};
+use utils::completion;
+use utils::generation::Generation;
+use utils::id::TimelineId;
+use utils::lsn::Lsn;
+use utils::sync::gate::GateError;
+
+use super::layer_manager::LayerManager;
+use super::{FlushLayerError, Timeline};
+use crate::context::{DownloadBehavior, RequestContext};
+use crate::task_mgr::TaskKind;
+use crate::tenant::Tenant;
+use crate::tenant::remote_timeline_client::index::GcBlockingReason::DetachAncestor;
+use crate::tenant::storage_layer::layer::local_layer_path;
+use crate::tenant::storage_layer::{
+    AsLayerDesc as _, DeltaLayerWriter, ImageLayerWriter, IoConcurrency, Layer, ResidentLayer,
+    ValuesReconstructState,
+};
+use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
@@ -28,6 +39,9 @@ pub(crate) enum Error {
 
     #[error("too many ancestors")]
     TooManyAncestors,
+
+    #[error("ancestor is not empty")]
+    AncestorNotEmpty,
 
     #[error("shutting down, please retry later")]
     ShuttingDown,
@@ -64,9 +78,10 @@ impl Error {
     where
         F: Fn(anyhow::Error) -> Error,
     {
+        use remote_storage::TimeoutOrCancel;
+
         use crate::tenant::remote_timeline_client::WaitCompletionError;
         use crate::tenant::upload_queue::NotInitialized;
-        use remote_storage::TimeoutOrCancel;
 
         if e.is::<NotInitialized>()
             || TimeoutOrCancel::caused_by_cancel(&e)
@@ -85,7 +100,9 @@ impl From<Error> for ApiError {
     fn from(value: Error) -> Self {
         match value {
             Error::NoAncestor => ApiError::Conflict(value.to_string()),
-            Error::TooManyAncestors => ApiError::BadRequest(anyhow::anyhow!("{value}")),
+            Error::TooManyAncestors | Error::AncestorNotEmpty => {
+                ApiError::BadRequest(anyhow::anyhow!("{value}"))
+            }
             Error::ShuttingDown => ApiError::ShuttingDown,
             Error::Archived(_) => ApiError::BadRequest(anyhow::anyhow!("{value}")),
             Error::OtherTimelineDetachOngoing(_) | Error::FailedToReparentAll => {
@@ -123,7 +140,7 @@ pub(crate) struct PreparedTimelineDetach {
     layers: Vec<Layer>,
 }
 
-/// TODO: this should be part of PageserverConf because we cannot easily modify cplane arguments.
+// TODO: this should be part of PageserverConf because we cannot easily modify cplane arguments.
 #[derive(Debug)]
 pub(crate) struct Options {
     pub(crate) rewrite_concurrency: std::num::NonZeroUsize,
@@ -143,7 +160,8 @@ impl Default for Options {
 #[derive(Debug)]
 pub(crate) struct Attempt {
     pub(crate) timeline_id: TimelineId,
-
+    pub(crate) ancestor_timeline_id: TimelineId,
+    pub(crate) ancestor_lsn: Lsn,
     _guard: completion::Completion,
     gate_entered: Option<utils::sync::gate::GateGuard>,
 }
@@ -159,29 +177,120 @@ impl Attempt {
     }
 }
 
+async fn generate_tombstone_image_layer(
+    detached: &Arc<Timeline>,
+    ancestor: &Arc<Timeline>,
+    ancestor_lsn: Lsn,
+    ctx: &RequestContext,
+) -> Result<Option<ResidentLayer>, Error> {
+    tracing::info!(
+        "removing non-inherited keys by writing an image layer with tombstones at the detach LSN"
+    );
+    let io_concurrency = IoConcurrency::spawn_from_conf(
+        detached.conf,
+        detached.gate.enter().map_err(|_| Error::ShuttingDown)?,
+    );
+    let mut reconstruct_state = ValuesReconstructState::new(io_concurrency);
+    // Directly use `get_vectored_impl` to skip the max_vectored_read_key limit check. Note that the keyspace should
+    // not contain too many keys, otherwise this takes a lot of memory. Currently we limit it to 10k keys in the compute.
+    let key_range = Key::sparse_non_inherited_keyspace();
+    // avoid generating a "future layer" which will then be removed
+    let image_lsn = ancestor_lsn;
+
+    {
+        let layers = detached.layers.read().await;
+        for layer in layers.all_persistent_layers() {
+            if !layer.is_delta
+                && layer.lsn_range.start == image_lsn
+                && overlaps_with(&key_range, &layer.key_range)
+            {
+                tracing::warn!(
+                    layer=%layer, "image layer at the detach LSN already exists, skipping removing aux files"
+                );
+                return Ok(None);
+            }
+        }
+    }
+
+    let data = ancestor
+        .get_vectored_impl(
+            KeySpace::single(key_range.clone()),
+            image_lsn,
+            &mut reconstruct_state,
+            ctx,
+        )
+        .await
+        .context("failed to retrieve aux keys")
+        .map_err(|e| Error::launder(e, Error::Prepare))?;
+    if !data.is_empty() {
+        // TODO: is it possible that we can have an image at `image_lsn`? Unlikely because image layers are only generated
+        // upon compaction but theoretically possible.
+        let mut image_layer_writer = ImageLayerWriter::new(
+            detached.conf,
+            detached.timeline_id,
+            detached.tenant_shard_id,
+            &key_range,
+            image_lsn,
+            ctx,
+        )
+        .await
+        .context("failed to create image layer writer")
+        .map_err(Error::Prepare)?;
+        for key in data.keys() {
+            image_layer_writer
+                .put_image(*key, Bytes::new(), ctx)
+                .await
+                .context("failed to write key")
+                .map_err(|e| Error::launder(e, Error::Prepare))?;
+        }
+        let (desc, path) = image_layer_writer
+            .finish(ctx)
+            .await
+            .context("failed to finish image layer writer for removing the metadata keys")
+            .map_err(|e| Error::launder(e, Error::Prepare))?;
+        let generated = Layer::finish_creating(detached.conf, detached, desc, &path)
+            .map_err(|e| Error::launder(e, Error::Prepare))?;
+        detached
+            .remote_client
+            .upload_layer_file(&generated, &detached.cancel)
+            .await
+            .map_err(|e| Error::launder(e, Error::Prepare))?;
+        tracing::info!(layer=%generated, "wrote image layer");
+        Ok(Some(generated))
+    } else {
+        tracing::info!("no aux keys found in ancestor");
+        Ok(None)
+    }
+}
+
 /// See [`Timeline::prepare_to_detach_from_ancestor`]
 pub(super) async fn prepare(
     detached: &Arc<Timeline>,
     tenant: &Tenant,
+    behavior: DetachBehavior,
     options: Options,
     ctx: &RequestContext,
 ) -> Result<Progress, Error> {
     use Error::*;
 
-    let Some((ancestor, ancestor_lsn)) = detached
+    let Some((mut ancestor, mut ancestor_lsn)) = detached
         .ancestor_timeline
         .as_ref()
         .map(|tl| (tl.clone(), detached.ancestor_lsn))
     else {
+        let ancestor_id;
+        let ancestor_lsn;
         let still_in_progress = {
             let accessor = detached.remote_client.initialized_upload_queue()?;
 
             // we are safe to inspect the latest uploaded, because we can only witness this after
             // restart is complete and ancestor is no more.
             let latest = accessor.latest_uploaded_index_part();
-            if latest.lineage.detached_previous_ancestor().is_none() {
+            let Some((id, lsn)) = latest.lineage.detached_previous_ancestor() else {
                 return Err(NoAncestor);
             };
+            ancestor_id = id;
+            ancestor_lsn = lsn;
 
             latest
                 .gc_blocking
@@ -192,7 +301,8 @@ pub(super) async fn prepare(
         if still_in_progress {
             // gc is still blocked, we can still reparent and complete.
             // we are safe to reparent remaining, because they were locked in in the beginning.
-            let attempt = continue_with_blocked_gc(detached, tenant).await?;
+            let attempt =
+                continue_with_blocked_gc(detached, tenant, ancestor_id, ancestor_lsn).await?;
 
             // because the ancestor of detached is already set to none, we have published all
             // of the layers, so we are still "prepared."
@@ -218,15 +328,42 @@ pub(super) async fn prepare(
         return Err(NoAncestor);
     }
 
-    check_no_archived_children_of_ancestor(tenant, detached, &ancestor, ancestor_lsn)?;
+    check_no_archived_children_of_ancestor(tenant, detached, &ancestor, ancestor_lsn, behavior)?;
 
-    if ancestor.ancestor_timeline.is_some() {
+    if let DetachBehavior::MultiLevelAndNoReparent = behavior {
+        // If the ancestor has an ancestor, we might be able to fast-path detach it if the current ancestor does not have any data written/used by the detaching timeline.
+        while let Some(ancestor_of_ancestor) = ancestor.ancestor_timeline.clone() {
+            if ancestor_lsn != ancestor.ancestor_lsn {
+                // non-technical requirement; we could flatten still if ancestor LSN does not match but that needs
+                // us to copy and cut more layers.
+                return Err(AncestorNotEmpty);
+            }
+            // Use the ancestor of the ancestor as the new ancestor (only when the ancestor LSNs are the same)
+            ancestor_lsn = ancestor.ancestor_lsn; // Get the LSN first before resetting the `ancestor` variable
+            ancestor = ancestor_of_ancestor;
+            // TODO: do we still need to check if we don't want to reparent?
+            check_no_archived_children_of_ancestor(
+                tenant,
+                detached,
+                &ancestor,
+                ancestor_lsn,
+                behavior,
+            )?;
+        }
+    } else if ancestor.ancestor_timeline.is_some() {
         // non-technical requirement; we could flatten N ancestors just as easily but we chose
         // not to, at least initially
         return Err(TooManyAncestors);
     }
 
-    let attempt = start_new_attempt(detached, tenant).await?;
+    tracing::info!(
+        "attempt to detach the timeline from the ancestor: {}@{}, behavior={:?}",
+        ancestor.timeline_id,
+        ancestor_lsn,
+        behavior
+    );
+
+    let attempt = start_new_attempt(detached, tenant, ancestor.timeline_id, ancestor_lsn).await?;
 
     utils::pausable_failpoint!("timeline-detach-ancestor::before_starting_after_locking-pausable");
 
@@ -308,10 +445,16 @@ pub(super) async fn prepare(
 
     // TODO: copying and lsn prefix copying could be done at the same time with a single fsync after
     let mut new_layers: Vec<Layer> =
-        Vec::with_capacity(straddling_branchpoint.len() + rest_of_historic.len());
+        Vec::with_capacity(straddling_branchpoint.len() + rest_of_historic.len() + 1);
+
+    if let Some(tombstone_layer) =
+        generate_tombstone_image_layer(detached, &ancestor, ancestor_lsn, ctx).await?
+    {
+        new_layers.push(tombstone_layer.into());
+    }
 
     {
-        tracing::debug!(to_rewrite = %straddling_branchpoint.len(), "copying prefix of delta layers");
+        tracing::info!(to_rewrite = %straddling_branchpoint.len(), "copying prefix of delta layers");
 
         let mut tasks = tokio::task::JoinSet::new();
 
@@ -360,14 +503,25 @@ pub(super) async fn prepare(
 
     let mut tasks = tokio::task::JoinSet::new();
     let limiter = Arc::new(Semaphore::new(options.copy_concurrency.get()));
+    let cancel_eval = CancellationToken::new();
 
     for adopted in rest_of_historic {
         let limiter = limiter.clone();
         let timeline = detached.clone();
+        let cancel_eval = cancel_eval.clone();
 
         tasks.spawn(
             async move {
-                let _permit = limiter.acquire().await;
+                let _permit = tokio::select! {
+                    permit = limiter.acquire() => {
+                        permit
+                    }
+                    // Wait for the cancellation here instead of letting the entire task be cancelled.
+                    // Cancellations are racy in that they might leave layers on disk.
+                    _ = cancel_eval.cancelled() => {
+                        Err(Error::ShuttingDown)?
+                    }
+                };
                 let (owned, did_hardlink) = remote_copy(
                     &adopted,
                     &timeline,
@@ -383,7 +537,22 @@ pub(super) async fn prepare(
         );
     }
 
+    fn delete_layers(timeline: &Timeline, layers: Vec<Layer>) -> Result<(), Error> {
+        // We are deleting layers, so we must hold the gate
+        let _gate = timeline.gate.enter().map_err(|e| match e {
+            GateError::GateClosed => Error::ShuttingDown,
+        })?;
+        {
+            layers.into_iter().for_each(|l: Layer| {
+                l.delete_on_drop();
+                std::mem::drop(l);
+            });
+        }
+        Ok(())
+    }
+
     let mut should_fsync = false;
+    let mut first_err = None;
     while let Some(res) = tasks.join_next().await {
         match res {
             Ok(Ok((owned, did_hardlink))) => {
@@ -392,11 +561,22 @@ pub(super) async fn prepare(
                 }
                 new_layers.push(owned);
             }
+
+            // Don't stop the evaluation on errors, so that we get the full set of hardlinked layers to delete.
             Ok(Err(failed)) => {
-                return Err(failed);
+                cancel_eval.cancel();
+                first_err.get_or_insert(failed);
             }
-            Err(je) => return Err(Error::Prepare(je.into())),
+            Err(je) => {
+                cancel_eval.cancel();
+                first_err.get_or_insert(Error::Prepare(je.into()));
+            }
         }
+    }
+
+    if let Some(failed) = first_err {
+        delete_layers(detached, new_layers)?;
+        return Err(failed);
     }
 
     // fsync directory again if we hardlinked something
@@ -409,8 +589,13 @@ pub(super) async fn prepare(
     Ok(Progress::Prepared(attempt, prepared))
 }
 
-async fn start_new_attempt(detached: &Timeline, tenant: &Tenant) -> Result<Attempt, Error> {
-    let attempt = obtain_exclusive_attempt(detached, tenant)?;
+async fn start_new_attempt(
+    detached: &Timeline,
+    tenant: &Tenant,
+    ancestor_timeline_id: TimelineId,
+    ancestor_lsn: Lsn,
+) -> Result<Attempt, Error> {
+    let attempt = obtain_exclusive_attempt(detached, tenant, ancestor_timeline_id, ancestor_lsn)?;
 
     // insert the block in the index_part.json, if not already there.
     let _dont_care = tenant
@@ -425,13 +610,23 @@ async fn start_new_attempt(detached: &Timeline, tenant: &Tenant) -> Result<Attem
     Ok(attempt)
 }
 
-async fn continue_with_blocked_gc(detached: &Timeline, tenant: &Tenant) -> Result<Attempt, Error> {
+async fn continue_with_blocked_gc(
+    detached: &Timeline,
+    tenant: &Tenant,
+    ancestor_timeline_id: TimelineId,
+    ancestor_lsn: Lsn,
+) -> Result<Attempt, Error> {
     // FIXME: it would be nice to confirm that there is an in-memory version, since we've just
     // verified there is a persistent one?
-    obtain_exclusive_attempt(detached, tenant)
+    obtain_exclusive_attempt(detached, tenant, ancestor_timeline_id, ancestor_lsn)
 }
 
-fn obtain_exclusive_attempt(detached: &Timeline, tenant: &Tenant) -> Result<Attempt, Error> {
+fn obtain_exclusive_attempt(
+    detached: &Timeline,
+    tenant: &Tenant,
+    ancestor_timeline_id: TimelineId,
+    ancestor_lsn: Lsn,
+) -> Result<Attempt, Error> {
     use Error::{OtherTimelineDetachOngoing, ShuttingDown};
 
     // ensure we are the only active attempt for this tenant
@@ -452,6 +647,8 @@ fn obtain_exclusive_attempt(detached: &Timeline, tenant: &Tenant) -> Result<Atte
 
     Ok(Attempt {
         timeline_id: detached.timeline_id,
+        ancestor_timeline_id,
+        ancestor_lsn,
         _guard: guard,
         gate_entered: Some(_gate_entered),
     })
@@ -588,7 +785,7 @@ async fn copy_lsn_prefix(
     .with_context(|| format!("prepare to copy lsn prefix of ancestors {layer}"))
     .map_err(Error::Prepare)?;
 
-    let resident = layer.download_and_keep_resident().await.map_err(|e| {
+    let resident = layer.download_and_keep_resident(ctx).await.map_err(|e| {
         if e.is_cancelled() {
             Error::ShuttingDown
         } else {
@@ -646,6 +843,11 @@ async fn remote_copy(
     let conf = adoptee.conf;
     let file_name = adopted.layer_desc().layer_name();
 
+    // We don't want to shut the timeline down during this operation because we do `delete_on_drop` below
+    let _gate = adoptee.gate.enter().map_err(|e| match e {
+        GateError::GateClosed => Error::ShuttingDown,
+    })?;
+
     // depending if Layer::keep_resident, do a hardlink
     let did_hardlink;
     let owned = if let Some(adopted_resident) = adopted.keep_resident().await {
@@ -657,8 +859,32 @@ async fn remote_copy(
             &file_name,
             &metadata.generation,
         );
-        std::fs::hard_link(adopted_path, &adoptee_path)
-            .map_err(|e| Error::launder(e.into(), Error::Prepare))?;
+
+        match std::fs::hard_link(adopted_path, &adoptee_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // In theory we should not get into this situation as we are doing cleanups of the layer file after errors.
+                // However, we don't do cleanups for errors past `prepare`, so there is the slight chance to get to this branch.
+
+                // Double check that the file is orphan (probably from an earlier attempt), then delete it
+                let key = file_name.clone().into();
+                if adoptee.layers.read().await.contains_key(&key) {
+                    // We are supposed to filter out such cases before coming to this function
+                    return Err(Error::Prepare(anyhow::anyhow!(
+                        "layer file {file_name} already present and inside layer map"
+                    )));
+                }
+                tracing::info!("Deleting orphan layer file to make way for hard linking");
+                // Delete orphan layer file and try again, to ensure this layer has a well understood source
+                std::fs::remove_file(adopted_path)
+                    .map_err(|e| Error::launder(e.into(), Error::Prepare))?;
+                std::fs::hard_link(adopted_path, &adoptee_path)
+                    .map_err(|e| Error::launder(e.into(), Error::Prepare))?;
+            }
+            Err(e) => {
+                return Err(Error::launder(e.into(), Error::Prepare));
+            }
+        };
         did_hardlink = true;
         Layer::for_resident(conf, adoptee, adoptee_path, file_name, metadata).drop_eviction_guard()
     } else {
@@ -666,12 +892,21 @@ async fn remote_copy(
         Layer::for_evicted(conf, adoptee, file_name, metadata)
     };
 
-    let layer = adoptee
+    let layer = match adoptee
         .remote_client
         .copy_timeline_layer(adopted, &owned, cancel)
         .await
-        .map(move |()| owned)
-        .map_err(|e| Error::launder(e, Error::Prepare))?;
+    {
+        Ok(()) => owned,
+        Err(e) => {
+            {
+                // Clean up the layer so that on a retry we don't get errors that the file already exists
+                owned.delete_on_drop();
+                std::mem::drop(owned);
+            }
+            return Err(Error::launder(e, Error::Prepare));
+        }
+    };
 
     Ok((layer, did_hardlink))
 }
@@ -716,6 +951,9 @@ pub(super) async fn detach_and_reparent(
     detached: &Arc<Timeline>,
     tenant: &Tenant,
     prepared: PreparedTimelineDetach,
+    ancestor_timeline_id: TimelineId,
+    ancestor_lsn: Lsn,
+    behavior: DetachBehavior,
     _ctx: &RequestContext,
 ) -> Result<DetachingAndReparenting, Error> {
     let PreparedTimelineDetach { layers } = prepared;
@@ -743,7 +981,30 @@ pub(super) async fn detach_and_reparent(
         "cannot (detach? reparent)? complete if the operation is not still ongoing"
     );
 
-    let ancestor = match (detached.ancestor_timeline.as_ref(), recorded_branchpoint) {
+    let ancestor_to_detach = match detached.ancestor_timeline.as_ref() {
+        Some(mut ancestor) => {
+            while ancestor.timeline_id != ancestor_timeline_id {
+                match ancestor.ancestor_timeline.as_ref() {
+                    Some(found) => {
+                        if ancestor_lsn != ancestor.ancestor_lsn {
+                            return Err(Error::DetachReparent(anyhow::anyhow!(
+                                "cannot find the ancestor timeline to detach from: wrong ancestor lsn"
+                            )));
+                        }
+                        ancestor = found;
+                    }
+                    None => {
+                        return Err(Error::DetachReparent(anyhow::anyhow!(
+                            "cannot find the ancestor timeline to detach from"
+                        )));
+                    }
+                }
+            }
+            Some(ancestor)
+        }
+        None => None,
+    };
+    let ancestor = match (ancestor_to_detach, recorded_branchpoint) {
         (Some(ancestor), None) => {
             assert!(
                 !layers.is_empty(),
@@ -780,7 +1041,7 @@ pub(super) async fn detach_and_reparent(
             // TODO: make sure there are no `?` before tenant_reset from after a questionmark from
             // here.
             panic!(
-            "bug: detach_and_reparent called on a timeline which has not been detached or which has no live ancestor"
+                "bug: detach_and_reparent called on a timeline which has not been detached or which has no live ancestor"
             );
         }
     };
@@ -815,6 +1076,11 @@ pub(super) async fn detach_and_reparent(
         }
         Ancestor::Detached(ancestor, ancestor_lsn) => (ancestor, ancestor_lsn, false),
     };
+
+    if let DetachBehavior::MultiLevelAndNoReparent = behavior {
+        // Do not reparent if the user requests to behave so.
+        return Ok(DetachingAndReparenting::Reparented(HashSet::new()));
+    }
 
     let mut tasks = tokio::task::JoinSet::new();
 
@@ -953,6 +1219,11 @@ pub(super) async fn complete(
 }
 
 /// Query against a locked `Tenant::timelines`.
+///
+/// A timeline is reparentable if:
+///
+/// - It is not the timeline being detached.
+/// - It has the same ancestor as the timeline being detached. Note that the ancestor might not be the direct ancestor.
 fn reparentable_timelines<'a, I>(
     timelines: I,
     detached: &'a Arc<Timeline>,
@@ -990,31 +1261,44 @@ fn check_no_archived_children_of_ancestor(
     detached: &Arc<Timeline>,
     ancestor: &Arc<Timeline>,
     ancestor_lsn: Lsn,
+    detach_behavior: DetachBehavior,
 ) -> Result<(), Error> {
-    let timelines = tenant.timelines.lock().unwrap();
-    let timelines_offloaded = tenant.timelines_offloaded.lock().unwrap();
-    for timeline in reparentable_timelines(timelines.values(), detached, ancestor, ancestor_lsn) {
-        if timeline.is_archived() == Some(true) {
-            return Err(Error::Archived(timeline.timeline_id));
-        }
-    }
-    for timeline_offloaded in timelines_offloaded.values() {
-        if timeline_offloaded.ancestor_timeline_id != Some(ancestor.timeline_id) {
-            continue;
-        }
-        // This forbids the detach ancestor feature if flattened timelines are present,
-        // even if the ancestor_lsn is from after the branchpoint of the detached timeline.
-        // But as per current design, we don't record the ancestor_lsn of flattened timelines.
-        // This is a bit unfortunate, but as of writing this we don't support flattening
-        // anyway. Maybe we can evolve the data model in the future.
-        if let Some(retain_lsn) = timeline_offloaded.ancestor_retain_lsn {
-            let is_earlier = retain_lsn <= ancestor_lsn;
-            if !is_earlier {
-                continue;
+    match detach_behavior {
+        DetachBehavior::NoAncestorAndReparent => {
+            let timelines = tenant.timelines.lock().unwrap();
+            let timelines_offloaded = tenant.timelines_offloaded.lock().unwrap();
+
+            for timeline in
+                reparentable_timelines(timelines.values(), detached, ancestor, ancestor_lsn)
+            {
+                if timeline.is_archived() == Some(true) {
+                    return Err(Error::Archived(timeline.timeline_id));
+                }
+            }
+
+            for timeline_offloaded in timelines_offloaded.values() {
+                if timeline_offloaded.ancestor_timeline_id != Some(ancestor.timeline_id) {
+                    continue;
+                }
+                // This forbids the detach ancestor feature if flattened timelines are present,
+                // even if the ancestor_lsn is from after the branchpoint of the detached timeline.
+                // But as per current design, we don't record the ancestor_lsn of flattened timelines.
+                // This is a bit unfortunate, but as of writing this we don't support flattening
+                // anyway. Maybe we can evolve the data model in the future.
+                if let Some(retain_lsn) = timeline_offloaded.ancestor_retain_lsn {
+                    let is_earlier = retain_lsn <= ancestor_lsn;
+                    if !is_earlier {
+                        continue;
+                    }
+                }
+                return Err(Error::Archived(timeline_offloaded.timeline_id));
             }
         }
-        return Err(Error::Archived(timeline_offloaded.timeline_id));
+        DetachBehavior::MultiLevelAndNoReparent => {
+            // We don't need to check anything if the user requested to not reparent.
+        }
     }
+
     Ok(())
 }
 

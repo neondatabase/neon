@@ -1,6 +1,18 @@
 //! Implementation of append-only file data structure
 //! used to keep in-memory layers spilled on disk.
 
+use std::io;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+
+use camino::Utf8PathBuf;
+use num_traits::Num;
+use pageserver_api::shard::TenantShardId;
+use tokio_epoll_uring::{BoundedBuf, Slice};
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info_span};
+use utils::id::TimelineId;
+
 use crate::assert_u64_eq_usize::{U64IsUsize, UsizeIsU64};
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
@@ -8,18 +20,8 @@ use crate::page_cache;
 use crate::tenant::storage_layer::inmemory_layer::vectored_dio_read::File;
 use crate::virtual_file::owned_buffers_io::io_buf_aligned::IoBufAlignedMut;
 use crate::virtual_file::owned_buffers_io::slice::SliceMutExt;
-use crate::virtual_file::owned_buffers_io::write::Buffer;
-use crate::virtual_file::{self, owned_buffers_io, IoBufferMut, VirtualFile};
-use camino::Utf8PathBuf;
-use num_traits::Num;
-use pageserver_api::shard::TenantShardId;
-use tokio_epoll_uring::{BoundedBuf, Slice};
-use tracing::error;
-
-use std::io;
-use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
-use utils::id::TimelineId;
+use crate::virtual_file::owned_buffers_io::write::{Buffer, FlushTaskError};
+use crate::virtual_file::{self, IoBufferMut, VirtualFile, owned_buffers_io};
 
 pub struct EphemeralFile {
     _tenant_shard_id: TenantShardId,
@@ -39,6 +41,7 @@ impl EphemeralFile {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         gate: &utils::sync::gate::Gate,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<EphemeralFile> {
         static NEXT_FILENAME: AtomicU64 = AtomicU64::new(1);
@@ -74,7 +77,9 @@ impl EphemeralFile {
                 file,
                 || IoBufferMut::with_capacity(TAIL_SZ),
                 gate.enter()?,
+                cancel.child_token(),
                 ctx,
+                info_span!(parent: None, "ephemeral_file_buffered_writer", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), timeline_id=%timeline_id, path = %filename),
             ),
             _gate_guard: gate.enter()?,
         })
@@ -97,6 +102,14 @@ impl Drop for EphemeralFile {
             }
         }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum EphemeralFileWriteError {
+    #[error("{0}")]
+    TooLong(String),
+    #[error("cancelled")]
+    Cancelled,
 }
 
 impl EphemeralFile {
@@ -131,7 +144,7 @@ impl EphemeralFile {
         &mut self,
         srcbuf: &[u8],
         ctx: &RequestContext,
-    ) -> std::io::Result<u64> {
+    ) -> Result<u64, EphemeralFileWriteError> {
         let (pos, control) = self.write_raw_controlled(srcbuf, ctx).await?;
         if let Some(control) = control {
             control.release().await;
@@ -143,24 +156,24 @@ impl EphemeralFile {
         &mut self,
         srcbuf: &[u8],
         ctx: &RequestContext,
-    ) -> std::io::Result<(u64, Option<owned_buffers_io::write::FlushControl>)> {
+    ) -> Result<(u64, Option<owned_buffers_io::write::FlushControl>), EphemeralFileWriteError> {
         let pos = self.bytes_written;
 
         let new_bytes_written = pos.checked_add(srcbuf.len().into_u64()).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!(
-                    "write would grow EphemeralFile beyond u64::MAX: len={pos} writen={srcbuf_len}",
-                    srcbuf_len = srcbuf.len(),
-                ),
-            )
+            EphemeralFileWriteError::TooLong(format!(
+                "write would grow EphemeralFile beyond u64::MAX: len={pos} writen={srcbuf_len}",
+                srcbuf_len = srcbuf.len(),
+            ))
         })?;
 
         // Write the payload
         let (nwritten, control) = self
             .buffered_writer
             .write_buffered_borrowed_controlled(srcbuf, ctx)
-            .await?;
+            .await
+            .map_err(|e| match e {
+                FlushTaskError::Cancelled => EphemeralFileWriteError::Cancelled,
+            })?;
         assert_eq!(
             nwritten,
             srcbuf.len(),
@@ -182,8 +195,14 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
     ) -> std::io::Result<(tokio_epoll_uring::Slice<B>, usize)> {
         let submitted_offset = self.buffered_writer.bytes_submitted();
 
-        let mutable = self.buffered_writer.inspect_mutable();
-        let mutable = &mutable[0..mutable.pending()];
+        let mutable = match self.buffered_writer.inspect_mutable() {
+            Some(mutable) => &mutable[0..mutable.pending()],
+            None => {
+                // Timeline::cancel and hence buffered writer flush was cancelled.
+                // Remain read-available while timeline is shutting down.
+                &[]
+            }
+        };
 
         let maybe_flushed = self.buffered_writer.inspect_maybe_flushed();
 
@@ -214,7 +233,6 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
         let (written_range, maybe_flushed_range) = {
             if maybe_flushed.is_some() {
                 // [       written       ][ maybe_flushed ][    mutable    ]
-                //                        <-   TAIL_SZ   -><-   TAIL_SZ   ->
                 //                                         ^
                 //                                 `submitted_offset`
                 // <++++++ on disk +++++++????????????????>
@@ -230,7 +248,6 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
                 )
             } else {
                 // [       written                        ][    mutable    ]
-                //                                         <-   TAIL_SZ   ->
                 //                                         ^
                 //                                 `submitted_offset`
                 // <++++++ on disk +++++++++++++++++++++++>
@@ -319,13 +336,14 @@ pub fn is_ephemeral_file(filename: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::str::FromStr;
+
     use rand::Rng;
 
     use super::*;
     use crate::context::DownloadBehavior;
     use crate::task_mgr::TaskKind;
-    use std::fs;
-    use std::str::FromStr;
 
     fn harness(
         test_name: &str,
@@ -349,7 +367,8 @@ mod tests {
         let timeline_id = TimelineId::from_str("22000000000000000000000000000000").unwrap();
         fs::create_dir_all(conf.timeline_path(&tenant_shard_id, &timeline_id))?;
 
-        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let ctx =
+            RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
 
         Ok((conf, tenant_shard_id, timeline_id, ctx))
     }
@@ -362,8 +381,9 @@ mod tests {
             harness("ephemeral_file_holds_gate_open").unwrap();
 
         let gate = utils::sync::gate::Gate::default();
+        let cancel = CancellationToken::new();
 
-        let file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &ctx)
+        let file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &cancel, &ctx)
             .await
             .unwrap();
 
@@ -393,12 +413,13 @@ mod tests {
         let (conf, tenant_id, timeline_id, ctx) = harness("test_ephemeral_file_basics").unwrap();
 
         let gate = utils::sync::gate::Gate::default();
+        let cancel = CancellationToken::new();
 
-        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &ctx)
+        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &cancel, &ctx)
             .await
             .unwrap();
 
-        let mutable = file.buffered_writer.inspect_mutable();
+        let mutable = file.buffered_writer.mutable();
         let cap = mutable.capacity();
         let align = mutable.align();
 
@@ -441,7 +462,7 @@ mod tests {
         let maybe_flushed_buffer_contents = file.buffered_writer.inspect_maybe_flushed().unwrap();
         assert_eq!(&maybe_flushed_buffer_contents[..], &content[cap..cap * 2]);
 
-        let mutable_buffer_contents = file.buffered_writer.inspect_mutable();
+        let mutable_buffer_contents = file.buffered_writer.mutable();
         assert_eq!(mutable_buffer_contents, &content[cap * 2..write_nbytes]);
     }
 
@@ -450,13 +471,13 @@ mod tests {
         let (conf, tenant_id, timeline_id, ctx) = harness("test_flushes_do_happen").unwrap();
 
         let gate = utils::sync::gate::Gate::default();
-
-        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &ctx)
+        let cancel = CancellationToken::new();
+        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &cancel, &ctx)
             .await
             .unwrap();
 
         // mutable buffer and maybe_flushed buffer each has `cap` bytes.
-        let cap = file.buffered_writer.inspect_mutable().capacity();
+        let cap = file.buffered_writer.mutable().capacity();
 
         let content: Vec<u8> = rand::thread_rng()
             .sample_iter(rand::distributions::Standard)
@@ -466,10 +487,8 @@ mod tests {
         file.write_raw(&content, &ctx).await.unwrap();
 
         // assert the state is as this test expects it to be
-        assert_eq!(
-            &file.load_to_io_buf(&ctx).await.unwrap(),
-            &content[0..cap * 2 + cap / 2]
-        );
+        let load_io_buf_res = file.load_to_io_buf(&ctx).await.unwrap();
+        assert_eq!(&load_io_buf_res[..], &content[0..cap * 2 + cap / 2]);
         let md = file.buffered_writer.as_inner().path().metadata().unwrap();
         assert_eq!(
             md.len(),
@@ -481,7 +500,7 @@ mod tests {
             &content[cap..cap * 2]
         );
         assert_eq!(
-            &file.buffered_writer.inspect_mutable()[0..cap / 2],
+            &file.buffered_writer.mutable()[0..cap / 2],
             &content[cap * 2..cap * 2 + cap / 2]
         );
     }
@@ -497,12 +516,13 @@ mod tests {
             harness("test_read_split_across_file_and_buffer").unwrap();
 
         let gate = utils::sync::gate::Gate::default();
+        let cancel = CancellationToken::new();
 
-        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &ctx)
+        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &cancel, &ctx)
             .await
             .unwrap();
 
-        let mutable = file.buffered_writer.inspect_mutable();
+        let mutable = file.buffered_writer.mutable();
         let cap = mutable.capacity();
         let align = mutable.align();
         let content: Vec<u8> = rand::thread_rng()

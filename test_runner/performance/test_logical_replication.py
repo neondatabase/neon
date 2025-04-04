@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, cast
 
@@ -14,6 +13,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import logical_replication_sync
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from subprocess import Popen
     from typing import AnyStr
 
@@ -21,6 +21,25 @@ if TYPE_CHECKING:
     from fixtures.neon_api import NeonApiEndpoint
     from fixtures.neon_fixtures import NeonEnv, PgBin, VanillaPostgres
     from psycopg2.extensions import connection, cursor
+
+
+"""
+These benchmarks stress test logical replication within Neon. In order to run
+them locally, they require setting up some infrastructure. See
+https://docs.neon.build/compute/logical_replication_benchmarks.html for how to
+do that. After setting that up, run the following shell commands.
+
+# These are the project IDs setup for the purposes of running these benchmarks
+export BENCHMARK_PROJECT_ID_PUB=
+export BENCHMARK_PROJECT_ID_SUB=
+
+# See https://neon.tech/docs/manage/api-keys
+export NEON_API_KEY=
+
+# Fiddling with the --timeout parameter may be required depending on the
+# performance of the benchmark
+pytest -m remote_cluster 'test_runner/performance/test_logical_replication.py'
+"""
 
 
 @pytest.mark.timeout(1000)

@@ -3,30 +3,31 @@ from __future__ import annotations
 import enum
 import os
 import shutil
-import sys
 from enum import StrEnum
 from logging import debug
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+# Docs are available at https://jsonnet.org/ref/bindings.html#python_api
+import _jsonnet
 import pytest
 import requests
 import yaml
-from fixtures.endpoint.http import EndpointHttpClient
 from fixtures.log_helper import log
 from fixtures.metrics import parse_metrics
 from fixtures.paths import BASE_DIR, COMPUTE_CONFIG_DIR
 from fixtures.utils import wait_until
-from prometheus_client.samples import Sample
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from types import TracebackType
     from typing import Self, TypedDict
 
+    from fixtures.endpoint.http import EndpointHttpClient
     from fixtures.neon_fixtures import NeonEnv
     from fixtures.pg_version import PgVersion
     from fixtures.port_distributor import PortDistributor
+    from prometheus_client.samples import Sample
 
     class Metric(TypedDict):
         metric_name: str
@@ -92,10 +93,6 @@ def jsonnet_evaluate_file(
     ext_vars: str | dict[str, str] | None = None,
     tla_vars: str | dict[str, str] | None = None,
 ) -> str:
-    # Jsonnet doesn't support Python 3.13 yet
-    # Docs are available at https://jsonnet.org/ref/bindings.html#python_api
-    import _jsonnet
-
     return cast(
         "str",
         _jsonnet.evaluate_file(
@@ -130,7 +127,6 @@ class SqlExporterProcess(StrEnum):
     AUTOSCALING = "autoscaling"
 
 
-@pytest.mark.xfail(sys.version_info >= (3, 13), reason="Jsonnet doesn't support Python 3.13 yet")
 @pytest.mark.parametrize(
     "collector_name",
     ["neon_collector", "neon_collector_autoscaling"],
@@ -359,7 +355,6 @@ else:
             self.__proc.wait()
 
 
-@pytest.mark.xfail(sys.version_info >= (3, 13), reason="Jsonnet doesn't support Python 3.13 yet")
 @pytest.mark.parametrize(
     "exporter",
     [SqlExporterProcess.COMPUTE, SqlExporterProcess.AUTOSCALING],

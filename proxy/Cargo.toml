@@ -53,7 +53,7 @@ measured = { workspace = true, features = ["lasso"] }
 metrics.workspace = true
 once_cell.workspace = true
 opentelemetry = { workspace = true, features = ["trace"] }
-papaya = "0.1.8"
+papaya = "0.2.0"
 parking_lot.workspace = true
 parquet.workspace = true
 parquet_derive.workspace = true
@@ -70,8 +70,9 @@ reqwest-middleware = { workspace = true, features = ["json"] }
 reqwest-retry.workspace = true
 reqwest-tracing.workspace = true
 rustc-hash.workspace = true
-rustls-pemfile.workspace = true
 rustls.workspace = true
+rustls-native-certs.workspace = true
+rustls-pemfile.workspace = true
 scopeguard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -99,8 +100,7 @@ url.workspace = true
 urlencoding.workspace = true
 utils.workspace = true
 uuid.workspace = true
-rustls-native-certs.workspace = true
-x509-parser.workspace = true
+x509-cert.workspace = true
 redis.workspace = true
 zerocopy.workspace = true
 

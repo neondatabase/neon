@@ -19,7 +19,6 @@ from urllib.parse import urlencode
 import allure
 import pytest
 import zstandard
-from psycopg2.extensions import cursor
 from typing_extensions import override
 
 from fixtures.common_types import Id, Lsn
@@ -33,6 +32,8 @@ from fixtures.pg_version import PgVersion
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from typing import IO
+
+    from psycopg2.extensions import cursor
 
     from fixtures.common_types import TimelineId
     from fixtures.neon_fixtures import PgBin
@@ -337,6 +338,8 @@ def allure_add_grafana_link(host: str, timeline_id: TimelineId, start_ms: int, e
     """
     # We expect host to be in format like ep-holy-mouse-w2u462gi.us-east-2.aws.neon.build
     endpoint_id, region_id, _ = host.split(".", 2)
+    # Remove "-pooler" suffix if present
+    endpoint_id = endpoint_id.removesuffix("-pooler")
 
     params = {
         "orgId": 1,
@@ -510,7 +513,9 @@ def assert_no_errors(log_file: Path, service: str, allowed_errors: list[str]):
     for _lineno, error in errors:
         log.info(f"not allowed {service} error: {error.strip()}")
 
-    assert not errors, f"First log error on {service}: {errors[0]}\nHint: use scripts/check_allowed_errors.sh to test any new allowed_error you add"
+    assert not errors, (
+        f"First log error on {service}: {errors[0]}\nHint: use scripts/check_allowed_errors.sh to test any new allowed_error you add"
+    )
 
 
 def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: set[str]):
@@ -548,18 +553,18 @@ def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: set[str
 
     left_list, right_list = map(build_hash_list, [left, right])
 
-    assert len(left_list) == len(
-        right_list
-    ), f"unexpected number of files on tar files, {len(left_list)} != {len(right_list)}"
+    assert len(left_list) == len(right_list), (
+        f"unexpected number of files on tar files, {len(left_list)} != {len(right_list)}"
+    )
 
     mismatching: set[str] = set()
 
     for left_tuple, right_tuple in zip(left_list, right_list, strict=False):
         left_path, left_hash = left_tuple
         right_path, right_hash = right_tuple
-        assert (
-            left_path == right_path
-        ), f"file count matched, expected these to be same paths: {left_path}, {right_path}"
+        assert left_path == right_path, (
+            f"file count matched, expected these to be same paths: {left_path}, {right_path}"
+        )
         if left_hash != right_hash:
             mismatching.add(left_path)
 
@@ -719,3 +724,20 @@ def skip_on_ci(reason: str):
         os.getenv("CI", "false") == "true",
         reason=reason,
     )
+
+
+def shared_buffers_for_max_cu(max_cu: float) -> str:
+    """
+    Returns the string value of shared_buffers for the given max CU.
+    Use shared_buffers size like in production for max CU compute.
+    See https://github.com/neondatabase/cloud/blob/877e33b4289a471b8f0a35c84009846358f3e5a3/goapp/controlplane/internal/pkg/compute/computespec/pg_settings.go#L405
+
+    e.g. // 2 CU: 225mb; 4 CU: 450mb; 8 CU: 900mb
+    """
+    ramBytes = int(4096 * max_cu * 1024 * 1024)
+    maxConnections = max(100, min(int(ramBytes / 9531392), 4000))
+    maxWorkerProcesses = 12 + int(max_cu * 2)
+    maxBackends = 1 + maxConnections + maxWorkerProcesses
+    sharedBuffersMb = int(max(128, (1023 + maxBackends * 256) / 1024))
+    sharedBuffers = int(sharedBuffersMb * 1024 / 8)
+    return str(sharedBuffers)

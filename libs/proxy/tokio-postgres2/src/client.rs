@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -18,10 +19,10 @@ use crate::config::{Host, SslMode};
 use crate::connection::{Request, RequestMessages};
 use crate::query::RowStream;
 use crate::simple_query::SimpleQueryStream;
-use crate::types::{Oid, ToSql, Type};
+use crate::types::{Oid, Type};
 use crate::{
-    CancelToken, Error, ReadyForQueryStatus, Row, SimpleQueryMessage, Statement, Transaction,
-    TransactionBuilder, query, simple_query, slice_iter,
+    CancelToken, Error, ReadyForQueryStatus, SimpleQueryMessage, Statement, Transaction,
+    TransactionBuilder, query, simple_query,
 };
 
 pub struct Responses {
@@ -53,26 +54,18 @@ impl Responses {
 /// A cache of type info and prepared statements for fetching type info
 /// (corresponding to the queries in the [crate::prepare] module).
 #[derive(Default)]
-struct CachedTypeInfo {
+pub(crate) struct CachedTypeInfo {
     /// A statement for basic information for a type from its
     /// OID. Corresponds to [TYPEINFO_QUERY](crate::prepare::TYPEINFO_QUERY) (or its
     /// fallback).
-    typeinfo: Option<Statement>,
-    /// A statement for getting information for a composite type from its OID.
-    /// Corresponds to [TYPEINFO_QUERY](crate::prepare::TYPEINFO_COMPOSITE_QUERY).
-    typeinfo_composite: Option<Statement>,
-    /// A statement for getting information for a composite type from its OID.
-    /// Corresponds to [TYPEINFO_QUERY](crate::prepare::TYPEINFO_COMPOSITE_QUERY) (or
-    /// its fallback).
-    typeinfo_enum: Option<Statement>,
+    pub(crate) typeinfo: Option<Statement>,
 
     /// Cache of types already looked up.
-    types: HashMap<Oid, Type>,
+    pub(crate) types: HashMap<Oid, Type>,
 }
 
 pub struct InnerClient {
     sender: mpsc::UnboundedSender<Request>,
-    cached_typeinfo: Mutex<CachedTypeInfo>,
 
     /// A buffer to use when writing out postgres commands.
     buffer: Mutex<BytesMut>,
@@ -90,38 +83,6 @@ impl InnerClient {
         })
     }
 
-    pub fn typeinfo(&self) -> Option<Statement> {
-        self.cached_typeinfo.lock().typeinfo.clone()
-    }
-
-    pub fn set_typeinfo(&self, statement: &Statement) {
-        self.cached_typeinfo.lock().typeinfo = Some(statement.clone());
-    }
-
-    pub fn typeinfo_composite(&self) -> Option<Statement> {
-        self.cached_typeinfo.lock().typeinfo_composite.clone()
-    }
-
-    pub fn set_typeinfo_composite(&self, statement: &Statement) {
-        self.cached_typeinfo.lock().typeinfo_composite = Some(statement.clone());
-    }
-
-    pub fn typeinfo_enum(&self) -> Option<Statement> {
-        self.cached_typeinfo.lock().typeinfo_enum.clone()
-    }
-
-    pub fn set_typeinfo_enum(&self, statement: &Statement) {
-        self.cached_typeinfo.lock().typeinfo_enum = Some(statement.clone());
-    }
-
-    pub fn type_(&self, oid: Oid) -> Option<Type> {
-        self.cached_typeinfo.lock().types.get(&oid).cloned()
-    }
-
-    pub fn set_type(&self, oid: Oid, type_: &Type) {
-        self.cached_typeinfo.lock().types.insert(oid, type_.clone());
-    }
-
     /// Call the given function with a buffer to be used when writing out
     /// postgres commands.
     pub fn with_buf<F, R>(&self, f: F) -> R
@@ -137,10 +98,10 @@ impl InnerClient {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SocketConfig {
+    pub host_addr: Option<IpAddr>,
     pub host: Host,
     pub port: u16,
     pub connect_timeout: Option<Duration>,
-    // pub keepalive: Option<KeepaliveConfig>,
 }
 
 /// An asynchronous PostgreSQL client.
@@ -149,6 +110,7 @@ pub struct SocketConfig {
 /// through this client object.
 pub struct Client {
     inner: Arc<InnerClient>,
+    cached_typeinfo: CachedTypeInfo,
 
     socket_config: SocketConfig,
     ssl_mode: SslMode,
@@ -167,9 +129,9 @@ impl Client {
         Client {
             inner: Arc::new(InnerClient {
                 sender,
-                cached_typeinfo: Default::default(),
                 buffer: Default::default(),
             }),
+            cached_typeinfo: Default::default(),
 
             socket_config,
             ssl_mode,
@@ -185,55 +147,6 @@ impl Client {
 
     pub(crate) fn inner(&self) -> &Arc<InnerClient> {
         &self.inner
-    }
-
-    /// Executes a statement, returning a vector of the resulting rows.
-    ///
-    /// A statement may contain parameters, specified by `$n`, where `n` is the index of the parameter of the list
-    /// provided, 1-indexed.
-    ///
-    /// The `statement` argument can either be a `Statement`, or a raw query string. If the same statement will be
-    /// repeatedly executed (perhaps with different query parameters), consider preparing the statement up front
-    /// with the `prepare` method.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the number of parameters provided does not match the number expected.
-    pub async fn query(
-        &self,
-        statement: Statement,
-        params: &[&(dyn ToSql + Sync)],
-    ) -> Result<Vec<Row>, Error> {
-        self.query_raw(statement, slice_iter(params))
-            .await?
-            .try_collect()
-            .await
-    }
-
-    /// The maximally flexible version of [`query`].
-    ///
-    /// A statement may contain parameters, specified by `$n`, where `n` is the index of the parameter of the list
-    /// provided, 1-indexed.
-    ///
-    /// The `statement` argument can either be a `Statement`, or a raw query string. If the same statement will be
-    /// repeatedly executed (perhaps with different query parameters), consider preparing the statement up front
-    /// with the `prepare` method.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the number of parameters provided does not match the number expected.
-    ///
-    /// [`query`]: #method.query
-    pub async fn query_raw<'a, I>(
-        &self,
-        statement: Statement,
-        params: I,
-    ) -> Result<RowStream, Error>
-    where
-        I: IntoIterator<Item = &'a (dyn ToSql + Sync)>,
-        I::IntoIter: ExactSizeIterator,
-    {
-        query::query(&self.inner, statement, params).await
     }
 
     /// Pass text directly to the Postgres backend to allow it to sort out typing itself and
@@ -280,6 +193,14 @@ impl Client {
     /// them to this method!
     pub async fn batch_execute(&self, query: &str) -> Result<ReadyForQueryStatus, Error> {
         simple_query::batch_execute(self.inner(), query).await
+    }
+
+    pub async fn discard_all(&mut self) -> Result<ReadyForQueryStatus, Error> {
+        // clear the prepared statements that are about to be nuked from the postgres session
+
+        self.cached_typeinfo.typeinfo = None;
+
+        self.batch_execute("discard all").await
     }
 
     /// Begins a new database transaction.
@@ -345,8 +266,8 @@ impl Client {
     }
 
     /// Query for type information
-    pub async fn get_type(&self, oid: Oid) -> Result<Type, Error> {
-        crate::prepare::get_type(&self.inner, oid).await
+    pub(crate) async fn get_type_inner(&mut self, oid: Oid) -> Result<Type, Error> {
+        crate::prepare::get_type(&self.inner, &mut self.cached_typeinfo, oid).await
     }
 
     /// Determines if the connection to the server has already closed.

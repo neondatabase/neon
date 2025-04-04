@@ -5,7 +5,16 @@
 //! easier to work with locally. The python tests in `test_runner`
 //! rely on `neon_local` to set up the environment for each test.
 //!
-use anyhow::{anyhow, bail, Context, Result};
+use std::borrow::Cow;
+use std::collections::{BTreeSet, HashMap};
+use std::fs::File;
+use std::os::fd::AsRawFd;
+use std::path::PathBuf;
+use std::process::exit;
+use std::str::FromStr;
+use std::time::Duration;
+
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use compute_api::spec::ComputeMode;
 use control_plane::endpoint::ComputeControlPlane;
@@ -19,7 +28,7 @@ use control_plane::storage_controller::{
     NeonStorageControllerStartArgs, NeonStorageControllerStopArgs, StorageController,
 };
 use control_plane::{broker, local_env};
-use nix::fcntl::{flock, FlockArg};
+use nix::fcntl::{FlockArg, flock};
 use pageserver_api::config::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
@@ -27,31 +36,24 @@ use pageserver_api::config::{
 use pageserver_api::controller_api::{
     NodeAvailabilityWrapper, PlacementPolicy, TenantCreateRequest,
 };
-use pageserver_api::models::{ShardParameters, TimelineCreateRequest, TimelineInfo};
+use pageserver_api::models::{
+    ShardParameters, TenantConfigRequest, TimelineCreateRequest, TimelineInfo,
+};
 use pageserver_api::shard::{ShardCount, ShardStripeSize, TenantShardId};
 use postgres_backend::AuthType;
 use postgres_connection::parse_host_port;
+use safekeeper_api::membership::SafekeeperGeneration;
 use safekeeper_api::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_SAFEKEEPER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
 };
-use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap};
-use std::fs::File;
-use std::os::fd::AsRawFd;
-use std::path::PathBuf;
-use std::process::exit;
-use std::str::FromStr;
-use std::time::Duration;
 use storage_broker::DEFAULT_LISTEN_ADDR as DEFAULT_BROKER_ADDR;
 use tokio::task::JoinSet;
 use url::Host;
-use utils::{
-    auth::{Claims, Scope},
-    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
-    lsn::Lsn,
-    project_git_version,
-};
+use utils::auth::{Claims, Scope};
+use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
+use utils::lsn::Lsn;
+use utils::project_git_version;
 
 // Default id of a safekeeper node, if not specified on the command line.
 const DEFAULT_SAFEKEEPER_ID: NodeId = NodeId(1);
@@ -597,7 +599,15 @@ struct EndpointStartCmdArgs {
     #[clap(long = "pageserver-id")]
     endpoint_pageserver_id: Option<NodeId>,
 
-    #[clap(long)]
+    #[clap(
+        long,
+        help = "Safekeepers membership generation to prefix neon.safekeepers with. Normally neon_local sets it on its own, but this option allows to override. Non zero value forces endpoint to use membership configurations."
+    )]
+    safekeepers_generation: Option<u32>,
+    #[clap(
+        long,
+        help = "List of safekeepers endpoint will talk to. Normally neon_local chooses them on its own, but this option allows to override."
+    )]
     safekeepers: Option<String>,
 
     #[clap(
@@ -618,9 +628,9 @@ struct EndpointStartCmdArgs {
     )]
     allow_multiple: bool,
 
-    #[clap(short = 't', long, help = "timeout until we fail the command")]
-    #[arg(default_value = "10s")]
-    start_timeout: humantime::Duration,
+    #[clap(short = 't', long, value_parser= humantime::parse_duration, help = "timeout until we fail the command")]
+    #[arg(default_value = "90s")]
+    start_timeout: Duration,
 }
 
 #[derive(clap::Args)]
@@ -887,20 +897,6 @@ fn print_timeline(
     Ok(())
 }
 
-/// Returns a map of timeline IDs to timeline_id@lsn strings.
-/// Connects to the pageserver to query this information.
-async fn get_timeline_infos(
-    env: &local_env::LocalEnv,
-    tenant_shard_id: &TenantShardId,
-) -> Result<HashMap<TimelineId, TimelineInfo>> {
-    Ok(get_default_pageserver(env)
-        .timeline_list(tenant_shard_id)
-        .await?
-        .into_iter()
-        .map(|timeline_info| (timeline_info.timeline_id, timeline_info))
-        .collect())
-}
-
 /// Helper function to get tenant id from an optional --tenant_id option or from the config file
 fn get_tenant_id(
     tenant_id_arg: Option<TenantId>,
@@ -935,7 +931,9 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
     let init_conf: NeonLocalInitConf = if let Some(config_path) = &args.config {
         // User (likely the Python test suite) provided a description of the environment.
         if args.num_pageservers.is_some() {
-            bail!("Cannot specify both --num-pageservers and --config, use key `pageservers` in the --config file instead");
+            bail!(
+                "Cannot specify both --num-pageservers and --config, use key `pageservers` in the --config file instead"
+            );
         }
         // load and parse the file
         let contents = std::fs::read_to_string(config_path).with_context(|| {
@@ -967,6 +965,7 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
                         id: pageserver_id,
                         listen_pg_addr: format!("127.0.0.1:{pg_port}"),
                         listen_http_addr: format!("127.0.0.1:{http_port}"),
+                        listen_https_addr: None,
                         pg_auth_type: AuthType::Trust,
                         http_auth_type: AuthType::Trust,
                         other: Default::default(),
@@ -980,7 +979,8 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
             neon_distrib_dir: None,
             default_tenant_id: TenantId::from_array(std::array::from_fn(|_| 0)),
             storage_controller: None,
-            control_plane_compute_hook_api: None,
+            control_plane_hooks_api: None,
+            generate_local_ssl_certs: false,
         }
     };
 
@@ -1131,12 +1131,16 @@ async fn handle_tenant(subcmd: &TenantCmd, env: &mut local_env::LocalEnv) -> any
             let tenant_id = get_tenant_id(args.tenant_id, env)?;
             let tenant_conf: HashMap<_, _> =
                 args.config.iter().flat_map(|c| c.split_once(':')).collect();
+            let config = PageServerNode::parse_config(tenant_conf)?;
 
-            pageserver
-                .tenant_config(tenant_id, tenant_conf)
+            let req = TenantConfigRequest { tenant_id, config };
+
+            let storage_controller = StorageController::from_env(env);
+            storage_controller
+                .set_tenant_config(&req)
                 .await
                 .with_context(|| format!("Tenant config failed for tenant with id {tenant_id}"))?;
-            println!("tenant {tenant_id} successfully configured on the pageserver");
+            println!("tenant {tenant_id} successfully configured via storcon");
         }
     }
     Ok(())
@@ -1251,12 +1255,6 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             // TODO(sharding): this command shouldn't have to specify a shard ID: we should ask the storage controller
             // where shard 0 is attached, and query there.
             let tenant_shard_id = get_tenant_shard_id(args.tenant_shard_id, env)?;
-            let timeline_infos = get_timeline_infos(env, &tenant_shard_id)
-                .await
-                .unwrap_or_else(|e| {
-                    eprintln!("Failed to load timeline info: {}", e);
-                    HashMap::new()
-                });
 
             let timeline_name_mappings = env.timeline_name_mappings();
 
@@ -1285,12 +1283,9 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                         lsn.to_string()
                     }
                     _ => {
-                        // -> primary endpoint or hot replica
-                        // Use the LSN at the end of the timeline.
-                        timeline_infos
-                            .get(&endpoint.timeline_id)
-                            .map(|bi| bi.last_record_lsn.to_string())
-                            .unwrap_or_else(|| "?".to_string())
+                        // As the LSN here refers to the one that the compute is started with,
+                        // we display nothing as it is a primary/hot standby compute.
+                        "---".to_string()
                     }
                 };
 
@@ -1338,10 +1333,14 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
 
             match (mode, args.hot_standby) {
                 (ComputeMode::Static(_), true) => {
-                    bail!("Cannot start a node in hot standby mode when it is already configured as a static replica")
+                    bail!(
+                        "Cannot start a node in hot standby mode when it is already configured as a static replica"
+                    )
                 }
                 (ComputeMode::Primary, true) => {
-                    bail!("Cannot start a node as a hot standby replica, it is already configured as primary node")
+                    bail!(
+                        "Cannot start a node as a hot standby replica, it is already configured as primary node"
+                    )
                 }
                 _ => {}
             }
@@ -1368,6 +1367,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             let pageserver_id = args.endpoint_pageserver_id;
             let remote_ext_config = &args.remote_ext_config;
 
+            let safekeepers_generation = args.safekeepers_generation.map(SafekeeperGeneration::new);
             // If --safekeepers argument is given, use only the listed
             // safekeeper nodes; otherwise all from the env.
             let safekeepers = if let Some(safekeepers) = parse_safekeepers(&args.safekeepers)? {
@@ -1443,11 +1443,13 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             endpoint
                 .start(
                     &auth_token,
+                    safekeepers_generation,
                     safekeepers,
                     pageservers,
                     remote_ext_config.as_ref(),
                     stripe_size.0 as usize,
                     args.create_test_user,
+                    args.start_timeout,
                 )
                 .await?;
         }

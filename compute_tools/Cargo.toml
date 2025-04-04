@@ -1,7 +1,7 @@
 [package]
 name = "compute_tools"
 version = "0.1.0"
-edition.workspace = true
+edition = "2024"
 license.workspace = true
 
 [features]
@@ -17,6 +17,7 @@ aws-sdk-kms.workspace = true
 aws-smithy-types.workspace = true
 anyhow.workspace = true
 axum = { workspace = true, features = [] }
+axum-extra.workspace = true
 camino.workspace = true
 chrono.workspace = true
 cfg-if.workspace = true
@@ -25,6 +26,8 @@ fail.workspace = true
 flate2.workspace = true
 futures.workspace = true
 http.workspace = true
+indexmap.workspace = true
+jsonwebtoken.workspace = true
 metrics.workspace = true
 nix.workspace = true
 notify.workspace = true
@@ -32,27 +35,33 @@ num_cpus.workspace = true
 once_cell.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
+p256 = { version = "0.13", features = ["pem"] }
 postgres.workspace = true
 regex.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+ring = "0.17"
 serde.workspace = true
 serde_with.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true
+spki = { version = "0.7.3", features = ["std"] }
 tar.workspace = true
 tower.workspace = true
 tower-http.workspace = true
-reqwest = { workspace = true, features = ["json"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 tokio-postgres.workspace = true
 tokio-util.workspace = true
 tokio-stream.workspace = true
+tower-otel.workspace = true
 tracing.workspace = true
+tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 tracing-utils.workspace = true
 thiserror.workspace = true
 url.workspace = true
 uuid.workspace = true
 walkdir.workspace = true
+x509-cert.workspace = true
 
 postgres_initdb.workspace = true
 compute_api.workspace = true

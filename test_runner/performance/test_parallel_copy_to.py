@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from io import BytesIO
+from typing import TYPE_CHECKING
 
-from fixtures.compare_fixtures import PgCompare
-from fixtures.neon_fixtures import PgProtocol
+if TYPE_CHECKING:
+    from fixtures.compare_fixtures import PgCompare
+    from fixtures.neon_fixtures import PgProtocol
 
 
 async def repeat_bytes(buf, repetitions: int):

@@ -1,5 +1,7 @@
 //! Mock console backend which relies on a user-provided postgres instance.
 
+use std::io;
+use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -21,7 +23,6 @@ use crate::control_plane::errors::{
 };
 use crate::control_plane::messages::MetricsAuxInfo;
 use crate::control_plane::{AccessBlockerFlags, AuthInfo, AuthSecret, CachedNodeInfo, NodeInfo};
-use crate::error::io_error;
 use crate::intern::RoleNameInt;
 use crate::types::{BranchId, EndpointId, ProjectId, RoleName};
 use crate::url::ApiUrl;
@@ -35,13 +36,13 @@ enum MockApiError {
 
 impl From<MockApiError> for ControlPlaneError {
     fn from(e: MockApiError) -> Self {
-        io_error(e).into()
+        io::Error::other(e).into()
     }
 }
 
 impl From<tokio_postgres::Error> for ControlPlaneError {
     fn from(e: tokio_postgres::Error) -> Self {
-        io_error(e).into()
+        io::Error::other(e).into()
     }
 }
 
@@ -167,10 +168,22 @@ impl MockControlPlane {
     }
 
     async fn do_wake_compute(&self) -> Result<NodeInfo, WakeComputeError> {
-        let mut config = compute::ConnCfg::new(
-            self.endpoint.host_str().unwrap_or("localhost").to_owned(),
-            self.endpoint.port().unwrap_or(5432),
-        );
+        let port = self.endpoint.port().unwrap_or(5432);
+        let mut config = match self.endpoint.host_str() {
+            None => {
+                let mut config = compute::ConnCfg::new("localhost".to_string(), port);
+                config.set_host_addr(IpAddr::V4(Ipv4Addr::LOCALHOST));
+                config
+            }
+            Some(host) => {
+                let mut config = compute::ConnCfg::new(host.to_string(), port);
+                if let Ok(addr) = IpAddr::from_str(host) {
+                    config.set_host_addr(addr);
+                }
+                config
+            }
+        };
+
         config.ssl_mode(postgres_client::config::SslMode::Disable);
 
         let node = NodeInfo {
@@ -179,6 +192,7 @@ impl MockControlPlane {
                 endpoint_id: (&EndpointId::from("endpoint")).into(),
                 project_id: (&ProjectId::from("project")).into(),
                 branch_id: (&BranchId::from("branch")).into(),
+                compute_id: "compute".into(),
                 cold_start_info: crate::control_plane::messages::ColdStartInfo::Warm,
             },
         };

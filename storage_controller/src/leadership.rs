@@ -3,11 +3,9 @@ use std::sync::Arc;
 use hyper::Uri;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    peer_client::{GlobalObservedState, PeerClient},
-    persistence::{ControllerPersistence, DatabaseError, DatabaseResult, Persistence},
-    service::Config,
-};
+use crate::peer_client::{GlobalObservedState, PeerClient};
+use crate::persistence::{ControllerPersistence, DatabaseError, DatabaseResult, Persistence};
+use crate::service::Config;
 
 /// Helper for storage controller leadership acquisition
 pub(crate) struct Leadership {
@@ -91,7 +89,9 @@ impl Leadership {
                 // Special case: if this is a brand new storage controller, migrations will not
                 // have run at this point yet, and, hence, the controllers table does not exist.
                 // Detect this case via the error string (diesel doesn't type it) and allow it.
-                tracing::info!("Detected first storage controller start-up. Allowing missing controllers table ...");
+                tracing::info!(
+                    "Detected first storage controller start-up. Allowing missing controllers table ..."
+                );
                 return Ok(None);
             }
         }
@@ -110,7 +110,20 @@ impl Leadership {
     ) -> Option<GlobalObservedState> {
         tracing::info!("Sending step down request to {leader:?}");
 
+        let mut http_client = reqwest::Client::builder();
+        for cert in &self.config.ssl_ca_certs {
+            http_client = http_client.add_root_certificate(cert.clone());
+        }
+        let http_client = match http_client.build() {
+            Ok(http_client) => http_client,
+            Err(err) => {
+                tracing::error!("Failed to build client for leader step-down request: {err}");
+                return None;
+            }
+        };
+
         let client = PeerClient::new(
+            http_client,
             Uri::try_from(leader.address.as_str()).expect("Failed to build leader URI"),
             self.config.peer_jwt_token.clone(),
         );

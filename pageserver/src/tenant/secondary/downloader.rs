@@ -1,48 +1,10 @@
-use std::{
-    collections::{HashMap, HashSet},
-    pin::Pin,
-    str::FromStr,
-    sync::Arc,
-    time::{Duration, Instant, SystemTime},
-};
+use std::collections::{HashMap, HashSet};
+use std::pin::Pin;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 
-use crate::{
-    config::PageServerConf,
-    context::RequestContext,
-    disk_usage_eviction_task::{
-        finite_f32, DiskUsageEvictionInfo, EvictionCandidate, EvictionLayer, EvictionSecondaryLayer,
-    },
-    metrics::SECONDARY_MODE,
-    tenant::{
-        config::SecondaryLocationConfig,
-        debug_assert_current_span_has_tenant_and_timeline_id,
-        ephemeral_file::is_ephemeral_file,
-        remote_timeline_client::{
-            index::LayerFileMetadata, is_temp_download_file, FAILED_DOWNLOAD_WARN_THRESHOLD,
-            FAILED_REMOTE_OP_RETRIES,
-        },
-        span::debug_assert_current_span_has_tenant_id,
-        storage_layer::{layer::local_layer_path, LayerName, LayerVisibilityHint},
-        tasks::{warn_when_period_overrun, BackgroundLoopKind},
-    },
-    virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile},
-    TEMP_FILE_SUFFIX,
-};
-
-use super::{
-    heatmap::HeatMapLayer,
-    scheduler::{
-        self, period_jitter, period_warmup, Completion, JobGenerator, SchedulingResult,
-        TenantBackgroundJobs,
-    },
-    GetTenantError, SecondaryTenant, SecondaryTenantError,
-};
-
-use crate::tenant::{
-    mgr::TenantManager,
-    remote_timeline_client::{download::download_layer_file, remote_heatmap_path},
-};
-
+use crate::metrics::{STORAGE_IO_SIZE, StorageIoSizeOperation};
 use camino::Utf8PathBuf;
 use chrono::format::{DelayedFormat, StrftimeItems};
 use futures::Future;
@@ -50,18 +12,43 @@ use metrics::UIntGauge;
 use pageserver_api::models::SecondaryProgress;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::{DownloadError, DownloadKind, DownloadOpts, Etag, GenericRemoteStorage};
-
 use tokio_util::sync::CancellationToken;
-use tracing::{info_span, instrument, warn, Instrument};
-use utils::{
-    backoff, completion::Barrier, crashsafe::path_with_suffix_extension, failpoint_support, fs_ext,
-    id::TimelineId, pausable_failpoint, serde_system_time,
-};
+use tracing::{Instrument, info_span, instrument, warn};
+use utils::completion::Barrier;
+use utils::crashsafe::path_with_suffix_extension;
+use utils::id::TimelineId;
+use utils::{backoff, failpoint_support, fs_ext, pausable_failpoint, serde_system_time};
 
-use super::{
-    heatmap::{HeatMapTenant, HeatMapTimeline},
-    CommandRequest, DownloadCommand,
+use super::heatmap::{HeatMapLayer, HeatMapTenant, HeatMapTimeline};
+use super::scheduler::{
+    self, Completion, JobGenerator, SchedulingResult, TenantBackgroundJobs, period_jitter,
+    period_warmup,
 };
+use super::{
+    CommandRequest, DownloadCommand, GetTenantError, SecondaryTenant, SecondaryTenantError,
+};
+use crate::TEMP_FILE_SUFFIX;
+use crate::config::PageServerConf;
+use crate::context::RequestContext;
+use crate::disk_usage_eviction_task::{
+    DiskUsageEvictionInfo, EvictionCandidate, EvictionLayer, EvictionSecondaryLayer, finite_f32,
+};
+use crate::metrics::SECONDARY_MODE;
+use crate::tenant::config::SecondaryLocationConfig;
+use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
+use crate::tenant::ephemeral_file::is_ephemeral_file;
+use crate::tenant::mgr::TenantManager;
+use crate::tenant::remote_timeline_client::download::download_layer_file;
+use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
+use crate::tenant::remote_timeline_client::{
+    FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES, is_temp_download_file,
+    remote_heatmap_path,
+};
+use crate::tenant::span::debug_assert_current_span_has_tenant_id;
+use crate::tenant::storage_layer::layer::local_layer_path;
+use crate::tenant::storage_layer::{LayerName, LayerVisibilityHint};
+use crate::tenant::tasks::{BackgroundLoopKind, warn_when_period_overrun};
+use crate::virtual_file::{MaybeFatalIo, VirtualFile, on_fatal_io_error};
 
 /// For each tenant, default period for how long must have passed since the last download_tenant call before
 /// calling it again.  This default is replaced with the value of [`HeatMapTenant::upload_period_ms`] after first
@@ -138,15 +125,53 @@ impl OnDiskState {
     }
 }
 
-#[derive(Debug, Clone, Default)]
 pub(super) struct SecondaryDetailTimeline {
     on_disk_layers: HashMap<LayerName, OnDiskState>,
 
     /// We remember when layers were evicted, to prevent re-downloading them.
     pub(super) evicted_at: HashMap<LayerName, SystemTime>,
+
+    ctx: RequestContext,
+}
+
+impl Clone for SecondaryDetailTimeline {
+    fn clone(&self) -> Self {
+        Self {
+            on_disk_layers: self.on_disk_layers.clone(),
+            evicted_at: self.evicted_at.clone(),
+            // This is a bit awkward. The downloader code operates on a snapshot
+            // of the secondary list to avoid locking it for extended periods of time.
+            // No particularly strong reason to chose [`RequestContext::detached_child`],
+            // but makes more sense than [`RequestContext::attached_child`].
+            ctx: self
+                .ctx
+                .detached_child(self.ctx.task_kind(), self.ctx.download_behavior()),
+        }
+    }
+}
+
+impl std::fmt::Debug for SecondaryDetailTimeline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecondaryDetailTimeline")
+            .field("on_disk_layers", &self.on_disk_layers)
+            .field("evicted_at", &self.evicted_at)
+            .finish()
+    }
 }
 
 impl SecondaryDetailTimeline {
+    pub(super) fn empty(ctx: RequestContext) -> Self {
+        SecondaryDetailTimeline {
+            on_disk_layers: Default::default(),
+            evicted_at: Default::default(),
+            ctx,
+        }
+    }
+
+    pub(super) fn context(&self) -> &RequestContext {
+        &self.ctx
+    }
+
     pub(super) fn remove_layer(
         &mut self,
         name: &LayerName,
@@ -272,18 +297,50 @@ impl SecondaryDetail {
 
     pub(super) fn remove_timeline(
         &mut self,
+        tenant_shard_id: &TenantShardId,
         timeline_id: &TimelineId,
         resident_metric: &UIntGauge,
     ) {
         let removed = self.timelines.remove(timeline_id);
         if let Some(removed) = removed {
-            resident_metric.sub(
-                removed
-                    .on_disk_layers
-                    .values()
-                    .map(|l| l.metadata.file_size)
-                    .sum(),
-            );
+            Self::clear_timeline_metrics(tenant_shard_id, timeline_id, removed, resident_metric);
+        }
+    }
+
+    pub(super) fn drain_timelines(
+        &mut self,
+        tenant_shard_id: &TenantShardId,
+        resident_metric: &UIntGauge,
+    ) {
+        for (timeline_id, removed) in self.timelines.drain() {
+            Self::clear_timeline_metrics(tenant_shard_id, &timeline_id, removed, resident_metric);
+        }
+    }
+
+    fn clear_timeline_metrics(
+        tenant_shard_id: &TenantShardId,
+        timeline_id: &TimelineId,
+        detail: SecondaryDetailTimeline,
+        resident_metric: &UIntGauge,
+    ) {
+        resident_metric.sub(
+            detail
+                .on_disk_layers
+                .values()
+                .map(|l| l.metadata.file_size)
+                .sum(),
+        );
+
+        let shard_id = format!("{}", tenant_shard_id.shard_slug());
+        let tenant_id = tenant_shard_id.tenant_id.to_string();
+        let timeline_id = timeline_id.to_string();
+        for op in StorageIoSizeOperation::VARIANTS {
+            let _ = STORAGE_IO_SIZE.remove_label_values(&[
+                op,
+                tenant_id.as_str(),
+                shard_id.as_str(),
+                timeline_id.as_str(),
+            ]);
         }
     }
 
@@ -505,7 +562,10 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
         let remote_storage = self.remote_storage.clone();
         let conf = self.tenant_manager.get_conf();
         let tenant_shard_id = *secondary_state.get_tenant_shard_id();
-        let download_ctx = self.root_ctx.attached_child();
+        let download_ctx = self
+            .root_ctx
+            .attached_child()
+            .with_scope_secondary_tenant(&tenant_shard_id);
         (RunningDownload { barrier }, Box::pin(async move {
             let _completion = completion;
 
@@ -738,6 +798,7 @@ impl<'a> TenantDownloader<'a> {
                         last_heatmap,
                         timeline,
                         &self.secondary_state.resident_size_metric,
+                        ctx,
                     )
                     .await;
 
@@ -883,8 +944,7 @@ impl<'a> TenantDownloader<'a> {
                 let heatmap_timeline = heatmap.timelines.get(heatmap_timeline_index).unwrap();
 
                 let layers_in_heatmap = heatmap_timeline
-                    .layers
-                    .iter()
+                    .hot_layers()
                     .map(|l| (&l.name, l.metadata.generation))
                     .collect::<HashSet<_>>();
                 let layers_on_disk = timeline_state
@@ -928,7 +988,11 @@ impl<'a> TenantDownloader<'a> {
             for delete_timeline in &delete_timelines {
                 // We haven't removed from disk yet, but optimistically remove from in-memory state: if removal
                 // from disk fails that will be a fatal error.
-                detail.remove_timeline(delete_timeline, &self.secondary_state.resident_size_metric);
+                detail.remove_timeline(
+                    self.secondary_state.get_tenant_shard_id(),
+                    delete_timeline,
+                    &self.secondary_state.resident_size_metric,
+                );
             }
         }
 
@@ -1024,12 +1088,12 @@ impl<'a> TenantDownloader<'a> {
         timeline: HeatMapTimeline,
         timeline_state: SecondaryDetailTimeline,
         deadline: Instant,
-        ctx: &RequestContext,
     ) -> (Result<(), UpdateError>, Vec<HeatMapLayer>) {
         // Accumulate updates to the state
         let mut touched = Vec::new();
 
-        for layer in timeline.layers {
+        let timeline_id = timeline.timeline_id;
+        for layer in timeline.into_hot_layers() {
             if self.secondary_state.cancel.is_cancelled() {
                 tracing::debug!("Cancelled -- dropping out of layer loop");
                 return (Err(UpdateError::Cancelled), touched);
@@ -1054,7 +1118,12 @@ impl<'a> TenantDownloader<'a> {
             }
 
             match self
-                .download_layer(tenant_shard_id, &timeline.timeline_id, layer, ctx)
+                .download_layer(
+                    tenant_shard_id,
+                    &timeline_id,
+                    layer,
+                    timeline_state.context(),
+                )
                 .await
             {
                 Ok(Some(layer)) => touched.push(layer),
@@ -1162,16 +1231,19 @@ impl<'a> TenantDownloader<'a> {
         let tenant_shard_id = self.secondary_state.get_tenant_shard_id();
         let timeline_id = timeline.timeline_id;
 
-        tracing::debug!(timeline_id=%timeline_id, "Downloading layers, {} in heatmap", timeline.layers.len());
+        tracing::debug!(timeline_id=%timeline_id, "Downloading layers, {} in heatmap", timeline.hot_layers().count());
 
         let (result, touched) = self
-            .download_timeline_layers(tenant_shard_id, timeline, timeline_state, deadline, ctx)
+            .download_timeline_layers(tenant_shard_id, timeline, timeline_state, deadline)
             .await;
 
         // Write updates to state to record layers we just downloaded or touched, irrespective of whether the overall result was successful
         {
             let mut detail = self.secondary_state.detail.lock().unwrap();
-            let timeline_detail = detail.timelines.entry(timeline_id).or_default();
+            let timeline_detail = detail.timelines.entry(timeline_id).or_insert_with(|| {
+                let ctx = ctx.with_scope_secondary_timeline(tenant_shard_id, &timeline_id);
+                SecondaryDetailTimeline::empty(ctx)
+            });
 
             tracing::info!("Wrote timeline_detail for {} touched layers", touched.len());
             touched.into_iter().for_each(|t| {
@@ -1305,10 +1377,12 @@ async fn init_timeline_state(
     last_heatmap: Option<&HeatMapTimeline>,
     heatmap: &HeatMapTimeline,
     resident_metric: &UIntGauge,
+    ctx: &RequestContext,
 ) -> SecondaryDetailTimeline {
-    let timeline_path = conf.timeline_path(tenant_shard_id, &heatmap.timeline_id);
-    let mut detail = SecondaryDetailTimeline::default();
+    let ctx = ctx.with_scope_secondary_timeline(tenant_shard_id, &heatmap.timeline_id);
+    let mut detail = SecondaryDetailTimeline::empty(ctx);
 
+    let timeline_path = conf.timeline_path(tenant_shard_id, &heatmap.timeline_id);
     let mut dir = match tokio::fs::read_dir(&timeline_path).await {
         Ok(d) => d,
         Err(e) => {
@@ -1330,11 +1404,11 @@ async fn init_timeline_state(
     // As we iterate through layers found on disk, we will look up their metadata from this map.
     // Layers not present in metadata will be discarded.
     let heatmap_metadata: HashMap<&LayerName, &HeatMapLayer> =
-        heatmap.layers.iter().map(|l| (&l.name, l)).collect();
+        heatmap.hot_layers().map(|l| (&l.name, l)).collect();
 
     let last_heatmap_metadata: HashMap<&LayerName, &HeatMapLayer> =
         if let Some(last_heatmap) = last_heatmap {
-            last_heatmap.layers.iter().map(|l| (&l.name, l)).collect()
+            last_heatmap.hot_layers().map(|l| (&l.name, l)).collect()
         } else {
             HashMap::new()
         };

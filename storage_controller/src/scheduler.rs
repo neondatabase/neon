@@ -1,10 +1,16 @@
-use crate::{metrics::NodeLabelGroup, node::Node, tenant_shard::TenantShard};
+use std::collections::HashMap;
+use std::fmt::Debug;
+
 use http_utils::error::ApiError;
 use itertools::Itertools;
-use pageserver_api::{controller_api::AvailabilityZone, models::PageserverUtilization};
+use pageserver_api::controller_api::AvailabilityZone;
+use pageserver_api::models::PageserverUtilization;
 use serde::Serialize;
-use std::{collections::HashMap, fmt::Debug};
 use utils::id::NodeId;
+
+use crate::metrics::NodeLabelGroup;
+use crate::node::Node;
+use crate::tenant_shard::TenantShard;
 
 /// Scenarios in which we cannot find a suitable location for a tenant shard
 #[derive(thiserror::Error, Debug)]
@@ -403,13 +409,14 @@ impl ScheduleContext {
     }
 }
 
-pub(crate) enum RefCountUpdate {
+pub(crate) enum RefCountUpdate<'a> {
     PromoteSecondary,
     Attach,
     Detach,
     DemoteAttached,
     AddSecondary,
     RemoveSecondary,
+    ChangePreferredAzFrom(Option<&'a AvailabilityZone>),
 }
 
 impl Scheduler {
@@ -572,6 +579,14 @@ impl Scheduler {
                     node.home_shard_count -= 1;
                 }
             }
+            RefCountUpdate::ChangePreferredAzFrom(old_az) => {
+                if Some(&node.az) == old_az {
+                    node.home_shard_count -= 1;
+                }
+                if is_home_az {
+                    node.home_shard_count += 1;
+                }
+            }
         }
 
         // Maybe update PageserverUtilization
@@ -588,7 +603,8 @@ impl Scheduler {
             RefCountUpdate::PromoteSecondary
             | RefCountUpdate::Detach
             | RefCountUpdate::RemoveSecondary
-            | RefCountUpdate::DemoteAttached => {
+            | RefCountUpdate::DemoteAttached
+            | RefCountUpdate::ChangePreferredAzFrom(_) => {
                 // De-referencing the node: leave the utilization's shard_count at a stale higher
                 // value until some future heartbeat after we have physically removed this shard
                 // from the node: this prevents the scheduler over-optimistically trying to schedule
@@ -775,10 +791,10 @@ impl Scheduler {
 
         if !matches!(context.mode, ScheduleMode::Speculative) {
             tracing::info!(
-            "scheduler selected node {node_id} (elegible nodes {:?}, hard exclude: {hard_exclude:?}, soft exclude: {context:?}, preferred_az: {:?})",
-            scores.iter().map(|i| i.node_id().0).collect::<Vec<_>>(),
-            preferred_az,
-       );
+                "scheduler selected node {node_id} (elegible nodes {:?}, hard exclude: {hard_exclude:?}, soft exclude: {context:?}, preferred_az: {:?})",
+                scores.iter().map(|i| i.node_id().0).collect::<Vec<_>>(),
+                preferred_az,
+            );
         }
 
         // Note that we do not update shard count here to reflect the scheduling: that
@@ -906,13 +922,13 @@ impl Scheduler {
 #[cfg(test)]
 pub(crate) mod test_utils {
 
-    use crate::node::Node;
-    use pageserver_api::{
-        controller_api::{AvailabilityZone, NodeAvailability},
-        models::utilization::test_utilization,
-    };
     use std::collections::HashMap;
+
+    use pageserver_api::controller_api::{AvailabilityZone, NodeAvailability};
+    use pageserver_api::models::utilization::test_utilization;
     use utils::id::NodeId;
+
+    use crate::node::Node;
 
     /// Test helper: synthesize the requested number of nodes, all in active state.
     ///
@@ -951,17 +967,13 @@ pub(crate) mod test_utils {
 
 #[cfg(test)]
 mod tests {
-    use pageserver_api::{
-        controller_api::NodeAvailability, models::utilization::test_utilization,
-        shard::ShardIdentity,
-    };
-    use utils::{
-        id::TenantId,
-        shard::{ShardCount, ShardNumber, TenantShardId},
-    };
+    use pageserver_api::controller_api::NodeAvailability;
+    use pageserver_api::models::utilization::test_utilization;
+    use pageserver_api::shard::ShardIdentity;
+    use utils::id::TenantId;
+    use utils::shard::{ShardCount, ShardNumber, TenantShardId};
 
     use super::*;
-
     use crate::tenant_shard::IntentState;
     #[test]
     fn scheduler_basic() -> anyhow::Result<()> {
@@ -1532,5 +1544,68 @@ mod tests {
         for mut shard in scheduled_shards {
             shard.intent.clear(&mut scheduler);
         }
+    }
+
+    #[test]
+    fn change_preferred_az() {
+        let az_a = AvailabilityZone("az-a".to_string());
+        let az_b = AvailabilityZone("az-b".to_string());
+
+        // 2 nodes: 1 az_a and 1 az_b.
+        let nodes = test_utils::make_test_nodes(2, &[az_a.clone(), az_b.clone()]);
+        let mut scheduler = Scheduler::new(nodes.values());
+
+        let tenant_shard_id = TenantShardId {
+            tenant_id: TenantId::generate(),
+            shard_number: ShardNumber(0),
+            shard_count: ShardCount(1),
+        };
+        let shard_identity = ShardIdentity::new(
+            tenant_shard_id.shard_number,
+            tenant_shard_id.shard_count,
+            pageserver_api::shard::ShardStripeSize(1),
+        )
+        .unwrap();
+        // 1 attached and 1 secondary.
+        let mut shard = TenantShard::new(
+            tenant_shard_id,
+            shard_identity,
+            pageserver_api::controller_api::PlacementPolicy::Attached(1),
+            Some(az_a.clone()),
+        );
+
+        let mut context = ScheduleContext::default();
+        shard.schedule(&mut scheduler, &mut context).unwrap();
+        eprintln!("Scheduled shard at {:?}", shard.intent);
+
+        for node in scheduler.nodes.values() {
+            // Only 2 nodes, one tenant shard should be scheduled on each of them.
+            assert_eq!(node.shard_count, 1);
+            if node.az == az_a {
+                assert_eq!(node.home_shard_count, 1);
+            } else {
+                assert_eq!(node.home_shard_count, 0);
+            }
+        }
+
+        shard.set_preferred_az(&mut scheduler, Some(az_b.clone()));
+        // Home AZ flipped.
+        for node in scheduler.nodes.values() {
+            assert_eq!(node.shard_count, 1);
+            if node.az == az_a {
+                assert_eq!(node.home_shard_count, 0);
+            } else {
+                assert_eq!(node.home_shard_count, 1);
+            }
+        }
+
+        shard.set_preferred_az(&mut scheduler, None);
+        // No home AZ.
+        for node in scheduler.nodes.values() {
+            assert_eq!(node.shard_count, 1);
+            assert_eq!(node.home_shard_count, 0);
+        }
+
+        shard.intent.clear(&mut scheduler);
     }
 }

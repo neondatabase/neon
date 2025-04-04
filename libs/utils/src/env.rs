@@ -1,6 +1,7 @@
 //! Wrapper around `std::env::var` for parsing environment variables.
 
-use std::{fmt::Display, str::FromStr};
+use std::fmt::Display;
+use std::str::FromStr;
 
 /// For types `V` that implement [`FromStr`].
 pub fn var<V, E>(varname: &str) -> Option<V>

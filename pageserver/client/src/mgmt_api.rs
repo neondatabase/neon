@@ -1,17 +1,15 @@
-use std::{collections::HashMap, error::Error as _};
+use std::collections::HashMap;
+use std::error::Error as _;
 
 use bytes::Bytes;
-use reqwest::{IntoUrl, Method, StatusCode};
-
 use detach_ancestor::AncestorDetached;
 use http_utils::error::HttpErrorBody;
-use pageserver_api::{models::*, shard::TenantShardId};
-use utils::{
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
-
+use pageserver_api::models::*;
+use pageserver_api::shard::TenantShardId;
 pub use reqwest::Body as ReqwestBody;
+use reqwest::{IntoUrl, Method, StatusCode, Url};
+use utils::id::{TenantId, TimelineId};
+use utils::lsn::Lsn;
 
 use crate::BlockUnblock;
 
@@ -40,6 +38,9 @@ pub enum Error {
 
     #[error("Cancelled")]
     Cancelled,
+
+    #[error("request timed out: {0}")]
+    Timeout(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -71,15 +72,7 @@ pub enum ForceAwaitLogicalSize {
 }
 
 impl Client {
-    pub fn new(mgmt_api_endpoint: String, jwt: Option<&str>) -> Self {
-        Self::from_client(reqwest::Client::new(), mgmt_api_endpoint, jwt)
-    }
-
-    pub fn from_client(
-        client: reqwest::Client,
-        mgmt_api_endpoint: String,
-        jwt: Option<&str>,
-    ) -> Self {
+    pub fn new(client: reqwest::Client, mgmt_api_endpoint: String, jwt: Option<&str>) -> Self {
         Self {
             mgmt_api_endpoint,
             authorization_header: jwt.map(|jwt| format!("Bearer {jwt}")),
@@ -93,22 +86,20 @@ impl Client {
         resp.json().await.map_err(Error::ReceiveBody)
     }
 
-    /// Get an arbitrary path and returning a streaming Response.  This function is suitable
-    /// for pass-through/proxy use cases where we don't care what the response content looks
-    /// like.
+    /// Send an HTTP request to an arbitrary path with a desired HTTP method and returning a streaming
+    /// Response.  This function is suitable for pass-through/proxy use cases where we don't care
+    /// what the response content looks like.
     ///
     /// Use/add one of the properly typed methods below if you know aren't proxying, and
     /// know what kind of response you expect.
-    pub async fn get_raw(&self, path: String) -> Result<reqwest::Response> {
+    pub async fn op_raw(&self, method: Method, path: String) -> Result<reqwest::Response> {
         debug_assert!(path.starts_with('/'));
         let uri = format!("{}{}", self.mgmt_api_endpoint, path);
 
-        let req = self.client.request(Method::GET, uri);
-        let req = if let Some(value) = &self.authorization_header {
-            req.header(reqwest::header::AUTHORIZATION, value)
-        } else {
-            req
-        };
+        let mut req = self.client.request(method, uri);
+        if let Some(value) = &self.authorization_header {
+            req = req.header(reqwest::header::AUTHORIZATION, value);
+        }
         req.send().await.map_err(Error::ReceiveBody)
     }
 
@@ -450,13 +441,21 @@ impl Client {
         &self,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
+        behavior: Option<DetachBehavior>,
     ) -> Result<AncestorDetached> {
         let uri = format!(
             "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/detach_ancestor",
             self.mgmt_api_endpoint
         );
+        let mut uri = Url::parse(&uri)
+            .map_err(|e| Error::ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
 
-        self.request(Method::PUT, &uri, ())
+        if let Some(behavior) = behavior {
+            uri.query_pairs_mut()
+                .append_pair("detach_behavior", &behavior.to_string());
+        }
+
+        self.request(Method::PUT, uri, ())
             .await?
             .json()
             .await
@@ -482,12 +481,16 @@ impl Client {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         concurrency: Option<usize>,
+        recurse: bool,
     ) -> Result<()> {
         let mut path = reqwest::Url::parse(&format!(
             "{}/v1/tenant/{}/timeline/{}/download_heatmap_layers",
             self.mgmt_api_endpoint, tenant_shard_id, timeline_id
         ))
         .expect("Cannot build URL");
+
+        path.query_pairs_mut()
+            .append_pair("recurse", &format!("{}", recurse));
 
         if let Some(concurrency) = concurrency {
             path.query_pairs_mut()

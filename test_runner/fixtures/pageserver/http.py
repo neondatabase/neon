@@ -7,8 +7,7 @@ import string
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -25,6 +24,9 @@ from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pg_version import PgVersion
 from fixtures.utils import EnhancedJSONEncoder, Fn
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 
 class PageserverApiException(Exception):
@@ -374,6 +376,19 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/reset", params=params)
         self.verbose_error(res)
+
+    def timeline_patch_index_part(
+        self,
+        tenant_id: TenantId | TenantShardId,
+        timeline_id: TimelineId,
+        data: dict[str, Any],
+    ):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/patch_index_part",
+            json=data,
+        )
+        self.verbose_error(res)
+        return res.json()
 
     def tenant_location_conf(
         self,
@@ -838,6 +853,25 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res_json = res.json()
         return res_json
 
+    def timeline_mark_invisible(
+        self,
+        tenant_id: TenantId | TenantShardId,
+        timeline_id: TimelineId,
+        is_visible: bool | None = None,
+    ):
+        data = {
+            "is_visible": is_visible,
+        }
+
+        log.info(
+            f"Requesting marking timeline invisible for {is_visible=}, {tenant_id=}, {timeline_id=}"
+        )
+        res = self.put(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/mark_invisible",
+            json=data,
+        )
+        self.verbose_error(res)
+
     def timeline_get_timestamp_of_lsn(
         self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId, lsn: Lsn
     ):
@@ -1057,11 +1091,14 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         tenant_id: TenantId | TenantShardId,
         timeline_id: TimelineId,
         batch_size: int | None = None,
+        detach_behavior: str | None = None,
         **kwargs,
     ) -> set[TimelineId]:
-        params = {}
+        params: dict[str, Any] = {}
         if batch_size is not None:
             params["batch_size"] = batch_size
+        if detach_behavior:
+            params["detach_behavior"] = detach_behavior
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/detach_ancestor",
             params=params,
@@ -1153,5 +1190,30 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/perf_info",
         )
         log.info(f"Got perf info response code: {res.status_code}")
+        self.verbose_error(res)
+        return res.json()
+
+    def ingest_aux_files(
+        self,
+        tenant_id: TenantId | TenantShardId,
+        timeline_id: TimelineId,
+        aux_files: dict[str, bytes],
+    ):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/ingest_aux_files",
+            json={
+                "aux_files": aux_files,
+            },
+        )
+        self.verbose_error(res)
+        return res.json()
+
+    def list_aux_files(
+        self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId, lsn: Lsn
+    ) -> Any:
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/list_aux_files",
+            json={"lsn": str(lsn)},
+        )
         self.verbose_error(res)
         return res.json()

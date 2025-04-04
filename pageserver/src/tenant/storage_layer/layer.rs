@@ -1,32 +1,33 @@
+use std::ops::Range;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
+use std::time::{Duration, SystemTime};
+
+use crate::PERF_TRACE_TARGET;
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::HistoricLayerInfo;
 use pageserver_api::shard::{ShardIdentity, ShardIndex, TenantShardId};
-use std::ops::Range;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Weak};
-use std::time::{Duration, SystemTime};
-use tracing::Instrument;
+use tracing::{Instrument, info_span};
+use utils::generation::Generation;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
 use utils::sync::{gate, heavier_once_cell};
-
-use crate::config::PageServerConf;
-use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
-use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
-use crate::task_mgr::TaskKind;
-use crate::tenant::timeline::{CompactionError, GetVectoredError};
-use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
 
 use super::delta_layer::{self};
 use super::image_layer::{self};
 use super::{
     AsLayerDesc, ImageLayerWriter, LayerAccessStats, LayerAccessStatsReset, LayerName,
-    LayerVisibilityHint, PersistentLayerDesc, ValuesReconstructState,
+    LayerVisibilityHint, PerfInstrumentFutureExt, PersistentLayerDesc, ValuesReconstructState,
 };
-
-use utils::generation::Generation;
+use crate::config::PageServerConf;
+use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
+use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
+use crate::task_mgr::TaskKind;
+use crate::tenant::Timeline;
+use crate::tenant::remote_timeline_client::LayerFileMetadata;
+use crate::tenant::timeline::{CompactionError, GetVectoredError};
 
 #[cfg(test)]
 mod tests;
@@ -324,16 +325,29 @@ impl Layer {
         reconstruct_data: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
-        let downloaded = self
-            .0
-            .get_or_maybe_download(true, Some(ctx))
-            .await
-            .map_err(|err| match err {
-                DownloadError::TimelineShutdown | DownloadError::DownloadCancelled => {
-                    GetVectoredError::Cancelled
-                }
-                other => GetVectoredError::Other(anyhow::anyhow!(other)),
-            })?;
+        let downloaded = {
+            let ctx = RequestContextBuilder::from(ctx)
+                .perf_span(|crnt_perf_span| {
+                    info_span!(
+                        target: PERF_TRACE_TARGET,
+                        parent: crnt_perf_span,
+                        "GET_LAYER",
+                    )
+                })
+                .attached_child();
+
+            self.0
+                .get_or_maybe_download(true, &ctx)
+                .maybe_perf_instrument(&ctx, |crnt_perf_context| crnt_perf_context.clone())
+                .await
+                .map_err(|err| match err {
+                    DownloadError::TimelineShutdown | DownloadError::DownloadCancelled => {
+                        GetVectoredError::Cancelled
+                    }
+                    other => GetVectoredError::Other(anyhow::anyhow!(other)),
+                })?
+        };
+
         let this = ResidentLayer {
             downloaded: downloaded.clone(),
             owner: self.clone(),
@@ -341,9 +355,20 @@ impl Layer {
 
         self.record_access(ctx);
 
+        let ctx = RequestContextBuilder::from(ctx)
+            .perf_span(|crnt_perf_span| {
+                info_span!(
+                    target: PERF_TRACE_TARGET,
+                    parent: crnt_perf_span,
+                    "VISIT_LAYER",
+                )
+            })
+            .attached_child();
+
         downloaded
-            .get_values_reconstruct_data(this, keyspace, lsn_range, reconstruct_data, ctx)
+            .get_values_reconstruct_data(this, keyspace, lsn_range, reconstruct_data, &ctx)
             .instrument(tracing::debug_span!("get_values_reconstruct_data", layer=%self))
+            .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
             .await
             .map_err(|err| match err {
                 GetVectoredError::Other(err) => GetVectoredError::Other(
@@ -356,8 +381,8 @@ impl Layer {
     /// Download the layer if evicted.
     ///
     /// Will not error when the layer is already downloaded.
-    pub(crate) async fn download(&self) -> Result<(), DownloadError> {
-        self.0.get_or_maybe_download(true, None).await?;
+    pub(crate) async fn download(&self, ctx: &RequestContext) -> Result<(), DownloadError> {
+        self.0.get_or_maybe_download(true, ctx).await?;
         Ok(())
     }
 
@@ -392,8 +417,11 @@ impl Layer {
     }
 
     /// Downloads if necessary and creates a guard, which will keep this layer from being evicted.
-    pub(crate) async fn download_and_keep_resident(&self) -> Result<ResidentLayer, DownloadError> {
-        let downloaded = self.0.get_or_maybe_download(true, None).await?;
+    pub(crate) async fn download_and_keep_resident(
+        &self,
+        ctx: &RequestContext,
+    ) -> Result<ResidentLayer, DownloadError> {
+        let downloaded = self.0.get_or_maybe_download(true, ctx).await?;
 
         Ok(ResidentLayer {
             downloaded,
@@ -446,7 +474,7 @@ impl Layer {
 
         if verbose {
             // for now, unconditionally download everything, even if that might not be wanted.
-            let l = self.0.get_or_maybe_download(true, Some(ctx)).await?;
+            let l = self.0.get_or_maybe_download(true, ctx).await?;
             l.dump(&self.0, ctx).await?
         }
 
@@ -945,8 +973,12 @@ impl LayerInner {
     async fn get_or_maybe_download(
         self: &Arc<Self>,
         allow_download: bool,
-        ctx: Option<&RequestContext>,
+        ctx: &RequestContext,
     ) -> Result<Arc<DownloadedLayer>, DownloadError> {
+        let mut wait_for_download_recorder =
+            scopeguard::guard(utils::elapsed_accum::ElapsedAccum::default(), |accum| {
+                ctx.ondemand_download_wait_observe(accum.get());
+            });
         let (weak, permit) = {
             // get_or_init_detached can:
             // - be fast (mutex lock) OR uncontested semaphore permit acquire
@@ -955,7 +987,7 @@ impl LayerInner {
 
             let locked = self
                 .inner
-                .get_or_init_detached()
+                .get_or_init_detached_measured(Some(&mut wait_for_download_recorder))
                 .await
                 .map(|mut guard| guard.get_and_upgrade().ok_or(guard));
 
@@ -985,6 +1017,7 @@ impl LayerInner {
                 Err(permit) => (None, permit),
             }
         };
+        let _guard = wait_for_download_recorder.guard();
 
         if let Some(weak) = weak {
             // only drop the weak after dropping the heavier_once_cell guard
@@ -1035,29 +1068,41 @@ impl LayerInner {
             return Err(DownloadError::NotFile(ft));
         }
 
-        if let Some(ctx) = ctx {
-            self.check_expected_download(ctx)?;
-        }
+        self.check_expected_download(ctx)?;
 
         if !allow_download {
             // this is only used from tests, but it is hard to test without the boolean
             return Err(DownloadError::DownloadRequired);
         }
 
-        let download_ctx = ctx
-            .map(|ctx| ctx.detached_child(TaskKind::LayerDownload, DownloadBehavior::Download))
-            .unwrap_or(RequestContext::new(
-                TaskKind::LayerDownload,
-                DownloadBehavior::Download,
-            ));
+        let ctx = if ctx.has_perf_span() {
+            let dl_ctx = RequestContextBuilder::from(ctx)
+                .task_kind(TaskKind::LayerDownload)
+                .download_behavior(DownloadBehavior::Download)
+                .root_perf_span(|| {
+                    info_span!(
+                        target: PERF_TRACE_TARGET,
+                        "DOWNLOAD_LAYER",
+                        layer = %self,
+                        reason = %reason
+                    )
+                })
+                .detached_child();
+            ctx.perf_follows_from(&dl_ctx);
+            dl_ctx
+        } else {
+            ctx.attached_child()
+        };
 
         async move {
             tracing::info!(%reason, "downloading on-demand");
 
             let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
             let res = self
-                .download_init_and_wait(timeline, permit, download_ctx)
+                .download_init_and_wait(timeline, permit, ctx.attached_child())
+                .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
                 .await?;
+
             scopeguard::ScopeGuard::into_inner(init_cancelled);
             Ok(res)
         }
@@ -1162,6 +1207,7 @@ impl LayerInner {
         permit: heavier_once_cell::InitPermit,
         ctx: &RequestContext,
     ) -> Result<Arc<DownloadedLayer>, remote_storage::DownloadError> {
+        let start = std::time::Instant::now();
         let result = timeline
             .remote_client
             .download_layer_file(
@@ -1173,7 +1219,8 @@ impl LayerInner {
                 ctx,
             )
             .await;
-
+        let latency = start.elapsed();
+        let latency_millis = u64::try_from(latency.as_millis()).unwrap();
         match result {
             Ok(size) => {
                 assert_eq!(size, self.desc.file_size);
@@ -1189,9 +1236,8 @@ impl LayerInner {
                     Err(e) => {
                         panic!("post-condition failed: needs_download errored: {e:?}");
                     }
-                }
-
-                tracing::info!(size=%self.desc.file_size, "on-demand download successful");
+                };
+                tracing::info!(size=%self.desc.file_size, %latency_millis, "on-demand download successful");
                 timeline
                     .metrics
                     .resident_physical_size_add(self.desc.file_size);
@@ -1220,7 +1266,7 @@ impl LayerInner {
                     return Err(e);
                 }
 
-                tracing::error!(consecutive_failures, "layer file download failed: {e:#}");
+                tracing::error!(consecutive_failures, %latency_millis, "layer file download failed: {e:#}");
 
                 let backoff = utils::backoff::exponential_backoff_duration_seconds(
                     consecutive_failures.min(u32::MAX as usize) as u32,
@@ -1567,9 +1613,9 @@ impl LayerInner {
 
         self.access_stats.record_residence_event();
 
-        self.status.as_ref().unwrap().send_replace(Status::Evicted);
-
         *self.last_evicted_at.lock().unwrap() = Some(std::time::Instant::now());
+
+        self.status.as_ref().unwrap().send_replace(Status::Evicted);
 
         Ok(())
     }
@@ -1724,9 +1770,9 @@ impl DownloadedLayer {
             );
 
             let res = if owner.desc.is_delta {
-                let ctx = RequestContextBuilder::extend(ctx)
+                let ctx = RequestContextBuilder::from(ctx)
                     .page_content_kind(crate::context::PageContentKind::DeltaLayerSummary)
-                    .build();
+                    .attached_child();
                 let summary = Some(delta_layer::Summary::expected(
                     owner.desc.tenant_shard_id.tenant_id,
                     owner.desc.timeline_id,
@@ -1742,9 +1788,9 @@ impl DownloadedLayer {
                 .await
                 .map(LayerKind::Delta)
             } else {
-                let ctx = RequestContextBuilder::extend(ctx)
+                let ctx = RequestContextBuilder::from(ctx)
                     .page_content_kind(crate::context::PageContentKind::ImageLayerSummary)
-                    .build();
+                    .attached_child();
                 let lsn = owner.desc.image_layer_lsn();
                 let summary = Some(image_layer::Summary::expected(
                     owner.desc.tenant_shard_id.tenant_id,
@@ -1873,8 +1919,8 @@ impl ResidentLayer {
         self.owner.record_access(ctx);
 
         let res = match inner {
-            Delta(ref d) => delta_layer::DeltaLayerInner::load_keys(d, ctx).await,
-            Image(ref i) => image_layer::ImageLayerInner::load_keys(i, ctx).await,
+            Delta(d) => delta_layer::DeltaLayerInner::load_keys(d, ctx).await,
+            Image(i) => image_layer::ImageLayerInner::load_keys(i, ctx).await,
         };
         res.with_context(|| format!("Layer index is corrupted for {self}"))
     }
@@ -1920,7 +1966,7 @@ impl ResidentLayer {
         let owner = &self.owner.0;
 
         match self.downloaded.get(owner, ctx).await? {
-            Delta(ref d) => d
+            Delta(d) => d
                 .copy_prefix(writer, until, ctx)
                 .await
                 .with_context(|| format!("copy_delta_prefix until {until} of {self}")),
@@ -1943,7 +1989,7 @@ impl ResidentLayer {
     ) -> anyhow::Result<&delta_layer::DeltaLayerInner> {
         use LayerKind::*;
         match self.downloaded.get(&self.owner.0, ctx).await? {
-            Delta(ref d) => Ok(d),
+            Delta(d) => Ok(d),
             Image(_) => Err(anyhow::anyhow!("image layer")),
         }
     }
@@ -1955,7 +2001,7 @@ impl ResidentLayer {
     ) -> anyhow::Result<&image_layer::ImageLayerInner> {
         use LayerKind::*;
         match self.downloaded.get(&self.owner.0, ctx).await? {
-            Image(ref d) => Ok(d),
+            Image(d) => Ok(d),
             Delta(_) => Err(anyhow::anyhow!("delta layer")),
         }
     }

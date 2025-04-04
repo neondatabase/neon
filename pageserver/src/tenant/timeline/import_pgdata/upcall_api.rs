@@ -1,13 +1,12 @@
 //! FIXME: most of this is copy-paste from mgmt_api.rs ; dedupe into a `reqwest_utils::Client` crate.
 use pageserver_client::mgmt_api::{Error, ResponseErrorMessageExt};
+use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 
-use crate::config::PageServerConf;
-use reqwest::Method;
-
 use super::importbucket_format::Spec;
+use crate::config::PageServerConf;
 
 pub struct Client {
     base_url: String,
@@ -33,9 +32,15 @@ impl Client {
         let Some(ref base_url) = conf.import_pgdata_upcall_api else {
             anyhow::bail!("import_pgdata_upcall_api is not configured")
         };
+        let mut http_client = reqwest::Client::builder();
+        for cert in &conf.ssl_ca_certs {
+            http_client = http_client.add_root_certificate(cert.clone());
+        }
+        let http_client = http_client.build()?;
+
         Ok(Self {
             base_url: base_url.to_string(),
-            client: reqwest::Client::new(),
+            client: http_client,
             cancel,
             authorization_header: conf
                 .import_pgdata_upcall_api_token

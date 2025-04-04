@@ -67,23 +67,18 @@
 //! mapping is automatically removed and the slot is marked free.
 //!
 
-use std::{
-    collections::{hash_map::Entry, HashMap},
-    sync::{
-        atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering},
-        Arc, Weak,
-    },
-    time::Duration,
-};
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use anyhow::Context;
 use once_cell::sync::OnceCell;
 
-use crate::{
-    context::RequestContext,
-    metrics::{page_cache_eviction_metrics, PageCacheSizeMetrics},
-    virtual_file::{IoBufferMut, IoPageSlice},
-};
+use crate::context::RequestContext;
+use crate::metrics::{PageCacheSizeMetrics, page_cache_eviction_metrics};
+use crate::virtual_file::{IoBufferMut, IoPageSlice};
 
 static PAGE_CACHE: OnceCell<PageCache> = OnceCell::new();
 const TEST_PAGE_CACHE_SIZE: usize = 50;
@@ -168,11 +163,7 @@ impl Slot {
         let count_res =
             self.usage_count
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |val| {
-                    if val == 0 {
-                        None
-                    } else {
-                        Some(val - 1)
-                    }
+                    if val == 0 { None } else { Some(val - 1) }
                 });
 
         match count_res {

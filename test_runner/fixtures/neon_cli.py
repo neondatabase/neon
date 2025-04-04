@@ -7,7 +7,6 @@ import subprocess
 import tempfile
 import textwrap
 from itertools import chain, product
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import toml
@@ -15,13 +14,14 @@ import toml
 from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.pageserver.common_types import IndexPartDump
-from fixtures.pg_version import PgVersion
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from typing import (
         Any,
-        cast,
     )
+
+    from fixtures.pg_version import PgVersion
 
 
 # Used to be an ABC. abc.ABC removed due to linter without name change.
@@ -36,7 +36,7 @@ class AbstractNeonCli:
         self.extra_env = extra_env
         self.binpath = binpath
 
-    COMMAND: str = cast(str, None)  # To be overwritten by the derived class.
+    COMMAND: str = cast("str", None)  # To be overwritten by the derived class.
 
     def raw_cli(
         self,
@@ -525,12 +525,14 @@ class NeonLocalCli(AbstractNeonCli):
     def endpoint_start(
         self,
         endpoint_id: str,
+        safekeepers_generation: int | None = None,
         safekeepers: list[int] | None = None,
         remote_ext_config: str | None = None,
         pageserver_id: int | None = None,
         allow_multiple: bool = False,
         create_test_user: bool = False,
         basebackup_request_tries: int | None = None,
+        timeout: str | None = None,
         env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         args = [
@@ -543,6 +545,8 @@ class NeonLocalCli(AbstractNeonCli):
         if remote_ext_config is not None:
             args.extend(["--remote-ext-config", remote_ext_config])
 
+        if safekeepers_generation is not None:
+            args.extend(["--safekeepers-generation", str(safekeepers_generation)])
         if safekeepers is not None:
             args.extend(["--safekeepers", (",".join(map(str, safekeepers)))])
         if endpoint_id is not None:
@@ -553,6 +557,8 @@ class NeonLocalCli(AbstractNeonCli):
             args.extend(["--allow-multiple"])
         if create_test_user:
             args.extend(["--create-test-user"])
+        if timeout is not None:
+            args.extend(["--start-timeout", str(timeout)])
 
         res = self.raw_cli(args, extra_env_vars)
         res.check_returncode()

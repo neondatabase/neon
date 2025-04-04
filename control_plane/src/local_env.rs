@@ -3,28 +3,22 @@
 //! Now it also provides init method which acts like a stub for proper installation
 //! script which will use local paths.
 
-use anyhow::{bail, Context};
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+use std::{env, fs};
 
+use anyhow::{Context, bail};
 use clap::ValueEnum;
 use postgres_backend::AuthType;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::env;
-use std::fs;
-use std::net::IpAddr;
-use std::net::Ipv4Addr;
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Duration;
-use utils::{
-    auth::{encode_from_key_file, Claims},
-    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
-};
+use utils::auth::{Claims, encode_from_key_file};
+use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 
-use crate::pageserver::PageServerNode;
-use crate::pageserver::PAGESERVER_REMOTE_STORAGE_DIR;
+use crate::pageserver::{PAGESERVER_REMOTE_STORAGE_DIR, PageServerNode};
 use crate::safekeeper::SafekeeperNode;
 
 pub const DEFAULT_PG_VERSION: u32 = 16;
@@ -78,15 +72,19 @@ pub struct LocalEnv {
     // be propagated into each pageserver's configuration.
     pub control_plane_api: Url,
 
-    // Control plane upcall API for storage controller.  If set, this will be propagated into the
+    // Control plane upcall APIs for storage controller.  If set, this will be propagated into the
     // storage controller's configuration.
-    pub control_plane_compute_hook_api: Option<Url>,
+    pub control_plane_hooks_api: Option<Url>,
 
     /// Keep human-readable aliases in memory (and persist them to config), to hide ZId hex strings from the user.
     // A `HashMap<String, HashMap<TenantId, TimelineId>>` would be more appropriate here,
     // but deserialization into a generic toml object as `toml::Value::try_from` fails with an error.
     // https://toml.io/en/v1.0.0 does not contain a concept of "a table inside another table".
     pub branch_name_mappings: HashMap<String, Vec<(TenantId, TimelineId)>>,
+
+    /// Flag to generate SSL certificates for components that need it.
+    /// Also generates root CA certificate that is used to sign all other certificates.
+    pub generate_local_ssl_certs: bool,
 }
 
 /// On-disk state stored in `.neon/config`.
@@ -106,8 +104,13 @@ pub struct OnDiskConfig {
     pub pageservers: Vec<PageServerConf>,
     pub safekeepers: Vec<SafekeeperConf>,
     pub control_plane_api: Option<Url>,
+    pub control_plane_hooks_api: Option<Url>,
     pub control_plane_compute_hook_api: Option<Url>,
     branch_name_mappings: HashMap<String, Vec<(TenantId, TimelineId)>>,
+    // Note: skip serializing because in compat tests old storage controller fails
+    // to load new config file. May be removed after this field is in release branch.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub generate_local_ssl_certs: bool,
 }
 
 fn fail_if_pageservers_field_specified<'de, D>(_: D) -> Result<Vec<PageServerConf>, D::Error>
@@ -134,7 +137,8 @@ pub struct NeonLocalInitConf {
     pub pageservers: Vec<NeonLocalInitPageserverConf>,
     pub safekeepers: Vec<SafekeeperConf>,
     pub control_plane_api: Option<Url>,
-    pub control_plane_compute_hook_api: Option<Option<Url>>,
+    pub control_plane_hooks_api: Option<Url>,
+    pub generate_local_ssl_certs: bool,
 }
 
 /// Broker config for cluster internal communication.
@@ -145,7 +149,7 @@ pub struct NeonBroker {
     pub listen_addr: SocketAddr,
 }
 
-/// Broker config for cluster internal communication.
+/// A part of storage controller's config the neon_local knows about.
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 #[serde(default)]
 pub struct NeonStorageControllerConf {
@@ -161,8 +165,11 @@ pub struct NeonStorageControllerConf {
     /// Database url used when running multiple storage controller instances
     pub database_url: Option<SocketAddr>,
 
-    /// Threshold for auto-splitting a tenant into shards
+    /// Thresholds for auto-splitting a tenant into shards.
     pub split_threshold: Option<u64>,
+    pub max_split_shards: Option<u8>,
+    pub initial_split_threshold: Option<u64>,
+    pub initial_split_shards: Option<u8>,
 
     pub max_secondary_lag_bytes: Option<u64>,
 
@@ -171,6 +178,14 @@ pub struct NeonStorageControllerConf {
 
     #[serde(with = "humantime_serde")]
     pub long_reconcile_threshold: Option<Duration>,
+
+    pub use_https_pageserver_api: bool,
+
+    pub timelines_onto_safekeepers: bool,
+
+    pub use_https_safekeeper_api: bool,
+
+    pub use_local_compute_notifications: bool,
 }
 
 impl NeonStorageControllerConf {
@@ -191,9 +206,16 @@ impl Default for NeonStorageControllerConf {
             start_as_candidate: false,
             database_url: None,
             split_threshold: None,
+            max_split_shards: None,
+            initial_split_threshold: None,
+            initial_split_shards: None,
             max_secondary_lag_bytes: None,
             heartbeat_interval: Self::DEFAULT_HEARTBEAT_INTERVAL,
             long_reconcile_threshold: None,
+            use_https_pageserver_api: false,
+            timelines_onto_safekeepers: false,
+            use_https_safekeeper_api: false,
+            use_local_compute_notifications: true,
         }
     }
 }
@@ -223,6 +245,7 @@ pub struct PageServerConf {
     pub id: NodeId,
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
+    pub listen_https_addr: Option<String>,
     pub pg_auth_type: AuthType,
     pub http_auth_type: AuthType,
     pub no_sync: bool,
@@ -234,6 +257,7 @@ impl Default for PageServerConf {
             id: NodeId(0),
             listen_pg_addr: String::new(),
             listen_http_addr: String::new(),
+            listen_https_addr: None,
             pg_auth_type: AuthType::Trust,
             http_auth_type: AuthType::Trust,
             no_sync: false,
@@ -249,6 +273,7 @@ pub struct NeonLocalInitPageserverConf {
     pub id: NodeId,
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
+    pub listen_https_addr: Option<String>,
     pub pg_auth_type: AuthType,
     pub http_auth_type: AuthType,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -263,6 +288,7 @@ impl From<&NeonLocalInitPageserverConf> for PageServerConf {
             id,
             listen_pg_addr,
             listen_http_addr,
+            listen_https_addr,
             pg_auth_type,
             http_auth_type,
             no_sync,
@@ -272,6 +298,7 @@ impl From<&NeonLocalInitPageserverConf> for PageServerConf {
             id: *id,
             listen_pg_addr: listen_pg_addr.clone(),
             listen_http_addr: listen_http_addr.clone(),
+            listen_https_addr: listen_https_addr.clone(),
             pg_auth_type: *pg_auth_type,
             http_auth_type: *http_auth_type,
             no_sync: *no_sync,
@@ -286,6 +313,7 @@ pub struct SafekeeperConf {
     pub pg_port: u16,
     pub pg_tenant_only_port: Option<u16>,
     pub http_port: u16,
+    pub https_port: Option<u16>,
     pub sync: bool,
     pub remote_storage: Option<String>,
     pub backup_threads: Option<u32>,
@@ -300,6 +328,7 @@ impl Default for SafekeeperConf {
             pg_port: 0,
             pg_tenant_only_port: None,
             http_port: 0,
+            https_port: None,
             sync: true,
             remote_storage: None,
             backup_threads: None,
@@ -416,6 +445,41 @@ impl LocalEnv {
         }
     }
 
+    pub fn ssl_ca_cert_path(&self) -> Option<PathBuf> {
+        if self.generate_local_ssl_certs {
+            Some(self.base_data_dir.join("rootCA.crt"))
+        } else {
+            None
+        }
+    }
+
+    pub fn ssl_ca_key_path(&self) -> Option<PathBuf> {
+        if self.generate_local_ssl_certs {
+            Some(self.base_data_dir.join("rootCA.key"))
+        } else {
+            None
+        }
+    }
+
+    pub fn generate_ssl_ca_cert(&self) -> anyhow::Result<()> {
+        let cert_path = self.ssl_ca_cert_path().unwrap();
+        let key_path = self.ssl_ca_key_path().unwrap();
+        if !fs::exists(cert_path.as_path())? {
+            generate_ssl_ca_cert(cert_path.as_path(), key_path.as_path())?;
+        }
+        Ok(())
+    }
+
+    pub fn generate_ssl_cert(&self, cert_path: &Path, key_path: &Path) -> anyhow::Result<()> {
+        self.generate_ssl_ca_cert()?;
+        generate_ssl_cert(
+            cert_path,
+            key_path,
+            self.ssl_ca_cert_path().unwrap().as_path(),
+            self.ssl_ca_key_path().unwrap().as_path(),
+        )
+    }
+
     /// Inspect the base data directory and extract the instance id and instance directory path
     /// for all storage controller instances
     pub async fn storage_controller_instances(&self) -> std::io::Result<Vec<(u8, PathBuf)>> {
@@ -465,7 +529,9 @@ impl LocalEnv {
             if old_timeline_id == &timeline_id {
                 Ok(())
             } else {
-                bail!("branch '{branch_name}' is already mapped to timeline {old_timeline_id}, cannot map to another timeline {timeline_id}");
+                bail!(
+                    "branch '{branch_name}' is already mapped to timeline {old_timeline_id}, cannot map to another timeline {timeline_id}"
+                );
             }
         } else {
             existing_values.push((tenant_id, timeline_id));
@@ -521,8 +587,10 @@ impl LocalEnv {
                 pageservers,
                 safekeepers,
                 control_plane_api,
-                control_plane_compute_hook_api,
+                control_plane_hooks_api,
+                control_plane_compute_hook_api: _,
                 branch_name_mappings,
+                generate_local_ssl_certs,
             } = on_disk_config;
             LocalEnv {
                 base_data_dir: repopath.to_owned(),
@@ -535,8 +603,9 @@ impl LocalEnv {
                 pageservers,
                 safekeepers,
                 control_plane_api: control_plane_api.unwrap(),
-                control_plane_compute_hook_api,
+                control_plane_hooks_api,
                 branch_name_mappings,
+                generate_local_ssl_certs,
             }
         };
 
@@ -572,6 +641,7 @@ impl LocalEnv {
                 struct PageserverConfigTomlSubset {
                     listen_pg_addr: String,
                     listen_http_addr: String,
+                    listen_https_addr: Option<String>,
                     pg_auth_type: AuthType,
                     http_auth_type: AuthType,
                     #[serde(default)]
@@ -596,6 +666,7 @@ impl LocalEnv {
                 let PageserverConfigTomlSubset {
                     listen_pg_addr,
                     listen_http_addr,
+                    listen_https_addr,
                     pg_auth_type,
                     http_auth_type,
                     no_sync,
@@ -613,6 +684,7 @@ impl LocalEnv {
                     },
                     listen_pg_addr,
                     listen_http_addr,
+                    listen_https_addr,
                     pg_auth_type,
                     http_auth_type,
                     no_sync,
@@ -638,8 +710,10 @@ impl LocalEnv {
                 pageservers: vec![], // it's skip_serializing anyway
                 safekeepers: self.safekeepers.clone(),
                 control_plane_api: Some(self.control_plane_api.clone()),
-                control_plane_compute_hook_api: self.control_plane_compute_hook_api.clone(),
+                control_plane_hooks_api: self.control_plane_hooks_api.clone(),
+                control_plane_compute_hook_api: None,
                 branch_name_mappings: self.branch_name_mappings.clone(),
+                generate_local_ssl_certs: self.generate_local_ssl_certs,
             },
         )
     }
@@ -721,7 +795,8 @@ impl LocalEnv {
             pageservers,
             safekeepers,
             control_plane_api,
-            control_plane_compute_hook_api,
+            generate_local_ssl_certs,
+            control_plane_hooks_api,
         } = conf;
 
         // Find postgres binaries.
@@ -768,9 +843,14 @@ impl LocalEnv {
             pageservers: pageservers.iter().map(Into::into).collect(),
             safekeepers,
             control_plane_api: control_plane_api.unwrap(),
-            control_plane_compute_hook_api: control_plane_compute_hook_api.unwrap_or_default(),
+            control_plane_hooks_api,
             branch_name_mappings: Default::default(),
+            generate_local_ssl_certs,
         };
+
+        if generate_local_ssl_certs {
+            env.generate_ssl_ca_cert()?;
+        }
 
         // create endpoints dir
         fs::create_dir_all(env.endpoints_path())?;
@@ -778,6 +858,9 @@ impl LocalEnv {
         // create safekeeper dirs
         for safekeeper in &env.safekeepers {
             fs::create_dir_all(SafekeeperNode::datadir_path_by_id(&env, safekeeper.id))?;
+            SafekeeperNode::from_env(&env, safekeeper)
+                .initialize()
+                .context("safekeeper init failed")?;
         }
 
         // initialize pageserver state
@@ -853,5 +936,82 @@ fn generate_auth_keys(private_key_path: &Path, public_key_path: &Path) -> anyhow
             String::from_utf8_lossy(&keygen_output.stderr)
         );
     }
+    Ok(())
+}
+
+fn generate_ssl_ca_cert(cert_path: &Path, key_path: &Path) -> anyhow::Result<()> {
+    // openssl req -x509 -newkey rsa:2048 -nodes -subj "/CN=Neon Local CA" -days 36500 \
+    // -out rootCA.crt -keyout rootCA.key
+    let keygen_output = Command::new("openssl")
+        .args([
+            "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "36500",
+        ])
+        .args(["-subj", "/CN=Neon Local CA"])
+        .args(["-out", cert_path.to_str().unwrap()])
+        .args(["-keyout", key_path.to_str().unwrap()])
+        .output()
+        .context("failed to generate CA certificate")?;
+    if !keygen_output.status.success() {
+        bail!(
+            "openssl failed: '{}'",
+            String::from_utf8_lossy(&keygen_output.stderr)
+        );
+    }
+    Ok(())
+}
+
+fn generate_ssl_cert(
+    cert_path: &Path,
+    key_path: &Path,
+    ca_cert_path: &Path,
+    ca_key_path: &Path,
+) -> anyhow::Result<()> {
+    // Generate Certificate Signing Request (CSR).
+    let mut csr_path = cert_path.to_path_buf();
+    csr_path.set_extension(".csr");
+
+    // openssl req -new -nodes -newkey rsa:2048 -keyout server.key -out server.csr \
+    // -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+    let keygen_output = Command::new("openssl")
+        .args(["req", "-new", "-nodes"])
+        .args(["-newkey", "rsa:2048"])
+        .args(["-subj", "/CN=localhost"])
+        .args(["-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"])
+        .args(["-keyout", key_path.to_str().unwrap()])
+        .args(["-out", csr_path.to_str().unwrap()])
+        .output()
+        .context("failed to generate CSR")?;
+    if !keygen_output.status.success() {
+        bail!(
+            "openssl failed: '{}'",
+            String::from_utf8_lossy(&keygen_output.stderr)
+        );
+    }
+
+    // Sign CSR with CA key.
+    //
+    // openssl x509 -req -in server.csr -CA rootCA.crt -CAkey rootCA.key -CAcreateserial \
+    // -out server.crt -days 36500 -copy_extensions copyall
+    let keygen_output = Command::new("openssl")
+        .args(["x509", "-req"])
+        .args(["-in", csr_path.to_str().unwrap()])
+        .args(["-CA", ca_cert_path.to_str().unwrap()])
+        .args(["-CAkey", ca_key_path.to_str().unwrap()])
+        .arg("-CAcreateserial")
+        .args(["-out", cert_path.to_str().unwrap()])
+        .args(["-days", "36500"])
+        .args(["-copy_extensions", "copyall"])
+        .output()
+        .context("failed to sign CSR")?;
+    if !keygen_output.status.success() {
+        bail!(
+            "openssl failed: '{}'",
+            String::from_utf8_lossy(&keygen_output.stderr)
+        );
+    }
+
+    // Remove CSR file as it's not needed anymore.
+    fs::remove_file(csr_path)?;
+
     Ok(())
 }

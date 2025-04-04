@@ -1,9 +1,8 @@
 use std::sync::Arc;
 use std::thread;
 
-use tracing::{error, info, instrument};
-
 use compute_api::responses::ComputeStatus;
+use tracing::{error, info, instrument};
 
 use crate::compute::ComputeNode;
 

@@ -35,12 +35,13 @@ use super::conn_pool_lib::{
     Client, ClientDataEnum, ClientInnerCommon, ClientInnerExt, ConnInfo, DbUserConn,
     EndpointConnPool,
 };
+use super::sql_over_http::SqlOverHttpError;
 use crate::context::RequestContext;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::Metrics;
 
 pub(crate) const EXT_NAME: &str = "pg_session_jwt";
-pub(crate) const EXT_VERSION: &str = "0.2.0";
+pub(crate) const EXT_VERSION: &str = "0.3.0";
 pub(crate) const EXT_SCHEMA: &str = "auth";
 
 #[derive(Clone)]
@@ -274,18 +275,23 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
 }
 
 impl ClientInnerCommon<postgres_client::Client> {
-    pub(crate) async fn set_jwt_session(&mut self, payload: &[u8]) -> Result<(), HttpConnError> {
+    pub(crate) async fn set_jwt_session(&mut self, payload: &[u8]) -> Result<(), SqlOverHttpError> {
         if let ClientDataEnum::Local(local_data) = &mut self.data {
             local_data.jti += 1;
             let token = resign_jwt(&local_data.key, payload, local_data.jti)?;
 
-            // discard all cannot run in a transaction. must be executed alone.
-            self.inner.batch_execute("discard all").await?;
+            self.inner
+                .discard_all()
+                .await
+                .map_err(SqlOverHttpError::InternalPostgres)?;
 
             // initiates the auth session
             // this is safe from query injections as the jwt format free of any escape characters.
             let query = format!("select auth.jwt_session_init('{token}')");
-            self.inner.batch_execute(&query).await?;
+            self.inner
+                .batch_execute(&query)
+                .await
+                .map_err(SqlOverHttpError::InternalPostgres)?;
 
             let pid = self.inner.get_process_id();
             info!(pid, jti = local_data.jti, "user session state init");

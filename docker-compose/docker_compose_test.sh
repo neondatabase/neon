@@ -51,8 +51,6 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
     done
 
     if [ $pg_version -ge 16 ]; then
-        docker cp ext-src $TEST_CONTAINER_NAME:/
-        docker exec $TEST_CONTAINER_NAME bash -c "apt update && apt install -y libtap-parser-sourcehandler-pgtap-perl"
         # This is required for the pg_hint_plan test, to prevent flaky log message causing the test to fail
         # It cannot be moved to Dockerfile now because the database directory is created after the start of the container
         echo Adding dummy config
@@ -71,7 +69,7 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         cat ../compute/patches/contrib_pg${pg_version}.patch | docker exec -i $TEST_CONTAINER_NAME bash -c "(cd /postgres && patch -p1)"
         # We are running tests now
         rm -f testout.txt testout_contrib.txt
-        docker exec -e USE_PGXS=1 -e SKIP=timescaledb-src,rdkit-src,postgis-src,pgx_ulid-src,pg_tiktoken-src,pg_jsonschema-src,kq_imcx-src,wal2json_2_5-src \
+        docker exec -e USE_PGXS=1 -e SKIP=timescaledb-src,rdkit-src,postgis-src,pg_jsonschema-src,kq_imcx-src,wal2json_2_5-src,rag_jina_reranker_v1_tiny_en-src,rag_bge_small_en_v15-src \
         $TEST_CONTAINER_NAME /run-tests.sh /ext-src | tee testout.txt && EXT_SUCCESS=1 || EXT_SUCCESS=0
         docker exec -e SKIP=start-scripts,postgres_fdw,ltree_plpython,jsonb_plpython,jsonb_plperl,hstore_plpython,hstore_plperl,dblink,bool_plperl \
         $TEST_CONTAINER_NAME /run-tests.sh /postgres/contrib | tee testout_contrib.txt && CONTRIB_SUCCESS=1 || CONTRIB_SUCCESS=0

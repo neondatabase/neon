@@ -1,46 +1,39 @@
-use anyhow::{anyhow, bail, Context, Result};
+use std::cmp::min;
+use std::io::{self, ErrorKind};
+use std::sync::Arc;
+
+use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
 use camino::Utf8PathBuf;
 use chrono::{DateTime, Utc};
 use futures::{SinkExt, StreamExt, TryStreamExt};
-use postgres_ffi::{XLogFileName, XLogSegNo, PG_TLI};
-use safekeeper_api::{
-    models::{PullTimelineRequest, PullTimelineResponse, TimelineStatus},
-    Term,
-};
+use postgres_ffi::{PG_TLI, XLogFileName, XLogSegNo};
+use reqwest::Certificate;
+use safekeeper_api::Term;
+use safekeeper_api::models::{PullTimelineRequest, PullTimelineResponse, TimelineStatus};
 use safekeeper_client::mgmt_api;
 use safekeeper_client::mgmt_api::Client;
 use serde::Deserialize;
-use std::{
-    cmp::min,
-    io::{self, ErrorKind},
-    sync::Arc,
-};
-use tokio::{fs::OpenOptions, io::AsyncWrite, sync::mpsc, task};
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWrite;
+use tokio::sync::mpsc;
+use tokio::task;
 use tokio_tar::{Archive, Builder, Header};
-use tokio_util::{
-    io::{CopyToBytes, SinkWriter},
-    sync::PollSender,
-};
+use tokio_util::io::{CopyToBytes, SinkWriter};
+use tokio_util::sync::PollSender;
 use tracing::{error, info, instrument};
+use utils::crashsafe::fsync_async_opt;
+use utils::id::{NodeId, TenantTimelineId};
+use utils::logging::SecretString;
+use utils::lsn::Lsn;
+use utils::pausable_failpoint;
 
-use crate::{
-    control_file::CONTROL_FILE_NAME,
-    debug_dump,
-    state::{EvictionState, TimelinePersistentState},
-    timeline::{Timeline, WalResidentTimeline},
-    timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline},
-    wal_backup,
-    wal_storage::open_wal_file,
-    GlobalTimelines,
-};
-use utils::{
-    crashsafe::fsync_async_opt,
-    id::{NodeId, TenantTimelineId},
-    logging::SecretString,
-    lsn::Lsn,
-    pausable_failpoint,
-};
+use crate::control_file::CONTROL_FILE_NAME;
+use crate::state::{EvictionState, TimelinePersistentState};
+use crate::timeline::{Timeline, WalResidentTimeline};
+use crate::timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline};
+use crate::wal_storage::open_wal_file;
+use crate::{GlobalTimelines, debug_dump, wal_backup};
 
 /// Stream tar archive of timeline to tx.
 #[instrument(name = "snapshot", skip_all, fields(ttid = %tli.ttid))]
@@ -374,8 +367,13 @@ impl WalResidentTimeline {
         // change, but as long as older history is strictly part of new that's
         // fine), but there is no need to do it.
         if bctx.term != term || bctx.last_log_term != last_log_term {
-            bail!("term(s) changed during snapshot: were term={}, last_log_term={}, now term={}, last_log_term={}",
-              bctx.term, bctx.last_log_term, term, last_log_term);
+            bail!(
+                "term(s) changed during snapshot: were term={}, last_log_term={}, now term={}, last_log_term={}",
+                bctx.term,
+                bctx.last_log_term,
+                term,
+                last_log_term
+            );
         }
         Ok(())
     }
@@ -395,6 +393,7 @@ pub struct DebugDumpResponse {
 pub async fn handle_request(
     request: PullTimelineRequest,
     sk_auth_token: Option<SecretString>,
+    ssl_ca_certs: Vec<Certificate>,
     global_timelines: Arc<GlobalTimelines>,
 ) -> Result<PullTimelineResponse> {
     let existing_tli = global_timelines.get(TenantTimelineId::new(
@@ -405,12 +404,18 @@ pub async fn handle_request(
         bail!("Timeline {} already exists", request.timeline_id);
     }
 
+    let mut http_client = reqwest::Client::builder();
+    for ssl_ca_cert in ssl_ca_certs {
+        http_client = http_client.add_root_certificate(ssl_ca_cert);
+    }
+    let http_client = http_client.build()?;
+
     let http_hosts = request.http_hosts.clone();
 
     // Figure out statuses of potential donors.
     let responses: Vec<Result<TimelineStatus, mgmt_api::Error>> =
         futures::future::join_all(http_hosts.iter().map(|url| async {
-            let cclient = Client::new(url.clone(), sk_auth_token.clone());
+            let cclient = Client::new(http_client.clone(), url.clone(), sk_auth_token.clone());
             let info = cclient
                 .timeline_status(request.tenant_id, request.timeline_id)
                 .await?;
@@ -440,13 +445,21 @@ pub async fn handle_request(
     assert!(status.tenant_id == request.tenant_id);
     assert!(status.timeline_id == request.timeline_id);
 
-    pull_timeline(status, safekeeper_host, sk_auth_token, global_timelines).await
+    pull_timeline(
+        status,
+        safekeeper_host,
+        sk_auth_token,
+        http_client,
+        global_timelines,
+    )
+    .await
 }
 
 async fn pull_timeline(
     status: TimelineStatus,
     host: String,
     sk_auth_token: Option<SecretString>,
+    http_client: reqwest::Client,
     global_timelines: Arc<GlobalTimelines>,
 ) -> Result<PullTimelineResponse> {
     let ttid = TenantTimelineId::new(status.tenant_id, status.timeline_id);
@@ -463,8 +476,7 @@ async fn pull_timeline(
     let conf = &global_timelines.get_global_config();
 
     let (_tmp_dir, tli_dir_path) = create_temp_timeline_dir(conf, ttid).await?;
-
-    let client = Client::new(host.clone(), sk_auth_token.clone());
+    let client = Client::new(http_client, host.clone(), sk_auth_token.clone());
     // Request stream with basebackup archive.
     let bb_resp = client
         .snapshot(status.tenant_id, status.timeline_id, conf.my_id)

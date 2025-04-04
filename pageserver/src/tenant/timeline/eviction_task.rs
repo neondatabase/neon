@@ -13,34 +13,27 @@
 //! Items with parentheses are not (yet) touched by this task.
 //!
 //! See write-up on restart on-demand download spike: <https://gist.github.com/problame/2265bf7b8dc398be834abfead36c76b5>
-use std::{
-    collections::HashMap,
-    ops::ControlFlow,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::collections::HashMap;
+use std::ops::ControlFlow;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use pageserver_api::models::{EvictionPolicy, EvictionPolicyLayerAccessThreshold};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, info_span, instrument, warn, Instrument};
-
-use crate::{
-    context::{DownloadBehavior, RequestContext},
-    pgdatadir_mapping::CollectKeySpaceError,
-    task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
-    tenant::{
-        size::CalculateSyntheticSizeError,
-        storage_layer::LayerVisibilityHint,
-        tasks::{sleep_random, BackgroundLoopKind, BackgroundLoopSemaphorePermit},
-        timeline::EvictionError,
-        LogicalSizeCalculationCause, Tenant,
-    },
-};
-
-use utils::{completion, sync::gate::GateGuard};
+use tracing::{Instrument, debug, info, info_span, instrument, warn};
+use utils::completion;
+use utils::sync::gate::GateGuard;
 
 use super::Timeline;
+use crate::context::{DownloadBehavior, RequestContext};
+use crate::pgdatadir_mapping::CollectKeySpaceError;
+use crate::task_mgr::{self, BACKGROUND_RUNTIME, TaskKind};
+use crate::tenant::size::CalculateSyntheticSizeError;
+use crate::tenant::storage_layer::LayerVisibilityHint;
+use crate::tenant::tasks::{BackgroundLoopKind, BackgroundLoopSemaphorePermit, sleep_random};
+use crate::tenant::timeline::EvictionError;
+use crate::tenant::{LogicalSizeCalculationCause, Tenant};
 
 #[derive(Default)]
 pub struct EvictionTaskTimelineState {
@@ -100,7 +93,8 @@ impl Timeline {
             }
         }
 
-        let ctx = RequestContext::new(TaskKind::Eviction, DownloadBehavior::Warn);
+        let ctx = RequestContext::new(TaskKind::Eviction, DownloadBehavior::Warn)
+            .with_scope_timeline(&self);
         loop {
             let policy = self.get_eviction_policy();
             let cf = self

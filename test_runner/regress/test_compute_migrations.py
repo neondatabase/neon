@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -9,6 +8,8 @@ from fixtures.metrics import parse_metrics
 from fixtures.utils import wait_until
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from fixtures.neon_fixtures import NeonEnv
 
 

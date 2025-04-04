@@ -2,33 +2,30 @@
 //! Gets messages from the network, passes them down to consensus module and
 //! sends replies back.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use bytes::{Bytes, BytesMut};
 use camino::Utf8PathBuf;
-use desim::{
-    executor::{self, PollSome},
-    network::TCP,
-    node_os::NodeOs,
-    proto::{AnyMessage, NetEvent, NodeEvent},
-};
+use desim::executor::{self, PollSome};
+use desim::network::TCP;
+use desim::node_os::NodeOs;
+use desim::proto::{AnyMessage, NetEvent, NodeEvent};
 use http::Uri;
-use safekeeper::{
-    safekeeper::{
-        ProposerAcceptorMessage, SafeKeeper, SK_PROTOCOL_VERSION, UNKNOWN_SERVER_VERSION,
-    },
-    state::{TimelinePersistentState, TimelineState},
-    timeline::TimelineError,
-    wal_storage::Storage,
-    SafeKeeperConf,
+use safekeeper::SafeKeeperConf;
+use safekeeper::safekeeper::{
+    ProposerAcceptorMessage, SK_PROTO_VERSION_3, SafeKeeper, UNKNOWN_SERVER_VERSION,
 };
-use safekeeper_api::{membership::Configuration, ServerInfo};
+use safekeeper::state::{TimelinePersistentState, TimelineState};
+use safekeeper::timeline::TimelineError;
+use safekeeper::wal_storage::Storage;
+use safekeeper_api::ServerInfo;
+use safekeeper_api::membership::Configuration;
 use tracing::{debug, info_span, warn};
-use utils::{
-    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
-    lsn::Lsn,
-};
+use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
+use utils::lsn::Lsn;
 
 use super::safekeeper_disk::{DiskStateStorage, DiskWALStorage, SafekeeperDisk, TimelineDisk};
 
@@ -155,6 +152,7 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
         my_id: NodeId(os.id() as u64),
         listen_pg_addr: String::new(),
         listen_http_addr: String::new(),
+        listen_https_addr: None,
         no_sync: false,
         broker_endpoint: "/".parse::<Uri>().unwrap(),
         broker_keepalive_interval: Duration::from_secs(0),
@@ -182,6 +180,11 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
         eviction_min_resident: Duration::ZERO,
         wal_reader_fanout: false,
         max_delta_for_fanout: None,
+        ssl_key_file: Utf8PathBuf::from(""),
+        ssl_cert_file: Utf8PathBuf::from(""),
+        ssl_cert_reload_period: Duration::ZERO,
+        ssl_ca_certs: Vec::new(),
+        use_https_safekeeper_api: false,
     };
 
     let mut global = GlobalMap::new(disk, conf.clone())?;
@@ -287,7 +290,7 @@ impl ConnState {
                 bail!("finished processing START_REPLICATION")
             }
 
-            let msg = ProposerAcceptorMessage::parse(copy_data, SK_PROTOCOL_VERSION)?;
+            let msg = ProposerAcceptorMessage::parse(copy_data, SK_PROTO_VERSION_3)?;
             debug!("got msg: {:?}", msg);
             self.process(msg, global)
         } else {
@@ -403,7 +406,7 @@ impl ConnState {
             // TODO: if this is AppendResponse, fill in proper hot standby feedback and disk consistent lsn
 
             let mut buf = BytesMut::with_capacity(128);
-            reply.serialize(&mut buf)?;
+            reply.serialize(&mut buf, SK_PROTO_VERSION_3)?;
 
             self.tcp.send(AnyMessage::Bytes(buf.into()));
         }

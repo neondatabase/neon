@@ -4,38 +4,40 @@
 //! held in an ephemeral file, not in memory. The metadata for each page version, i.e.
 //! its position in the file, is kept in memory, though.
 //!
-use crate::assert_u64_eq_usize::{u64_to_usize, U64IsUsize, UsizeIsU64};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write;
+use std::ops::Range;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
+
+use anyhow::Result;
+use camino::Utf8PathBuf;
+use pageserver_api::key::{CompactKey, Key};
+use pageserver_api::keyspace::KeySpace;
+use pageserver_api::models::InMemoryLayerInfo;
+use pageserver_api::shard::TenantShardId;
+use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
+use tracing::*;
+use utils::id::TimelineId;
+use utils::lsn::Lsn;
+use utils::vec_map::VecMap;
+use wal_decoder::serialized_batch::{SerializedValueBatch, SerializedValueMeta, ValueMeta};
+
+use super::{DeltaLayerWriter, PersistentLayerDesc, ValuesReconstructState};
+use crate::assert_u64_eq_usize::{U64IsUsize, UsizeIsU64, u64_to_usize};
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
+// avoid binding to Write (conflicts with std::io::Write)
+// while being able to use std::fmt::Write's methods
+use crate::metrics::TIMELINE_EPHEMERAL_BYTES;
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::{OnDiskValue, OnDiskValueIo};
 use crate::tenant::timeline::GetVectoredError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::{l0_flush, page_cache};
-use anyhow::Result;
-use camino::Utf8PathBuf;
-use pageserver_api::key::CompactKey;
-use pageserver_api::key::Key;
-use pageserver_api::keyspace::KeySpace;
-use pageserver_api::models::InMemoryLayerInfo;
-use pageserver_api::shard::TenantShardId;
-use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, OnceLock};
-use std::time::Instant;
-use tracing::*;
-use utils::{id::TimelineId, lsn::Lsn, vec_map::VecMap};
-use wal_decoder::serialized_batch::{SerializedValueBatch, SerializedValueMeta, ValueMeta};
-// avoid binding to Write (conflicts with std::io::Write)
-// while being able to use std::fmt::Write's methods
-use crate::metrics::TIMELINE_EPHEMERAL_BYTES;
-use std::cmp::Ordering;
-use std::fmt::Write;
-use std::ops::Range;
-use std::sync::atomic::Ordering as AtomicOrdering;
-use std::sync::atomic::{AtomicU64, AtomicUsize};
-use tokio::sync::RwLock;
-
-use super::{DeltaLayerWriter, PersistentLayerDesc, ValuesReconstructState};
 
 pub(crate) mod vectored_dio_read;
 
@@ -415,13 +417,13 @@ impl InMemoryLayer {
     pub(crate) async fn get_values_reconstruct_data(
         self: &Arc<InMemoryLayer>,
         keyspace: KeySpace,
-        end_lsn: Lsn,
+        lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
-        let ctx = RequestContextBuilder::extend(ctx)
+        let ctx = RequestContextBuilder::from(ctx)
             .page_content_kind(PageContentKind::InMemoryLayer)
-            .build();
+            .attached_child();
 
         let inner = self.inner.read().await;
 
@@ -431,8 +433,6 @@ impl InMemoryLayer {
         }
         let mut reads: HashMap<Key, Vec<ValueRead>> = HashMap::new();
         let mut ios: HashMap<(Key, Lsn), OnDiskValueIo> = Default::default();
-
-        let lsn_range = self.start_lsn..end_lsn;
 
         for range in keyspace.ranges.iter() {
             for (key, vec_map) in inner
@@ -553,11 +553,15 @@ impl InMemoryLayer {
         tenant_shard_id: TenantShardId,
         start_lsn: Lsn,
         gate: &utils::sync::gate::Gate,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<InMemoryLayer> {
-        trace!("initializing new empty InMemoryLayer for writing on timeline {timeline_id} at {start_lsn}");
+        trace!(
+            "initializing new empty InMemoryLayer for writing on timeline {timeline_id} at {start_lsn}"
+        );
 
-        let file = EphemeralFile::create(conf, tenant_shard_id, timeline_id, gate, ctx).await?;
+        let file =
+            EphemeralFile::create(conf, tenant_shard_id, timeline_id, gate, cancel, ctx).await?;
         let key = InMemoryLayerFileId(file.page_cache_file_id());
 
         Ok(InMemoryLayer {
@@ -816,8 +820,7 @@ mod tests {
     #[test]
     fn test_index_entry() {
         const MAX_SUPPORTED_POS: usize = IndexEntry::MAX_SUPPORTED_POS;
-        use IndexEntryNewArgs as Args;
-        use IndexEntryUnpacked as Unpacked;
+        use {IndexEntryNewArgs as Args, IndexEntryUnpacked as Unpacked};
 
         let roundtrip = |args, expect: Unpacked| {
             let res = IndexEntry::new(args).expect("this tests expects no errors");

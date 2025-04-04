@@ -1,24 +1,23 @@
-use futures::{stream::FuturesUnordered, StreamExt};
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::future::Future;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
+use pageserver_api::controller_api::{NodeAvailability, SkSchedulingPolicy};
+use pageserver_api::models::PageserverUtilization;
 use safekeeper_api::models::SafekeeperUtilization;
 use safekeeper_client::mgmt_api;
-use std::{
-    collections::HashMap,
-    fmt::Debug,
-    future::Future,
-    sync::Arc,
-    time::{Duration, Instant},
-};
-use tokio_util::sync::CancellationToken;
-
-use pageserver_api::{
-    controller_api::{NodeAvailability, SkSchedulingPolicy},
-    models::PageserverUtilization,
-};
-
 use thiserror::Error;
-use utils::{id::NodeId, logging::SecretString};
+use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
+use utils::id::NodeId;
+use utils::logging::SecretString;
 
-use crate::{node::Node, safekeeper::Safekeeper};
+use crate::node::Node;
+use crate::safekeeper::Safekeeper;
 
 struct HeartbeaterTask<Server, State> {
     receiver: tokio::sync::mpsc::UnboundedReceiver<HeartbeatRequest<Server, State>>,
@@ -28,6 +27,7 @@ struct HeartbeaterTask<Server, State> {
 
     max_offline_interval: Duration,
     max_warming_up_interval: Duration,
+    http_client: reqwest::Client,
     jwt_token: Option<String>,
 }
 
@@ -76,6 +76,7 @@ where
     HeartbeaterTask<Server, State>: HeartBeat<Server, State>,
 {
     pub(crate) fn new(
+        http_client: reqwest::Client,
         jwt_token: Option<String>,
         max_offline_interval: Duration,
         max_warming_up_interval: Duration,
@@ -85,6 +86,7 @@ where
             tokio::sync::mpsc::unbounded_channel::<HeartbeatRequest<Server, State>>();
         let mut heartbeater = HeartbeaterTask::new(
             receiver,
+            http_client,
             jwt_token,
             max_offline_interval,
             max_warming_up_interval,
@@ -120,6 +122,7 @@ where
 {
     fn new(
         receiver: tokio::sync::mpsc::UnboundedReceiver<HeartbeatRequest<Server, State>>,
+        http_client: reqwest::Client,
         jwt_token: Option<String>,
         max_offline_interval: Duration,
         max_warming_up_interval: Duration,
@@ -131,6 +134,7 @@ where
             state: HashMap::new(),
             max_offline_interval,
             max_warming_up_interval,
+            http_client,
             jwt_token,
         }
     }
@@ -174,6 +178,7 @@ impl HeartBeat<Node, PageserverState> for HeartbeaterTask<Node, PageserverState>
         let mut heartbeat_futs = FuturesUnordered::new();
         for (node_id, node) in &*pageservers {
             heartbeat_futs.push({
+                let http_client = self.http_client.clone();
                 let jwt_token = self.jwt_token.clone();
                 let cancel = self.cancel.clone();
 
@@ -188,6 +193,7 @@ impl HeartBeat<Node, PageserverState> for HeartbeaterTask<Node, PageserverState>
                     let response = node_clone
                         .with_client_retries(
                             |client| async move { client.get_utilization().await },
+                            &http_client,
                             &jwt_token,
                             3,
                             3,
@@ -222,22 +228,23 @@ impl HeartBeat<Node, PageserverState> for HeartbeaterTask<Node, PageserverState>
 
                     Some((*node_id, status))
                 }
+                .instrument(tracing::info_span!("heartbeat_ps", %node_id))
             });
+        }
 
-            loop {
-                let maybe_status = tokio::select! {
-                    next = heartbeat_futs.next() => {
-                        match next {
-                            Some(result) => result,
-                            None => { break; }
-                        }
-                    },
-                    _ = self.cancel.cancelled() => { return Err(HeartbeaterError::Cancel); }
-                };
+        loop {
+            let maybe_status = tokio::select! {
+                next = heartbeat_futs.next() => {
+                    match next {
+                        Some(result) => result,
+                        None => { break; }
+                    }
+                },
+                _ = self.cancel.cancelled() => { return Err(HeartbeaterError::Cancel); }
+            };
 
-                if let Some((node_id, status)) = maybe_status {
-                    new_state.insert(node_id, status);
-                }
+            if let Some((node_id, status)) = maybe_status {
+                new_state.insert(node_id, status);
             }
         }
 
@@ -248,7 +255,7 @@ impl HeartBeat<Node, PageserverState> for HeartbeaterTask<Node, PageserverState>
                 PageserverState::WarmingUp { .. } => {
                     warming_up += 1;
                 }
-                PageserverState::Offline { .. } => offline += 1,
+                PageserverState::Offline => offline += 1,
                 PageserverState::Available { .. } => {}
             }
         }
@@ -323,6 +330,7 @@ impl HeartBeat<Safekeeper, SafekeeperState> for HeartbeaterTask<Safekeeper, Safe
                 continue;
             }
             heartbeat_futs.push({
+                let http_client = self.http_client.clone();
                 let jwt_token = self
                     .jwt_token
                     .as_ref()
@@ -333,6 +341,7 @@ impl HeartBeat<Safekeeper, SafekeeperState> for HeartbeaterTask<Safekeeper, Safe
                     let response = sk
                         .with_client_retries(
                             |client| async move { client.get_utilization().await },
+                            &http_client,
                             &jwt_token,
                             3,
                             3,
@@ -362,29 +371,30 @@ impl HeartBeat<Safekeeper, SafekeeperState> for HeartbeaterTask<Safekeeper, Safe
 
                     Some((*node_id, status))
                 }
+                .instrument(tracing::info_span!("heartbeat_sk", %node_id))
             });
+        }
 
-            loop {
-                let maybe_status = tokio::select! {
-                    next = heartbeat_futs.next() => {
-                        match next {
-                            Some(result) => result,
-                            None => { break; }
-                        }
-                    },
-                    _ = self.cancel.cancelled() => { return Err(HeartbeaterError::Cancel); }
-                };
+        loop {
+            let maybe_status = tokio::select! {
+                next = heartbeat_futs.next() => {
+                    match next {
+                        Some(result) => result,
+                        None => { break; }
+                    }
+                },
+                _ = self.cancel.cancelled() => { return Err(HeartbeaterError::Cancel); }
+            };
 
-                if let Some((node_id, status)) = maybe_status {
-                    new_state.insert(node_id, status);
-                }
+            if let Some((node_id, status)) = maybe_status {
+                new_state.insert(node_id, status);
             }
         }
 
         let mut offline = 0;
         for state in new_state.values() {
             match state {
-                SafekeeperState::Offline { .. } => offline += 1,
+                SafekeeperState::Offline => offline += 1,
                 SafekeeperState::Available { .. } => {}
             }
         }

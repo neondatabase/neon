@@ -1,20 +1,19 @@
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
+use tracing::{Instrument, info, info_span, warn};
 use utils::sync::duplex;
 
-use crate::{
-    context::RequestContext,
-    virtual_file::owned_buffers_io::{io_buf_aligned::IoBufAligned, io_buf_ext::FullSlice},
-};
-
 use super::{Buffer, CheapCloneForRead, OwnedAsyncWriter};
+use crate::context::RequestContext;
+use crate::virtual_file::MaybeFatalIo;
+use crate::virtual_file::owned_buffers_io::io_buf_aligned::IoBufAligned;
+use crate::virtual_file::owned_buffers_io::io_buf_ext::FullSlice;
 
 /// A handle to the flush task.
 pub struct FlushHandle<Buf, W> {
     inner: Option<FlushHandleInner<Buf, W>>,
-    /// Immutable buffer for serving tail reads.
-    /// `None` if no flush request has been submitted.
-    pub(super) maybe_flushed: Option<FullSlice<Buf>>,
 }
 
 pub struct FlushHandleInner<Buf, W> {
@@ -22,7 +21,7 @@ pub struct FlushHandleInner<Buf, W> {
     /// and receives recyled buffer.
     channel: duplex::mpsc::Duplex<FlushRequest<Buf>, FullSlice<Buf>>,
     /// Join handle for the background flush task.
-    join_handle: tokio::task::JoinHandle<std::io::Result<Arc<W>>>,
+    join_handle: tokio::task::JoinHandle<Result<Arc<W>, FlushTaskError>>,
 }
 
 struct FlushRequest<Buf> {
@@ -114,31 +113,38 @@ where
 {
     /// Spawns a new background flush task and obtains a handle.
     ///
-    /// Note: The background task so we do not need to explicitly maintain a queue of buffers.
+    /// Handle and background task are connected through a duplex channel.
+    /// Dirty buffers are sent to the background task for flushing.
+    /// Clean buffers are sent back to the handle for reuse.
+    ///
+    /// The queue depth is 1, and the passed-in `buf` seeds the queue depth.
+    /// I.e., the passed-in buf is immediately available to the handle as a recycled buffer.
     pub fn spawn_new<B>(
         file: Arc<W>,
         buf: B,
         gate_guard: utils::sync::gate::GateGuard,
+        cancel: CancellationToken,
         ctx: RequestContext,
+        span: tracing::Span,
     ) -> Self
     where
         B: Buffer<IoBuf = Buf> + Send + 'static,
     {
-        // It is fine to buffer up to only 1 message. We only 1 message in-flight at a time.
         let (front, back) = duplex::mpsc::channel(1);
+        back.try_send(buf.flush())
+            .expect("we just created it with capacity 1");
 
-        let join_handle = tokio::spawn(async move {
-            FlushBackgroundTask::new(back, file, gate_guard, ctx)
-                .run(buf.flush())
-                .await
-        });
+        let join_handle = tokio::spawn(
+            FlushBackgroundTask::new(back, file, gate_guard, cancel, ctx)
+                .run()
+                .instrument(span),
+        );
 
         FlushHandle {
             inner: Some(FlushHandleInner {
                 channel: front,
                 join_handle,
             }),
-            maybe_flushed: None,
         }
     }
 
@@ -146,15 +152,11 @@ where
     /// Returns a buffer that completed flushing for re-use, length reset to 0, capacity unchanged.
     /// If `save_buf_for_read` is true, then we save the buffer in `Self::maybe_flushed`, otherwise
     /// clear `maybe_flushed`.
-    pub async fn flush<B>(&mut self, buf: B, offset: u64) -> std::io::Result<(B, FlushControl)>
-    where
-        B: Buffer<IoBuf = Buf> + Send + 'static,
-    {
-        let slice = buf.flush();
-
-        // Saves a buffer for read while flushing. This also removes reference to the old buffer.
-        self.maybe_flushed = Some(slice.cheap_clone());
-
+    pub async fn flush(
+        &mut self,
+        slice: FullSlice<Buf>,
+        offset: u64,
+    ) -> Result<(FullSlice<Buf>, FlushControl), FlushTaskError> {
         let (request, flush_control) = new_flush_op(slice, offset);
 
         // Submits the buffer to the background task.
@@ -170,13 +172,10 @@ where
             return self.handle_error().await;
         };
 
-        // The only other place that could hold a reference to the recycled buffer
-        // is in `Self::maybe_flushed`, but we have already replace it with the new buffer.
-        let recycled = Buffer::reuse_after_flush(recycled.into_raw_slice().into_inner());
         Ok((recycled, flush_control))
     }
 
-    async fn handle_error<T>(&mut self) -> std::io::Result<T> {
+    async fn handle_error<T>(&mut self) -> Result<T, FlushTaskError> {
         Err(self
             .shutdown()
             .await
@@ -184,7 +183,7 @@ where
     }
 
     /// Cleans up the channel, join the flush task.
-    pub async fn shutdown(&mut self) -> std::io::Result<Arc<W>> {
+    pub async fn shutdown(&mut self) -> Result<Arc<W>, FlushTaskError> {
         let handle = self
             .inner
             .take()
@@ -210,8 +209,15 @@ pub struct FlushBackgroundTask<Buf, W> {
     /// A writter for persisting data to disk.
     writer: Arc<W>,
     ctx: RequestContext,
+    cancel: CancellationToken,
     /// Prevent timeline from shuting down until the flush background task finishes flushing all remaining buffers to disk.
     _gate_guard: utils::sync::gate::GateGuard,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum FlushTaskError {
+    #[error("flush task cancelled")]
+    Cancelled,
 }
 
 impl<Buf, W> FlushBackgroundTask<Buf, W>
@@ -224,24 +230,20 @@ where
         channel: duplex::mpsc::Duplex<FullSlice<Buf>, FlushRequest<Buf>>,
         file: Arc<W>,
         gate_guard: utils::sync::gate::GateGuard,
+        cancel: CancellationToken,
         ctx: RequestContext,
     ) -> Self {
         FlushBackgroundTask {
             channel,
             writer: file,
             _gate_guard: gate_guard,
+            cancel,
             ctx,
         }
     }
 
     /// Runs the background flush task.
-    /// The passed in slice is immediately sent back to the flush handle through the duplex channel.
-    async fn run(mut self, slice: FullSlice<Buf>) -> std::io::Result<Arc<W>> {
-        // Sends the extra buffer back to the handle.
-        self.channel.send(slice).await.map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "flush handle closed early")
-        })?;
-
+    async fn run(mut self) -> Result<Arc<W>, FlushTaskError> {
         //  Exit condition: channel is closed and there is no remaining buffer to be flushed
         while let Some(request) = self.channel.recv().await {
             #[cfg(test)]
@@ -253,10 +255,49 @@ where
             }
 
             // Write slice to disk at `offset`.
-            let slice = self
-                .writer
-                .write_all_at(request.slice, request.offset, &self.ctx)
-                .await?;
+            //
+            // Error handling happens according to the current policy of crashing
+            // on fatal IO errors and retrying in place otherwise (deeming all other errors retryable).
+            // (The upper layers of the Pageserver write path are not equipped to retry write errors
+            //  becasuse they often deallocate the buffers that were already written).
+            //
+            // TODO: use utils::backoff::retry once async closures are actually usable
+            //
+            let mut slice_storage = Some(request.slice);
+            for attempt in 1.. {
+                if self.cancel.is_cancelled() {
+                    return Err(FlushTaskError::Cancelled);
+                }
+                let result = async {
+                    if attempt > 1 {
+                        info!("retrying flush");
+                    }
+                    let slice = slice_storage.take().expect(
+                        "likely previous invocation of this future didn't get polled to completion",
+                    );
+                    // Don't cancel this write by doing tokio::select with self.cancel.cancelled().
+                    // The underlying tokio-epoll-uring slot / kernel operation is still ongoing and occupies resources.
+                    // If we retry indefinitely, we'll deplete those resources.
+                    // Future: teach tokio-epoll-uring io_uring operation cancellation, but still,
+                    // wait for cancelled ops to complete and discard their error.
+                    let (slice, res) = self.writer.write_all_at(slice, request.offset, &self.ctx).await;
+                    slice_storage = Some(slice);
+                    let res = res.maybe_fatal_err("owned_buffers_io flush");
+                    let Err(err) = res else {
+                        return ControlFlow::Break(());
+                    };
+                    warn!(%err, "error flushing buffered writer buffer to disk, retrying after backoff");
+                    utils::backoff::exponential_backoff(attempt, 1.0, 10.0, &self.cancel).await;
+                    ControlFlow::Continue(())
+                }
+                .instrument(info_span!("flush_attempt", %attempt))
+                .await;
+                match result {
+                    ControlFlow::Break(()) => break,
+                    ControlFlow::Continue(()) => continue,
+                }
+            }
+            let slice = slice_storage.expect("loop must have run at least once");
 
             #[cfg(test)]
             {

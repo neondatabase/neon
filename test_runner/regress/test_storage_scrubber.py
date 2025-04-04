@@ -6,18 +6,21 @@ import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    NeonEnv,
-    NeonEnvBuilder,
-)
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import S3Storage, s3_storage
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import (
+        NeonEnv,
+        NeonEnvBuilder,
+    )
 
 
 @pytest.mark.parametrize("shard_count", [None, 4])
@@ -311,17 +314,6 @@ def test_scrubber_physical_gc_ancestors(neon_env_builder: NeonEnvBuilder, shard_
     workload.stop()
     drop_local_state(env, tenant_id)
     workload.validate()
-
-    for ps in env.pageservers:
-        # This is not okay, but it's not a scrubber bug: it's a pageserver issue that is exposed by
-        # the specific pattern of aggressive checkpointing+image layer generation + GC that this test does.
-        # TODO: remove when https://github.com/neondatabase/neon/issues/10720 is fixed
-        ps.allowed_errors.extend(
-            [
-                ".*could not find data for key.*",
-                ".*could not ingest record.*",
-            ]
-        )
 
 
 def test_scrubber_physical_gc_timeline_deletion(neon_env_builder: NeonEnvBuilder):

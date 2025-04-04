@@ -172,15 +172,13 @@ fn tracing_subscriber_configured() -> bool {
 #[cfg(test)]
 mod tests {
 
+    use std::collections::HashSet;
+    use std::fmt::{self};
+    use std::hash::{Hash, Hasher};
+
     use tracing_subscriber::prelude::*;
 
     use super::*;
-
-    use std::{
-        collections::HashSet,
-        fmt::{self},
-        hash::{Hash, Hasher},
-    };
 
     struct MemoryIdentity<'a>(&'a dyn Extractor);
 

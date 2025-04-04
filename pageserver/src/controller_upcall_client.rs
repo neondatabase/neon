@@ -1,28 +1,27 @@
 use std::collections::HashMap;
 
 use futures::Future;
-use pageserver_api::{
-    controller_api::{AvailabilityZone, NodeRegisterRequest},
-    shard::TenantShardId,
-    upcall_api::{
-        ReAttachRequest, ReAttachResponse, ReAttachResponseTenant, ValidateRequest,
-        ValidateRequestTenant, ValidateResponse,
-    },
+use pageserver_api::config::NodeMetadata;
+use pageserver_api::controller_api::{AvailabilityZone, NodeRegisterRequest};
+use pageserver_api::shard::TenantShardId;
+use pageserver_api::upcall_api::{
+    ReAttachRequest, ReAttachResponse, ReAttachResponseTenant, ValidateRequest,
+    ValidateRequestTenant, ValidateResponse,
 };
-use serde::{de::DeserializeOwned, Serialize};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tokio_util::sync::CancellationToken;
 use url::Url;
-use utils::{backoff, failpoint_support, generation::Generation, id::NodeId};
+use utils::generation::Generation;
+use utils::id::NodeId;
+use utils::{backoff, failpoint_support};
 
-use crate::{config::PageServerConf, virtual_file::on_fatal_io_error};
-use pageserver_api::config::NodeMetadata;
+use crate::config::PageServerConf;
+use crate::virtual_file::on_fatal_io_error;
 
 /// The Pageserver's client for using the storage controller upcall API: this is a small API
 /// for dealing with generations (see docs/rfcs/025-generation-numbers.md).
-///
-/// The server presenting this API may either be the storage controller or some other
-/// service (such as the Neon control plane) providing a store of generation numbers.
-pub struct ControllerUpcallClient {
+pub struct StorageControllerUpcallClient {
     http_client: reqwest::Client,
     base_url: Url,
     node_id: NodeId,
@@ -35,7 +34,7 @@ pub enum RetryForeverError {
     ShuttingDown,
 }
 
-pub trait ControlPlaneGenerationsApi {
+pub trait StorageControllerUpcallApi {
     fn re_attach(
         &self,
         conf: &PageServerConf,
@@ -48,13 +47,16 @@ pub trait ControlPlaneGenerationsApi {
     ) -> impl Future<Output = Result<HashMap<TenantShardId, bool>, RetryForeverError>> + Send;
 }
 
-impl ControllerUpcallClient {
+impl StorageControllerUpcallClient {
     /// A None return value indicates that the input `conf` object does not have control
     /// plane API enabled.
-    pub fn new(conf: &'static PageServerConf, cancel: &CancellationToken) -> Option<Self> {
+    pub fn new(
+        conf: &'static PageServerConf,
+        cancel: &CancellationToken,
+    ) -> Result<Option<Self>, reqwest::Error> {
         let mut url = match conf.control_plane_api.as_ref() {
             Some(u) => u.clone(),
-            None => return None,
+            None => return Ok(None),
         };
 
         if let Ok(mut segs) = url.path_segments_mut() {
@@ -74,14 +76,19 @@ impl ControllerUpcallClient {
             client = client.default_headers(headers);
         }
 
-        Some(Self {
-            http_client: client.build().expect("Failed to construct HTTP client"),
+        for ssl_ca_cert in &conf.ssl_ca_certs {
+            client = client.add_root_certificate(ssl_ca_cert.clone());
+        }
+
+        Ok(Some(Self {
+            http_client: client.build()?,
             base_url: url,
             node_id: conf.id,
             cancel: cancel.clone(),
-        })
+        }))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn retry_http_forever<R, T>(
         &self,
         url: &url::Url,
@@ -106,7 +113,7 @@ impl ControllerUpcallClient {
             |_| false,
             3,
             u32::MAX,
-            "calling control plane generation validation API",
+            "storage controller upcall",
             &self.cancel,
         )
         .await
@@ -121,13 +128,14 @@ impl ControllerUpcallClient {
     }
 }
 
-impl ControlPlaneGenerationsApi for ControllerUpcallClient {
+impl StorageControllerUpcallApi for StorageControllerUpcallClient {
     /// Block until we get a successful response, or error out if we are shut down
+    #[tracing::instrument(skip_all)] // so that warning logs from retry_http_forever have context
     async fn re_attach(
         &self,
         conf: &PageServerConf,
     ) -> Result<HashMap<TenantShardId, ReAttachResponseTenant>, RetryForeverError> {
-        let re_attach_path = self
+        let url = self
             .base_url
             .join("re-attach")
             .expect("Failed to build re-attach path");
@@ -157,14 +165,18 @@ impl ControlPlaneGenerationsApi for ControllerUpcallClient {
                         match az_id_from_metadata {
                             Some(az_id) => Some(AvailabilityZone(az_id)),
                             None => {
-                                tracing::warn!("metadata.json does not contain an 'availability_zone_id' field");
+                                tracing::warn!(
+                                    "metadata.json does not contain an 'availability_zone_id' field"
+                                );
                                 conf.availability_zone.clone().map(AvailabilityZone)
                             }
                         }
                     };
 
                     if az_id.is_none() {
-                        panic!("Availablity zone id could not be inferred from metadata.json or pageserver config");
+                        panic!(
+                            "Availablity zone id could not be inferred from metadata.json or pageserver config"
+                        );
                     }
 
                     Some(NodeRegisterRequest {
@@ -173,7 +185,7 @@ impl ControlPlaneGenerationsApi for ControllerUpcallClient {
                         listen_pg_port: m.postgres_port,
                         listen_http_addr: m.http_host,
                         listen_http_port: m.http_port,
-                        listen_https_port: None, // TODO: Support https.
+                        listen_https_port: m.https_port,
                         availability_zone_id: az_id.expect("Checked above"),
                     })
                 }
@@ -199,7 +211,7 @@ impl ControlPlaneGenerationsApi for ControllerUpcallClient {
             register: register.clone(),
         };
 
-        let response: ReAttachResponse = self.retry_http_forever(&re_attach_path, request).await?;
+        let response: ReAttachResponse = self.retry_http_forever(&url, request).await?;
         tracing::info!(
             "Received re-attach response with {} tenants (node {}, register: {:?})",
             response.tenants.len(),
@@ -217,11 +229,12 @@ impl ControlPlaneGenerationsApi for ControllerUpcallClient {
     }
 
     /// Block until we get a successful response, or error out if we are shut down
+    #[tracing::instrument(skip_all)] // so that warning logs from retry_http_forever have context
     async fn validate(
         &self,
         tenants: Vec<(TenantShardId, Generation)>,
     ) -> Result<HashMap<TenantShardId, bool>, RetryForeverError> {
-        let re_attach_path = self
+        let url = self
             .base_url
             .join("validate")
             .expect("Failed to build validate path");
@@ -236,7 +249,7 @@ impl ControlPlaneGenerationsApi for ControllerUpcallClient {
                     .iter()
                     .map(|(id, generation)| ValidateRequestTenant {
                         id: *id,
-                        gen: (*generation).into().expect(
+                        r#gen: (*generation).into().expect(
                             "Generation should always be valid for a Tenant doing deletions",
                         ),
                     })
@@ -251,8 +264,7 @@ impl ControlPlaneGenerationsApi for ControllerUpcallClient {
                 return Err(RetryForeverError::ShuttingDown);
             }
 
-            let response: ValidateResponse =
-                self.retry_http_forever(&re_attach_path, request).await?;
+            let response: ValidateResponse = self.retry_http_forever(&url, request).await?;
             for rt in response.tenants {
                 result.insert(rt.id, rt.valid);
             }

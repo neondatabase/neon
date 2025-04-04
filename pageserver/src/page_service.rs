@@ -1,7 +1,16 @@
 //! The Page Service listens for client connections and serves their GetPage@LSN
 //! requests.
 
-use anyhow::{bail, Context};
+use std::borrow::Cow;
+use std::num::NonZeroUsize;
+use std::os::fd::AsRawFd;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
+use std::{io, str};
+
+use crate::PERF_TRACE_TARGET;
+use anyhow::{Context, bail};
 use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
 use futures::FutureExt;
@@ -11,71 +20,60 @@ use pageserver_api::config::{
     PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
     PageServiceProtocolPipelinedExecutionStrategy,
 };
-use pageserver_api::models::{self, TenantState};
+use pageserver_api::key::rel_block_to_key;
 use pageserver_api::models::{
-    PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
+    self, PageTraceEvent, PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
     PagestreamErrorResponse, PagestreamExistsRequest, PagestreamExistsResponse,
     PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetSlruSegmentRequest,
     PagestreamGetSlruSegmentResponse, PagestreamNblocksRequest, PagestreamNblocksResponse,
-    PagestreamProtocolVersion, PagestreamRequest,
+    PagestreamProtocolVersion, PagestreamRequest, TenantState,
 };
+use pageserver_api::reltag::SlruKind;
 use pageserver_api::shard::TenantShardId;
 use postgres_backend::{
-    is_expected_io_error, AuthType, PostgresBackend, PostgresBackendReader, QueryError,
+    AuthType, PostgresBackend, PostgresBackendReader, QueryError, is_expected_io_error,
 };
+use postgres_ffi::BLCKSZ;
+use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use pq_proto::framed::ConnectionError;
-use pq_proto::FeStartupPacket;
-use pq_proto::{BeMessage, FeMessage, RowDescriptor};
-use std::borrow::Cow;
-use std::io;
-use std::num::NonZeroUsize;
-use std::str;
-use std::str::FromStr;
-use std::sync::Arc;
-use std::time::SystemTime;
-use std::time::{Duration, Instant};
+use pq_proto::{BeMessage, FeMessage, FeStartupPacket, RowDescriptor};
 use strum_macros::IntoStaticStr;
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::logging::warn_slow;
+use utils::auth::{Claims, Scope, SwappableJwtAuth};
+use utils::failpoint_support;
+use utils::id::{TenantId, TimelineId};
+use utils::logging::log_slow;
+use utils::lsn::Lsn;
+use utils::simple_rcu::RcuReadGuard;
 use utils::sync::gate::{Gate, GateGuard};
 use utils::sync::spsc_fold;
-use utils::{
-    auth::{Claims, Scope, SwappableJwtAuth},
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-    simple_rcu::RcuReadGuard,
-};
 
 use crate::auth::check_permission;
 use crate::basebackup::BasebackupError;
 use crate::config::PageServerConf;
-use crate::context::{DownloadBehavior, RequestContext};
-use crate::metrics::{self, SmgrOpTimer};
-use crate::metrics::{ComputeCommandKind, COMPUTE_COMMANDS_COUNTERS, LIVE_CONNECTIONS};
+use crate::context::{
+    DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
+};
+use crate::metrics::{
+    self, COMPUTE_COMMANDS_COUNTERS, ComputeCommandKind, LIVE_CONNECTIONS, SmgrOpTimer,
+    TimelineMetrics,
+};
 use crate::pgdatadir_mapping::Version;
-use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
-use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
-use crate::task_mgr::TaskKind;
-use crate::task_mgr::{self, COMPUTE_REQUEST_RUNTIME};
-use crate::tenant::mgr::ShardSelector;
-use crate::tenant::mgr::TenantManager;
-use crate::tenant::mgr::{GetActiveTenantError, GetTenantError, ShardResolveResult};
+use crate::span::{
+    debug_assert_current_span_has_tenant_and_timeline_id,
+    debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id,
+};
+use crate::task_mgr::{self, COMPUTE_REQUEST_RUNTIME, TaskKind};
+use crate::tenant::mgr::{
+    GetActiveTenantError, GetTenantError, ShardResolveResult, ShardSelector, TenantManager,
+};
 use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::timeline::{self, WaitLsnError};
-use crate::tenant::GetTimelineError;
-use crate::tenant::PageReconstructError;
-use crate::tenant::Timeline;
+use crate::tenant::{GetTimelineError, PageReconstructError, Timeline};
 use crate::{basebackup, timed_after_cancellation};
-use pageserver_api::key::rel_block_to_key;
-use pageserver_api::models::PageTraceEvent;
-use pageserver_api::reltag::SlruKind;
-use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
-use postgres_ffi::BLCKSZ;
-use std::os::fd::AsRawFd;
 
 /// How long we may wait for a [`crate::tenant::mgr::TenantSlot::InProgress`]` and/or a [`crate::tenant::Tenant`] which
 /// is not yet in state [`TenantState::Active`].
@@ -83,8 +81,8 @@ use std::os::fd::AsRawFd;
 /// NB: this is a different value than [`crate::http::routes::ACTIVE_TENANT_TIMEOUT`].
 const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
 
-/// Threshold at which to log a warning about slow GetPage requests.
-const WARN_SLOW_GETPAGE_THRESHOLD: Duration = Duration::from_secs(30);
+/// Threshold at which to log slow GetPage requests.
+const LOG_SLOW_GETPAGE_THRESHOLD: Duration = Duration::from_secs(30);
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -105,6 +103,7 @@ pub fn spawn(
     conf: &'static PageServerConf,
     tenant_manager: Arc<TenantManager>,
     pg_auth: Option<Arc<SwappableJwtAuth>>,
+    perf_trace_dispatch: Option<Dispatch>,
     tcp_listener: tokio::net::TcpListener,
 ) -> Listener {
     let cancel = CancellationToken::new();
@@ -122,6 +121,7 @@ pub fn spawn(
             conf,
             tenant_manager,
             pg_auth,
+            perf_trace_dispatch,
             tcp_listener,
             conf.pg_auth_type,
             conf.page_service_pipelining.clone(),
@@ -178,6 +178,7 @@ pub async fn libpq_listener_main(
     conf: &'static PageServerConf,
     tenant_manager: Arc<TenantManager>,
     auth: Option<Arc<SwappableJwtAuth>>,
+    perf_trace_dispatch: Option<Dispatch>,
     listener: tokio::net::TcpListener,
     auth_type: AuthType,
     pipelining_config: PageServicePipeliningConfig,
@@ -210,8 +211,12 @@ pub async fn libpq_listener_main(
                 // Connection established. Spawn a new task to handle it.
                 debug!("accepted connection from {}", peer_addr);
                 let local_auth = auth.clone();
-                let connection_ctx = listener_ctx
-                    .detached_child(TaskKind::PageRequestHandler, DownloadBehavior::Download);
+                let connection_ctx = RequestContextBuilder::from(&listener_ctx)
+                    .task_kind(TaskKind::PageRequestHandler)
+                    .download_behavior(DownloadBehavior::Download)
+                    .perf_span_dispatch(perf_trace_dispatch.clone())
+                    .detached_child();
+
                 connection_handler_tasks.spawn(page_service_conn_main(
                     conf,
                     tenant_manager.clone(),
@@ -242,7 +247,16 @@ pub async fn libpq_listener_main(
 
 type ConnectionHandlerResult = anyhow::Result<()>;
 
-#[instrument(skip_all, fields(peer_addr, application_name))]
+/// Perf root spans start at the per-request level, after shard routing.
+/// This struct carries connection-level information to the root perf span definition.
+#[derive(Clone)]
+struct ConnectionPerfSpanFields {
+    peer_addr: String,
+    application_name: Option<String>,
+    compute_mode: Option<String>,
+}
+
+#[instrument(skip_all, fields(peer_addr, application_name, compute_mode))]
 #[allow(clippy::too_many_arguments)]
 async fn page_service_conn_main(
     conf: &'static PageServerConf,
@@ -266,6 +280,12 @@ async fn page_service_conn_main(
     let socket_fd = socket.as_raw_fd();
 
     let peer_addr = socket.peer_addr().context("get peer address")?;
+
+    let perf_span_fields = ConnectionPerfSpanFields {
+        peer_addr: peer_addr.to_string(),
+        application_name: None, // filled in later
+        compute_mode: None,     // filled in later
+    };
     tracing::Span::current().record("peer_addr", field::display(peer_addr));
 
     // setup read timeout of 10 minutes. the timeout is rather arbitrary for requirements:
@@ -309,6 +329,7 @@ async fn page_service_conn_main(
         tenant_manager,
         auth,
         pipelining_config,
+        perf_span_fields,
         connection_ctx,
         cancel.clone(),
         gate_guard,
@@ -352,6 +373,8 @@ struct PageServerHandler {
     /// For each query received over the connection,
     /// `process_query` creates a child context from this one.
     connection_ctx: RequestContext,
+
+    perf_span_fields: ConnectionPerfSpanFields,
 
     cancel: CancellationToken,
 
@@ -398,10 +421,6 @@ impl TimelineHandles {
             .await
             .map_err(|e| match e {
                 timeline::handle::GetError::TenantManager(e) => e,
-                timeline::handle::GetError::TimelineGateClosed => {
-                    trace!("timeline gate closed");
-                    GetActiveTimelineError::Timeline(GetTimelineError::ShuttingDown)
-                }
                 timeline::handle::GetError::PerTimelineStateShutDown => {
                     trace!("per-timeline state shut down");
                     GetActiveTimelineError::Timeline(GetTimelineError::ShuttingDown)
@@ -428,24 +447,36 @@ pub(crate) struct TenantManagerTypes;
 impl timeline::handle::Types for TenantManagerTypes {
     type TenantManagerError = GetActiveTimelineError;
     type TenantManager = TenantManagerWrapper;
-    type Timeline = Arc<Timeline>;
+    type Timeline = TenantManagerCacheItem;
 }
 
-impl timeline::handle::ArcTimeline<TenantManagerTypes> for Arc<Timeline> {
-    fn gate(&self) -> &utils::sync::gate::Gate {
-        &self.gate
-    }
+pub(crate) struct TenantManagerCacheItem {
+    pub(crate) timeline: Arc<Timeline>,
+    // allow() for cheap propagation through RequestContext inside a task
+    #[allow(clippy::redundant_allocation)]
+    pub(crate) metrics: Arc<Arc<TimelineMetrics>>,
+    #[allow(dead_code)] // we store it to keep the gate open
+    pub(crate) gate_guard: GateGuard,
+}
 
+impl std::ops::Deref for TenantManagerCacheItem {
+    type Target = Arc<Timeline>;
+    fn deref(&self) -> &Self::Target {
+        &self.timeline
+    }
+}
+
+impl timeline::handle::Timeline<TenantManagerTypes> for TenantManagerCacheItem {
     fn shard_timeline_id(&self) -> timeline::handle::ShardTimelineId {
-        Timeline::shard_timeline_id(self)
+        Timeline::shard_timeline_id(&self.timeline)
     }
 
     fn per_timeline_state(&self) -> &timeline::handle::PerTimelineState<TenantManagerTypes> {
-        &self.handles
+        &self.timeline.handles
     }
 
     fn get_shard_identity(&self) -> &pageserver_api::shard::ShardIdentity {
-        Timeline::get_shard_identity(self)
+        Timeline::get_shard_identity(&self.timeline)
     }
 }
 
@@ -454,7 +485,7 @@ impl timeline::handle::TenantManager<TenantManagerTypes> for TenantManagerWrappe
         &self,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
-    ) -> Result<Arc<Timeline>, GetActiveTimelineError> {
+    ) -> Result<TenantManagerCacheItem, GetActiveTimelineError> {
         let tenant_id = self.tenant_id.get().expect("we set this in get()");
         let timeout = ACTIVE_TENANT_TIMEOUT;
         let wait_start = Instant::now();
@@ -497,7 +528,23 @@ impl timeline::handle::TenantManager<TenantManagerTypes> for TenantManagerWrappe
         let timeline = tenant_shard
             .get_timeline(timeline_id, true)
             .map_err(GetActiveTimelineError::Timeline)?;
-        Ok(timeline)
+
+        let gate_guard = match timeline.gate.enter() {
+            Ok(guard) => guard,
+            Err(_) => {
+                return Err(GetActiveTimelineError::Timeline(
+                    GetTimelineError::ShuttingDown,
+                ));
+            }
+        };
+
+        let metrics = Arc::new(Arc::clone(&timeline.metrics));
+
+        Ok(TenantManagerCacheItem {
+            timeline,
+            metrics,
+            gate_guard,
+        })
     }
 }
 
@@ -588,6 +635,7 @@ impl std::fmt::Display for BatchedPageStreamError {
 struct BatchedGetPageRequest {
     req: PagestreamGetPageRequest,
     timer: SmgrOpTimer,
+    ctx: RequestContext,
 }
 
 #[cfg(feature = "testing")]
@@ -673,11 +721,13 @@ impl BatchedFeMessage {
 }
 
 impl PageServerHandler {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         conf: &'static PageServerConf,
         tenant_manager: Arc<TenantManager>,
         auth: Option<Arc<SwappableJwtAuth>>,
         pipelining_config: PageServicePipeliningConfig,
+        perf_span_fields: ConnectionPerfSpanFields,
         connection_ctx: RequestContext,
         cancel: CancellationToken,
         gate_guard: GateGuard,
@@ -687,6 +737,7 @@ impl PageServerHandler {
             auth,
             claims: None,
             connection_ctx,
+            perf_span_fields,
             timeline_handles: Some(TimelineHandles::new(tenant_manager)),
             cancel,
             pipelining_config,
@@ -724,6 +775,7 @@ impl PageServerHandler {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         timeline_handles: &mut TimelineHandles,
+        conn_perf_span_fields: &ConnectionPerfSpanFields,
         cancel: &CancellationToken,
         ctx: &RequestContext,
         protocol_version: PagestreamProtocolVersion,
@@ -883,10 +935,12 @@ impl PageServerHandler {
                 }
 
                 let key = rel_block_to_key(req.rel, req.blkno);
-                let shard = match timeline_handles
+
+                let res = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Page(key))
-                    .await
-                {
+                    .await;
+
+                let shard = match res {
                     Ok(tl) => tl,
                     Err(e) => {
                         let span = mkspan!(before shard routing);
@@ -913,6 +967,41 @@ impl PageServerHandler {
                         }
                     }
                 };
+
+                let ctx = if shard.is_get_page_request_sampled() {
+                    RequestContextBuilder::from(ctx)
+                        .root_perf_span(|| {
+                            info_span!(
+                            target: PERF_TRACE_TARGET,
+                            "GET_PAGE",
+                            peer_addr = conn_perf_span_fields.peer_addr,
+                            application_name = conn_perf_span_fields.application_name,
+                            compute_mode = conn_perf_span_fields.compute_mode,
+                            tenant_id = %tenant_id,
+                            shard_id = %shard.get_shard_identity().shard_slug(),
+                            timeline_id = %timeline_id,
+                            lsn = %req.hdr.request_lsn,
+                            request_id = %req.hdr.reqid,
+                            key = %key,
+                            )
+                        })
+                        .attached_child()
+                } else {
+                    ctx.attached_child()
+                };
+
+                // This ctx travels as part of the BatchedFeMessage through
+                // batching into the request handler.
+                // The request handler needs to do some per-request work
+                // (relsize check) before dispatching the batch as a single
+                // get_vectored call to the Timeline.
+                // This ctx will be used for the reslize check, whereas the
+                // get_vectored call will be a different ctx with separate
+                // perf span.
+                let ctx = ctx.with_scope_page_service_pagestream(&shard);
+
+                // Similar game for this `span`: we funnel it through so that
+                // request handler log messages contain the request-specific fields.
                 let span = mkspan!(shard.tenant_shard_id.shard_slug());
 
                 let timer = record_op_start_and_throttle(
@@ -920,19 +1009,34 @@ impl PageServerHandler {
                     metrics::SmgrQueryType::GetPageAtLsn,
                     received_at,
                 )
+                .maybe_perf_instrument(&ctx, |current_perf_span| {
+                    info_span!(
+                        target: PERF_TRACE_TARGET,
+                        parent: current_perf_span,
+                        "THROTTLE",
+                    )
+                })
                 .await?;
 
                 // We're holding the Handle
-                let effective_request_lsn = match Self::wait_or_get_last_lsn(
+                // TODO: if we actually need to wait for lsn here, it delays the entire batch which doesn't need to wait
+                let res = Self::wait_or_get_last_lsn(
                     &shard,
                     req.hdr.request_lsn,
                     req.hdr.not_modified_since,
                     &shard.get_applied_gc_cutoff_lsn(),
-                    ctx,
+                    &ctx,
                 )
-                // TODO: if we actually need to wait for lsn here, it delays the entire batch which doesn't need to wait
-                .await
-                {
+                .maybe_perf_instrument(&ctx, |current_perf_span| {
+                    info_span!(
+                        target: PERF_TRACE_TARGET,
+                        parent: current_perf_span,
+                        "WAIT_LSN",
+                    )
+                })
+                .await;
+
+                let effective_request_lsn = match res {
                     Ok(lsn) => lsn,
                     Err(e) => {
                         return respond_error!(span, e);
@@ -942,7 +1046,7 @@ impl PageServerHandler {
                     span,
                     shard: shard.downgrade(),
                     effective_request_lsn,
-                    pages: smallvec::smallvec![BatchedGetPageRequest { req, timer }],
+                    pages: smallvec::smallvec![BatchedGetPageRequest { req, timer, ctx }],
                 }
             }
             #[cfg(feature = "testing")]
@@ -985,7 +1089,7 @@ impl PageServerHandler {
                 Ok(BatchedFeMessage::GetPage {
                     span: _,
                     shard: accum_shard,
-                    pages: ref mut accum_pages,
+                    pages: accum_pages,
                     effective_request_lsn: accum_lsn,
                 }),
                 BatchedFeMessage::GetPage {
@@ -1086,132 +1190,19 @@ impl PageServerHandler {
             batch
         };
 
-        // invoke handler function
-        let (mut handler_results, span): (
-            Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>>,
-            _,
-        ) = match batch {
-            BatchedFeMessage::Exists {
-                span,
-                timer,
-                shard,
-                req,
-            } => {
-                fail::fail_point!("ps::handle-pagerequest-message::exists");
-                (
-                    vec![self
-                        .handle_get_rel_exists_request(&*shard.upgrade()?, &req, ctx)
-                        .instrument(span.clone())
-                        .await
-                        .map(|msg| (msg, timer))
-                        .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
-                    span,
-                )
-            }
-            BatchedFeMessage::Nblocks {
-                span,
-                timer,
-                shard,
-                req,
-            } => {
-                fail::fail_point!("ps::handle-pagerequest-message::nblocks");
-                (
-                    vec![self
-                        .handle_get_nblocks_request(&*shard.upgrade()?, &req, ctx)
-                        .instrument(span.clone())
-                        .await
-                        .map(|msg| (msg, timer))
-                        .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
-                    span,
-                )
-            }
-            BatchedFeMessage::GetPage {
-                span,
-                shard,
-                effective_request_lsn,
-                pages,
-            } => {
-                fail::fail_point!("ps::handle-pagerequest-message::getpage");
-                (
-                    {
-                        let npages = pages.len();
-                        trace!(npages, "handling getpage request");
-                        let res = self
-                            .handle_get_page_at_lsn_request_batched(
-                                &*shard.upgrade()?,
-                                effective_request_lsn,
-                                pages,
-                                io_concurrency,
-                                ctx,
-                            )
-                            .instrument(span.clone())
-                            .await;
-                        assert_eq!(res.len(), npages);
-                        res
-                    },
-                    span,
-                )
-            }
-            BatchedFeMessage::DbSize {
-                span,
-                timer,
-                shard,
-                req,
-            } => {
-                fail::fail_point!("ps::handle-pagerequest-message::dbsize");
-                (
-                    vec![self
-                        .handle_db_size_request(&*shard.upgrade()?, &req, ctx)
-                        .instrument(span.clone())
-                        .await
-                        .map(|msg| (msg, timer))
-                        .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
-                    span,
-                )
-            }
-            BatchedFeMessage::GetSlruSegment {
-                span,
-                timer,
-                shard,
-                req,
-            } => {
-                fail::fail_point!("ps::handle-pagerequest-message::slrusegment");
-                (
-                    vec![self
-                        .handle_get_slru_segment_request(&*shard.upgrade()?, &req, ctx)
-                        .instrument(span.clone())
-                        .await
-                        .map(|msg| (msg, timer))
-                        .map_err(|err| BatchedPageStreamError { err, req: req.hdr })],
-                    span,
-                )
-            }
-            #[cfg(feature = "testing")]
-            BatchedFeMessage::Test {
-                span,
-                shard,
-                requests,
-            } => {
-                fail::fail_point!("ps::handle-pagerequest-message::test");
-                (
-                    {
-                        let npages = requests.len();
-                        trace!(npages, "handling getpage request");
-                        let res = self
-                            .handle_test_request_batch(&*shard.upgrade()?, requests, ctx)
-                            .instrument(span.clone())
-                            .await;
-                        assert_eq!(res.len(), npages);
-                        res
-                    },
-                    span,
-                )
-            }
-            BatchedFeMessage::RespondError { span, error } => {
-                // We've already decided to respond with an error, so we don't need to
-                // call the handler.
-                (vec![Err(error)], span)
-            }
+        // Dispatch the batch to the appropriate request handler.
+        let log_slow_name = batch.as_static_str();
+        let (mut handler_results, span) = {
+            // TODO: we unfortunately have to pin the future on the heap, since GetPage futures are huge and
+            // won't fit on the stack.
+            let mut boxpinned =
+                Box::pin(self.pagestream_dispatch_batched_message(batch, io_concurrency, ctx));
+            log_slow(
+                log_slow_name,
+                LOG_SLOW_GETPAGE_THRESHOLD,
+                boxpinned.as_mut(),
+            )
+            .await?
         };
 
         // We purposefully don't count flush time into the smgr operation timer.
@@ -1298,6 +1289,8 @@ impl PageServerHandler {
                 &response_msg.serialize(protocol_version),
             ))?;
 
+            failpoint_support::sleep_millis_async!("before-pagestream-msg-flush", cancel);
+
             // what we want to do
             let socket_fd = pgb_writer.socket_fd;
             let flush_fut = pgb_writer.flush();
@@ -1328,6 +1321,163 @@ impl PageServerHandler {
             .await?;
         }
         Ok(())
+    }
+
+    /// Helper which dispatches a batched message to the appropriate handler.
+    /// Returns a vec of results, along with the extracted trace span.
+    async fn pagestream_dispatch_batched_message(
+        &mut self,
+        batch: BatchedFeMessage,
+        io_concurrency: IoConcurrency,
+        ctx: &RequestContext,
+    ) -> Result<
+        (
+            Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>>,
+            Span,
+        ),
+        QueryError,
+    > {
+        macro_rules! upgrade_handle_and_set_context {
+            ($shard:ident) => {{
+                let weak_handle = &$shard;
+                let handle = weak_handle.upgrade()?;
+                let ctx = ctx.with_scope_page_service_pagestream(&handle);
+                (handle, ctx)
+            }};
+        }
+        Ok(match batch {
+            BatchedFeMessage::Exists {
+                span,
+                timer,
+                shard,
+                req,
+            } => {
+                fail::fail_point!("ps::handle-pagerequest-message::exists");
+                let (shard, ctx) = upgrade_handle_and_set_context!(shard);
+                (
+                    vec![
+                        self.handle_get_rel_exists_request(&shard, &req, &ctx)
+                            .instrument(span.clone())
+                            .await
+                            .map(|msg| (msg, timer))
+                            .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
+                    ],
+                    span,
+                )
+            }
+            BatchedFeMessage::Nblocks {
+                span,
+                timer,
+                shard,
+                req,
+            } => {
+                fail::fail_point!("ps::handle-pagerequest-message::nblocks");
+                let (shard, ctx) = upgrade_handle_and_set_context!(shard);
+                (
+                    vec![
+                        self.handle_get_nblocks_request(&shard, &req, &ctx)
+                            .instrument(span.clone())
+                            .await
+                            .map(|msg| (msg, timer))
+                            .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
+                    ],
+                    span,
+                )
+            }
+            BatchedFeMessage::GetPage {
+                span,
+                shard,
+                effective_request_lsn,
+                pages,
+            } => {
+                fail::fail_point!("ps::handle-pagerequest-message::getpage");
+                let (shard, ctx) = upgrade_handle_and_set_context!(shard);
+                (
+                    {
+                        let npages = pages.len();
+                        trace!(npages, "handling getpage request");
+                        let res = self
+                            .handle_get_page_at_lsn_request_batched(
+                                &shard,
+                                effective_request_lsn,
+                                pages,
+                                io_concurrency,
+                                &ctx,
+                            )
+                            .instrument(span.clone())
+                            .await;
+                        assert_eq!(res.len(), npages);
+                        res
+                    },
+                    span,
+                )
+            }
+            BatchedFeMessage::DbSize {
+                span,
+                timer,
+                shard,
+                req,
+            } => {
+                fail::fail_point!("ps::handle-pagerequest-message::dbsize");
+                let (shard, ctx) = upgrade_handle_and_set_context!(shard);
+                (
+                    vec![
+                        self.handle_db_size_request(&shard, &req, &ctx)
+                            .instrument(span.clone())
+                            .await
+                            .map(|msg| (msg, timer))
+                            .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
+                    ],
+                    span,
+                )
+            }
+            BatchedFeMessage::GetSlruSegment {
+                span,
+                timer,
+                shard,
+                req,
+            } => {
+                fail::fail_point!("ps::handle-pagerequest-message::slrusegment");
+                let (shard, ctx) = upgrade_handle_and_set_context!(shard);
+                (
+                    vec![
+                        self.handle_get_slru_segment_request(&shard, &req, &ctx)
+                            .instrument(span.clone())
+                            .await
+                            .map(|msg| (msg, timer))
+                            .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
+                    ],
+                    span,
+                )
+            }
+            #[cfg(feature = "testing")]
+            BatchedFeMessage::Test {
+                span,
+                shard,
+                requests,
+            } => {
+                fail::fail_point!("ps::handle-pagerequest-message::test");
+                let (shard, ctx) = upgrade_handle_and_set_context!(shard);
+                (
+                    {
+                        let npages = requests.len();
+                        trace!(npages, "handling getpage request");
+                        let res = self
+                            .handle_test_request_batch(&shard, requests, &ctx)
+                            .instrument(span.clone())
+                            .await;
+                        assert_eq!(res.len(), npages);
+                        res
+                    },
+                    span,
+                )
+            }
+            BatchedFeMessage::RespondError { span, error } => {
+                // We've already decided to respond with an error, so we don't need to
+                // call the handler.
+                (vec![Err(error)], span)
+            }
+        })
     }
 
     /// Pagestream sub-protocol handler.
@@ -1449,12 +1599,14 @@ impl PageServerHandler {
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
     {
         let cancel = self.cancel.clone();
+
         let err = loop {
             let msg = Self::pagestream_read_message(
                 &mut pgb_reader,
                 tenant_id,
                 timeline_id,
                 &mut timeline_handles,
+                &self.perf_span_fields,
                 &cancel,
                 ctx,
                 protocol_version,
@@ -1473,19 +1625,16 @@ impl PageServerHandler {
                 }
             };
 
-            let result = warn_slow(
-                msg.as_static_str(),
-                WARN_SLOW_GETPAGE_THRESHOLD,
-                self.pagesteam_handle_batched_message(
+            let result = self
+                .pagesteam_handle_batched_message(
                     pgb_writer,
                     msg,
                     io_concurrency.clone(),
                     &cancel,
                     protocol_version,
                     ctx,
-                ),
-            )
-            .await;
+                )
+                .await;
             match result {
                 Ok(()) => {}
                 Err(e) => break e,
@@ -1591,6 +1740,8 @@ impl PageServerHandler {
         // Batcher
         //
 
+        let perf_span_fields = self.perf_span_fields.clone();
+
         let cancel_batcher = self.cancel.child_token();
         let (mut batch_tx, mut batch_rx) = spsc_fold::channel();
         let batcher = pipeline_stage!("batcher", cancel_batcher.clone(), move |cancel_batcher| {
@@ -1604,6 +1755,7 @@ impl PageServerHandler {
                         tenant_id,
                         timeline_id,
                         &mut timeline_handles,
+                        &perf_span_fields,
                         &cancel_batcher,
                         &ctx,
                         protocol_version,
@@ -1649,17 +1801,13 @@ impl PageServerHandler {
                             return Err(e);
                         }
                     };
-                    warn_slow(
-                        batch.as_static_str(),
-                        WARN_SLOW_GETPAGE_THRESHOLD,
-                        self.pagesteam_handle_batched_message(
-                            pgb_writer,
-                            batch,
-                            io_concurrency.clone(),
-                            &cancel,
-                            protocol_version,
-                            &ctx,
-                        ),
+                    self.pagesteam_handle_batched_message(
+                        pgb_writer,
+                        batch,
+                        io_concurrency.clone(),
+                        &cancel,
+                        protocol_version,
+                        &ctx,
                     )
                     .await?;
                 }
@@ -1946,7 +2094,9 @@ impl PageServerHandler {
 
         let results = timeline
             .get_rel_page_at_lsn_batched(
-                requests.iter().map(|p| (&p.req.rel, &p.req.blkno)),
+                requests
+                    .iter()
+                    .map(|p| (&p.req.rel, &p.req.blkno, p.ctx.attached_child())),
                 effective_lsn,
                 io_concurrency,
                 ctx,
@@ -2083,6 +2233,7 @@ impl PageServerHandler {
                 // TODO: passthrough the error site to the final error message?
                 BasebackupError::Client(e, _) => QueryError::Disconnected(ConnectionError::Io(e)),
                 BasebackupError::Server(e) => QueryError::Other(e),
+                BasebackupError::Shutdown => QueryError::Shutdown,
             }
         }
 
@@ -2095,9 +2246,12 @@ impl PageServerHandler {
             .get(tenant_id, timeline_id, ShardSelector::Zero)
             .await?;
         set_tracing_field_shard_id(&timeline);
+        let ctx = ctx.with_scope_timeline(&timeline);
 
         if timeline.is_archived() == Some(true) {
-            tracing::info!("timeline {tenant_id}/{timeline_id} is archived, but got basebackup request for it.");
+            tracing::info!(
+                "timeline {tenant_id}/{timeline_id} is archived, but got basebackup request for it."
+            );
             return Err(QueryError::NotFound("timeline is archived".into()));
         }
 
@@ -2110,7 +2264,7 @@ impl PageServerHandler {
                     lsn,
                     crate::tenant::timeline::WaitLsnWaiter::PageService,
                     crate::tenant::timeline::WaitLsnTimeout::Default,
-                    ctx,
+                    &ctx,
                 )
                 .await?;
             timeline
@@ -2136,7 +2290,7 @@ impl PageServerHandler {
                 prev_lsn,
                 full_backup,
                 replica,
-                ctx,
+                &ctx,
             )
             .await
             .map_err(map_basebackup_error)?;
@@ -2159,7 +2313,7 @@ impl PageServerHandler {
                     prev_lsn,
                     full_backup,
                     replica,
-                    ctx,
+                    &ctx,
                 )
                 .await
                 .map_err(map_basebackup_error)?;
@@ -2176,7 +2330,7 @@ impl PageServerHandler {
                     prev_lsn,
                     full_backup,
                     replica,
-                    ctx,
+                    &ctx,
                 )
                 .await
                 .map_err(map_basebackup_error)?;
@@ -2450,6 +2604,58 @@ impl PageServiceCmd {
     }
 }
 
+/// Parse the startup options from the postgres wire protocol startup packet.
+///
+/// It takes a sequence of `-c option=X` or `-coption=X`. It parses the options string
+/// by best effort and returns all the options parsed (key-value pairs) and a bool indicating
+/// whether all options are successfully parsed. There could be duplicates in the options
+/// if the caller passed such parameters.
+fn parse_options(options: &str) -> (Vec<(String, String)>, bool) {
+    let mut parsing_config = false;
+    let mut has_error = false;
+    let mut config = Vec::new();
+    for item in options.split_whitespace() {
+        if item == "-c" {
+            if !parsing_config {
+                parsing_config = true;
+            } else {
+                // "-c" followed with another "-c"
+                tracing::warn!("failed to parse the startup options: {options}");
+                has_error = true;
+                break;
+            }
+        } else if item.starts_with("-c") || parsing_config {
+            let Some((mut key, value)) = item.split_once('=') else {
+                // "-c" followed with an invalid option
+                tracing::warn!("failed to parse the startup options: {options}");
+                has_error = true;
+                break;
+            };
+            if !parsing_config {
+                // Parse "-coptions=X"
+                let Some(stripped_key) = key.strip_prefix("-c") else {
+                    tracing::warn!("failed to parse the startup options: {options}");
+                    has_error = true;
+                    break;
+                };
+                key = stripped_key;
+            }
+            config.push((key.to_string(), value.to_string()));
+            parsing_config = false;
+        } else {
+            tracing::warn!("failed to parse the startup options: {options}");
+            has_error = true;
+            break;
+        }
+    }
+    if parsing_config {
+        // "-c" without the option
+        tracing::warn!("failed to parse the startup options: {options}");
+        has_error = true;
+    }
+    (config, has_error)
+}
+
 impl<IO> postgres_backend::Handler<IO> for PageServerHandler
 where
     IO: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
@@ -2492,7 +2698,17 @@ where
 
         if let FeStartupPacket::StartupMessage { params, .. } = sm {
             if let Some(app_name) = params.get("application_name") {
+                self.perf_span_fields.application_name = Some(app_name.to_string());
                 Span::current().record("application_name", field::display(app_name));
+            }
+            if let Some(options) = params.get("options") {
+                let (config, _) = parse_options(options);
+                for (key, value) in config {
+                    if key == "neon.compute_mode" {
+                        self.perf_span_fields.compute_mode = Some(value.clone());
+                        Span::current().record("compute_mode", field::display(value));
+                    }
+                }
             }
         };
 
@@ -2607,6 +2823,7 @@ where
             PageServiceCmd::Set => {
                 // important because psycopg2 executes "SET datestyle TO 'ISO'"
                 // on connect
+                // TODO: allow setting options, i.e., application_name/compute_mode via SET commands
                 pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
             }
             PageServiceCmd::LeaseLsn(LeaseLsnCmd {
@@ -2880,5 +3097,47 @@ mod tests {
         assert!(cmd.is_err());
         let cmd = PageServiceCmd::parse(&format!("lease {tenant_id} {timeline_id} gzip 0/16ABCDE"));
         assert!(cmd.is_err());
+    }
+
+    #[test]
+    fn test_parse_options() {
+        let (config, has_error) = parse_options(" -c neon.compute_mode=primary ");
+        assert!(!has_error);
+        assert_eq!(
+            config,
+            vec![("neon.compute_mode".to_string(), "primary".to_string())]
+        );
+
+        let (config, has_error) = parse_options(" -c neon.compute_mode=primary -c foo=bar ");
+        assert!(!has_error);
+        assert_eq!(
+            config,
+            vec![
+                ("neon.compute_mode".to_string(), "primary".to_string()),
+                ("foo".to_string(), "bar".to_string()),
+            ]
+        );
+
+        let (config, has_error) = parse_options(" -c neon.compute_mode=primary -cfoo=bar");
+        assert!(!has_error);
+        assert_eq!(
+            config,
+            vec![
+                ("neon.compute_mode".to_string(), "primary".to_string()),
+                ("foo".to_string(), "bar".to_string()),
+            ]
+        );
+
+        let (_, has_error) = parse_options("-c");
+        assert!(has_error);
+
+        let (_, has_error) = parse_options("-c foo=bar -c -c");
+        assert!(has_error);
+
+        let (_, has_error) = parse_options("    ");
+        assert!(!has_error);
+
+        let (_, has_error) = parse_options(" -c neon.compute_mode");
+        assert!(has_error);
     }
 }

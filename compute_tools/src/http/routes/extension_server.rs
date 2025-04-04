@@ -1,19 +1,13 @@
 use std::sync::Arc;
 
-use axum::{
-    extract::State,
-    response::{IntoResponse, Response},
-};
+use axum::extract::State;
+use axum::response::{IntoResponse, Response};
 use http::StatusCode;
 use serde::Deserialize;
 
-use crate::{
-    compute::ComputeNode,
-    http::{
-        extract::{Path, Query},
-        JsonResponse,
-    },
-};
+use crate::compute::{BUILD_TAG, ComputeNode};
+use crate::http::JsonResponse;
+use crate::http::extract::{Path, Query};
 
 #[derive(Debug, Clone, Deserialize)]
 pub(in crate::http) struct ExtensionServerParams {
@@ -24,11 +18,11 @@ pub(in crate::http) struct ExtensionServerParams {
 /// Download a remote extension.
 pub(in crate::http) async fn download_extension(
     Path(filename): Path<String>,
-    params: Query<ExtensionServerParams>,
+    ext_server_params: Query<ExtensionServerParams>,
     State(compute): State<Arc<ComputeNode>>,
 ) -> Response {
     // Don't even try to download extensions if no remote storage is configured
-    if compute.ext_remote_storage.is_none() {
+    if compute.params.ext_remote_storage.is_none() {
         return JsonResponse::error(
             StatusCode::PRECONDITION_FAILED,
             "remote storage is not configured",
@@ -52,9 +46,9 @@ pub(in crate::http) async fn download_extension(
 
         remote_extensions.get_ext(
             &filename,
-            params.is_library,
-            &compute.build_tag,
-            &compute.pgversion,
+            ext_server_params.is_library,
+            &BUILD_TAG,
+            &compute.params.pgversion,
         )
     };
 

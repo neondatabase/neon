@@ -82,6 +82,7 @@ pub(crate) struct RequestData {
     peer_addr: String,
     username: Option<String>,
     application_name: Option<String>,
+    user_agent: Option<String>,
     endpoint_id: Option<String>,
     database: Option<String>,
     project: Option<String>,
@@ -128,6 +129,7 @@ impl From<&RequestContextInner> for RequestData {
             timestamp: value.first_packet.naive_utc(),
             username: value.user.as_deref().map(String::from),
             application_name: value.application.as_deref().map(String::from),
+            user_agent: value.user_agent.as_deref().map(String::from),
             endpoint_id: value.endpoint_id.as_deref().map(String::from),
             database: value.dbname.as_deref().map(String::from),
             project: value.project.as_deref().map(String::from),
@@ -522,6 +524,7 @@ mod tests {
             .unwrap()
             .naive_utc(),
             application_name: Some("test".to_owned()),
+            user_agent: Some("test-user-agent".to_owned()),
             username: Some(hex::encode(rng.r#gen::<[u8; 4]>())),
             endpoint_id: Some(hex::encode(rng.r#gen::<[u8; 16]>())),
             database: Some(hex::encode(rng.r#gen::<[u8; 16]>())),
@@ -610,15 +613,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1313105, 3, 6000),
-                (1313094, 3, 6000),
-                (1313153, 3, 6000),
-                (1313110, 3, 6000),
-                (1313246, 3, 6000),
-                (1313083, 3, 6000),
-                (1312877, 3, 6000),
-                (1313112, 3, 6000),
-                (438020, 1, 2000)
+                (1313953, 3, 6000),
+                (1313942, 3, 6000),
+                (1314001, 3, 6000),
+                (1313958, 3, 6000),
+                (1314094, 3, 6000),
+                (1313931, 3, 6000),
+                (1313725, 3, 6000),
+                (1313960, 3, 6000),
+                (438318, 1, 2000)
             ]
         );
 
@@ -650,11 +653,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1204324, 5, 10000),
-                (1204048, 5, 10000),
-                (1204349, 5, 10000),
-                (1204334, 5, 10000),
-                (1204588, 5, 10000)
+                (1205810, 5, 10000),
+                (1205534, 5, 10000),
+                (1205835, 5, 10000),
+                (1205820, 5, 10000),
+                (1206074, 5, 10000)
             ]
         );
 
@@ -679,15 +682,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1313105, 3, 6000),
-                (1313094, 3, 6000),
-                (1313153, 3, 6000),
-                (1313110, 3, 6000),
-                (1313246, 3, 6000),
-                (1313083, 3, 6000),
-                (1312877, 3, 6000),
-                (1313112, 3, 6000),
-                (438020, 1, 2000)
+                (1313953, 3, 6000),
+                (1313942, 3, 6000),
+                (1314001, 3, 6000),
+                (1313958, 3, 6000),
+                (1314094, 3, 6000),
+                (1313931, 3, 6000),
+                (1313725, 3, 6000),
+                (1313960, 3, 6000),
+                (438318, 1, 2000)
             ]
         );
 
@@ -724,7 +727,7 @@ mod tests {
         // files are smaller than the size threshold, but they took too long to fill so were flushed early
         assert_eq!(
             file_stats,
-            [(658014, 2, 3001), (657728, 2, 3000), (657524, 2, 2999)]
+            [(658584, 2, 3001), (658298, 2, 3000), (658094, 2, 2999)]
         );
 
         tmpdir.close().unwrap();

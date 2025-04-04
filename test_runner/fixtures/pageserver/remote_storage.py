@@ -5,11 +5,9 @@ import os
 import queue
 import shutil
 import threading
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fixtures.common_types import TenantId, TimelineId
-from fixtures.neon_fixtures import NeonEnv
 from fixtures.pageserver.common_types import (
     InvalidFileName,
     parse_layer_file_name,
@@ -17,7 +15,10 @@ from fixtures.pageserver.common_types import (
 from fixtures.remote_storage import LocalFsStorage
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from typing import Any
+
+    from fixtures.neon_fixtures import NeonEnv
 
 
 def duplicate_one_tenant(env: NeonEnv, template_tenant: TenantId, new_tenant: TenantId):

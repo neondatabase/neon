@@ -4,6 +4,7 @@ import json
 import random
 import threading
 import time
+from typing import TYPE_CHECKING
 
 import pytest
 import requests
@@ -23,10 +24,12 @@ from fixtures.pageserver.utils import (
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import S3Storage, s3_storage
 from fixtures.utils import run_only_on_default_postgres, skip_in_debug_build, wait_until
-from mypy_boto3_s3.type_defs import (
-    ObjectTypeDef,
-)
 from psycopg2.errors import IoError, UndefinedTable
+
+if TYPE_CHECKING:
+    from mypy_boto3_s3.type_defs import (
+        ObjectTypeDef,
+    )
 
 
 @pytest.mark.parametrize("shard_count", [0, 4])
@@ -41,6 +44,17 @@ def test_timeline_archive(neon_env_builder: NeonEnvBuilder, shard_count: int):
         env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
         # If we run the unsharded version, talk to the storage controller
         ps_http = env.storage_controller.pageserver_api()
+
+    for ps in env.pageservers:
+        # We make /archival_config requests that are intended to fail.
+        # It's expected that storcon drops requests to other pageservers after
+        # it gets the first error (https://github.com/neondatabase/neon/issues/11177)
+        ps.allowed_errors.extend(
+            [
+                ".*WARN.* path=/v1/tenant/.*/archival_config .*request was dropped before completing",
+                ".*ERROR.* path=/v1/tenant/.*/archival_config .*Cancelled request finished with an error.*",
+            ]
+        )
 
     # first try to archive a non existing timeline for an existing tenant:
     invalid_timeline_id = TimelineId.generate()
@@ -281,7 +295,7 @@ def test_timeline_offload_persist(neon_env_builder: NeonEnvBuilder, delete_timel
         conf={
             "gc_period": "0s",
             "compaction_period": "0s",
-            "checkpoint_distance": f"{1024 ** 2}",
+            "checkpoint_distance": f"{1024**2}",
         }
     )
 
@@ -887,7 +901,7 @@ def test_timeline_offload_generations(neon_env_builder: NeonEnvBuilder):
         conf={
             "gc_period": "0s",
             "compaction_period": "0s",
-            "checkpoint_distance": f"{1024 ** 2}",
+            "checkpoint_distance": f"{1024**2}",
         }
     )
 

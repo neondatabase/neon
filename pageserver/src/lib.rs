@@ -15,7 +15,8 @@ pub mod l0_flush;
 
 extern crate hyper0 as hyper;
 
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 pub use pageserver_api::keyspace;
 use tokio_util::sync::CancellationToken;
 mod assert_u64_eq_usize;
@@ -35,10 +36,8 @@ pub mod walredo;
 
 use camino::Utf8Path;
 use deletion_queue::DeletionQueue;
-use tenant::{
-    mgr::{BackgroundPurges, TenantManager},
-    secondary,
-};
+use tenant::mgr::{BackgroundPurges, TenantManager};
+use tenant::secondary;
 use tracing::{info, info_span};
 
 /// Current storage format version
@@ -56,6 +55,9 @@ pub const DEFAULT_PG_VERSION: u32 = 16;
 pub const IMAGE_FILE_MAGIC: u16 = 0x5A60;
 pub const DELTA_FILE_MAGIC: u16 = 0x5A61;
 
+// Target used for performance traces.
+pub const PERF_TRACE_TARGET: &str = "P";
+
 static ZERO_PAGE: bytes::Bytes = bytes::Bytes::from_static(&[0u8; 8192]);
 
 pub use crate::metrics::preinitialize_metrics;
@@ -65,6 +67,7 @@ pub struct CancellableTask {
     pub cancel: CancellationToken,
 }
 pub struct HttpEndpointListener(pub CancellableTask);
+pub struct HttpsEndpointListener(pub CancellableTask);
 pub struct ConsumptionMetricsTasks(pub CancellableTask);
 pub struct DiskUsageEvictionTask(pub CancellableTask);
 impl CancellableTask {
@@ -78,6 +81,7 @@ impl CancellableTask {
 #[allow(clippy::too_many_arguments)]
 pub async fn shutdown_pageserver(
     http_listener: HttpEndpointListener,
+    https_listener: Option<HttpsEndpointListener>,
     page_service: page_service::Listener,
     consumption_metrics_worker: ConsumptionMetricsTasks,
     disk_usage_eviction_task: Option<DiskUsageEvictionTask>,
@@ -213,6 +217,15 @@ pub async fn shutdown_pageserver(
         Duration::from_secs(1),
     )
     .await;
+
+    if let Some(https_listener) = https_listener {
+        timed(
+            https_listener.0.shutdown(),
+            "shutdown https",
+            Duration::from_secs(1),
+        )
+        .await;
+    }
 
     // Shut down the HTTP endpoint last, so that you can still check the server's
     // status while it's shutting down.
@@ -350,8 +363,9 @@ async fn timed_after_cancellation<Fut: std::future::Future>(
 
 #[cfg(test)]
 mod timed_tests {
-    use super::timed;
     use std::time::Duration;
+
+    use super::timed;
 
     #[tokio::test]
     async fn timed_completes_when_inner_future_completes() {

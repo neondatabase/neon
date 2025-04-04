@@ -1,6 +1,7 @@
 use pageserver_client::mgmt_api::{self, ResponseErrorMessageExt};
 use reqwest::{Method, Url};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 pub struct Client {
     base_url: Url,
@@ -9,13 +10,11 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(base_url: Url, jwt_token: Option<String>) -> Self {
+    pub fn new(http_client: reqwest::Client, base_url: Url, jwt_token: Option<String>) -> Self {
         Self {
             base_url,
             jwt_token,
-            client: reqwest::ClientBuilder::new()
-                .build()
-                .expect("Failed to construct http client"),
+            client: http_client,
         }
     }
 

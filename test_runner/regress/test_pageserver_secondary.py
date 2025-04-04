@@ -4,7 +4,6 @@ import json
 import os
 import random
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -24,11 +23,13 @@ from fixtures.pageserver.utils import (
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind, S3Storage, s3_storage
 from fixtures.utils import run_only_on_default_postgres, skip_in_debug_build, wait_until
 from fixtures.workload import Workload
-from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from typing import Any
+
+    from werkzeug.wrappers.request import Request
 
 
 # A tenant configuration that is convenient for generating uploads and deletions
@@ -87,9 +88,11 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
     neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=s3_storage(),
     )
-    neon_env_builder.control_plane_compute_hook_api = (
-        f"http://{make_httpserver.host}:{make_httpserver.port}/notify-attach"
+    neon_env_builder.control_plane_hooks_api = (
+        f"http://{make_httpserver.host}:{make_httpserver.port}/"
     )
+
+    neon_env_builder.storage_controller_config = {"use_local_compute_notifications": False}
 
     def ignore_notify(request: Request):
         # This test does all its own compute configuration (by passing explicit pageserver ID to Workload functions),
@@ -626,7 +629,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     except:
         # On assertion failures, log some details to help with debugging
         heatmap = env.pageserver_remote_storage.heatmap_content(tenant_id)
-        log.warn(f"heatmap contents: {json.dumps(heatmap,indent=2)}")
+        log.warn(f"heatmap contents: {json.dumps(heatmap, indent=2)}")
         raise
 
     # Scrub the remote storage
@@ -938,9 +941,12 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
     # Expect lots of layers
     assert len(ps_attached.list_layers(tenant_id, timeline_id)) > 10
 
-    # Simulate large data by making layer downloads artifically slow
     for ps in env.pageservers:
+        # Simulate large data by making layer downloads artifically slow
         ps.http_client().configure_failpoints([("secondary-layer-download-sleep", "return(1000)")])
+        # Make the initial logical size calculation lie. Otherwise it on demand downloads
+        # layers and makes accounting difficult.
+        ps.http_client().configure_failpoints(("skip-logical-size-calculation", "return"))
 
     def timeline_heatmap(tlid):
         assert env.pageserver_remote_storage is not None
@@ -952,20 +958,16 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
 
         raise RuntimeError(f"No heatmap for timeline: {tlid}")
 
-    # Upload a heatmap, so that secondaries have something to download
-    ps_attached.http_client().tenant_heatmap_upload(tenant_id)
-    heatmap_before_migration = timeline_heatmap(timeline_id)
+    def count_timeline_heatmap_layers(tlid) -> tuple[int, int]:
+        cold, hot = 0, 0
+        layers = timeline_heatmap(tlid)["layers"]
+        for layer in layers:
+            if layer["cold"]:
+                cold += 1
+            else:
+                hot += 1
 
-    # This has no chance to succeed: we have lots of layers and each one takes at least 1000ms.
-    # However, it pulls the heatmap, which will be important later.
-    http_client = env.storage_controller.pageserver_api()
-    (status, progress) = http_client.tenant_secondary_download(tenant_id, wait_ms=4000)
-    assert status == 202
-    assert progress["heatmap_mtime"] is not None
-    assert progress["layers_downloaded"] > 0
-    assert progress["bytes_downloaded"] > 0
-    assert progress["layers_total"] > progress["layers_downloaded"]
-    assert progress["bytes_total"] > progress["bytes_downloaded"]
+        return cold, hot
 
     env.storage_controller.allowed_errors.extend(
         [
@@ -975,8 +977,9 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
 
     # Use a custom configuration that gives up earlier than usual.
     # We can't hydrate everything anyway because of the failpoints.
+    # Implicitly, this also uploads a heatmap from the current attached location.
     config = StorageControllerMigrationConfig(
-        secondary_warmup_timeout="5s", secondary_download_request_timeout="2s"
+        secondary_warmup_timeout="5s", secondary_download_request_timeout="2s", prewarm=False
     )
     env.storage_controller.tenant_shard_migrate(
         TenantShardId(tenant_id, shard_number=0, shard_count=0), ps_secondary.id, config
@@ -988,31 +991,33 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
     ps_secondary.http_client().tenant_heatmap_upload(tenant_id)
     heatmap_after_migration = timeline_heatmap(timeline_id)
 
-    assert len(heatmap_before_migration["layers"]) > 0
+    local_layers = ps_secondary.list_layers(tenant_id, timeline_id)
+    # We download 1 layer per second and give up within 5 seconds.
+    assert len(local_layers) < 10
 
     after_migration_heatmap_layers_count = len(heatmap_after_migration["layers"])
-    assert len(heatmap_before_migration["layers"]) <= after_migration_heatmap_layers_count
-
     log.info(f"Heatmap size after cold migration is {after_migration_heatmap_layers_count}")
 
     env.storage_controller.download_heatmap_layers(
         TenantShardId(tenant_id, shard_number=0, shard_count=0), timeline_id
     )
 
-    # Now simulate the case where a child timeline is archived, parent layers
-    # are evicted and the child is unarchived. When the child is unarchived,
-    # itself and the parent update their heatmaps to contain layers needed by the
-    # child. One can warm up the timeline hierarchy since the heatmaps are ready.
-
-    def all_layers_downloaded(expected_layer_count: int):
-        local_layers_count = len(ps_secondary.list_layers(tenant_id, timeline_id))
+    def all_layers_downloaded(node, expected_layer_count: int):
+        local_layers_count = len(node.list_layers(tenant_id, timeline_id))
 
         log.info(f"{local_layers_count=} {after_migration_heatmap_layers_count=}")
         assert local_layers_count >= expected_layer_count
 
-    wait_until(lambda: all_layers_downloaded(after_migration_heatmap_layers_count))
-    ps_secondary.http_client().tenant_heatmap_upload(tenant_id)
+    def no_layers_downloaded(node):
+        local_layers_count = len(node.list_layers(tenant_id, timeline_id))
 
+        log.info(f"{local_layers_count=} {after_migration_heatmap_layers_count=}")
+        assert local_layers_count == 0
+
+    wait_until(lambda: all_layers_downloaded(ps_secondary, after_migration_heatmap_layers_count))
+
+    # Read everything and make sure that we're not downloading anything extra.
+    # All hot layers should be available locally now.
     before = (
         ps_secondary.http_client()
         .get_metrics()
@@ -1029,6 +1034,11 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
 
     workload.stop()
     assert before == after
+
+    # Now simulate the case where a child timeline is archived, parent layers
+    # are evicted and the child is unarchived. When the child is unarchived,
+    # itself and the parent update their heatmaps to contain layers needed by the
+    # child. One can warm up the timeline hierarchy since the heatmaps are ready.
 
     def check_archival_state(state: TimelineArchivalState, tline):
         timelines = (
@@ -1057,13 +1067,102 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
     wait_until(lambda: check_archival_state(TimelineArchivalState.UNARCHIVED, child_timeline_id))
 
     ps_secondary.http_client().tenant_heatmap_upload(tenant_id)
-    log.info(f"Parent timeline heatmap size: {len(timeline_heatmap(timeline_id)['layers'])}")
-    log.info(f"Child timeline heatmap size: {len(timeline_heatmap(child_timeline_id)['layers'])}")
 
-    expected_locally = len(timeline_heatmap(timeline_id)["layers"])
-    assert expected_locally > 0
+    parent_cold, parent_hot = count_timeline_heatmap_layers(timeline_id)
+    child_cold, child_hot = count_timeline_heatmap_layers(child_timeline_id)
+
+    log.info(f"Parent timeline heatmap size: cold={parent_cold}, hot={parent_hot}")
+    log.info(f"Child timeline heatmap size: cold={child_cold}, hot={child_hot}")
+
+    # All layers in the heatmap should come from the generation on unarchival.
+    # Hence, they should be cold.
+    assert parent_cold > 0
+    assert parent_hot == 0
+
+    expected_locally = parent_cold
 
     env.storage_controller.download_heatmap_layers(
-        TenantShardId(tenant_id, shard_number=0, shard_count=0), timeline_id
+        TenantShardId(tenant_id, shard_number=0, shard_count=0), child_timeline_id, recurse=True
     )
-    wait_until(lambda: all_layers_downloaded(expected_locally))
+    wait_until(lambda: all_layers_downloaded(ps_secondary, expected_locally))
+
+    for ps in env.pageservers:
+        ps.http_client().configure_failpoints([("secondary-layer-download-sleep", "off")])
+
+    # The uploaded heatmap is still empty. Clean up all layers on the secondary.
+    ps_attached.http_client().tenant_secondary_download(tenant_id, wait_ms=100)
+    wait_until(lambda: no_layers_downloaded(ps_attached))
+
+    # Upload a new heatmap. The previously cold layers become hot since they're now resident.
+    ps_secondary.http_client().tenant_heatmap_upload(tenant_id)
+
+    # Warm up the current secondary.
+    ps_attached.http_client().tenant_secondary_download(tenant_id, wait_ms=100)
+    wait_until(lambda: all_layers_downloaded(ps_secondary, expected_locally))
+
+
+@run_only_on_default_postgres("PG version is not interesting here")
+@pytest.mark.parametrize("action", ["delete_timeline", "detach"])
+def test_io_metrics_match_secondary_timeline_lifecycle(
+    neon_env_builder: NeonEnvBuilder, action: str
+):
+    """
+    Check that IO metrics for secondary timelines are de-registered when the timeline
+    is removed
+    """
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_id = TenantId.generate()
+    parent_timeline_id = TimelineId.generate()
+
+    # We do heatmap uploads and pulls manually
+    tenant_conf = {"heatmap_period": "0s"}
+    env.create_tenant(
+        tenant_id, parent_timeline_id, conf=tenant_conf, placement_policy='{"Attached":1}'
+    )
+
+    child_timeline_id = env.create_branch("foo", tenant_id)
+
+    attached_to_id = env.storage_controller.locate(tenant_id)[0]["node_id"]
+    ps_attached = env.get_pageserver(attached_to_id)
+    ps_secondary = next(p for p in env.pageservers if p != ps_attached)
+
+    ps_attached.http_client().tenant_heatmap_upload(tenant_id)
+    status, _ = ps_secondary.http_client().tenant_secondary_download(tenant_id, wait_ms=5000)
+    assert status == 200
+
+    labels = {
+        "operation": "write",
+        "tenant_id": str(tenant_id),
+        "timeline_id": str(child_timeline_id),
+    }
+    bytes_written = (
+        ps_secondary.http_client()
+        .get_metrics()
+        .query_one("pageserver_io_operations_bytes_total", labels)
+        .value
+    )
+
+    assert bytes_written == 0
+
+    if action == "delete_timeline":
+        env.storage_controller.pageserver_api().timeline_delete(tenant_id, child_timeline_id)
+        ps_attached.http_client().tenant_heatmap_upload(tenant_id)
+        status, _ = ps_secondary.http_client().tenant_secondary_download(tenant_id, wait_ms=5000)
+        assert status == 200
+    elif action == "detach":
+        env.storage_controller.tenant_policy_update(tenant_id, {"placement": {"Attached": 0}})
+        env.storage_controller.reconcile_until_idle()
+    else:
+        raise Exception("Unexpected action")
+
+    assert (
+        len(
+            ps_secondary.http_client()
+            .get_metrics()
+            .query_all("pageserver_io_operations_bytes_total", labels)
+        )
+        == 0
+    )

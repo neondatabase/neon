@@ -4,21 +4,18 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tenant_size_model::svg::SvgBranchKind;
-use tokio::sync::oneshot::error::RecvError;
+use tenant_size_model::{Segment, StorageModel};
 use tokio::sync::Semaphore;
+use tokio::sync::oneshot::error::RecvError;
 use tokio_util::sync::CancellationToken;
-
-use crate::context::RequestContext;
-use crate::pgdatadir_mapping::CalculateLogicalSizeError;
-
-use super::{GcError, LogicalSizeCalculationCause, Tenant};
-use crate::tenant::{MaybeOffloaded, Timeline};
+use tracing::*;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
 
-use tracing::*;
-
-use tenant_size_model::{Segment, StorageModel};
+use super::{GcError, LogicalSizeCalculationCause, Tenant};
+use crate::context::RequestContext;
+use crate::pgdatadir_mapping::CalculateLogicalSizeError;
+use crate::tenant::{MaybeOffloaded, Timeline};
 
 /// Inputs to the actual tenant sizing model
 ///
@@ -36,7 +33,7 @@ pub struct ModelInputs {
 }
 
 /// A [`Segment`], with some extra information for display purposes
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct SegmentMeta {
     pub segment: Segment,
     pub timeline_id: TimelineId,
@@ -251,6 +248,8 @@ pub(super) async fn gather_inputs(
             None
         };
 
+        let branch_is_invisible = timeline.is_invisible() == Some(true);
+
         let lease_points = gc_info
             .leases
             .keys()
@@ -274,7 +273,10 @@ pub(super) async fn gather_inputs(
             .map(|(lsn, _child_id, _is_offloaded)| (lsn, LsnKind::BranchPoint))
             .collect::<Vec<_>>();
 
-        lsns.extend(lease_points.iter().map(|&lsn| (lsn, LsnKind::LeasePoint)));
+        if !branch_is_invisible {
+            // Do not count lease points for invisible branches.
+            lsns.extend(lease_points.iter().map(|&lsn| (lsn, LsnKind::LeasePoint)));
+        }
 
         drop(gc_info);
 
@@ -290,7 +292,9 @@ pub(super) async fn gather_inputs(
 
         // Add a point for the PITR cutoff
         let branch_start_needed = next_pitr_cutoff <= branch_start_lsn;
-        if !branch_start_needed {
+        if !branch_start_needed && !branch_is_invisible {
+            // Only add the GcCutOff point when the timeline is visible; otherwise, do not compute the size for the LSN
+            // range from the last branch point to the latest data.
             lsns.push((next_pitr_cutoff, LsnKind::GcCutOff));
         }
 
@@ -376,11 +380,19 @@ pub(super) async fn gather_inputs(
             }
         }
 
+        let branch_end_lsn = if branch_is_invisible {
+            // If the branch is invisible, the branch end is the last requested LSN (likely a branch cutoff point).
+            segments.last().unwrap().segment.lsn
+        } else {
+            // Otherwise, the branch end is the last record LSN.
+            last_record_lsn.0
+        };
+
         // Current end of the timeline
         segments.push(SegmentMeta {
             segment: Segment {
                 parent: Some(parent),
-                lsn: last_record_lsn.0,
+                lsn: branch_end_lsn,
                 size: None, // Filled in later, if necessary
                 needed: true,
             },
@@ -477,7 +489,7 @@ async fn fill_logical_sizes(
             if cached_size.is_none() {
                 let timeline = Arc::clone(timeline_hash.get(&timeline_id).unwrap());
                 let parallel_size_calcs = Arc::clone(limit);
-                let ctx = ctx.attached_child();
+                let ctx = ctx.attached_child().with_scope_timeline(&timeline);
                 joinset.spawn(
                     calculate_logical_size(parallel_size_calcs, timeline, lsn, cause, ctx)
                         .in_current_span(),
@@ -498,7 +510,9 @@ async fn fill_logical_sizes(
             }
             Err(join_error) => {
                 // cannot really do anything, as this panic is likely a bug
-                error!("task that calls spawn_ondemand_logical_size_calculation panicked: {join_error:#}");
+                error!(
+                    "task that calls spawn_ondemand_logical_size_calculation panicked: {join_error:#}"
+                );
 
                 have_any_error = Some(CalculateSyntheticSizeError::Fatal(
                     anyhow::anyhow!(join_error)
@@ -610,6 +624,7 @@ async fn calculate_logical_size(
     Ok(TimelineAtLsnSizeResult(timeline, lsn, size_res))
 }
 
+#[cfg(test)]
 #[test]
 fn verify_size_for_multiple_branches() {
     // this is generated from integration test test_tenant_size_with_multiple_branches, but this way
@@ -767,6 +782,7 @@ fn verify_size_for_multiple_branches() {
     assert_eq!(inputs.calculate(), 37_851_408);
 }
 
+#[cfg(test)]
 #[test]
 fn verify_size_for_one_branch() {
     let doc = r#"

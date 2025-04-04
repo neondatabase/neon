@@ -1,22 +1,21 @@
-use std::{str::FromStr, time::Duration};
+use std::str::FromStr;
+use std::time::Duration;
 
-use anyhow::anyhow;
-use pageserver_api::{
-    controller_api::{
-        AvailabilityZone, NodeAvailability, NodeDescribeResponse, NodeRegisterRequest,
-        NodeSchedulingPolicy, TenantLocateResponseShard,
-    },
-    shard::TenantShardId,
+use pageserver_api::controller_api::{
+    AvailabilityZone, NodeAvailability, NodeDescribeResponse, NodeRegisterRequest,
+    NodeSchedulingPolicy, TenantLocateResponseShard,
 };
+use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use reqwest::StatusCode;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
-use utils::{backoff, id::NodeId};
+use utils::backoff;
+use utils::id::NodeId;
 
-use crate::{
-    pageserver_client::PageserverClient, persistence::NodePersistence, scheduler::MaySchedule,
-};
+use crate::pageserver_client::PageserverClient;
+use crate::persistence::NodePersistence;
+use crate::scheduler::MaySchedule;
 
 /// Represents the in-memory description of a Node.
 ///
@@ -211,7 +210,10 @@ impl Node {
         use_https: bool,
     ) -> anyhow::Result<Self> {
         if use_https && listen_https_port.is_none() {
-            return Err(anyhow!("https is enabled, but node has no https port"));
+            anyhow::bail!(
+                "cannot create node {id}: \
+                https is enabled, but https port is not specified"
+            );
         }
 
         Ok(Self {
@@ -244,7 +246,11 @@ impl Node {
 
     pub(crate) fn from_persistent(np: NodePersistence, use_https: bool) -> anyhow::Result<Self> {
         if use_https && np.listen_https_port.is_none() {
-            return Err(anyhow!("https is enabled, but node has no https port"));
+            anyhow::bail!(
+                "cannot load node {} from persistent: \
+                https is enabled, but https port is not specified",
+                np.node_id,
+            );
         }
 
         Ok(Self {
@@ -270,9 +276,11 @@ impl Node {
     /// This will return None to indicate cancellation.  Cancellation may happen from
     /// the cancellation token passed in, or from Self's cancellation token (i.e. node
     /// going offline).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn with_client_retries<T, O, F>(
         &self,
         mut op: O,
+        http_client: &reqwest::Client,
         jwt: &Option<String>,
         warn_threshold: u32,
         max_retries: u32,
@@ -292,30 +300,29 @@ impl Node {
                 | ApiError(StatusCode::REQUEST_TIMEOUT, _) => false,
                 ApiError(_, _) => true,
                 Cancelled => true,
+                Timeout(_) => false,
             }
         }
 
         backoff::retry(
             || {
-                let http_client = reqwest::ClientBuilder::new()
-                    .timeout(timeout)
-                    .build()
-                    .expect("Failed to construct HTTP client");
-
-                let client = PageserverClient::from_client(
+                let client = PageserverClient::new(
                     self.get_id(),
-                    http_client,
+                    http_client.clone(),
                     self.base_url(),
                     jwt.as_deref(),
                 );
 
                 let node_cancel_fut = self.cancel.cancelled();
 
-                let op_fut = op(client);
+                let op_fut = tokio::time::timeout(timeout, op(client));
 
                 async {
                     tokio::select! {
-                        r = op_fut=> {r},
+                        r = op_fut => match r {
+                            Ok(r) => r,
+                            Err(e) => Err(mgmt_api::Error::Timeout(format!("{e}"))),
+                        },
                         _ = node_cancel_fut => {
                         Err(mgmt_api::Error::Cancelled)
                     }}

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import psycopg2
 import pytest
-from fixtures.neon_fixtures import (
-    NeonProxy,
-    VanillaPostgres,
-)
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import (
+        NeonProxy,
+        VanillaPostgres,
+    )
 
 TABLE_NAME = "neon_control_plane.endpoints"
 

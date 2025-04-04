@@ -1,29 +1,29 @@
 //! Types used in safekeeper http API. Many of them are also reused internally.
 
+use std::net::SocketAddr;
+
 use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::TimestampTz;
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
 use tokio::time::Instant;
+use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
+use utils::lsn::Lsn;
+use utils::pageserver_feedback::PageserverFeedback;
 
-use utils::{
-    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
-    lsn::Lsn,
-    pageserver_feedback::PageserverFeedback,
-};
-
-use crate::{membership::Configuration, ServerInfo, Term};
+use crate::membership::Configuration;
+use crate::{ServerInfo, Term};
 
 #[derive(Debug, Serialize)]
 pub struct SafekeeperStatus {
     pub id: NodeId,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct TimelineCreateRequest {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
     pub mconf: Configuration,
+    /// In the PG_VERSION_NUM macro format, like 140017.
     pub pg_version: u32,
     pub system_id: Option<u64>,
     // By default WAL_SEGMENT_SIZE
@@ -71,6 +71,7 @@ pub struct PeerInfo {
     pub ts: Instant,
     pub pg_connstr: String,
     pub http_connstr: String,
+    pub https_connstr: Option<String>,
 }
 
 pub type FullTransactionId = u64;
@@ -222,6 +223,13 @@ pub struct TimelineMembershipSwitchResponse {
     pub current_conf: Configuration,
 }
 
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct TimelineDeleteResult {
+    pub dir_existed: bool,
+}
+
+pub type TenantDeleteResult = std::collections::HashMap<String, TimelineDeleteResult>;
+
 fn lsn_invalid() -> Lsn {
     Lsn::INVALID
 }
@@ -254,6 +262,8 @@ pub struct SkTimelineInfo {
     pub safekeeper_connstr: Option<String>,
     #[serde(default)]
     pub http_connstr: Option<String>,
+    #[serde(default)]
+    pub https_connstr: Option<String>,
     // Minimum of all active RO replicas flush LSN
     #[serde(default = "lsn_invalid")]
     pub standby_horizon: Lsn,
@@ -284,7 +294,7 @@ pub struct SafekeeperUtilization {
 }
 
 /// pull_timeline request body.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PullTimelineRequest {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,

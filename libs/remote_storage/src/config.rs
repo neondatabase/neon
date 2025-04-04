@@ -1,8 +1,10 @@
-use std::{fmt::Debug, num::NonZeroUsize, str::FromStr, time::Duration};
+use std::fmt::Debug;
+use std::num::NonZeroUsize;
+use std::str::FromStr;
+use std::time::Duration;
 
 use aws_sdk_s3::types::StorageClass;
 use camino::Utf8PathBuf;
-
 use serde::{Deserialize, Serialize};
 
 use crate::{

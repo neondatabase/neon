@@ -1,9 +1,12 @@
 use std::sync::Arc;
 
-use axum::{extract::State, response::Response};
+use axum::extract::State;
+use axum::response::Response;
 use http::StatusCode;
 
-use crate::{catalog::get_dbs_and_roles, compute::ComputeNode, http::JsonResponse};
+use crate::catalog::get_dbs_and_roles;
+use crate::compute::ComputeNode;
+use crate::http::JsonResponse;
 
 /// Get the databases and roles from the compute.
 pub(in crate::http) async fn get_catalog_objects(

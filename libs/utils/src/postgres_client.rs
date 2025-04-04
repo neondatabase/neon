@@ -3,7 +3,7 @@
 //! postgres_connection crate.
 
 use anyhow::Context;
-use postgres_connection::{parse_host_port, PgConnectionConfig};
+use postgres_connection::{PgConnectionConfig, parse_host_port};
 
 use crate::id::TenantTimelineId;
 

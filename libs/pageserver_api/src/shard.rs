@@ -33,12 +33,13 @@
 
 use std::hash::{Hash, Hasher};
 
-use crate::{key::Key, models::ShardParameters};
+#[doc(inline)]
+pub use ::utils::shard::*;
 use postgres_ffi::relfile_utils::INIT_FORKNUM;
 use serde::{Deserialize, Serialize};
 
-#[doc(inline)]
-pub use ::utils::shard::*;
+use crate::key::Key;
+use crate::models::ShardParameters;
 
 /// The ShardIdentity contains enough information to map a [`Key`] to a [`ShardNumber`],
 /// and to check whether that [`ShardNumber`] is the same as the current shard.
@@ -109,6 +110,16 @@ impl ShardIdentity {
             layout: LAYOUT_V1,
             stripe_size: DEFAULT_STRIPE_SIZE,
         }
+    }
+
+    /// An unsharded identity with the given stripe size (if non-zero). This is typically used to
+    /// carry over a stripe size for an unsharded tenant from persistent storage.
+    pub fn unsharded_with_stripe_size(stripe_size: ShardStripeSize) -> Self {
+        let mut shard_identity = Self::unsharded();
+        if stripe_size.0 > 0 {
+            shard_identity.stripe_size = stripe_size;
+        }
+        shard_identity
     }
 
     /// A broken instance of this type is only used for `TenantState::Broken` tenants,
@@ -337,7 +348,8 @@ pub fn describe(
 mod tests {
     use std::str::FromStr;
 
-    use utils::{id::TenantId, Hex};
+    use utils::Hex;
+    use utils::id::TenantId;
 
     use super::*;
 
