@@ -410,10 +410,13 @@ impl DeleteTimelineFlow {
         // So indeed, the tenant manifest might refer to an offloaded timeline which has already been deleted.
         // However, we handle this case in tenant loading code so the next time we attach, the issue is
         // resolved.
-        tenant.store_tenant_manifest().await.map_err(|e| match e {
-            TenantManifestError::Cancelled => DeleteTimelineError::Cancelled,
-            _ => DeleteTimelineError::Other(e.into()),
-        })?;
+        tenant
+            .maybe_upload_tenant_manifest()
+            .await
+            .map_err(|err| match err {
+                TenantManifestError::Cancelled => DeleteTimelineError::Cancelled,
+                err => DeleteTimelineError::Other(err.into()),
+            })?;
 
         *guard = Self::Finished;
 
