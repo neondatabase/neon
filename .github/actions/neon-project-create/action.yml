@@ -70,23 +70,6 @@ runs:
       # A shell without `set -x` to not to expose password/dsn in logs
       shell: bash -euo pipefail {0}
       run: |
-        echo curl \
-          "https://${API_HOST}/api/v2/projects" \
-          --fail \
-          --header "Accept: application/json" \
-          --header "Content-Type: application/json" \
-          --header "Authorization: Bearer ${API_KEY}" \
-          --data "{
-            \"project\": {
-              \"name\": \"Created by actions/neon-project-create; GITHUB_RUN_ID=${GITHUB_RUN_ID}\",
-              \"pg_version\": ${POSTGRES_VERSION},
-              \"region_id\": \"${REGION_ID}\",
-              \"provisioner\": \"k8s-neonvm\",
-              \"autoscaling_limit_min_cu\": ${MIN_CU},
-              \"autoscaling_limit_max_cu\": ${MAX_CU},
-              \"settings\": ${PROJECT_SETTINGS}
-            }
-          }"
         project=$(curl \
           "https://${API_HOST}/api/v2/projects" \
           --fail \
