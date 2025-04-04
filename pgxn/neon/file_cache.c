@@ -1567,8 +1567,12 @@ local_cache_pages(PG_FUNCTION_ARGS)
 				hash_seq_init(&status, lfc_hash);
 				while ((entry = hash_seq_search(&status)) != NULL)
 				{
-					for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
-						n_pages += GET_STATE(entry, i) == AVAILABLE;
+					/* Skip hole tags */
+					if (NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key)) != 0)
+					{
+						for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
+							n_pages += GET_STATE(entry, i) == AVAILABLE;
+					}
 				}
 			}
 		}
