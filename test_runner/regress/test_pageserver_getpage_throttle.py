@@ -191,3 +191,7 @@ def test_throttle_fair_config_is_settable_but_ignored_in_config_toml(
     ps_http = env.pageserver.http_client()
     conf = ps_http.tenant_config(env.initial_tenant)
     assert_throttle_config_with_field_fair_set(conf.effective_config["timeline_get_throttle"])
+
+    env.pageserver.allowed_errors.append(
+        r'.*ignoring unknown configuration item path="tenant_config\.timeline_get_throttle\.fair"*'
+    )

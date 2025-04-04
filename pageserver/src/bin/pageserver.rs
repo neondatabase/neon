@@ -15,7 +15,7 @@ use clap::{Arg, ArgAction, Command};
 use metrics::launch_timestamp::{LaunchTimestamp, set_launch_timestamp_metric};
 use metrics::set_build_info_metric;
 use nix::sys::socket::{setsockopt, sockopt};
-use pageserver::config::{PageServerConf, PageserverIdentity};
+use pageserver::config::{PageServerConf, PageserverIdentity, ignored_fields};
 use pageserver::controller_upcall_client::StorageControllerUpcallClient;
 use pageserver::deletion_queue::DeletionQueue;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
@@ -130,7 +130,7 @@ fn main() -> anyhow::Result<()> {
     // Warn about ignored config items; see pageserver_api::config::ConfigToml
     // doc comment for rationale why we prefer this over serde(deny_unknown_fields).
     {
-        let IgnoredConfigItems { paths } = ignored;
+        let ignored_fields::Paths { paths } = &ignored;
         for path in paths {
             warn!(?path, "ignoring unknown configuration item");
         }
@@ -200,21 +200,17 @@ fn main() -> anyhow::Result<()> {
     tracing::info!("Initializing page_cache...");
     page_cache::init(conf.page_cache_size);
 
-    start_pageserver(launch_ts, conf).context("Failed to start pageserver")?;
+    start_pageserver(launch_ts, conf, ignored).context("Failed to start pageserver")?;
 
     scenario.teardown();
     Ok(())
-}
-
-struct IgnoredConfigItems {
-    paths: Vec<String>,
 }
 
 fn initialize_config(
     identity_file_path: &Utf8Path,
     cfg_file_path: &Utf8Path,
     workdir: &Utf8Path,
-) -> anyhow::Result<(&'static PageServerConf, IgnoredConfigItems)> {
+) -> anyhow::Result<(&'static PageServerConf, ignored_fields::Paths)> {
     // The deployment orchestrator writes out an indentity file containing the node id
     // for all pageservers. This file is the source of truth for the node id. In order
     // to allow for rolling back pageserver releases, the node id is also included in
@@ -243,19 +239,35 @@ fn initialize_config(
 
     let config_file_contents =
         std::fs::read_to_string(cfg_file_path).context("read config file from filesystem")?;
-    let deserializer = toml_edit::de::Deserializer::from_str(&config_file_contents)
-        .context("build toml deserializer")?;
-    let mut path_to_error_track = serde_path_to_error::Track::new();
-    let deserializer =
-        serde_path_to_error::Deserializer::new(deserializer, &mut path_to_error_track);
-    let config_toml: pageserver_api::config::ConfigToml =
-        serde::Deserialize::deserialize(deserializer).context("deserialize config toml")?;
+
+    // Deserialize the config file contents into a ConfigToml.
+    let config_toml: pageserver_api::config::ConfigToml = {
+        let deserializer = toml_edit::de::Deserializer::from_str(&config_file_contents)
+            .context("build toml deserializer")?;
+        let mut path_to_error_track = serde_path_to_error::Track::new();
+        let deserializer =
+            serde_path_to_error::Deserializer::new(deserializer, &mut path_to_error_track);
+        serde::Deserialize::deserialize(deserializer).context("deserialize config toml")?
+    };
+
+    // Find unknown fields by re-serializing the parsed ConfigToml and comparing it to the on-disk file.
+    // Any fields that are only in the on-disk version are unknown.
+    // (The assumption here is that the ConfigToml doesn't to skip_serializing_if.)
+    // (Make sure to read the ConfigToml doc comment on why we only want to warn about, but not fail startup, on unknown fields).
+    let ignored = {
+        let ondisk_toml = config_file_contents
+            .parse::<toml_edit::DocumentMut>()
+            .context("parse original config as toml document")?;
+        let parsed_toml = toml_edit::ser::to_document(&config_toml)
+            .context("re-serialize config to toml document")?;
+        pageserver::config::ignored_fields::find(ondisk_toml, parsed_toml)
+    };
+
+    // Construct the runtime god object (it's called PageServerConf but actually is just global shared state).
     let conf = PageServerConf::parse_and_validate(identity.id, config_toml, workdir)
         .context("runtime-validation of config toml")?;
     let conf = Box::leak(Box::new(conf));
-    let ignored = IgnoredConfigItems {
-        paths: vec![], /* TODO: https://github.com/neondatabase/neon/issues/11322 */
-    };
+
     Ok((conf, ignored))
 }
 
@@ -307,6 +319,7 @@ fn startup_checkpoint(started_at: Instant, phase: &str, human_phase: &str) {
 fn start_pageserver(
     launch_ts: &'static LaunchTimestamp,
     conf: &'static PageServerConf,
+    ignored: ignored_fields::Paths,
 ) -> anyhow::Result<()> {
     // Monotonic time for later calculating startup duration
     let started_startup_at = Instant::now();
@@ -329,7 +342,7 @@ fn start_pageserver(
         pageserver::metrics::tokio_epoll_uring::Collector::new(),
     ))
     .unwrap();
-    pageserver::preinitialize_metrics(conf);
+    pageserver::preinitialize_metrics(conf, ignored);
 
     // If any failpoints were set from FAILPOINTS environment variable,
     // print them to the log for debugging purposes

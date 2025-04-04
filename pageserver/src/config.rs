@@ -4,6 +4,8 @@
 //! file, or on the command line.
 //! See also `settings.md` for better description on every parameter.
 
+pub mod ignored_fields;
+
 use std::env;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
