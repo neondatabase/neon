@@ -1810,7 +1810,7 @@ impl Tenant {
         // IndexPart is the source of truth.
         self.clean_up_timelines(&existent_timelines)?;
 
-        self.gc_block.set_scanned(gc_blocks);
+        self.gc_block.set_scanned(gc_blocks).await;
 
         fail::fail_point!("attach-before-activate", |_| {
             anyhow::bail!("attach-before-activate");
