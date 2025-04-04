@@ -111,14 +111,14 @@ impl<T> OnceCell<T> {
         }
     }
 
-    /// Like [`Self::get_or_init_detached2`], but without out parameter for time spent waiting.
+    /// Like [`Self::get_or_init_detached_measured`], but without out parameter for time spent waiting.
     pub async fn get_or_init_detached(&self) -> Result<Guard<'_, T>, InitPermit> {
-        self.get_or_init_detached2(None).await
+        self.get_or_init_detached_measured(None).await
     }
 
     /// Returns a guard to an existing initialized value, or returns an unique initialization
     /// permit which can be used to initialize this `OnceCell` using `OnceCell::set`.
-    pub async fn get_or_init_detached2(
+    pub async fn get_or_init_detached_measured(
         &self,
         mut wait_time: Option<&mut crate::elapsed_accum::ElapsedAccum>,
     ) -> Result<Guard<'_, T>, InitPermit> {

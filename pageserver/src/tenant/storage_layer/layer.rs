@@ -987,7 +987,7 @@ impl LayerInner {
 
             let locked = self
                 .inner
-                .get_or_init_detached2(Some(&mut wait_for_download_recorder))
+                .get_or_init_detached_measured(Some(&mut wait_for_download_recorder))
                 .await
                 .map(|mut guard| guard.get_and_upgrade().ok_or(guard));
 
