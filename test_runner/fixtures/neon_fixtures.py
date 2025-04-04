@@ -1307,9 +1307,7 @@ class NeonEnv:
                 # Compatibility tests run with old binaries that predate feature code & config.
                 # So, old binaries will warn about the flag's presence.
                 # Silence those warnings categorically.
-                log.info(
-                    "test may use old binaries, ignoring warnings about unknown config items"
-                )
+                log.info("test may use old binaries, ignoring warnings about unknown config items")
                 ps.allowed_errors.append(".*ignoring unknown configuration item.*")
 
             self.pageservers.append(ps)
