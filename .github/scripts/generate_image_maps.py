@@ -8,7 +8,7 @@ target_tag = os.getenv("TARGET_TAG")
 branch = os.getenv("BRANCH")
 dev_acr = os.getenv("DEV_ACR")
 prod_acr = os.getenv("PROD_ACR")
-dev_aws = os.getenv("DEV_AWS")
+dev_aws = "12345"
 prod_aws = os.getenv("PROD_AWS")
 aws_region = os.getenv("AWS_REGION")
 
