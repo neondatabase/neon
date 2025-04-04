@@ -89,7 +89,7 @@
 //! [`RequestContext`] argument. Functions in the middle of the call chain
 //! only need to pass it on.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use once_cell::sync::Lazy;
 use tracing::warn;
@@ -563,6 +563,34 @@ impl RequestContext {
             #[cfg(test)]
             Scope::UnitTest { io_size_metrics } => io_size_metrics,
             Scope::DebugTools { io_size_metrics } => io_size_metrics,
+        }
+    }
+
+    pub(crate) fn ondemand_download_wait_observe(&self, duration: Duration) {
+        if duration == Duration::ZERO {
+            return;
+        }
+
+        match &self.scope {
+            Scope::Timeline { arc_arc } => arc_arc
+                .wait_ondemand_download_time
+                .observe(self.task_kind, duration),
+            _ => {
+                use once_cell::sync::Lazy;
+                use std::sync::Mutex;
+                use std::time::Duration;
+                use utils::rate_limit::RateLimit;
+                static LIMIT: Lazy<Mutex<RateLimit>> =
+                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(1))));
+                let mut guard = LIMIT.lock().unwrap();
+                guard.call2(|rate_limit_stats| {
+                    warn!(
+                        %rate_limit_stats,
+                        backtrace=%std::backtrace::Backtrace::force_capture(),
+                        "ondemand downloads should always happen within timeline scope",
+                    );
+                });
+            }
         }
     }
 
