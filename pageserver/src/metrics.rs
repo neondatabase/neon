@@ -3485,7 +3485,7 @@ impl RemoteTimelineClientMetrics {
     ) -> Histogram {
         REMOTE_TIMELINE_CLIENT_COMPLETION_LATENCY
             .get_metric_with_label_values(&[
-                task_kind.as_ref().map(|tk| tk.into()).unwrap_or("*"),
+                task_kind.as_ref().map(|tk| tk.into()).unwrap_or("unknown"),
                 file_kind.as_str(),
                 op_kind.as_str(),
                 status,
