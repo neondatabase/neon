@@ -33,6 +33,7 @@
     import 'sql_exporter/lfc_hits.libsonnet',
     import 'sql_exporter/lfc_misses.libsonnet',
     import 'sql_exporter/lfc_used.libsonnet',
+    import 'sql_exporter/lfc_used_pages.libsonnet',
     import 'sql_exporter/lfc_writes.libsonnet',
     import 'sql_exporter/logical_slot_restart_lsn.libsonnet',
     import 'sql_exporter/max_cluster_size.libsonnet',

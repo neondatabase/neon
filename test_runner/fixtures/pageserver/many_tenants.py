@@ -43,7 +43,7 @@ def single_timeline(
         f"template tenant is template_tenant={template_tenant} template_timeline={template_timeline}"
     )
 
-    log.info("detach template tenant form pageserver")
+    log.info("detach template tenant from pageserver")
     env.pageserver.tenant_detach(template_tenant)
 
     log.info(f"duplicating template tenant {ncopies} times in remote storage")
@@ -65,11 +65,13 @@ def single_timeline(
     assert ps_http.tenant_list() == []
 
     def attach(tenant):
-        env.pageserver.tenant_attach(
-            tenant,
-            config=template_config.copy(),
-            generation=100,
-            override_storage_controller_generation=True,
+        # NB: create the new tenant in the storage controller with the correct tenant config. This
+        # will pick up the existing tenant data from remote storage. If we just attach it to the
+        # Pageserver, the storage controller will reset the tenant config to the default.
+        env.create_tenant(
+            tenant_id=tenant,
+            timeline_id=template_timeline,
+            conf=template_config,
         )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=22) as executor:

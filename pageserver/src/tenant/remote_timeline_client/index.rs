@@ -130,7 +130,7 @@ impl IndexPart {
     /// Version history
     /// - 2: added `deleted_at`
     /// - 3: no longer deserialize `timeline_layers` (serialized format is the same, but timeline_layers
-    ///      is always generated from the keys of `layer_metadata`)
+    ///   is always generated from the keys of `layer_metadata`)
     /// - 4: timeline_layers is fully removed.
     /// - 5: lineage was added
     /// - 6: last_aux_file_policy is added.

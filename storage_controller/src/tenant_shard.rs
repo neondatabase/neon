@@ -622,7 +622,7 @@ impl TenantShard {
             .collect::<Vec<_>>();
 
         attached_locs.sort_by_key(|i| i.1);
-        if let Some((node_id, _gen)) = attached_locs.into_iter().last() {
+        if let Some((node_id, _gen)) = attached_locs.into_iter().next_back() {
             self.intent.set_attached(scheduler, Some(*node_id));
         }
 

@@ -121,6 +121,7 @@ pub struct SafeKeeperConf {
     pub ssl_cert_file: Utf8PathBuf,
     pub ssl_cert_reload_period: Duration,
     pub ssl_ca_certs: Vec<Certificate>,
+    pub use_https_safekeeper_api: bool,
 }
 
 impl SafeKeeperConf {
@@ -170,6 +171,7 @@ impl SafeKeeperConf {
             ssl_cert_file: Utf8PathBuf::from(defaults::DEFAULT_SSL_CERT_FILE),
             ssl_cert_reload_period: Duration::from_secs(60),
             ssl_ca_certs: Vec::new(),
+            use_https_safekeeper_api: false,
         }
     }
 }

@@ -639,6 +639,15 @@ async fn handle_tenant_timeline_passthrough(
         return Err(ApiError::BadRequest(anyhow::anyhow!("Missing path")));
     };
 
+    let method = match *req.method() {
+        hyper::Method::GET => reqwest::Method::GET,
+        hyper::Method::POST => reqwest::Method::POST,
+        hyper::Method::PUT => reqwest::Method::PUT,
+        hyper::Method::DELETE => reqwest::Method::DELETE,
+        hyper::Method::PATCH => reqwest::Method::PATCH,
+        _ => return Err(ApiError::BadRequest(anyhow::anyhow!("Unsupported method"))),
+    };
+
     tracing::info!(
         "Proxying request for tenant {} ({})",
         tenant_or_shard_id.tenant_id,
@@ -686,7 +695,7 @@ async fn handle_tenant_timeline_passthrough(
         node.base_url(),
         service.get_config().pageserver_jwt_token.as_deref(),
     );
-    let resp = client.get_raw(path).await.map_err(|e|
+    let resp = client.op_raw(method, path).await.map_err(|e|
         // We return 503 here because if we can't successfully send a request to the pageserver,
         // either we aren't available or the pageserver is unavailable.
         ApiError::ResourceUnavailable(format!("Error sending pageserver API request to {node}: {e}").into()))?;
@@ -1407,6 +1416,12 @@ async fn handle_upsert_safekeeper(mut req: Request<Body>) -> Result<Response<Bod
         )));
     }
 
+    if id <= 0 {
+        return Err(ApiError::BadRequest(anyhow::anyhow!(
+            "id not allowed to be zero or negative: {id}"
+        )));
+    }
+
     let req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
             return res;
@@ -1718,9 +1733,9 @@ async fn maybe_forward(req: Request<Body>) -> ForwardOutcome {
         };
 
         if *self_addr == leader_addr {
-            return ForwardOutcome::Forwarded(Err(ApiError::InternalServerError(anyhow::anyhow!(
-                "Leader is stepped down instance"
-            ))));
+            return ForwardOutcome::Forwarded(Err(ApiError::ResourceUnavailable(
+                "Leader is stepped down instance".into(),
+            )));
         }
     }
 
@@ -1729,19 +1744,17 @@ async fn maybe_forward(req: Request<Body>) -> ForwardOutcome {
     // Use [`RECONCILE_TIMEOUT`] as the max amount of time a request should block for and
     // include some leeway to get the timeout for proxied requests.
     const PROXIED_REQUEST_TIMEOUT: Duration = Duration::from_secs(RECONCILE_TIMEOUT.as_secs() + 10);
-    let client = reqwest::ClientBuilder::new()
-        .timeout(PROXIED_REQUEST_TIMEOUT)
-        .build();
-    let client = match client {
-        Ok(client) => client,
-        Err(err) => {
-            return ForwardOutcome::Forwarded(Err(ApiError::InternalServerError(anyhow::anyhow!(
-                "Failed to build leader client for forwarding while in stepped down state: {err}"
-            ))));
-        }
-    };
 
-    let request: reqwest::Request = match convert_request(req, &client, leader.address).await {
+    let client = state.service.get_http_client().clone();
+
+    let request: reqwest::Request = match convert_request(
+        req,
+        &client,
+        leader.address,
+        PROXIED_REQUEST_TIMEOUT,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(err) => {
             return ForwardOutcome::Forwarded(Err(ApiError::InternalServerError(anyhow::anyhow!(
@@ -1799,6 +1812,7 @@ async fn convert_request(
     req: hyper::Request<Body>,
     client: &reqwest::Client,
     to_address: String,
+    timeout: Duration,
 ) -> Result<reqwest::Request, ApiError> {
     use std::str::FromStr;
 
@@ -1853,6 +1867,7 @@ async fn convert_request(
         .request(method, uri)
         .headers(headers)
         .body(body)
+        .timeout(timeout)
         .build()
         .map_err(|err| {
             ApiError::InternalServerError(anyhow::anyhow!("Request conversion failed: {err}"))
@@ -2247,6 +2262,17 @@ pub fn make_router(
                 RequestName("v1_tenant_passthrough"),
             )
         })
+        // Tenant timeline mark_invisible passthrough to shard zero
+        .put(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/mark_invisible",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_timeline_passthrough,
+                    RequestName("v1_tenant_timeline_mark_invisible_passthrough"),
+                )
+            },
+        )
 }
 
 #[cfg(test)]

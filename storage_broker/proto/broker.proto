@@ -45,8 +45,10 @@ message SafekeeperTimelineInfo {
     uint64 standby_horizon = 14;
     // A connection string to use for WAL receiving.
     string safekeeper_connstr = 10;
-    // HTTP endpoint connection string
+    // HTTP endpoint connection string.
     string http_connstr = 13;
+    // HTTPS endpoint connection string.
+    optional string https_connstr = 15;
     // Availability zone of a safekeeper.
     optional string availability_zone = 11;
 }

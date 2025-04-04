@@ -1524,25 +1524,14 @@ impl Persistence {
     /// Load pending operations from db.
     pub(crate) async fn list_pending_ops(
         &self,
-        filter_for_sk: Option<NodeId>,
     ) -> DatabaseResult<Vec<TimelinePendingOpPersistence>> {
         use crate::schema::safekeeper_timeline_pending_ops::dsl;
 
-        const FILTER_VAL_1: i64 = 1;
-        const FILTER_VAL_2: i64 = 2;
-        let filter_opt = filter_for_sk.map(|id| id.0 as i64);
         let timeline_from_db = self
             .with_measured_conn(DatabaseOperation::ListTimelineReconcile, move |conn| {
                 Box::pin(async move {
                     let from_db: Vec<TimelinePendingOpPersistence> =
-                        dsl::safekeeper_timeline_pending_ops
-                            .filter(
-                                dsl::sk_id
-                                    .eq(filter_opt.unwrap_or(FILTER_VAL_1))
-                                    .and(dsl::sk_id.eq(filter_opt.unwrap_or(FILTER_VAL_2))),
-                            )
-                            .load(conn)
-                            .await?;
+                        dsl::safekeeper_timeline_pending_ops.load(conn).await?;
                     Ok(from_db)
                 })
             })

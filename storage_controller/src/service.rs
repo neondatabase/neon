@@ -1711,7 +1711,7 @@ impl Service {
             ))),
             config: config.clone(),
             persistence,
-            compute_hook: Arc::new(ComputeHook::new(config.clone())),
+            compute_hook: Arc::new(ComputeHook::new(config.clone())?),
             result_tx,
             heartbeater_ps,
             heartbeater_sk,

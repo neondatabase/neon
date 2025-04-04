@@ -110,6 +110,7 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*delaying layer flush by \\S+ for compaction backpressure.*",
     ".*stalling layer flushes for compaction backpressure.*",
     ".*layer roll waiting for flush due to compaction backpressure.*",
+    ".*BatchSpanProcessor.*",
 )
 
 
@@ -118,6 +119,7 @@ DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS = [
     # failing to connect to them.
     ".*Call to node.*management API.*failed.*receive body.*",
     ".*Call to node.*management API.*failed.*ReceiveBody.*",
+    ".*Call to node.*management API.*failed.*Timeout.*",
     ".*Failed to update node .+ after heartbeat round.*error sending request for url.*",
     ".*background_reconcile: failed to fetch top tenants:.*client error \\(Connect\\).*",
     # Many tests will start up with a node offline

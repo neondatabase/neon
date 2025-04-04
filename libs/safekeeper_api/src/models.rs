@@ -71,6 +71,7 @@ pub struct PeerInfo {
     pub ts: Instant,
     pub pg_connstr: String,
     pub http_connstr: String,
+    pub https_connstr: Option<String>,
 }
 
 pub type FullTransactionId = u64;
@@ -227,6 +228,8 @@ pub struct TimelineDeleteResult {
     pub dir_existed: bool,
 }
 
+pub type TenantDeleteResult = std::collections::HashMap<String, TimelineDeleteResult>;
+
 fn lsn_invalid() -> Lsn {
     Lsn::INVALID
 }
@@ -259,6 +262,8 @@ pub struct SkTimelineInfo {
     pub safekeeper_connstr: Option<String>,
     #[serde(default)]
     pub http_connstr: Option<String>,
+    #[serde(default)]
+    pub https_connstr: Option<String>,
     // Minimum of all active RO replicas flush LSN
     #[serde(default = "lsn_invalid")]
     pub standby_horizon: Lsn,

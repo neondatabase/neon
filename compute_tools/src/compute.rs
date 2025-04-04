@@ -188,7 +188,7 @@ impl ComputeState {
 
         COMPUTE_CTL_UP.reset();
         COMPUTE_CTL_UP
-            .with_label_values(&[&BUILD_TAG, format!("{}", status).as_str()])
+            .with_label_values(&[&BUILD_TAG, status.to_string().as_str()])
             .set(1);
     }
 
@@ -360,6 +360,14 @@ impl ComputeNode {
             this.prewarm_postgres()?;
         }
 
+        // Set the up metric with Empty status before starting the HTTP server.
+        // That way on the first metric scrape, an external observer will see us
+        // as 'up' and 'empty' (unless the compute was started with a spec or
+        // already configured by control plane).
+        COMPUTE_CTL_UP
+            .with_label_values(&[&BUILD_TAG, ComputeStatus::Empty.to_string().as_str()])
+            .set(1);
+
         // Launch the external HTTP server first, so that we can serve control plane
         // requests while configuration is still in progress.
         crate::http::server::Server::External {
@@ -369,18 +377,12 @@ impl ComputeNode {
         }
         .launch(&this);
 
-        // The internal HTTP server is needed for a further activation by control plane
-        // if compute was started for a pool, so we have to start server before hanging
-        // waiting for a spec.
+        // The internal HTTP server could be launched later, but there isn't much
+        // sense in waiting.
         crate::http::server::Server::Internal {
             port: this.params.internal_http_port,
         }
         .launch(&this);
-
-        // HTTP server is running, so we can officially declare compute_ctl as 'up'
-        COMPUTE_CTL_UP
-            .with_label_values(&[&BUILD_TAG, ComputeStatus::Empty.to_string().as_str()])
-            .set(1);
 
         // If we got a spec from the CLI already, use that. Otherwise wait for the
         // control plane to pass it to us with a /configure HTTP request

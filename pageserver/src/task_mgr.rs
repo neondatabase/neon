@@ -219,8 +219,7 @@ pageserver_runtime!(MGMT_REQUEST_RUNTIME, "mgmt request worker");
 pageserver_runtime!(WALRECEIVER_RUNTIME, "walreceiver worker");
 pageserver_runtime!(BACKGROUND_RUNTIME, "background op worker");
 // Bump this number when adding a new pageserver_runtime!
-// SAFETY: it's obviously correct
-const NUM_MULTIPLE_RUNTIMES: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(4) };
+const NUM_MULTIPLE_RUNTIMES: NonZeroUsize = NonZeroUsize::new(4).unwrap();
 
 #[derive(Debug, Clone, Copy)]
 pub struct PageserverTaskId(u64);

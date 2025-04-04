@@ -3,7 +3,7 @@ use camino::Utf8PathBuf;
 use clap::{Parser, Subcommand};
 use pageserver_api::controller_api::{MetadataHealthUpdateRequest, MetadataHealthUpdateResponse};
 use pageserver_api::shard::TenantShardId;
-use reqwest::{Method, Url};
+use reqwest::{Certificate, Method, Url};
 use storage_controller_client::control_api;
 use storage_scrubber::garbage::{PurgeMode, find_garbage, purge_garbage};
 use storage_scrubber::pageserver_physical_gc::{GcMode, pageserver_physical_gc};
@@ -41,6 +41,10 @@ struct Cli {
     /// If set to true, the scrubber will exit with error code on fatal error.
     #[arg(long, default_value_t = false)]
     exit_code: bool,
+
+    /// Trusted root CA certificates to use in https APIs.
+    #[arg(long)]
+    ssl_ca_file: Option<Utf8PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -146,13 +150,28 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("version: {}, build_tag {}", GIT_VERSION, BUILD_TAG);
 
+    let ssl_ca_certs = match cli.ssl_ca_file.as_ref() {
+        Some(ssl_ca_file) => {
+            tracing::info!("Using ssl root CA file: {ssl_ca_file:?}");
+            let buf = tokio::fs::read(ssl_ca_file).await?;
+            Certificate::from_pem_bundle(&buf)?
+        }
+        None => Vec::new(),
+    };
+
+    let mut http_client = reqwest::Client::builder();
+    for cert in ssl_ca_certs {
+        http_client = http_client.add_root_certificate(cert);
+    }
+    let http_client = http_client.build()?;
+
     let controller_client = cli.controller_api.map(|controller_api| {
         ControllerClientConfig {
             controller_api,
             // Default to no key: this is a convenience when working in a development environment
             controller_jwt: cli.controller_jwt.unwrap_or("".to_owned()),
         }
-        .build_client()
+        .build_client(http_client)
     });
 
     match cli.command {
