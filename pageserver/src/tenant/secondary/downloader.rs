@@ -303,7 +303,7 @@ impl SecondaryDetail {
     ) {
         let removed = self.timelines.remove(timeline_id);
         if let Some(removed) = removed {
-            Self::clear_timeline_metrics(tenant_shard_id, &timeline_id, removed, resident_metric);
+            Self::clear_timeline_metrics(tenant_shard_id, timeline_id, removed, resident_metric);
         }
     }
 
