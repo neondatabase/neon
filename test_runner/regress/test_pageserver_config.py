@@ -26,7 +26,7 @@ def test_unknown_config_items_handling(neon_simple_env: NeonEnv, what: str):
         else:
             raise ValueError(f"Unknown what: {what}")
 
-    def get_metric() -> str:
+    def get_metric():
         metrics = env.pageserver.http_client().get_metrics()
         samples = metrics.query_all("pageserver_config_ignored_items")
         by_item = {sample.labels["item"]: sample.value for sample in samples}
