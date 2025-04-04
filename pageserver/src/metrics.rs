@@ -540,7 +540,7 @@ pub(crate) mod wait_ondemand_download_time {
     }
 
     impl WaitOndemandDownloadTimeSum {
-        pub fn new(tenant_id: &str, shard_id: &str, timeline_id: &str) -> Self {
+        pub(crate) fn new(tenant_id: &str, shard_id: &str, timeline_id: &str) -> Self {
             let counters = WAIT_ONDEMAND_DOWNLOAD_METRIC_TASK_KINDS
                 .iter()
                 .map(|task_kind| {
@@ -558,7 +558,7 @@ pub(crate) mod wait_ondemand_download_time {
                 counters: counters.try_into().unwrap(),
             }
         }
-        pub fn observe(&self, task_kind: TaskKind, duration: Duration) {
+        pub(crate) fn observe(&self, task_kind: TaskKind, duration: Duration) {
             let maybe = WAIT_ONDEMAND_DOWNLOAD_METRIC_TASK_KINDS
                 .iter()
                 .enumerate()
@@ -572,7 +572,7 @@ pub(crate) mod wait_ondemand_download_time {
         }
     }
 
-    pub fn shutdown_timeline(tenant_id: &str, shard_id: &str, timeline_id: &str) {
+    pub(crate) fn shutdown_timeline(tenant_id: &str, shard_id: &str, timeline_id: &str) {
         for task_kind in WAIT_ONDEMAND_DOWNLOAD_METRIC_TASK_KINDS {
             let _ = WAIT_ONDEMAND_DOWNLOAD_TIME_SUM.remove_label_values(&[
                 tenant_id,
@@ -583,7 +583,7 @@ pub(crate) mod wait_ondemand_download_time {
         }
     }
 
-    pub fn preinitialize_global_metrics() {
+    pub(crate) fn preinitialize_global_metrics() {
         Lazy::force(&WAIT_ONDEMAND_DOWNLOAD_TIME_GLOBAL);
     }
 }
