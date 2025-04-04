@@ -1,12 +1,18 @@
-//! Check for fields in the on-disk config file that were ignored when deserializing [`ConfigToml`].
+//! Check for fields in the on-disk config file that were ignored when
+//! deserializing [`pageserver_api::config::ConfigToml`].
+//!
+//! This could have been part of the [`pageserver_api::config`] module,
+//! but the way we identify unused fields in this module
+//! is specific to the format (TOML) and the implementation of the
+//! deserialization for that format ([`toml_edit`]).
 
 use std::collections::HashSet;
 
 use itertools::Itertools;
 
-/// Pass in the user-specified config and the re-serialized [`super::ConfigToml`].
+/// Pass in the user-specified config and the re-serialized [`pageserver_api::config::ConfigToml`].
 /// The returned [`Paths`] contains the paths to the fields that were ignored by deserialization
-/// of the [`super::ConfigToml`].
+/// of the [`pageserver_api::config::ConfigToml`].
 pub fn find(user_specified: toml_edit::DocumentMut, reserialized: toml_edit::DocumentMut) -> Paths {
     let user_specified = paths(user_specified);
     let reserialized = paths(reserialized);
