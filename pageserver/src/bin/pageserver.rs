@@ -624,6 +624,7 @@ fn start_pageserver(
         let https_task = match https_listener {
             Some(https_listener) => {
                 let resolver = MGMT_REQUEST_RUNTIME.block_on(ReloadingCertificateResolver::new(
+                    "main",
                     &conf.ssl_key_file,
                     &conf.ssl_cert_file,
                     conf.ssl_cert_reload_period,

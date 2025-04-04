@@ -472,6 +472,7 @@ async fn async_main() -> anyhow::Result<()> {
             let https_listener = tcp_listener::bind(https_addr)?;
 
             let resolver = ReloadingCertificateResolver::new(
+                "main",
                 &args.ssl_key_file,
                 &args.ssl_cert_file,
                 *args.ssl_cert_reload_period,
