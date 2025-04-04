@@ -25,7 +25,6 @@ use serde::ser::SerializeMap;
 use sha2::{Digest as _, Sha256};
 
 const AZ_LABEL: &str = "topology.kubernetes.io/zone";
-const CSV_FILE_S3_KEY: &str = "lambda/pod_info_dumper/pod_info.csv";
 
 #[derive(Debug)]
 struct Config {
@@ -38,6 +37,7 @@ struct Config {
 struct S3BucketConfig {
     region: String,
     name: String,
+    key: String,
 }
 
 impl S3BucketConfig {
@@ -92,14 +92,15 @@ pub async fn start() -> Result<(), Error> {
     tracing::info!("function handler started");
 
     let config = Config {
-        aws_account_id: env::var("NEON_LAMBDA_AWS_ACCOUNT_ID")?,
+        aws_account_id: env::var("NEON_ACCOUNT_ID")?,
         s3_bucket: S3BucketConfig {
-            region: env::var("NEON_LAMBDA_TARGET_S3_BUCKET_REGION")?,
-            name: env::var("NEON_LAMBDA_TARGET_S3_BUCKET_NAME")?,
+            region: env::var("NEON_REGION")?,
+            name: env::var("NEON_S3_BUCKET_NAME")?,
+            key: env::var("NEON_S3_BUCKET_KEY")?,
         },
         eks_cluster: EksClusterConfig {
-            region: env::var("NEON_LAMBDA_TARGET_EKS_CLUSTER_REGION")?,
-            name: env::var("NEON_LAMBDA_TARGET_EKS_CLUSTER_NAME")?,
+            region: env::var("NEON_REGION")?,
+            name: env::var("NEON_CLUSTER")?,
         },
     };
 
@@ -406,7 +407,7 @@ async fn upload_csv(
     let resp = s3_client
         .put_object()
         .bucket(&config.s3_bucket.name)
-        .key(CSV_FILE_S3_KEY)
+        .key(&config.s3_bucket.key)
         .content_type("text/csv")
         .checksum_algorithm(ChecksumAlgorithm::Sha256)
         .checksum_sha256(STANDARD.encode(csum))
