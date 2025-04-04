@@ -1,4 +1,4 @@
-name: Cloud Extensions Test
+name: Cloud Regression Test
 on:
   schedule:
     # * is a special character in YAML so you have to quote this string
@@ -9,11 +9,6 @@ on:
     #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
     - cron:  '45 1 * * *' # run once a day, timezone is utc
   workflow_dispatch: # adds ability to run this manually
-    inputs:
-      region_id:
-        description: 'Project region id. If not set, the default region will be used'
-        required: false
-        default: 'aws-us-east-2'
 
 defaults:
   run:
@@ -40,9 +35,9 @@ jobs:
       matrix:
         pg-version: [16, 17]
 
-    runs-on: [self-hosted, small]
+    runs-on: us-east-2
     container:
-      image: ghcr.io/neondatabase/neon-test-extensions-v${{ matrix.pg-version }}:14192004730
+      image: ghcr.io/neondatabase/build-tools:pinned-bookworm
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -55,26 +50,72 @@ jobs:
           egress-policy: audit
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Create Neon Project
-        id: create-neon-project
-        uses: ./.github/actions/neon-project-create
         with:
-          region_id: ${{ inputs.region_id }}
-          postgres_version: ${{ matrix.pg-version }}
+          submodules: true
+
+      - name: Patch the test
+        env:
+          PG_VERSION: ${{matrix.pg-version}}
+        run: |
+          cd "vendor/postgres-v${PG_VERSION}"
+          patch -p1 < "../../compute/patches/cloud_regress_pg${PG_VERSION}.patch"
+
+      - name: Generate a random password
+        id: pwgen
+        run: |
+          set +x
+          DBPASS=$(dd if=/dev/random bs=48 count=1 2>/dev/null | base64)
+          echo "::add-mask::${DBPASS//\//}"
+          echo DBPASS="${DBPASS//\//}" >> "${GITHUB_OUTPUT}"
+
+      - name: Change tests according to the generated password
+        env:
+          DBPASS: ${{ steps.pwgen.outputs.DBPASS }}
+          PG_VERSION: ${{matrix.pg-version}}
+        run: |
+          cd vendor/postgres-v"${PG_VERSION}"/src/test/regress
+          for fname in sql/*.sql expected/*.out; do
+            sed -i.bak s/NEON_PASSWORD_PLACEHOLDER/"'${DBPASS}'"/ "${fname}"
+          done
+          for ph in $(grep NEON_MD5_PLACEHOLDER expected/password.out | awk '{print $3;}' | sort | uniq); do
+            USER=$(echo "${ph}" | cut -c 22-)
+            MD5=md5$(echo -n "${DBPASS}${USER}" | md5sum | awk '{print $1;}')
+            sed -i.bak "s/${ph}/${MD5}/" expected/password.out
+          done
+
+      - name: Download Neon artifact
+        uses: ./.github/actions/download
+        with:
+          name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
+          path: /tmp/neon/
+          prefix: latest
+          aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+
+      - name: Create a new branch
+        id: create-branch
+        uses: ./.github/actions/neon-branch-create
+        with:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+          project_id: ${{ vars[format('PGREGRESS_PG{0}_PROJECT_ID', matrix.pg-version)] }}
 
       - name: Run the regression tests
-        run: /run-tests.sh /ext-src
-        env:
-          BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
-
-      - name: Delete Neon Project
-        if: ${{ always() }}
-        uses: ./.github/actions/neon-project-delete
+        uses: ./.github/actions/run-python-test-set
         with:
-          project_id: ${{ steps.create-neon-project.outputs.project_id }}
+          build_type: ${{ env.BUILD_TYPE }}
+          test_selection: cloud_regress
+          pg_version: ${{matrix.pg-version}}
+          extra_params: -m remote_cluster
+          aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        env:
+          BENCHMARK_CONNSTR: ${{steps.create-branch.outputs.dsn}}
+
+      - name: Delete branch
+        if: always()
+        uses: ./.github/actions/neon-branch-delete
+        with:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+          project_id: ${{ vars[format('PGREGRESS_PG{0}_PROJECT_ID', matrix.pg-version)] }}
+          branch_id: ${{steps.create-branch.outputs.branch_id}}
 
       - name: Create Allure report
         id: create-allure-report

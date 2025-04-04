@@ -40,9 +40,9 @@ jobs:
       matrix:
         pg-version: [16, 17]
 
-    runs-on: us-east-2
+    runs-on: [self-hosted, small]
     container:
-      image: ghcr.io/neondatabase/neon-test-extensions-v${{ matrix.pg-versions }}:latest
+      image: ghcr.io/neondatabase/neon-test-extensions-v${{ matrix.pg-version }}:14192004730
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -54,6 +54,8 @@ jobs:
         with:
           egress-policy: audit
 
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
       - name: Create Neon Project
         id: create-neon-project
         uses: ./.github/actions/neon-project-create
@@ -63,15 +65,9 @@ jobs:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
       - name: Run the regression tests
-        run: /run-tests.sh
-        with:
-          build_type: ${{ env.BUILD_TYPE }}
-          test_selection: cloud_regress
-          pg_version: ${{matrix.pg-version}}
-          extra_params: -m remote_cluster
-          aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        run: /run-tests.sh /ext-src
         env:
-          BENCHMARK_CONNSTR: ${{steps.create-branch.outputs.dsn}}
+          BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
 
       - name: Delete Neon Project
         if: ${{ always() }}
