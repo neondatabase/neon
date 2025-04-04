@@ -55,6 +55,9 @@ pub const DEFAULT_PG_VERSION: u32 = 16;
 pub const IMAGE_FILE_MAGIC: u16 = 0x5A60;
 pub const DELTA_FILE_MAGIC: u16 = 0x5A61;
 
+// Target used for performance traces.
+pub const PERF_TRACE_TARGET: &str = "P";
+
 static ZERO_PAGE: bytes::Bytes = bytes::Bytes::from_static(&[0u8; 8192]);
 
 pub use crate::metrics::preinitialize_metrics;

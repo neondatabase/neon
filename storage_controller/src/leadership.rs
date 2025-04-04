@@ -110,7 +110,20 @@ impl Leadership {
     ) -> Option<GlobalObservedState> {
         tracing::info!("Sending step down request to {leader:?}");
 
+        let mut http_client = reqwest::Client::builder();
+        for cert in &self.config.ssl_ca_certs {
+            http_client = http_client.add_root_certificate(cert.clone());
+        }
+        let http_client = match http_client.build() {
+            Ok(http_client) => http_client,
+            Err(err) => {
+                tracing::error!("Failed to build client for leader step-down request: {err}");
+                return None;
+            }
+        };
+
         let client = PeerClient::new(
+            http_client,
             Uri::try_from(leader.address.as_str()).expect("Failed to build leader URI"),
             self.config.peer_jwt_token.clone(),
         );
