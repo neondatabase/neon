@@ -49,6 +49,10 @@ inputs:
     description: 'A JSON object with project settings'
     required: false
     default: '{}'
+  default_endpoint_settings:
+    description: 'A JSON object with the default endpoint settings'
+    required: false
+    default: '{}'
 
 outputs:
   dsn:
@@ -80,7 +84,8 @@ runs:
               \"provisioner\": \"k8s-neonvm\",
               \"autoscaling_limit_min_cu\": ${MIN_CU},
               \"autoscaling_limit_max_cu\": ${MAX_CU},
-              \"settings\": ${PROJECT_SETTINGS}
+              \"settings\": ${PROJECT_SETTINGS},
+              \"default_endpoint_settings\": ${DEFAULT_ENDPOINT_SETTINGS}
             }
           }")
 
@@ -142,3 +147,4 @@ runs:
         PSQL: ${{ inputs.psql_path }}
         LD_LIBRARY_PATH: ${{ inputs.libpq_lib_path }}
         PROJECT_SETTINGS: ${{ inputs.project_settings }}
+        DEFAULT_ENDPOINT_SETTINGS: ${{ inputs.default_endpoint_settings }}
