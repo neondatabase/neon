@@ -87,7 +87,7 @@ impl S3ProxyNode {
         )
         .await;
         if res.is_err() {
-            eprintln!("{}", std::fs::read_to_string(self.log_file())?);
+            eprintln!("Logs:\n{}", std::fs::read_to_string(self.log_file())?);
         }
 
         res

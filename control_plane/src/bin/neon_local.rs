@@ -1720,6 +1720,17 @@ async fn handle_safekeeper(subcmd: &SafekeeperCmd, env: &local_env::LocalEnv) ->
 async fn handle_s3proxy(subcmd: &S3ProxyCmd, env: &local_env::LocalEnv) -> Result<()> {
     use S3ProxyCmd::*;
     let proxy = S3ProxyNode::from_env(env);
+
+    // In tests like test_forward_compatibility or test_graceful_cluster_restart
+    // old neon binaries (without s3proxy) are present
+    if !proxy.bin.exists() {
+        eprintln!(
+            "{} binary not found. Ignore if this is a compatibility test",
+            proxy.bin
+        );
+        return Ok(());
+    }
+
     match subcmd {
         Start(S3ProxyStartCmd { start_timeout }) => {
             if let Err(e) = proxy.start(start_timeout).await {
