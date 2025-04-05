@@ -1,0 +1,97 @@
+name: Cloud Extensions Test
+on:
+  schedule:
+    # * is a special character in YAML so you have to quote this string
+    #          ┌───────────── minute (0 - 59)
+    #          │ ┌───────────── hour (0 - 23)
+    #          │ │ ┌───────────── day of the month (1 - 31)
+    #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
+    #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
+    - cron:  '45 1 * * *' # run once a day, timezone is utc
+  workflow_dispatch: # adds ability to run this manually
+    inputs:
+      region_id:
+        description: 'Project region id. If not set, the default region will be used'
+        required: false
+        default: 'aws-us-east-2'
+
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}
+
+concurrency:
+  # Allow only one workflow
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write # aws-actions/configure-aws-credentials
+  statuses: write
+  contents: write
+
+jobs:
+  regress:
+    env:
+      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+      TEST_OUTPUT: /tmp/test_output
+      BUILD_TYPE: remote
+    strategy:
+      fail-fast: false
+      matrix:
+        pg-version: [16, 17]
+
+    runs-on: [self-hosted, small]
+    container:
+      image: ghcr.io/neondatabase/neon-test-extensions-v${{ matrix.pg-version }}:14192004730
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --init
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Create Neon Project
+        id: create-neon-project
+        uses: ./.github/actions/neon-project-create
+        with:
+          region_id: ${{ inputs.region_id }}
+          postgres_version: ${{ matrix.pg-version }}
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+
+      - name: Run the regression tests
+        run: /run-tests.sh /ext-src
+        env:
+          BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
+
+      - name: Delete Neon Project
+        if: ${{ always() }}
+        uses: ./.github/actions/neon-project-delete
+        with:
+          project_id: ${{ steps.create-neon-project.outputs.project_id }}
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+
+      - name: Create Allure report
+        id: create-allure-report
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/allure-report-generate
+        with:
+          aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+
+      - name: Post to a Slack channel
+        if: ${{ github.event.schedule && failure() }}
+        uses: slackapi/slack-github-action@fcfb566f8b0aab22203f066d80ca1d7e4b5d05b3 # v1.27.1
+        with:
+          channel-id: ${{ vars.SLACK_ON_CALL_QA_STAGING_STREAM }}
+          slack-message: |
+            Periodic pg_regress on staging: ${{ job.status }}
+            <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+            <${{ steps.create-allure-report.outputs.report-url }}|Allure report>
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
