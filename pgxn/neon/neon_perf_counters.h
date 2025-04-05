@@ -12,8 +12,8 @@
 #include "storage/procnumber.h"
 #else
 #include "storage/backendid.h"
-#include "storage/proc.h"
 #endif
+#include "storage/proc.h"
 
 static const uint64 io_wait_bucket_thresholds[] = {
 	       2,        3,        6,        10,  /* 0 us   - 10 us */

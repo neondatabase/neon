@@ -6,10 +6,6 @@
  * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- *
- * IDENTIFICATION
- *	 contrib/neon/libpqpagestore.c
- *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
@@ -34,6 +30,7 @@
 #include "storage/lwlock.h"
 #include "storage/pg_shmem.h"
 #include "utils/guc.h"
+#include "utils/memutils.h"
 
 #include "neon.h"
 #include "neon_perf_counters.h"
@@ -1478,6 +1475,4 @@ pg_init_libpagestore(void)
 	}
 
 	memset(page_servers, 0, sizeof(page_servers));
-
-	lfc_init();
 }
