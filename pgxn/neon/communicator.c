@@ -1,6 +1,50 @@
 /*-------------------------------------------------------------------------
  *
  * communicator.c
+ *	  Functions for communicating with remote pageservers.
+ *
+ * This is the so-called "legacy" communicator. It consists of functions that
+ * are called from the smgr implementation, in pagestore_smgr.c. There are
+ * plans to replace this with a different implementation, see RFC.
+ *
+ * The communicator is a collection of functions that are called in each
+ * backend, when the backend needs to read a page or other information. It
+ * does not spawn background threads or anything like that. To process
+ * responses to prefetch requests in a timely fashion, however, it registers
+ * a ProcessInterrupts hook that gets called periodically from any
+ * CHECK_FOR_INTERRUPTS() point in the backend.
+ *
+ * By the time the functions in this file are called, the caller has already
+ * established that a request to the pageserver is necessary. The functions
+ * are only called for permanent relations (i.e. not temp or unlogged tables).
+ * Before making a call to the communicator, the caller has already checked
+ * the relation size or local file cache.
+ *
+ * However, when processing responses to getpage requests, the communicator
+ * writes pages directly to the LFC.
+ *
+ * The communicator functions take request LSNs as arguments; the caller is
+ * responsible for determining the correct LSNs to use. There's one exception
+ * to that, in prefetch_do_request(); it sometimes calls back to
+ * neon_get_request_lsns().  That's because sometimes a suitable response is
+ * found in the prefetch buffer and the request LSns are not needed, and the
+ * caller doesn't know whether it's needed or not.
+ *
+ * The main interface consists of the following "synchronous" calls:
+ *
+ * communicator_exists			- Returns true if a relation file exists
+ * communicator_nblocks			- Returns a relation's size
+ * communicator_dbsize			- Returns a databases's total size
+ * communicator_read_at_lsnv	- Read contents of one relation block
+ * communicator_read_slru_segment - Read contents of one SLRU segment
+ *
+ * In addition, there functions related to prefetching:
+ * communicator_prefetch_register_bufferv - Start prefetching a page
+ * communicator_prefetch_lookupv - Check if a page is already in prefetch queue
+ *
+ * Misc other functions:
+ * - communicator_init			- Initialize the module at startup
+ * - communicator_prefetch_pump_state - Called periodically to advance the state
  *
  *
  * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
