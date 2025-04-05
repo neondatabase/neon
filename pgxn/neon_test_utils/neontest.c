@@ -50,13 +50,8 @@ PG_FUNCTION_INFO_V1(trigger_segfault);
  * Linkage to functions in neon module.
  * The signature here would need to be updated whenever function parameters change in pagestore_smgr.c
  */
-#if PG_MAJORVERSION_NUM < 16
-typedef void (*neon_read_at_lsn_type) (NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
-									   neon_request_lsns request_lsns, char *buffer);
-#else
 typedef void (*neon_read_at_lsn_type) (NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 									   neon_request_lsns request_lsns, void *buffer);
-#endif
 
 static neon_read_at_lsn_type neon_read_at_lsn_ptr;
 
