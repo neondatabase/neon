@@ -20,9 +20,11 @@ use compute_api::spec::ComputeMode;
 use control_plane::endpoint::ComputeControlPlane;
 use control_plane::local_env::{
     InitForceMode, LocalEnv, NeonBroker, NeonLocalInitConf, NeonLocalInitPageserverConf,
-    SafekeeperConf,
+    S3ProxyConf, SafekeeperConf,
 };
 use control_plane::pageserver::PageServerNode;
+use control_plane::s3proxy::S3PROXY_DEFAULT_PORT as DEFAULT_S3PROXY_PORT;
+use control_plane::s3proxy::S3ProxyNode;
 use control_plane::safekeeper::SafekeeperNode;
 use control_plane::storage_controller::{
     NeonStorageControllerStartArgs, NeonStorageControllerStopArgs, StorageController,
@@ -90,6 +92,8 @@ enum NeonLocalCmd {
     StorageBroker(StorageBrokerCmd),
     #[command(subcommand)]
     Safekeeper(SafekeeperCmd),
+    #[command(subcommand)]
+    S3Proxy(S3ProxyCmd),
     #[command(subcommand)]
     Endpoint(EndpointCmd),
     #[command(subcommand)]
@@ -454,6 +458,32 @@ enum SafekeeperCmd {
     Restart(SafekeeperRestartCmdArgs),
 }
 
+#[derive(clap::Subcommand)]
+#[clap(about = "Manage s3proxy")]
+enum S3ProxyCmd {
+    Start(S3ProxyStartCmd),
+    Stop(S3ProxyStopCmd),
+}
+
+#[derive(clap::Args)]
+#[clap(about = "Start local safekeeper")]
+struct S3ProxyStartCmd {
+    #[clap(short = 't', long, help = "timeout until we fail the command")]
+    #[arg(default_value = "10s")]
+    start_timeout: humantime::Duration,
+}
+
+#[derive(clap::Args)]
+#[clap(about = "Stop local safekeeper")]
+struct S3ProxyStopCmd {
+    #[arg(value_enum, default_value = "fast")]
+    #[clap(
+        short = 'm',
+        help = "If 'immediate', don't flush repository data at shutdown"
+    )]
+    stop_mode: StopMode,
+}
+
 #[derive(clap::Args)]
 #[clap(about = "Start local safekeeper")]
 struct SafekeeperStartCmdArgs {
@@ -759,6 +789,7 @@ fn main() -> Result<()> {
             }
             NeonLocalCmd::StorageBroker(subcmd) => rt.block_on(handle_storage_broker(&subcmd, env)),
             NeonLocalCmd::Safekeeper(subcmd) => rt.block_on(handle_safekeeper(&subcmd, env)),
+            NeonLocalCmd::S3Proxy(subcmd) => rt.block_on(handle_s3proxy(&subcmd, env)),
             NeonLocalCmd::Endpoint(subcmd) => rt.block_on(handle_endpoint(&subcmd, env)),
             NeonLocalCmd::Mappings(subcmd) => handle_mappings(&subcmd, env),
         };
@@ -975,6 +1006,9 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
                     }
                 })
                 .collect(),
+            s3proxy: S3ProxyConf {
+                port: DEFAULT_S3PROXY_PORT,
+            },
             pg_distrib_dir: None,
             neon_distrib_dir: None,
             default_tenant_id: TenantId::from_array(std::array::from_fn(|_| 0)),
@@ -1683,6 +1717,41 @@ async fn handle_safekeeper(subcmd: &SafekeeperCmd, env: &local_env::LocalEnv) ->
     Ok(())
 }
 
+async fn handle_s3proxy(subcmd: &S3ProxyCmd, env: &local_env::LocalEnv) -> Result<()> {
+    use S3ProxyCmd::*;
+    let proxy = S3ProxyNode::from_env(env);
+
+    // In tests like test_forward_compatibility or test_graceful_cluster_restart
+    // old neon binaries (without s3proxy) are present
+    if !proxy.bin.exists() {
+        eprintln!(
+            "{} binary not found. Ignore if this is a compatibility test",
+            proxy.bin
+        );
+        return Ok(());
+    }
+
+    match subcmd {
+        Start(S3ProxyStartCmd { start_timeout }) => {
+            if let Err(e) = proxy.start(start_timeout).await {
+                eprintln!("s3proxy start failed: {e}");
+                exit(1);
+            }
+        }
+        Stop(S3ProxyStopCmd { stop_mode }) => {
+            let immediate = match stop_mode {
+                StopMode::Fast => false,
+                StopMode::Immediate => true,
+            };
+            if let Err(e) = proxy.stop(immediate) {
+                eprintln!("proxy stop failed: {e}");
+                exit(1);
+            }
+        }
+    };
+    Ok(())
+}
+
 async fn handle_storage_broker(subcmd: &StorageBrokerCmd, env: &local_env::LocalEnv) -> Result<()> {
     match subcmd {
         StorageBrokerCmd::Start(args) => {
@@ -1777,6 +1846,13 @@ async fn handle_start_all_impl(
                     .map_err(|e| e.context(format!("start safekeeper {}", safekeeper.id)))
             });
         }
+
+        js.spawn(async move {
+            S3ProxyNode::from_env(env)
+                .start(&retry_timeout)
+                .await
+                .map_err(|e| e.context("start s3proxy"))
+        });
     })();
 
     let mut errors = Vec::new();
@@ -1872,6 +1948,11 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
         Err(e) => {
             eprintln!("postgres stop failed, could not restore control plane data from env: {e:#}")
         }
+    }
+
+    let proxy = S3ProxyNode::from_env(env);
+    if let Err(e) = proxy.stop(immediate) {
+        eprintln!("s3proxy stop failed: {:#}", e);
     }
 
     for ps_conf in &env.pageservers {
