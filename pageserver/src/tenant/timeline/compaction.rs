@@ -1244,6 +1244,10 @@ impl Timeline {
         let mut replace_image_layers = Vec::new();
 
         for layer in layers_to_rewrite {
+            if self.cancel.is_cancelled() {
+                return Err(CompactionError::ShuttingDown);
+            }
+
             tracing::info!(layer=%layer, "Rewriting layer after shard split...");
             let mut image_layer_writer = ImageLayerWriter::new(
                 self.conf,
