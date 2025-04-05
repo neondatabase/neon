@@ -1903,7 +1903,6 @@ neon_wallog_pagev(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		log_pages = true;
 	}
 	else if (XLogInsertAllowed() &&
-			 !ShutdownRequestPending &&
 			 (forknum == FSM_FORKNUM || forknum == VISIBILITYMAP_FORKNUM))
 	{
 		log_pages = true;
