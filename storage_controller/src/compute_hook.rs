@@ -800,7 +800,7 @@ impl ComputeHook {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use pageserver_api::shard::{ShardCount, ShardNumber};
+    use pageserver_api::shard::{DEFAULT_STRIPE_SIZE, ShardCount, ShardNumber};
     use utils::id::TenantId;
 
     use super::*;
@@ -808,6 +808,7 @@ pub(crate) mod tests {
     #[test]
     fn tenant_updates() -> anyhow::Result<()> {
         let tenant_id = TenantId::generate();
+        let stripe_size = DEFAULT_STRIPE_SIZE;
         let mut tenant_state = ComputeHookTenant::new(
             TenantShardId {
                 tenant_id,
@@ -848,7 +849,7 @@ pub(crate) mod tests {
                 shard_count: ShardCount::new(2),
                 shard_number: ShardNumber(1),
             },
-            stripe_size: ShardStripeSize(32768),
+            stripe_size,
             preferred_az: None,
             node_id: NodeId(1),
         });
@@ -864,7 +865,7 @@ pub(crate) mod tests {
                 shard_count: ShardCount::new(2),
                 shard_number: ShardNumber(0),
             },
-            stripe_size: ShardStripeSize(32768),
+            stripe_size,
             preferred_az: None,
             node_id: NodeId(1),
         });
@@ -874,7 +875,7 @@ pub(crate) mod tests {
             anyhow::bail!("Wrong send result");
         };
         assert_eq!(request.shards.len(), 2);
-        assert_eq!(request.stripe_size, Some(ShardStripeSize(32768)));
+        assert_eq!(request.stripe_size, Some(stripe_size));
 
         // Simulate successful send
         *guard = Some(ComputeRemoteState {
