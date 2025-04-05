@@ -6,6 +6,7 @@ self-hosted-runner:
     - small
     - small-metal
     - small-arm64
+    - unit-perf
     - us-east-2
 config-variables:
   - AWS_ECR_REGION
