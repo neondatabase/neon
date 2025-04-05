@@ -38,7 +38,6 @@ typedef struct SnapDesc {
 } SnapDesc;
 
 PGDLLEXPORT void LogicalSlotsMonitorMain(Datum main_arg);
-
 /*
  * Sorts an array of snapshot descriptors by their LSN.
  */
