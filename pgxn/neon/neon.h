@@ -3,15 +3,13 @@
  * neon.h
  *	  Functions used in the initialization of this extension.
  *
- * IDENTIFICATION
- *	 contrib/neon/neon.h
- *
  *-------------------------------------------------------------------------
  */
 
 #ifndef NEON_H
 #define NEON_H
-#include "access/xlogreader.h"
+
+#include "access/xlogdefs.h"
 #include "utils/wait_event.h"
 
 /* GUCs */
@@ -58,8 +56,8 @@ extern void SetNeonCurrentClusterSize(uint64 size);
 extern uint64 GetNeonCurrentClusterSize(void);
 extern void replication_feedback_get_lsns(XLogRecPtr *writeLsn, XLogRecPtr *flushLsn, XLogRecPtr *applyLsn);
 
-extern void PGDLLEXPORT WalProposerSync(int argc, char *argv[]);
-extern void PGDLLEXPORT WalProposerMain(Datum main_arg);
-PGDLLEXPORT void LogicalSlotsMonitorMain(Datum main_arg);
+extern PGDLLEXPORT void WalProposerSync(int argc, char *argv[]);
+extern PGDLLEXPORT void WalProposerMain(Datum main_arg);
+extern PGDLLEXPORT void LogicalSlotsMonitorMain(Datum main_arg);
 
 #endif							/* NEON_H */

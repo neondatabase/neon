@@ -1,10 +1,7 @@
 /*-------------------------------------------------------------------------
  *
  * neon.c
- *	  Utility functions to expose neon specific information to user
- *
- * IDENTIFICATION
- *	 contrib/neon/neon.c
+ *	  Main entry point into the neon exension
  *
  *-------------------------------------------------------------------------
  */
