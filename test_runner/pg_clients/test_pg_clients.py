@@ -25,7 +25,7 @@ if TYPE_CHECKING:
         # See example itself: test_runner/pg_clients/swift/PostgresClientKitExample/Sources/PostgresClientKitExample/main.swift
         "swift/PostgresClientKitExample",
         "swift/PostgresNIOExample",
-        "typescript/postgresql-client",
+        "typescript/postgrejs",
         "typescript/serverless-driver",
     ],
 )

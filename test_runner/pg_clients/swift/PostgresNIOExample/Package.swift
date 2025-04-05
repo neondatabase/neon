@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "PostgresNIOExample",
     dependencies: [
-        .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.21.5")
+        .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.25.0")
     ],
     targets: [
         .executableTarget(
