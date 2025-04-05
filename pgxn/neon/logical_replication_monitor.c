@@ -1,10 +1,10 @@
+#include "postgres.h"
+
 #include <dirent.h>
 #include <limits.h>
 #include <string.h>
 #include <signal.h>
 #include <sys/stat.h>
-
-#include "postgres.h"
 
 #include "miscadmin.h"
 #include "postmaster/bgworker.h"
