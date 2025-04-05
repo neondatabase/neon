@@ -233,6 +233,7 @@ extern const f_smgr *smgr_neon(ProcNumber backend, NRelFileInfo rinfo);
 extern void smgr_init_neon(void);
 extern void readahead_buffer_resize(int newsize, void *extra);
 
+
 /*
  * LSN values associated with each request to the pageserver
  */
@@ -268,6 +269,10 @@ typedef struct
 extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
 										 neon_request_lsns request_lsns, void *buffer);
 extern int64 neon_dbsize(Oid dbNode);
+
+extern void neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum,
+								  BlockNumber blkno, neon_request_lsns *output,
+								  BlockNumber nblocks);
 
 /* utils for neon relsize cache */
 extern void relsize_hash_init(void);
