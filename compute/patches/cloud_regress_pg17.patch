@@ -202,10 +202,10 @@ index cf0b80d616..e8e2a14a4a 100644
  COMMENT ON CONSTRAINT the_constraint ON constraint_comments_tbl IS 'no, the comment';
  ERROR:  must be owner of relation constraint_comments_tbl
 diff --git a/src/test/regress/expected/conversion.out b/src/test/regress/expected/conversion.out
-index 442e7aff2b..525f732b03 100644
+index d785f92561..16377e5ac9 100644
 --- a/src/test/regress/expected/conversion.out
 +++ b/src/test/regress/expected/conversion.out
-@@ -8,7 +8,7 @@
+@@ -15,7 +15,7 @@ SELECT FROM test_enc_setup();
  CREATE FUNCTION test_enc_conversion(bytea, name, name, bool, validlen OUT int, result OUT bytea)
      AS :'regresslib', 'test_enc_conversion'
      LANGUAGE C STRICT;
@@ -587,16 +587,15 @@ index f551624afb..57f1e432d4 100644
  SELECT *
     INTO TABLE ramp
 diff --git a/src/test/regress/expected/database.out b/src/test/regress/expected/database.out
-index 454db91ec0..01378d7081 100644
+index 4cbdbdf84d..573362850e 100644
 --- a/src/test/regress/expected/database.out
 +++ b/src/test/regress/expected/database.out
-@@ -1,8 +1,7 @@
+@@ -1,8 +1,6 @@
  CREATE DATABASE regression_tbd
  	ENCODING utf8 LC_COLLATE "C" LC_CTYPE "C" TEMPLATE template0;
  ALTER DATABASE regression_tbd RENAME TO regression_utf8;
 -ALTER DATABASE regression_utf8 SET TABLESPACE regress_tblspace;
 -ALTER DATABASE regression_utf8 RESET TABLESPACE;
-+WARNING:  you need to manually restart any running background workers after this command
  ALTER DATABASE regression_utf8 CONNECTION_LIMIT 123;
  -- Test PgDatabaseToastTable.  Doing this with GRANT would be slow.
  BEGIN;
@@ -700,7 +699,7 @@ index 6ed50fdcfa..caa00a345d 100644
  COMMENT ON FOREIGN DATA WRAPPER dummy IS 'useless';
  CREATE FOREIGN DATA WRAPPER postgresql VALIDATOR postgresql_fdw_validator;
 diff --git a/src/test/regress/expected/foreign_key.out b/src/test/regress/expected/foreign_key.out
-index 69994c98e3..129abcfbe8 100644
+index fe6a1015f2..614b387b7d 100644
 --- a/src/test/regress/expected/foreign_key.out
 +++ b/src/test/regress/expected/foreign_key.out
 @@ -1985,7 +1985,7 @@ ALTER TABLE fk_partitioned_fk_6 ATTACH PARTITION fk_partitioned_pk_6 FOR VALUES
@@ -1147,7 +1146,7 @@ index 924d6e001d..7fdda73439 100644
  DROP ROLE regress_passwd_sha_len1;
  DROP ROLE regress_passwd_sha_len2;
 diff --git a/src/test/regress/expected/privileges.out b/src/test/regress/expected/privileges.out
-index 1296da0d57..f43fffa44c 100644
+index e8c668e0a1..03be5c2120 100644
 --- a/src/test/regress/expected/privileges.out
 +++ b/src/test/regress/expected/privileges.out
 @@ -20,19 +20,19 @@ SELECT lo_unlink(oid) FROM pg_largeobject_metadata WHERE oid >= 1000 AND oid < 3
@@ -1209,8 +1208,8 @@ index 1296da0d57..f43fffa44c 100644
 +CREATE GROUP regress_priv_group2 WITH ADMIN regress_priv_user1 PASSWORD NEON_PASSWORD_PLACEHOLDER USER regress_priv_user2;
  ALTER GROUP regress_priv_group1 ADD USER regress_priv_user4;
  GRANT regress_priv_group2 TO regress_priv_user2 GRANTED BY regress_priv_user1;
- SET SESSION AUTHORIZATION regress_priv_user1;
-@@ -239,12 +239,16 @@ GRANT regress_priv_role TO regress_priv_user1 WITH ADMIN OPTION GRANTED BY regre
+ SET SESSION AUTHORIZATION regress_priv_user3;
+@@ -246,12 +246,16 @@ GRANT regress_priv_role TO regress_priv_user1 WITH ADMIN OPTION GRANTED BY regre
  ERROR:  permission denied to grant privileges as role "regress_priv_role"
  DETAIL:  The grantor must have the ADMIN option on role "regress_priv_role".
  GRANT regress_priv_role TO regress_priv_user1 WITH ADMIN OPTION GRANTED BY CURRENT_ROLE;
@@ -1227,7 +1226,7 @@ index 1296da0d57..f43fffa44c 100644
  DROP ROLE regress_priv_role;
  SET SESSION AUTHORIZATION regress_priv_user1;
  SELECT session_user, current_user;
-@@ -1776,7 +1780,7 @@ SELECT has_table_privilege('regress_priv_user1', 'atest4', 'SELECT WITH GRANT OP
+@@ -1783,7 +1787,7 @@ SELECT has_table_privilege('regress_priv_user1', 'atest4', 'SELECT WITH GRANT OP
  
  -- security-restricted operations
  \c -
@@ -1236,7 +1235,7 @@ index 1296da0d57..f43fffa44c 100644
  -- Check that index expressions and predicates are run as the table's owner
  -- A dummy index function checking current_user
  CREATE FUNCTION sro_ifun(int) RETURNS int AS $$
-@@ -2668,8 +2672,8 @@ drop cascades to function testns.priv_testagg(integer)
+@@ -2675,8 +2679,8 @@ drop cascades to function testns.priv_testagg(integer)
  drop cascades to function testns.priv_testproc(integer)
  -- Change owner of the schema & and rename of new schema owner
  \c -
@@ -1247,7 +1246,7 @@ index 1296da0d57..f43fffa44c 100644
  SET SESSION ROLE regress_schemauser1;
  CREATE SCHEMA testns;
  SELECT nspname, rolname FROM pg_namespace, pg_roles WHERE pg_namespace.nspname = 'testns' AND pg_namespace.nspowner = pg_roles.oid;
-@@ -2792,7 +2796,7 @@ DROP USER regress_priv_user7;
+@@ -2799,7 +2803,7 @@ DROP USER regress_priv_user7;
  DROP USER regress_priv_user8; -- does not exist
  ERROR:  role "regress_priv_user8" does not exist
  -- permissions with LOCK TABLE
@@ -1256,7 +1255,7 @@ index 1296da0d57..f43fffa44c 100644
  CREATE TABLE lock_table (a int);
  -- LOCK TABLE and SELECT permission
  GRANT SELECT ON lock_table TO regress_locktable_user;
-@@ -2888,7 +2892,7 @@ DROP USER regress_locktable_user;
+@@ -2895,7 +2899,7 @@ DROP USER regress_locktable_user;
  -- pg_backend_memory_contexts.
  -- switch to superuser
  \c -
@@ -1265,7 +1264,7 @@ index 1296da0d57..f43fffa44c 100644
  SELECT has_table_privilege('regress_readallstats','pg_backend_memory_contexts','SELECT'); -- no
   has_table_privilege 
  ---------------------
-@@ -2932,10 +2936,10 @@ RESET ROLE;
+@@ -2939,10 +2943,10 @@ RESET ROLE;
  -- clean up
  DROP ROLE regress_readallstats;
  -- test role grantor machinery
@@ -1280,7 +1279,7 @@ index 1296da0d57..f43fffa44c 100644
  GRANT regress_group TO regress_group_direct_manager WITH INHERIT FALSE, ADMIN TRUE;
  GRANT regress_group_direct_manager TO regress_group_indirect_manager;
  SET SESSION AUTHORIZATION regress_group_direct_manager;
-@@ -2964,9 +2968,9 @@ DROP ROLE regress_group_direct_manager;
+@@ -2971,9 +2975,9 @@ DROP ROLE regress_group_direct_manager;
  DROP ROLE regress_group_indirect_manager;
  DROP ROLE regress_group_member;
  -- test SET and INHERIT options with object ownership changes
@@ -1293,7 +1292,7 @@ index 1296da0d57..f43fffa44c 100644
  CREATE SCHEMA regress_roleoption;
  GRANT CREATE, USAGE ON SCHEMA regress_roleoption TO PUBLIC;
  GRANT regress_roleoption_donor TO regress_roleoption_protagonist WITH INHERIT TRUE, SET FALSE;
-@@ -2995,9 +2999,9 @@ DROP ROLE regress_roleoption_protagonist;
+@@ -3002,9 +3006,9 @@ DROP ROLE regress_roleoption_protagonist;
  DROP ROLE regress_roleoption_donor;
  DROP ROLE regress_roleoption_recipient;
  -- MAINTAIN
@@ -2433,10 +2432,10 @@ index e3e3bea709..fa86ddc326 100644
  COMMENT ON CONSTRAINT the_constraint ON constraint_comments_tbl IS 'no, the comment';
  COMMENT ON CONSTRAINT the_constraint ON DOMAIN constraint_comments_dom IS 'no, another comment';
 diff --git a/src/test/regress/sql/conversion.sql b/src/test/regress/sql/conversion.sql
-index 9a65fca91f..58431a3056 100644
+index b567a1a572..4d1ac2e631 100644
 --- a/src/test/regress/sql/conversion.sql
 +++ b/src/test/regress/sql/conversion.sql
-@@ -12,7 +12,7 @@ CREATE FUNCTION test_enc_conversion(bytea, name, name, bool, validlen OUT int, r
+@@ -17,7 +17,7 @@ CREATE FUNCTION test_enc_conversion(bytea, name, name, bool, validlen OUT int, r
      AS :'regresslib', 'test_enc_conversion'
      LANGUAGE C STRICT;
  
@@ -2800,7 +2799,7 @@ index ae6841308b..47bc792e30 100644
  
  SELECT *
 diff --git a/src/test/regress/sql/database.sql b/src/test/regress/sql/database.sql
-index 0367c0e37a..a23b98c4bd 100644
+index 46ad263478..eb05584ed5 100644
 --- a/src/test/regress/sql/database.sql
 +++ b/src/test/regress/sql/database.sql
 @@ -1,8 +1,6 @@
@@ -2913,7 +2912,7 @@ index aa147b14a9..370e0dd570 100644
  CREATE FOREIGN DATA WRAPPER dummy;
  COMMENT ON FOREIGN DATA WRAPPER dummy IS 'useless';
 diff --git a/src/test/regress/sql/foreign_key.sql b/src/test/regress/sql/foreign_key.sql
-index 2e710e419c..89cd481a54 100644
+index 8c4e4c7c83..e946cd2119 100644
 --- a/src/test/regress/sql/foreign_key.sql
 +++ b/src/test/regress/sql/foreign_key.sql
 @@ -1435,7 +1435,7 @@ ALTER TABLE fk_partitioned_fk_6 ATTACH PARTITION fk_partitioned_pk_6 FOR VALUES
@@ -3301,7 +3300,7 @@ index bb82aa4aa2..dd8a05e24d 100644
  -- Check that the invalid secrets were re-hashed. A re-hashed secret
  -- should not contain the original salt.
 diff --git a/src/test/regress/sql/privileges.sql b/src/test/regress/sql/privileges.sql
-index 5880bc018d..27aa952b18 100644
+index b7e1cb6cdd..6e5a2217f1 100644
 --- a/src/test/regress/sql/privileges.sql
 +++ b/src/test/regress/sql/privileges.sql
 @@ -24,18 +24,18 @@ RESET client_min_messages;
@@ -3363,7 +3362,7 @@ index 5880bc018d..27aa952b18 100644
  
  ALTER GROUP regress_priv_group1 ADD USER regress_priv_user4;
  
-@@ -1157,7 +1157,7 @@ SELECT has_table_privilege('regress_priv_user1', 'atest4', 'SELECT WITH GRANT OP
+@@ -1160,7 +1160,7 @@ SELECT has_table_privilege('regress_priv_user1', 'atest4', 'SELECT WITH GRANT OP
  
  -- security-restricted operations
  \c -
@@ -3372,7 +3371,7 @@ index 5880bc018d..27aa952b18 100644
  
  -- Check that index expressions and predicates are run as the table's owner
  
-@@ -1653,8 +1653,8 @@ DROP SCHEMA testns CASCADE;
+@@ -1656,8 +1656,8 @@ DROP SCHEMA testns CASCADE;
  -- Change owner of the schema & and rename of new schema owner
  \c -
  
@@ -3383,7 +3382,7 @@ index 5880bc018d..27aa952b18 100644
  
  SET SESSION ROLE regress_schemauser1;
  CREATE SCHEMA testns;
-@@ -1748,7 +1748,7 @@ DROP USER regress_priv_user8; -- does not exist
+@@ -1751,7 +1751,7 @@ DROP USER regress_priv_user8; -- does not exist
  
  
  -- permissions with LOCK TABLE
@@ -3392,7 +3391,7 @@ index 5880bc018d..27aa952b18 100644
  CREATE TABLE lock_table (a int);
  
  -- LOCK TABLE and SELECT permission
-@@ -1851,7 +1851,7 @@ DROP USER regress_locktable_user;
+@@ -1854,7 +1854,7 @@ DROP USER regress_locktable_user;
  -- switch to superuser
  \c -
  
@@ -3401,7 +3400,7 @@ index 5880bc018d..27aa952b18 100644
  
  SELECT has_table_privilege('regress_readallstats','pg_backend_memory_contexts','SELECT'); -- no
  SELECT has_table_privilege('regress_readallstats','pg_shmem_allocations','SELECT'); -- no
-@@ -1871,10 +1871,10 @@ RESET ROLE;
+@@ -1874,10 +1874,10 @@ RESET ROLE;
  DROP ROLE regress_readallstats;
  
  -- test role grantor machinery
@@ -3416,7 +3415,7 @@ index 5880bc018d..27aa952b18 100644
  
  GRANT regress_group TO regress_group_direct_manager WITH INHERIT FALSE, ADMIN TRUE;
  GRANT regress_group_direct_manager TO regress_group_indirect_manager;
-@@ -1896,9 +1896,9 @@ DROP ROLE regress_group_indirect_manager;
+@@ -1899,9 +1899,9 @@ DROP ROLE regress_group_indirect_manager;
  DROP ROLE regress_group_member;
  
  -- test SET and INHERIT options with object ownership changes
@@ -3429,7 +3428,7 @@ index 5880bc018d..27aa952b18 100644
  CREATE SCHEMA regress_roleoption;
  GRANT CREATE, USAGE ON SCHEMA regress_roleoption TO PUBLIC;
  GRANT regress_roleoption_donor TO regress_roleoption_protagonist WITH INHERIT TRUE, SET FALSE;
-@@ -1926,9 +1926,9 @@ DROP ROLE regress_roleoption_donor;
+@@ -1929,9 +1929,9 @@ DROP ROLE regress_roleoption_donor;
  DROP ROLE regress_roleoption_recipient;
  
  -- MAINTAIN
