@@ -1547,6 +1547,9 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) \
         -C pgxn/neon_test_utils \
         -s install && \
     make -j $(getconf _NPROCESSORS_ONLN) \
+        -C pgxn/lsm3 \
+        -s install && \
+    make -j $(getconf _NPROCESSORS_ONLN) \
         -C pgxn/neon_rmgr \
         -s install
 
