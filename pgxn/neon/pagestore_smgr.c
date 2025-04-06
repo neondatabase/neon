@@ -37,10 +37,6 @@
  * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- *
- * IDENTIFICATION
- *	  contrib/neon/pagestore_smgr.c
- *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
@@ -55,6 +51,7 @@
 #include "catalog/pg_class.h"
 #include "common/hashfn.h"
 #include "executor/instrument.h"
+#include "libpq/pqformat.h"
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
 #include "postmaster/interrupt.h"
