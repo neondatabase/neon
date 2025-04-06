@@ -1,0 +1,22 @@
+[package]
+name = "aztraffic"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1.0.97"
+aws-config = "1.6.1"
+aws-sdk-athena = "1.68.0"
+aws-sdk-ec2 = "1.121.0"
+aws-sdk-eks = "1.82.0"
+aws-sdk-glue = "1.88.0"
+aws-sdk-lambda = "1.75.0"
+aws-sdk-scheduler = "1.64.0"
+aws-sdk-sfn = "1.68.0"
+aws-sdk-sts = "1.65.0"
+clap = { version = "4.5.35", features = ["derive", "env"] }
+tokio = { version = "1.44.1", features = ["full"] }
+serde = "1.0.219"
+serde_json = { version = "1.0.140", features = ["preserve_order"] }
