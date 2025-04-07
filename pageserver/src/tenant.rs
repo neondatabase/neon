@@ -1371,7 +1371,7 @@ impl Tenant {
                         // Mark the tenant as broken.
                         TenantState::Attaching | TenantState::Stopping { .. } => {
                             error!("attach failed, setting tenant state to Broken: {err:?}");
-                            *state = TenantState::broken_from_reason(err.to_string()) 
+                            *state = TenantState::broken_from_reason(err.to_string())
                         }
                         // The attach task owns the tenant state until activated.
                         state => panic!("invalid tenant state {state} during attach: {err:?}"),
