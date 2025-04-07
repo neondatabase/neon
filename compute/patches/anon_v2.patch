@@ -11,7 +11,7 @@ index 0cdc769..5ceb91c 100644
 +
 +GRANT EXECUTE ON FUNCTION pg_config to neon_superuser;
 diff --git a/sql/init.sql b/sql/init.sql
-index 7da6553..0cbc132 100644
+index 7da6553..23ab7ee 100644
 --- a/sql/init.sql
 +++ b/sql/init.sql
 @@ -11,7 +11,6 @@ CREATE OR REPLACE FUNCTION anon.load_csv(
@@ -56,12 +56,7 @@ index 7da6553..0cbc132 100644
  
    WHEN invalid_text_representation THEN
      RAISE NOTICE 'Data file ''%'' has a bad CSV format. Skipping.', csv_file;
-@@ -76,13 +76,9201 @@ SECURITY LABEL FOR anon ON FUNCTION anon.load_csv IS 'UNTRUSTED';
- 
- -- load fake data from a given path
- CREATE OR REPLACE FUNCTION anon.init(
--  datapath TEXT
- )
+@@ -81,8 +81,9197 @@ CREATE OR REPLACE FUNCTION anon.init(
  RETURNS BOOLEAN
  AS $$
  DECLARE
@@ -9260,7 +9255,7 @@ index 7da6553..0cbc132 100644
  BEGIN
  
    IF anon.is_initialized() THEN
-@@ -90,22 +9278,24 @@ BEGIN
+@@ -90,22 +9279,24 @@ BEGIN
      RETURN TRUE;
    END IF;
  
