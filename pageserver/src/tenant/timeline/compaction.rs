@@ -7,7 +7,7 @@
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::ops::{Deref, Range};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::layer_manager::LayerManager;
 use super::{
@@ -819,6 +819,7 @@ pub struct CompactionStatistics {
     time_acquire_lock_secs: f64,
     time_analyze_secs: f64,
     time_download_layer_secs: f64,
+    time_to_first_kv_pair_secs: f64,
     time_main_loop_secs: f64,
     time_final_phase_secs: f64,
     time_total_secs: f64,
@@ -3032,7 +3033,7 @@ impl Timeline {
         .map_err(CompactionError::Other)?;
 
         let time_download_layer = timer.elapsed();
-        let timer = Instant::now();
+        let mut timer = Instant::now();
 
         // Step 2: Produce images+deltas.
         let mut accumulated_values = Vec::new();
@@ -3107,6 +3108,7 @@ impl Timeline {
         // Actually, we can decide not to write to the image layer at all at this point because
         // the key and LSN range are determined. However, to keep things simple here, we still
         // create this writer, and discard the writer in the end.
+        let mut time_to_first_kv_pair = None;
 
         while let Some(((key, lsn, val), desc)) = merge_iter
             .next_with_trace()
@@ -3114,6 +3116,11 @@ impl Timeline {
             .context("failed to get next key-value pair")
             .map_err(CompactionError::Other)?
         {
+            if time_to_first_kv_pair.is_none() {
+                time_to_first_kv_pair = Some(timer.elapsed());
+                timer = Instant::now();
+            }
+
             if cancel.is_cancelled() {
                 return Err(CompactionError::ShuttingDown);
             }
@@ -3449,6 +3456,9 @@ impl Timeline {
         let time_final_phase = timer.elapsed();
 
         stat.time_final_phase_secs = time_final_phase.as_secs_f64();
+        stat.time_to_first_kv_pair_secs = time_to_first_kv_pair
+            .unwrap_or(Duration::ZERO)
+            .as_secs_f64();
         stat.time_main_loop_secs = time_main_loop.as_secs_f64();
         stat.time_acquire_lock_secs = time_acquire_lock.as_secs_f64();
         stat.time_download_layer_secs = time_download_layer.as_secs_f64();
