@@ -10,7 +10,7 @@ from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import USE_LFC
 
 
-@pytest.mark.timeout(1000)
+@pytest.mark.timeout(10000)
 @pytest.mark.parametrize("n_readers", [1, 2, 4, 8])
 @pytest.mark.parametrize("n_writers", [0, 1, 2, 4, 8])
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
@@ -22,19 +22,20 @@ def test_lfc_prefetch(neon_simple_env: NeonEnv, n_readers: int, n_writers: int):
     endpoint = env.endpoints.create_start(
         "main",
         config_lines=[
-            "neon.max_file_cache_size=10MB",
-            "neon.file_cache_size_limit=10MB",
+            "neon.max_file_cache_size=100MB",
+            "neon.file_cache_size_limit=100MB",
             "effective_io_concurrency=100",
-            "shared_buffers=1MB",
+            "shared_buffers=128MB",
             "enable_bitmapscan=off",
             "enable_seqscan=off",
             "autovacuum=off",
             "statement_timeout=0",
+            "io_combine_limit=1",
             "neon.store_prefetch_result_in_lfc=on",
         ],
     )
-    n_records = 10000  # 80Mb table
-    top_n = n_records // 4  # 20Mb - should be larger than LFC size
+    n_records = 100000  # 800Mb table
+    top_n = n_records // 4  # 200Mb - should be larger than LFC size
     test_time = 100.0  # seconds
 
     conn = endpoint.connect()
