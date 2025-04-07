@@ -1337,8 +1337,8 @@ ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN wget https://gitlab.com/dalibo/postgresql_anonymizer/-/archive/latest/postgresql_anonymizer-latest.tar.gz -O pg_anon.tar.gz && \
     mkdir pg_anon-src && cd pg_anon-src && tar xzf ../pg_anon.tar.gz --strip-components=1 -C . && \
     find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt && \
-    sed -i 's/pgrx = "0.12.9"/pgrx = { version = "=0.12.9", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
-    patch -p1 < /ext-src/anon_v2.patch
+    sed -i 's/pgrx = "0.12.9"/pgrx = { version = "=0.12.9", features = [ "unsafe-postgres" ] }/g' Cargo.toml
+    # patch -p1 < /ext-src/anon_v2.patch
 
 FROM rust-extensions-build-pgrx12 AS pg-anon-pg-build
 ARG PG_VERSION
@@ -1347,6 +1347,7 @@ WORKDIR /ext-src
 RUN cd pg_anon-src && \
     make -j $(getconf _NPROCESSORS_ONLN) extension PG_CONFIG=/usr/local/pgsql/bin/pg_config PGVER=pg$(echo "$PG_VERSION" | sed 's/^v//') && \
     make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config PGVER=pg$(echo "$PG_VERSION" | sed 's/^v//') && \
+    chmod -R a+r ../pg_anon-src && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/anon.control;
 
 ########################################################################################
