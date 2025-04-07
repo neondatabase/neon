@@ -6364,7 +6364,7 @@ impl Timeline {
 
     /// Reconstruct a value, using the given base image and WAL records in 'data'. It does not fire critical errors because
     /// sometimes it is expected to fail due to unreplayable history described in <https://github.com/neondatabase/neon/issues/10395>.
-    async fn reconstruct_value_maybe_fail(
+    async fn reconstruct_value_wo_critical_error(
         &self,
         key: Key,
         request_lsn: Lsn,

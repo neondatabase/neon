@@ -2407,7 +2407,7 @@ impl Timeline {
                     lsn_split_points[i]
                 };
                 let img = self
-                    .reconstruct_value_maybe_fail(key, request_lsn, state)
+                    .reconstruct_value_wo_critical_error(key, request_lsn, state)
                     .await?;
                 Some((request_lsn, img))
             } else {
