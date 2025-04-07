@@ -11,16 +11,10 @@ index 0cdc769..5ceb91c 100644
 +
 +GRANT EXECUTE ON FUNCTION pg_config to neon_superuser;
 diff --git a/sql/init.sql b/sql/init.sql
-index 7da6553..b99d580 100644
+index 7da6553..0cbc132 100644
 --- a/sql/init.sql
 +++ b/sql/init.sql
-@@ -6,12 +6,11 @@
- 
- CREATE OR REPLACE FUNCTION anon.load_csv(
-   dest_table REGCLASS,
--  csv_file TEXT
-+  csv_data TEXT
- )
+@@ -11,7 +11,6 @@ CREATE OR REPLACE FUNCTION anon.load_csv(
  RETURNS BOOLEAN AS
  $$
  DECLARE
@@ -38,7 +32,7 @@ index 7da6553..b99d580 100644
 +  -- copy the csv data
 +  EXECUTE format(
 +    'COPY %I FROM stdin WITH CSV', dest_table
-+  ) USING csv_data;
++  ) USING csv_file;
  
    -- update the oid sequence (if any)
    SELECT pg_catalog.pg_get_serial_sequence(dest_table::TEXT,'oid')
@@ -62,14 +56,19 @@ index 7da6553..b99d580 100644
  
    WHEN invalid_text_representation THEN
      RAISE NOTICE 'Data file ''%'' has a bad CSV format. Skipping.', csv_file;
-@@ -74,14 +74,9205 @@ $$
+@@ -76,13 +76,9201 @@ SECURITY LABEL FOR anon ON FUNCTION anon.load_csv IS 'UNTRUSTED';
  
- SECURITY LABEL FOR anon ON FUNCTION anon.load_csv IS 'UNTRUSTED';
- 
-+-- CSV data variables
-+DO $$
-+DECLARE
-+    identifiers_category_csv TEXT := 'name	1	NULL
+ -- load fake data from a given path
+ CREATE OR REPLACE FUNCTION anon.init(
+-  datapath TEXT
+ )
+ RETURNS BOOLEAN
+ AS $$
+ DECLARE
+-  datapath_check TEXT;
+   success BOOLEAN;
++  -- CSV data variables
++  identifiers_category_csv TEXT := 'name	1	NULL
 +firstname	1	NULL
 +lastname	1	NULL
 +civility	0	NULL
@@ -9258,19 +9257,10 @@ index 7da6553..b99d580 100644
 +997	383 580 263 00069
 +998	979 130 929 00768
 +999	930 197 934 00613';
-+
- -- load fake data from a given path
- CREATE OR REPLACE FUNCTION anon.init(
--  datapath TEXT
- )
- RETURNS BOOLEAN
- AS $$
- DECLARE
--  datapath_check TEXT;
-   success BOOLEAN;
  BEGIN
  
-@@ -90,22 +9281,24 @@ BEGIN
+   IF anon.is_initialized() THEN
+@@ -90,22 +9278,24 @@ BEGIN
      RETURN TRUE;
    END IF;
  
