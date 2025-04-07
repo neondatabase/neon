@@ -4022,34 +4022,29 @@ impl Timeline {
         let mut completed_keyspace = KeySpace::default();
         let mut image_covered_keyspace = KeySpaceRandomAccum::new();
 
-        loop {
+        while let Some((layer_to_read, keyspace_to_read, lsn_range)) = fringe.next_layer() {
             if cancel.is_cancelled() {
                 return Err(GetVectoredError::Cancelled);
             }
 
-            let mut unmapped_keyspace;
-
-            if let Some((layer_to_read, keyspace_to_read, lsn_range)) = fringe.next_layer() {
-                if let Some(ref mut read_path) = reconstruct_state.read_path {
-                    read_path.record_layer_visit(&layer_to_read, &keyspace_to_read, &lsn_range);
-                }
-                let next_cont_lsn = lsn_range.start;
-                layer_to_read
-                    .get_values_reconstruct_data(
-                        keyspace_to_read.clone(),
-                        lsn_range,
-                        reconstruct_state,
-                        ctx,
-                    )
-                    .await?;
-
-                unmapped_keyspace = keyspace_to_read;
-                cont_lsn = next_cont_lsn;
-
-                reconstruct_state.on_layer_visited(&layer_to_read);
-            } else {
-                break;
+            if let Some(ref mut read_path) = reconstruct_state.read_path {
+                read_path.record_layer_visit(&layer_to_read, &keyspace_to_read, &lsn_range);
             }
+
+            let next_cont_lsn = lsn_range.start;
+            layer_to_read
+                .get_values_reconstruct_data(
+                    keyspace_to_read.clone(),
+                    lsn_range,
+                    reconstruct_state,
+                    ctx,
+                )
+                .await?;
+
+            let mut unmapped_keyspace = keyspace_to_read;
+            cont_lsn = next_cont_lsn;
+
+            reconstruct_state.on_layer_visited(&layer_to_read);
 
             let (keys_done_last_step, keys_with_image_coverage) =
                 reconstruct_state.consume_done_keys();
