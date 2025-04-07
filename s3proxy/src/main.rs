@@ -45,9 +45,7 @@ async fn main() -> anyhow::Result<()> {
         cancel: cancel.clone(),
     });
 
-    let ctrl_c_cancel = cancel.clone();
-    tokio::spawn(utils::signals::signal_handler(ctrl_c_cancel));
-
+    tokio::spawn(utils::signals::signal_handler(cancel.clone()));
     axum::serve(listener, app::app(proxy))
         .with_graceful_shutdown(async move { cancel.cancelled().await })
         .await?;

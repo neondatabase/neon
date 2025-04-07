@@ -329,7 +329,7 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
             tenant_id: TENANT_ID,
             timeline_id: TIMELINE_ID,
             endpoint_id: ENDPOINT_ID.into(),
-            exp: u64::max_value(),
+            exp: u64::MAX,
         };
         let key = jsonwebtoken::EncodingKey::from_ed_pem(TEST_PRIV_KEY_ED25519).unwrap();
         let header = jsonwebtoken::Header::new(s3proxy::VALIDATION_ALGO);
@@ -435,7 +435,7 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
             .await;
         assert_eq!(res.status(), StatusCode::OK);
         let body = res.into_body().collect().await.unwrap().to_bytes();
-        let body = String::from_utf8_lossy(&*body);
+        let body = String::from_utf8_lossy(&body);
         tracing::debug!(%body);
         // Storage metrics are not gathered for LocalFs
         if var(REAL_S3_ENV).is_ok() {
@@ -470,7 +470,7 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
             tenant_id: parts.get(1).map(|c| c.parse().unwrap()).unwrap(),
             timeline_id: parts.get(2).map(|c| c.parse().unwrap()),
             endpoint_id: parts.get(3).map(ToString::to_string),
-            exp: u64::max_value(),
+            exp: u64::MAX,
         };
         let key = jsonwebtoken::EncodingKey::from_ed_pem(TEST_PRIV_KEY_ED25519).unwrap();
         let header = jsonwebtoken::Header::new(s3proxy::VALIDATION_ALGO);

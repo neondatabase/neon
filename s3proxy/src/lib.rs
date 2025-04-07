@@ -292,7 +292,7 @@ mod tests {
             tenant_id: TENANT_ID,
             timeline_id: TIMELINE_ID,
             endpoint_id: ENDPOINT_ID.into(),
-            exp: u64::max_value(),
+            exp: u64::MAX,
         };
         let s3_path = |key| {
             let path = &format!("{TENANT_ID}/{TIMELINE_ID}/{ENDPOINT_ID}/{key}");
@@ -303,9 +303,9 @@ mod tests {
         let path = "cache_key".to_string();
         let mut key_path = KeyRequest {
             path,
-            tenant_id: auth.tenant_id.clone(),
-            timeline_id: auth.timeline_id.clone(),
-            endpoint_id: auth.endpoint_id.clone(),
+            tenant_id: auth.tenant_id,
+            timeline_id: auth.timeline_id,
+            endpoint_id: auth.endpoint_id,
         };
         assert_eq!(S3Path::try_from(&key_path).unwrap(), s3_path(key_path.path));
 
