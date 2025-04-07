@@ -1354,36 +1354,41 @@ impl Tenant {
                     }
                 }
 
-                // Ideally we should use Tenant::set_broken_no_wait, but it is not supposed to be used when tenant is in loading state.
-                enum BrokenVerbosity {
-                    Error,
-                    Info
-                }
-                let make_broken =
-                    |t: &Tenant, err: anyhow::Error, verbosity: BrokenVerbosity| {
-                        match verbosity {
-                            BrokenVerbosity::Info => {
-                                info!("attach cancelled, setting tenant state to Broken: {err}");
-                            },
-                            BrokenVerbosity::Error => {
-                                error!("attach failed, setting tenant state to Broken: {err:?}");
-                            }
+                fn make_broken_or_stopping(t: &Tenant, err: anyhow::Error) {
+                    t.state.send_modify(|state| match state {
+                        // TODO: the old code alluded to DeleteTenantFlow sometimes setting
+                        // TenantState::Stopping before we get here, but this may be outdated.
+                        // Let's find out with a testing assertion. If this doesn't fire, and the
+                        // logs don't show this happening in production, remove the Stopping cases.
+                        TenantState::Stopping{..} if cfg!(any(test, feature = "testing")) => {
+                            panic!("unexpected TenantState::Stopping during attach")
                         }
-                        t.state.send_modify(|state| {
-                            // The Stopping case is for when we have passed control on to DeleteTenantFlow:
-                            // if it errors, we will call make_broken when tenant is already in Stopping.
-                            assert!(
-                                matches!(*state, TenantState::Attaching | TenantState::Stopping { .. }),
-                                "the attach task owns the tenant state until activation is complete"
-                            );
-
-                            *state = TenantState::broken_from_reason(err.to_string());
-                        });
-                    };
+                        // If the tenant is cancelled, assume the error was caused by cancellation.
+                        TenantState::Attaching if t.cancel.is_cancelled() => {
+                            info!("attach cancelled, setting tenant state to Stopping: {err}");
+                            // NB: progress None tells `set_stopping` that attach has cancelled.
+                            *state = TenantState::Stopping { progress: None };
+                        }
+                        // According to the old code, DeleteTenantFlow may already have set this to
+                        // Stopping. Retain its progress.
+                        // TODO: there is no DeleteTenantFlow. Is this still needed? See above.
+                        TenantState::Stopping { progress } if t.cancel.is_cancelled() => {
+                            assert!(progress.is_some(), "concurrent attach cancellation");
+                            info!("attach cancelled, already Stopping: {err}");
+                        }
+                        // Mark the tenant as broken.
+                        TenantState::Attaching | TenantState::Stopping { .. } => {
+                            error!("attach failed, setting tenant state to Broken (was {state}): {err:?}");
+                            *state = TenantState::broken_from_reason(err.to_string())
+                        }
+                        // The attach task owns the tenant state until activated.
+                        state => panic!("invalid tenant state {state} during attach: {err:?}"),
+                    });
+                }
 
                 // TODO: should also be rejecting tenant conf changes that violate this check.
                 if let Err(e) = crate::tenant::storage_layer::inmemory_layer::IndexEntry::validate_checkpoint_distance(tenant_clone.get_checkpoint_distance()) {
-                    make_broken(&tenant_clone, anyhow::anyhow!(e), BrokenVerbosity::Error);
+                    make_broken_or_stopping(&tenant_clone, anyhow::anyhow!(e));
                     return Ok(());
                 }
 
@@ -1435,10 +1440,8 @@ impl Tenant {
                             // stayed in Activating for such a long time that shutdown found it in
                             // that state.
                             tracing::info!(state=%tenant_clone.current_state(), "Tenant shut down before activation");
-                            // Make the tenant broken so that set_stopping will not hang waiting for it to leave
-                            // the Attaching state.  This is an over-reaction (nothing really broke, the tenant is
-                            // just shutting down), but ensures progress.
-                            make_broken(&tenant_clone, anyhow::anyhow!("Shut down while Attaching"), BrokenVerbosity::Info);
+                            // Set the tenant to Stopping to signal `set_stopping` that we're done.
+                            make_broken_or_stopping(&tenant_clone, anyhow::anyhow!("Shut down while Attaching"));
                             return Ok(());
                         },
                     )
@@ -1457,7 +1460,7 @@ impl Tenant {
                         match res {
                             Ok(p) => Some(p),
                             Err(e) => {
-                                make_broken(&tenant_clone, anyhow::anyhow!(e), BrokenVerbosity::Error);
+                                make_broken_or_stopping(&tenant_clone, anyhow::anyhow!(e));
                                 return Ok(());
                             }
                         }
@@ -1483,9 +1486,7 @@ impl Tenant {
                         info!("attach finished, activating");
                         tenant_clone.activate(broker_client, None, &ctx);
                     }
-                    Err(e) => {
-                        make_broken(&tenant_clone, anyhow::anyhow!(e), BrokenVerbosity::Error);
-                    }
+                    Err(e) => make_broken_or_stopping(&tenant_clone, anyhow::anyhow!(e)),
                 }
 
                 // If we are doing an opportunistic warmup attachment at startup, initialize
@@ -3429,7 +3430,7 @@ impl Tenant {
             shutdown_mode
         };
 
-        match self.set_stopping(shutdown_progress, false, false).await {
+        match self.set_stopping(shutdown_progress).await {
             Ok(()) => {}
             Err(SetStoppingError::Broken) => {
                 // assume that this is acceptable
@@ -3509,25 +3510,13 @@ impl Tenant {
     /// This function waits for the tenant to become active if it isn't already, before transitioning it into Stopping state.
     ///
     /// This function is not cancel-safe!
-    ///
-    /// `allow_transition_from_loading` is needed for the special case of loading task deleting the tenant.
-    /// `allow_transition_from_attaching` is needed for the special case of attaching deleted tenant.
-    async fn set_stopping(
-        &self,
-        progress: completion::Barrier,
-        _allow_transition_from_loading: bool,
-        allow_transition_from_attaching: bool,
-    ) -> Result<(), SetStoppingError> {
+    async fn set_stopping(&self, progress: completion::Barrier) -> Result<(), SetStoppingError> {
         let mut rx = self.state.subscribe();
 
         // cannot stop before we're done activating, so wait out until we're done activating
         rx.wait_for(|state| match state {
-            TenantState::Attaching if allow_transition_from_attaching => true,
             TenantState::Activating(_) | TenantState::Attaching => {
-                info!(
-                    "waiting for {} to turn Active|Broken|Stopping",
-                    <&'static str>::from(state)
-                );
+                info!("waiting for {state} to turn Active|Broken|Stopping");
                 false
             }
             TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping { .. } => true,
@@ -3538,23 +3527,22 @@ impl Tenant {
         // we now know we're done activating, let's see whether this task is the winner to transition into Stopping
         let mut err = None;
         let stopping = self.state.send_if_modified(|current_state| match current_state {
-            TenantState::Activating(_) => {
-                unreachable!("1we ensured above that we're done with activation, and, there is no re-activation")
-            }
-            TenantState::Attaching => {
-                if !allow_transition_from_attaching {
-                    unreachable!("2we ensured above that we're done with activation, and, there is no re-activation")
-                };
-                *current_state = TenantState::Stopping { progress };
-                true
+            TenantState::Activating(_) | TenantState::Attaching => {
+                unreachable!("we ensured above that we're done with activation, and, there is no re-activation")
             }
             TenantState::Active => {
                 // FIXME: due to time-of-check vs time-of-use issues, it can happen that new timelines
                 // are created after the transition to Stopping. That's harmless, as the Timelines
                 // won't be accessible to anyone afterwards, because the Tenant is in Stopping state.
-                *current_state = TenantState::Stopping { progress };
+                *current_state = TenantState::Stopping { progress: Some(progress) };
                 // Continue stopping outside the closure. We need to grab timelines.lock()
                 // and we plan to turn it into a tokio::sync::Mutex in a future patch.
+                true
+            }
+            TenantState::Stopping { progress: None } => {
+                // An attach was cancelled, and the attach transitioned the tenant from Attaching to
+                // Stopping(None) to let us know it exited. Register our progress and continue.
+                *current_state = TenantState::Stopping { progress: Some(progress) };
                 true
             }
             TenantState::Broken { reason, .. } => {
@@ -3564,7 +3552,7 @@ impl Tenant {
                 err = Some(SetStoppingError::Broken);
                 false
             }
-            TenantState::Stopping { progress } => {
+            TenantState::Stopping { progress: Some(progress) } => {
                 info!("Tenant is already in Stopping state");
                 err = Some(SetStoppingError::AlreadyStopping(progress.clone()));
                 false
