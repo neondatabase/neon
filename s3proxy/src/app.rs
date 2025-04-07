@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use axum::body::{Body, BodyDataStream};
 use axum::response::{IntoResponse, Response};
 use axum::{Router, http::StatusCode};
@@ -7,6 +8,7 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
+use utils::backoff::retry;
 
 pub fn app(state: Arc<Proxy>) -> Router<()> {
     use axum::routing::{delete as _delete, get as _get};
@@ -28,54 +30,54 @@ pub fn app(state: Arc<Proxy>) -> Router<()> {
 }
 
 type Result = anyhow::Result<Response, Response>;
+type State = axum::extract::State<Arc<Proxy>>;
+
+const CONTENT_TYPE: &str = "content-type";
+const APPLICATION_OCTET_STREAM: &str = "application/octet-stream";
+const WARN_THRESHOLD: u32 = 3;
+const MAX_RETRIES: u32 = 10;
 
 async fn metrics() -> Result {
-    // eagerly init bucket metrics
-
     prometheus::TextEncoder::new()
         .encode_to_string(&prometheus::gather())
         .map(|s| s.into_response())
-        .map_err(|err| {
-            error!(%err, "collecting metrics");
-            internal_error()
-        })
+        .map_err(|e| internal_error(e, "/metrics", "collecting metrics"))
 }
 
-type State = axum::extract::State<Arc<Proxy>>;
-const CONTENT_TYPE: &str = "content-type";
-const APPLICATION_OCTET_STREAM: &str = "application/octet-stream";
 async fn get(S3Path { path }: S3Path, state: State) -> Result {
     info!(%path, "downloading");
-    let download_err = |err| {
-        if let DownloadError::NotFound = err {
-            warn!(%path, %err, "downloading");
+    let download_err = |e| {
+        if let DownloadError::NotFound = e {
+            warn!(%path, %e, "downloading");
             return not_found(&path);
         }
-        error!(%path, %err, "downloading");
-        internal_error()
+        internal_error(e, &path, "downloading")
     };
-    let stream = state
-        .storage
-        .download(&path, &DownloadOpts::default(), &state.cancel.clone())
-        .await
-        .map_err(download_err)?
-        .download_stream;
+    let cancel = state.cancel.clone();
+    let opts = &DownloadOpts::default();
+
+    let stream = retry(
+        async || state.storage.download(&path, opts, &cancel).await,
+        |e| !matches!(e, DownloadError::Timeout),
+        WARN_THRESHOLD,
+        MAX_RETRIES,
+        "downloading",
+        &cancel,
+    )
+    .await
+    .unwrap_or(Err(DownloadError::Cancelled))
+    .map_err(download_err)?
+    .download_stream;
+
     Response::builder()
         .status(StatusCode::OK)
         .header(CONTENT_TYPE, APPLICATION_OCTET_STREAM)
         .body(Body::from_stream(stream))
-        .map_err(|err| {
-            error!(%err, "reading response");
-            internal_error()
-        })
+        .map_err(|e| internal_error(e, path, "reading response"))
 }
 
 async fn set(S3Path { path }: S3Path, state: State, body: Body) -> Result {
     info!(%path, "uploading");
-    let upload_err = |err| {
-        error!(%path, %err, "uploading");
-        internal_error()
-    };
     use axum::body::HttpBody;
     let stream = body.into_data_stream();
     // TODO Get stream hint size without reading it into Bytes
@@ -85,35 +87,41 @@ async fn set(S3Path { path }: S3Path, state: State, body: Body) -> Result {
         .storage
         .upload(stream, body_size, &path, None, &state.cancel.clone())
         .await
-        .map_err(upload_err)?;
+        .map_err(|e| internal_error(e, path, "reading response"))?;
     Ok(ok())
 }
 
 async fn delete(S3Path { path }: S3Path, state: State) -> Result {
     info!(%path, "deleting");
-    let delete_err = |err| {
-        error!(%path, %err, "deleting");
-        internal_error()
-    };
-    state
-        .storage
-        .delete(&path, &state.cancel.clone())
-        .await
-        .map_err(delete_err)?;
+    let cancel = state.cancel.clone();
+    retry(
+        async || state.storage.delete(&path, &cancel).await,
+        |_| false,
+        WARN_THRESHOLD,
+        MAX_RETRIES,
+        "deleting",
+        &cancel,
+    )
+    .await
+    .unwrap_or(Err(anyhow!("deleting")))
+    .map_err(|e| internal_error(e, path, "deleting"))?;
     Ok(ok())
 }
 
 async fn delete_prefix(PrefixS3Path { path }: PrefixS3Path, state: State) -> Result {
     info!(%path, "deleting prefix");
-    let delete_err = |err| {
-        error!(%path, %err, "deleting prefix");
-        internal_error()
-    };
-    state
-        .storage
-        .delete_prefix(&path, &state.cancel.clone())
-        .await
-        .map_err(delete_err)?;
+    let cancel = state.cancel.clone();
+    retry(
+        async || state.storage.delete_prefix(&path, &cancel).await,
+        |_| false,
+        WARN_THRESHOLD,
+        MAX_RETRIES,
+        "deleting prefix",
+        &cancel,
+    )
+    .await
+    .unwrap_or(Err(anyhow!("deleting prefix")))
+    .map_err(|e| internal_error(e, path, "deleting prefix"))?;
     Ok(ok())
 }
 
@@ -429,7 +437,11 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
         let body = res.into_body().collect().await.unwrap().to_bytes();
         let body = String::from_utf8_lossy(&*body);
         tracing::debug!(%body);
-        assert!(body.contains("remote_storage_s3_deleted_objects_total"));
+        // Storage metrics are not gathered for LocalFs
+        if var(REAL_S3_ENV).is_ok() {
+            assert!(body.contains("remote_storage_s3_deleted_objects_total"));
+        }
+        assert!(body.contains("process_threads"));
     }
 
     #[testlog(tokio::test)]

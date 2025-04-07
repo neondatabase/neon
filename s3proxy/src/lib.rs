@@ -12,7 +12,7 @@ use std::fmt::Display;
 use std::result::Result as StdResult;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{debug, error};
 use utils::id::{TenantId, TimelineId};
 
 // simplified version of utils::auth::JwtAuth
@@ -139,7 +139,8 @@ pub fn ok() -> Response {
     StatusCode::OK.into_response()
 }
 
-pub fn internal_error() -> Response {
+pub fn internal_error(err: impl Display, path: impl Display, desc: &'static str) -> Response {
+    error!(%err, %path, desc);
     StatusCode::INTERNAL_SERVER_ERROR.into_response()
 }
 
