@@ -1837,7 +1837,6 @@ COPY --from=pg_repack-src /ext-src/ /ext-src/
 COPY --from=pg_repack-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY compute/patches/pg_repack.patch /ext-src
 RUN cd /ext-src/pg_repack-src && patch -p1 </ext-src/pg_repack.patch && rm -f /ext-src/pg_repack.patch
-COPY --from=pg_rest-src /ext-src/ /ext-src/
 COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
 RUN apt-get update && apt-get install -y libtap-parser-sourcehandler-pgtap-perl\
    && apt clean && rm -rf /ext-src/*.tar.gz /var/lib/apt/lists/*
