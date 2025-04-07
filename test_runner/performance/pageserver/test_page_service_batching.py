@@ -131,11 +131,6 @@ def test_throughput(
     conn = endpoint.connect()
     cur = conn.cursor()
 
-    cur.execute("SET max_parallel_workers_per_gather=0")  # disable parallel backends
-    cur.execute(f"SET effective_io_concurrency={effective_io_concurrency}")
-    cur.execute(
-        f"SET neon.readahead_buffer_size={readhead_buffer_size}"
-    )  # this is the current default value, but let's hard-code that
 
     cur.execute("CREATE EXTENSION IF NOT EXISTS neon;")
     cur.execute("CREATE EXTENSION IF NOT EXISTS neon_test_utils;")
@@ -201,6 +196,16 @@ def test_throughput(
             )
 
     def workload() -> Metrics:
+
+        conn = endpoint.connect(autocommit=False)
+        cur = conn.cursor()
+
+        cur.execute("SET max_parallel_workers_per_gather=0")  # disable parallel backends
+        cur.execute(f"SET effective_io_concurrency={effective_io_concurrency}")
+        cur.execute(
+            f"SET neon.readahead_buffer_size={readhead_buffer_size}"
+        )  # this is the current default value, but let's hard-code that
+
         start = time.time()
         iters = 0
         while time.time() - start < target_runtime or iters < 2:
@@ -211,8 +216,10 @@ def test_throughput(
             cur.execute(
                 "select clear_buffer_cache()"
             )  # TODO: what about LFC? doesn't matter right now because LFC isn't enabled by default in tests
-            cur.execute("select sum(data::bigint) from t")
-            assert cur.fetchall()[0][0] == npages * (npages + 1) // 2
+            # cur.execute("select sum(data::bigint) from t")
+            # assert cur.fetchall()[0][0] == npages * (npages + 1) // 2
+            rewrite_fraction = 4
+            cur.execute("update t set data = data::bigint + %s where data::bigint %% %s = (%s %% %s)", (rewrite_fraction,rewrite_fraction,iters,rewrite_fraction))
             iters += 1
         after = get_metrics()
         return (after - before).normalize(iters - 1)
