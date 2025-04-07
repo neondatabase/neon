@@ -30,30 +30,32 @@ impl SafekeeperReconcilers {
             reconcilers: HashMap::new(),
         }
     }
-    pub(crate) fn schedule_request_vec(
-        &mut self,
-        service: &Arc<Service>,
-        reqs: Vec<ScheduleRequest>,
-    ) {
-        tracing::info!(
-            "Scheduling {} pending safekeeper ops loaded from db",
-            reqs.len()
-        );
-        for req in reqs {
-            self.schedule_request(service, req);
-        }
-    }
-    pub(crate) fn schedule_request(&mut self, service: &Arc<Service>, req: ScheduleRequest) {
-        let node_id = req.safekeeper.get_id();
-        let reconciler_handle = self.reconcilers.entry(node_id).or_insert_with(|| {
+    /// Adds a safekeeper-specific reconciler.
+    /// Can be called multiple times, but it needs to be called at least once
+    /// for every new safekeeper added.
+    pub(crate) fn add_safekeeper(&mut self, node_id: NodeId, service: &Arc<Service>) {
+        self.reconcilers.entry(node_id).or_insert_with(|| {
             SafekeeperReconciler::spawn(self.cancel.child_token(), service.clone())
         });
-        reconciler_handle.schedule_reconcile(req);
     }
     pub(crate) fn cancel_safekeeper(&mut self, node_id: NodeId) {
         if let Some(handle) = self.reconcilers.remove(&node_id) {
             handle.cancel.cancel();
         }
+    }
+    pub(crate) fn schedule_request_vec(&self, reqs: Vec<ScheduleRequest>) {
+        tracing::info!(
+            "Scheduling {} pending safekeeper ops loaded from db",
+            reqs.len()
+        );
+        for req in reqs {
+            self.schedule_request(req);
+        }
+    }
+    pub(crate) fn schedule_request(&self, req: ScheduleRequest) {
+        let node_id = req.safekeeper.get_id();
+        let reconciler_handle = self.reconcilers.get(&node_id).unwrap();
+        reconciler_handle.schedule_reconcile(req);
     }
     /// Cancel ongoing reconciles for the given timeline
     ///
