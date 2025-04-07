@@ -11,7 +11,7 @@ index 0cdc769..5ceb91c 100644
 +
 +GRANT EXECUTE ON FUNCTION pg_config to neon_superuser;
 diff --git a/sql/init.sql b/sql/init.sql
-index 7da6553..5a2d7e5 100644
+index 7da6553..8612dec 100644
 --- a/sql/init.sql
 +++ b/sql/init.sql
 @@ -11,7 +11,6 @@ CREATE OR REPLACE FUNCTION anon.load_csv(
@@ -31,7 +31,7 @@ index 7da6553..5a2d7e5 100644
 -      || ' FROM ' || quote_literal(csv_file);
 +  -- copy the csv data
 +  EXECUTE format(
-+    'COPY %I FROM stdin WITH CSV', dest_table
++    '\COPY %I FROM stdin WITH CSV', dest_table
 +  ) USING csv_file;
  
    -- update the oid sequence (if any)
