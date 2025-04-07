@@ -4077,13 +4077,25 @@ class RestartStorcon(Enum):
     RESTART = "restart"
     ONLINE = "online"
 
+
+class DeletionSubject(Enum):
+    TIMELINE = "timeline"
+    TENANT = "tenant"
+
+
 @run_only_on_default_postgres("PG version is not interesting here")
 @pytest.mark.parametrize("restart_storcon", [RestartStorcon.RESTART, RestartStorcon.ONLINE])
-def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart_storcon: RestartStorcon):
+@pytest.mark.parametrize("deletetion_subject", [DeletionSubject.TENANT, DeletionSubject.TIMELINE])
+def test_storcon_create_delete_sk_down(
+    neon_env_builder: NeonEnvBuilder,
+    restart_storcon: RestartStorcon,
+    deletetion_subject: DeletionSubject,
+):
     """
     Test that the storcon can create and delete tenants and timelines with a safekeeper being down.
-      - restart_storcon: tests whether the pending ops are persisted.
+      - restart_storcon: tests that the pending ops are persisted.
         if we don't restart, we test that we don't require it to come from the db.
+      - deletion_subject: test that both single timeline and whole tenant deletion work.
     """
 
     neon_env_builder.num_safekeepers = 3
@@ -4106,6 +4118,7 @@ def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
     env.create_tenant(tenant_id, timeline_id)
+    child_timeline_id = env.create_branch("child_of_main", tenant_id)
 
     env.safekeepers[1].assert_log_contains(f"creating new timeline {tenant_id}/{timeline_id}")
     env.safekeepers[2].assert_log_contains(f"creating new timeline {tenant_id}/{timeline_id}")
@@ -4131,6 +4144,13 @@ def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart
         ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
         ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
 
+    with env.endpoints.create(
+        "child_of_main", tenant_id=tenant_id, config_lines=config_lines
+    ) as ep:
+        # endpoint should start.
+        ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
+        ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
+
     env.storage_controller.assert_log_contains("writing pending op for sk id 1")
     env.safekeepers[0].start()
 
@@ -4139,20 +4159,26 @@ def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart
         env.safekeepers[0].assert_log_contains(
             f"pulling timeline {tenant_id}/{timeline_id} from safekeeper"
         )
+        env.safekeepers[0].assert_log_contains(
+            f"pulling timeline {tenant_id}/{child_timeline_id} from safekeeper"
+        )
 
     wait_until(logged_contains_on_sk)
 
     env.safekeepers[1].stop()
 
-    env.storage_controller.pageserver_api().tenant_delete(tenant_id)
+    if deletetion_subject is DeletionSubject.TENANT:
+        env.storage_controller.pageserver_api().tenant_delete(tenant_id)
+    else:
+        env.storage_controller.pageserver_api().timeline_delete(tenant_id, child_timeline_id)
 
     # ensure the safekeeper deleted the timeline
     def timeline_deleted_on_active_sks():
         env.safekeepers[0].assert_log_contains(
-            f"deleting timeline {tenant_id}/{timeline_id} from disk"
+            f"deleting timeline {tenant_id}/{child_timeline_id} from disk"
         )
         env.safekeepers[2].assert_log_contains(
-            f"deleting timeline {tenant_id}/{timeline_id} from disk"
+            f"deleting timeline {tenant_id}/{child_timeline_id} from disk"
         )
 
     wait_until(timeline_deleted_on_active_sks)
@@ -4167,7 +4193,7 @@ def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart
     # ensure that there is log msgs for the third safekeeper too
     def timeline_deleted_on_sk():
         env.safekeepers[1].assert_log_contains(
-            f"deleting timeline {tenant_id}/{timeline_id} from disk"
+            f"deleting timeline {tenant_id}/{child_timeline_id} from disk"
         )
 
     wait_until(timeline_deleted_on_sk)
