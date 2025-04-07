@@ -220,6 +220,9 @@ struct Args {
     /// Trusted root CA certificates to use in https APIs.
     #[arg(long)]
     ssl_ca_file: Option<Utf8PathBuf>,
+    /// Flag to use https for requests to peer's safekeeper API.
+    #[arg(long)]
+    pub use_https_safekeeper_api: bool,
     /// Path to the JWT auth token used to authenticate with other safekeepers.
     #[arg(long)]
     auth_token_path: Option<Utf8PathBuf>,
@@ -412,6 +415,7 @@ async fn main() -> anyhow::Result<()> {
         ssl_cert_file: args.ssl_cert_file,
         ssl_cert_reload_period: args.ssl_cert_reload_period,
         ssl_ca_certs,
+        use_https_safekeeper_api: args.use_https_safekeeper_api,
     });
 
     // initialize sentry if SENTRY_DSN is provided

@@ -101,7 +101,7 @@ if TYPE_CHECKING:
 #    export CHECK_ONDISK_DATA_COMPATIBILITY=true
 #    export COMPATIBILITY_NEON_BIN=neon_previous/target/${BUILD_TYPE}
 #    export COMPATIBILITY_POSTGRES_DISTRIB_DIR=neon_previous/pg_install
-#    export NEON_BIN=target/release
+#    export NEON_BIN=target/${BUILD_TYPE}
 #    export POSTGRES_DISTRIB_DIR=pg_install
 #
 #    # Build previous version of binaries and store them somewhere:
@@ -249,6 +249,7 @@ def test_forward_compatibility(
     top_output_dir: Path,
     pg_version: PgVersion,
     compatibility_snapshot_dir: Path,
+    compute_reconfigure_listener: ComputeReconfigure,
 ):
     """
     Test that the old binaries can read new data
@@ -257,6 +258,7 @@ def test_forward_compatibility(
         os.environ.get("ALLOW_FORWARD_COMPATIBILITY_BREAKAGE", "false").lower() == "true"
     )
 
+    neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
     neon_env_builder.test_may_use_compatibility_snapshot_binaries = True
 
     try:

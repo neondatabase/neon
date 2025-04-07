@@ -167,10 +167,17 @@ impl SecondaryTenant {
 
         self.validate_metrics();
 
+        // Metrics are subtracted from and/or removed eagerly.
+        // Deletions are done in the background via [`BackgroundPurges::spawn`].
         let tenant_id = self.tenant_shard_id.tenant_id.to_string();
         let shard_id = format!("{}", self.tenant_shard_id.shard_slug());
         let _ = SECONDARY_RESIDENT_PHYSICAL_SIZE.remove_label_values(&[&tenant_id, &shard_id]);
         let _ = SECONDARY_HEATMAP_TOTAL_SIZE.remove_label_values(&[&tenant_id, &shard_id]);
+
+        self.detail
+            .lock()
+            .unwrap()
+            .drain_timelines(&self.tenant_shard_id, &self.resident_size_metric);
     }
 
     pub(crate) fn set_config(&self, config: &SecondaryLocationConfig) {

@@ -8,8 +8,8 @@
  *
  *-------------------------------------------------------------------------
  */
-#ifndef pageserver_h
-#define pageserver_h
+#ifndef PAGESTORE_CLIENT_h
+#define PAGESTORE_CLIENT_h
 
 #include "neon_pgversioncompat.h"
 
@@ -17,11 +17,8 @@
 #include "access/xlogdefs.h"
 #include RELFILEINFO_HDR
 #include "lib/stringinfo.h"
-#include "libpq/pqformat.h"
 #include "storage/block.h"
 #include "storage/buf_internals.h"
-#include "storage/smgr.h"
-#include "utils/memutils.h"
 
 #define MAX_SHARDS 128
 #define MAX_PAGESERVER_CONNSTRING_SIZE 256
@@ -277,13 +274,8 @@ typedef struct
 	XLogRecPtr effective_request_lsn;
 } neon_request_lsns;
 
-#if PG_MAJORVERSION_NUM < 16
-extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
-										 neon_request_lsns request_lsns, char *buffer);
-#else
 extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
 										 neon_request_lsns request_lsns, void *buffer);
-#endif
 extern int64 neon_dbsize(Oid dbNode);
 
 /* utils for neon relsize cache */
@@ -326,4 +318,4 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	return lfc_writev(rinfo, forkNum, blkno, &buffer, 1);
 }
 
-#endif
+#endif							/* PAGESTORE_CLIENT_H */

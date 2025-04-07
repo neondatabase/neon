@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::PERF_TRACE_TARGET;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use bytes::Bytes;
@@ -96,7 +97,9 @@ use super::{
 };
 use crate::aux_file::AuxFileSizeEstimator;
 use crate::config::PageServerConf;
-use crate::context::{DownloadBehavior, RequestContext};
+use crate::context::{
+    DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
+};
 use crate::disk_usage_eviction_task::{DiskUsageEvictionInfo, EvictionCandidate, finite_f32};
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::l0_flush::{self, L0FlushGlobalState};
@@ -1289,9 +1292,22 @@ impl Timeline {
         };
         reconstruct_state.read_path = read_path;
 
-        let traversal_res: Result<(), _> = self
-            .get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, ctx)
-            .await;
+        let traversal_res: Result<(), _> = {
+            let ctx = RequestContextBuilder::from(ctx)
+                .perf_span(|crnt_perf_span| {
+                    info_span!(
+                        target: PERF_TRACE_TARGET,
+                        parent: crnt_perf_span,
+                        "PLAN_IO",
+                    )
+                })
+                .attached_child();
+
+            self.get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, &ctx)
+                .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
+                .await
+        };
+
         if let Err(err) = traversal_res {
             // Wait for all the spawned IOs to complete.
             // See comments on `spawn_io` inside `storage_layer` for more details.
@@ -1305,14 +1321,46 @@ impl Timeline {
 
         let layers_visited = reconstruct_state.get_layers_visited();
 
+        let ctx = RequestContextBuilder::from(ctx)
+            .perf_span(|crnt_perf_span| {
+                info_span!(
+                    target: PERF_TRACE_TARGET,
+                    parent: crnt_perf_span,
+                    "RECONSTRUCT",
+                )
+            })
+            .attached_child();
+
         let futs = FuturesUnordered::new();
         for (key, state) in std::mem::take(&mut reconstruct_state.keys) {
             futs.push({
                 let walredo_self = self.myself.upgrade().expect("&self method holds the arc");
+                let ctx = RequestContextBuilder::from(&ctx)
+                    .perf_span(|crnt_perf_span| {
+                        info_span!(
+                            target: PERF_TRACE_TARGET,
+                            parent: crnt_perf_span,
+                            "RECONSTRUCT_KEY",
+                            key = %key,
+                        )
+                    })
+                    .attached_child();
+
                 async move {
                     assert_eq!(state.situation, ValueReconstructSituation::Complete);
 
-                    let converted = match state.collect_pending_ios().await {
+                    let res = state
+                        .collect_pending_ios()
+                        .maybe_perf_instrument(&ctx, |crnt_perf_span| {
+                            info_span!(
+                                target: PERF_TRACE_TARGET,
+                                parent: crnt_perf_span,
+                                "WAIT_FOR_IO_COMPLETIONS",
+                            )
+                        })
+                        .await;
+
+                    let converted = match res {
                         Ok(ok) => ok,
                         Err(err) => {
                             return (key, Err(err));
@@ -1329,16 +1377,27 @@ impl Timeline {
                         "{converted:?}"
                     );
 
-                    (
-                        key,
-                        walredo_self.reconstruct_value(key, lsn, converted).await,
-                    )
+                    let walredo_deltas = converted.num_deltas();
+                    let walredo_res = walredo_self
+                        .reconstruct_value(key, lsn, converted)
+                        .maybe_perf_instrument(&ctx, |crnt_perf_span| {
+                            info_span!(
+                                target: PERF_TRACE_TARGET,
+                                parent: crnt_perf_span,
+                                "WALREDO",
+                                deltas = %walredo_deltas,
+                            )
+                        })
+                        .await;
+
+                    (key, walredo_res)
                 }
             });
         }
 
         let results = futs
             .collect::<BTreeMap<Key, Result<Bytes, PageReconstructError>>>()
+            .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
             .await;
 
         // For aux file keys (v1 or v2) the vectored read path does not return an error
@@ -2415,6 +2474,31 @@ impl Timeline {
             .tenant_conf
             .lazy_slru_download
             .unwrap_or(self.conf.default_tenant_conf.lazy_slru_download)
+    }
+
+    /// Checks if a get page request should get perf tracing
+    ///
+    /// The configuration priority is: tenant config override, default tenant config,
+    /// pageserver config.
+    pub(crate) fn is_get_page_request_sampled(&self) -> bool {
+        let tenant_conf = self.tenant_conf.load();
+        let ratio = tenant_conf
+            .tenant_conf
+            .sampling_ratio
+            .flatten()
+            .or(self.conf.default_tenant_conf.sampling_ratio)
+            .or(self.conf.tracing.as_ref().map(|t| t.sampling_ratio));
+
+        match ratio {
+            Some(r) => {
+                if r.numerator == 0 {
+                    false
+                } else {
+                    rand::thread_rng().gen_range(0..r.denominator) < r.numerator
+                }
+            }
+            None => false,
+        }
     }
 
     fn get_checkpoint_distance(&self) -> u64 {
@@ -3875,15 +3959,30 @@ impl Timeline {
             let TimelineVisitOutcome {
                 completed_keyspace: completed,
                 image_covered_keyspace,
-            } = Self::get_vectored_reconstruct_data_timeline(
-                timeline,
-                keyspace.clone(),
-                cont_lsn,
-                reconstruct_state,
-                &self.cancel,
-                ctx,
-            )
-            .await?;
+            } = {
+                let ctx = RequestContextBuilder::from(ctx)
+                    .perf_span(|crnt_perf_span| {
+                        info_span!(
+                            target: PERF_TRACE_TARGET,
+                            parent: crnt_perf_span,
+                            "PLAN_IO_TIMELINE",
+                            timeline = %timeline.timeline_id,
+                            lsn = %cont_lsn,
+                        )
+                    })
+                    .attached_child();
+
+                Self::get_vectored_reconstruct_data_timeline(
+                    timeline,
+                    keyspace.clone(),
+                    cont_lsn,
+                    reconstruct_state,
+                    &self.cancel,
+                    &ctx,
+                )
+                .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
+                .await?
+            };
 
             keyspace.remove_overlapping_with(&completed);
 
@@ -3927,8 +4026,24 @@ impl Timeline {
 
             // Take the min to avoid reconstructing a page with data newer than request Lsn.
             cont_lsn = std::cmp::min(Lsn(request_lsn.0 + 1), Lsn(timeline.ancestor_lsn.0 + 1));
+
+            let ctx = RequestContextBuilder::from(ctx)
+                .perf_span(|crnt_perf_span| {
+                    info_span!(
+                        target: PERF_TRACE_TARGET,
+                        parent: crnt_perf_span,
+                        "GET_ANCESTOR",
+                        timeline = %timeline.timeline_id,
+                        lsn = %cont_lsn,
+                        ancestor = %ancestor_timeline.timeline_id,
+                        ancestor_lsn = %timeline.ancestor_lsn
+                    )
+                })
+                .attached_child();
+
             timeline_owned = timeline
-                .get_ready_ancestor_timeline(ancestor_timeline, ctx)
+                .get_ready_ancestor_timeline(ancestor_timeline, &ctx)
+                .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
                 .await?;
             timeline = &*timeline_owned;
         };
@@ -7259,9 +7374,9 @@ mod tests {
 
             eprintln!("Downloading {layer} and re-generating heatmap");
 
-            let ctx = &RequestContextBuilder::extend(ctx)
+            let ctx = &RequestContextBuilder::from(ctx)
                 .download_behavior(crate::context::DownloadBehavior::Download)
-                .build();
+                .attached_child();
 
             let _resident = layer
                 .download_and_keep_resident(ctx)

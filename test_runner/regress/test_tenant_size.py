@@ -776,6 +776,7 @@ def test_lsn_lease_storcon(neon_env_builder: NeonEnvBuilder):
         env.initial_tenant, env.initial_timeline, last_flush_lsn
     )
     env.storage_controller.tenant_shard_split(env.initial_tenant, 8)
+    env.storage_controller.reconcile_until_idle(timeout_secs=120)
     # TODO: do we preserve LSN leases across shard splits?
     env.storage_controller.pageserver_api().timeline_lsn_lease(
         env.initial_tenant, env.initial_timeline, last_flush_lsn

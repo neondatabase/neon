@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::os::fd::RawFd;
-use std::pin::Pin;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use enum_map::{Enum as _, EnumMap};
@@ -23,13 +21,13 @@ use pageserver_api::config::{
 };
 use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
-use pin_project_lite::pin_project;
 use postgres_backend::{QueryError, is_expected_io_error};
 use pq_proto::framed::ConnectionError;
 use strum::{EnumCount, IntoEnumIterator as _, VariantNames};
 use strum_macros::{IntoStaticStr, VariantNames};
 use utils::id::TimelineId;
 
+use crate::config;
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext};
 use crate::pgdatadir_mapping::DatadirModificationStats;
@@ -498,6 +496,100 @@ pub(crate) static WAIT_LSN_IN_PROGRESS_GLOBAL_MICROS: Lazy<IntCounter> = Lazy::n
     )
     .expect("failed to define a metric")
 });
+
+pub(crate) mod wait_ondemand_download_time {
+    use super::*;
+    const WAIT_ONDEMAND_DOWNLOAD_TIME_BUCKETS: &[f64] = &[
+        0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, // 10 ms - 100ms
+        0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, // 100ms to 1s
+        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, // 1s to 10s
+        10.0, 20.0, 30.0, 40.0, 50.0, 60.0, // 10s to 1m
+    ];
+
+    /// The task kinds for which we want to track wait times for on-demand downloads.
+    /// Other task kinds' wait times are accumulated in label value `unknown`.
+    pub(crate) const WAIT_ONDEMAND_DOWNLOAD_METRIC_TASK_KINDS: [TaskKind; 2] = [
+        TaskKind::PageRequestHandler,
+        TaskKind::WalReceiverConnectionHandler,
+    ];
+
+    pub(crate) static WAIT_ONDEMAND_DOWNLOAD_TIME_GLOBAL: Lazy<Vec<Histogram>> = Lazy::new(|| {
+        let histo = register_histogram_vec!(
+            "pageserver_wait_ondemand_download_seconds_global",
+            "Observations are individual tasks' wait times for on-demand downloads. \
+         If N tasks coalesce on an on-demand download, and it takes 10s, than we observe N * 10s.",
+            &["task_kind"],
+            WAIT_ONDEMAND_DOWNLOAD_TIME_BUCKETS.into(),
+        )
+        .expect("failed to define a metric");
+        WAIT_ONDEMAND_DOWNLOAD_METRIC_TASK_KINDS
+            .iter()
+            .map(|task_kind| histo.with_label_values(&[task_kind.into()]))
+            .collect::<Vec<_>>()
+    });
+
+    pub(crate) static WAIT_ONDEMAND_DOWNLOAD_TIME_SUM: Lazy<CounterVec> = Lazy::new(|| {
+        register_counter_vec!(
+            // use a name that _could_ be evolved into a per-timeline histogram later
+            "pageserver_wait_ondemand_download_seconds_sum",
+            "Like `pageserver_wait_ondemand_download_seconds_global` but per timeline",
+            &["tenant_id", "shard_id", "timeline_id", "task_kind"],
+        )
+        .unwrap()
+    });
+
+    pub struct WaitOndemandDownloadTimeSum {
+        counters: [Counter; WAIT_ONDEMAND_DOWNLOAD_METRIC_TASK_KINDS.len()],
+    }
+
+    impl WaitOndemandDownloadTimeSum {
+        pub(crate) fn new(tenant_id: &str, shard_id: &str, timeline_id: &str) -> Self {
+            let counters = WAIT_ONDEMAND_DOWNLOAD_METRIC_TASK_KINDS
+                .iter()
+                .map(|task_kind| {
+                    WAIT_ONDEMAND_DOWNLOAD_TIME_SUM
+                        .get_metric_with_label_values(&[
+                            tenant_id,
+                            shard_id,
+                            timeline_id,
+                            task_kind.into(),
+                        ])
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            Self {
+                counters: counters.try_into().unwrap(),
+            }
+        }
+        pub(crate) fn observe(&self, task_kind: TaskKind, duration: Duration) {
+            let maybe = WAIT_ONDEMAND_DOWNLOAD_METRIC_TASK_KINDS
+                .iter()
+                .enumerate()
+                .find(|(_, kind)| **kind == task_kind);
+            let Some((idx, _)) = maybe else {
+                return;
+            };
+            WAIT_ONDEMAND_DOWNLOAD_TIME_GLOBAL[idx].observe(duration.as_secs_f64());
+            let counter = &self.counters[idx];
+            counter.inc_by(duration.as_secs_f64());
+        }
+    }
+
+    pub(crate) fn shutdown_timeline(tenant_id: &str, shard_id: &str, timeline_id: &str) {
+        for task_kind in WAIT_ONDEMAND_DOWNLOAD_METRIC_TASK_KINDS {
+            let _ = WAIT_ONDEMAND_DOWNLOAD_TIME_SUM.remove_label_values(&[
+                tenant_id,
+                shard_id,
+                timeline_id,
+                task_kind.into(),
+            ]);
+        }
+    }
+
+    pub(crate) fn preinitialize_global_metrics() {
+        Lazy::force(&WAIT_ONDEMAND_DOWNLOAD_TIME_GLOBAL);
+    }
+}
 
 static LAST_RECORD_LSN: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
@@ -1248,13 +1340,13 @@ pub(crate) static STORAGE_IO_TIME_METRIC: Lazy<StorageIoTime> = Lazy::new(Storag
 
 #[derive(Clone, Copy)]
 #[repr(usize)]
-enum StorageIoSizeOperation {
+pub(crate) enum StorageIoSizeOperation {
     Read,
     Write,
 }
 
 impl StorageIoSizeOperation {
-    const VARIANTS: &'static [&'static str] = &["read", "write"];
+    pub(crate) const VARIANTS: &'static [&'static str] = &["read", "write"];
 
     fn as_str(&self) -> &'static str {
         Self::VARIANTS[*self as usize]
@@ -1262,7 +1354,7 @@ impl StorageIoSizeOperation {
 }
 
 // Needed for the https://neonprod.grafana.net/d/5uK9tHL4k/picking-tenant-for-relocation?orgId=1
-static STORAGE_IO_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
+pub(crate) static STORAGE_IO_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_io_operations_bytes_total",
         "Total amount of bytes read/written in IO operations",
@@ -2314,13 +2406,18 @@ impl RemoteOpFileKind {
     }
 }
 
-pub(crate) static REMOTE_OPERATION_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+pub(crate) static REMOTE_TIMELINE_CLIENT_COMPLETION_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
-        "pageserver_remote_operation_seconds",
-        "Time spent on remote storage operations. \
-        Grouped by tenant, timeline, operation_kind and status. \
+        "pageserver_remote_timeline_client_seconds_global",
+        "Time spent on remote timeline client operations. \
+        Grouped by task_kind, file_kind, operation_kind and status. \
+        The task_kind is \
+          - for layer downloads, populated from RequestContext (primary objective of having the label) \
+          - for index downloads, set to 'unknown' \
+          - for any upload operation, set to 'RemoteUploadTask' \
+        This keeps dimensionality at bay. \
         Does not account for time spent waiting in remote timeline client's queues.",
-        &["file_kind", "op_kind", "status"]
+        &["task_kind", "file_kind", "op_kind", "status"]
     )
     .expect("failed to define a metric")
 });
@@ -2882,6 +2979,7 @@ pub(crate) struct TimelineMetrics {
     pub storage_io_size: StorageIoSizeMetrics,
     pub wait_lsn_in_progress_micros: GlobalAndPerTenantIntCounter,
     pub wait_lsn_start_finish_counterpair: IntCounterPair,
+    pub wait_ondemand_download_time: wait_ondemand_download_time::WaitOndemandDownloadTimeSum,
     shutdown: std::sync::atomic::AtomicBool,
 }
 
@@ -3027,6 +3125,13 @@ impl TimelineMetrics {
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
 
+        let wait_ondemand_download_time =
+            wait_ondemand_download_time::WaitOndemandDownloadTimeSum::new(
+                &tenant_id,
+                &shard_id,
+                &timeline_id,
+            );
+
         TimelineMetrics {
             tenant_id,
             shard_id,
@@ -3060,6 +3165,7 @@ impl TimelineMetrics {
             wal_records_received,
             wait_lsn_in_progress_micros,
             wait_lsn_start_finish_counterpair,
+            wait_ondemand_download_time,
             shutdown: std::sync::atomic::AtomicBool::default(),
         }
     }
@@ -3252,6 +3358,8 @@ impl TimelineMetrics {
                 .remove_label_values(&mut res, &[tenant_id, shard_id, timeline_id]);
         }
 
+        wait_ondemand_download_time::shutdown_timeline(tenant_id, shard_id, timeline_id);
+
         let _ = SMGR_QUERY_STARTED_PER_TENANT_TIMELINE.remove_label_values(&[
             SmgrQueryType::GetPageAtLsn.into(),
             tenant_id,
@@ -3373,13 +3481,18 @@ impl RemoteTimelineClientMetrics {
 
     pub fn remote_operation_time(
         &self,
+        task_kind: Option<TaskKind>,
         file_kind: &RemoteOpFileKind,
         op_kind: &RemoteOpKind,
         status: &'static str,
     ) -> Histogram {
-        let key = (file_kind.as_str(), op_kind.as_str(), status);
-        REMOTE_OPERATION_TIME
-            .get_metric_with_label_values(&[key.0, key.1, key.2])
+        REMOTE_TIMELINE_CLIENT_COMPLETION_LATENCY
+            .get_metric_with_label_values(&[
+                task_kind.as_ref().map(|tk| tk.into()).unwrap_or("unknown"),
+                file_kind.as_str(),
+                op_kind.as_str(),
+                status,
+            ])
             .unwrap()
     }
 
@@ -3624,54 +3737,26 @@ impl Drop for RemoteTimelineClientMetrics {
 
 /// Wrapper future that measures the time spent by a remote storage operation,
 /// and records the time and success/failure as a prometheus metric.
-pub(crate) trait MeasureRemoteOp: Sized {
-    fn measure_remote_op(
+pub(crate) trait MeasureRemoteOp<O, E>: Sized + Future<Output = Result<O, E>> {
+    async fn measure_remote_op(
         self,
+        task_kind: Option<TaskKind>, // not all caller contexts have a RequestContext / TaskKind handy
         file_kind: RemoteOpFileKind,
         op: RemoteOpKind,
         metrics: Arc<RemoteTimelineClientMetrics>,
-    ) -> MeasuredRemoteOp<Self> {
+    ) -> Result<O, E> {
         let start = Instant::now();
-        MeasuredRemoteOp {
-            inner: self,
-            file_kind,
-            op,
-            start,
-            metrics,
-        }
+        let res = self.await;
+        let duration = start.elapsed();
+        let status = if res.is_ok() { &"success" } else { &"failure" };
+        metrics
+            .remote_operation_time(task_kind, &file_kind, &op, status)
+            .observe(duration.as_secs_f64());
+        res
     }
 }
 
-impl<T: Sized> MeasureRemoteOp for T {}
-
-pin_project! {
-    pub(crate) struct MeasuredRemoteOp<F>
-    {
-        #[pin]
-        inner: F,
-        file_kind: RemoteOpFileKind,
-        op: RemoteOpKind,
-        start: Instant,
-        metrics: Arc<RemoteTimelineClientMetrics>,
-    }
-}
-
-impl<F: Future<Output = Result<O, E>>, O, E> Future for MeasuredRemoteOp<F> {
-    type Output = Result<O, E>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
-        let poll_result = this.inner.poll(cx);
-        if let Poll::Ready(ref res) = poll_result {
-            let duration = this.start.elapsed();
-            let status = if res.is_ok() { &"success" } else { &"failure" };
-            this.metrics
-                .remote_operation_time(this.file_kind, this.op, status)
-                .observe(duration.as_secs_f64());
-        }
-        poll_result
-    }
-}
+impl<Fut, O, E> MeasureRemoteOp<O, E> for Fut where Fut: Sized + Future<Output = Result<O, E>> {}
 
 pub mod tokio_epoll_uring {
     use std::collections::HashMap;
@@ -4107,8 +4192,32 @@ pub(crate) fn set_tokio_runtime_setup(setup: &str, num_threads: NonZeroUsize) {
         .set(u64::try_from(num_threads.get()).unwrap());
 }
 
-pub fn preinitialize_metrics(conf: &'static PageServerConf) {
+static PAGESERVER_CONFIG_IGNORED_ITEMS: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_config_ignored_items",
+        "TOML items present in the on-disk configuration file but ignored by the pageserver config parser.\
+         The `item` label is the dot-separated path of the ignored item in the on-disk configuration file.\
+         The value for an unknown config item is always 1.\
+         There is a special label value \"\", which is 0, so that there is always a metric exposed (simplifies dashboards).",
+        &["item"]
+    )
+    .unwrap()
+});
+
+pub fn preinitialize_metrics(
+    conf: &'static PageServerConf,
+    ignored: config::ignored_fields::Paths,
+) {
     set_page_service_config_max_batch_size(&conf.page_service_pipelining);
+
+    PAGESERVER_CONFIG_IGNORED_ITEMS
+        .with_label_values(&[""])
+        .set(0);
+    for path in &ignored.paths {
+        PAGESERVER_CONFIG_IGNORED_ITEMS
+            .with_label_values(&[path])
+            .set(1);
+    }
 
     // Python tests need these and on some we do alerting.
     //
@@ -4195,4 +4304,5 @@ pub fn preinitialize_metrics(conf: &'static PageServerConf) {
     Lazy::force(&tokio_epoll_uring::THREAD_LOCAL_METRICS_STORAGE);
 
     tenant_throttling::preinitialize_global_metrics();
+    wait_ondemand_download_time::preinitialize_global_metrics();
 }

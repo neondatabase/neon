@@ -35,6 +35,10 @@ impl SafekeeperReconcilers {
         service: &Arc<Service>,
         reqs: Vec<ScheduleRequest>,
     ) {
+        tracing::info!(
+            "Scheduling {} pending safekeeper ops loaded from db",
+            reqs.len()
+        );
         for req in reqs {
             self.schedule_request(service, req);
         }
@@ -74,7 +78,7 @@ pub(crate) async fn load_schedule_requests(
     service: &Arc<Service>,
     safekeepers: &HashMap<NodeId, Safekeeper>,
 ) -> anyhow::Result<Vec<ScheduleRequest>> {
-    let pending_ops = service.persistence.list_pending_ops(None).await?;
+    let pending_ops = service.persistence.list_pending_ops().await?;
     let mut res = Vec::with_capacity(pending_ops.len());
     for op_persist in pending_ops {
         let node_id = NodeId(op_persist.sk_id as u64);
@@ -232,12 +236,14 @@ impl SafekeeperReconciler {
             let kind = req.kind;
             let tenant_id = req.tenant_id;
             let timeline_id = req.timeline_id;
+            let node_id = req.safekeeper.skp.id;
             self.reconcile_one(req, req_cancel)
                 .instrument(tracing::info_span!(
                     "reconcile_one",
                     ?kind,
                     %tenant_id,
-                    ?timeline_id
+                    ?timeline_id,
+                    %node_id,
                 ))
                 .await;
         }
