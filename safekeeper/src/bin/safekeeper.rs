@@ -349,7 +349,7 @@ async fn main() -> anyhow::Result<()> {
         Err(VarError::NotPresent) => {
             if let Some(auth_token_path) = args.auth_token_path.as_ref() {
                 info!(
-                    "loading JWT token for authenticatiun with safekeepers from {auth_token_path}"
+                    "loading JWT token for authentication with safekeepers from {auth_token_path}"
                 );
                 let auth_token = tokio::fs::read_to_string(auth_token_path).await?;
                 Some(SecretString::from(auth_token.trim().to_owned()))
