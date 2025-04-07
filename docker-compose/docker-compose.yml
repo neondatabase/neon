@@ -161,6 +161,7 @@ services:
     volumes:
       - ./compute_wrapper/var/db/postgres/configs/:/var/db/postgres/configs/
       - ./compute_wrapper/shell/:/shell/
+      - ./compute_wrapper/public-key.der:/public-key.der
     ports:
       - 55433:55433 # pg protocol handler
       - 3080:3080 # http endpoints

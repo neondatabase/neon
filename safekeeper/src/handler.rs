@@ -6,6 +6,7 @@ use std::str::{self, FromStr};
 use std::sync::Arc;
 
 use anyhow::Context;
+use jsonwebtoken::TokenData;
 use pageserver_api::models::ShardParameters;
 use pageserver_api::shard::{ShardIdentity, ShardStripeSize};
 use postgres_backend::{PostgresBackend, QueryError};
@@ -278,7 +279,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
             .auth
             .as_ref()
             .expect("auth_type is configured but .auth of handler is missing");
-        let data = auth
+        let data: TokenData<Claims> = auth
             .decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)
             .map_err(|e| QueryError::Unauthorized(e.0))?;
 
