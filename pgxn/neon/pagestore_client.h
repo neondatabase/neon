@@ -274,13 +274,8 @@ typedef struct
 	XLogRecPtr effective_request_lsn;
 } neon_request_lsns;
 
-#if PG_MAJORVERSION_NUM < 16
-extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
-										 neon_request_lsns request_lsns, char *buffer);
-#else
 extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
 										 neon_request_lsns request_lsns, void *buffer);
-#endif
 extern int64 neon_dbsize(Oid dbNode);
 
 /* utils for neon relsize cache */
