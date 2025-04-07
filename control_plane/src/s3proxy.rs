@@ -80,7 +80,7 @@ impl S3ProxyNode {
             &self.data_dir.clone().into_std_path_buf(),
             &self.bin.clone().into_std_path_buf(),
             vec![self.config_path().to_string()],
-            vec![],
+            vec![("RUST_LOG".into(), "debug".into())],
             background_process::InitialPidFile::Create(self.pid_file()),
             retry_timeout,
             process_status_check,
