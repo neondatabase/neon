@@ -1,5 +1,6 @@
 import dataclasses
 import json
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -227,14 +228,14 @@ def test_throughput(
                 break
             disruptor_started.set()
             iters += 1
-            time.sleep(0.001)
+            time.sleep(0.1)
         return iters
 
     env.pageserver.patch_config_toml_nonrecursive(
         {"page_service_pipelining": dataclasses.asdict(pipelining_config)}
     )
 
-    # non-package-mode-py3.10christian@neon-hetzner-dev-christian:[~/src/neon]: cat test_output/test_throughput\[debug-pg16-50-pipelining_config0-30-100-128-batchable\ \{\'max_batch_size\':\ 32,\ \'execution\':\ \'concurrent-futures\',\ \'mode\':\ \'pipelined\'\}\]/repo/pageserver_1/pageserver.log | perl -nE 'if (/stopping batching because (LSN changed|of batch size|timeline object mismatch|batch key changed)/) { say $1 }' | sort | uniq -c
+    # set trace for log analysis below
     env.pageserver.restart(extra_env_vars={"RUST_LOG": "info,pageserver::page_service=trace"})
 
     log.info("Starting workload")
@@ -251,6 +252,24 @@ def test_throughput(
 
 
     log.info("Results: %s", metrics)
+
+    since_last_start = []
+    for line in env.pageserver.logfile.read_text().splitlines():
+        if "git:" in line:
+            since_last_start = []
+        since_last_start.append(line)
+
+    stopping_batching_because_re = re.compile(r"stopping batching because (LSN changed|of batch size|timeline object mismatch|batch key changed|.*)")
+    reasons_for_stopping_batching =  {}
+    for line in since_last_start:
+        match = stopping_batching_because_re.search(line)
+        if match:
+            if match.group(1) not in reasons_for_stopping_batching:
+                reasons_for_stopping_batching[match.group(1)] = 0
+            reasons_for_stopping_batching[match.group(1)] += 1
+
+    log.info("Reasons for stopping batching: %s", reasons_for_stopping_batching)
+
 
     #
     # Sanity-checks on the collected data
