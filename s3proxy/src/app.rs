@@ -1,9 +1,8 @@
-use anyhow::Result;
 use axum::body::{Body, BodyDataStream};
 use axum::response::{IntoResponse, Response};
 use axum::{Router, http::StatusCode};
 use remote_storage::{DownloadError, DownloadOpts, GenericRemoteStorage, RemotePath};
-use s3proxy::{PrefixS3Path, Proxy, S3Path};
+use s3proxy::{PrefixS3Path, Proxy, S3Path, internal_error, not_found, ok};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 use tokio_util::sync::CancellationToken;
@@ -11,13 +10,11 @@ use tracing::{error, info, warn};
 
 pub fn app(state: Arc<Proxy>) -> Router<()> {
     use axum::routing::{delete as _delete, get as _get};
-    let delete_prefix = _delete(async |p: PrefixS3Path, s: State| merge(delete_prefix(p, s).await));
+    let delete_prefix = _delete(delete_prefix);
     Router::new()
         .route(
             "/{tenant_id}/{timeline_id}/{endpoint_id}/{*path}",
-            _get(async |p: S3Path, s: State| merge(get(p, s).await))
-                .put(async |p: S3Path, s: State, b: Body| merge(set(p, s, b).await))
-                .delete(async |p: S3Path, s: State| merge(delete(p, s).await)),
+            _get(get).put(set).delete(delete),
         )
         .route(
             "/{tenant_id}/{timeline_id}/{endpoint_id}",
@@ -25,11 +22,16 @@ pub fn app(state: Arc<Proxy>) -> Router<()> {
         )
         .route("/{tenant_id}/{timeline_id}", delete_prefix.clone())
         .route("/{tenant_id}", delete_prefix)
-        .route("/metrics", _get(async || merge(metrics().await)))
+        .route("/metrics", _get(metrics))
+        .route("/status", _get(async || StatusCode::OK.into_response()))
         .with_state(state)
 }
 
-async fn metrics() -> Result<Response, Response> {
+type Result = anyhow::Result<Response, Response>;
+
+async fn metrics() -> Result {
+    // eagerly init bucket metrics
+
     prometheus::TextEncoder::new()
         .encode_to_string(&prometheus::gather())
         .map(|s| s.into_response())
@@ -42,7 +44,7 @@ async fn metrics() -> Result<Response, Response> {
 type State = axum::extract::State<Arc<Proxy>>;
 const CONTENT_TYPE: &str = "content-type";
 const APPLICATION_OCTET_STREAM: &str = "application/octet-stream";
-async fn get(S3Path { path }: S3Path, state: State) -> Result<Response, Response> {
+async fn get(S3Path { path }: S3Path, state: State) -> Result {
     info!(%path, "downloading");
     let download_err = |err| {
         if let DownloadError::NotFound = err {
@@ -62,11 +64,13 @@ async fn get(S3Path { path }: S3Path, state: State) -> Result<Response, Response
         .status(StatusCode::OK)
         .header(CONTENT_TYPE, APPLICATION_OCTET_STREAM)
         .body(Body::from_stream(stream))
-        .map_err(|_| internal_error())
+        .map_err(|err| {
+            error!(%err, "reading response");
+            internal_error()
+        })
 }
 
-async fn set(path: S3Path, state: State, body: Body) -> Result<Response, Response> {
-    let S3Path { path } = path;
+async fn set(S3Path { path }: S3Path, state: State, body: Body) -> Result {
     info!(%path, "uploading");
     let upload_err = |err| {
         error!(%path, %err, "uploading");
@@ -85,7 +89,7 @@ async fn set(path: S3Path, state: State, body: Body) -> Result<Response, Respons
     Ok(ok())
 }
 
-async fn delete(S3Path { path }: S3Path, state: State) -> Result<Response, Response> {
+async fn delete(S3Path { path }: S3Path, state: State) -> Result {
     info!(%path, "deleting");
     let delete_err = |err| {
         error!(%path, %err, "deleting");
@@ -99,10 +103,7 @@ async fn delete(S3Path { path }: S3Path, state: State) -> Result<Response, Respo
     Ok(ok())
 }
 
-async fn delete_prefix(
-    PrefixS3Path { path }: PrefixS3Path,
-    state: State,
-) -> Result<Response, Response> {
+async fn delete_prefix(PrefixS3Path { path }: PrefixS3Path, state: State) -> Result {
     info!(%path, "deleting prefix");
     let delete_err = |err| {
         error!(%path, %err, "deleting prefix");
@@ -119,7 +120,7 @@ async fn delete_prefix(
 pub async fn check_storage_permissions(
     client: &GenericRemoteStorage,
     cancel: CancellationToken,
-) -> Result<()> {
+) -> anyhow::Result<()> {
     info!("storage permissions check");
 
     let now = std::time::SystemTime::now()
@@ -163,25 +164,6 @@ pub async fn check_storage_permissions(
     client.delete(&path, &cancel).await
 }
 
-fn merge(res: Result<Response, Response>) -> Response {
-    match res {
-        Ok(v) => v,
-        Err(e) => e,
-    }
-}
-
-fn ok() -> Response {
-    StatusCode::OK.into_response()
-}
-
-fn internal_error() -> Response {
-    StatusCode::INTERNAL_SERVER_ERROR.into_response()
-}
-
-fn not_found(key: impl ToString) -> Response {
-    (StatusCode::NOT_FOUND, key.to_string()).into_response()
-}
-
 fn body_stream_to_sync_stream(
     stream: BodyDataStream,
 ) -> impl futures::Stream<Item = std::io::Result<axum::body::Bytes>> {
@@ -194,7 +176,9 @@ fn body_stream_to_sync_stream(
 mod tests {
     use super::*;
     use axum::{body::Body, extract::Request, response::Response};
+    use http_body_util::BodyExt;
     use itertools::iproduct;
+    use serde::Serialize;
     use std::env::var;
     use std::sync::Arc;
     use std::time::Duration;
@@ -272,6 +256,17 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
             .unwrap()
     }
 
+    #[testlog(tokio::test)]
+    async fn status() {
+        let res = Request::builder()
+            .uri("/status")
+            .body(Body::empty())
+            .map(request)
+            .unwrap()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
     fn routes() -> impl Iterator<Item = (&'static str, &'static str)> {
         iproduct!(
             vec!["/1", "/1/2", "/1/2/3", "/1/2/3/4"],
@@ -283,7 +278,7 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
     async fn no_token() {
         for (uri, method) in routes() {
             info!(%uri, %method);
-            let status = Request::builder()
+            let res = Request::builder()
                 .uri(uri)
                 .method(method)
                 .body(Body::empty())
@@ -291,7 +286,7 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
                 .unwrap()
                 .await;
             assert!(matches!(
-                status.status(),
+                res.status(),
                 StatusCode::METHOD_NOT_ALLOWED | StatusCode::BAD_REQUEST
             ));
         }
@@ -326,6 +321,7 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
             tenant_id: TENANT_ID,
             timeline_id: TIMELINE_ID,
             endpoint_id: ENDPOINT_ID.into(),
+            exp: u64::max_value(),
         };
         let key = jsonwebtoken::EncodingKey::from_ed_pem(TEST_PRIV_KEY_ED25519).unwrap();
         let header = jsonwebtoken::Header::new(s3proxy::VALIDATION_ALGO);
@@ -409,10 +405,31 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
             if !compare_body {
                 continue;
             }
-            use http_body_util::BodyExt;
             let read_body = response.into_body().collect().await.unwrap().to_bytes();
             assert_eq!(body, read_body);
         }
+    }
+
+    #[testlog(tokio::test)]
+    async fn metrics() {
+        let uri = format!("/{TENANT_ID}/{TIMELINE_ID}/{ENDPOINT_ID}/key");
+        let req = vec![
+            (uri.clone(), "PUT", "body", StatusCode::OK, false),
+            (uri.clone(), "DELETE", "", StatusCode::OK, false),
+        ];
+        requests_chain(req.into_iter(), |_| token()).await;
+
+        let res = Request::builder()
+            .uri("/metrics")
+            .body(Body::empty())
+            .map(request)
+            .unwrap()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8_lossy(&*body);
+        tracing::debug!(%body);
+        assert!(body.contains("remote_storage_s3_deleted_objects_total"));
     }
 
     #[testlog(tokio::test)]
@@ -430,10 +447,18 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
 
     fn delete_prefix_token(uri: &str) -> String {
         let parts = uri.split("/").collect::<Vec<&str>>();
-        let claims = s3proxy::PrefixKeyPath {
+        #[derive(Serialize)]
+        struct PrefixClaims {
+            tenant_id: TenantId,
+            timeline_id: Option<TimelineId>,
+            endpoint_id: Option<s3proxy::EndpointId>,
+            exp: u64,
+        }
+        let claims = PrefixClaims {
             tenant_id: parts.get(1).map(|c| c.parse().unwrap()).unwrap(),
             timeline_id: parts.get(2).map(|c| c.parse().unwrap()),
             endpoint_id: parts.get(3).map(ToString::to_string),
+            exp: u64::max_value(),
         };
         let key = jsonwebtoken::EncodingKey::from_ed_pem(TEST_PRIV_KEY_ED25519).unwrap();
         let header = jsonwebtoken::Header::new(s3proxy::VALIDATION_ALGO);

@@ -12,6 +12,7 @@ use std::fmt::Display;
 use std::result::Result as StdResult;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
 use utils::id::{TenantId, TimelineId};
 
 // simplified version of utils::auth::JwtAuth
@@ -23,11 +24,9 @@ pub struct JwtAuth {
 pub const VALIDATION_ALGO: jsonwebtoken::Algorithm = jsonwebtoken::Algorithm::EdDSA;
 impl JwtAuth {
     pub fn new(key: &[u8]) -> Result<Self> {
-        let mut validation = Validation::new(VALIDATION_ALGO);
-        validation.required_spec_claims = [].into();
         Ok(Self {
             decoding_key: DecodingKey::from_ed_pem(key)?,
-            validation,
+            validation: Validation::new(VALIDATION_ALGO),
         })
     }
 
@@ -79,29 +78,31 @@ pub struct Proxy {
     pub cancel: CancellationToken,
 }
 
-type EndpointId = String; // If needed, reuse small string from proxy/src/types.rc
+pub type EndpointId = String; // If needed, reuse small string from proxy/src/types.rc
 
 #[derive(Deserialize, Serialize, PartialEq)]
 pub struct Claims {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
     pub endpoint_id: EndpointId,
+    pub exp: u64,
 }
 
 impl Display for Claims {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Claims(tenant_id {} timeline_id {} endpoint_id {})",
-            self.tenant_id, self.timeline_id, self.endpoint_id,
+            "Claims(tenant_id {} timeline_id {} endpoint_id {} exp {})",
+            self.tenant_id, self.timeline_id, self.endpoint_id, self.exp
         )
     }
 }
 
 #[derive(Deserialize, Serialize)]
-struct KeyPath {
-    #[serde(flatten)]
-    auth: Claims,
+struct KeyRequest {
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    endpoint_id: EndpointId,
     path: String,
 }
 
@@ -110,14 +111,15 @@ pub struct S3Path {
     pub path: RemotePath,
 }
 
-impl TryFrom<&KeyPath> for S3Path {
+impl TryFrom<&KeyRequest> for S3Path {
     type Error = String;
-    fn try_from(KeyPath { auth, path }: &KeyPath) -> StdResult<Self, Self::Error> {
-        let Claims {
+    fn try_from(req: &KeyRequest) -> StdResult<Self, Self::Error> {
+        let KeyRequest {
             tenant_id,
             timeline_id,
             endpoint_id,
-        } = &auth;
+            path,
+        } = &req;
         let prefix = format!("{tenant_id}/{timeline_id}/{endpoint_id}",);
         let path = Utf8PathBuf::from(prefix).join(normalize_key(path)?);
         let path = RemotePath::new(&path).unwrap(); // unwrap() because the path is already relative
@@ -128,8 +130,21 @@ impl TryFrom<&KeyPath> for S3Path {
 fn unauthorized() -> Response {
     StatusCode::UNAUTHORIZED.into_response()
 }
-fn bad_request(e: impl ToString) -> Response {
+
+pub fn bad_request(e: impl ToString) -> Response {
     (StatusCode::BAD_REQUEST, e.to_string()).into_response()
+}
+
+pub fn ok() -> Response {
+    StatusCode::OK.into_response()
+}
+
+pub fn internal_error() -> Response {
+    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+}
+
+pub fn not_found(key: impl ToString) -> Response {
+    (StatusCode::NOT_FOUND, key.to_string()).into_response()
 }
 
 impl FromRequestParts<Arc<Proxy>> for S3Path {
@@ -138,20 +153,26 @@ impl FromRequestParts<Arc<Proxy>> for S3Path {
         parts: &mut Parts,
         state: &Arc<Proxy>,
     ) -> Result<Self, Self::Rejection> {
+        let Path(path): Path<KeyRequest> = parts
+            .extract()
+            .await
+            .map_err(|_| bad_request("invalid route"))?;
         let TypedHeader(Authorization(bearer)) = parts
             .extract::<TypedHeader<Authorization<Bearer>>>()
             .await
             .map_err(|_| bad_request("invalid token"))?;
-        let claims: Claims = state
-            .auth
-            .decode(bearer.token())
-            .map_err(|_| bad_request("invalid token"))?;
-        let Path(path): Path<KeyPath> = parts
-            .extract()
-            .await
-            .map_err(|_| bad_request("invalid route"))?;
-        if path.auth != claims {
-            tracing::debug!(%path.auth, %claims, "route doesn't match claims");
+        let claims: Claims = state.auth.decode(bearer.token()).map_err(|err| {
+            debug!(%err, "decoding token");
+            bad_request("invalid token")
+        })?;
+        let route = Claims {
+            tenant_id: path.tenant_id,
+            timeline_id: path.timeline_id,
+            endpoint_id: path.endpoint_id.clone(),
+            exp: claims.exp,
+        };
+        if route != claims {
+            debug!(%route, %claims, "route doesn't match claims");
             return Err(unauthorized());
         }
         (&path).try_into().map_err(|_| bad_request("invalid route"))
@@ -214,20 +235,20 @@ impl FromRequestParts<Arc<Proxy>> for PrefixS3Path {
         parts: &mut Parts,
         state: &Arc<Proxy>,
     ) -> Result<Self, Self::Rejection> {
-        let TypedHeader(Authorization(bearer)) = parts
-            .extract::<TypedHeader<Authorization<Bearer>>>()
-            .await
-            .map_err(|_| bad_request("invalid token"))?;
-        let claims: PrefixKeyPath = state
-            .auth
-            .decode(bearer.token())
-            .map_err(|_| bad_request("invalid token"))?;
         let Path(path) = parts
             .extract::<Path<PrefixKeyPath>>()
             .await
             .map_err(|_| bad_request("invalid route"))?;
+        let TypedHeader(Authorization(bearer)) = parts
+            .extract::<TypedHeader<Authorization<Bearer>>>()
+            .await
+            .map_err(|_| bad_request("invalid token"))?;
+        let claims: PrefixKeyPath = state.auth.decode(bearer.token()).map_err(|err| {
+            debug!(%path, %err, "decoding token");
+            bad_request("invalid token")
+        })?;
         if path != claims {
-            tracing::debug!(%path, %claims, "route doesn't match claims");
+            debug!(%path, %claims, "route doesn't match claims");
             return Err(unauthorized());
         }
         Ok((&path).into())
@@ -268,6 +289,7 @@ mod tests {
             tenant_id: TENANT_ID,
             timeline_id: TIMELINE_ID,
             endpoint_id: ENDPOINT_ID.into(),
+            exp: u64::max_value(),
         };
         let s3_path = |key| {
             let path = &format!("{TENANT_ID}/{TIMELINE_ID}/{ENDPOINT_ID}/{key}");
@@ -276,7 +298,12 @@ mod tests {
         };
 
         let path = "cache_key".to_string();
-        let mut key_path = KeyPath { auth, path };
+        let mut key_path = KeyRequest {
+            path,
+            tenant_id: auth.tenant_id.clone(),
+            timeline_id: auth.timeline_id.clone(),
+            endpoint_id: auth.endpoint_id.clone(),
+        };
         assert_eq!(S3Path::try_from(&key_path).unwrap(), s3_path(key_path.path));
 
         key_path.path = "we/can/have/nested/paths".to_string();

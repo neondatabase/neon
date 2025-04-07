@@ -46,11 +46,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let ctrl_c_cancel = cancel.clone();
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.unwrap();
-        tracing::info!("Shutting down");
-        ctrl_c_cancel.cancel()
-    });
+    tokio::spawn(utils::signals::signal_handler(ctrl_c_cancel));
 
     axum::serve(listener, app::app(proxy))
         .with_graceful_shutdown(async move { cancel.cancelled().await })
