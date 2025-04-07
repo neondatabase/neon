@@ -106,6 +106,8 @@ def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
 
     assert int(lfc_file_blocks) <= 128 * 1024
 
+    # Now test that number of rows returned by local_cache is the same as file_cache_used_pages.
+    # Perform several iterations to make cache cache content stabilized.
     nretries = 10
     while True:
         cur.execute("select count(*) from local_cache")
