@@ -3426,7 +3426,7 @@ impl Tenant {
             shutdown_mode
         };
 
-        match self.set_stopping(shutdown_progress, false, false).await {
+        match self.set_stopping(shutdown_progress).await {
             Ok(()) => {}
             Err(SetStoppingError::Broken) => {
                 // assume that this is acceptable
@@ -3506,25 +3506,13 @@ impl Tenant {
     /// This function waits for the tenant to become active if it isn't already, before transitioning it into Stopping state.
     ///
     /// This function is not cancel-safe!
-    ///
-    /// `allow_transition_from_loading` is needed for the special case of loading task deleting the tenant.
-    /// `allow_transition_from_attaching` is needed for the special case of attaching deleted tenant.
-    async fn set_stopping(
-        &self,
-        progress: completion::Barrier,
-        _allow_transition_from_loading: bool,
-        allow_transition_from_attaching: bool,
-    ) -> Result<(), SetStoppingError> {
+    async fn set_stopping(&self, progress: completion::Barrier) -> Result<(), SetStoppingError> {
         let mut rx = self.state.subscribe();
 
         // cannot stop before we're done activating, so wait out until we're done activating
         rx.wait_for(|state| match state {
-            TenantState::Attaching if allow_transition_from_attaching => true,
             TenantState::Activating(_) | TenantState::Attaching => {
-                info!(
-                    "waiting for {} to turn Active|Broken|Stopping",
-                    <&'static str>::from(state)
-                );
+                info!("waiting for {state} to turn Active|Broken|Stopping");
                 false
             }
             TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping { .. } => true,
@@ -3535,15 +3523,8 @@ impl Tenant {
         // we now know we're done activating, let's see whether this task is the winner to transition into Stopping
         let mut err = None;
         let stopping = self.state.send_if_modified(|current_state| match current_state {
-            TenantState::Activating(_) => {
-                unreachable!("1we ensured above that we're done with activation, and, there is no re-activation")
-            }
-            TenantState::Attaching => {
-                if !allow_transition_from_attaching {
-                    unreachable!("2we ensured above that we're done with activation, and, there is no re-activation")
-                };
-                *current_state = TenantState::Stopping { progress };
-                true
+            TenantState::Activating(_) | TenantState::Attaching => {
+                unreachable!("we ensured above that we're done with activation, and, there is no re-activation")
             }
             TenantState::Active => {
                 // FIXME: due to time-of-check vs time-of-use issues, it can happen that new timelines
