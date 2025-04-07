@@ -4109,6 +4109,7 @@ def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart
     env.storage_controller.allowed_errors.extend(
         [
             ".*Call to safekeeper.* management API still failed after.*",
+            ".*Call to safekeeper.* management API failed, will retry.*",
             ".*reconcile_one.*tenant_id={tenant_id}.*Call to safekeeper.* management API still failed after.*",
         ]
     )
