@@ -552,6 +552,7 @@ enum EndpointCmd {
     Start(EndpointStartCmdArgs),
     Reconfigure(EndpointReconfigureCmdArgs),
     Stop(EndpointStopCmdArgs),
+    GenerateJwt(EndpointGenerateJwtCmdArgs),
 }
 
 #[derive(clap::Args)]
@@ -697,6 +698,13 @@ struct EndpointStopCmdArgs {
     #[arg(value_parser(["smart", "fast", "immediate"]))]
     #[arg(default_value = "fast")]
     mode: String,
+}
+
+#[derive(clap::Args)]
+#[clap(about = "Generate a JWT for an endpoint")]
+struct EndpointGenerateJwtCmdArgs {
+    #[clap(help = "Postgres endpoint id")]
+    endpoint_id: String,
 }
 
 #[derive(clap::Subcommand)]
@@ -1527,6 +1535,16 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 .get(endpoint_id)
                 .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
             endpoint.stop(&args.mode, args.destroy)?;
+        }
+        EndpointCmd::GenerateJwt(args) => {
+            let endpoint_id = &args.endpoint_id;
+            let endpoint = cplane
+                .endpoints
+                .get(endpoint_id)
+                .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
+            let jwt = endpoint.generate_jwt()?;
+
+            println!("{jwt}");
         }
     }
 

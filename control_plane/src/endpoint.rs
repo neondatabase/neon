@@ -42,22 +42,29 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use compute_api::requests::ConfigurationRequest;
+use compute_api::requests::{ComputeClaims, ConfigurationRequest};
 use compute_api::responses::{
-    ComputeConfig, ComputeCtlConfig, ComputeStatus, ComputeStatusResponse,
+    ComputeConfig, ComputeCtlConfig, ComputeStatus, ComputeStatusResponse, TlsConfig,
 };
 use compute_api::spec::{
     Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, PgIdent,
     RemoteExtSpec, Role,
 };
+use jsonwebtoken::jwk::{
+    AlgorithmParameters, CommonParameters, EllipticCurve, Jwk, JwkSet, KeyAlgorithm, KeyOperations,
+    OctetKeyPairParameters, OctetKeyPairType, PublicKeyUse,
+};
 use nix::sys::signal::{Signal, kill};
 use pageserver_api::shard::ShardStripeSize;
+use pem::Pem;
+use pkcs8::der::Decode;
 use reqwest::header::CONTENT_TYPE;
 use safekeeper_api::membership::SafekeeperGeneration;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::debug;
 use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
@@ -82,6 +89,7 @@ pub struct EndpointConf {
     drop_subscriptions_before_start: bool,
     features: Vec<ComputeFeature>,
     cluster: Option<Cluster>,
+    compute_ctl_config: ComputeCtlConfig,
 }
 
 //
@@ -137,6 +145,36 @@ impl ComputeControlPlane {
             .unwrap_or(self.base_port)
     }
 
+    /// Create a JSON Web Key Set. This ideally matches the way we create a JWKS
+    /// from the production control plane.
+    fn create_jwks_from_pem(pem: Pem) -> Result<JwkSet> {
+        let document = pkcs8::Document::from_der(&pem.into_contents())?;
+
+        let mut hasher = Sha256::new();
+        hasher.update(&document);
+        let key_hash = hasher.finalize();
+
+        Ok(JwkSet {
+            keys: vec![Jwk {
+                common: CommonParameters {
+                    public_key_use: Some(PublicKeyUse::Signature),
+                    key_operations: Some(vec![KeyOperations::Verify]),
+                    key_algorithm: Some(KeyAlgorithm::EdDSA),
+                    key_id: Some(base64::encode_config(key_hash, base64::URL_SAFE_NO_PAD)),
+                    x509_url: None::<String>,
+                    x509_chain: None::<Vec<String>>,
+                    x509_sha1_fingerprint: None::<String>,
+                    x509_sha256_fingerprint: None::<String>,
+                },
+                algorithm: AlgorithmParameters::OctetKeyPair(OctetKeyPairParameters {
+                    key_type: OctetKeyPairType::OctetKeyPair,
+                    curve: EllipticCurve::Ed25519,
+                    x: base64::encode_config(&document, base64::URL_SAFE_NO_PAD),
+                }),
+            }],
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new_endpoint(
         &mut self,
@@ -154,6 +192,10 @@ impl ComputeControlPlane {
         let pg_port = pg_port.unwrap_or_else(|| self.get_port());
         let external_http_port = external_http_port.unwrap_or_else(|| self.get_port() + 1);
         let internal_http_port = internal_http_port.unwrap_or_else(|| external_http_port + 1);
+        let compute_ctl_config = ComputeCtlConfig {
+            jwks: Self::create_jwks_from_pem(self.env.read_public_key()?)?,
+            tls: None::<TlsConfig>,
+        };
         let ep = Arc::new(Endpoint {
             endpoint_id: endpoint_id.to_owned(),
             pg_address: SocketAddr::new(IpAddr::from(Ipv4Addr::LOCALHOST), pg_port),
@@ -181,6 +223,7 @@ impl ComputeControlPlane {
             reconfigure_concurrency: 1,
             features: vec![],
             cluster: None,
+            compute_ctl_config: compute_ctl_config.clone(),
         });
 
         ep.create_endpoint_dir()?;
@@ -200,6 +243,7 @@ impl ComputeControlPlane {
                 reconfigure_concurrency: 1,
                 features: vec![],
                 cluster: None,
+                compute_ctl_config,
             })?,
         )?;
         std::fs::write(
@@ -242,7 +286,6 @@ impl ComputeControlPlane {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-#[derive(Debug)]
 pub struct Endpoint {
     /// used as the directory name
     endpoint_id: String,
@@ -271,6 +314,9 @@ pub struct Endpoint {
     features: Vec<ComputeFeature>,
     // Cluster settings
     cluster: Option<Cluster>,
+
+    /// The compute_ctl config for the endpoint's compute.
+    compute_ctl_config: ComputeCtlConfig,
 }
 
 #[derive(PartialEq, Eq)]
@@ -333,6 +379,7 @@ impl Endpoint {
             drop_subscriptions_before_start: conf.drop_subscriptions_before_start,
             features: conf.features,
             cluster: conf.cluster,
+            compute_ctl_config: conf.compute_ctl_config,
         })
     }
 
@@ -580,6 +627,13 @@ impl Endpoint {
         Ok(safekeeper_connstrings)
     }
 
+    /// Generate a JWT with the correct claims.
+    pub fn generate_jwt(&self) -> Result<String> {
+        self.env.generate_auth_token(&ComputeClaims {
+            compute_id: self.endpoint_id.clone(),
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn start(
         &self,
@@ -706,7 +760,7 @@ impl Endpoint {
 
             ComputeConfig {
                 spec: Some(spec),
-                compute_ctl_config: ComputeCtlConfig::default(),
+                compute_ctl_config: self.compute_ctl_config.clone(),
             }
         };
 
@@ -774,16 +828,7 @@ impl Endpoint {
         ])
         // TODO: It would be nice if we generated compute IDs with the same
         // algorithm as the real control plane.
-        .args([
-            "--compute-id",
-            &format!(
-                "compute-{}",
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-            ),
-        ])
+        .args(["--compute-id", &self.endpoint_id])
         .stdin(std::process::Stdio::null())
         .stderr(logfile.try_clone()?)
         .stdout(logfile);
@@ -881,6 +926,7 @@ impl Endpoint {
                     self.external_http_address.port()
                 ),
             )
+            .bearer_auth(self.generate_jwt()?)
             .send()
             .await?;
 
@@ -957,6 +1003,7 @@ impl Endpoint {
                 self.external_http_address.port()
             ))
             .header(CONTENT_TYPE.as_str(), "application/json")
+            .bearer_auth(self.generate_jwt()?)
             .body(
                 serde_json::to_string(&ConfigurationRequest {
                     spec,

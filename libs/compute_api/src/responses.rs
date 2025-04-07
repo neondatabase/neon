@@ -160,7 +160,7 @@ pub struct CatalogObjects {
     pub databases: Vec<Database>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ComputeCtlConfig {
     /// Set of JSON web keys that the compute can use to authenticate
     /// communication from the control plane.
@@ -179,7 +179,7 @@ impl Default for ComputeCtlConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TlsConfig {
     pub key_path: String,
     pub cert_path: String,

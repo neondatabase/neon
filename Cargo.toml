@@ -141,7 +141,9 @@ parking_lot = "0.12"
 parquet = { version = "53", default-features = false, features = ["zstd"] }
 parquet_derive = "53"
 pbkdf2 = { version = "0.12.1", features = ["simple", "std"] }
+pem = "3.0.3"
 pin-project-lite = "0.2"
+pkcs8 = "0.10.2"
 pprof = { version = "0.14", features = ["criterion", "flamegraph", "frame-pointer", "prost-codec"] }
 procfs = "0.16"
 prometheus = {version = "0.13", default-features=false, features = ["process"]} # removes protobuf dependency
