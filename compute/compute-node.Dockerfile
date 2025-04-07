@@ -1529,6 +1529,44 @@ RUN make install USE_PGXS=1 -j $(getconf _NPROCESSORS_ONLN)
 
 #########################################################################################
 #
+# Layer "pg_rest-build"
+# compile pg_rest extension
+#
+#########################################################################################
+FROM build-deps AS pg_rest-src
+ARG PG_VERSION
+ARG VERSION=3.0.1
+
+# Only supported for PostgreSQL v17
+RUN if [ "${PG_VERSION:?}" != "v17" ]; then \
+        echo "pg_rest extension is only supported for PostgreSQL v17" && exit 1; \
+    fi
+
+WORKDIR /ext-src
+RUN mkdir -p pg_rest-src && cd pg_rest-src && \
+    wget https://github.com/ruslantalpa/foxfirebase/raw/main/pg_rest_pg17-${VERSION}_aarch64.deb -O pg_rest_pg17-${VERSION}_aarch64.deb && \
+    wget https://github.com/ruslantalpa/foxfirebase/raw/main/pg_rest_pg17-${VERSION}_amd64.deb -O pg_rest_pg17-${VERSION}_amd64.deb
+
+FROM pg-build AS pg_rest-build
+ARG VERSION=3.0.1
+COPY --from=pg_rest-src /ext-src/ /ext-src/
+WORKDIR /ext-src/pg_rest-src
+RUN export ARCH=$(uname -m) && \
+    echo "ARCH: $ARCH" && \
+    # Map architecture names to package names
+    if [ "$ARCH" = "x86_64" ]; then \
+        PACKAGE_ARCH="amd64"; \
+    else \
+        PACKAGE_ARCH="$ARCH"; \
+    fi && \
+    echo "Using package architecture: $PACKAGE_ARCH" && \
+    apt-get update && \
+    apt-get install -y ./pg_rest_pg17-${VERSION}_${PACKAGE_ARCH}.deb && \
+    apt-get clean && rm -rf /var/lib/apt/lists/* && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_rest.control
+
+#########################################################################################
+#
 # Layer "neon-ext-build"
 # compile neon extensions
 #
@@ -1622,6 +1660,7 @@ COPY --from=pg_duckdb-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_repack-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pgaudit-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pgauditlogtofile-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg_rest-build /usr/local/pgsql/ /usr/local/pgsql/
 
 #########################################################################################
 #
@@ -1798,6 +1837,7 @@ COPY --from=pg_repack-src /ext-src/ /ext-src/
 COPY --from=pg_repack-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY compute/patches/pg_repack.patch /ext-src
 RUN cd /ext-src/pg_repack-src && patch -p1 </ext-src/pg_repack.patch && rm -f /ext-src/pg_repack.patch
+COPY --from=pg_rest-src /ext-src/ /ext-src/
 
 COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
 RUN apt-get update && apt-get install -y libtap-parser-sourcehandler-pgtap-perl\
