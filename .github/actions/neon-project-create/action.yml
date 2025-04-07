@@ -70,9 +70,9 @@ runs:
       # A shell without `set -x` to not to expose password/dsn in logs
       shell: bash -euo pipefail {0}
       run: |
-        project=$(curl \
+        res=$(curl \
           "https://${API_HOST}/api/v2/projects" \
-          --fail \
+          -w "%{http_code}" \
           --header "Accept: application/json" \
           --header "Content-Type: application/json" \
           --header "Authorization: Bearer ${API_KEY}" \
@@ -88,6 +88,15 @@ runs:
               \"default_endpoint_settings\": ${DEFAULT_ENDPOINT_SETTINGS}
             }
           }")
+        
+        code=${res: -3}
+        if [[ ${code} -ge 400 ]]; then
+          echo Request failed with error code ${code}
+          echo ${res::-3}
+          exit 1
+        else
+          project=${res::-3}
+        fi
 
         # Mask password
         echo "::add-mask::$(echo $project | jq --raw-output '.roles[] | select(.name != "web_access") | .password')"

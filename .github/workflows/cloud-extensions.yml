@@ -35,7 +35,7 @@ jobs:
       matrix:
         pg-version: [16, 17]
 
-    runs-on: us-east-2
+    runs-on: small
     container:
       image: ghcr.io/neondatabase/neon-test-extensions-v${{ matrix.pg-version }}:14263641182
       credentials:
@@ -54,16 +54,14 @@ jobs:
       - name: Evaluate the settings
         id: project-settings
         run: |
-          if [[ matrix.pg-version -lt 17 ]]; then
+          if [[ ${{ matrix.pg-version }} -lt 17 ]]; then
             ULID=ulid
           else
             ULID=pgx_ulid
           fi
           LIBS=timescaledb:rag_bge_small_en_v15,rag_jina_reranker_v1_tiny_en:$ULID
-          ( 
-          echo -n settings=; 
-          jq -c -n --arg libs $LIBS '{preload_libraries:{use_defaults:false,enabled_libraries:($libs| split(":"))}}'
-          ) >> $GITHUB_OUTPUT
+          settings=$(jq -c -n --arg libs $LIBS '{preload_libraries:{use_defaults:false,enabled_libraries:($libs| split(":"))}}')
+          echo settings=$settings >> $GITHUB_OUTPUT
           
 
       - name: Create Neon Project
@@ -72,12 +70,11 @@ jobs:
         with:
           region_id: ${{ inputs.region_id }}
           postgres_version: ${{ matrix.pg-version }}
-          project_settings: ${{ steps.outputs.project-settings.settings }}
-          default_endpoint_settings: '{"pg_settings":{"DateStyle":"Postgres,MDY","TimeZone":"America/Los_Angeles","neon.allow_unstable_extensions":"on"}}'
+          project_settings: ${{ steps.project-settings.outputs.settings }}
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
       - name: Run the regression tests
-        run: /run-tests.sh /ext-src
+        run: /run-tests.sh -r /ext-src
         env:
           BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
 
