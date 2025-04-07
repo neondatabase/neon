@@ -201,7 +201,7 @@ impl Service {
             tenant_id: tenant_id.to_string(),
             timeline_id: timeline_id.to_string(),
             start_lsn: start_lsn.into(),
-            generation: 0,
+            generation: 1,
             sk_set: sks_persistence.clone(),
             new_sk_set: None,
             cplane_notified_generation: 0,
