@@ -112,7 +112,7 @@ use crate::pgdatadir_mapping::{
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::AttachmentMode;
 use crate::tenant::gc_result::GcResult;
-use crate::tenant::layer_map::{LayerMap, SearchResult};
+use crate::tenant::layer_map::LayerMap;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::storage_layer::delta_layer::DeltaEntry;
 use crate::tenant::storage_layer::inmemory_layer::IndexEntry;
@@ -3996,25 +3996,7 @@ impl Timeline {
             let mut fringe = LayerFringe::new();
 
             let guard = timeline.layers.read().await;
-            let layers = guard.layer_map()?;
-
-            for range in keyspace.ranges.iter() {
-                let results = layers.range_search(range.clone(), cont_lsn);
-
-                results
-                    .found
-                    .into_iter()
-                    .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
-                        (
-                            guard.upgrade(layer),
-                            keyspace_accum.to_keyspace(),
-                            lsn_floor..cont_lsn,
-                        )
-                    })
-                    .for_each(|(layer, keyspace, lsn_range)| {
-                        fringe.update(layer, keyspace, lsn_range)
-                    });
-            }
+            guard.update_search_fringe(&keyspace, cont_lsn, &mut fringe)?;
 
             fringe
         };
@@ -4031,6 +4013,7 @@ impl Timeline {
                 read_path.record_layer_visit(&layer_to_read, &keyspace_to_read, &lsn_range);
             }
 
+            // Visit the layer and plan IOs for it
             let next_cont_lsn = lsn_range.start;
             layer_to_read
                 .get_values_reconstruct_data(
@@ -4056,31 +4039,15 @@ impl Timeline {
                 image_covered_keyspace.add_range(keys_with_image_coverage);
             }
 
+            // Query the layer map for the next layers to read.
+            //
             // Do not descent any further if the last layer we visited
             // completed all keys in the keyspace it inspected. This is not
             // required for correctness, but avoids visiting extra layers
             // which turns out to be a perf bottleneck in some cases.
             if !unmapped_keyspace.is_empty() {
                 let guard = timeline.layers.read().await;
-                let layers = guard.layer_map()?;
-
-                for range in unmapped_keyspace.ranges.iter() {
-                    let results = layers.range_search(range.clone(), cont_lsn);
-
-                    results
-                        .found
-                        .into_iter()
-                        .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
-                            (
-                                guard.upgrade(layer),
-                                keyspace_accum.to_keyspace(),
-                                lsn_floor..cont_lsn,
-                            )
-                        })
-                        .for_each(|(layer, keyspace, lsn_range)| {
-                            fringe.update(layer, keyspace, lsn_range)
-                        });
-                }
+                guard.update_search_fringe(&unmapped_keyspace, cont_lsn, &mut fringe)?;
 
                 // It's safe to drop the layer map lock after planning the next round of reads.
                 // The fringe keeps readable handles for the layers which are safe to read even
