@@ -150,8 +150,8 @@ def test_throughput(
     cur.execute("INSERT INTO t SELECT generate_series(1, %s)", (npages,))
 
     log.info("Creating table for disruptor")
-    # cur.execute("CREATE TABLE advancelsn(data bigint)");
-    # cur.execute("INSERT INTO advancelsn values (1)")
+    cur.execute("CREATE TABLE advancelsn(data bigint)");
+    cur.execute("INSERT INTO advancelsn values (1)")
 
     #
     # Run the workload, collect `Metrics` before and after, calculate difference, normalize.
@@ -226,8 +226,7 @@ def test_throughput(
         cur = conn.cursor()
         iters = 0
         while True:
-            # cur.execute("UPDATE advancelsn SET data = %s", (time.time() * 1e6,))
-            cur.execute("SELECT test_consume_xids(1)")
+            cur.execute("UPDATE advancelsn SET data = %s", (time.time() * 1e6,))
             if stop_disruptor.is_set():
                 break
             disruptor_started.set()
