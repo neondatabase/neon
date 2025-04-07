@@ -1539,7 +1539,7 @@ ARG VERSION=3.0.1
 
 # Only supported for PostgreSQL v17
 RUN if [ "${PG_VERSION:?}" != "v17" ]; then \
-        echo "pg_rest extension is only supported for PostgreSQL v17" && exit 1; \
+        echo "pg_rest extension is only supported for PostgreSQL v17" && exit 0; \
     fi
 
 WORKDIR /ext-src
@@ -1838,7 +1838,6 @@ COPY --from=pg_repack-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY compute/patches/pg_repack.patch /ext-src
 RUN cd /ext-src/pg_repack-src && patch -p1 </ext-src/pg_repack.patch && rm -f /ext-src/pg_repack.patch
 COPY --from=pg_rest-src /ext-src/ /ext-src/
-
 COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
 RUN apt-get update && apt-get install -y libtap-parser-sourcehandler-pgtap-perl\
    && apt clean && rm -rf /ext-src/*.tar.gz /var/lib/apt/lists/*
@@ -1971,3 +1970,4 @@ RUN mkdir /var/run/rsyslogd && \
 ENV LANG=en_US.utf8
 USER postgres
 ENTRYPOINT ["/usr/local/bin/compute_ctl"]
+
