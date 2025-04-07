@@ -27,6 +27,9 @@ pub(super) enum Name {
     /// Timeline logical size
     #[serde(rename = "timeline_logical_size")]
     LogicalSize,
+    /// Timeline delta from parent (WAL bytes clamped to logical size)
+    #[serde(rename = "timeline_changed_bytes_from_parent")]
+    ChangedBytesFromParent,
     /// Tenant remote size
     #[serde(rename = "remote_storage_size")]
     RemoteSize,
@@ -171,6 +174,24 @@ impl MetricsKey {
             tenant_id,
             timeline_id: Some(timeline_id),
             metric: Name::LogicalSize,
+        }
+        .absolute_values()
+    }
+
+    /// [`Timeline::get_current_lsn`] - [`Timeline::get_ancestor_lsn`], clamped to
+    /// [`Timeline::get_current_logical_size`].
+    ///
+    /// [`Timeline::get_current_lsn`]: crate::tenant::Timeline::get_current_lsn
+    /// [`Timeline::get_ancestor_lsn`]: crate::tenant::Timeline::get_ancestor_lsn
+    /// [`Timeline::get_current_logical_size`]: crate::tenant::Timeline::get_current_logical_size
+    const fn timeline_changed_bytes_from_parent(
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> AbsoluteValueFactory {
+        MetricsKey {
+            tenant_id,
+            timeline_id: Some(timeline_id),
+            metric: Name::ChangedBytesFromParent,
         }
         .absolute_values()
     }
@@ -371,6 +392,7 @@ struct TimelineSnapshot {
     loaded_at: (Lsn, SystemTime),
     last_record_lsn: Lsn,
     current_exact_logical_size: Option<u64>,
+    changed_bytes_from_parent: Option<u64>,
 }
 
 impl TimelineSnapshot {
@@ -406,10 +428,22 @@ impl TimelineSnapshot {
                 }
             };
 
+            // This is an approximation of how much data has changed on this branch vs. its
+            // ancestor: the number of bytes written to the WAL, clamped to the size of the branch.
+            let changed_bytes_from_parent = current_exact_logical_size.and_then(|size| {
+                if t.get_ancestor_lsn() == Lsn::MAX {
+                    return None;
+                }
+                t.get_last_record_lsn()
+                    .checked_sub(t.get_ancestor_lsn())
+                    .map(|wal_bytes| wal_bytes.0.min(size))
+            });
+
             Ok(Some(TimelineSnapshot {
                 loaded_at,
                 last_record_lsn,
                 current_exact_logical_size,
+                changed_bytes_from_parent,
             }))
         }
     }
@@ -481,6 +515,17 @@ impl TimelineSnapshot {
             let factory = MetricsKey::timeline_logical_size(tenant_id, timeline_id);
             let current_or_previous = self
                 .current_exact_logical_size
+                .or_else(|| cache.get(factory.key()).map(|item| item.value));
+
+            if let Some(size) = current_or_previous {
+                metrics.push(factory.at(now, size));
+            }
+        }
+
+        {
+            let factory = MetricsKey::timeline_changed_bytes_from_parent(tenant_id, timeline_id);
+            let current_or_previous = self
+                .changed_bytes_from_parent
                 .or_else(|| cache.get(factory.key()).map(|item| item.value));
 
             if let Some(size) = current_or_previous {
