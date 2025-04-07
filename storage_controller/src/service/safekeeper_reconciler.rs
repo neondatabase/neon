@@ -304,15 +304,16 @@ impl SafekeeperReconciler {
             SafekeeperTimelineOpKind::Delete => {
                 let tenant_id = req.tenant_id;
                 if let Some(timeline_id) = req.timeline_id {
-                    let deleted = self.reconcile_inner(
-                        req,
-                        async |client| client.delete_timeline(tenant_id, timeline_id).await,
-                        |_resp| {
-                            tracing::info!(%tenant_id, %timeline_id, "deleted timeline from {req_host}");
-                        },
-                        req_cancel,
-                    )
-                    .await;
+                    let deleted = self
+                        .reconcile_inner(
+                            req,
+                            async |client| client.delete_timeline(tenant_id, timeline_id).await,
+                            |_resp| {
+                                tracing::info!("deleted timeline from {req_host}");
+                            },
+                            req_cancel,
+                        )
+                        .await;
                     if deleted {
                         self.delete_timeline_from_db(tenant_id, timeline_id).await;
                     }
@@ -343,12 +344,13 @@ impl SafekeeperReconciler {
         {
             Ok(list) => {
                 if !list.is_empty() {
-                    tracing::info!(%tenant_id, %timeline_id, "not deleting timeline from db as there is {} open reconciles", list.len());
+                    // duplicate the timeline_id here because it might be None in the reconcile context
+                    tracing::info!(%timeline_id, "not deleting timeline from db as there is {} open reconciles", list.len());
                     return;
                 }
             }
             Err(e) => {
-                tracing::warn!(%tenant_id, %timeline_id, "couldn't query pending ops: {e}");
+                tracing::warn!(%timeline_id, "couldn't query pending ops: {e}");
                 return;
             }
         }
