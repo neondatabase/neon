@@ -30,7 +30,6 @@ def test_lfc_prefetch(neon_simple_env: NeonEnv, n_readers: int, n_writers: int):
             "enable_seqscan=off",
             "autovacuum=off",
             "statement_timeout=0",
-            "io_combine_limit=1",
             "neon.store_prefetch_result_in_lfc=on",
         ],
     )
