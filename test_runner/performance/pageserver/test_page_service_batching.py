@@ -127,11 +127,7 @@ def test_throughput(
 
     env = neon_env_builder.init_start()
     ps_http = env.pageserver.http_client()
-    endpoint = env.endpoints.create_start("main", config_lines=[
-        # minimal lfc & small shared buffers to force requests to pageserver
-        "neon.max_file_cache_size=1MB",
-        "shared_buffers=10MB",
-    ])
+    endpoint = env.endpoints.create_start("main")
     conn = endpoint.connect()
     cur = conn.cursor()
 
@@ -204,32 +200,22 @@ def test_throughput(
                 ).value,
             )
 
-    def workload(disruptor_started: threading.Event) -> Metrics:
-        disruptor_started.wait()
+    def workload() -> Metrics:
         start = time.time()
         iters = 0
         while time.time() - start < target_runtime or iters < 2:
+            log.info("Seqscan %d", iters)
             if iters == 1:
                 # round zero for warming up
                 before = get_metrics()
+            cur.execute(
+                "select clear_buffer_cache()"
+            )  # TODO: what about LFC? doesn't matter right now because LFC isn't enabled by default in tests
             cur.execute("select sum(data::bigint) from t")
             assert cur.fetchall()[0][0] == npages * (npages + 1) // 2
             iters += 1
         after = get_metrics()
         return (after - before).normalize(iters - 1)
-
-    def disruptor(disruptor_started: threading.Event, stop_disruptor: threading.Event):
-        conn = endpoint.connect()
-        cur = conn.cursor()
-        iters = 0
-        while True:
-            cur.execute("SELECT pg_logical_emit_message(true, 'test', 'advancelsn')")
-            if stop_disruptor.is_set():
-                break
-            disruptor_started.set()
-            iters += 1
-            time.sleep(0.001)
-        return iters
 
     env.pageserver.patch_config_toml_nonrecursive(
         {"page_service_pipelining": dataclasses.asdict(pipelining_config)}
@@ -239,17 +225,7 @@ def test_throughput(
     env.pageserver.restart(extra_env_vars={"RUST_LOG": "info,pageserver::page_service=trace"})
 
     log.info("Starting workload")
-
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        disruptor_started = threading.Event()
-        stop_disruptor = threading.Event()
-        disruptor_fut = executor.submit(disruptor, disruptor_started, stop_disruptor)
-        workload_fut = executor.submit(workload, disruptor_started)
-        metrics = workload_fut.result()
-        stop_disruptor.set()
-        ndisruptions = disruptor_fut.result()
-        log.info("Disruptor issued %d disrupting requests", ndisruptions)
-
+    metrics = workload()
 
     log.info("Results: %s", metrics)
 
