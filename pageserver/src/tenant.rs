@@ -45,6 +45,7 @@ use remote_timeline_client::manifest::{
 };
 use remote_timeline_client::{
     FAILED_REMOTE_OP_RETRIES, FAILED_UPLOAD_WARN_THRESHOLD, UploadQueueNotReadyError,
+    download_tenant_manifest,
 };
 use secondary::heatmap::{HeatMapTenant, HeatMapTimeline};
 use storage_broker::BrokerClientChannel;
@@ -226,7 +227,8 @@ struct TimelinePreload {
 }
 
 pub(crate) struct TenantPreload {
-    tenant_manifest: TenantManifest,
+    /// The tenant manifest from remote storage, or None if no manifest was found.
+    tenant_manifest: Option<TenantManifest>,
     /// Map from timeline ID to a possible timeline preload. It is None iff the timeline is offloaded according to the manifest.
     timelines: HashMap<TimelineId, Option<TimelinePreload>>,
 }
@@ -282,12 +284,15 @@ pub struct Tenant {
     /// **Lock order**: if acquiring all (or a subset), acquire them in order `timelines`, `timelines_offloaded`, `timelines_creating`
     timelines_offloaded: Mutex<HashMap<TimelineId, Arc<OffloadedTimeline>>>,
 
-    /// Serialize writes of the tenant manifest to remote storage.  If there are concurrent operations
-    /// affecting the manifest, such as timeline deletion and timeline offload, they must wait for
-    /// each other (this could be optimized to coalesce writes if necessary).
+    /// The last tenant manifest known to be in remote storage. None if the manifest has not yet
+    /// been either downloaded or uploaded. Always Some after tenant attach.
     ///
-    /// The contents of the Mutex are the last manifest we successfully uploaded
-    tenant_manifest_upload: tokio::sync::Mutex<Option<TenantManifest>>,
+    /// Initially populated during tenant attach, updated via `maybe_upload_tenant_manifest`.
+    ///
+    /// Do not modify this directly. It is used to check whether a new manifest needs to be
+    /// uploaded. The manifest is constructed in `build_tenant_manifest`, and uploaded via
+    /// `maybe_upload_tenant_manifest`.
+    remote_tenant_manifest: tokio::sync::Mutex<Option<TenantManifest>>,
 
     // This mutex prevents creation of new timelines during GC.
     // Adding yet another mutex (in addition to `timelines`) is needed because holding
@@ -1526,28 +1531,27 @@ impl Tenant {
             cancel.clone(),
         )
         .await?;
-        let (offloaded_add, tenant_manifest) =
-            match remote_timeline_client::download_tenant_manifest(
-                remote_storage,
-                &self.tenant_shard_id,
-                self.generation,
-                &cancel,
-            )
-            .await
-            {
-                Ok((tenant_manifest, _generation, _manifest_mtime)) => (
-                    format!("{} offloaded", tenant_manifest.offloaded_timelines.len()),
-                    tenant_manifest,
-                ),
-                Err(DownloadError::NotFound) => {
-                    ("no manifest".to_string(), TenantManifest::empty())
-                }
-                Err(e) => Err(e)?,
-            };
+
+        let tenant_manifest = match download_tenant_manifest(
+            remote_storage,
+            &self.tenant_shard_id,
+            self.generation,
+            &cancel,
+        )
+        .await
+        {
+            Ok((tenant_manifest, _, _)) => Some(tenant_manifest),
+            Err(DownloadError::NotFound) => None,
+            Err(err) => return Err(err.into()),
+        };
 
         info!(
-            "found {} timelines, and {offloaded_add}",
-            remote_timeline_ids.len()
+            "found {} timelines ({} offloaded timelines)",
+            remote_timeline_ids.len(),
+            tenant_manifest
+                .as_ref()
+                .map(|m| m.offloaded_timelines.len())
+                .unwrap_or(0)
         );
 
         for k in other_keys {
@@ -1556,11 +1560,13 @@ impl Tenant {
 
         // Avoid downloading IndexPart of offloaded timelines.
         let mut offloaded_with_prefix = HashSet::new();
-        for offloaded in tenant_manifest.offloaded_timelines.iter() {
-            if remote_timeline_ids.remove(&offloaded.timeline_id) {
-                offloaded_with_prefix.insert(offloaded.timeline_id);
-            } else {
-                // We'll take care later of timelines in the manifest without a prefix
+        if let Some(tenant_manifest) = &tenant_manifest {
+            for offloaded in tenant_manifest.offloaded_timelines.iter() {
+                if remote_timeline_ids.remove(&offloaded.timeline_id) {
+                    offloaded_with_prefix.insert(offloaded.timeline_id);
+                } else {
+                    // We'll take care later of timelines in the manifest without a prefix
+                }
             }
         }
 
@@ -1634,12 +1640,14 @@ impl Tenant {
 
         let mut offloaded_timeline_ids = HashSet::new();
         let mut offloaded_timelines_list = Vec::new();
-        for timeline_manifest in preload.tenant_manifest.offloaded_timelines.iter() {
-            let timeline_id = timeline_manifest.timeline_id;
-            let offloaded_timeline =
-                OffloadedTimeline::from_manifest(self.tenant_shard_id, timeline_manifest);
-            offloaded_timelines_list.push((timeline_id, Arc::new(offloaded_timeline)));
-            offloaded_timeline_ids.insert(timeline_id);
+        if let Some(tenant_manifest) = &preload.tenant_manifest {
+            for timeline_manifest in tenant_manifest.offloaded_timelines.iter() {
+                let timeline_id = timeline_manifest.timeline_id;
+                let offloaded_timeline =
+                    OffloadedTimeline::from_manifest(self.tenant_shard_id, timeline_manifest);
+                offloaded_timelines_list.push((timeline_id, Arc::new(offloaded_timeline)));
+                offloaded_timeline_ids.insert(timeline_id);
+            }
         }
         // Complete deletions for offloaded timeline id's from manifest.
         // The manifest will be uploaded later in this function.
@@ -1797,15 +1805,21 @@ impl Tenant {
             .context("resume_deletion")
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
         }
-        let needs_manifest_upload =
-            offloaded_timelines_list.len() != preload.tenant_manifest.offloaded_timelines.len();
         {
             let mut offloaded_timelines_accessor = self.timelines_offloaded.lock().unwrap();
             offloaded_timelines_accessor.extend(offloaded_timelines_list.into_iter());
         }
-        if needs_manifest_upload {
-            self.store_tenant_manifest().await?;
+
+        // Stash the preloaded tenant manifest, and upload a new manifest if changed.
+        //
+        // NB: this must happen after the tenant is fully populated above. In particular the
+        // offloaded timelines, which are included in the manifest.
+        {
+            let mut guard = self.remote_tenant_manifest.lock().await;
+            assert!(guard.is_none(), "tenant manifest set before preload"); // first populated here
+            *guard = preload.tenant_manifest;
         }
+        self.maybe_upload_tenant_manifest().await?;
 
         // The local filesystem contents are a cache of what's in the remote IndexPart;
         // IndexPart is the source of truth.
@@ -2219,7 +2233,7 @@ impl Tenant {
         };
 
         // Upload new list of offloaded timelines to S3
-        self.store_tenant_manifest().await?;
+        self.maybe_upload_tenant_manifest().await?;
 
         // Activate the timeline (if it makes sense)
         if !(timeline.is_broken() || timeline.is_stopping()) {
@@ -4053,18 +4067,19 @@ impl Tenant {
 
     /// Generate an up-to-date TenantManifest based on the state of this Tenant.
     fn build_tenant_manifest(&self) -> TenantManifest {
-        let timelines_offloaded = self.timelines_offloaded.lock().unwrap();
-
-        let mut timeline_manifests = timelines_offloaded
-            .iter()
-            .map(|(_timeline_id, offloaded)| offloaded.manifest())
-            .collect::<Vec<_>>();
-        // Sort the manifests so that our output is deterministic
-        timeline_manifests.sort_by_key(|timeline_manifest| timeline_manifest.timeline_id);
+        // Collect the offloaded timelines, and sort them for deterministic output.
+        let offloaded_timelines = self
+            .timelines_offloaded
+            .lock()
+            .unwrap()
+            .values()
+            .map(|tli| tli.manifest())
+            .sorted_by_key(|m| m.timeline_id)
+            .collect_vec();
 
         TenantManifest {
             version: LATEST_TENANT_MANIFEST_VERSION,
-            offloaded_timelines: timeline_manifests,
+            offloaded_timelines,
         }
     }
 
@@ -4287,7 +4302,7 @@ impl Tenant {
             timelines: Mutex::new(HashMap::new()),
             timelines_creating: Mutex::new(HashSet::new()),
             timelines_offloaded: Mutex::new(HashMap::new()),
-            tenant_manifest_upload: Default::default(),
+            remote_tenant_manifest: Default::default(),
             gc_cs: tokio::sync::Mutex::new(()),
             walredo_mgr,
             remote_storage,
@@ -5520,27 +5535,35 @@ impl Tenant {
             .unwrap_or(0)
     }
 
-    /// Serialize and write the latest TenantManifest to remote storage.
-    pub(crate) async fn store_tenant_manifest(&self) -> Result<(), TenantManifestError> {
-        // Only one manifest write may be done at at time, and the contents of the manifest
-        // must be loaded while holding this lock. This makes it safe to call this function
-        // from anywhere without worrying about colliding updates.
+    /// Builds a new tenant manifest, and uploads it if it differs from the last-known tenant
+    /// manifest in `Self::remote_tenant_manifest`.
+    ///
+    /// TODO: instead of requiring callers to remember to call `maybe_upload_tenant_manifest` after
+    /// changing any `Tenant` state that's included in the manifest, consider making the manifest
+    /// the authoritative source of data with an API that automatically uploads on changes. Revisit
+    /// this when the manifest is more widely used and we have a better idea of the data model.
+    pub(crate) async fn maybe_upload_tenant_manifest(&self) -> Result<(), TenantManifestError> {
+        // Multiple tasks may call this function concurrently after mutating the Tenant runtime
+        // state, affecting the manifest generated by `build_tenant_manifest`. We use an async mutex
+        // to serialize these callers. `eq_ignoring_version` acts as a slightly inefficient but
+        // simple coalescing mechanism.
         let mut guard = tokio::select! {
-            g = self.tenant_manifest_upload.lock() => {
-                g
-            },
-            _ = self.cancel.cancelled() => {
-                return Err(TenantManifestError::Cancelled);
-            }
+            guard = self.remote_tenant_manifest.lock() => guard,
+            _ = self.cancel.cancelled() => return Err(TenantManifestError::Cancelled),
         };
 
+        // Build a new manifest.
         let manifest = self.build_tenant_manifest();
-        if Some(&manifest) == (*guard).as_ref() {
-            // Optimisation: skip uploads that don't change anything.
-            return Ok(());
+
+        // Check if the manifest has changed. We ignore the version number here, to avoid
+        // uploading every manifest on version number bumps.
+        if let Some(old) = guard.as_ref() {
+            if manifest.eq_ignoring_version(old) {
+                return Ok(());
+            }
         }
 
-        // Remote storage does no retries internally, so wrap it
+        // Upload the manifest. Remote storage does no retries internally, so retry here.
         match backoff::retry(
             || async {
                 upload_tenant_manifest(
@@ -5552,7 +5575,7 @@ impl Tenant {
                 )
                 .await
             },
-            |_e| self.cancel.is_cancelled(),
+            |_| self.cancel.is_cancelled(),
             FAILED_UPLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
             "uploading tenant manifest",
