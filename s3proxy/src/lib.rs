@@ -127,12 +127,14 @@ impl TryFrom<&KeyRequest> for S3Path {
     }
 }
 
-fn unauthorized() -> Response {
+fn unauthorized(route: impl Display, claims: impl Display) -> Response {
+    debug!(%route, %claims, "route doesn't match claims");
     StatusCode::UNAUTHORIZED.into_response()
 }
 
-pub fn bad_request(e: impl ToString) -> Response {
-    (StatusCode::BAD_REQUEST, e.to_string()).into_response()
+pub fn bad_request(err: impl Display, desc: &'static str) -> Response {
+    debug!(%err, desc);
+    (StatusCode::BAD_REQUEST, err.to_string()).into_response()
 }
 
 pub fn ok() -> Response {
@@ -157,15 +159,15 @@ impl FromRequestParts<Arc<Proxy>> for S3Path {
         let Path(path): Path<KeyRequest> = parts
             .extract()
             .await
-            .map_err(|_| bad_request("invalid route"))?;
+            .map_err(|e| bad_request(e, "invalid route"))?;
         let TypedHeader(Authorization(bearer)) = parts
             .extract::<TypedHeader<Authorization<Bearer>>>()
             .await
-            .map_err(|_| bad_request("invalid token"))?;
-        let claims: Claims = state.auth.decode(bearer.token()).map_err(|err| {
-            debug!(%err, "decoding token");
-            bad_request("invalid token")
-        })?;
+            .map_err(|e| bad_request(e, "invalid token"))?;
+        let claims: Claims = state
+            .auth
+            .decode(bearer.token())
+            .map_err(|e| bad_request(e, "decoding token"))?;
         let route = Claims {
             tenant_id: path.tenant_id,
             timeline_id: path.timeline_id,
@@ -173,10 +175,11 @@ impl FromRequestParts<Arc<Proxy>> for S3Path {
             exp: claims.exp,
         };
         if route != claims {
-            debug!(%route, %claims, "route doesn't match claims");
-            return Err(unauthorized());
+            return Err(unauthorized(route, claims));
         }
-        (&path).try_into().map_err(|_| bad_request("invalid route"))
+        (&path)
+            .try_into()
+            .map_err(|e| bad_request(e, "invalid route"))
     }
 }
 
@@ -239,18 +242,17 @@ impl FromRequestParts<Arc<Proxy>> for PrefixS3Path {
         let Path(path) = parts
             .extract::<Path<PrefixKeyPath>>()
             .await
-            .map_err(|_| bad_request("invalid route"))?;
+            .map_err(|e| bad_request(e, "invalid route"))?;
         let TypedHeader(Authorization(bearer)) = parts
             .extract::<TypedHeader<Authorization<Bearer>>>()
             .await
-            .map_err(|_| bad_request("invalid token"))?;
-        let claims: PrefixKeyPath = state.auth.decode(bearer.token()).map_err(|err| {
-            debug!(%path, %err, "decoding token");
-            bad_request("invalid token")
-        })?;
+            .map_err(|e| bad_request(e, "invalid token"))?;
+        let claims: PrefixKeyPath = state
+            .auth
+            .decode(bearer.token())
+            .map_err(|e| bad_request(e, "invalid token"))?;
         if path != claims {
-            debug!(%path, %claims, "route doesn't match claims");
-            return Err(unauthorized());
+            return Err(unauthorized(path, claims));
         }
         Ok((&path).into())
     }
