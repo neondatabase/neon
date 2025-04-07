@@ -231,12 +231,15 @@ def test_throughput(
                 break
             disruptor_started.set()
             iters += 1
+            time.sleep(0.001)
         return iters
 
     env.pageserver.patch_config_toml_nonrecursive(
         {"page_service_pipelining": dataclasses.asdict(pipelining_config)}
     )
-    env.pageserver.restart()
+
+    # non-package-mode-py3.10christian@neon-hetzner-dev-christian:[~/src/neon]: cat test_output/test_throughput\[debug-pg16-50-pipelining_config0-30-100-128-batchable\ \{\'max_batch_size\':\ 32,\ \'execution\':\ \'concurrent-futures\',\ \'mode\':\ \'pipelined\'\}\]/repo/pageserver_1/pageserver.log | perl -nE 'if (/stopping batching because (LSN changed|of batch size|timeline object mismatch|batch key changed)/) { say $1 }' | sort | uniq -c
+    env.pageserver.restart(extra_env_vars={"RUST_LOG": "info,pageserver::page_service=trace"})
 
     log.info("Starting workload")
 
