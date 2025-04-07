@@ -1580,7 +1580,7 @@ impl Persistence {
 
         let tenant_id = &tenant_id;
         let timeline_id = &timeline_id;
-        self.with_measured_conn(DatabaseOperation::ListTimelineReconcile, move |conn| {
+        self.with_measured_conn(DatabaseOperation::RemoveTimelineReconcile, move |conn| {
             let timeline_id_str = timeline_id.map(|tid| tid.to_string()).unwrap_or_default();
             Box::pin(async move {
                 diesel::delete(dsl::safekeeper_timeline_pending_ops)
