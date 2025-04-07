@@ -448,7 +448,7 @@ impl GcCompactionQueue {
     ) -> Result<CompactionOutcome, CompactionError> {
         let res = self.iteration_inner(cancel, ctx, gc_block, timeline).await;
         if let Err(err) = &res {
-            log_compaction_error(err, None, cancel.is_cancelled());
+            log_compaction_error(err, None, cancel.is_cancelled(), true);
         }
         match res {
             Ok(res) => Ok(res),
@@ -2410,7 +2410,9 @@ impl Timeline {
                 } else {
                     lsn_split_points[i]
                 };
-                let img = self.reconstruct_value(key, request_lsn, state).await?;
+                let img = self
+                    .reconstruct_value_wo_critical_error(key, request_lsn, state)
+                    .await?;
                 Some((request_lsn, img))
             } else {
                 None
@@ -3106,8 +3108,6 @@ impl Timeline {
         // the key and LSN range are determined. However, to keep things simple here, we still
         // create this writer, and discard the writer in the end.
 
-        let mut keys_processed = 0;
-
         while let Some(((key, lsn, val), desc)) = merge_iter
             .next_with_trace()
             .await
@@ -3118,9 +3118,7 @@ impl Timeline {
                 return Err(CompactionError::ShuttingDown);
             }
 
-            keys_processed += 1;
             let should_yield = yield_for_l0
-                && keys_processed % 1000 == 0
                 && self
                     .l0_compaction_trigger
                     .notified()
