@@ -126,6 +126,7 @@ pub(crate) enum DatabaseOperation {
     InsertTimelineReconcile,
     RemoveTimelineReconcile,
     ListTimelineReconcile,
+    ListTimelineReconcileStartup,
 }
 
 #[must_use]
@@ -1521,23 +1522,41 @@ impl Persistence {
         .await
     }
 
-    /// Load pending operations from db.
-    pub(crate) async fn list_pending_ops(
+    /// Load pending operations from db, joined together with timeline data.
+    pub(crate) async fn list_pending_ops_with_timelines(
         &self,
-    ) -> DatabaseResult<Vec<TimelinePendingOpPersistence>> {
+    ) -> DatabaseResult<Vec<(TimelinePendingOpPersistence, Option<TimelinePersistence>)>> {
         use crate::schema::safekeeper_timeline_pending_ops::dsl;
+        use crate::schema::timelines;
 
         let timeline_from_db = self
-            .with_measured_conn(DatabaseOperation::ListTimelineReconcile, move |conn| {
-                Box::pin(async move {
-                    let from_db: Vec<TimelinePendingOpPersistence> =
-                        dsl::safekeeper_timeline_pending_ops.load(conn).await?;
-                    Ok(from_db)
-                })
-            })
+            .with_measured_conn(
+                DatabaseOperation::ListTimelineReconcileStartup,
+                move |conn| {
+                    Box::pin(async move {
+                        let from_db: Vec<(TimelinePendingOpPersistence, Option<TimelineFromDb>)> =
+                            dsl::safekeeper_timeline_pending_ops
+                                .left_join(
+                                    timelines::table.on(timelines::tenant_id
+                                        .eq(dsl::tenant_id)
+                                        .and(timelines::timeline_id.eq(dsl::timeline_id))),
+                                )
+                                .select((
+                                    TimelinePendingOpPersistence::as_select(),
+                                    Option::<TimelineFromDb>::as_select(),
+                                ))
+                                .load(conn)
+                                .await?;
+                        Ok(from_db)
+                    })
+                },
+            )
             .await?;
 
-        Ok(timeline_from_db)
+        Ok(timeline_from_db
+            .into_iter()
+            .map(|(op, tl_opt)| (op, tl_opt.map(|tl_opt| tl_opt.into_persistence())))
+            .collect())
     }
     /// List pending operations for a given timeline (including tenant-global ones)
     pub(crate) async fn list_pending_ops_for_timeline(

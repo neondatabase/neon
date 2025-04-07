@@ -78,9 +78,12 @@ pub(crate) async fn load_schedule_requests(
     service: &Arc<Service>,
     safekeepers: &HashMap<NodeId, Safekeeper>,
 ) -> anyhow::Result<Vec<ScheduleRequest>> {
-    let pending_ops = service.persistence.list_pending_ops().await?;
-    let mut res = Vec::with_capacity(pending_ops.len());
-    for op_persist in pending_ops {
+    let pending_ops_timelines = service
+        .persistence
+        .list_pending_ops_with_timelines()
+        .await?;
+    let mut res = Vec::with_capacity(pending_ops_timelines.len());
+    for (op_persist, timeline_persist) in pending_ops_timelines {
         let node_id = NodeId(op_persist.sk_id as u64);
         let Some(sk) = safekeepers.get(&node_id) else {
             // This shouldn't happen, at least the safekeeper should exist as decomissioned.
@@ -102,16 +105,12 @@ pub(crate) async fn load_schedule_requests(
             SafekeeperTimelineOpKind::Delete => Vec::new(),
             SafekeeperTimelineOpKind::Exclude => Vec::new(),
             SafekeeperTimelineOpKind::Pull => {
-                // TODO this code is super hacky, it doesn't take migrations into account
-                let Some(timeline_id) = timeline_id else {
+                if timeline_id.is_none() {
+                    // We only do this extra check (outside of timeline_persist check) to give better error msgs
                     anyhow::bail!(
                         "timeline_id is empty for `pull` schedule request for {tenant_id}"
                     );
                 };
-                let timeline_persist = service
-                    .persistence
-                    .get_timeline(tenant_id, timeline_id)
-                    .await?;
                 let Some(timeline_persist) = timeline_persist else {
                     // This shouldn't happen, the timeline should still exist
                     tracing::warn!(
