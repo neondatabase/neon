@@ -825,10 +825,10 @@ pub struct CompactionStatistics {
     time_total_secs: f64,
 
     // Summary
-    /// Ratio of the key-value size before/after gc-compaction.
-    uncompressed_size_ratio: f64,
-    /// Ratio of the physical size before/after gc-compaction.
-    physical_size_ratio: f64,
+    /// Ratio of the key-value size after/before gc-compaction.
+    uncompressed_size_ratio_inv: f64,
+    /// Ratio of the physical size after/before gc-compaction.
+    physical_size_ratio_inv: f64,
 }
 
 impl CompactionStatistics {
@@ -897,15 +897,15 @@ impl CompactionStatistics {
     fn finalize(&mut self) {
         let original_key_value_size = self.image_keys_visited.size + self.wal_keys_visited.size;
         let produced_key_value_size = self.image_produced.size + self.wal_produced.size;
-        self.uncompressed_size_ratio =
-            original_key_value_size as f64 / (produced_key_value_size as f64 + 1.0); // avoid div by 0
+        self.uncompressed_size_ratio_inv =
+            produced_key_value_size as f64 / (original_key_value_size as f64 + 1.0); // avoid div by 0
         let original_physical_size = self.image_layer_visited.size + self.delta_layer_visited.size;
         let produced_physical_size = self.image_layer_produced.size
             + self.delta_layer_produced.size
             + self.image_layer_discarded.size
             + self.delta_layer_discarded.size; // Also include the discarded layers to make the ratio accurate
-        self.physical_size_ratio =
-            original_physical_size as f64 / (produced_physical_size as f64 + 1.0); // avoid div by 0
+        self.physical_size_ratio_inv =
+            produced_physical_size as f64 / (original_physical_size as f64 + 1.0); // avoid div by 0
     }
 }
 
