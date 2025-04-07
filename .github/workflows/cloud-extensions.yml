@@ -54,7 +54,7 @@ jobs:
       - name: Evaluate the settings
         id: project-settings
         run: |
-          if [[ ${{ matrix.pg-version }} -lt 17 ]]; then
+          if [ ${{ matrix.pg-version }} -lt 17 ]; then
             ULID=ulid
           else
             ULID=pgx_ulid
