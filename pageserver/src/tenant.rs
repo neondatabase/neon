@@ -1356,21 +1356,29 @@ impl Tenant {
 
                 fn make_broken_or_stopping(t: &Tenant, err: anyhow::Error) {
                     t.state.send_modify(|state| match state {
+                        // TODO: the old code alluded to DeleteTenantFlow sometimes setting
+                        // TenantState::Stopping before we get here, but this may be outdated.
+                        // Let's find out with a testing assertion. If this doesn't fire, and the
+                        // logs don't show this happening in production, remove the Stopping cases.
+                        TenantState::Stopping{..} if cfg!(any(test, feature = "testing")) => {
+                            panic!("unexpected TenantState::Stopping during attach")
+                        }
                         // If the tenant is cancelled, assume the error was caused by cancellation.
                         TenantState::Attaching if t.cancel.is_cancelled() => {
                             info!("attach cancelled, setting tenant state to Stopping: {err}");
-                            // NB: progress None tells `set_stopping` that attach is cancelled.
+                            // NB: progress None tells `set_stopping` that attach has cancelled.
                             *state = TenantState::Stopping { progress: None };
                         }
-                        // DeleteTenantFlow may already have set this Stopping. Retain its progress.
-                        // TODO: there is no DeleteTenantFlow, is this still needed?
+                        // According to the old code, DeleteTenantFlow may already have set this to
+                        // Stopping. Retain its progress.
+                        // TODO: there is no DeleteTenantFlow. Is this still needed? See above.
                         TenantState::Stopping { progress } if t.cancel.is_cancelled() => {
                             assert!(progress.is_some(), "concurrent attach cancellation");
                             info!("attach cancelled, already Stopping: {err}");
                         }
                         // Mark the tenant as broken.
                         TenantState::Attaching | TenantState::Stopping { .. } => {
-                            error!("attach failed, setting tenant state to Broken: {err:?}");
+                            error!("attach failed, setting tenant state to Broken (was {state}): {err:?}");
                             *state = TenantState::broken_from_reason(err.to_string())
                         }
                         // The attach task owns the tenant state until activated.
