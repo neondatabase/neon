@@ -341,6 +341,8 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Load JWT auth token to connect to other safekeepers for pull_timeline.
+    // First check if the env var is present, then check the arg with the path.
+    // We want to deprecate and remove the env var method in the future.
     let sk_auth_token = match var("SAFEKEEPER_AUTH_TOKEN") {
         Ok(v) => {
             info!("loaded JWT token for authentication with safekeepers");
