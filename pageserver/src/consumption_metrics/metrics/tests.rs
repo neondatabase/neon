@@ -18,6 +18,7 @@ fn startup_collected_timeline_metrics_before_advancing() {
         loaded_at: (disk_consistent_lsn, SystemTime::now()),
         last_record_lsn: disk_consistent_lsn,
         current_exact_logical_size: Some(0x42000),
+        changed_bytes_from_parent: Some(0x1000),
     };
 
     let now = DateTime::<Utc>::from(SystemTime::now());
@@ -33,7 +34,8 @@ fn startup_collected_timeline_metrics_before_advancing() {
                 0
             ),
             MetricsKey::written_size(tenant_id, timeline_id).at(now, disk_consistent_lsn.0),
-            MetricsKey::timeline_logical_size(tenant_id, timeline_id).at(now, 0x42000)
+            MetricsKey::timeline_logical_size(tenant_id, timeline_id).at(now, 0x42000),
+            MetricsKey::timeline_changed_bytes_from_parent(tenant_id, timeline_id).at(now, 0x1000)
         ]
     );
 }
@@ -60,6 +62,7 @@ fn startup_collected_timeline_metrics_second_round() {
         loaded_at: (disk_consistent_lsn, init),
         last_record_lsn: disk_consistent_lsn,
         current_exact_logical_size: Some(0x42000),
+        changed_bytes_from_parent: Some(0x1000),
     };
 
     snap.to_metrics(tenant_id, timeline_id, now, &mut metrics, &cache);
@@ -69,7 +72,8 @@ fn startup_collected_timeline_metrics_second_round() {
         &[
             MetricsKey::written_size_delta(tenant_id, timeline_id).from_until(before, now, 0),
             MetricsKey::written_size(tenant_id, timeline_id).at(now, disk_consistent_lsn.0),
-            MetricsKey::timeline_logical_size(tenant_id, timeline_id).at(now, 0x42000)
+            MetricsKey::timeline_logical_size(tenant_id, timeline_id).at(now, 0x42000),
+            MetricsKey::timeline_changed_bytes_from_parent(tenant_id, timeline_id).at(now, 0x1000)
         ]
     );
 }
@@ -104,6 +108,7 @@ fn startup_collected_timeline_metrics_nth_round_at_same_lsn() {
         loaded_at: (disk_consistent_lsn, init),
         last_record_lsn: disk_consistent_lsn,
         current_exact_logical_size: Some(0x42000),
+        changed_bytes_from_parent: Some(0x1000),
     };
 
     snap.to_metrics(tenant_id, timeline_id, now, &mut metrics, &cache);
@@ -113,7 +118,8 @@ fn startup_collected_timeline_metrics_nth_round_at_same_lsn() {
         &[
             MetricsKey::written_size_delta(tenant_id, timeline_id).from_until(just_before, now, 0),
             MetricsKey::written_size(tenant_id, timeline_id).at(now, disk_consistent_lsn.0),
-            MetricsKey::timeline_logical_size(tenant_id, timeline_id).at(now, 0x42000)
+            MetricsKey::timeline_logical_size(tenant_id, timeline_id).at(now, 0x42000),
+            MetricsKey::timeline_changed_bytes_from_parent(tenant_id, timeline_id).at(now, 0x1000)
         ]
     );
 }
@@ -141,6 +147,7 @@ fn post_restart_written_sizes_with_rolled_back_last_record_lsn() {
         loaded_at: (Lsn(50), at_restart),
         last_record_lsn: Lsn(50),
         current_exact_logical_size: None,
+        changed_bytes_from_parent: None,
     };
 
     let mut cache = HashMap::from([
@@ -202,6 +209,7 @@ fn post_restart_current_exact_logical_size_uses_cached() {
         loaded_at: (Lsn(50), at_restart),
         last_record_lsn: Lsn(50),
         current_exact_logical_size: None,
+        changed_bytes_from_parent: Some(0x1000),
     };
 
     let cache = HashMap::from([MetricsKey::timeline_logical_size(tenant_id, timeline_id)
