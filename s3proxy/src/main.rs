@@ -3,6 +3,11 @@ use anyhow::Context;
 use tracing::info;
 use utils::logging;
 
+//see set()
+const fn max_upload_file_limit() -> usize {
+    100 * 1024 * 1024
+}
+
 #[derive(serde::Deserialize)]
 #[serde(tag = "type")]
 struct Config {
@@ -10,6 +15,8 @@ struct Config {
     pemfile: camino::Utf8PathBuf,
     #[serde(flatten)]
     storage_config: remote_storage::RemoteStorageConfig,
+    #[serde(default = "max_upload_file_limit")]
+    max_upload_file_limit: usize,
 }
 
 #[tokio::main]
@@ -43,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
         auth,
         storage,
         cancel: cancel.clone(),
+        max_upload_file_limit: config.max_upload_file_limit,
     });
 
     tokio::spawn(utils::signals::signal_handler(cancel.clone()));

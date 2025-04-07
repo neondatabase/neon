@@ -3,7 +3,7 @@ use axum::body::{Body, BodyDataStream};
 use axum::response::{IntoResponse, Response};
 use axum::{Router, http::StatusCode};
 use remote_storage::{DownloadError, DownloadOpts, GenericRemoteStorage, RemotePath};
-use s3proxy::{PrefixS3Path, Proxy, S3Path, internal_error, not_found, ok};
+use s3proxy::{PrefixS3Path, Proxy, S3Path, bad_request, internal_error, not_found, ok};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 use tokio_util::sync::CancellationToken;
@@ -76,18 +76,42 @@ async fn get(S3Path { path }: S3Path, state: State) -> Result {
         .map_err(|e| internal_error(e, path, "reading response"))
 }
 
-async fn set(S3Path { path }: S3Path, state: State, body: Body) -> Result {
+// Best solution for files is multipart upload, but remote_storage doesn't support it,
+// so we can either read Bytes in memory and push at once or forward BodyDataStream to
+// remote_storage. The latter may seem more peformant, but BodyDataStream doesn't have a
+// guaranteed size() which may produce issues while uploading to s3.
+// So, currently we're going with an in-memory copy plus a boundary to prevent uploading
+// very large files.
+async fn set(S3Path { path }: S3Path, state: State, bytes: bytes::Bytes) -> Result {
     info!(%path, "uploading");
-    use axum::body::HttpBody;
-    let stream = body.into_data_stream();
-    // TODO Get stream hint size without reading it into Bytes
-    let body_size = stream.size_hint().upper().unwrap_or(0) as usize;
-    let stream = body_stream_to_sync_stream(stream);
-    state
-        .storage
-        .upload(stream, body_size, &path, None, &state.cancel.clone())
-        .await
-        .map_err(|e| internal_error(e, path, "reading response"))?;
+    let request_len = bytes.len();
+    let max_len = state.max_upload_file_limit;
+    if request_len > max_len {
+        return Err(bad_request(
+            anyhow!("File size {request_len} exceeds max {max_len}"),
+            "uploading",
+        ));
+    }
+
+    let cancel = state.cancel.clone();
+    let fun = async || {
+        let stream = futures::stream::once(futures::future::ready(Ok(bytes.clone())));
+        state
+            .storage
+            .upload(stream, request_len, &path, None, &cancel)
+            .await
+    };
+    retry(
+        fun,
+        |_| false,
+        WARN_THRESHOLD,
+        MAX_RETRIES,
+        "uploading",
+        &cancel,
+    )
+    .await
+    .unwrap_or(Err(anyhow!("uploading cancelled")))
+    .map_err(|e| internal_error(e, path, "reading response"))?;
     Ok(ok())
 }
 
@@ -103,7 +127,7 @@ async fn delete(S3Path { path }: S3Path, state: State) -> Result {
         &cancel,
     )
     .await
-    .unwrap_or(Err(anyhow!("deleting")))
+    .unwrap_or(Err(anyhow!("deleting cancelled")))
     .map_err(|e| internal_error(e, path, "deleting"))?;
     Ok(ok())
 }
@@ -120,7 +144,7 @@ async fn delete_prefix(PrefixS3Path { path }: PrefixS3Path, state: State) -> Res
         &cancel,
     )
     .await
-    .unwrap_or(Err(anyhow!("deleting prefix")))
+    .unwrap_or(Err(anyhow!("deleting prefix cancelled")))
     .map_err(|e| internal_error(e, path, "deleting prefix"))?;
     Ok(ok())
 }
@@ -131,16 +155,15 @@ pub async fn check_storage_permissions(
 ) -> anyhow::Result<()> {
     info!("storage permissions check");
 
+    // as_nanos() as multiple instances proxying same bucket may be started at once
     let now = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)?
-        .as_secs()
+        .as_nanos()
         .to_string();
 
     let path = RemotePath::from_string(&format!("write_access_{now}"))?;
     info!(%path, "uploading");
 
-    // TODO what if multiple instances try to write a file?
-    // random delay before writing? Instances will be ~3 per region + dedicated for computes
     let body = now.to_string();
     let stream = Body::from(body.clone()).into_data_stream();
     let stream = body_stream_to_sync_stream(stream);
@@ -235,6 +258,7 @@ mod tests {
             auth: s3proxy::JwtAuth::new(TEST_PUB_KEY_ED25519).unwrap(),
             storage,
             cancel: cancel.clone(),
+            max_upload_file_limit: usize::MAX,
         };
         check_storage_permissions(&proxy.storage, cancel)
             .await

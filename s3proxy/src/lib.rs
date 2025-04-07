@@ -76,6 +76,7 @@ pub struct Proxy {
     pub auth: JwtAuth,
     pub storage: GenericRemoteStorage,
     pub cancel: CancellationToken,
+    pub max_upload_file_limit: usize,
 }
 
 pub type EndpointId = String; // If needed, reuse small string from proxy/src/types.rc
