@@ -228,7 +228,7 @@ def test_throughput(
                 break
             disruptor_started.set()
             iters += 1
-            time.sleep(0.1)
+            time.sleep(0.001)
         return iters
 
     env.pageserver.patch_config_toml_nonrecursive(
