@@ -4073,9 +4073,13 @@ def test_storage_controller_location_conf_equivalence(neon_env_builder: NeonEnvB
     assert reconciles_after_restart == 0
 
 
+class RestartStorcon(Enum):
+    RESTART = "restart"
+    ONLINE = "online"
+
 @run_only_on_default_postgres("PG version is not interesting here")
-@pytest.mark.parametrize("restart_storcon", [True, False])
-def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart_storcon: bool):
+@pytest.mark.parametrize("restart_storcon", [RestartStorcon.RESTART, RestartStorcon.ONLINE])
+def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart_storcon: RestartStorcon):
     """
     Test that the storcon can create and delete tenants and timelines with a safekeeper being down.
       - restart_storcon: tests whether the pending ops are persisted.
@@ -4114,7 +4118,7 @@ def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart
         ]
     )
 
-    if restart_storcon:
+    if restart_storcon is RestartStorcon.RESTART:
         # Restart the storcon to check that we persist operations
         env.storage_controller.stop()
         env.storage_controller.start()
@@ -4153,7 +4157,7 @@ def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart
 
     wait_until(timeline_deleted_on_active_sks)
 
-    if restart_storcon:
+    if restart_storcon is RestartStorcon.RESTART:
         # Restart the storcon to check that we persist operations
         env.storage_controller.stop()
         env.storage_controller.start()
