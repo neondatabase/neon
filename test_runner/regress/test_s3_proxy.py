@@ -47,11 +47,7 @@ async def test_s3_proxy_insert_retrieve_delete(neon_simple_env: NeonEnv):
 
         async with session.get(key) as res:
             read_data = await res.read()
-            data_str = data.decode("utf-8")
-            read_data_str = read_data.decode("utf-8")
-            assert data == read_data, f"Read back data {read_data_str} doesn't match original {
-                data_str
-            }"
+            assert data == read_data
 
         async with session.delete(key) as res:
             assert res.status == 200, f"Error removing file {res}"
