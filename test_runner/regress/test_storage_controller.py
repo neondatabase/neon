@@ -2955,9 +2955,6 @@ def test_storage_controller_leadership_transfer_during_split(
         )
         pause_failpoint = "shard-split-pre-complete"
         env.storage_controller.configure_failpoints((pause_failpoint, "pause"))
-        split_fut = executor.submit(
-            env.storage_controller.tenant_shard_split, list(tenants)[0], shard_count * 2
-        )
 
         if not step_down_times_out:
             # Prevent the timeout self-terminate code from executing: we will block step down on the
@@ -2965,6 +2962,10 @@ def test_storage_controller_leadership_transfer_during_split(
             env.storage_controller.configure_failpoints(
                 ("step-down-delay-timeout", "return(3600000)")
             )
+
+        split_fut = executor.submit(
+            env.storage_controller.tenant_shard_split, list(tenants)[0], shard_count * 2
+        )
 
         def hit_failpoint():
             log.info("Checking log for pattern...")
