@@ -1509,6 +1509,10 @@ impl Service {
             .metrics_group
             .storage_controller_pageserver_nodes
             .set(nodes.len() as i64);
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_https_pageserver_nodes
+            .set(nodes.values().filter(|n| n.has_https_port()).count() as i64);
 
         tracing::info!("Loading safekeepers from database...");
         let safekeepers = persistence
@@ -1526,6 +1530,14 @@ impl Service {
         let safekeepers: HashMap<NodeId, Safekeeper> =
             safekeepers.into_iter().map(|n| (n.get_id(), n)).collect();
         tracing::info!("Loaded {} safekeepers from database.", safekeepers.len());
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_safekeeper_nodes
+            .set(safekeepers.len() as i64);
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_https_safekeeper_nodes
+            .set(safekeepers.values().filter(|s| s.has_https_port()).count() as i64);
 
         tracing::info!("Loading shards from database...");
         let mut tenant_shard_persistence = persistence.load_active_tenant_shards().await?;
@@ -6242,6 +6254,10 @@ impl Service {
             .metrics_group
             .storage_controller_pageserver_nodes
             .set(locked.nodes.len() as i64);
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_https_pageserver_nodes
+            .set(locked.nodes.values().filter(|n| n.has_https_port()).count() as i64);
 
         locked.scheduler.node_remove(node_id);
 
@@ -6333,6 +6349,10 @@ impl Service {
                     .metrics_group
                     .storage_controller_pageserver_nodes
                     .set(nodes.len() as i64);
+                metrics::METRICS_REGISTRY
+                    .metrics_group
+                    .storage_controller_https_pageserver_nodes
+                    .set(nodes.values().filter(|n| n.has_https_port()).count() as i64);
             }
         }
 
@@ -6557,6 +6577,10 @@ impl Service {
             .metrics_group
             .storage_controller_pageserver_nodes
             .set(locked.nodes.len() as i64);
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_https_pageserver_nodes
+            .set(locked.nodes.values().filter(|n| n.has_https_port()).count() as i64);
 
         match registration_status {
             RegistrationStatus::New => {
