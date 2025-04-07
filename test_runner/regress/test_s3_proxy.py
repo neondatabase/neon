@@ -1,3 +1,5 @@
+from time import time
+
 import pytest
 from aiohttp import ClientSession
 from fixtures.log_helper import log
@@ -22,8 +24,9 @@ async def test_s3_proxy_insert_retrieve_delete(neon_simple_env: NeonEnv):
         "tenant_id": tenant_id,
         "timeline_id": timeline_id,
         "endpoint_id": endpoint_id,
+        "exp": round(time()) + 99,
     }
-    log.info(f"key path {key_path} claims {claims}")
+    log.info(f"key path {key_path}\nclaims {claims}")
     token = jwt.JWT(header={"alg": "EdDSA"}, claims=claims)
     token.make_signed_token(key)
     token = token.serialize()
@@ -46,9 +49,9 @@ async def test_s3_proxy_insert_retrieve_delete(neon_simple_env: NeonEnv):
             read_data = await res.read()
             data_str = data.decode("utf-8")
             read_data_str = read_data.decode("utf-8")
-            assert data == read_data, (
-                f"Read back data {read_data_str} doesn't match original {data_str}"
-            )
+            assert data == read_data, f"Read back data {read_data_str} doesn't match original {
+                data_str
+            }"
 
         async with session.delete(key) as res:
             assert res.status == 200, f"Error removing file {res}"
