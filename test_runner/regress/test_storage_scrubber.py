@@ -134,7 +134,7 @@ def test_scrubber_tenant_snapshot(neon_env_builder: NeonEnvBuilder, shard_count:
     for pageserver in env.pageservers:
         pageserver.start()
 
-    # Turn shedulling back on.
+    # Turn scheduling back on.
     # We don't care about optimizations, so enable only essential scheduling
     env.storage_controller.tenant_policy_update(tenant_id, {"scheduling": "Essential"})
 
