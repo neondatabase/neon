@@ -65,6 +65,7 @@
 #include "utils/timeout.h"
 
 #include "bitmap.h"
+#include "file_cache.h"
 #include "neon.h"
 #include "neon_lwlsncache.h"
 #include "neon_perf_counters.h"

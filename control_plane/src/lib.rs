@@ -10,6 +10,7 @@ mod background_process;
 pub mod broker;
 pub mod endpoint;
 pub mod local_env;
+pub mod object_storage;
 pub mod pageserver;
 pub mod postgresql_conf;
 pub mod safekeeper;

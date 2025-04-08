@@ -8734,6 +8734,21 @@ mod tests {
                 Lsn(0x20),
                 Value::WalRecord(NeonWalRecord::wal_init("i")),
             ),
+            (
+                get_key(4),
+                Lsn(0x30),
+                Value::WalRecord(NeonWalRecord::wal_append_conditional("j", "i")),
+            ),
+            (
+                get_key(5),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_init("1")),
+            ),
+            (
+                get_key(5),
+                Lsn(0x30),
+                Value::WalRecord(NeonWalRecord::wal_append_conditional("j", "2")),
+            ),
         ];
         let image1 = vec![(get_key(1), "0x10".into())];
 
@@ -8764,8 +8779,18 @@ mod tests {
 
         // Need to remove the limit of "Neon WAL redo requires base image".
 
-        // assert_eq!(tline.get(get_key(3), Lsn(0x50), &ctx).await?, Bytes::new());
-        // assert_eq!(tline.get(get_key(4), Lsn(0x50), &ctx).await?, Bytes::new());
+        assert_eq!(
+            tline.get(get_key(3), Lsn(0x50), &ctx).await?,
+            Bytes::from_static(b"c")
+        );
+        assert_eq!(
+            tline.get(get_key(4), Lsn(0x50), &ctx).await?,
+            Bytes::from_static(b"ij")
+        );
+
+        // Manual testing required: currently, read errors will panic the process in debug mode. So we
+        // cannot enable this assertion in the unit test.
+        // assert!(tline.get(get_key(5), Lsn(0x50), &ctx).await.is_err());
 
         Ok(())
     }
