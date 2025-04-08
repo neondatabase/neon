@@ -584,7 +584,7 @@ pub(crate) enum PageReconstructError {
     WalRedo(anyhow::Error),
 
     #[error("{0}")]
-    MissingKey(MissingKeyError),
+    MissingKey(Box<MissingKeyError>),
 }
 
 impl From<anyhow::Error> for PageReconstructError {
@@ -815,7 +815,7 @@ pub(crate) enum GetVectoredError {
     InvalidLsn(Lsn),
 
     #[error("requested key not found: {0}")]
-    MissingKey(MissingKeyError),
+    MissingKey(Box<MissingKeyError>),
 
     #[error("ancestry walk")]
     GetReadyAncestorError(#[source] GetReadyAncestorError),
@@ -1151,14 +1151,16 @@ impl Timeline {
                     value
                 }
             }
-            None => Err(PageReconstructError::MissingKey(MissingKeyError {
-                key,
-                shard: self.shard_identity.get_shard_number(&key),
-                request_lsn: lsn,
-                ancestor_lsn: None,
-                backtrace: None,
-                read_path: None,
-            })),
+            None => Err(PageReconstructError::MissingKey(Box::new(
+                MissingKeyError {
+                    key,
+                    shard: self.shard_identity.get_shard_number(&key),
+                    request_lsn: lsn,
+                    ancestor_lsn: None,
+                    backtrace: None,
+                    read_path: None,
+                },
+            ))),
         }
     }
 
@@ -4230,7 +4232,7 @@ impl Timeline {
         };
 
         if let Some(missing_keyspace) = missing_keyspace {
-            return Err(GetVectoredError::MissingKey(MissingKeyError {
+            return Err(GetVectoredError::MissingKey(Box::new(MissingKeyError {
                 key: missing_keyspace.start().unwrap(), /* better if we can store the full keyspace */
                 shard: self
                     .shard_identity
@@ -4239,7 +4241,7 @@ impl Timeline {
                 ancestor_lsn: Some(timeline.ancestor_lsn),
                 backtrace: None,
                 read_path: std::mem::take(&mut reconstruct_state.read_path),
-            }));
+            })));
         }
 
         Ok(())
