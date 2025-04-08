@@ -95,6 +95,7 @@ def test_storage_controller_smoke(
     env.pageservers[1].start()
     for sk in env.safekeepers:
         sk.start()
+    env.object_storage.start()
 
     # The pageservers we started should have registered with the sharding service on startup
     nodes = env.storage_controller.node_list()
@@ -346,6 +347,7 @@ def prepare_onboarding_env(
     env = neon_env_builder.init_configs()
     env.broker.start()
     env.storage_controller.start()
+    env.object_storage.start()
 
     # This is the pageserver where we'll initially create the tenant.  Run it in emergency
     # mode so that it doesn't talk to storage controller, and do not register it.
