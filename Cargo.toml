@@ -10,7 +10,6 @@ members = [
     "pageserver/client",
     "pageserver/pagebench",
     "proxy",
-    "s3proxy",
     "safekeeper",
     "safekeeper/client",
     "storage_broker",
@@ -41,6 +40,7 @@ members = [
     "libs/proxy/postgres-protocol2",
     "libs/proxy/postgres-types2",
     "libs/proxy/tokio-postgres2",
+    "object_storage",
 ]
 
 [workspace.package]

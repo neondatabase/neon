@@ -3992,6 +3992,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "object_storage"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "axum",
+ "axum-extra",
+ "camino",
+ "camino-tempfile",
+ "futures",
+ "http-body-util",
+ "itertools 0.10.5",
+ "jsonwebtoken",
+ "prometheus",
+ "rand 0.8.5",
+ "remote_storage",
+ "serde",
+ "serde_json",
+ "test-log",
+ "tokio",
+ "tokio-util",
+ "tower 0.5.2",
+ "tracing",
+ "utils",
+ "workspace_hack",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5935,33 +5962,6 @@ name = "ryu"
 version = "1.0.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f91339c0467de62360649f8d3e185ca8de4224ff281f66000de5eb2a77a79041"
-
-[[package]]
-name = "s3proxy"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "axum",
- "axum-extra",
- "camino",
- "camino-tempfile",
- "futures",
- "http-body-util",
- "itertools 0.10.5",
- "jsonwebtoken",
- "prometheus",
- "rand 0.8.5",
- "remote_storage",
- "serde",
- "serde_json",
- "test-log",
- "tokio",
- "tokio-util",
- "tower 0.5.2",
- "tracing",
- "utils",
- "workspace_hack",
-]
 
 [[package]]
 name = "safekeeper"

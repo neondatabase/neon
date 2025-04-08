@@ -72,7 +72,7 @@ fn clean_utf8(path: &camino::Utf8Path) -> Utf8PathBuf {
     }
 }
 
-pub struct Proxy {
+pub struct Storage {
     pub auth: JwtAuth,
     pub storage: GenericRemoteStorage,
     pub cancel: CancellationToken,
@@ -151,11 +151,11 @@ pub fn not_found(key: impl ToString) -> Response {
     (StatusCode::NOT_FOUND, key.to_string()).into_response()
 }
 
-impl FromRequestParts<Arc<Proxy>> for S3Path {
+impl FromRequestParts<Arc<Storage>> for S3Path {
     type Rejection = Response;
     async fn from_request_parts(
         parts: &mut Parts,
-        state: &Arc<Proxy>,
+        state: &Arc<Storage>,
     ) -> Result<Self, Self::Rejection> {
         let Path(path): Path<KeyRequest> = parts
             .extract()
@@ -234,11 +234,11 @@ impl From<&PrefixKeyPath> for PrefixS3Path {
     }
 }
 
-impl FromRequestParts<Arc<Proxy>> for PrefixS3Path {
+impl FromRequestParts<Arc<Storage>> for PrefixS3Path {
     type Rejection = Response;
     async fn from_request_parts(
         parts: &mut Parts,
-        state: &Arc<Proxy>,
+        state: &Arc<Storage>,
     ) -> Result<Self, Self::Rejection> {
         let Path(path) = parts
             .extract::<Path<PrefixKeyPath>>()
