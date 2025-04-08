@@ -2660,7 +2660,7 @@ class S3Proxy(LogUtils):
         self.env.neon_cli.s3proxy_stop(immediate)
 
     def assert_no_errors(self):
-        assert_no_errors(self.logfile, "s3proxy", [".*WARN.*"])
+        assert_no_errors(self.logfile, "s3proxy", [])
 
 
 class NeonProxiedStorageController(NeonStorageController):
