@@ -4079,6 +4079,7 @@ impl Tenant {
 
         TenantManifest {
             version: LATEST_TENANT_MANIFEST_VERSION,
+            stripe_size: Some(self.get_shard_stripe_size()),
             offloaded_timelines,
         }
     }

@@ -67,7 +67,7 @@ use crate::tenant::mgr::{
 };
 use crate::tenant::remote_timeline_client::index::GcCompactionState;
 use crate::tenant::remote_timeline_client::{
-    download_index_part, list_remote_tenant_shards, list_remote_timelines,
+    download_index_part, download_tenant_manifest, list_remote_tenant_shards, list_remote_timelines,
 };
 use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
@@ -2911,9 +2911,22 @@ async fn tenant_scan_remote_handler(
             };
         }
 
+        let result =
+            download_tenant_manifest(&state.remote_storage, &tenant_shard_id, generation, &cancel)
+                .instrument(info_span!("download_tenant_manifest",
+                            tenant_id=%tenant_shard_id.tenant_id,
+                            shard_id=%tenant_shard_id.shard_slug()))
+                .await;
+        let stripe_size = match result {
+            Ok((manifest, _, _)) => manifest.stripe_size,
+            Err(DownloadError::NotFound) => None,
+            Err(err) => return Err(ApiError::InternalServerError(anyhow!(err))),
+        };
+
         response.shards.push(TenantScanRemoteStorageShard {
             tenant_shard_id,
             generation: generation.into(),
+            stripe_size,
         });
     }
 
