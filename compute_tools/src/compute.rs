@@ -661,15 +661,8 @@ impl ComputeNode {
         }
 
         // Configure and start rsyslog for Postgres logs export
-        if self.has_feature(ComputeFeature::PostgresLogsExport) {
-            if let Some(ref project_id) = pspec.spec.cluster.cluster_id {
-                let host = PostgresLogsRsyslogConfig::default_host(project_id);
-                let conf = PostgresLogsRsyslogConfig::new(Some(&host));
-                configure_postgres_logs_export(conf)?;
-            } else {
-                warn!("not configuring rsyslog for Postgres logs export: project ID is missing")
-            }
-        }
+        let conf = PostgresLogsRsyslogConfig::new(pspec.spec.logs_export_host.as_deref());
+        configure_postgres_logs_export(conf)?;
 
         // Launch remaining service threads
         let _monitor_handle = launch_monitor(self);
@@ -1572,6 +1565,10 @@ impl ComputeNode {
                 }
             });
         }
+
+        // Reconfigure rsyslog for Postgres logs export
+        let conf = PostgresLogsRsyslogConfig::new(spec.logs_export_host.as_deref());
+        configure_postgres_logs_export(conf)?;
 
         // Write new config
         let pgdata_path = Path::new(&self.params.pgdata);
