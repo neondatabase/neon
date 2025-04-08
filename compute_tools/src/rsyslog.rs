@@ -121,7 +121,7 @@ impl<'a> PostgresLogsRsyslogConfig<'a> {
     }
 }
 
-/// Writes rsyslog configuration for Postgres logs export and restart rsyslog.
+/// Writes rsyslogd configuration for Postgres logs export and restarts rsyslog.
 pub fn configure_postgres_logs_export(conf: PostgresLogsRsyslogConfig) -> Result<()> {
     let new_config = conf.build()?;
     let current_config = PostgresLogsRsyslogConfig::current_config()?;
