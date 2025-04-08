@@ -4217,14 +4217,11 @@ def test_storcon_few_sk(
         ep.start(safekeeper_generation=1, safekeepers=safekeeper_list)
         ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
 
-    #env.safekeepers[0].stop()
-
     if deletetion_subject is DeletionSubject.TENANT:
         env.storage_controller.pageserver_api().tenant_delete(tenant_id)
     else:
         env.storage_controller.pageserver_api().timeline_delete(tenant_id, child_timeline_id)
 
-    #env.safekeepers[0].start()
     # ensure that there is log msgs for the third safekeeper too
     def timeline_deleted_on_sk():
         env.safekeepers[0].assert_log_contains(

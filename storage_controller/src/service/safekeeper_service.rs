@@ -146,10 +146,16 @@ impl Service {
             "Got {} non-successful responses from initial creation request of total {total_result_count} responses",
             remaining.len()
         );
-        if remaining.len() >= 2 {
+        let quorum_size = match timeline_persistence.sk_set.len() {
+            1 => 1,
+            2 => 2,
+            _ => (timeline_persistence.sk_set.len() * 3) / 2,
+        };
+        if remaining.len() >= quorum_size {
             // Failure
             return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                "not enough successful reconciliations to reach quorum, please retry: {} errored",
+                "not enough successful reconciliations to reach quorum size {}, please retry: {} errored",
+                quorum_size,
                 remaining.len()
             )));
         }
