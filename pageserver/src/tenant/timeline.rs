@@ -926,7 +926,7 @@ impl std::fmt::Debug for Timeline {
     }
 }
 
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, Clone)]
 pub(crate) enum WaitLsnError {
     // Called on a timeline which is shutting down
     #[error("Shutdown")]
@@ -3935,13 +3935,24 @@ pub(crate) enum VersionedKeySpaceQuery {
     Uniform { keyspace: KeySpace, lsn: Lsn },
     /// Variant for queries at multiple [`Lsn`]s
     Scattered {
-        // Will be filled by a future commit
+        keyspaces_at_lsn: Vec<(Lsn, KeySpace)>,
+
+        cached_total_keyspace: once_cell::sync::OnceCell<KeySpace>,
+        cached_high_watermark_lsn: once_cell::sync::OnceCell<Lsn>,
     },
 }
 
 impl VersionedKeySpaceQuery {
     pub(crate) fn uniform(keyspace: KeySpace, lsn: Lsn) -> Self {
         Self::Uniform { keyspace, lsn }
+    }
+
+    pub(crate) fn scattered(keyspaces_at_lsn: Vec<(Lsn, KeySpace)>) -> Self {
+        Self::Scattered {
+            keyspaces_at_lsn,
+            cached_total_keyspace: Default::default(),
+            cached_high_watermark_lsn: Default::default(),
+        }
     }
 
     /// Returns the most recent (largest) LSN included in the query.
@@ -3956,7 +3967,31 @@ impl VersionedKeySpaceQuery {
 
                 Ok(*lsn)
             }
-            Self::Scattered { .. } => todo!(),
+            Self::Scattered {
+                keyspaces_at_lsn,
+                cached_high_watermark_lsn,
+                ..
+            } => match cached_high_watermark_lsn.get() {
+                Some(cached) => Ok(*cached),
+                None => {
+                    let mut max_lsn = None;
+                    for (lsn, _keyspace) in keyspaces_at_lsn.iter() {
+                        if !lsn.is_valid() {
+                            return Err(GetVectoredError::InvalidLsn(*lsn));
+                        }
+                        max_lsn = std::cmp::max(max_lsn, Some(lsn));
+                    }
+
+                    if let Some(computed) = max_lsn {
+                        cached_high_watermark_lsn
+                            .set(*computed)
+                            .expect("cache invalidation");
+                        Ok(*computed)
+                    } else {
+                        Err(GetVectoredError::Other(anyhow!("empty input")))
+                    }
+                }
+            },
         }
     }
 
@@ -3965,7 +4000,21 @@ impl VersionedKeySpaceQuery {
     fn total_keyspace(&self) -> KeySpace {
         match self {
             Self::Uniform { keyspace, .. } => keyspace.clone(),
-            Self::Scattered { .. } => todo!(),
+            Self::Scattered {
+                keyspaces_at_lsn,
+                cached_total_keyspace,
+                ..
+            } => cached_total_keyspace
+                .get_or_init(|| {
+                    keyspaces_at_lsn
+                        .iter()
+                        .map(|(_lsn, keyspace)| keyspace)
+                        .fold(KeySpace::default(), |mut acc, v| {
+                            acc.merge(v);
+                            acc
+                        })
+                })
+                .clone(),
         }
     }
 
@@ -3975,7 +4024,15 @@ impl VersionedKeySpaceQuery {
     fn map_key_to_lsn(&self, key: &Key) -> Lsn {
         match self {
             Self::Uniform { lsn, .. } => *lsn,
-            Self::Scattered { .. } => todo!(),
+            Self::Scattered {
+                keyspaces_at_lsn, ..
+            } => {
+                keyspaces_at_lsn
+                    .iter()
+                    .find(|(_lsn, keyspace)| keyspace.contains(key))
+                    .expect("Returned key was requested")
+                    .0
+            }
         }
     }
 
@@ -3984,14 +4041,34 @@ impl VersionedKeySpaceQuery {
     fn remove_overlapping_with(&mut self, to_remove: &KeySpace) -> KeySpace {
         match self {
             Self::Uniform { keyspace, .. } => keyspace.remove_overlapping_with(to_remove),
-            Self::Scattered { .. } => todo!(),
+            Self::Scattered {
+                keyspaces_at_lsn,
+                cached_total_keyspace,
+                cached_high_watermark_lsn,
+            } => {
+                // Invalidate the caches
+                *cached_total_keyspace = once_cell::sync::OnceCell::new();
+                *cached_high_watermark_lsn = once_cell::sync::OnceCell::new();
+
+                let mut removed_accum = KeySpaceRandomAccum::new();
+                keyspaces_at_lsn.iter_mut().for_each(|(_lsn, keyspace)| {
+                    let removed = keyspace.remove_overlapping_with(to_remove);
+                    removed_accum.add_keyspace(removed);
+                });
+
+                removed_accum.to_keyspace()
+            }
         }
     }
 
     fn is_empty(&self) -> bool {
         match self {
             Self::Uniform { keyspace, .. } => keyspace.is_empty(),
-            Self::Scattered { .. } => todo!(),
+            Self::Scattered {
+                keyspaces_at_lsn, ..
+            } => keyspaces_at_lsn
+                .iter()
+                .all(|(_lsn, keyspace)| keyspace.is_empty()),
         }
     }
 
@@ -4004,7 +4081,17 @@ impl VersionedKeySpaceQuery {
                 // Hence the min.
                 *lsn = std::cmp::min(*lsn, to);
             }
-            Self::Scattered { .. } => todo!(),
+            Self::Scattered {
+                keyspaces_at_lsn,
+                cached_high_watermark_lsn,
+                ..
+            } => {
+                *cached_high_watermark_lsn = once_cell::sync::OnceCell::new();
+
+                keyspaces_at_lsn.iter_mut().for_each(|(lsn, _keyspace)| {
+                    *lsn = std::cmp::min(*lsn, to);
+                });
+            }
         }
     }
 }
@@ -4174,8 +4261,13 @@ impl Timeline {
                 let cont_lsn = Lsn(lsn.0 + 1);
                 guard.update_search_fringe(keyspace, cont_lsn, &mut fringe)?;
             }
-            VersionedKeySpaceQuery::Scattered { .. } => {
-                todo!()
+            VersionedKeySpaceQuery::Scattered {
+                keyspaces_at_lsn, ..
+            } => {
+                for (lsn, keyspace) in keyspaces_at_lsn.iter() {
+                    let cont_lsn_for_keyspace = Lsn(lsn.0 + 1);
+                    guard.update_search_fringe(keyspace, cont_lsn_for_keyspace, &mut fringe)?;
+                }
             }
         }
 
