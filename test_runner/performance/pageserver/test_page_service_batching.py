@@ -259,7 +259,7 @@ def test_throughput(
             since_last_start = []
         since_last_start.append(line)
 
-    stopping_batching_because_re = re.compile(r"stopping batching because (LSN changed|of batch size|timeline object mismatch|batch key changed|.*)")
+    stopping_batching_because_re = re.compile(r"stopping batching because (LSN changed|of batch size|timeline object mismatch|batch key changed|same page was requested at different LSNs|.*)")
     reasons_for_stopping_batching =  {}
     for line in since_last_start:
         match = stopping_batching_because_re.search(line)
