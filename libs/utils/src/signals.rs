@@ -40,8 +40,8 @@ impl ShutdownSignals {
 }
 
 /// Runs in a loop since we want to be responsive to multiple signals
-/// even after triggering shutdown (e.g. a SIGQUIT after a slow SIGTERM shutdown). See:
-/// https://github.com/neondatabase/neon/issues/9740.
+/// even after triggering shutdown (e.g. a SIGQUIT after a slow SIGTERM shutdown)
+/// <https://github.com/neondatabase/neon/issues/9740>
 pub async fn signal_handler(token: tokio_util::sync::CancellationToken) {
     let mut sigint = signal(SignalKind::interrupt()).unwrap();
     let mut sigterm = signal(SignalKind::terminate()).unwrap();
