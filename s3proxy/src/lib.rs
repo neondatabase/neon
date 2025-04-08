@@ -4,7 +4,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{RequestPartsExt, http::StatusCode, http::request::Parts};
 use axum_extra::TypedHeader;
 use axum_extra::headers::{Authorization, authorization::Bearer};
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8PathBuf;
 use jsonwebtoken::{DecodingKey, Validation};
 use remote_storage::{GenericRemoteStorage, RemotePath};
 use serde::{Deserialize, Serialize};
@@ -47,7 +47,7 @@ fn normalize_key(key: &str) -> StdResult<Utf8PathBuf, String> {
 }
 
 // Copied from path_clean crate with PathBuf->Utf8PathBuf
-fn clean_utf8(path: &Utf8Path) -> Utf8PathBuf {
+fn clean_utf8(path: &camino::Utf8Path) -> Utf8PathBuf {
     use camino::Utf8Component as Comp;
     let mut out = Vec::new();
     for comp in path.components() {
@@ -262,7 +262,6 @@ impl FromRequestParts<Arc<Proxy>> for PrefixS3Path {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camino::Utf8PathBuf;
 
     #[test]
     fn normalize_key() {

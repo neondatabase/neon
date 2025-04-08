@@ -1,32 +1,28 @@
 [package]
 name = "s3proxy"
 version = "0.0.1"
-edition = "2024"
+edition.workspace = true
 license.workspace = true
 [dependencies]
 anyhow.workspace = true
 axum-extra.workspace = true
 axum.workspace = true
-bytes.workspace = true
 camino.workspace = true
 futures.workspace = true
 jsonwebtoken.workspace = true
-metrics.workspace = true
 prometheus.workspace = true
 remote_storage.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sync_wrapper.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true
-tracing-subscriber.workspace = true
 tracing.workspace = true
 utils = { path = "../libs/utils", default-features = false }
 workspace_hack.workspace = true
 [dev-dependencies]
-rand.workspace = true
 camino-tempfile.workspace = true
 http-body-util.workspace = true
 itertools.workspace = true
-test-log = "0.2.17"
+rand.workspace = true
+test-log.workspace = true
 tower.workspace = true

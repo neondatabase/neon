@@ -1,13 +1,13 @@
 use anyhow::anyhow;
-use axum::body::{Body, BodyDataStream};
+use axum::body::{Body, Bytes};
 use axum::response::{IntoResponse, Response};
 use axum::{Router, http::StatusCode};
+use remote_storage::TimeoutOrCancel;
 use remote_storage::{DownloadError, DownloadOpts, GenericRemoteStorage, RemotePath};
 use s3proxy::{PrefixS3Path, Proxy, S3Path, bad_request, internal_error, not_found, ok};
-use std::sync::Arc;
-use std::time::UNIX_EPOCH;
+use std::{sync::Arc, time::SystemTime, time::UNIX_EPOCH};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use utils::backoff::retry;
 
 pub fn app(state: Arc<Proxy>) -> Router<()> {
@@ -48,7 +48,7 @@ async fn get(S3Path { path }: S3Path, state: State) -> Result {
     info!(%path, "downloading");
     let download_err = |e| {
         if let DownloadError::NotFound = e {
-            warn!(%path, %e, "downloading");
+            info!(%path, %e, "downloading"); // 404 is not an issue of _this_ service
             return not_found(&path);
         }
         internal_error(e, &path, "downloading")
@@ -58,7 +58,7 @@ async fn get(S3Path { path }: S3Path, state: State) -> Result {
 
     let stream = retry(
         async || state.storage.download(&path, opts, &cancel).await,
-        |e| !matches!(e, DownloadError::Timeout),
+        DownloadError::is_permanent,
         WARN_THRESHOLD,
         MAX_RETRIES,
         "downloading",
@@ -82,7 +82,7 @@ async fn get(S3Path { path }: S3Path, state: State) -> Result {
 // guaranteed size() which may produce issues while uploading to s3.
 // So, currently we're going with an in-memory copy plus a boundary to prevent uploading
 // very large files.
-async fn set(S3Path { path }: S3Path, state: State, bytes: bytes::Bytes) -> Result {
+async fn set(S3Path { path }: S3Path, state: State, bytes: Bytes) -> Result {
     info!(%path, "uploading");
     let request_len = bytes.len();
     let max_len = state.max_upload_file_limit;
@@ -95,7 +95,7 @@ async fn set(S3Path { path }: S3Path, state: State, bytes: bytes::Bytes) -> Resu
 
     let cancel = state.cancel.clone();
     let fun = async || {
-        let stream = futures::stream::once(futures::future::ready(Ok(bytes.clone())));
+        let stream = bytes_to_stream(bytes.clone());
         state
             .storage
             .upload(stream, request_len, &path, None, &cancel)
@@ -103,7 +103,7 @@ async fn set(S3Path { path }: S3Path, state: State, bytes: bytes::Bytes) -> Resu
     };
     retry(
         fun,
-        |_| false,
+        TimeoutOrCancel::caused_by_cancel,
         WARN_THRESHOLD,
         MAX_RETRIES,
         "uploading",
@@ -120,7 +120,7 @@ async fn delete(S3Path { path }: S3Path, state: State) -> Result {
     let cancel = state.cancel.clone();
     retry(
         async || state.storage.delete(&path, &cancel).await,
-        |_| false,
+        TimeoutOrCancel::caused_by_cancel,
         WARN_THRESHOLD,
         MAX_RETRIES,
         "deleting",
@@ -137,7 +137,7 @@ async fn delete_prefix(PrefixS3Path { path }: PrefixS3Path, state: State) -> Res
     let cancel = state.cancel.clone();
     retry(
         async || state.storage.delete_prefix(&path, &cancel).await,
-        |_| false,
+        TimeoutOrCancel::caused_by_cancel,
         WARN_THRESHOLD,
         MAX_RETRIES,
         "deleting prefix",
@@ -156,7 +156,7 @@ pub async fn check_storage_permissions(
     info!("storage permissions check");
 
     // as_nanos() as multiple instances proxying same bucket may be started at once
-    let now = std::time::SystemTime::now()
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)?
         .as_nanos()
         .to_string();
@@ -165,8 +165,7 @@ pub async fn check_storage_permissions(
     info!(%path, "uploading");
 
     let body = now.to_string();
-    let stream = Body::from(body.clone()).into_data_stream();
-    let stream = body_stream_to_sync_stream(stream);
+    let stream = bytes_to_stream(Bytes::from(body.clone()));
     client
         .upload(stream, body.len(), &path, None, &cancel)
         .await?;
@@ -195,12 +194,8 @@ pub async fn check_storage_permissions(
     client.delete(&path, &cancel).await
 }
 
-fn body_stream_to_sync_stream(
-    stream: BodyDataStream,
-) -> impl futures::Stream<Item = std::io::Result<axum::body::Bytes>> {
-    use futures::stream::TryStreamExt;
-    sync_wrapper::SyncStream::new(stream)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+fn bytes_to_stream(bytes: Bytes) -> impl futures::Stream<Item = std::io::Result<Bytes>> {
+    futures::stream::once(futures::future::ready(Ok(bytes)))
 }
 
 #[cfg(test)]
@@ -209,7 +204,6 @@ mod tests {
     use axum::{body::Body, extract::Request, response::Response};
     use http_body_util::BodyExt;
     use itertools::iproduct;
-    use serde::Serialize;
     use std::env::var;
     use std::sync::Arc;
     use std::time::Duration;
@@ -232,7 +226,7 @@ mod tests {
             (Some(dir), GenericRemoteStorage::LocalFs(fs))
         } else {
             // test_real_s3::create_s3_client is hard to reference, reimplementing here
-            let millis = std::time::SystemTime::now()
+            let millis = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_millis();
@@ -482,6 +476,7 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
     }
 
     fn delete_prefix_token(uri: &str) -> String {
+        use serde::Serialize;
         let parts = uri.split("/").collect::<Vec<&str>>();
         #[derive(Serialize)]
         struct PrefixClaims {
@@ -501,7 +496,7 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
         jsonwebtoken::encode(&header, &claims, &key).unwrap()
     }
 
-    // We can't use single digit numbers,they won't be validated as TimelineId and EndpointId
+    // Can't use single digit numbers as they won't be validated as TimelineId and EndpointId
     #[testlog(tokio::test)]
     async fn delete_prefix() {
         let tenant_id =

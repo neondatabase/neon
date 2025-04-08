@@ -1,3 +1,7 @@
+//! `object_storage` is a service which provides API for uploading and downloading
+//! files. It is used by compute and control plane for accessing LFC prewarm data.
+//! This service is deployed either as a separate component or as part of compute image
+//! for large computes.
 mod app;
 use anyhow::Context;
 use tracing::info;
