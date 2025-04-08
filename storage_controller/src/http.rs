@@ -22,6 +22,7 @@ use pageserver_api::controller_api::{
     MetadataHealthListUnhealthyResponse, MetadataHealthUpdateRequest, MetadataHealthUpdateResponse,
     NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, SafekeeperSchedulingPolicyRequest,
     ShardsPreferredAzsRequest, TenantCreateRequest, TenantPolicyRequest, TenantShardMigrateRequest,
+    TimelineImportRequest,
 };
 use pageserver_api::models::{
     DetachBehavior, LsnLeaseRequest, TenantConfigPatchRequest, TenantConfigRequest,
@@ -1276,6 +1277,37 @@ async fn handle_tenant_import(req: Request<Body>) -> Result<Response<Body>, ApiE
     )
 }
 
+async fn handle_timeline_import(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+    check_permissions(&req, Scope::PageServerApi)?;
+    maybe_rate_limit(&req, tenant_id).await;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let import_req = json_request::<TimelineImportRequest>(&mut req).await?;
+
+    let state = get_state(&req);
+
+    if import_req.tenant_id != tenant_id || import_req.timeline_id != timeline_id {
+        return Err(ApiError::BadRequest(anyhow::anyhow!(
+            "tenant id or timeline id mismatch: url={tenant_id}/{timeline_id}, body={}/{}",
+            import_req.tenant_id,
+            import_req.timeline_id
+        )));
+    }
+
+    json_response(
+        StatusCode::OK,
+        state.service.timeline_import(import_req).await?,
+    )
+}
+
 async fn handle_tenants_dump(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -1949,6 +1981,16 @@ pub fn make_router(
                 RequestName("debug_v1_tenant_locate"),
             )
         })
+        .post(
+            "/debug/v1/tenant/:tenant_id/timeline/:timeline_id/import",
+            |r| {
+                named_request_span(
+                    r,
+                    handle_timeline_import,
+                    RequestName("debug_v1_timeline_import"),
+                )
+            },
+        )
         .get("/debug/v1/scheduler", |r| {
             named_request_span(r, handle_scheduler_dump, RequestName("debug_v1_scheduler"))
         })
