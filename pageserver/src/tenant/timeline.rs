@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::PERF_TRACE_TARGET;
+use crate::walredo::RedoAttemptType;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use bytes::Bytes;
@@ -1292,6 +1293,12 @@ impl Timeline {
         };
         reconstruct_state.read_path = read_path;
 
+        let redo_attempt_type = if ctx.task_kind() == TaskKind::Compaction {
+            RedoAttemptType::LegacyCompaction
+        } else {
+            RedoAttemptType::ReadPage
+        };
+
         let traversal_res: Result<(), _> = {
             let ctx = RequestContextBuilder::from(ctx)
                 .perf_span(|crnt_perf_span| {
@@ -1379,7 +1386,7 @@ impl Timeline {
 
                     let walredo_deltas = converted.num_deltas();
                     let walredo_res = walredo_self
-                        .reconstruct_value(key, lsn, converted)
+                        .reconstruct_value(key, lsn, converted, redo_attempt_type)
                         .maybe_perf_instrument(&ctx, |crnt_perf_span| {
                             info_span!(
                                 target: PERF_TRACE_TARGET,
@@ -6356,33 +6363,17 @@ impl Timeline {
         &self,
         key: Key,
         request_lsn: Lsn,
-        data: ValueReconstructState,
-    ) -> Result<Bytes, PageReconstructError> {
-        self.reconstruct_value_inner(key, request_lsn, data, false)
-            .await
-    }
-
-    /// Reconstruct a value, using the given base image and WAL records in 'data'. It does not fire critical errors because
-    /// sometimes it is expected to fail due to unreplayable history described in <https://github.com/neondatabase/neon/issues/10395>.
-    async fn reconstruct_value_wo_critical_error(
-        &self,
-        key: Key,
-        request_lsn: Lsn,
-        data: ValueReconstructState,
-    ) -> Result<Bytes, PageReconstructError> {
-        self.reconstruct_value_inner(key, request_lsn, data, true)
-            .await
-    }
-
-    async fn reconstruct_value_inner(
-        &self,
-        key: Key,
-        request_lsn: Lsn,
         mut data: ValueReconstructState,
-        no_critical_error: bool,
+        redo_attempt_type: RedoAttemptType,
     ) -> Result<Bytes, PageReconstructError> {
         // Perform WAL redo if needed
         data.records.reverse();
+
+        let fire_critical_error = match redo_attempt_type {
+            RedoAttemptType::ReadPage => true,
+            RedoAttemptType::LegacyCompaction => true,
+            RedoAttemptType::GcCompaction => false,
+        };
 
         // If we have a page image, and no WAL, we're all set
         if data.records.is_empty() {
@@ -6430,13 +6421,20 @@ impl Timeline {
                     .as_ref()
                     .context("timeline has no walredo manager")
                     .map_err(PageReconstructError::WalRedo)?
-                    .request_redo(key, request_lsn, data.img, data.records, self.pg_version)
+                    .request_redo(
+                        key,
+                        request_lsn,
+                        data.img,
+                        data.records,
+                        self.pg_version,
+                        redo_attempt_type,
+                    )
                     .await;
                 let img = match res {
                     Ok(img) => img,
                     Err(walredo::Error::Cancelled) => return Err(PageReconstructError::Cancelled),
                     Err(walredo::Error::Other(err)) => {
-                        if !no_critical_error {
+                        if fire_critical_error {
                             critical!("walredo failure during page reconstruction: {err:?}");
                         }
                         return Err(PageReconstructError::WalRedo(

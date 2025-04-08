@@ -136,6 +136,16 @@ macro_rules! bail {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum RedoAttemptType {
+    // Used for the read path. Will fire critical errors and retry twice if failure.
+    ReadPage,
+    // Used for legacy compaction (only used in image compaction). Will fire critical errors and retry once if failure.
+    LegacyCompaction,
+    // Used for gc compaction. Will not fire critical errors and not retry.
+    GcCompaction,
+}
+
 ///
 /// Public interface of WAL redo manager
 ///
@@ -156,10 +166,17 @@ impl PostgresRedoManager {
         base_img: Option<(Lsn, Bytes)>,
         records: Vec<(Lsn, NeonWalRecord)>,
         pg_version: u32,
+        redo_attempt_type: RedoAttemptType,
     ) -> Result<Bytes, Error> {
         if records.is_empty() {
             bail!("invalid WAL redo request with no records");
         }
+
+        let max_retry_attempts = match redo_attempt_type {
+            RedoAttemptType::ReadPage => 2,
+            RedoAttemptType::LegacyCompaction => 1,
+            RedoAttemptType::GcCompaction => 0,
+        };
 
         let base_img_lsn = base_img.as_ref().map(|p| p.0).unwrap_or(Lsn::INVALID);
         let mut img = base_img.map(|p| p.1);
@@ -180,6 +197,7 @@ impl PostgresRedoManager {
                         &records[batch_start..i],
                         self.conf.wal_redo_timeout,
                         pg_version,
+                        max_retry_attempts,
                     )
                     .await
                 };
@@ -201,6 +219,7 @@ impl PostgresRedoManager {
                 &records[batch_start..],
                 self.conf.wal_redo_timeout,
                 pg_version,
+                max_retry_attempts,
             )
             .await
         }
@@ -424,11 +443,11 @@ impl PostgresRedoManager {
         records: &[(Lsn, NeonWalRecord)],
         wal_redo_timeout: Duration,
         pg_version: u32,
+        max_retry_attempts: u32,
     ) -> Result<Bytes, Error> {
         *(self.last_redo_at.lock().unwrap()) = Some(Instant::now());
 
         let (rel, blknum) = key.to_rel_block().context("invalid record")?;
-        const MAX_RETRY_ATTEMPTS: u32 = 1;
         let mut n_attempts = 0u32;
         loop {
             let base_img = &base_img;
@@ -486,7 +505,7 @@ impl PostgresRedoManager {
                 info!(n_attempts, "retried walredo succeeded");
             }
             n_attempts += 1;
-            if n_attempts > MAX_RETRY_ATTEMPTS || result.is_ok() {
+            if n_attempts > max_retry_attempts || result.is_ok() {
                 return result;
             }
         }
@@ -560,6 +579,7 @@ mod tests {
 
     use super::PostgresRedoManager;
     use crate::config::PageServerConf;
+    use crate::walredo::RedoAttemptType;
 
     #[tokio::test]
     async fn test_ping() {
@@ -593,6 +613,7 @@ mod tests {
                 None,
                 short_records(),
                 14,
+                RedoAttemptType::ReadPage,
             )
             .instrument(h.span())
             .await
@@ -621,6 +642,7 @@ mod tests {
                 None,
                 short_records(),
                 14,
+                RedoAttemptType::ReadPage,
             )
             .instrument(h.span())
             .await
@@ -642,6 +664,7 @@ mod tests {
                 None,
                 short_records(),
                 16, /* 16 currently produces stderr output on startup, which adds a nice extra edge */
+                RedoAttemptType::ReadPage,
             )
             .instrument(h.span())
             .await
