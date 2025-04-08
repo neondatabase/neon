@@ -495,7 +495,7 @@ HISTORIC_DATA_SETS = [
     # Tenant manifest v1.
     HistoricDataSet(
         "2025-04-08-tenant-manifest-v1",
-        TenantId("9c2b73dec63b071189d6166a99be0ef2"),
+        TenantId("a127b34db7091665f0d4fa2196d60860"),
         PgVersion.V17,
         "https://neon-github-public-dev.s3.eu-central-1.amazonaws.com/compatibility-data-snapshots/2025-04-08-pgv17-tenant-manifest-v1.tar.zst",
     ),
