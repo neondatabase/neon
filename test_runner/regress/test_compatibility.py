@@ -504,6 +504,7 @@ HISTORIC_DATA_SETS = [
 
 @pytest.mark.parametrize("dataset", HISTORIC_DATA_SETS)
 @pytest.mark.xdist_group("compatibility")
+@pytest.mark.timeout(900) # snapshot downloads and extraction can be slow
 def test_historic_storage_formats(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
