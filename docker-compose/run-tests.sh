@@ -60,5 +60,8 @@ for d in ${LIST}; do
     fi
 done
 [ -z "${FAILED}" ] && exit 0
+for d in ${FAILED}; do
+  cat "$(find $d -name regression.diffs)"
+done
 echo "${FAILED}"
 exit 1
