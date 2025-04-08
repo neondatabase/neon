@@ -1544,39 +1544,33 @@ RUN if [ "${PG_VERSION:?}" != "v17" ]; then \
 
 WORKDIR /ext-src
 RUN mkdir -p pg_rest-src && cd pg_rest-src && \
-    wget https://github.com/ruslantalpa/foxfirebase/raw/main/pg_rest_pg17-${PG_REST_VERSION}_aarch64.deb -O pg_rest_pg17-${PG_REST_VERSION}_aarch64.deb && \
-    wget https://github.com/ruslantalpa/foxfirebase/raw/main/pg_rest_pg17-${PG_REST_VERSION}_amd64.deb -O pg_rest_pg17-${PG_REST_VERSION}_amd64.deb
+    wget https://github.com/ruslantalpa/foxfirebase/raw/main/pg_rest_pg17-${PG_REST_VERSION}_neon-debian-bookworm_aarch64.deb -O pg_rest_pg17-${PG_REST_VERSION}_aarch64.deb && \
+    wget https://github.com/ruslantalpa/foxfirebase/raw/main/pg_rest_pg17-${PG_REST_VERSION}_neon-debian-bookworm_amd64.deb -O pg_rest_pg17-${PG_REST_VERSION}_amd64.deb
 
 FROM pg-build AS pg_rest-build
 ARG PG_REST_VERSION=3.0.1
 ARG PG_VERSION
 COPY --from=pg_rest-src /ext-src/ /ext-src/
 WORKDIR /ext-src/pg_rest-src
-RUN export ARCH=$(uname -m) && \
-    echo "ARCH: $ARCH" && \
-    # Map architecture names to package names
-    if [ "$ARCH" = "x86_64" ]; then \
-        PACKAGE_ARCH="amd64"; \
+RUN if [ "${PG_VERSION:?}" = "v17" ]; then \
+        export ARCH=$(uname -m) && \
+        echo "ARCH: $ARCH" && \
+        # Map architecture names to package names
+        if [ "$ARCH" = "x86_64" ]; then \
+            PACKAGE_ARCH="amd64"; \
+        else \
+            PACKAGE_ARCH="$ARCH"; \
+        fi && \
+        echo "Using package architecture: $PACKAGE_ARCH" && \
+        apt-get update && \
+        apt-get install -y ./pg_rest_pg17-${PG_REST_VERSION}_${PACKAGE_ARCH}.deb && \
+        sed -i 's/superuser = false/superuser = true/g' /usr/local/pgsql/share/extension/pg_rest.control && \
+        echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_rest.control && \
+        # Clean up
+        apt-get clean && rm -rf /var/lib/apt/lists/*; \
     else \
-        PACKAGE_ARCH="$ARCH"; \
-    fi && \
-    echo "Using package architecture: $PACKAGE_ARCH" && \
-    apt-get update && \
-    apt-get install -y ./pg_rest_pg17-${PG_REST_VERSION}_${PACKAGE_ARCH}.deb && \
-    # Copy the extension files from the default Debian package locations to the Neon locations
-    # Create target directories
-    mkdir -p /usr/local/pgsql/share/extension && \
-    mkdir -p /usr/local/pgsql/lib && \
-    # Copy extension files
-    cp -v /usr/share/postgresql/$(echo "${PG_VERSION:?}" | sed 's/^v//')/extension/pg_rest* /usr/local/pgsql/share/extension/ && \
-    cp -v /usr/lib/postgresql/$(echo "${PG_VERSION:?}" | sed 's/^v//')/lib/pg_rest* /usr/local/pgsql/lib/ && \
-    # Set permissions
-    chmod 644 /usr/local/pgsql/share/extension/pg_rest* && \
-    chmod 755 /usr/local/pgsql/lib/pg_rest* && \
-    # Mark extension as trusted
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_rest.control && \
-    # Clean up
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+        echo "pg_rest extension is only supported for PostgreSQL v17, skipping build"; \
+    fi
 
 #########################################################################################
 #
