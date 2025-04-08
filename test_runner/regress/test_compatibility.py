@@ -495,7 +495,7 @@ HISTORIC_DATA_SETS = [
     # Tenant manifest v1.
     HistoricDataSet(
         "2025-04-08-tenant-manifest-v1",
-        TenantId("a127b34db7091665f0d4fa2196d60860"),
+        TenantId("c547c28588abf1d7b7139ff1f1158345"),
         PgVersion.V17,
         "https://neon-github-public-dev.s3.eu-central-1.amazonaws.com/compatibility-data-snapshots/2025-04-08-pgv17-tenant-manifest-v1.tar.zst",
     ),
@@ -504,7 +504,6 @@ HISTORIC_DATA_SETS = [
 
 @pytest.mark.parametrize("dataset", HISTORIC_DATA_SETS)
 @pytest.mark.xdist_group("compatibility")
-@pytest.mark.timeout(900) # snapshot downloads and extraction can be slow
 def test_historic_storage_formats(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
