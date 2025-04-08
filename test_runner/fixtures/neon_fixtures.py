@@ -1023,7 +1023,7 @@ class NeonEnvBuilder:
 
             self.env.broker.assert_no_errors()
 
-            self.env.s3proxy.assert_no_errors()
+            self.env.object_storage.assert_no_errors()
 
         try:
             self.overlay_cleanup_teardown()
@@ -1120,7 +1120,7 @@ class NeonEnv:
             pagectl_env_vars["RUST_LOG"] = self.rust_log_override
         self.pagectl = Pagectl(extra_env=pagectl_env_vars, binpath=self.neon_binpath)
 
-        self.s3proxy = S3Proxy(self)
+        self.object_storage = ObjectStorage(self)
 
         # The URL for the pageserver to use as its control_plane_api config
         if config.storage_controller_port_override is not None:
@@ -1177,7 +1177,7 @@ class NeonEnv:
             },
             "safekeepers": [],
             "pageservers": [],
-            "s3proxy": {"port": self.port_distributor.get_port()},
+            "object_storage": {"port": self.port_distributor.get_port()},
             "generate_local_ssl_certs": self.generate_local_ssl_certs,
         }
 
@@ -1413,7 +1413,7 @@ class NeonEnv:
                 self.storage_controller.on_safekeeper_deploy(sk_id, body)
                 self.storage_controller.safekeeper_scheduling_policy(sk_id, "Active")
 
-        self.s3proxy.start(timeout_in_seconds=timeout_in_seconds)
+        self.object_storage.start(timeout_in_seconds=timeout_in_seconds)
 
     def stop(self, immediate=False, ps_assert_metric_no_errors=False, fail_on_endpoint_errors=True):
         """
@@ -1432,7 +1432,7 @@ class NeonEnv:
         except Exception as e:
             raise_later = e
 
-        self.s3proxy.stop(immediate=immediate)
+        self.object_storage.stop(immediate=immediate)
 
         # Stop storage controller before pageservers: we don't want it to spuriously
         # detect a pageserver "failure" during test teardown
@@ -2644,23 +2644,24 @@ class NeonStorageController(MetricsGetter, LogUtils):
         self.stop(immediate=True)
 
 
-class S3Proxy(LogUtils):
+class ObjectStorage(LogUtils):
     def __init__(self, env: NeonEnv):
-        super().__init__(logfile=env.repo_dir / "s3proxy/s3proxy.log")
-        self.conf_path = env.repo_dir / "s3proxy/s3proxy.json"
+        service_dir = env.repo_dir / "object_storage"
+        super().__init__(logfile=service_dir / "object_storage.log")
+        self.conf_path = service_dir / "object_storage.json"
         self.env = env
 
     def base_url(self):
         return json.loads(self.conf_path.read_text())["listen"]
 
     def start(self, timeout_in_seconds: int | None = None):
-        self.env.neon_cli.s3proxy_start(timeout_in_seconds)
+        self.env.neon_cli.object_storage_start(timeout_in_seconds)
 
     def stop(self, immediate: bool = False):
-        self.env.neon_cli.s3proxy_stop(immediate)
+        self.env.neon_cli.object_storage_stop(immediate)
 
     def assert_no_errors(self):
-        assert_no_errors(self.logfile, "s3proxy", [])
+        assert_no_errors(self.logfile, "object_storage", [])
 
 
 class NeonProxiedStorageController(NeonStorageController):
