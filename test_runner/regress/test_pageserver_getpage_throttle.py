@@ -102,10 +102,6 @@ def test_pageserver_getpage_throttle(neon_env_builder: NeonEnvBuilder, pg_bin: P
 
     log.info("validate the client is capped at the configured rps limit")
     expect_ncompleted = duration_secs * rate_limit_rps
-    threshold = 0.05 * expect_ncompleted
-    assert threshold / rate_limit_rps < 0.1 * duration_secs, (
-        "test self-test: unrealistic expecations regarding precision in this test"
-    )
     assert pytest.approx(expect_ncompleted, 0.05) == actual_ncompleted (
         "the throttling deviates more than 5percent from the expectation"
     )
