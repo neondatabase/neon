@@ -3927,6 +3927,91 @@ impl Timeline {
     }
 }
 
+#[derive(Clone)]
+/// Type representing a query in the ([`Lsn`], [`Key`]) space.
+/// In other words, a set of segments in a 2D space.
+///
+/// This representation has the advatange of avoiding hash map
+/// allocations for uniform queries.
+pub(crate) enum VersionedKeySpaceQuery {
+    /// Variant for queries at a single [`Lsn`]
+    Uniform { keyspace: KeySpace, lsn: Lsn },
+    /// Variant for queries at multiple [`Lsn`]s
+    Scattered {
+        // Will be filled by a future commit
+    },
+}
+
+impl VersionedKeySpaceQuery {
+    pub(crate) fn uniform(keyspace: KeySpace, lsn: Lsn) -> Self {
+        Self::Uniform { keyspace, lsn }
+    }
+
+    /// Returns the most recent (largest) LSN included in the query.
+    /// If any of the LSNs included in the query are invalid, returns
+    /// an error instead.
+    fn high_watermark_lsn(&self) -> Result<Lsn, GetVectoredError> {
+        match self {
+            Self::Uniform { lsn, .. } => {
+                if !lsn.is_valid() {
+                    return Err(GetVectoredError::InvalidLsn(*lsn));
+                }
+
+                Ok(*lsn)
+            }
+            Self::Scattered { .. } => todo!(),
+        }
+    }
+
+    /// Returns the total keyspace being queried: the result of projecting
+    /// everything in the key dimensions onto the key axis.
+    fn total_keyspace(&self) -> KeySpace {
+        match self {
+            Self::Uniform { keyspace, .. } => keyspace.clone(),
+            Self::Scattered { .. } => todo!(),
+        }
+    }
+
+    /// Returns LSN for a specific key.
+    ///
+    /// Invariant: requested key must be part of [`Self::total_keyspace`]
+    fn map_key_to_lsn(&self, key: &Key) -> Lsn {
+        match self {
+            Self::Uniform { lsn, .. } => *lsn,
+            Self::Scattered { .. } => todo!(),
+        }
+    }
+
+    /// Remove any parts of the query (segments) which overlap with the provided
+    /// key space (also segments).
+    fn remove_overlapping_with(&mut self, to_remove: &KeySpace) -> KeySpace {
+        match self {
+            Self::Uniform { keyspace, .. } => keyspace.remove_overlapping_with(to_remove),
+            Self::Scattered { .. } => todo!(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Uniform { keyspace, .. } => keyspace.is_empty(),
+            Self::Scattered { .. } => todo!(),
+        }
+    }
+
+    /// "Lower" the query on the LSN dimension
+    fn lower(&mut self, to: Lsn) {
+        match self {
+            Self::Uniform { lsn, .. } => {
+                // If the originally requested LSN is smaller than the starting
+                // LSN of the ancestor we are descending into, we need to respect that.
+                // Hence the min.
+                *lsn = std::cmp::min(*lsn, to);
+            }
+            Self::Scattered { .. } => todo!(),
+        }
+    }
+}
+
 impl Timeline {
     #[allow(clippy::doc_lazy_continuation)]
     /// Get the data needed to reconstruct all keys in the provided keyspace
