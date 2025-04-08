@@ -19,7 +19,7 @@
 !pageserver/
 !pgxn/
 !proxy/
-!s3proxy/
+!object_storage/
 !storage_scrubber/
 !safekeeper/
 !storage_broker/
