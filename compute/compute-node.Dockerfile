@@ -1535,7 +1535,7 @@ RUN make install USE_PGXS=1 -j $(getconf _NPROCESSORS_ONLN)
 #########################################################################################
 FROM build-deps AS pg_rest-src
 ARG PG_VERSION
-ARG VERSION=3.0.1
+ARG PG_REST_VERSION=3.0.1
 
 # Only supported for PostgreSQL v17
 RUN if [ "${PG_VERSION:?}" != "v17" ]; then \
@@ -1544,11 +1544,12 @@ RUN if [ "${PG_VERSION:?}" != "v17" ]; then \
 
 WORKDIR /ext-src
 RUN mkdir -p pg_rest-src && cd pg_rest-src && \
-    wget https://github.com/ruslantalpa/foxfirebase/raw/main/pg_rest_pg17-${VERSION}_aarch64.deb -O pg_rest_pg17-${VERSION}_aarch64.deb && \
-    wget https://github.com/ruslantalpa/foxfirebase/raw/main/pg_rest_pg17-${VERSION}_amd64.deb -O pg_rest_pg17-${VERSION}_amd64.deb
+    wget https://github.com/ruslantalpa/foxfirebase/raw/main/pg_rest_pg17-${PG_REST_VERSION}_aarch64.deb -O pg_rest_pg17-${PG_REST_VERSION}_aarch64.deb && \
+    wget https://github.com/ruslantalpa/foxfirebase/raw/main/pg_rest_pg17-${PG_REST_VERSION}_amd64.deb -O pg_rest_pg17-${PG_REST_VERSION}_amd64.deb
 
 FROM pg-build AS pg_rest-build
-ARG VERSION=3.0.1
+ARG PG_REST_VERSION=3.0.1
+ARG PG_VERSION
 COPY --from=pg_rest-src /ext-src/ /ext-src/
 WORKDIR /ext-src/pg_rest-src
 RUN export ARCH=$(uname -m) && \
@@ -1561,9 +1562,21 @@ RUN export ARCH=$(uname -m) && \
     fi && \
     echo "Using package architecture: $PACKAGE_ARCH" && \
     apt-get update && \
-    apt-get install -y ./pg_rest_pg17-${VERSION}_${PACKAGE_ARCH}.deb && \
-    apt-get clean && rm -rf /var/lib/apt/lists/* && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_rest.control
+    apt-get install -y ./pg_rest_pg17-${PG_REST_VERSION}_${PACKAGE_ARCH}.deb && \
+    # Copy the extension files from the default Debian package locations to the Neon locations
+    # Create target directories
+    mkdir -p /usr/local/pgsql/share/extension && \
+    mkdir -p /usr/local/pgsql/lib && \
+    # Copy extension files
+    cp -v /usr/share/postgresql/$(echo "${PG_VERSION:?}" | sed 's/^v//')/extension/pg_rest* /usr/local/pgsql/share/extension/ && \
+    cp -v /usr/lib/postgresql/$(echo "${PG_VERSION:?}" | sed 's/^v//')/lib/pg_rest* /usr/local/pgsql/lib/ && \
+    # Set permissions
+    chmod 644 /usr/local/pgsql/share/extension/pg_rest* && \
+    chmod 755 /usr/local/pgsql/lib/pg_rest* && \
+    # Mark extension as trusted
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_rest.control && \
+    # Clean up
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
 #########################################################################################
 #
