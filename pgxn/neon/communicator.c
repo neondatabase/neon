@@ -115,7 +115,6 @@ static bool		timeout_signaled = false;
  */
 static bool		readpage_reentrant_guard = false;
 
-static void reconfigure_timeout_if_needed(void);
 static void pagestore_timeout_handler(void);
 
 #define START_PREFETCH_RECEIVE_WORK() \
@@ -490,7 +489,7 @@ communicator_prefetch_pump_state(bool IsHandlingInterrupts)
 	if (!IsHandlingInterrupts)
 		END_PREFETCH_RECEIVE_WORK();
 
-	reconfigure_timeout_if_needed();
+	communicator_reconfigure_timeout_if_needed();
 }
 
 void
@@ -2419,12 +2418,12 @@ communicator_read_slru_segment(SlruKind kind, int64 segno, neon_request_lsns *re
 	}
 	pfree(resp);
 
-	reconfigure_timeout_if_needed();
+	communicator_reconfigure_timeout_if_needed();
 	return n_blocks;
 }
 
-static void
-reconfigure_timeout_if_needed(void)
+void
+communicator_reconfigure_timeout_if_needed(void)
 {
 	bool	needs_set = MyPState->ring_receive != MyPState->ring_unused &&
 						readahead_getpage_pull_timeout_ms > 0;
@@ -2495,7 +2494,7 @@ communicator_processinterrupts(void)
 			communicator_prefetch_pump_state(true);
 
 		timeout_signaled = false;
-		reconfigure_timeout_if_needed();
+		communicator_reconfigure_timeout_if_needed();
 	}
 
 	if (!prev_interrupt_cb)
