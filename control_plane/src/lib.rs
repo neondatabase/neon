@@ -12,6 +12,6 @@ pub mod endpoint;
 pub mod local_env;
 pub mod pageserver;
 pub mod postgresql_conf;
-pub mod s3proxy;
+pub mod object_storage;
 pub mod safekeeper;
 pub mod storage_controller;

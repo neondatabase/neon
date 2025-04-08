@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 use utils::auth::{Claims, encode_from_key_file};
 use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 
+use crate::object_storage::{OBJECT_STORAGE_REMOTE_STORAGE_DIR, ObjectStorage};
 use crate::pageserver::{PAGESERVER_REMOTE_STORAGE_DIR, PageServerNode};
-use crate::s3proxy::{S3PROXY_REMOTE_STORAGE_DIR, S3ProxyNode};
 use crate::safekeeper::SafekeeperNode;
 
 pub const DEFAULT_PG_VERSION: u32 = 16;
@@ -70,7 +70,7 @@ pub struct LocalEnv {
 
     pub safekeepers: Vec<SafekeeperConf>,
 
-    pub s3proxy: S3ProxyConf,
+    pub object_storage: ObjectStorageConf,
 
     // Control plane upcall API for pageserver: if None, we will not run storage_controller  If set, this will
     // be propagated into each pageserver's configuration.
@@ -108,7 +108,7 @@ pub struct OnDiskConfig {
     )]
     pub pageservers: Vec<PageServerConf>,
     pub safekeepers: Vec<SafekeeperConf>,
-    pub s3proxy: S3ProxyConf,
+    pub object_storage: ObjectStorageConf,
     pub control_plane_api: Option<Url>,
     pub control_plane_hooks_api: Option<Url>,
     pub control_plane_compute_hook_api: Option<Url>,
@@ -142,7 +142,7 @@ pub struct NeonLocalInitConf {
     pub storage_controller: Option<NeonStorageControllerConf>,
     pub pageservers: Vec<NeonLocalInitPageserverConf>,
     pub safekeepers: Vec<SafekeeperConf>,
-    pub s3proxy: S3ProxyConf,
+    pub object_storage: ObjectStorageConf,
     pub control_plane_api: Option<Url>,
     pub control_plane_hooks_api: Option<Url>,
     pub generate_local_ssl_certs: bool,
@@ -150,7 +150,7 @@ pub struct NeonLocalInitConf {
 
 #[derive(Serialize, Default, Deserialize, PartialEq, Eq, Clone, Debug)]
 #[serde(default)]
-pub struct S3ProxyConf {
+pub struct ObjectStorageConf {
     pub port: u16,
 }
 
@@ -411,8 +411,8 @@ impl LocalEnv {
         self.pg_dir(pg_version, "lib")
     }
 
-    pub fn s3proxy_bin(&self) -> PathBuf {
-        self.neon_distrib_dir.join("s3proxy")
+    pub fn object_storage_bin(&self) -> PathBuf {
+        self.neon_distrib_dir.join("object_storage")
     }
 
     pub fn pageserver_bin(&self) -> PathBuf {
@@ -448,8 +448,8 @@ impl LocalEnv {
         self.base_data_dir.join("safekeepers").join(data_dir_name)
     }
 
-    pub fn s3proxy_data_dir(&self) -> PathBuf {
-        self.base_data_dir.join("s3proxy")
+    pub fn object_storage_data_dir(&self) -> PathBuf {
+        self.base_data_dir.join("object_storage")
     }
 
     pub fn get_pageserver_conf(&self, id: NodeId) -> anyhow::Result<&PageServerConf> {
@@ -613,7 +613,7 @@ impl LocalEnv {
                 control_plane_compute_hook_api: _,
                 branch_name_mappings,
                 generate_local_ssl_certs,
-                s3proxy,
+                object_storage,
             } = on_disk_config;
             LocalEnv {
                 base_data_dir: repopath.to_owned(),
@@ -630,7 +630,7 @@ impl LocalEnv {
                 control_plane_hooks_api,
                 branch_name_mappings,
                 generate_local_ssl_certs,
-                s3proxy,
+                object_storage,
             }
         };
 
@@ -740,7 +740,7 @@ impl LocalEnv {
                 control_plane_compute_hook_api: None,
                 branch_name_mappings: self.branch_name_mappings.clone(),
                 generate_local_ssl_certs: self.generate_local_ssl_certs,
-                s3proxy: self.s3proxy.clone(),
+                object_storage: self.object_storage.clone(),
             },
         )
     }
@@ -824,7 +824,7 @@ impl LocalEnv {
             control_plane_api,
             generate_local_ssl_certs,
             control_plane_hooks_api,
-            s3proxy,
+            object_storage,
         } = conf;
 
         // Find postgres binaries.
@@ -876,7 +876,7 @@ impl LocalEnv {
             control_plane_hooks_api,
             branch_name_mappings: Default::default(),
             generate_local_ssl_certs,
-            s3proxy,
+            object_storage,
         };
 
         if generate_local_ssl_certs {
@@ -904,13 +904,13 @@ impl LocalEnv {
                 .context("pageserver init failed")?;
         }
 
-        S3ProxyNode::from_env(&env)
+        ObjectStorage::from_env(&env)
             .init()
-            .context("s3proxy init failed")?;
+            .context("object storage init failed")?;
 
         // setup remote remote location for default LocalFs remote storage
         std::fs::create_dir_all(env.base_data_dir.join(PAGESERVER_REMOTE_STORAGE_DIR))?;
-        std::fs::create_dir_all(env.base_data_dir.join(S3PROXY_REMOTE_STORAGE_DIR))?;
+        std::fs::create_dir_all(env.base_data_dir.join(OBJECT_STORAGE_REMOTE_STORAGE_DIR))?;
 
         env.persist_config()
     }
