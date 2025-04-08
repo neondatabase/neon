@@ -7270,7 +7270,7 @@ impl Service {
             }
 
             // Eventual consistency: if an earlier reconcile job failed, and the shard is still
-            // dirty, spawn another rone
+            // dirty, spawn another one
             if self
                 .maybe_reconcile_shard(shard, &pageservers, ReconcilerPriority::Normal)
                 .is_some()
