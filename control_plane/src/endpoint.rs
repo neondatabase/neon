@@ -670,7 +670,7 @@ impl Endpoint {
             reconfigure_concurrency: self.reconfigure_concurrency,
             drop_subscriptions_before_start: self.drop_subscriptions_before_start,
             audit_log_level: ComputeAudit::Disabled,
-            logs_export_host: None,
+            logs_export_host: None::<String>,
         };
 
         // this strange code is needed to support respec() in tests
