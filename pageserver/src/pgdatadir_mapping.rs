@@ -50,7 +50,7 @@ use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id,
 };
 use crate::tenant::storage_layer::IoConcurrency;
-use crate::tenant::timeline::GetVectoredError;
+use crate::tenant::timeline::{GetVectoredError, VersionedKeySpaceQuery};
 
 /// Max delta records appended to the AUX_FILES_KEY (for aux v1). The write path will write a full image once this threshold is reached.
 pub const MAX_AUX_FILE_DELTAS: usize = 1024;
@@ -349,8 +349,9 @@ impl Timeline {
             false => ctx.attached_child(),
         };
 
+        let query = VersionedKeySpaceQuery::uniform(keyspace, effective_lsn);
         let res = self
-            .get_vectored(keyspace, effective_lsn, io_concurrency, &ctx)
+            .get_vectored(query, io_concurrency, &ctx)
             .maybe_perf_instrument(&ctx, |current_perf_span| current_perf_span.clone())
             .await;
 
@@ -664,8 +665,9 @@ impl Timeline {
 
         let mut segment = BytesMut::with_capacity(n_blocks as usize * BLCKSZ as usize);
         for batch in batches.parts {
+            let query = VersionedKeySpaceQuery::uniform(batch, lsn);
             let blocks = self
-                .get_vectored(batch, lsn, io_concurrency.clone(), ctx)
+                .get_vectored(query, io_concurrency.clone(), ctx)
                 .await?;
 
             for (_key, block) in blocks {
@@ -902,8 +904,9 @@ impl Timeline {
             );
 
             for batch in batches.parts.into_iter().rev() {
+                let query = VersionedKeySpaceQuery::uniform(batch, probe_lsn);
                 let blocks = self
-                    .get_vectored(batch, probe_lsn, io_concurrency.clone(), ctx)
+                    .get_vectored(query, io_concurrency.clone(), ctx)
                     .await?;
 
                 for (_key, clog_page) in blocks.into_iter().rev() {

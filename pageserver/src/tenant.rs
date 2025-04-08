@@ -5947,7 +5947,7 @@ mod tests {
     use timeline::InMemoryLayerTestDesc;
     #[cfg(feature = "testing")]
     use timeline::compaction::{KeyHistoryRetention, KeyLogAtLsn};
-    use timeline::{CompactOptions, DeltaLayerTestDesc};
+    use timeline::{CompactOptions, DeltaLayerTestDesc, VersionedKeySpaceQuery};
     use utils::id::TenantId;
 
     use super::*;
@@ -6785,10 +6785,14 @@ mod tests {
         for read in reads {
             info!("Doing vectored read on {:?}", read);
 
+            let query = VersionedKeySpaceQuery::Uniform {
+                keyspace: read.clone(),
+                lsn: reads_lsn,
+            };
+
             let vectored_res = tline
                 .get_vectored_impl(
-                    read.clone(),
-                    reads_lsn,
+                    query,
                     &mut ValuesReconstructState::new(io_concurrency.clone()),
                     &ctx,
                 )
@@ -6867,10 +6871,14 @@ mod tests {
         };
         let read_lsn = child_timeline.get_last_record_lsn();
 
+        let query = VersionedKeySpaceQuery::Uniform {
+            keyspace: aux_keyspace.clone(),
+            lsn: read_lsn,
+        };
+
         let vectored_res = child_timeline
             .get_vectored_impl(
-                aux_keyspace.clone(),
-                read_lsn,
+                query,
                 &mut ValuesReconstructState::new(io_concurrency.clone()),
                 &ctx,
             )
@@ -7016,10 +7024,15 @@ mod tests {
         let read = KeySpace {
             ranges: vec![key_near_gap..gap_at_key.next(), key_near_end..current_key],
         };
+
+        let query = VersionedKeySpaceQuery::Uniform {
+            keyspace: read.clone(),
+            lsn: current_lsn,
+        };
+
         let results = child_timeline
             .get_vectored_impl(
-                read.clone(),
-                current_lsn,
+                query,
                 &mut ValuesReconstructState::new(io_concurrency.clone()),
                 &ctx,
             )
@@ -7150,12 +7163,16 @@ mod tests {
         }
 
         for query_lsn in query_lsns {
+            let query = VersionedKeySpaceQuery::Uniform {
+                keyspace: KeySpace {
+                    ranges: vec![child_gap_at_key..child_gap_at_key.next()],
+                },
+                lsn: query_lsn,
+            };
+
             let results = child_timeline
                 .get_vectored_impl(
-                    KeySpace {
-                        ranges: vec![child_gap_at_key..child_gap_at_key.next()],
-                    },
-                    query_lsn,
+                    query,
                     &mut ValuesReconstructState::new(io_concurrency.clone()),
                     &ctx,
                 )
@@ -7654,10 +7671,14 @@ mod tests {
             }
 
             let mut cnt = 0;
+            let query = VersionedKeySpaceQuery::Uniform {
+                keyspace: keyspace.clone(),
+                lsn,
+            };
+
             for (key, value) in tline
                 .get_vectored_impl(
-                    keyspace.clone(),
-                    lsn,
+                    query,
                     &mut ValuesReconstructState::new(io_concurrency.clone()),
                     &ctx,
                 )
@@ -7864,8 +7885,12 @@ mod tests {
             io_concurrency: IoConcurrency,
         ) -> anyhow::Result<(BTreeMap<Key, Result<Bytes, PageReconstructError>>, usize)> {
             let mut reconstruct_state = ValuesReconstructState::new(io_concurrency);
+            let query = VersionedKeySpaceQuery::Uniform {
+                keyspace: keyspace.clone(),
+                lsn,
+            };
             let res = tline
-                .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
+                .get_vectored_impl(query, &mut reconstruct_state, ctx)
                 .await?;
             Ok((res, reconstruct_state.get_delta_layers_visited() as usize))
         }
@@ -8162,13 +8187,12 @@ mod tests {
 
         // test vectored scan on parent timeline
         let mut reconstruct_state = ValuesReconstructState::new(io_concurrency.clone());
+        let query = VersionedKeySpaceQuery::Uniform {
+            keyspace: KeySpace::single(Key::metadata_key_range()),
+            lsn,
+        };
         let res = tline
-            .get_vectored_impl(
-                KeySpace::single(Key::metadata_key_range()),
-                lsn,
-                &mut reconstruct_state,
-                &ctx,
-            )
+            .get_vectored_impl(query, &mut reconstruct_state, &ctx)
             .await?;
 
         assert_eq!(
@@ -8188,13 +8212,12 @@ mod tests {
 
         // test vectored scan on child timeline
         let mut reconstruct_state = ValuesReconstructState::new(io_concurrency.clone());
+        let query = VersionedKeySpaceQuery::Uniform {
+            keyspace: KeySpace::single(Key::metadata_key_range()),
+            lsn,
+        };
         let res = child
-            .get_vectored_impl(
-                KeySpace::single(Key::metadata_key_range()),
-                lsn,
-                &mut reconstruct_state,
-                &ctx,
-            )
+            .get_vectored_impl(query, &mut reconstruct_state, &ctx)
             .await?;
 
         assert_eq!(
@@ -8228,13 +8251,12 @@ mod tests {
         let io_concurrency =
             IoConcurrency::spawn_from_conf(tline.conf, tline.gate.enter().unwrap());
         let mut reconstruct_state = ValuesReconstructState::new(io_concurrency);
+        let query = VersionedKeySpaceQuery::Uniform {
+            keyspace: KeySpace::single(key..key.next()),
+            lsn,
+        };
         let mut res = tline
-            .get_vectored_impl(
-                KeySpace::single(key..key.next()),
-                lsn,
-                &mut reconstruct_state,
-                ctx,
-            )
+            .get_vectored_impl(query, &mut reconstruct_state, ctx)
             .await?;
         Ok(res.pop_last().map(|(k, v)| {
             assert_eq!(k, key);
@@ -10357,14 +10379,13 @@ mod tests {
             )
             .await?;
 
-        let keyspace = KeySpace::single(get_key(0)..get_key(10));
+        let query = VersionedKeySpaceQuery::Uniform {
+            keyspace: KeySpace::single(get_key(0)..get_key(10)),
+            lsn: delta_layer_end_lsn,
+        };
+
         let results = tline
-            .get_vectored(
-                keyspace,
-                delta_layer_end_lsn,
-                IoConcurrency::sequential(),
-                &ctx,
-            )
+            .get_vectored(query, IoConcurrency::sequential(), &ctx)
             .await
             .expect("No vectored errors");
         for (key, res) in results {
@@ -10512,9 +10533,13 @@ mod tests {
             )
             .await?;
 
-        let keyspace = KeySpace::single(get_key(0)..get_key(10));
+        let query = VersionedKeySpaceQuery::Uniform {
+            keyspace: KeySpace::single(get_key(0)..get_key(10)),
+            lsn: last_record_lsn,
+        };
+
         let results = tline
-            .get_vectored(keyspace, last_record_lsn, IoConcurrency::sequential(), &ctx)
+            .get_vectored(query, IoConcurrency::sequential(), &ctx)
             .await
             .expect("No vectored errors");
         for (key, res) in results {

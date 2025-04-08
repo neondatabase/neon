@@ -691,7 +691,6 @@ impl std::fmt::Display for ReadPath {
 pub struct MissingKeyError {
     key: Key,
     shard: ShardNumber,
-    cont_lsn: Lsn,
     request_lsn: Lsn,
     ancestor_lsn: Option<Lsn>,
     /// Debug information about the read path if there's an error
@@ -709,8 +708,8 @@ impl std::fmt::Display for MissingKeyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "could not find data for key {} (shard {:?}) at LSN {}, request LSN {}",
-            self.key, self.shard, self.cont_lsn, self.request_lsn
+            "could not find data for key {} (shard {:?}), request LSN {}",
+            self.key, self.shard, self.request_lsn
         )?;
 
         if let Some(ref ancestor_lsn) = self.ancestor_lsn {
@@ -1126,14 +1125,15 @@ impl Timeline {
         // page_service.
         debug_assert!(!self.shard_identity.is_key_disposable(&key));
 
-        let keyspace = KeySpace {
-            ranges: vec![key..key.next()],
-        };
-
         let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::sequential());
 
+        let query = VersionedKeySpaceQuery::Uniform {
+            keyspace: KeySpace::single(key..key.next()),
+            lsn,
+        };
+
         let vectored_res = self
-            .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
+            .get_vectored_impl(query, &mut reconstruct_state, ctx)
             .await;
 
         let key_value = vectored_res?.pop_first();
@@ -1154,7 +1154,6 @@ impl Timeline {
             None => Err(PageReconstructError::MissingKey(MissingKeyError {
                 key,
                 shard: self.shard_identity.get_shard_number(&key),
-                cont_lsn: Lsn(0),
                 request_lsn: lsn,
                 ancestor_lsn: None,
                 backtrace: None,
@@ -1172,21 +1171,19 @@ impl Timeline {
     /// which actually vectorizes the read path.
     pub(crate) async fn get_vectored(
         &self,
-        keyspace: KeySpace,
-        lsn: Lsn,
+        query: VersionedKeySpaceQuery,
         io_concurrency: super::storage_layer::IoConcurrency,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
-        if !lsn.is_valid() {
-            return Err(GetVectoredError::InvalidLsn(lsn));
-        }
+        let max_request_lsn = query.high_watermark_lsn()?;
+        let total_keyspace = query.total_keyspace();
 
-        let key_count = keyspace.total_raw_size().try_into().unwrap();
+        let key_count = total_keyspace.total_raw_size().try_into().unwrap();
         if key_count > Timeline::MAX_GET_VECTORED_KEYS {
             return Err(GetVectoredError::Oversized(key_count));
         }
 
-        for range in &keyspace.ranges {
+        for range in &total_keyspace.ranges {
             let mut key = range.start;
             while key != range.end {
                 assert!(!self.shard_identity.is_key_disposable(&key));
@@ -1196,8 +1193,8 @@ impl Timeline {
 
         trace!(
             "get vectored request for {:?}@{} from task kind {:?}",
-            keyspace,
-            lsn,
+            total_keyspace,
+            max_request_lsn,
             ctx.task_kind(),
         );
 
@@ -1206,12 +1203,7 @@ impl Timeline {
             .map(|metric| (metric, Instant::now()));
 
         let res = self
-            .get_vectored_impl(
-                keyspace.clone(),
-                lsn,
-                &mut ValuesReconstructState::new(io_concurrency),
-                ctx,
-            )
+            .get_vectored_impl(query, &mut ValuesReconstructState::new(io_concurrency), ctx)
             .await;
 
         if let Some((metric, start)) = start {
@@ -1262,13 +1254,10 @@ impl Timeline {
             .for_task_kind(ctx.task_kind())
             .map(ScanLatencyOngoingRecording::start_recording);
 
+        let query = VersionedKeySpaceQuery::Uniform { keyspace, lsn };
+
         let vectored_res = self
-            .get_vectored_impl(
-                keyspace.clone(),
-                lsn,
-                &mut ValuesReconstructState::new(io_concurrency),
-                ctx,
-            )
+            .get_vectored_impl(query, &mut ValuesReconstructState::new(io_concurrency), ctx)
             .await;
 
         if let Some(recording) = start {
@@ -1280,16 +1269,19 @@ impl Timeline {
 
     pub(super) async fn get_vectored_impl(
         &self,
-        keyspace: KeySpace,
-        lsn: Lsn,
+        query: VersionedKeySpaceQuery,
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         let read_path = if self.conf.enable_read_path_debugging || ctx.read_path_debug() {
-            Some(ReadPath::new(keyspace.clone(), lsn))
+            Some(ReadPath::new(
+                query.total_keyspace(),
+                query.high_watermark_lsn()?,
+            ))
         } else {
             None
         };
+
         reconstruct_state.read_path = read_path;
 
         let traversal_res: Result<(), _> = {
@@ -1303,7 +1295,7 @@ impl Timeline {
                 })
                 .attached_child();
 
-            self.get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, &ctx)
+            self.get_vectored_reconstruct_data(query.clone(), reconstruct_state, &ctx)
                 .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
                 .await
         };
@@ -1333,6 +1325,8 @@ impl Timeline {
 
         let futs = FuturesUnordered::new();
         for (key, state) in std::mem::take(&mut reconstruct_state.keys) {
+            let req_lsn_for_key = query.map_key_to_lsn(&key);
+
             futs.push({
                 let walredo_self = self.myself.upgrade().expect("&self method holds the arc");
                 let ctx = RequestContextBuilder::from(&ctx)
@@ -1379,7 +1373,7 @@ impl Timeline {
 
                     let walredo_deltas = converted.num_deltas();
                     let walredo_res = walredo_self
-                        .reconstruct_value(key, lsn, converted)
+                        .reconstruct_value(key, req_lsn_for_key, converted)
                         .maybe_perf_instrument(&ctx, |crnt_perf_span| {
                             info_span!(
                                 target: PERF_TRACE_TARGET,
@@ -1406,15 +1400,18 @@ impl Timeline {
         // to avoid infinite results.
         if !results.is_empty() {
             if layers_visited >= Self::LAYERS_VISITED_WARN_THRESHOLD {
+                let total_keyspace = query.total_keyspace();
+                let max_request_lsn = query.high_watermark_lsn().expect("Validated previously");
+
                 static LOG_PACER: Lazy<Mutex<RateLimit>> =
                     Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(60))));
                 LOG_PACER.lock().unwrap().call(|| {
-                    let num_keys = keyspace.total_raw_size();
+                    let num_keys = total_keyspace.total_raw_size();
                     let num_pages = results.len();
                     tracing::info!(
                       shard_id = %self.tenant_shard_id.shard_slug(),
-                      lsn = %lsn,
-                      "Vectored read for {keyspace} visited {layers_visited} layers. Returned {num_pages}/{num_keys} pages.",
+                      lsn = %max_request_lsn,
+                      "Vectored read for {total_keyspace} visited {layers_visited} layers. Returned {num_pages}/{num_keys} pages.",
                     );
                 });
             }
@@ -4026,15 +4023,14 @@ impl Timeline {
     /// 2.4. If the fringe is empty, go back to 1
     async fn get_vectored_reconstruct_data(
         &self,
-        mut keyspace: KeySpace,
-        request_lsn: Lsn,
+        mut query: VersionedKeySpaceQuery,
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
+        let original_hwm_lsn = query.high_watermark_lsn().unwrap();
+
         let mut timeline_owned: Arc<Timeline>;
         let mut timeline = self;
-
-        let mut cont_lsn = Lsn(request_lsn.0 + 1);
 
         let missing_keyspace = loop {
             if self.cancel.is_cancelled() {
@@ -4052,15 +4048,14 @@ impl Timeline {
                             parent: crnt_perf_span,
                             "PLAN_IO_TIMELINE",
                             timeline = %timeline.timeline_id,
-                            lsn = %cont_lsn,
+                            high_watermark_lsn = %query.high_watermark_lsn().unwrap(),
                         )
                     })
                     .attached_child();
 
                 Self::get_vectored_reconstruct_data_timeline(
                     timeline,
-                    keyspace.clone(),
-                    cont_lsn,
+                    &query,
                     reconstruct_state,
                     &self.cancel,
                     &ctx,
@@ -4069,23 +4064,23 @@ impl Timeline {
                 .await?
             };
 
-            keyspace.remove_overlapping_with(&completed);
+            query.remove_overlapping_with(&completed);
 
             // Do not descend into the ancestor timeline for aux files.
             // We don't return a blanket [`GetVectoredError::MissingKey`] to avoid
             // stalling compaction.
-            keyspace.remove_overlapping_with(&KeySpace {
+            query.remove_overlapping_with(&KeySpace {
                 ranges: vec![NON_INHERITED_RANGE, Key::sparse_non_inherited_keyspace()],
             });
 
             // Keyspace is fully retrieved
-            if keyspace.is_empty() {
+            if query.is_empty() {
                 break None;
             }
 
             let Some(ancestor_timeline) = timeline.ancestor_timeline.as_ref() else {
                 // Not fully retrieved but no ancestor timeline.
-                break Some(keyspace);
+                break Some(query.total_keyspace());
             };
 
             // Now we see if there are keys covered by the image layer but does not exist in the
@@ -4096,7 +4091,7 @@ impl Timeline {
             // keys from `keyspace`, we expect there to be no overlap between it and the image covered key
             // space. If that's not the case, we had at least one key encounter a gap in the image layer
             // and stop the search as a result of that.
-            let mut removed = keyspace.remove_overlapping_with(&image_covered_keyspace);
+            let mut removed = query.remove_overlapping_with(&image_covered_keyspace);
             // Do not fire missing key error and end early for sparse keys. Note that we hava already removed
             // non-inherited keyspaces before, so we can safely do a full `SPARSE_RANGE` remove instead of
             // figuring out what is the inherited key range and do a fine-grained pruning.
@@ -4106,11 +4101,11 @@ impl Timeline {
             if !removed.is_empty() {
                 break Some(removed);
             }
-            // If we reached this point, `remove_overlapping_with` should not have made any change to the
-            // keyspace.
 
-            // Take the min to avoid reconstructing a page with data newer than request Lsn.
-            cont_lsn = std::cmp::min(Lsn(request_lsn.0 + 1), Lsn(timeline.ancestor_lsn.0 + 1));
+            // Each key range in the original query is at some point in the LSN space.
+            // When descending into the ancestor, lower all ranges in the LSN space
+            // such that new changes on the parent timeline are not visible.
+            query.lower(timeline.ancestor_lsn);
 
             let ctx = RequestContextBuilder::from(ctx)
                 .perf_span(|crnt_perf_span| {
@@ -4119,7 +4114,6 @@ impl Timeline {
                         parent: crnt_perf_span,
                         "GET_ANCESTOR",
                         timeline = %timeline.timeline_id,
-                        lsn = %cont_lsn,
                         ancestor = %ancestor_timeline.timeline_id,
                         ancestor_lsn = %timeline.ancestor_lsn
                     )
@@ -4154,8 +4148,7 @@ impl Timeline {
                 shard: self
                     .shard_identity
                     .get_shard_number(&missing_keyspace.start().unwrap()),
-                cont_lsn,
-                request_lsn,
+                request_lsn: original_hwm_lsn,
                 ancestor_lsn: Some(timeline.ancestor_lsn),
                 backtrace: None,
                 read_path: std::mem::take(&mut reconstruct_state.read_path),
@@ -4163,6 +4156,30 @@ impl Timeline {
         }
 
         Ok(())
+    }
+
+    async fn get_vectored_init_fringe(
+        &self,
+        query: &VersionedKeySpaceQuery,
+    ) -> Result<LayerFringe, GetVectoredError> {
+        let mut fringe = LayerFringe::new();
+        let guard = self.layers.read().await;
+
+        match query {
+            VersionedKeySpaceQuery::Uniform { keyspace, lsn } => {
+                // LSNs requested by the compute or determined by the pageserver
+                // are inclusive. Queries to the layer map use exclusive LSNs.
+                // Hence, bump the value before the query - same in the other
+                // match arm.
+                let cont_lsn = Lsn(lsn.0 + 1);
+                guard.update_search_fringe(keyspace, cont_lsn, &mut fringe)?;
+            }
+            VersionedKeySpaceQuery::Scattered { .. } => {
+                todo!()
+            }
+        }
+
+        Ok(fringe)
     }
 
     /// Collect the reconstruct data for a keyspace from the specified timeline.
@@ -4183,8 +4200,7 @@ impl Timeline {
     /// decides how to deal with these two keyspaces.
     async fn get_vectored_reconstruct_data_timeline(
         timeline: &Timeline,
-        keyspace: KeySpace,
-        mut cont_lsn: Lsn,
+        query: &VersionedKeySpaceQuery,
         reconstruct_state: &mut ValuesReconstructState,
         cancel: &CancellationToken,
         ctx: &RequestContext,
@@ -4200,14 +4216,7 @@ impl Timeline {
         let _guard = timeline.gc_compaction_layer_update_lock.read().await;
 
         // Initialize the fringe
-        let mut fringe = {
-            let mut fringe = LayerFringe::new();
-
-            let guard = timeline.layers.read().await;
-            guard.update_search_fringe(&keyspace, cont_lsn, &mut fringe)?;
-
-            fringe
-        };
+        let mut fringe = timeline.get_vectored_init_fringe(query).await?;
 
         let mut completed_keyspace = KeySpace::default();
         let mut image_covered_keyspace = KeySpaceRandomAccum::new();
@@ -4233,7 +4242,7 @@ impl Timeline {
                 .await?;
 
             let mut unmapped_keyspace = keyspace_to_read;
-            cont_lsn = next_cont_lsn;
+            let cont_lsn = next_cont_lsn;
 
             reconstruct_state.on_layer_visited(&layer_to_read);
 
@@ -5068,13 +5077,13 @@ impl Timeline {
                 if key_request_accum.raw_size() >= Timeline::MAX_GET_VECTORED_KEYS
                     || (last_key_in_range && key_request_accum.raw_size() > 0)
                 {
+                    let query = VersionedKeySpaceQuery::Uniform {
+                        keyspace: key_request_accum.consume_keyspace(),
+                        lsn,
+                    };
+
                     let results = self
-                        .get_vectored(
-                            key_request_accum.consume_keyspace(),
-                            lsn,
-                            io_concurrency.clone(),
-                            ctx,
-                        )
+                        .get_vectored(query, io_concurrency.clone(), ctx)
                         .await?;
 
                     if self.cancel.is_cancelled() {
@@ -5163,7 +5172,14 @@ impl Timeline {
         // Directly use `get_vectored_impl` to skip the max_vectored_read_key limit check. Note that the keyspace should
         // not contain too many keys, otherwise this takes a lot of memory.
         let data = self
-            .get_vectored_impl(partition.clone(), lsn, &mut reconstruct_state, ctx)
+            .get_vectored_impl(
+                VersionedKeySpaceQuery::Uniform {
+                    keyspace: partition.clone(),
+                    lsn,
+                },
+                &mut reconstruct_state,
+                ctx,
+            )
             .await?;
         let (data, total_kb_retrieved, total_keys_retrieved) = {
             let mut new_data = BTreeMap::new();
