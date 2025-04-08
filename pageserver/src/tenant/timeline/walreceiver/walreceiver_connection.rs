@@ -73,6 +73,7 @@ pub(super) enum WalReceiverError {
     /// Generic error
     Other(anyhow::Error),
     ClosedGate,
+    Cancelled,
 }
 
 impl From<tokio_postgres::Error> for WalReceiverError {
@@ -200,6 +201,9 @@ pub(super) async fn handle_walreceiver_connection(
                                 // with a similar error.
                             },
                             WalReceiverError::SuccessfulCompletion(_) => {}
+                            WalReceiverError::Cancelled => {
+                                debug!("Connection cancelled")
+                            }
                             WalReceiverError::ClosedGate => {
                                 // doesn't happen at runtime
                             }
@@ -273,7 +277,12 @@ pub(super) async fn handle_walreceiver_connection(
 
     let mut waldecoder = WalStreamDecoder::new(startpoint, timeline.pg_version);
 
-    let mut walingest = WalIngest::new(timeline.as_ref(), startpoint, &ctx).await?;
+    let mut walingest = WalIngest::new(timeline.as_ref(), startpoint, &ctx)
+        .await
+        .map_err(|e| match e {
+            crate::walingest::WalIngestError::Cancelled => WalReceiverError::Cancelled,
+            _ => WalReceiverError::Other(e.into()),
+        })?;
 
     let shard = vec![*timeline.get_shard_identity()];
 

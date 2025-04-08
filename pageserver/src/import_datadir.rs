@@ -27,7 +27,7 @@ use crate::context::RequestContext;
 use crate::metrics::WAL_INGEST;
 use crate::pgdatadir_mapping::*;
 use crate::tenant::Timeline;
-use crate::walingest::WalIngest;
+use crate::walingest::{WalIngest, WalIngestError};
 
 // Returns checkpoint LSN from controlfile
 pub fn get_lsn_from_controlfile(path: &Utf8Path) -> Result<Lsn> {
@@ -158,8 +158,8 @@ async fn import_rel(
         .await
     {
         match e {
-            RelationError::AlreadyExists => {
-                debug!("Relation {} already exist. We must be extending it.", rel)
+            WalIngestError::RelationAlreadyExists => {
+                debug!("Relation {rel} already exists. We must be extending it.")
             }
             _ => return Err(e.into()),
         }

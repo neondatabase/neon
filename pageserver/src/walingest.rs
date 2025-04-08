@@ -25,9 +25,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{Result, bail};
 use bytes::{Buf, Bytes};
-use pageserver_api::key::rel_block_to_key;
+use pageserver_api::key::{Key, rel_block_to_key};
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
@@ -38,7 +37,7 @@ use postgres_ffi::{
     fsm_logical_to_physical, pg_constants,
 };
 use tracing::*;
-use utils::bin_ser::SerializeError;
+use utils::bin_ser::{DeserializeError, SerializeError};
 use utils::lsn::Lsn;
 use utils::rate_limit::RateLimit;
 use utils::{critical, failpoint_support};
@@ -104,12 +103,66 @@ struct WarnIngestLag {
     timestamp_invalid_msg_ratelimit: RateLimit,
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum WalIngestError {
+    #[error(transparent)]
+    #[allow(private_interfaces)]
+    PageReconstructError(#[from] PageReconstructError),
+    #[error(transparent)]
+    DeserializationFailure(#[from] DeserializeError),
+    #[error(transparent)]
+    SerializationFailure(#[from] SerializeError),
+    #[error("the request contains data not supported by pageserver: {0} @ {1}")]
+    InvalidKey(Key, Lsn),
+    #[error("twophase file for xid {0} already exists")]
+    FileAlreadyExists(u64),
+    #[error("slru segment {0:?}/{1} already exists")]
+    SlruAlreadyExists(SlruKind, u32),
+    #[error("relation already exists")]
+    RelationAlreadyExists,
+    #[error("invalid relnode")]
+    InvalidRelnode,
+    #[error("invalid reldir key")]
+    InvalidRelDirKey,
+
+    #[error(transparent)]
+    AssertionError(anyhow::Error),
+    #[error(transparent)]
+    EncodeAuxFileError(anyhow::Error),
+    #[error(transparent)]
+    MaybeRelSizeV2Error(anyhow::Error),
+    #[error(transparent)]
+    ToRelBlockErr(anyhow::Error),
+
+    #[error("timeline shutting down")]
+    Cancelled,
+}
+
+#[macro_export]
+macro_rules! ensure_walingest {
+    ($($t:tt)*) => {
+        _ = || -> Result<(), anyhow::Error> {
+            anyhow::ensure!($($t)*);
+            Ok(())
+        }().map_err(|e| WalIngestError::AssertionError(e));
+    };
+}
+
+#[macro_export]
+macro_rules! bail_walingest {
+    ($($t:tt)*) => {
+        _ = || -> Result<(), anyhow::Error> {
+            anyhow::bail!($($t)*);
+        }().map_err(|e| WalIngestError::AssertionError(e));
+    };
+}
+
 impl WalIngest {
     pub async fn new(
         timeline: &Timeline,
         startpoint: Lsn,
         ctx: &RequestContext,
-    ) -> anyhow::Result<WalIngest> {
+    ) -> Result<WalIngest, WalIngestError> {
         // Fetch the latest checkpoint into memory, so that we can compare with it
         // quickly in `ingest_record` and update it when it changes.
         let checkpoint_bytes = timeline.get_checkpoint(startpoint, ctx).await?;
@@ -145,7 +198,7 @@ impl WalIngest {
         interpreted: InterpretedWalRecord,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<bool> {
+    ) -> Result<bool, WalIngestError> {
         WAL_INGEST.records_received.inc();
         let prev_len = modification.len();
 
@@ -288,7 +341,7 @@ impl WalIngest {
     }
 
     /// This is the same as AdjustToFullTransactionId(xid) in PostgreSQL
-    fn adjust_to_full_transaction_id(&self, xid: TransactionId) -> Result<u64> {
+    fn adjust_to_full_transaction_id(&self, xid: TransactionId) -> Result<u64, WalIngestError> {
         let next_full_xid =
             enum_pgversion_dispatch!(&self.checkpoint, CheckPoint, cp, { cp.nextXid.value });
 
@@ -298,7 +351,7 @@ impl WalIngest {
         if xid > next_xid {
             // Wraparound occurred, must be from a prev epoch.
             if epoch == 0 {
-                bail!(
+                bail_walingest!(
                     "apparent XID wraparound with prepared transaction XID {xid}, nextXid is {next_full_xid}"
                 );
             }
@@ -313,7 +366,7 @@ impl WalIngest {
         clear_vm_bits: ClearVmBits,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         let ClearVmBits {
             new_heap_blkno,
             old_heap_blkno,
@@ -402,7 +455,7 @@ impl WalIngest {
         create: DbaseCreate,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         let DbaseCreate {
             db_id,
             tablespace_id,
@@ -505,7 +558,7 @@ impl WalIngest {
         dbase_drop: DbaseDrop,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         let DbaseDrop {
             db_id,
             tablespace_ids,
@@ -523,7 +576,7 @@ impl WalIngest {
         create: SmgrCreate,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         let SmgrCreate { rel } = create;
         self.put_rel_creation(modification, rel, ctx).await?;
         Ok(())
@@ -537,7 +590,7 @@ impl WalIngest {
         truncate: XlSmgrTruncate,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         let XlSmgrTruncate {
             blkno,
             rnode,
@@ -689,7 +742,7 @@ impl WalIngest {
         record: XactRecord,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         let (xact_common, is_commit, is_prepared) = match record {
             XactRecord::Prepare(XactPrepare { xl_xid, data }) => {
                 let xid: u64 = if modification.tline.pg_version >= 17 {
@@ -813,7 +866,7 @@ impl WalIngest {
         truncate: ClogTruncate,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         let ClogTruncate {
             pageno,
             oldest_xid,
@@ -889,7 +942,7 @@ impl WalIngest {
         zero_page: ClogZeroPage,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         let ClogZeroPage { segno, rpageno } = zero_page;
 
         self.put_slru_page_image(
@@ -907,7 +960,7 @@ impl WalIngest {
         &mut self,
         modification: &mut DatadirModification,
         xlrec: &XlMultiXactCreate,
-    ) -> Result<()> {
+    ) -> Result<(), WalIngestError> {
         // Create WAL record for updating the multixact-offsets page
         let pageno = xlrec.mid / pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
         let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
@@ -1010,7 +1063,7 @@ impl WalIngest {
         modification: &mut DatadirModification<'_>,
         xlrec: &XlMultiXactTruncate,
         ctx: &RequestContext,
-    ) -> Result<()> {
+    ) -> Result<(), WalIngestError> {
         let (maxsegment, startsegment, endsegment) =
             enum_pgversion_dispatch!(&mut self.checkpoint, CheckPoint, cp, {
                 cp.oldestMulti = xlrec.end_trunc_off;
@@ -1058,7 +1111,7 @@ impl WalIngest {
         zero_page: MultiXactZeroPage,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> Result<()> {
+    ) -> Result<(), WalIngestError> {
         let MultiXactZeroPage {
             slru_kind,
             segno,
@@ -1080,7 +1133,7 @@ impl WalIngest {
         update: RelmapUpdate,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> Result<()> {
+    ) -> Result<(), WalIngestError> {
         let RelmapUpdate { update, buf } = update;
 
         modification
@@ -1093,7 +1146,7 @@ impl WalIngest {
         raw_record: RawXlogRecord,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> Result<()> {
+    ) -> Result<(), WalIngestError> {
         let RawXlogRecord { info, lsn, mut buf } = raw_record;
         let pg_version = modification.tline.pg_version;
 
@@ -1235,12 +1288,12 @@ impl WalIngest {
         put: PutLogicalMessage,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
-    ) -> Result<()> {
+    ) -> Result<(), WalIngestError> {
         let PutLogicalMessage { path, buf } = put;
         modification.put_file(path.as_str(), &buf, ctx).await
     }
 
-    fn ingest_standby_record(&mut self, record: StandbyRecord) -> Result<()> {
+    fn ingest_standby_record(&mut self, record: StandbyRecord) -> Result<(), WalIngestError> {
         match record {
             StandbyRecord::RunningXacts(running_xacts) => {
                 enum_pgversion_dispatch!(&mut self.checkpoint, CheckPoint, cp, {
@@ -1258,7 +1311,7 @@ impl WalIngest {
         &mut self,
         record: ReploriginRecord,
         modification: &mut DatadirModification<'_>,
-    ) -> Result<()> {
+    ) -> Result<(), WalIngestError> {
         match record {
             ReploriginRecord::Set(set) => {
                 modification
@@ -1278,7 +1331,7 @@ impl WalIngest {
         modification: &mut DatadirModification<'_>,
         rel: RelTag,
         ctx: &RequestContext,
-    ) -> Result<()> {
+    ) -> Result<(), WalIngestError> {
         modification.put_rel_creation(rel, 0, ctx).await?;
         Ok(())
     }
@@ -1291,7 +1344,7 @@ impl WalIngest {
         blknum: BlockNumber,
         img: Bytes,
         ctx: &RequestContext,
-    ) -> Result<(), PageReconstructError> {
+    ) -> Result<(), WalIngestError> {
         self.handle_rel_extend(modification, rel, blknum, ctx)
             .await?;
         modification.put_rel_page_image(rel, blknum, img)?;
@@ -1305,7 +1358,7 @@ impl WalIngest {
         blknum: BlockNumber,
         rec: NeonWalRecord,
         ctx: &RequestContext,
-    ) -> Result<()> {
+    ) -> Result<(), WalIngestError> {
         self.handle_rel_extend(modification, rel, blknum, ctx)
             .await?;
         modification.put_rel_wal_record(rel, blknum, rec)?;
@@ -1318,7 +1371,7 @@ impl WalIngest {
         rel: RelTag,
         nblocks: BlockNumber,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         modification.put_rel_truncation(rel, nblocks, ctx).await?;
         Ok(())
     }
@@ -1329,7 +1382,7 @@ impl WalIngest {
         rel: RelTag,
         blknum: BlockNumber,
         ctx: &RequestContext,
-    ) -> Result<(), PageReconstructError> {
+    ) -> Result<(), WalIngestError> {
         let new_nblocks = blknum + 1;
         // Check if the relation exists. We implicitly create relations on first
         // record.
@@ -1423,7 +1476,7 @@ impl WalIngest {
         blknum: BlockNumber,
         img: Bytes,
         ctx: &RequestContext,
-    ) -> Result<()> {
+    ) -> Result<(), WalIngestError> {
         if !self.shard.is_shard_zero() {
             return Ok(());
         }
@@ -1441,7 +1494,7 @@ impl WalIngest {
         segno: u32,
         blknum: BlockNumber,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         // we don't use a cache for this like we do for relations. SLRUS are explcitly
         // extended with ZEROPAGE records, not with commit records, so it happens
         // a lot less frequently.
@@ -1509,6 +1562,7 @@ async fn get_relsize(
 #[allow(clippy::bool_assert_comparison)]
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
     use postgres_ffi::RELSEG_SIZE;
 
     use super::*;
@@ -1530,7 +1584,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_zeroed_checkpoint_decodes_correctly() -> Result<()> {
+    async fn test_zeroed_checkpoint_decodes_correctly() -> Result<(), anyhow::Error> {
         for i in 14..=16 {
             dispatch_pgversion!(i, {
                 pgv::CheckPoint::decode(&pgv::ZERO_CHECKPOINT)?;
