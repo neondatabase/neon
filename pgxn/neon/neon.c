@@ -440,7 +440,6 @@ _PG_init(void)
 	pg_init_walproposer();
 	init_lwlsncache();
 
-	pagestore_smgr_init();
 	pg_init_communicator();
 	Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 
