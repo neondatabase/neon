@@ -462,8 +462,6 @@ impl Service {
     pub(crate) async fn safekeepers_for_new_timeline(
         &self,
     ) -> Result<Vec<SafekeeperInfo>, ApiError> {
-        // Number of safekeepers in different AZs we are looking for
-        let wanted_count = 3;
         let mut all_safekeepers = {
             let locked = self.inner.read().unwrap();
             locked
@@ -502,6 +500,17 @@ impl Service {
                 sk.1.id.0,
             )
         });
+        // Number of safekeepers in different AZs we are looking for
+        let wanted_count = match all_safekeepers.len() {
+            0 => {
+                return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                    "couldn't find any active safekeeper for new timeline",
+                )));
+            }
+            1 => 1,
+            2 => 2,
+            _ => 3,
+        };
         let mut sks = Vec::new();
         let mut azs = HashSet::new();
         for (_sk_util, sk_info, az_id) in all_safekeepers.iter() {
