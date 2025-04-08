@@ -1865,7 +1865,39 @@ impl PageServerHandler {
         ctx: &RequestContext,
     ) -> Result<Lsn, PageStreamError> {
         let last_record_lsn = timeline.get_last_record_lsn();
+        let effective_request_lsn = Self::effective_request_lsn(
+            timeline,
+            last_record_lsn,
+            request_lsn,
+            not_modified_since,
+            latest_gc_cutoff_lsn,
+        )?;
 
+        if effective_request_lsn > last_record_lsn {
+            timeline
+                .wait_lsn(
+                    not_modified_since,
+                    crate::tenant::timeline::WaitLsnWaiter::PageService,
+                    timeline::WaitLsnTimeout::Default,
+                    ctx,
+                )
+                .await?;
+
+            // Since we waited for 'effective_request_lsn' to arrive, that is now the last
+            // record LSN. (Or close enough for our purposes; the last-record LSN can
+            // advance immediately after we return anyway)
+        }
+
+        Ok(effective_request_lsn)
+    }
+
+    fn effective_request_lsn(
+        timeline: &Timeline,
+        last_record_lsn: Lsn,
+        request_lsn: Lsn,
+        not_modified_since: Lsn,
+        latest_gc_cutoff_lsn: &RcuReadGuard<Lsn>,
+    ) -> Result<Lsn, PageStreamError> {
         // Sanity check the request
         if request_lsn < not_modified_since {
             return Err(PageStreamError::BadRequest(
@@ -1900,19 +1932,7 @@ impl PageServerHandler {
             }
         }
 
-        // Wait for WAL up to 'not_modified_since' to arrive, if necessary
         if not_modified_since > last_record_lsn {
-            timeline
-                .wait_lsn(
-                    not_modified_since,
-                    crate::tenant::timeline::WaitLsnWaiter::PageService,
-                    timeline::WaitLsnTimeout::Default,
-                    ctx,
-                )
-                .await?;
-            // Since we waited for 'not_modified_since' to arrive, that is now the last
-            // record LSN. (Or close enough for our purposes; the last-record LSN can
-            // advance immediately after we return anyway)
             Ok(not_modified_since)
         } else {
             // It might be better to use max(not_modified_since, latest_gc_cutoff_lsn)
