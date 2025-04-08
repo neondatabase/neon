@@ -4169,6 +4169,71 @@ def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart
     wait_until(timeline_deleted_on_sk)
 
 
+class DeletionSubject(Enum):
+    TIMELINE = "timeline"
+    TENANT = "tenant"
+
+
+@run_only_on_default_postgres("PG version is not interesting here")
+@pytest.mark.parametrize("num_safekeepers", [1, 2, 3])
+@pytest.mark.parametrize("deletetion_subject", [DeletionSubject.TENANT, DeletionSubject.TIMELINE])
+def test_storcon_few_sk(
+    neon_env_builder: NeonEnvBuilder,
+    num_safekeepers: int,
+    deletetion_subject: DeletionSubject,
+):
+    """
+    Test that the storcon can create and delete tenants and timelines with a limited/special number of safekeepers
+      - num_safekeepers: number of safekeepers.
+      - deletion_subject: test that both single timeline and whole tenant deletion work.
+    """
+
+    neon_env_builder.num_safekeepers = num_safekeepers
+    safekeeper_list = list(range(1, num_safekeepers + 1))
+    neon_env_builder.storage_controller_config = {
+        "timelines_onto_safekeepers": True,
+    }
+    env = neon_env_builder.init_start()
+
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+    env.create_tenant(tenant_id, timeline_id)
+    child_timeline_id = env.create_branch("child_of_main", tenant_id)
+
+    env.safekeepers[0].assert_log_contains(f"creating new timeline {tenant_id}/{timeline_id}")
+
+    config_lines = [
+        "neon.safekeeper_proto_version = 3",
+    ]
+    with env.endpoints.create("main", tenant_id=tenant_id, config_lines=config_lines) as ep:
+        # endpoint should start.
+        ep.start(safekeeper_generation=1, safekeepers=safekeeper_list)
+        ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
+
+    with env.endpoints.create(
+        "child_of_main", tenant_id=tenant_id, config_lines=config_lines
+    ) as ep:
+        # endpoint should start.
+        ep.start(safekeeper_generation=1, safekeepers=safekeeper_list)
+        ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
+
+    #env.safekeepers[0].stop()
+
+    if deletetion_subject is DeletionSubject.TENANT:
+        env.storage_controller.pageserver_api().tenant_delete(tenant_id)
+    else:
+        env.storage_controller.pageserver_api().timeline_delete(tenant_id, child_timeline_id)
+
+    #env.safekeepers[0].start()
+    # ensure that there is log msgs for the third safekeeper too
+    def timeline_deleted_on_sk():
+        env.safekeepers[0].assert_log_contains(
+            f"deleting timeline {tenant_id}/{child_timeline_id} from disk"
+        )
+
+    wait_until(timeline_deleted_on_sk)
+
+
 @pytest.mark.parametrize("wrong_az", [True, False])
 def test_storage_controller_graceful_migration(neon_env_builder: NeonEnvBuilder, wrong_az: bool):
     """
