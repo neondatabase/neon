@@ -283,6 +283,7 @@ def test_timestamp_of_lsn_empty_branch(neon_env_builder: NeonEnvBuilder):
     Test that getting the timestamp of the head LSN of a newly created branch works.
     This verifies that we don't get a 404 error when trying to get the timestamp
     of the head LSN of a branch that was just created.
+    We now return a special status code 412 to indicate if there is no timestamp found for lsn.
 
     Reproducer for https://github.com/neondatabase/neon/issues/11439
     """
@@ -297,12 +298,12 @@ def test_timestamp_of_lsn_empty_branch(neon_env_builder: NeonEnvBuilder):
     )
     head_lsn = detail["last_record_lsn"]
 
-    # Verify we can get the timestamp for this LSN
+    # Verify that we get 412 status code
     with env.pageserver.http_client() as client:
-        result = client.timeline_get_timestamp_of_lsn(
-            env.initial_tenant,
-            new_timeline_id,
-            head_lsn,
-        )
-        # If we get here without a 404 error, the test passes
-        assert result is not None
+        with pytest.raises(PageserverApiException) as err:
+            client.timeline_get_timestamp_of_lsn(
+                env.initial_tenant,
+                new_timeline_id,
+                head_lsn,
+            )
+        assert err.value.status_code == 412
