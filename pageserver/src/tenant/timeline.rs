@@ -115,7 +115,7 @@ use crate::pgdatadir_mapping::{
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::AttachmentMode;
 use crate::tenant::gc_result::GcResult;
-use crate::tenant::layer_map::{LayerMap, SearchResult};
+use crate::tenant::layer_map::LayerMap;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::storage_layer::delta_layer::DeltaEntry;
 use crate::tenant::storage_layer::inmemory_layer::IndexEntry;
@@ -1039,6 +1039,7 @@ pub(crate) enum ShutdownMode {
     Hard,
 }
 
+#[allow(clippy::large_enum_variant, reason = "TODO")]
 enum ImageLayerCreationOutcome {
     /// We generated an image layer
     Generated {
@@ -4104,12 +4105,6 @@ impl Timeline {
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<TimelineVisitOutcome, GetVectoredError> {
-        let mut unmapped_keyspace = keyspace.clone();
-        let mut fringe = LayerFringe::new();
-
-        let mut completed_keyspace = KeySpace::default();
-        let mut image_covered_keyspace = KeySpaceRandomAccum::new();
-
         // Prevent GC from progressing while visiting the current timeline.
         // If we are GC-ing because a new image layer was added while traversing
         // the timeline, then it will remove layers that are required for fulfilling
@@ -4120,10 +4115,43 @@ impl Timeline {
         // See `compaction::compact_with_gc` for why we need this.
         let _guard = timeline.gc_compaction_layer_update_lock.read().await;
 
-        loop {
+        // Initialize the fringe
+        let mut fringe = {
+            let mut fringe = LayerFringe::new();
+
+            let guard = timeline.layers.read().await;
+            guard.update_search_fringe(&keyspace, cont_lsn, &mut fringe)?;
+
+            fringe
+        };
+
+        let mut completed_keyspace = KeySpace::default();
+        let mut image_covered_keyspace = KeySpaceRandomAccum::new();
+
+        while let Some((layer_to_read, keyspace_to_read, lsn_range)) = fringe.next_layer() {
             if cancel.is_cancelled() {
                 return Err(GetVectoredError::Cancelled);
             }
+
+            if let Some(ref mut read_path) = reconstruct_state.read_path {
+                read_path.record_layer_visit(&layer_to_read, &keyspace_to_read, &lsn_range);
+            }
+
+            // Visit the layer and plan IOs for it
+            let next_cont_lsn = lsn_range.start;
+            layer_to_read
+                .get_values_reconstruct_data(
+                    keyspace_to_read.clone(),
+                    lsn_range,
+                    reconstruct_state,
+                    ctx,
+                )
+                .await?;
+
+            let mut unmapped_keyspace = keyspace_to_read;
+            cont_lsn = next_cont_lsn;
+
+            reconstruct_state.on_layer_visited(&layer_to_read);
 
             let (keys_done_last_step, keys_with_image_coverage) =
                 reconstruct_state.consume_done_keys();
@@ -4135,31 +4163,15 @@ impl Timeline {
                 image_covered_keyspace.add_range(keys_with_image_coverage);
             }
 
+            // Query the layer map for the next layers to read.
+            //
             // Do not descent any further if the last layer we visited
             // completed all keys in the keyspace it inspected. This is not
             // required for correctness, but avoids visiting extra layers
             // which turns out to be a perf bottleneck in some cases.
             if !unmapped_keyspace.is_empty() {
                 let guard = timeline.layers.read().await;
-                let layers = guard.layer_map()?;
-
-                for range in unmapped_keyspace.ranges.iter() {
-                    let results = layers.range_search(range.clone(), cont_lsn);
-
-                    results
-                        .found
-                        .into_iter()
-                        .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
-                            (
-                                guard.upgrade(layer),
-                                keyspace_accum.to_keyspace(),
-                                lsn_floor..cont_lsn,
-                            )
-                        })
-                        .for_each(|(layer, keyspace, lsn_range)| {
-                            fringe.update(layer, keyspace, lsn_range)
-                        });
-                }
+                guard.update_search_fringe(&unmapped_keyspace, cont_lsn, &mut fringe)?;
 
                 // It's safe to drop the layer map lock after planning the next round of reads.
                 // The fringe keeps readable handles for the layers which are safe to read even
@@ -4172,28 +4184,6 @@ impl Timeline {
                 // range at *a particular point in time*. It is fine for the answer to be different
                 // at two different time points.
                 drop(guard);
-            }
-
-            if let Some((layer_to_read, keyspace_to_read, lsn_range)) = fringe.next_layer() {
-                if let Some(ref mut read_path) = reconstruct_state.read_path {
-                    read_path.record_layer_visit(&layer_to_read, &keyspace_to_read, &lsn_range);
-                }
-                let next_cont_lsn = lsn_range.start;
-                layer_to_read
-                    .get_values_reconstruct_data(
-                        keyspace_to_read.clone(),
-                        lsn_range,
-                        reconstruct_state,
-                        ctx,
-                    )
-                    .await?;
-
-                unmapped_keyspace = keyspace_to_read;
-                cont_lsn = next_cont_lsn;
-
-                reconstruct_state.on_layer_visited(&layer_to_read);
-            } else {
-                break;
             }
         }
 

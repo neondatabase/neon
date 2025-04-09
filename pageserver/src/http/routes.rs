@@ -989,7 +989,7 @@ async fn get_lsn_by_timestamp_handler(
     if !tenant_shard_id.is_shard_zero() {
         // Requires SLRU contents, which are only stored on shard zero
         return Err(ApiError::BadRequest(anyhow!(
-            "Size calculations are only available on shard zero"
+            "Lsn calculations by timestamp are only available on shard zero"
         )));
     }
 
@@ -1064,7 +1064,7 @@ async fn get_timestamp_of_lsn_handler(
     if !tenant_shard_id.is_shard_zero() {
         // Requires SLRU contents, which are only stored on shard zero
         return Err(ApiError::BadRequest(anyhow!(
-            "Size calculations are only available on shard zero"
+            "Timestamp calculations by lsn are only available on shard zero"
         )));
     }
 
@@ -1090,8 +1090,8 @@ async fn get_timestamp_of_lsn_handler(
             .to_string();
             json_response(StatusCode::OK, time)
         }
-        None => Err(ApiError::NotFound(
-            anyhow::anyhow!("Timestamp for lsn {} not found", lsn).into(),
+        None => Err(ApiError::PreconditionFailed(
+            format!("Timestamp for lsn {} not found", lsn).into(),
         )),
     }
 }
@@ -3381,11 +3381,11 @@ async fn put_tenant_timeline_import_basebackup(
 
         let broker_client = state.broker_client.clone();
 
-        let mut body = StreamReader::new(request.into_body().map(|res| {
-            res.map_err(|error| {
-                std::io::Error::new(std::io::ErrorKind::Other, anyhow::anyhow!(error))
-            })
-        }));
+        let mut body = StreamReader::new(
+            request
+                .into_body()
+                .map(|res| res.map_err(|error| std::io::Error::other(anyhow::anyhow!(error)))),
+        );
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
@@ -3459,7 +3459,7 @@ async fn put_tenant_timeline_import_wal(
 
         let mut body = StreamReader::new(request.into_body().map(|res| {
             res.map_err(|error| {
-                std::io::Error::new(std::io::ErrorKind::Other, anyhow::anyhow!(error))
+                std::io::Error::other( anyhow::anyhow!(error))
             })
         }));
 
