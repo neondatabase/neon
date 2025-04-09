@@ -138,7 +138,7 @@ macro_rules! bail {
 
 #[derive(Debug, Clone, Copy)]
 pub enum RedoAttemptType {
-    // Used for the read path. Will fire critical errors and retry twice if failure.
+    /// Used for the read path. Will fire critical errors and retry twice if failure.
     ReadPage,
     // Used for legacy compaction (only used in image compaction). Will fire critical errors and retry once if failure.
     LegacyCompaction,
