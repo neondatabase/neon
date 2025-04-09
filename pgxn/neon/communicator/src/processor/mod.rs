@@ -17,7 +17,7 @@ use thiserror::Error;
 use tonic;
 use tonic::metadata::AsciiMetadataValue;
 
-use crate::neon_request::DbSizeRequest;
+use crate::neon_request::{DbSizeRequest, GetPageRequest, RelExistsRequest, RelSizeRequest};
 
 type Shardno = u16;
 
@@ -71,6 +71,105 @@ impl CommunicatorProcessor {
         // Current sharding model assumes that all metadata is present only at shard 0.
         let shard_no = 0;
 
+        let mut client = self.get_client(shard_no).await?;
+
+        let request = tonic::Request::new(page_service::DbSizeRequest {
+            common: Some(page_service::RequestCommon {
+                request_lsn: request.request_lsn,
+                not_modified_since_lsn: request.not_modified_since,
+            }),
+            db_oid: request.db_oid,
+        });
+
+        let response = client.db_size(request).await?;
+
+        Ok(response.get_ref().num_bytes)
+    }
+
+    pub async fn process_rel_exists_request(
+        &self,
+        request: &RelExistsRequest,
+    ) -> Result<bool, CommunicatorError> {
+        // Current sharding model assumes that all metadata is present only at shard 0.
+        let shard_no = 0;
+
+        let mut client = self.get_client(shard_no).await?;
+
+        let request = tonic::Request::new(page_service::RelExistsRequest {
+            common: Some(page_service::RequestCommon {
+                request_lsn: request.request_lsn,
+                not_modified_since_lsn: request.not_modified_since,
+            }),
+            rel: Some(page_service::RelTag {
+                spc_oid: request.spc_oid,
+                db_oid: request.db_oid,
+                rel_number: request.rel_number,
+                fork_number: request.fork_number as u32,
+            }),
+        });
+
+        let response = client.rel_exists(request).await?;
+
+        Ok(response.get_ref().exists)
+    }
+
+    pub async fn process_rel_size_request(
+        &self,
+        request: &RelSizeRequest,
+    ) -> Result<u32, CommunicatorError> {
+        // Current sharding model assumes that all metadata is present only at shard 0.
+        let shard_no = 0;
+
+        let mut client = self.get_client(shard_no).await?;
+
+        let request = tonic::Request::new(page_service::RelSizeRequest {
+            common: Some(page_service::RequestCommon {
+                request_lsn: request.request_lsn,
+                not_modified_since_lsn: request.not_modified_since,
+            }),
+            rel: Some(page_service::RelTag {
+                spc_oid: request.spc_oid,
+                db_oid: request.db_oid,
+                rel_number: request.rel_number,
+                fork_number: request.fork_number as u32,
+            }),
+        });
+
+        let response = client.rel_size(request).await?;
+
+        Ok(response.get_ref().num_blocks)
+    }
+
+    pub async fn process_get_page_request(
+        &self,
+        request: &GetPageRequest,
+    ) -> Result<Vec<u8>, CommunicatorError> {
+        // Current sharding model assumes that all metadata is present only at shard 0.
+        // FIXME
+        let shard_no = 0;
+
+        let mut client = self.get_client(shard_no).await?;
+
+        let request = tonic::Request::new(page_service::GetPageRequest {
+            common: Some(page_service::RequestCommon {
+                request_lsn: request.request_lsn,
+                not_modified_since_lsn: request.not_modified_since,
+            }),
+            rel: Some(page_service::RelTag {
+                spc_oid: request.spc_oid,
+                db_oid: request.db_oid,
+                rel_number: request.rel_number,
+                fork_number: request.fork_number as u32,
+            }),
+            block_number: request.block_number,
+        });
+
+        let response = client.get_page(request).await?;
+
+        Ok(response.into_inner().page_image)
+    }
+
+    async fn get_client(&self, shard_no: u16) -> Result<MyPageServiceClient, CommunicatorError> {
         // FIXME: we create a new channel for every request. Inefficient
 
         let endpoint: tonic::transport::Endpoint = self
@@ -79,25 +178,18 @@ impl CommunicatorProcessor {
             .expect("no url for shard {shard_no}")
             .parse()?;
         let channel = endpoint.connect().await?;
-        let mut client = PageServiceClient::with_interceptor(
+
+        let client = PageServiceClient::with_interceptor(
             channel,
             AuthInterceptor::new(&self.tenant_id, &self.timeline_id, self.auth_token.as_ref()),
         );
-
-        let request = tonic::Request::new(page_service::DbSizeRequest {
-            request_lsn: request.request_lsn,
-            not_modified_since_lsn: request.not_modified_since,
-            db_oid: request.db_oid,
-        });
-
-        let response = client.db_size(request).await?;
-
-        println!("RESPONSE={:?}", response);
-
-        // TODO
-        Ok(response.get_ref().db_size_bytes)
+        Ok(client)
     }
 }
+
+type MyPageServiceClient = PageServiceClient<
+    tonic::service::interceptor::InterceptedService<tonic::transport::Channel, AuthInterceptor>,
+>;
 
 /// Inject tenant_id, timeline_id and authentication token to all pageserver requests.
 struct AuthInterceptor {

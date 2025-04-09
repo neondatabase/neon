@@ -98,7 +98,7 @@ static char *hexdump_page(char *page);
 		NInfoGetRelNumber(InfoFromSMgrRel(reln)) >= FirstNormalObjectId \
 )
 
-const int	SmgrTrace = DEBUG5;
+const int	SmgrTrace = LOG;
 
 /* unlogged relation build states */
 typedef enum
@@ -783,7 +783,10 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 	neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum,
 						  REL_METADATA_PSEUDO_BLOCKNO, &request_lsns, 1);
 
-	return communicator_exists(InfoFromSMgrRel(reln), forkNum, &request_lsns);
+	if (neon_enable_new_communicator)
+		return communicator_new_rel_exists(InfoFromSMgrRel(reln), forkNum, &request_lsns);
+	else
+		return communicator_exists(InfoFromSMgrRel(reln), forkNum, &request_lsns);
 }
 
 /*
@@ -1168,13 +1171,17 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 
 		tag.blockNum = blocknum;
 
-		communicator_prefetch_register_bufferv(tag, NULL, iterblocks, lfc_present);
+		if (neon_enable_new_communicator)
+			communicator_new_prefetch_register_bufferv(tag, NULL, iterblocks, lfc_present);
+		else
+			communicator_prefetch_register_bufferv(tag, NULL, iterblocks, lfc_present);
 
 		nblocks -= iterblocks;
 		blocknum += iterblocks;
 	}
 
-	communicator_prefetch_pump_state(false);
+	if (!neon_enable_new_communicator)
+		communicator_prefetch_pump_state(false);
 
 	return false;
 }
@@ -1211,9 +1218,13 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 
 	CopyNRelFileInfoToBufTag(tag, InfoFromSMgrRel(reln));
 
-	communicator_prefetch_register_bufferv(tag, NULL, 1, NULL);
+	if (neon_enable_new_communicator)
+		communicator_new_prefetch_register_bufferv(tag, NULL, 1, NULL);
+	else
+		communicator_prefetch_register_bufferv(tag, NULL, 1, NULL);
 
-	communicator_prefetch_pump_state(false);
+	if (!neon_enable_new_communicator)
+		communicator_prefetch_pump_state(false);
 
 	return false;
 }
@@ -1257,7 +1268,8 @@ neon_writeback(SMgrRelation reln, ForkNumber forknum,
 	 */
 	neon_log(SmgrTrace, "writeback noop");
 
-	communicator_prefetch_pump_state(false);
+	if (!neon_enable_new_communicator)
+		communicator_prefetch_pump_state(false);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -1273,7 +1285,10 @@ void
 neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				 neon_request_lsns request_lsns, void *buffer)
 {
-	communicator_read_at_lsnv(rinfo, forkNum, blkno, &request_lsns, &buffer, 1, NULL);
+	if (neon_enable_new_communicator)
+		communicator_new_read_at_lsnv(rinfo, forkNum, blkno, &request_lsns, &buffer, 1, NULL);
+	else
+		communicator_read_at_lsnv(rinfo, forkNum, blkno, &request_lsns, &buffer, 1, NULL);
 }
 
 #if PG_MAJORVERSION_NUM < 17
@@ -1291,6 +1306,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 	neon_request_lsns request_lsns;
 	bits8		present;
 	void	   *bufferp;
+	bool		prefetch_hit;
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -1310,13 +1326,19 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 	}
 
 	/* Try to read PS results if they are available */
-	communicator_prefetch_pump_state(false);
+	if (!neon_enable_new_communicator)
+		communicator_prefetch_pump_state(false);
 
 	neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum, blkno, &request_lsns, 1);
 
 	present = 0;
 	bufferp = buffer;
-	if (communicator_prefetch_lookupv(InfoFromSMgrRel(reln), forkNum, blkno, &request_lsns, 1, &bufferp, &present))
+
+	if (neon_enable_new_communicator)
+		prefetch_hit = communicator_new_prefetch_lookupv(InfoFromSMgrRel(reln), forkNum, blkno, &request_lsns, 1, &bufferp, &present);
+	else
+		prefetch_hit = communicator_prefetch_lookupv(InfoFromSMgrRel(reln), forkNum, blkno, &request_lsns, 1, &bufferp, &present);
+	if (prefetch_hit)
 	{
 		/* Prefetch hit */
 		return;
@@ -1334,7 +1356,8 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 	/*
 	 * Try to receive prefetch results once again just to make sure we don't leave the smgr code while the OS might still have buffered bytes.
 	 */
-	communicator_prefetch_pump_state(false);
+	if (!neon_enable_new_communicator)
+		communicator_prefetch_pump_state(false);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (forkNum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
@@ -1444,16 +1467,22 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 				 nblocks, PG_IOV_MAX);
 
 	/* Try to read PS results if they are available */
-	communicator_prefetch_pump_state(false);
+	if (!neon_enable_new_communicator)
+		communicator_prefetch_pump_state(false);
 
 	neon_get_request_lsns(InfoFromSMgrRel(reln), forknum, blocknum,
 						  request_lsns, nblocks);
 
 	memset(read_pages, 0, sizeof(read_pages));
 
-	prefetch_result = communicator_prefetch_lookupv(InfoFromSMgrRel(reln), forknum,
-													blocknum, request_lsns, nblocks,
-													buffers, read_pages);
+	if (neon_enable_new_communicator)
+		prefetch_result = communicator_new_prefetch_lookupv(InfoFromSMgrRel(reln), forknum,
+														blocknum, request_lsns, nblocks,
+														buffers, read_pages);
+	else
+		prefetch_result = communicator_prefetch_lookupv(InfoFromSMgrRel(reln), forknum,
+														blocknum, request_lsns, nblocks,
+														buffers, read_pages);
 
 	if (prefetch_result == nblocks)
 		return;
@@ -1469,13 +1498,18 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	if (prefetch_result + lfc_result == nblocks)
 		return;
 
-	communicator_read_at_lsnv(InfoFromSMgrRel(reln), forknum, blocknum, request_lsns,
-							  buffers, nblocks, read_pages);
+	if (neon_enable_new_communicator)
+		communicator_new_read_at_lsnv(InfoFromSMgrRel(reln), forknum, blocknum, request_lsns,
+									  buffers, nblocks, read_pages);
+	else
+		communicator_read_at_lsnv(InfoFromSMgrRel(reln), forknum, blocknum, request_lsns,
+								  buffers, nblocks, read_pages);
 
 	/*
 	 * Try to receive prefetch results once again just to make sure we don't leave the smgr code while the OS might still have buffered bytes.
 	 */
-	communicator_prefetch_pump_state(false);
+	if (!neon_enable_new_communicator)
+		communicator_prefetch_pump_state(false);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (forknum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
@@ -1660,7 +1694,8 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 
 	lfc_write(InfoFromSMgrRel(reln), forknum, blocknum, buffer);
 
-	communicator_prefetch_pump_state(false);
+	if (!neon_enable_new_communicator)
+		communicator_prefetch_pump_state(false);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -1722,7 +1757,8 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 
 	lfc_writev(InfoFromSMgrRel(reln), forknum, blkno, buffers, nblocks);
 
-	communicator_prefetch_pump_state(false);
+	if (!neon_enable_new_communicator)
+		communicator_prefetch_pump_state(false);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -1769,7 +1805,10 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 	neon_get_request_lsns(InfoFromSMgrRel(reln), forknum,
 						  REL_METADATA_PSEUDO_BLOCKNO, &request_lsns, 1);
 
-	n_blocks = communicator_nblocks(InfoFromSMgrRel(reln), forknum, &request_lsns);
+	if (neon_enable_new_communicator)
+		n_blocks = communicator_new_rel_nblocks(InfoFromSMgrRel(reln), forknum, &request_lsns);
+	else
+		n_blocks = communicator_nblocks(InfoFromSMgrRel(reln), forknum, &request_lsns);
 	update_cached_relsize(InfoFromSMgrRel(reln), forknum, n_blocks);
 
 	neon_log(SmgrTrace, "neon_nblocks: rel %u/%u/%u fork %u (request LSN %X/%08X): %u blocks",
@@ -1900,7 +1939,8 @@ neon_immedsync(SMgrRelation reln, ForkNumber forknum)
 
 	neon_log(SmgrTrace, "[NEON_SMGR] immedsync noop");
 
-	communicator_prefetch_pump_state(false);
+	if (!neon_enable_new_communicator)
+		communicator_prefetch_pump_state(false);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -2165,7 +2205,10 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 	request_lsns.not_modified_since = not_modified_since;
 	request_lsns.effective_request_lsn = request_lsn;
 
-	n_blocks = communicator_read_slru_segment(kind, segno, &request_lsns, buffer);
+	if (neon_enable_new_communicator)
+		n_blocks = communicator_new_read_slru_segment(kind, segno, &request_lsns, buffer);
+	else
+		n_blocks = communicator_read_slru_segment(kind, segno, &request_lsns, buffer);
 
 	return n_blocks;
 }
@@ -2202,7 +2245,8 @@ AtEOXact_neon(XactEvent event, void *arg)
 			}
 			break;
 	}
-	communicator_reconfigure_timeout_if_needed();
+	if (!neon_enable_new_communicator)
+		communicator_reconfigure_timeout_if_needed();
 }
 
 static const struct f_smgr neon_smgr =
@@ -2260,9 +2304,10 @@ smgr_init_neon(void)
 
 	smgr_init_standard();
 	neon_init();
-	communicator_init();
 	if (neon_enable_new_communicator)
 		communicator_new_init();
+	else
+		communicator_init();
 }
 
 
@@ -2297,7 +2342,10 @@ neon_extend_rel_size(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno, 
 		neon_get_request_lsns(rinfo, forknum,
 							  REL_METADATA_PSEUDO_BLOCKNO, &request_lsns, 1);
 
-		relsize = communicator_nblocks(rinfo, forknum, &request_lsns);
+		if (neon_enable_new_communicator)
+			relsize = communicator_new_rel_nblocks(rinfo, forknum, &request_lsns);
+		else
+			relsize = communicator_nblocks(rinfo, forknum, &request_lsns);
 
 		relsize = Max(relsize, blkno + 1);
 

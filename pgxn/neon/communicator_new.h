@@ -26,10 +26,10 @@ extern void communicator_new_shmem_startup(void);
 /* initialization at backend startup */
 extern void communicator_new_init(void);
 
-extern bool communicator_new_exists(NRelFileInfo rinfo, ForkNumber forkNum,
-									neon_request_lsns *request_lsns);
-extern BlockNumber communicator_new_nblocks(NRelFileInfo rinfo, ForkNumber forknum,
-											neon_request_lsns *request_lsns);
+extern bool communicator_new_rel_exists(NRelFileInfo rinfo, ForkNumber forkNum,
+										neon_request_lsns *request_lsns);
+extern BlockNumber communicator_new_rel_nblocks(NRelFileInfo rinfo, ForkNumber forknum,
+												neon_request_lsns *request_lsns);
 extern int64 communicator_new_dbsize(Oid dbNode, neon_request_lsns *request_lsns);
 extern void communicator_new_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum,
 										  BlockNumber base_blockno, neon_request_lsns *request_lsns,
@@ -43,4 +43,4 @@ extern int communicator_new_read_slru_segment(SlruKind kind, int64 segno,
 											  neon_request_lsns *request_lsns,
 											  void *buffer);
 
-#endif
+#endif							/* COMMUNICATOR_NEW_H */

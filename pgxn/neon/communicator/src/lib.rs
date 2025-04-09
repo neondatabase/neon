@@ -20,7 +20,7 @@ pub struct CommunicatorInitStruct {
     #[allow(dead_code)]
     max_backends: u32,
     #[allow(dead_code)]
-    shmem_ptr: *mut char,
+    shmem_ptr: *mut u8,
     #[allow(dead_code)]
     shmem_size: u64,
 

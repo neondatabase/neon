@@ -30,6 +30,7 @@
 #include "storage/spin.h"
 #include "tcop/tcopprot.h"
 
+#include "bitmap.h"
 #include "communicator_new.h"
 #include "neon.h"
 #include "neon_perf_counters.h"
@@ -205,7 +206,7 @@ communicator_new_prefetch_lookupv(NRelFileInfo rinfo, ForkNumber forknum, BlockN
 								  void **buffers, bits8 *mask)
 {
 	/* TODO */
-	elog(ERROR, "not implemented");
+	return 0;
 }
 
 /*
@@ -234,17 +235,96 @@ communicator_new_prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frl
 										   BlockNumber nblocks, const bits8 *mask)
 {
 	/* TODO */
-	elog(ERROR, "not implemented");
+	elog(LOG, "communicator_new_prefetch_register_bufferv not implemented");
 }
 
 /*
  *	Does the physical file exist?
  */
 bool
-communicator_new_exists(NRelFileInfo rinfo, ForkNumber forkNum, neon_request_lsns *request_lsns)
+communicator_new_rel_exists(NRelFileInfo rinfo, ForkNumber forkNum, neon_request_lsns *request_lsns)
 {
-	/* TODO */
-	elog(ERROR, "not implemented");
+	int32_t		request_idx;
+	int32_t		poll_res;
+
+	for (;;)
+	{
+		ResetLatch(MyLatch);
+
+		CHECK_FOR_INTERRUPTS();
+
+		request_idx = bcomm_start_rel_exists_request(
+			my_bs,
+			NInfoGetSpcOid(rinfo),
+			NInfoGetDbOid(rinfo),
+			NInfoGetRelNumber(rinfo),
+			forkNum,
+			request_lsns->request_lsn,
+			request_lsns->not_modified_since
+		);
+		// fixme: check 'request_idx' ?
+
+		(void) WaitLatch(MyLatch,
+						 WL_EXIT_ON_PM_DEATH | WL_LATCH_SET,
+						 0,
+						 WAIT_EVENT_NEON_PS_STARTING);
+
+		poll_res = bcomm_poll_rel_exists_completion(my_bs, request_idx);
+		if (poll_res == -1)
+			continue; /* still busy */
+		else if (poll_res == 0)
+			return false;
+		else if (poll_res == 1)
+			return true;
+		else
+		{
+			// FIXME: better error message
+			elog(ERROR, "get_rel_exists request failed");
+		}
+	}
+}
+
+static void
+communicator_new_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blockno,
+							  neon_request_lsns *request_lsns,
+							  void *buffer)
+{
+	int32_t		request_idx;
+	int32_t		poll_res;
+
+	for (;;)
+	{
+		ResetLatch(MyLatch);
+
+		CHECK_FOR_INTERRUPTS();
+
+		request_idx = bcomm_start_get_page_request(
+			my_bs,
+			NInfoGetSpcOid(rinfo),
+			NInfoGetDbOid(rinfo),
+			NInfoGetRelNumber(rinfo),
+			forkNum,
+			blockno,
+			request_lsns->request_lsn,
+			request_lsns->not_modified_since,
+			(uint8_t *) buffer,
+			BLCKSZ
+		);
+		// fixme: check 'request_idx' ?
+
+		(void) WaitLatch(MyLatch,
+						 WL_EXIT_ON_PM_DEATH | WL_LATCH_SET,
+						 0,
+						 WAIT_EVENT_NEON_PS_STARTING);
+
+		poll_res = bcomm_poll_get_page_completion(my_bs, request_idx);
+		if (poll_res == -1)
+			continue; /* still busy */
+		else
+		{
+			return;
+		}
+	}
 }
 
 /*
@@ -258,21 +338,65 @@ communicator_new_exists(NRelFileInfo rinfo, ForkNumber forkNum, neon_request_lsn
  */
 void
 communicator_new_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber base_blockno,
-							  neon_request_lsns *request_lsns,
+							  neon_request_lsns *request_lsnsv,
 							  void **buffers, BlockNumber nblocks, const bits8 *mask)
 {
-	/* TODO */
-	elog(ERROR, "not implemented");
+	for (uint32 i = 0; i < nblocks; i++)
+	{
+		if (PointerIsValid(mask) && !BITMAP_ISSET(mask, i))
+			continue;
+
+		communicator_new_read_at_lsn(rinfo,
+									 forkNum,
+									 base_blockno + i,
+									 &request_lsnsv[i],
+									 buffers[i]);
+	}
 }
+
+
+
 
 /*
  *	neon_nblocks() -- Get the number of blocks stored in a relation.
  */
 BlockNumber
-communicator_new_nblocks(NRelFileInfo rinfo, ForkNumber forknum, neon_request_lsns *request_lsns)
+communicator_new_rel_nblocks(NRelFileInfo rinfo, ForkNumber forknum, neon_request_lsns *request_lsns)
 {
-	/* TODO */
-	elog(ERROR, "not implemented");
+	int32_t		request_idx;
+	int32_t		poll_res;
+	uint32_t	nblocks_result;
+
+	for (;;)
+	{
+		ResetLatch(MyLatch);
+
+		CHECK_FOR_INTERRUPTS();
+
+		request_idx = bcomm_start_rel_size_request(
+			my_bs,
+			NInfoGetSpcOid(rinfo),
+			NInfoGetDbOid(rinfo),
+			NInfoGetRelNumber(rinfo),
+			forknum,
+			request_lsns->request_lsn,
+			request_lsns->not_modified_since
+		);
+		// fixme: check 'request_idx' ?
+
+		(void) WaitLatch(MyLatch,
+						 WL_EXIT_ON_PM_DEATH | WL_LATCH_SET,
+						 0,
+						 WAIT_EVENT_NEON_PS_STARTING);
+
+		poll_res = bcomm_poll_rel_size_completion(my_bs, request_idx, &nblocks_result);
+		if (poll_res == -1)
+			continue; /* still busy */
+		else
+		{
+			return nblocks_result;
+		}
+	}
 }
 
 /*
@@ -292,7 +416,7 @@ communicator_new_dbsize(Oid dbNode, neon_request_lsns *request_lsns)
 		CHECK_FOR_INTERRUPTS();
 
 		request_idx = bcomm_start_dbsize_request(my_bs, dbNode, request_lsns->request_lsn, request_lsns->not_modified_since);
-		// fixme: check 'request_idx' ? 
+		// fixme: check 'request_idx' ?
 
 		(void) WaitLatch(MyLatch,
 						 WL_EXIT_ON_PM_DEATH | WL_LATCH_SET,
