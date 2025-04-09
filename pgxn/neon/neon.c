@@ -28,6 +28,7 @@
 #include "utils/guc.h"
 #include "utils/guc_tables.h"
 
+#include "communicator.h"
 #include "extension_server.h"
 #include "file_cache.h"
 #include "neon.h"
@@ -439,7 +440,7 @@ _PG_init(void)
 	pg_init_walproposer();
 	init_lwlsncache();
 
-	pagestore_smgr_init();
+	pg_init_communicator();
 	Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 
 	InitUnstableExtensionsSupport();
