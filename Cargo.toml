@@ -147,6 +147,7 @@ pprof = { version = "0.14", features = ["criterion", "flamegraph", "frame-pointe
 procfs = "0.16"
 prometheus = {version = "0.13", default-features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.13"
+quinn = "0.11"
 rand = "0.8"
 redis = { version = "0.29.2", features = ["tokio-rustls-comp", "keep-alive"] }
 regex = "1.10.2"
@@ -154,6 +155,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 reqwest-tracing = { version = "0.5", features = ["opentelemetry_0_27"] }
 reqwest-middleware = "0.4"
 reqwest-retry = "0.7"
+ringbuf = "0.4.8"
 routerify = "3"
 rpds = "0.13"
 rustc-hash = "1.1.0"

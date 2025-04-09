@@ -62,6 +62,7 @@ postgres_backend.workspace = true
 postgres-client = { package = "tokio-postgres2", path = "../libs/proxy/tokio-postgres2" }
 postgres-protocol = { package = "postgres-protocol2", path = "../libs/proxy/postgres-protocol2" }
 pq_proto.workspace = true
+quinn.workspace = true
 rand.workspace = true
 regex.workspace = true
 remote_storage = { version = "0.1", path = "../libs/remote_storage/" }
@@ -69,6 +70,7 @@ reqwest = { workspace = true, features = ["rustls-tls-native-roots"] }
 reqwest-middleware = { workspace = true, features = ["json"] }
 reqwest-retry.workspace = true
 reqwest-tracing.workspace = true
+ringbuf.workspace = true
 rustc-hash.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
