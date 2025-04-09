@@ -317,6 +317,9 @@ impl GcCompactionQueue {
                     flags: {
                         let mut flags = EnumSet::new();
                         flags |= CompactFlags::EnhancedGcBottomMostCompaction;
+                        if timeline.get_compaction_l0_first() {
+                            flags |= CompactFlags::YieldForL0;
+                        }
                         flags
                     },
                     sub_compaction: true,
