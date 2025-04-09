@@ -41,6 +41,8 @@
 static CommunicatorInitStruct *cis;
 static CommunicatorBackendStruct *my_bs;
 
+static slock_t in_elog;
+
 PGDLLEXPORT void communicator_new_bgworker_main(Datum main_arg);
 
 /**** Initialization functions. These run in postmaster ****/
@@ -107,8 +109,6 @@ communicator_new_shmem_startup(void)
 
 /**** Worker process functions. These run in the communicator worker process ****/
 
-static slock_t in_elog;
-
 /* Entry point for the communicator bgworker process */
 void
 communicator_new_bgworker_main(Datum main_arg)
@@ -125,7 +125,7 @@ communicator_new_bgworker_main(Datum main_arg)
 
 	get_shard_map(&connstrs, &num_shards);
 
-	rcommunicator_start_threads(
+	communicator_worker_process_launch(
 		cis,
 		neon_tenant,
 		neon_timeline,

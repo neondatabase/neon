@@ -20,6 +20,7 @@
 #include "replication/logicallauncher.h"
 #include "replication/slot.h"
 #include "replication/walsender.h"
+#include "storage/ipc.h"
 #include "storage/proc.h"
 #include "funcapi.h"
 #include "access/htup_details.h"
@@ -594,7 +595,6 @@ neon_shmem_request(void)
 	communicator_new_shmem_request();
 }
 
-#if PG_MAJORVERSION_NUM >= 16
 static void
 neon_shmem_startup_hook(void)
 {
@@ -617,4 +617,3 @@ neon_shmem_startup_hook(void)
 
 	communicator_new_shmem_startup();
 }
-#endif
