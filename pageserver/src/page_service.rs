@@ -105,6 +105,7 @@ pub fn spawn(
     pg_auth: Option<Arc<SwappableJwtAuth>>,
     perf_trace_dispatch: Option<Dispatch>,
     tcp_listener: tokio::net::TcpListener,
+    tls_config: Option<Arc<rustls::ServerConfig>>,
 ) -> Listener {
     let cancel = CancellationToken::new();
     let libpq_ctx = RequestContext::todo_child(
@@ -127,6 +128,7 @@ pub fn spawn(
             conf.page_service_pipelining.clone(),
             libpq_ctx,
             cancel.clone(),
+            tls_config,
         )
         .map(anyhow::Ok),
     ));
@@ -184,6 +186,7 @@ pub async fn libpq_listener_main(
     pipelining_config: PageServicePipeliningConfig,
     listener_ctx: RequestContext,
     listener_cancel: CancellationToken,
+    tls_config: Option<Arc<rustls::ServerConfig>>,
 ) -> Connections {
     let connections_cancel = CancellationToken::new();
     let connections_gate = Gate::default();
@@ -227,6 +230,7 @@ pub async fn libpq_listener_main(
                     connection_ctx,
                     connections_cancel.child_token(),
                     gate_guard,
+                    tls_config.clone(),
                 ));
             }
             Err(err) => {
@@ -268,6 +272,7 @@ async fn page_service_conn_main(
     connection_ctx: RequestContext,
     cancel: CancellationToken,
     gate_guard: GateGuard,
+    tls_config: Option<Arc<rustls::ServerConfig>>,
 ) -> ConnectionHandlerResult {
     let _guard = LIVE_CONNECTIONS
         .with_label_values(&["page_service"])
@@ -334,7 +339,8 @@ async fn page_service_conn_main(
         cancel.clone(),
         gate_guard,
     );
-    let pgbackend = PostgresBackend::new_from_io(socket_fd, socket, peer_addr, auth_type, None)?;
+    let pgbackend =
+        PostgresBackend::new_from_io(socket_fd, socket, peer_addr, auth_type, tls_config)?;
 
     match pgbackend.run(&mut conn_handler, &cancel).await {
         Ok(()) => {
