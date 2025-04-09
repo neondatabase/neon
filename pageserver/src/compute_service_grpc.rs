@@ -24,12 +24,14 @@ use crate::context::RequestContext;
 use crate::tenant::Timeline;
 use crate::tenant::mgr::ShardResolveResult;
 use crate::tenant::mgr::ShardSelector;
+use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::timeline::WaitLsnTimeout;
 use tokio_util::sync::CancellationToken;
 
 use page_service_server::PageService;
 
 use tracing::debug;
+use tracing::Instrument;
 use utils::auth::SwappableJwtAuth;
 
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
@@ -42,12 +44,18 @@ use postgres_ffi::BLCKSZ;
 
 use tonic;
 
+use pageserver_api::reltag::RelTag;
+use pageserver_api::key::rel_block_to_key;
+
 use crate::pgdatadir_mapping::Version;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 
 use postgres_backend::AuthType;
 
-tonic::include_proto!("page_service");
+mod proto {
+    tonic::include_proto!("page_service");
+}
+pub use proto::page_service_server;
 
 pub struct PageServiceService {
     pub conf: &'static PageServerConf,
@@ -57,7 +65,6 @@ pub struct PageServiceService {
     pub tenant_mgr: Arc<TenantManager>,
 
     pub ctx: Arc<RequestContext>,
-    //pub gate_guard: GateGuard,
 }
 
 /// An error happened in a get() operation.
@@ -77,37 +84,189 @@ impl From<PageReconstructError> for tonic::Status {
     }
 }
 
+fn parse_reltag(input: &proto::RelTag) -> Result<RelTag, tonic::Status> {
+    Ok(RelTag {
+        forknum: u8::try_from(input.fork_number)
+            .map_err(|_| tonic::Status::invalid_argument("invalid forknum"))?,
+        spcnode: input.spc_oid,
+        dbnode: input.db_oid,
+        relnode: input.rel_number,
+    })
+}
+
 #[tonic::async_trait]
 impl PageService for PageServiceService {
-    async fn db_size(
+    async fn rel_exists(
         &self,
-        request: tonic::Request<DbSizeRequest>,
-    ) -> Result<tonic::Response<DbSizeResponse>, tonic::Status> {
+        request: tonic::Request<proto::RelExistsRequest>,
+    ) -> std::result::Result<tonic::Response<proto::RelExistsResponse>, tonic::Status> {
         let ttid = self.extract_ttid(request.metadata())?;
-
-        let timeline = self.get_timeline(ttid, ShardSelector::Zero).await?;
-
         let req = request.get_ref();
+        let common = req
+            .common
+            .ok_or(tonic::Status::invalid_argument("missing 'common' field"))?;
+        let rel: RelTag = parse_reltag(
+            &req.rel
+                .ok_or(tonic::Status::invalid_argument("missing 'rel' field"))?,
+        )?;
+
+        let span = tracing::info_span!("rel_exists", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, rel = %rel, req_lsn = %common.request_lsn);
+
+        async {
+            let timeline = self.get_timeline(ttid, ShardSelector::Zero).await?;
+            let ctx = self.ctx.with_scope_timeline(&timeline);
+            let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
+            let lsn = Self::wait_or_get_last_lsn(
+                &timeline,
+                Lsn(common.request_lsn),
+                Lsn(common.not_modified_since_lsn),
+                &latest_gc_cutoff_lsn,
+                &ctx,
+            )
+                .await?;
+
+            let exists = timeline
+                .get_rel_exists(rel, Version::Lsn(lsn), &ctx)
+                .await?;
+
+            Ok(tonic::Response::new(proto::RelExistsResponse { exists }))
+        }
+        .instrument(span)
+        .await
+    }
+
+    /// Returns size of a relation, as # of blocks
+    async fn rel_size(
+        &self,
+        request: tonic::Request<proto::RelSizeRequest>,
+    ) -> std::result::Result<tonic::Response<proto::RelSizeResponse>, tonic::Status> {
+        let ttid = self.extract_ttid(request.metadata())?;
+        let req = request.get_ref();
+        let common = req
+            .common
+            .ok_or(tonic::Status::invalid_argument("missing 'common' field"))?;
+        let rel: RelTag = parse_reltag(
+            &req.rel
+                .ok_or(tonic::Status::invalid_argument("missing 'rel' field"))?,
+        )?;
+
+        let span = tracing::info_span!("rel_size", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, rel = %rel, req_lsn = %common.request_lsn);
+
+        async {
+            let timeline = self.get_timeline(ttid, ShardSelector::Zero).await?;
+            let ctx = self.ctx.with_scope_timeline(&timeline);
+            let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
+            let lsn = Self::wait_or_get_last_lsn(
+                &timeline,
+                Lsn(common.request_lsn),
+                Lsn(common.not_modified_since_lsn),
+                &latest_gc_cutoff_lsn,
+                &ctx,
+            )
+                .await?;
+
+            let num_blocks = timeline.get_rel_size(rel, Version::Lsn(lsn), &ctx).await?;
+
+            Ok(tonic::Response::new(proto::RelSizeResponse {
+                num_blocks,
+            }))
+        }
+        .instrument(span)
+        .await
+    }
+
+    async fn get_page(
+        &self,
+        request: tonic::Request<proto::GetPageRequest>,
+    ) -> std::result::Result<tonic::Response<proto::GetPageResponse>, tonic::Status> {
+        let ttid = self.extract_ttid(request.metadata())?;
+        let req = request.get_ref();
+        let common = req
+            .common
+            .ok_or(tonic::Status::invalid_argument("missing 'common' field"))?;
+        let rel: RelTag = parse_reltag(
+            &req.rel
+                .ok_or(tonic::Status::invalid_argument("missing 'rel' field"))?,
+        )?;
+        let block_number = req.block_number;
+
+        // Calculate shard number. FIXME: this should probably be part of the protocol.
+        // Still makes sense to calculate it here as a cross-check I guess
+        let key = rel_block_to_key(rel, block_number);
+        let timeline = self.get_timeline(ttid, ShardSelector::Page(key)).await?;
 
         let ctx = self.ctx.with_scope_timeline(&timeline);
-
         let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             &timeline,
-            Lsn(req.request_lsn),
-            Lsn(req.not_modified_since_lsn),
+            Lsn(common.request_lsn),
+            Lsn(common.not_modified_since_lsn),
             &latest_gc_cutoff_lsn,
             &ctx,
         )
         .await?;
 
-        let total_blocks = timeline
-            .get_db_size(DEFAULTTABLESPACE_OID, req.db_oid, Version::Lsn(lsn), &ctx)
-            .await?;
+        let shard_id = timeline.tenant_shard_id.shard_number;
+        let span = tracing::info_span!("get_page", tenant_id = %ttid.tenant_id, shard_id = %shard_id, timeline_id = %ttid.timeline_id, rel = %rel, block_number = %block_number, req_lsn = %common.request_lsn);
 
-        Ok(tonic::Response::new(DbSizeResponse {
-            db_size_bytes: total_blocks as u64 * BLCKSZ as u64,
-        }))
+        async {
+            let gate_guard = match timeline.gate.enter() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    return Err(tonic::Status::unavailable("timeline is shutting down"));
+                }
+            };
+
+            let io_concurrency = IoConcurrency::spawn_from_conf(self.conf, gate_guard);
+
+            let page_image = timeline
+                .get_rel_page_at_lsn(rel, block_number, Version::Lsn(lsn), &ctx, io_concurrency)
+                .await?;
+
+            Ok(tonic::Response::new(proto::GetPageResponse {
+                page_image: page_image.to_vec(),
+            }))
+        }
+        .instrument(span)
+        .await
+    }
+
+    async fn db_size(
+        &self,
+        request: tonic::Request<proto::DbSizeRequest>,
+    ) -> Result<tonic::Response<proto::DbSizeResponse>, tonic::Status> {
+        let ttid = self.extract_ttid(request.metadata())?;
+        let req = request.get_ref();
+        let common = req
+            .common
+            .ok_or(tonic::Status::invalid_argument("missing common field"))?;
+        let db_oid = req.db_oid;
+
+        let span = tracing::info_span!("get_page", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, db_oid = %db_oid, req_lsn = %common.request_lsn);
+
+        async {
+            let timeline = self.get_timeline(ttid, ShardSelector::Zero).await?;
+            let ctx = self.ctx.with_scope_timeline(&timeline);
+            let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
+            let lsn = Self::wait_or_get_last_lsn(
+                &timeline,
+                Lsn(common.request_lsn),
+                Lsn(common.not_modified_since_lsn),
+                &latest_gc_cutoff_lsn,
+                &ctx,
+            )
+                .await?;
+
+            let total_blocks = timeline
+                .get_db_size(DEFAULTTABLESPACE_OID, db_oid, Version::Lsn(lsn), &ctx)
+                .await?;
+
+            Ok(tonic::Response::new(proto::DbSizeResponse {
+                num_bytes: total_blocks as u64 * BLCKSZ as u64,
+            }))
+        }
+        .instrument(span)
+        .await
     }
 }
 

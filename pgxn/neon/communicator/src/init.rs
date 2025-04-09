@@ -43,7 +43,7 @@ pub extern "C" fn rcommunicator_shmem_init(
     submission_pipe_read_fd: c_int,
     submission_pipe_write_fd: c_int,
     max_backends: u32,
-    shmem_ptr: *mut char,
+    shmem_ptr: *mut u8,
     shmem_size: u64,
 ) -> *mut CommunicatorInitStruct {
     let mut ptr = shmem_ptr;
