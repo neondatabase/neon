@@ -3381,11 +3381,11 @@ async fn put_tenant_timeline_import_basebackup(
 
         let broker_client = state.broker_client.clone();
 
-        let mut body = StreamReader::new(request.into_body().map(|res| {
-            res.map_err(|error| {
-                std::io::Error::new(std::io::ErrorKind::Other, anyhow::anyhow!(error))
-            })
-        }));
+        let mut body = StreamReader::new(
+            request
+                .into_body()
+                .map(|res| res.map_err(|error| std::io::Error::other(anyhow::anyhow!(error)))),
+        );
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
@@ -3459,7 +3459,7 @@ async fn put_tenant_timeline_import_wal(
 
         let mut body = StreamReader::new(request.into_body().map(|res| {
             res.map_err(|error| {
-                std::io::Error::new(std::io::ErrorKind::Other, anyhow::anyhow!(error))
+                std::io::Error::other( anyhow::anyhow!(error))
             })
         }));
 

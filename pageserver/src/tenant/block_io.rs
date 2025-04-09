@@ -216,12 +216,8 @@ impl<'a> FileBlockReader<'a> {
         match cache
             .read_immutable_buf(self.file_id, blknum, ctx)
             .await
-            .map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to read immutable buf: {e:#}"),
-                )
-            })? {
+            .map_err(|e| std::io::Error::other(format!("Failed to read immutable buf: {e:#}")))?
+        {
             ReadBufResult::Found(guard) => Ok(guard.into()),
             ReadBufResult::NotFound(write_guard) => {
                 // Read the page from disk into the buffer

@@ -425,12 +425,7 @@ impl CancelClosure {
             &mut mk_tls,
             &self.hostname,
         )
-        .map_err(|e| {
-            CancelError::IO(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
-        })?;
+        .map_err(|e| CancelError::IO(std::io::Error::other(e.to_string())))?;
 
         self.cancel_token.cancel_query_raw(socket, tls).await?;
         debug!("query was cancelled");
