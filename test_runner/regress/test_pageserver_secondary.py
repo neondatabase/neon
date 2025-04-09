@@ -244,7 +244,10 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
 
             # It's only valid to read from the last generation. Newer generations may yank layer
             # files used in older generations.
-            last_generation = max(s[1] for s in last_state.values() if s[1] is not None)
+            last_generation = max(
+                [ s[1] for s in last_state.values() if s[1] is not None ],
+                default=None
+            )
 
             if mode.startswith("Attached") and generation == last_generation:
                 # This is a basic test: we are validating that he endpoint works properly _between_
