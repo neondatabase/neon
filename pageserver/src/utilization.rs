@@ -3,13 +3,15 @@
 //! The metric is exposed via `GET /v1/utilization`. Refer and maintain it's openapi spec as the
 //! truth.
 
-use anyhow::Context;
 use std::path::Path;
+
+use anyhow::Context;
+use pageserver_api::models::PageserverUtilization;
 use utils::serde_percent::Percent;
 
-use pageserver_api::models::PageserverUtilization;
-
-use crate::{config::PageServerConf, metrics::NODE_UTILIZATION_SCORE, tenant::mgr::TenantManager};
+use crate::config::PageServerConf;
+use crate::metrics::NODE_UTILIZATION_SCORE;
+use crate::tenant::mgr::TenantManager;
 
 pub(crate) fn regenerate(
     conf: &PageServerConf,
@@ -49,7 +51,7 @@ pub(crate) fn regenerate(
     };
 
     // Express a static value for how many shards we may schedule on one node
-    const MAX_SHARDS: u32 = 20000;
+    const MAX_SHARDS: u32 = 5000;
 
     let mut doc = PageserverUtilization {
         disk_usage_bytes: used,

@@ -4,36 +4,29 @@
 //! file, or on the command line.
 //! See also `settings.md` for better description on every parameter.
 
-use anyhow::{bail, ensure, Context};
-use pageserver_api::models::ImageCompressionAlgorithm;
-use pageserver_api::{
-    config::{DiskUsageEvictionTaskConfig, MaxVectoredReadBytes},
-    shard::TenantShardId,
-};
-use remote_storage::{RemotePath, RemoteStorageConfig};
 use std::env;
-use storage_broker::Uri;
-use utils::logging::SecretString;
-use utils::postgres_client::PostgresClientProtocol;
-
-use once_cell::sync::OnceCell;
-use reqwest::Url;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::{Context, bail, ensure};
 use camino::{Utf8Path, Utf8PathBuf};
+use once_cell::sync::OnceCell;
+use pageserver_api::config::{DiskUsageEvictionTaskConfig, MaxVectoredReadBytes};
+use pageserver_api::models::ImageCompressionAlgorithm;
+use pageserver_api::shard::TenantShardId;
 use postgres_backend::AuthType;
-use utils::{
-    id::{NodeId, TimelineId},
-    logging::LogFormat,
-};
+use remote_storage::{RemotePath, RemoteStorageConfig};
+use reqwest::Url;
+use storage_broker::Uri;
+use utils::id::{NodeId, TimelineId};
+use utils::logging::{LogFormat, SecretString};
+use utils::postgres_client::PostgresClientProtocol;
 
 use crate::tenant::storage_layer::inmemory_layer::IndexEntry;
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
-use crate::virtual_file;
 use crate::virtual_file::io_engine;
-use crate::{TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME};
+use crate::{TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME, virtual_file};
 
 /// Global state of pageserver.
 ///
@@ -191,6 +184,16 @@ pub struct PageServerConf {
     pub wal_receiver_protocol: PostgresClientProtocol,
 
     pub page_service_pipelining: pageserver_api::config::PageServicePipeliningConfig,
+
+    pub get_vectored_concurrent_io: pageserver_api::config::GetVectoredConcurrentIo,
+
+    /// Enable read path debugging. If enabled, read key errors will print a backtrace of the layer
+    /// files read.
+    pub enable_read_path_debugging: bool,
+
+    /// Interpreted protocol feature: if enabled, validate that the logical WAL received from
+    /// safekeepers does not have gaps.
+    pub validate_wal_contiguity: bool,
 }
 
 /// Token for authentication to safekeepers
@@ -352,6 +355,9 @@ impl PageServerConf {
             no_sync,
             wal_receiver_protocol,
             page_service_pipelining,
+            get_vectored_concurrent_io,
+            enable_read_path_debugging,
+            validate_wal_contiguity,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -396,6 +402,7 @@ impl PageServerConf {
             import_pgdata_aws_endpoint_url,
             wal_receiver_protocol,
             page_service_pipelining,
+            get_vectored_concurrent_io,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling
@@ -426,7 +433,9 @@ impl PageServerConf {
                     io_engine::FeatureTestResult::PlatformPreferred(v) => v, // make no noise
                     io_engine::FeatureTestResult::Worse { engine, remark } => {
                         // TODO: bubble this up to the caller so we can tracing::warn! it.
-                        eprintln!("auto-detected IO engine is not platform-preferred: engine={engine:?} remark={remark:?}");
+                        eprintln!(
+                            "auto-detected IO engine is not platform-preferred: engine={engine:?} remark={remark:?}"
+                        );
                         engine
                     }
                 },
@@ -436,6 +445,8 @@ impl PageServerConf {
                 .unwrap_or_default(),
             virtual_file_io_mode: virtual_file_io_mode.unwrap_or(virtual_file::IoMode::preferred()),
             no_sync: no_sync.unwrap_or(false),
+            enable_read_path_debugging: enable_read_path_debugging.unwrap_or(false),
+            validate_wal_contiguity: validate_wal_contiguity.unwrap_or(false),
         };
 
         // ------------------------------------------------------------

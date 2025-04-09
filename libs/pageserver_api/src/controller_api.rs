@@ -9,11 +9,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use utils::id::{NodeId, TenantId};
 
-use crate::models::PageserverUtilization;
-use crate::{
-    models::{ShardParameters, TenantConfig},
-    shard::{ShardStripeSize, TenantShardId},
-};
+use crate::models::{PageserverUtilization, ShardParameters, TenantConfig};
+use crate::shard::{ShardStripeSize, TenantShardId};
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
@@ -57,6 +54,7 @@ pub struct NodeRegisterRequest {
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,
+    pub listen_https_port: Option<u16>,
 
     pub availability_zone_id: AvailabilityZone,
 }
@@ -75,7 +73,7 @@ pub struct TenantPolicyRequest {
     pub scheduling: Option<ShardSchedulingPolicy>,
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct AvailabilityZone(pub String);
 
 impl Display for AvailabilityZone {
@@ -87,7 +85,7 @@ impl Display for AvailabilityZone {
 #[derive(Serialize, Deserialize)]
 pub struct ShardsPreferredAzsRequest {
     #[serde(flatten)]
-    pub preferred_az_ids: HashMap<TenantShardId, AvailabilityZone>,
+    pub preferred_az_ids: HashMap<TenantShardId, Option<AvailabilityZone>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -105,6 +103,7 @@ pub struct TenantLocateResponseShard {
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,
+    pub listen_https_port: Option<u16>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -144,8 +143,11 @@ pub struct NodeDescribeResponse {
     pub availability: NodeAvailabilityWrapper,
     pub scheduling: NodeSchedulingPolicy,
 
+    pub availability_zone_id: String,
+
     pub listen_http_addr: String,
     pub listen_http_port: u16,
+    pub listen_https_port: Option<u16>,
 
     pub listen_pg_addr: String,
     pub listen_pg_port: u16,
@@ -179,8 +181,19 @@ pub struct TenantDescribeResponseShard {
 /// specifies some constraints, e.g. asking it to get off particular node(s)
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TenantShardMigrateRequest {
-    pub tenant_shard_id: TenantShardId,
     pub node_id: NodeId,
+    #[serde(default)]
+    pub migration_config: Option<MigrationConfig>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MigrationConfig {
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub secondary_warmup_timeout: Option<Duration>,
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub secondary_download_request_timeout: Option<Duration>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -320,6 +333,42 @@ impl From<NodeSchedulingPolicy> for String {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
+pub enum SkSchedulingPolicy {
+    Active,
+    Pause,
+    Decomissioned,
+}
+
+impl FromStr for SkSchedulingPolicy {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "active" => Self::Active,
+            "pause" => Self::Pause,
+            "decomissioned" => Self::Decomissioned,
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Unknown scheduling policy '{s}', try active,pause,decomissioned"
+                ));
+            }
+        })
+    }
+}
+
+impl From<SkSchedulingPolicy> for String {
+    fn from(value: SkSchedulingPolicy) -> String {
+        use SkSchedulingPolicy::*;
+        match value {
+            Active => "active",
+            Pause => "pause",
+            Decomissioned => "decomissioned",
+        }
+        .to_string()
+    }
+}
+
 /// Controls how tenant shards are mapped to locations on pageservers, e.g. whether
 /// to create secondary locations.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -334,6 +383,16 @@ pub enum PlacementPolicy {
     /// have been idle for a long time, where we do not mind some delay in making
     /// them available in future.
     Detached,
+}
+
+impl PlacementPolicy {
+    pub fn want_secondaries(&self) -> usize {
+        match self {
+            PlacementPolicy::Attached(secondary_count) => *secondary_count,
+            PlacementPolicy::Secondary => 1,
+            PlacementPolicy::Detached => 0,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -372,10 +431,32 @@ pub struct MetadataHealthListOutdatedResponse {
     pub health_records: Vec<MetadataHealthRecord>,
 }
 
+/// Publicly exposed safekeeper description
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SafekeeperDescribeResponse {
+    pub id: NodeId,
+    pub region_id: String,
+    /// 1 is special, it means just created (not currently posted to storcon).
+    /// Zero or negative is not really expected.
+    /// Otherwise the number from `release-$(number_of_commits_on_branch)` tag.
+    pub version: i64,
+    pub host: String,
+    pub port: i32,
+    pub http_port: i32,
+    pub availability_zone_id: String,
+    pub scheduling_policy: SkSchedulingPolicy,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SafekeeperSchedulingPolicyRequest {
+    pub scheduling_policy: SkSchedulingPolicy,
+}
+
 #[cfg(test)]
 mod test {
-    use super::*;
     use serde_json;
+
+    use super::*;
 
     /// Check stability of PlacementPolicy's serialization
     #[test]

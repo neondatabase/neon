@@ -1,6 +1,6 @@
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{ready, Context, Poll};
+use std::task::{Context, Poll, ready};
 
 use anyhow::Context as _;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -12,12 +12,12 @@ use pin_project_lite::pin_project;
 use tokio::io::{self, AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 use tracing::warn;
 
-use crate::cancellation::CancellationHandlerMain;
+use crate::cancellation::CancellationHandler;
 use crate::config::ProxyConfig;
 use crate::context::RequestContext;
-use crate::error::{io_error, ReportableError};
+use crate::error::{ReportableError, io_error};
 use crate::metrics::Metrics;
-use crate::proxy::{handle_client, ClientMode, ErrorSource};
+use crate::proxy::{ClientMode, ErrorSource, handle_client};
 use crate::rate_limiter::EndpointRateLimiter;
 
 pin_project! {
@@ -129,7 +129,7 @@ pub(crate) async fn serve_websocket(
     auth_backend: &'static crate::auth::Backend<'static, ()>,
     ctx: RequestContext,
     websocket: OnUpgrade,
-    cancellation_handler: Arc<CancellationHandlerMain>,
+    cancellation_handler: Arc<CancellationHandler>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     hostname: Option<String>,
     cancellations: tokio_util::task::task_tracker::TaskTracker,
@@ -168,7 +168,7 @@ pub(crate) async fn serve_websocket(
         Ok(Some(p)) => {
             ctx.set_success();
             ctx.log_connect();
-            match p.proxy_pass().await {
+            match p.proxy_pass(&config.connect_to_compute).await {
                 Ok(()) => Ok(()),
                 Err(ErrorSource::Client(err)) => Err(err).context("client"),
                 Err(ErrorSource::Compute(err)) => Err(err).context("compute"),
@@ -178,16 +178,17 @@ pub(crate) async fn serve_websocket(
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
     use std::pin::pin;
 
     use framed_websockets::WebSocketServer;
     use futures::{SinkExt, StreamExt};
-    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
     use tokio::task::JoinSet;
-    use tokio_tungstenite::tungstenite::protocol::Role;
-    use tokio_tungstenite::tungstenite::Message;
     use tokio_tungstenite::WebSocketStream;
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::protocol::Role;
 
     use super::WebSocketRw;
 

@@ -15,7 +15,7 @@ mod sql_over_http;
 mod websocket;
 
 use std::net::{IpAddr, SocketAddr};
-use std::pin::{pin, Pin};
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -23,31 +23,32 @@ use async_trait::async_trait;
 use atomic_take::AtomicTake;
 use bytes::Bytes;
 pub use conn_pool_lib::GlobalConnPoolOptions;
-use futures::future::{select, Either};
 use futures::TryFutureExt;
+use futures::future::{Either, select};
 use http::{Method, Response, StatusCode};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty};
+use http_utils::error::ApiError;
 use hyper::body::Incoming;
 use hyper_util::rt::TokioExecutor;
 use hyper_util::server::conn::auto::Builder;
-use rand::rngs::StdRng;
 use rand::SeedableRng;
-use sql_over_http::{uuid_to_header_value, NEON_REQUEST_ID};
+use rand::rngs::StdRng;
+use sql_over_http::{NEON_REQUEST_ID, uuid_to_header_value};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-use tracing::{info, warn, Instrument};
-use utils::http::error::ApiError;
+use tracing::{Instrument, info, warn};
 
-use crate::cancellation::CancellationHandlerMain;
+use crate::cancellation::CancellationHandler;
 use crate::config::{ProxyConfig, ProxyProtocolV2};
 use crate::context::RequestContext;
+use crate::ext::TaskExt;
 use crate::metrics::Metrics;
-use crate::protocol2::{read_proxy_protocol, ChainRW, ConnectHeader, ConnectionInfo};
+use crate::protocol2::{ChainRW, ConnectHeader, ConnectionInfo, read_proxy_protocol};
 use crate::proxy::run_until_cancelled;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
@@ -60,7 +61,7 @@ pub async fn task_main(
     auth_backend: &'static crate::auth::Backend<'static, ()>,
     ws_listener: TcpListener,
     cancellation_token: CancellationToken,
-    cancellation_handler: Arc<CancellationHandlerMain>,
+    cancellation_handler: Arc<CancellationHandler>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
@@ -84,7 +85,7 @@ pub async fn task_main(
             cancellation_token.cancelled().await;
             tokio::task::spawn_blocking(move || conn_pool.shutdown())
                 .await
-                .unwrap();
+                .propagate_task_panic();
         }
     });
 
@@ -104,7 +105,7 @@ pub async fn task_main(
             cancellation_token.cancelled().await;
             tokio::task::spawn_blocking(move || http_conn_pool.shutdown())
                 .await
-                .unwrap();
+                .propagate_task_panic();
         }
     });
 
@@ -317,7 +318,7 @@ async fn connection_handler(
     backend: Arc<PoolingBackend>,
     connections: TaskTracker,
     cancellations: TaskTracker,
-    cancellation_handler: Arc<CancellationHandlerMain>,
+    cancellation_handler: Arc<CancellationHandler>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     cancellation_token: CancellationToken,
     conn: AsyncRW,
@@ -411,7 +412,7 @@ async fn request_handler(
     config: &'static ProxyConfig,
     backend: Arc<PoolingBackend>,
     ws_connections: TaskTracker,
-    cancellation_handler: Arc<CancellationHandlerMain>,
+    cancellation_handler: Arc<CancellationHandler>,
     session_id: uuid::Uuid,
     conn_info: ConnectionInfo,
     // used to cancel in-flight HTTP requests. not used to cancel websockets

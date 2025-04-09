@@ -9,13 +9,12 @@ use std::str::FromStr;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
-use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use compute_api::spec::{PgIdent, Role};
+use compute_api::spec::{Database, PgIdent, Role};
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -41,12 +40,14 @@ use crate::local_proxy;
 use crate::pg_helpers::*;
 use crate::spec::*;
 use crate::spec_apply::ApplySpecPhase::{
-    CreateAndAlterDatabases, CreateAndAlterRoles, CreateAvailabilityCheck, CreateSuperUser,
-    DropInvalidDatabases, DropRoles, HandleNeonExtension, HandleOtherExtensions,
-    RenameAndDeleteDatabases, RenameRoles, RunInEachDatabase,
+    CreateAndAlterDatabases, CreateAndAlterRoles, CreateAvailabilityCheck, CreateSchemaNeon,
+    CreateSuperUser, DropInvalidDatabases, DropRoles, FinalizeDropLogicalSubscriptions,
+    HandleNeonExtension, HandleOtherExtensions, RenameAndDeleteDatabases, RenameRoles,
+    RunInEachDatabase,
 };
+use crate::spec_apply::PerDatabasePhase;
 use crate::spec_apply::PerDatabasePhase::{
-    ChangeSchemaPerms, DeleteDBRoleReferences, HandleAnonExtension,
+    ChangeSchemaPerms, DeleteDBRoleReferences, DropLogicalSubscriptions, HandleAnonExtension,
 };
 use crate::spec_apply::{apply_operations, MutableApplyContext, DB};
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
@@ -57,6 +58,8 @@ pub static PG_PID: AtomicU32 = AtomicU32::new(0);
 
 /// Compute node info shared across several `compute_ctl` threads.
 pub struct ComputeNode {
+    /// The ID of the compute
+    pub compute_id: String,
     // Url type maintains proper escaping
     pub connstr: url::Url,
     // We connect to Postgres from many different places, so build configs once
@@ -79,8 +82,10 @@ pub struct ComputeNode {
     /// - we push spec and it does configuration
     /// - but then it is restarted without any spec again
     pub live_config_allowed: bool,
-    /// The port that the compute's HTTP server listens on
-    pub http_port: u16,
+    /// The port that the compute's external HTTP server listens on
+    pub external_http_port: u16,
+    /// The port that the compute's internal HTTP server listens on
+    pub internal_http_port: u16,
     /// Volatile part of the `ComputeNode`, which should be used under `Mutex`.
     /// To allow HTTP API server to serving status requests, while configuration
     /// is in progress, lock should be held only for short periods of time to do
@@ -338,6 +343,15 @@ impl ComputeNode {
         self.state.lock().unwrap().status
     }
 
+    pub fn get_timeline_id(&self) -> Option<TimelineId> {
+        self.state
+            .lock()
+            .unwrap()
+            .pspec
+            .as_ref()
+            .map(|s| s.timeline_id)
+    }
+
     // Remove `pgdata` directory and create it again with right permissions.
     fn create_pgdata(&self) -> Result<()> {
         // Ignore removal error, likely it is a 'No such file or directory (os error 2)'.
@@ -535,11 +549,7 @@ impl ComputeNode {
     pub fn check_safekeepers_synced(&self, compute_state: &ComputeState) -> Result<Option<Lsn>> {
         let start_time = Utc::now();
 
-        // Run actual work with new tokio runtime
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to create rt");
+        let rt = tokio::runtime::Handle::current();
         let result = rt.block_on(self.check_safekeepers_synced_async(compute_state));
 
         // Record runtime
@@ -586,9 +596,9 @@ impl ComputeNode {
         SYNC_SAFEKEEPERS_PID.store(0, Ordering::SeqCst);
 
         // Process has exited, so we can join the logs thread.
-        let _ = logs_handle
-            .join()
-            .map_err(|e| tracing::error!("log thread panicked: {:?}", e));
+        let _ = tokio::runtime::Handle::current()
+            .block_on(logs_handle)
+            .map_err(|e| tracing::error!("log task panicked: {:?}", e));
 
         if !sync_output.status.success() {
             anyhow::bail!(
@@ -623,7 +633,7 @@ impl ComputeNode {
         config::write_postgres_conf(
             &pgdata_path.join("postgresql.conf"),
             &pspec.spec,
-            self.http_port,
+            self.internal_http_port,
         )?;
 
         // Syncing safekeepers is only safe with primary nodes: if a primary
@@ -773,7 +783,7 @@ impl ComputeNode {
     pub fn start_postgres(
         &self,
         storage_auth_token: Option<String>,
-    ) -> Result<(std::process::Child, std::thread::JoinHandle<()>)> {
+    ) -> Result<(std::process::Child, tokio::task::JoinHandle<Result<()>>)> {
         let pgdata_path = Path::new(&self.pgdata);
 
         // Run postgres as a child process.
@@ -789,7 +799,7 @@ impl ComputeNode {
             .expect("cannot start postgres process");
         PG_PID.store(pg.id(), Ordering::SeqCst);
 
-        // Start a thread to collect logs from stderr.
+        // Start a task to collect logs from stderr.
         let stderr = pg.stderr.take().expect("stderr should be captured");
         let logs_handle = handle_postgres_logs(stderr);
 
@@ -798,20 +808,28 @@ impl ComputeNode {
         Ok((pg, logs_handle))
     }
 
-    /// Do post configuration of the already started Postgres. This function spawns a background thread to
+    /// Do post configuration of the already started Postgres. This function spawns a background task to
     /// configure the database after applying the compute spec. Currently, it upgrades the neon extension
     /// version. In the future, it may upgrade all 3rd-party extensions.
     #[instrument(skip_all)]
     pub fn post_apply_config(&self) -> Result<()> {
-        let conf = self.get_conn_conf(Some("compute_ctl:post_apply_config"));
-        thread::spawn(move || {
-            let func = || {
-                let mut client = conf.connect(NoTls)?;
+        let conf = self.get_tokio_conn_conf(Some("compute_ctl:post_apply_config"));
+        tokio::spawn(async move {
+            let res = async {
+                let (mut client, connection) = conf.connect(NoTls).await?;
+                tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        eprintln!("connection error: {}", e);
+                    }
+                });
+
                 handle_neon_extension_upgrade(&mut client)
+                    .await
                     .context("handle_neon_extension_upgrade")?;
                 Ok::<_, anyhow::Error>(())
-            };
-            if let Err(err) = func() {
+            }
+            .await;
+            if let Err(err) = res {
                 error!("error while post_apply_config: {err:#}");
             }
         });
@@ -834,7 +852,7 @@ impl ComputeNode {
         conf
     }
 
-    async fn get_maintenance_client(
+    pub async fn get_maintenance_client(
         conf: &tokio_postgres::Config,
     ) -> Result<tokio_postgres::Client> {
         let mut conf = conf.clone();
@@ -908,13 +926,10 @@ impl ComputeNode {
         conf: Arc<tokio_postgres::Config>,
         concurrency: usize,
     ) -> Result<()> {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?;
-
         info!("Applying config with max {} concurrency", concurrency);
         debug!("Config: {:?}", spec);
 
+        let rt = tokio::runtime::Handle::current();
         rt.block_on(async {
             // Proceed with post-startup configuration. Note, that order of operations is important.
             let client = Self::get_maintenance_client(&conf).await?;
@@ -926,6 +941,48 @@ impl ComputeNode {
                 .into_iter()
                 .map(|role| (role.name.clone(), role))
                 .collect::<HashMap<String, Role>>();
+
+            // Check if we need to drop subscriptions before starting the endpoint.
+            //
+            // It is important to do this operation exactly once when endpoint starts on a new branch.
+            // Otherwise, we may drop not inherited, but newly created subscriptions.
+            //
+            // We cannot rely only on spec.drop_subscriptions_before_start flag,
+            // because if for some reason compute restarts inside VM,
+            // it will start again with the same spec and flag value.
+            //
+            // To handle this, we save the fact of the operation in the database
+            // in the neon.drop_subscriptions_done table.
+            // If the table does not exist, we assume that the operation was never performed, so we must do it.
+            // If table exists, we check if the operation was performed on the current timelilne.
+            //
+            let mut drop_subscriptions_done = false;
+
+            if spec.drop_subscriptions_before_start {
+                let timeline_id = self.get_timeline_id().context("timeline_id must be set")?;
+                let query = format!("select 1 from neon.drop_subscriptions_done where timeline_id = '{}'", timeline_id);
+
+                info!("Checking if drop subscription operation was already performed for timeline_id: {}", timeline_id);
+
+                drop_subscriptions_done =  match
+                    client.simple_query(&query).await {
+                    Ok(result) => {
+                        matches!(&result[0], postgres::SimpleQueryMessage::Row(_))
+                    },
+                    Err(e) =>
+                    {
+                        match e.code() {
+                            Some(&SqlState::UNDEFINED_TABLE) => false,
+                            _ => {
+                                // We don't expect any other error here, except for the schema/table not existing
+                                error!("Error checking if drop subscription operation was already performed: {}", e);
+                                return Err(e.into());
+                            }
+                        }
+                    }
+                }
+            };
+
 
             let jwks_roles = Arc::new(
                 spec.as_ref()
@@ -943,6 +1000,78 @@ impl ComputeNode {
                 dbs: databases,
             }));
 
+            // Apply special pre drop database phase.
+            // NOTE: we use the code of RunInEachDatabase phase for parallelism
+            // and connection management, but we don't really run it in *each* database,
+            // only in databases, we're about to drop.
+            info!("Applying PerDatabase (pre-dropdb) phase");
+            let concurrency_token = Arc::new(tokio::sync::Semaphore::new(concurrency));
+
+            // Run the phase for each database that we're about to drop.
+            let db_processes = spec
+                .delta_operations
+                .iter()
+                .flatten()
+                .filter_map(move |op| {
+                    if op.action.as_str() == "delete_db" {
+                        Some(op.name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .map(|dbname| {
+                    let spec = spec.clone();
+                    let ctx = ctx.clone();
+                    let jwks_roles = jwks_roles.clone();
+                    let mut conf = conf.as_ref().clone();
+                    let concurrency_token = concurrency_token.clone();
+                    // We only need dbname field for this phase, so set other fields to dummy values
+                    let db = DB::UserDB(Database {
+                        name: dbname.clone(),
+                        owner: "cloud_admin".to_string(),
+                        options: None,
+                        restrict_conn: false,
+                        invalid: false,
+                    });
+
+                    debug!("Applying per-database phases for Database {:?}", &db);
+
+                    match &db {
+                        DB::SystemDB => {}
+                        DB::UserDB(db) => {
+                            conf.dbname(db.name.as_str());
+                        }
+                    }
+
+                    let conf = Arc::new(conf);
+                    let fut = Self::apply_spec_sql_db(
+                        spec.clone(),
+                        conf,
+                        ctx.clone(),
+                        jwks_roles.clone(),
+                        concurrency_token.clone(),
+                        db,
+                        [DropLogicalSubscriptions].to_vec(),
+                    );
+
+                    Ok(spawn(fut))
+                })
+                .collect::<Vec<Result<_, anyhow::Error>>>();
+
+            for process in db_processes.into_iter() {
+                let handle = process?;
+                if let Err(e) = handle.await? {
+                    // Handle the error case where the database does not exist
+                    // We do not check whether the DB exists or not in the deletion phase,
+                    // so we shouldn't be strict about it in pre-deletion cleanup as well.
+                    if e.to_string().contains("does not exist") {
+                        warn!("Error dropping subscription: {}", e);
+                    } else {
+                        return Err(e);
+                    }
+                };
+            }
+
             for phase in [
                 CreateSuperUser,
                 DropInvalidDatabases,
@@ -950,6 +1079,7 @@ impl ComputeNode {
                 CreateAndAlterRoles,
                 RenameAndDeleteDatabases,
                 CreateAndAlterDatabases,
+                CreateSchemaNeon,
             ] {
                 info!("Applying phase {:?}", &phase);
                 apply_operations(
@@ -962,7 +1092,7 @@ impl ComputeNode {
                 .await?;
             }
 
-            info!("Applying RunInEachDatabase phase");
+            info!("Applying RunInEachDatabase2 phase");
             let concurrency_token = Arc::new(tokio::sync::Semaphore::new(concurrency));
 
             let db_processes = spec
@@ -990,6 +1120,17 @@ impl ComputeNode {
                     }
 
                     let conf = Arc::new(conf);
+                    let mut phases = vec![
+                        DeleteDBRoleReferences,
+                        ChangeSchemaPerms,
+                        HandleAnonExtension,
+                    ];
+
+                    if spec.drop_subscriptions_before_start && !drop_subscriptions_done {
+                        info!("Adding DropLogicalSubscriptions phase because drop_subscriptions_before_start is set");
+                        phases.push(DropLogicalSubscriptions);
+                    }
+
                     let fut = Self::apply_spec_sql_db(
                         spec.clone(),
                         conf,
@@ -997,6 +1138,7 @@ impl ComputeNode {
                         jwks_roles.clone(),
                         concurrency_token.clone(),
                         db,
+                        phases,
                     );
 
                     Ok(spawn(fut))
@@ -1008,12 +1150,20 @@ impl ComputeNode {
                 handle.await??;
             }
 
-            for phase in vec![
+            let mut phases = vec![
                 HandleOtherExtensions,
-                HandleNeonExtension,
+                HandleNeonExtension, // This step depends on CreateSchemaNeon
                 CreateAvailabilityCheck,
                 DropRoles,
-            ] {
+            ];
+
+            // This step depends on CreateSchemaNeon
+            if spec.drop_subscriptions_before_start && !drop_subscriptions_done {
+                info!("Adding FinalizeDropLogicalSubscriptions phase because drop_subscriptions_before_start is set");
+                phases.push(FinalizeDropLogicalSubscriptions);
+            }
+
+            for phase in phases {
                 debug!("Applying phase {:?}", &phase);
                 apply_operations(
                     spec.clone(),
@@ -1043,16 +1193,13 @@ impl ComputeNode {
         jwks_roles: Arc<HashSet<String>>,
         concurrency_token: Arc<tokio::sync::Semaphore>,
         db: DB,
+        subphases: Vec<PerDatabasePhase>,
     ) -> Result<()> {
         let _permit = concurrency_token.acquire().await?;
 
         let mut client_conn = None;
 
-        for subphase in [
-            DeleteDBRoleReferences,
-            ChangeSchemaPerms,
-            HandleAnonExtension,
-        ] {
+        for subphase in subphases {
             apply_operations(
                 spec.clone(),
                 ctx.clone(),
@@ -1176,13 +1323,28 @@ impl ComputeNode {
         }
 
         // Run migrations separately to not hold up cold starts
-        thread::spawn(move || {
-            let conf = conf.as_ref().clone();
-            let mut conf = postgres::config::Config::from(conf);
+        tokio::spawn(async move {
+            let mut conf = conf.as_ref().clone();
             conf.application_name("compute_ctl:migrations");
 
-            let mut client = conf.connect(NoTls)?;
-            handle_migrations(&mut client).context("apply_config handle_migrations")
+            match conf.connect(NoTls).await {
+                Ok((mut client, connection)) => {
+                    tokio::spawn(async move {
+                        if let Err(e) = connection.await {
+                            eprintln!("connection error: {}", e);
+                        }
+                    });
+                    if let Err(e) = handle_migrations(&mut client).await {
+                        error!("Failed to run migrations: {}", e);
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to connect to the compute for running migrations: {}",
+                        e
+                    );
+                }
+            };
         });
 
         Ok::<(), anyhow::Error>(())
@@ -1209,16 +1371,11 @@ impl ComputeNode {
         if let Some(ref pgbouncer_settings) = spec.pgbouncer_settings {
             info!("tuning pgbouncer");
 
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to create rt");
-
-            // Spawn a thread to do the tuning,
+            // Spawn a background task to do the tuning,
             // so that we don't block the main thread that starts Postgres.
             let pgbouncer_settings = pgbouncer_settings.clone();
-            let _handle = thread::spawn(move || {
-                let res = rt.block_on(tune_pgbouncer(pgbouncer_settings));
+            tokio::spawn(async move {
+                let res = tune_pgbouncer(pgbouncer_settings).await;
                 if let Err(err) = res {
                     error!("error while tuning pgbouncer: {err:?}");
                 }
@@ -1228,41 +1385,42 @@ impl ComputeNode {
         if let Some(ref local_proxy) = spec.local_proxy_config {
             info!("configuring local_proxy");
 
-            // Spawn a thread to do the configuration,
+            // Spawn a background task to do the configuration,
             // so that we don't block the main thread that starts Postgres.
             let local_proxy = local_proxy.clone();
-            let _handle = Some(thread::spawn(move || {
+            tokio::spawn(async move {
                 if let Err(err) = local_proxy::configure(&local_proxy) {
                     error!("error while configuring local_proxy: {err:?}");
                 }
-            }));
+            });
         }
 
         // Write new config
         let pgdata_path = Path::new(&self.pgdata);
         let postgresql_conf_path = pgdata_path.join("postgresql.conf");
-        config::write_postgres_conf(&postgresql_conf_path, &spec, self.http_port)?;
+        config::write_postgres_conf(&postgresql_conf_path, &spec, self.internal_http_port)?;
 
-        let max_concurrent_connections = spec.reconfigure_concurrency;
+        if !spec.skip_pg_catalog_updates {
+            let max_concurrent_connections = spec.reconfigure_concurrency;
+            // Temporarily reset max_cluster_size in config
+            // to avoid the possibility of hitting the limit, while we are reconfiguring:
+            // creating new extensions, roles, etc.
+            config::with_compute_ctl_tmp_override(pgdata_path, "neon.max_cluster_size=-1", || {
+                self.pg_reload_conf()?;
 
-        // Temporarily reset max_cluster_size in config
-        // to avoid the possibility of hitting the limit, while we are reconfiguring:
-        // creating new extensions, roles, etc.
-        config::with_compute_ctl_tmp_override(pgdata_path, "neon.max_cluster_size=-1", || {
-            self.pg_reload_conf()?;
+                if spec.mode == ComputeMode::Primary {
+                    let mut conf = tokio_postgres::Config::from_str(self.connstr.as_str()).unwrap();
+                    conf.application_name("apply_config");
+                    let conf = Arc::new(conf);
 
-            if spec.mode == ComputeMode::Primary {
-                let mut conf = tokio_postgres::Config::from_str(self.connstr.as_str()).unwrap();
-                conf.application_name("apply_config");
-                let conf = Arc::new(conf);
+                    let spec = Arc::new(spec.clone());
 
-                let spec = Arc::new(spec.clone());
+                    self.apply_spec_sql(spec, conf, max_concurrent_connections)?;
+                }
 
-                self.apply_spec_sql(spec, conf, max_concurrent_connections)?;
-            }
-
-            Ok(())
-        })?;
+                Ok(())
+            })?;
+        }
 
         self.pg_reload_conf()?;
 
@@ -1277,7 +1435,9 @@ impl ComputeNode {
     }
 
     #[instrument(skip_all)]
-    pub fn start_compute(&self) -> Result<(std::process::Child, std::thread::JoinHandle<()>)> {
+    pub fn start_compute(
+        &self,
+    ) -> Result<(std::process::Child, tokio::task::JoinHandle<Result<()>>)> {
         let compute_state = self.state.lock().unwrap().clone();
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
         info!(
@@ -1292,16 +1452,11 @@ impl ComputeNode {
         if let Some(pgbouncer_settings) = &pspec.spec.pgbouncer_settings {
             info!("tuning pgbouncer");
 
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to create rt");
-
-            // Spawn a thread to do the tuning,
+            // Spawn a background task to do the tuning,
             // so that we don't block the main thread that starts Postgres.
             let pgbouncer_settings = pgbouncer_settings.clone();
-            let _handle = thread::spawn(move || {
-                let res = rt.block_on(tune_pgbouncer(pgbouncer_settings));
+            let _handle = tokio::spawn(async move {
+                let res = tune_pgbouncer(pgbouncer_settings).await;
                 if let Err(err) = res {
                     error!("error while tuning pgbouncer: {err:?}");
                 }
@@ -1311,10 +1466,10 @@ impl ComputeNode {
         if let Some(local_proxy) = &pspec.spec.local_proxy_config {
             info!("configuring local_proxy");
 
-            // Spawn a thread to do the configuration,
+            // Spawn a background task to do the configuration,
             // so that we don't block the main thread that starts Postgres.
             let local_proxy = local_proxy.clone();
-            let _handle = thread::spawn(move || {
+            let _handle = tokio::spawn(async move {
                 if let Err(err) = local_proxy::configure(&local_proxy) {
                     error!("error while configuring local_proxy: {err:?}");
                 }
@@ -1333,7 +1488,8 @@ impl ComputeNode {
             extension_server::create_control_files(remote_extensions, &self.pgbin);
 
             let library_load_start_time = Utc::now();
-            let remote_ext_metrics = self.prepare_preload_libraries(&pspec.spec)?;
+            let rt = tokio::runtime::Handle::current();
+            let remote_ext_metrics = rt.block_on(self.prepare_preload_libraries(&pspec.spec))?;
 
             let library_load_time = Utc::now()
                 .signed_duration_since(library_load_start_time)
@@ -1375,12 +1531,20 @@ impl ComputeNode {
                         Ok(())
                     },
                 )?;
+
+                let postgresql_conf_path = pgdata_path.join("postgresql.conf");
+                if config::line_in_file(
+                    &postgresql_conf_path,
+                    "neon.disable_logical_replication_subscribers=false",
+                )? {
+                    info!("updated postgresql.conf to set neon.disable_logical_replication_subscribers=false");
+                }
                 self.pg_reload_conf()?;
             }
             self.post_apply_config()?;
 
             let conf = self.get_conn_conf(None);
-            thread::spawn(move || {
+            tokio::task::spawn_blocking(|| {
                 let res = get_installed_extensions(conf);
                 match res {
                     Ok(extensions) => {
@@ -1729,7 +1893,6 @@ LIMIT 100",
         Ok(ext_version)
     }
 
-    #[tokio::main]
     pub async fn prepare_preload_libraries(
         &self,
         spec: &ComputeSpec,

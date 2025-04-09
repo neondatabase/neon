@@ -18,28 +18,24 @@
 //! - An Iterator interface would be more convenient for the callers than the
 //!   'visit' function
 //!
+use std::cmp::Ordering;
+use std::iter::Rev;
+use std::ops::{Range, RangeInclusive};
+use std::{io, result};
+
 use async_stream::try_stream;
-use byteorder::{ReadBytesExt, BE};
+use byteorder::{BE, ReadBytesExt};
 use bytes::BufMut;
 use either::Either;
 use futures::{Stream, StreamExt};
 use hex;
-use std::{
-    cmp::Ordering,
-    io,
-    iter::Rev,
-    ops::{Range, RangeInclusive},
-    result,
-};
 use thiserror::Error;
 use tracing::error;
 
-use crate::{
-    context::{DownloadBehavior, RequestContext},
-    task_mgr::TaskKind,
-    tenant::block_io::{BlockReader, BlockWriter},
-    virtual_file::{owned_buffers_io::write::Buffer, IoBuffer, IoBufferMut},
-};
+use crate::context::{DownloadBehavior, RequestContext};
+use crate::task_mgr::TaskKind;
+use crate::tenant::block_io::{BlockReader, BlockWriter};
+use crate::virtual_file::{IoBuffer, IoBufferMut, owned_buffers_io::write::Buffer};
 
 // The maximum size of a value stored in the B-tree. 5 bytes is enough currently.
 pub const VALUE_SZ: usize = 5;
@@ -85,17 +81,17 @@ impl Value {
 
     fn to_u64(self) -> u64 {
         let b = &self.0;
-        (b[0] as u64) << 32
-            | (b[1] as u64) << 24
-            | (b[2] as u64) << 16
-            | (b[3] as u64) << 8
+        ((b[0] as u64) << 32)
+            | ((b[1] as u64) << 24)
+            | ((b[2] as u64) << 16)
+            | ((b[3] as u64) << 8)
             | b[4] as u64
     }
 
     fn to_blknum(self) -> u32 {
         let b = &self.0;
         assert!(b[0] == 0x80);
-        (b[1] as u32) << 24 | (b[2] as u32) << 16 | (b[3] as u32) << 8 | b[4] as u32
+        ((b[1] as u32) << 24) | ((b[2] as u32) << 16) | ((b[3] as u32) << 8) | b[4] as u32
     }
 }
 
@@ -533,7 +529,7 @@ pub struct DiskBtreeIterator<'a> {
     >,
 }
 
-impl<'a> DiskBtreeIterator<'a> {
+impl DiskBtreeIterator<'_> {
     pub async fn next(&mut self) -> Option<std::result::Result<(Vec<u8>, u64), DiskBtreeError>> {
         self.stream.next().await
     }
@@ -834,11 +830,13 @@ impl<const L: usize> BuildNode<L> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::*;
-    use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReaderRef};
-    use rand::Rng;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use rand::Rng;
+
+    use super::*;
+    use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReaderRef};
 
     #[derive(Clone, Default)]
     pub(crate) struct TestDisk {
@@ -1116,7 +1114,7 @@ pub(crate) mod tests {
 
         // Test get() operations on random keys, most of which will not exist
         for _ in 0..100000 {
-            let key_int = rand::thread_rng().gen::<u128>();
+            let key_int = rand::thread_rng().r#gen::<u128>();
             let search_key = u128::to_be_bytes(key_int);
             assert!(reader.get(&search_key, &ctx).await? == all_data.get(&key_int).cloned());
         }

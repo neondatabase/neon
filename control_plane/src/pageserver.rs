@@ -95,21 +95,19 @@ impl PageServerNode {
 
         let mut overrides = vec![pg_distrib_dir_param, broker_endpoint_param];
 
-        if let Some(control_plane_api) = &self.env.control_plane_api {
-            overrides.push(format!(
-                "control_plane_api='{}'",
-                control_plane_api.as_str()
-            ));
+        overrides.push(format!(
+            "control_plane_api='{}'",
+            self.env.control_plane_api.as_str()
+        ));
 
-            // Storage controller uses the same auth as pageserver: if JWT is enabled
-            // for us, we will also need it to talk to them.
-            if matches!(conf.http_auth_type, AuthType::NeonJWT) {
-                let jwt_token = self
-                    .env
-                    .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
-                    .unwrap();
-                overrides.push(format!("control_plane_api_token='{}'", jwt_token));
-            }
+        // Storage controller uses the same auth as pageserver: if JWT is enabled
+        // for us, we will also need it to talk to them.
+        if matches!(conf.http_auth_type, AuthType::NeonJWT) {
+            let jwt_token = self
+                .env
+                .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
+                .unwrap();
+            overrides.push(format!("control_plane_api_token='{}'", jwt_token));
         }
 
         if !conf.other.contains_key("remote_storage") {
@@ -337,29 +335,70 @@ impl PageServerNode {
                 .map(|x| x.parse::<u64>())
                 .transpose()
                 .context("Failed to parse 'checkpoint_distance' as an integer")?,
-            checkpoint_timeout: settings.remove("checkpoint_timeout").map(|x| x.to_string()),
+            checkpoint_timeout: settings
+                .remove("checkpoint_timeout")
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'checkpoint_timeout' as duration")?,
             compaction_target_size: settings
                 .remove("compaction_target_size")
                 .map(|x| x.parse::<u64>())
                 .transpose()
                 .context("Failed to parse 'compaction_target_size' as an integer")?,
-            compaction_period: settings.remove("compaction_period").map(|x| x.to_string()),
+            compaction_period: settings
+                .remove("compaction_period")
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'compaction_period' as duration")?,
             compaction_threshold: settings
                 .remove("compaction_threshold")
                 .map(|x| x.parse::<usize>())
                 .transpose()
                 .context("Failed to parse 'compaction_threshold' as an integer")?,
+            compaction_upper_limit: settings
+                .remove("compaction_upper_limit")
+                .map(|x| x.parse::<usize>())
+                .transpose()
+                .context("Failed to parse 'compaction_upper_limit' as an integer")?,
             compaction_algorithm: settings
                 .remove("compaction_algorithm")
                 .map(serde_json::from_str)
                 .transpose()
                 .context("Failed to parse 'compaction_algorithm' json")?,
+            compaction_l0_first: settings
+                .remove("compaction_l0_first")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'compaction_l0_first' as a bool")?,
+            compaction_l0_semaphore: settings
+                .remove("compaction_l0_semaphore")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'compaction_l0_semaphore' as a bool")?,
+            l0_flush_delay_threshold: settings
+                .remove("l0_flush_delay_threshold")
+                .map(|x| x.parse::<usize>())
+                .transpose()
+                .context("Failed to parse 'l0_flush_delay_threshold' as an integer")?,
+            l0_flush_wait_upload: settings
+                .remove("l0_flush_wait_upload")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'l0_flush_wait_upload' as a boolean")?,
+            l0_flush_stall_threshold: settings
+                .remove("l0_flush_stall_threshold")
+                .map(|x| x.parse::<usize>())
+                .transpose()
+                .context("Failed to parse 'l0_flush_stall_threshold' as an integer")?,
             gc_horizon: settings
                 .remove("gc_horizon")
                 .map(|x| x.parse::<u64>())
                 .transpose()
                 .context("Failed to parse 'gc_horizon' as an integer")?,
-            gc_period: settings.remove("gc_period").map(|x| x.to_string()),
+            gc_period: settings.remove("gc_period")
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'gc_period' as duration")?,
             image_creation_threshold: settings
                 .remove("image_creation_threshold")
                 .map(|x| x.parse::<usize>())
@@ -370,13 +409,25 @@ impl PageServerNode {
                 .map(|x| x.parse::<u8>())
                 .transpose()
                 .context("Failed to parse 'image_creation_check_threshold' as integer")?,
-            pitr_interval: settings.remove("pitr_interval").map(|x| x.to_string()),
+            image_creation_preempt_threshold: settings
+                .remove("image_creation_preempt_threshold")
+                .map(|x| x.parse::<usize>())
+                .transpose()
+                .context("Failed to parse 'image_creation_preempt_threshold' as integer")?,
+            pitr_interval: settings.remove("pitr_interval")
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'pitr_interval' as duration")?,
             walreceiver_connect_timeout: settings
                 .remove("walreceiver_connect_timeout")
-                .map(|x| x.to_string()),
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'walreceiver_connect_timeout' as duration")?,
             lagging_wal_timeout: settings
                 .remove("lagging_wal_timeout")
-                .map(|x| x.to_string()),
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'lagging_wal_timeout' as duration")?,
             max_lsn_wal_lag: settings
                 .remove("max_lsn_wal_lag")
                 .map(|x| x.parse::<NonZeroU64>())
@@ -394,8 +445,14 @@ impl PageServerNode {
                 .context("Failed to parse 'min_resident_size_override' as integer")?,
             evictions_low_residence_duration_metric_threshold: settings
                 .remove("evictions_low_residence_duration_metric_threshold")
-                .map(|x| x.to_string()),
-            heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'evictions_low_residence_duration_metric_threshold' as duration")?,
+            heatmap_period: settings
+                .remove("heatmap_period")
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'heatmap_period' as duration")?,
             lazy_slru_download: settings
                 .remove("lazy_slru_download")
                 .map(|x| x.parse::<bool>())
@@ -406,10 +463,15 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("parse `timeline_get_throttle` from json")?,
-            lsn_lease_length: settings.remove("lsn_lease_length").map(|x| x.to_string()),
+            lsn_lease_length: settings.remove("lsn_lease_length")
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'lsn_lease_length' as duration")?,
             lsn_lease_length_for_ts: settings
                 .remove("lsn_lease_length_for_ts")
-                .map(|x| x.to_string()),
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'lsn_lease_length_for_ts' as duration")?,
             timeline_offloading: settings
                 .remove("timeline_offloading")
                 .map(|x| x.parse::<bool>())
@@ -420,6 +482,26 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("parse `wal_receiver_protocol_override` from json")?,
+            rel_size_v2_enabled: settings
+                .remove("rel_size_v2_enabled")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'rel_size_v2_enabled' as bool")?,
+            gc_compaction_enabled: settings
+                .remove("gc_compaction_enabled")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'gc_compaction_enabled' as bool")?,
+            gc_compaction_initial_threshold_kb: settings
+                .remove("gc_compaction_initial_threshold_kb")
+                .map(|x| x.parse::<u64>())
+                .transpose()
+                .context("Failed to parse 'gc_compaction_initial_threshold_kb' as integer")?,
+            gc_compaction_ratio_percent: settings
+                .remove("gc_compaction_ratio_percent")
+                .map(|x| x.parse::<u64>())
+                .transpose()
+                .context("Failed to parse 'gc_compaction_ratio_percent' as integer")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -435,7 +517,7 @@ impl PageServerNode {
     ) -> anyhow::Result<()> {
         let config = Self::parse_config(settings)?;
         self.http_client
-            .tenant_config(&models::TenantConfigRequest { tenant_id, config })
+            .set_tenant_config(&models::TenantConfigRequest { tenant_id, config })
             .await?;
 
         Ok(())

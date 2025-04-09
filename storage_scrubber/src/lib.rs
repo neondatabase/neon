@@ -13,19 +13,18 @@ pub mod tenant_snapshot;
 use std::env;
 use std::fmt::Display;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
 use aws_config::retry::{RetryConfigBuilder, RetryMode};
+use aws_sdk_s3::Client;
 use aws_sdk_s3::config::Region;
 use aws_sdk_s3::error::DisplayErrorContext;
-use aws_sdk_s3::Client;
-
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::ValueEnum;
 use futures::{Stream, StreamExt};
-use pageserver::tenant::remote_timeline_client::{remote_tenant_path, remote_timeline_path};
 use pageserver::tenant::TENANTS_SEGMENT_NAME;
+use pageserver::tenant::remote_timeline_client::{remote_tenant_path, remote_timeline_path};
 use pageserver_api::shard::TenantShardId;
 use remote_storage::{
     DownloadOpts, GenericRemoteStorage, Listing, ListingMode, RemotePath, RemoteStorageConfig,
@@ -38,7 +37,8 @@ use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::{EnvFilter, fmt};
 use utils::fs_ext;
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 
@@ -411,10 +411,10 @@ async fn init_remote(
     let default_prefix = default_prefix_in_bucket(node_kind).to_string();
 
     match &mut storage_config.0.storage {
-        RemoteStorageKind::AwsS3(ref mut config) => {
+        RemoteStorageKind::AwsS3(config) => {
             config.prefix_in_bucket.get_or_insert(default_prefix);
         }
-        RemoteStorageKind::AzureContainer(ref mut config) => {
+        RemoteStorageKind::AzureContainer(config) => {
             config.prefix_in_container.get_or_insert(default_prefix);
         }
         RemoteStorageKind::LocalFs { .. } => (),
@@ -509,10 +509,11 @@ async fn list_objects_with_retries(
     panic!("MAX_RETRIES is not allowed to be 0");
 }
 
+/// Returns content, last modified time
 async fn download_object_with_retries(
     remote_client: &GenericRemoteStorage,
     key: &RemotePath,
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<(Vec<u8>, SystemTime)> {
     let cancel = CancellationToken::new();
     for trial in 0..MAX_RETRIES {
         let mut buf = Vec::new();
@@ -535,7 +536,7 @@ async fn download_object_with_retries(
         {
             Ok(bytes_read) => {
                 tracing::debug!("Downloaded {bytes_read} bytes for object {key}");
-                return Ok(buf);
+                return Ok((buf, download.last_modified));
             }
             Err(e) => {
                 error!("Failed to stream object body for key {key}: {e}");

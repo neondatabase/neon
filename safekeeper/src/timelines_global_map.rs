@@ -2,28 +2,32 @@
 //! All timelines should always be present in this map, this is done by loading them
 //! all from the disk on startup and keeping them in memory.
 
-use crate::defaults::DEFAULT_EVICTION_CONCURRENCY;
-use crate::rate_limit::RateLimiter;
-use crate::safekeeper::ServerInfo;
-use crate::state::TimelinePersistentState;
-use crate::timeline::{get_tenant_dir, get_timeline_dir, Timeline, TimelineError};
-use crate::timelines_set::TimelinesSet;
-use crate::wal_storage::Storage;
-use crate::{control_file, wal_storage, SafeKeeperConf};
-use anyhow::{bail, Context, Result};
-use camino::Utf8PathBuf;
-use camino_tempfile::Utf8TempDir;
-use serde::Serialize;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, bail};
+use camino::Utf8PathBuf;
+use camino_tempfile::Utf8TempDir;
+use safekeeper_api::ServerInfo;
+use safekeeper_api::membership::Configuration;
+use safekeeper_api::models::SafekeeperUtilization;
+use serde::Serialize;
 use tokio::fs;
 use tracing::*;
 use utils::crashsafe::{durable_rename, fsync_async_opt};
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
+
+use crate::defaults::DEFAULT_EVICTION_CONCURRENCY;
+use crate::rate_limit::RateLimiter;
+use crate::state::TimelinePersistentState;
+use crate::timeline::{Timeline, TimelineError, get_tenant_dir, get_timeline_dir};
+use crate::timelines_set::TimelinesSet;
+use crate::wal_storage::Storage;
+use crate::{SafeKeeperConf, control_file, wal_storage};
 
 // Timeline entry in the global map: either a ready timeline, or mark that it is
 // being created.
@@ -214,9 +218,10 @@ impl GlobalTimelines {
     pub(crate) async fn create(
         &self,
         ttid: TenantTimelineId,
+        mconf: Configuration,
         server_info: ServerInfo,
+        start_lsn: Lsn,
         commit_lsn: Lsn,
-        local_start_lsn: Lsn,
     ) -> Result<Arc<Timeline>> {
         let (conf, _, _) = {
             let state = self.state.lock().unwrap();
@@ -239,8 +244,7 @@ impl GlobalTimelines {
 
         // TODO: currently we create only cfile. It would be reasonable to
         // immediately initialize first WAL segment as well.
-        let state =
-            TimelinePersistentState::new(&ttid, server_info, vec![], commit_lsn, local_start_lsn)?;
+        let state = TimelinePersistentState::new(&ttid, mconf, server_info, start_lsn, commit_lsn)?;
         control_file::FileStorage::create_new(&tmp_dir_path, state, conf.no_sync).await?;
         let timeline = self.load_temp_timeline(ttid, &tmp_dir_path, true).await?;
         Ok(timeline)
@@ -415,6 +419,20 @@ impl GlobalTimelines {
             .collect()
     }
 
+    /// Returns statistics about timeline counts
+    pub fn get_timeline_counts(&self) -> SafekeeperUtilization {
+        let global_lock = self.state.lock().unwrap();
+        let timeline_count = global_lock
+            .timelines
+            .values()
+            .filter(|t| match t {
+                GlobalMapTimeline::CreationInProgress => false,
+                GlobalMapTimeline::Timeline(t) => !t.is_cancelled(),
+            })
+            .count() as u64;
+        SafekeeperUtilization { timeline_count }
+    }
+
     /// Returns all timelines belonging to a given tenant. Used for deleting all timelines of a tenant,
     /// and that's why it can return cancelled timelines, to retry deleting them.
     fn get_all_for_tenant(&self, tenant_id: TenantId) -> Vec<Arc<Timeline>> {
@@ -458,6 +476,8 @@ impl GlobalTimelines {
 
                 info!("deleting timeline {}, only_local={}", ttid, only_local);
                 timeline.shutdown().await;
+
+                info!("timeline {ttid} shut down for deletion");
 
                 // Take a lock and finish the deletion holding this mutex.
                 let mut shared_state = timeline.write_shared_state().await;

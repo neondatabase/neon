@@ -221,7 +221,17 @@ impl StorageController {
             "-p",
             &format!("{}", postgres_port),
         ];
-        let exitcode = Command::new(bin_path).args(args).spawn()?.wait().await?;
+        let pg_lib_dir = self.get_pg_lib_dir().await.unwrap();
+        let envs = [
+            ("LD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+            ("DYLD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+        ];
+        let exitcode = Command::new(bin_path)
+            .args(args)
+            .envs(envs)
+            .spawn()?
+            .wait()
+            .await?;
 
         Ok(exitcode.success())
     }
@@ -242,6 +252,11 @@ impl StorageController {
 
         let pg_bin_dir = self.get_pg_bin_dir().await?;
         let createdb_path = pg_bin_dir.join("createdb");
+        let pg_lib_dir = self.get_pg_lib_dir().await.unwrap();
+        let envs = [
+            ("LD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+            ("DYLD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+        ];
         let output = Command::new(&createdb_path)
             .args([
                 "-h",
@@ -254,6 +269,7 @@ impl StorageController {
                 &username(),
                 DB_NAME,
             ])
+            .envs(envs)
             .output()
             .await
             .expect("Failed to spawn createdb");
@@ -338,7 +354,7 @@ impl StorageController {
                         .port(),
                 )
             } else {
-                let listen_url = self.env.control_plane_api.clone().unwrap();
+                let listen_url = self.env.control_plane_api.clone();
 
                 let listen = format!(
                     "{}:{}",
@@ -708,7 +724,7 @@ impl StorageController {
         } else {
             // The configured URL has the /upcall path prefix for pageservers to use: we will strip that out
             // for general purpose API access.
-            let listen_url = self.env.control_plane_api.clone().unwrap();
+            let listen_url = self.env.control_plane_api.clone();
             Url::from_str(&format!(
                 "http://{}:{}/{path}",
                 listen_url.host_str().unwrap(),
@@ -823,8 +839,8 @@ impl StorageController {
             Method::PUT,
             format!("control/v1/tenant/{tenant_shard_id}/migrate"),
             Some(TenantShardMigrateRequest {
-                tenant_shard_id,
                 node_id,
+                migration_config: None,
             }),
         )
         .await

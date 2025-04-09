@@ -23,24 +23,31 @@ def test_layer_map(neon_env_builder: NeonEnvBuilder, zenbenchmark):
             "checkpoint_distance": "16384",
             "compaction_period": "1 s",
             "compaction_threshold": "1",
+            "l0_flush_delay_threshold": "0",
+            "l0_flush_stall_threshold": "0",
             "compaction_target_size": "16384",
         }
     )
 
     endpoint = env.endpoints.create_start("main", tenant_id=tenant)
     cur = endpoint.connect().cursor()
+    cur.execute("set log_statement = 'all'")
     cur.execute("create table t(x integer)")
     for _ in range(n_iters):
-        cur.execute(f"insert into t values (generate_series(1,{n_records}))")
+        with zenbenchmark.record_duration(f"insert into t values (generate_series(1,{n_records}))"):
+            cur.execute(f"insert into t values (generate_series(1,{n_records}))")
         time.sleep(1)
 
-    cur.execute("vacuum t")
+    with zenbenchmark.record_duration("vacuum t"):
+        cur.execute("vacuum t")
 
-    with zenbenchmark.record_duration("test_query"):
+    with zenbenchmark.record_duration("SELECT count(*) from t"):
         cur.execute("SELECT count(*) from t")
         assert cur.fetchone() == (n_iters * n_records,)
 
-    flush_ep_to_pageserver(env, endpoint, tenant, timeline)
-    env.pageserver.http_client().timeline_checkpoint(
-        tenant, timeline, compact=False, wait_until_uploaded=True
-    )
+    with zenbenchmark.record_duration("flush_ep_to_pageserver"):
+        flush_ep_to_pageserver(env, endpoint, tenant, timeline)
+    with zenbenchmark.record_duration("timeline_checkpoint"):
+        env.pageserver.http_client().timeline_checkpoint(
+            tenant, timeline, compact=False, wait_until_uploaded=True
+        )

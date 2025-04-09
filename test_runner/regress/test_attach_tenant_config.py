@@ -139,6 +139,12 @@ def test_fully_custom_config(positive_env: NeonEnv):
     fully_custom_config = {
         "compaction_period": "1h",
         "compaction_threshold": 13,
+        "compaction_upper_limit": 100,
+        "compaction_l0_first": False,
+        "compaction_l0_semaphore": False,
+        "l0_flush_delay_threshold": 25,
+        "l0_flush_stall_threshold": 42,
+        "l0_flush_wait_upload": False,
         "compaction_target_size": 1048576,
         "checkpoint_distance": 10000,
         "checkpoint_timeout": "13m",
@@ -171,11 +177,16 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "image_layer_creation_check_threshold": 1,
         "lsn_lease_length": "1m",
         "lsn_lease_length_for_ts": "5s",
-        "timeline_offloading": True,
+        "timeline_offloading": False,
         "wal_receiver_protocol_override": {
             "type": "interpreted",
             "args": {"format": "bincode", "compression": {"zstd": {"level": 1}}},
         },
+        "rel_size_v2_enabled": True,
+        "gc_compaction_enabled": True,
+        "gc_compaction_initial_threshold_kb": 1024000,
+        "gc_compaction_ratio_percent": 200,
+        "image_creation_preempt_threshold": 5,
     }
 
     vps_http = env.storage_controller.pageserver_api()

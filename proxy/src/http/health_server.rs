@@ -3,17 +3,18 @@ use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail};
+use http_utils::endpoint::{self, request_span};
+use http_utils::error::ApiError;
+use http_utils::json::json_response;
+use http_utils::{RouterBuilder, RouterService};
 use hyper0::header::CONTENT_TYPE;
 use hyper0::{Body, Request, Response, StatusCode};
-use measured::text::BufferedTextEncoder;
 use measured::MetricGroup;
+use measured::text::BufferedTextEncoder;
 use metrics::NeonMetrics;
 use tracing::{info, info_span};
-use utils::http::endpoint::{self, request_span};
-use utils::http::error::ApiError;
-use utils::http::json::json_response;
-use utils::http::{RouterBuilder, RouterService};
 
+use crate::ext::{LockExt, TaskExt};
 use crate::jemalloc;
 
 async fn status_handler(_: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -76,7 +77,7 @@ async fn prometheus_metrics_handler(
     let body = tokio::task::spawn_blocking(move || {
         let _span = span.entered();
 
-        let mut state = state.lock().unwrap();
+        let mut state = state.lock_propagate_poison();
         let PrometheusHandler { encoder, metrics } = &mut *state;
 
         metrics
@@ -94,13 +95,13 @@ async fn prometheus_metrics_handler(
         body
     })
     .await
-    .unwrap();
+    .propagate_task_panic();
 
     let response = Response::builder()
         .status(200)
         .header(CONTENT_TYPE, "text/plain; version=0.0.4")
         .body(Body::from(body))
-        .unwrap();
+        .expect("response headers should be valid");
 
     Ok(response)
 }

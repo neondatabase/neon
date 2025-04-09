@@ -1,24 +1,25 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::checks::{list_timeline_blobs, BlobDataParseResult, RemoteTimelineBlobData};
-use crate::metadata_stream::{stream_tenant_shards, stream_tenant_timelines};
-use crate::{
-    download_object_to_file_s3, init_remote, init_remote_s3, BucketConfig, NodeKind, RootTarget,
-    TenantShardTimelineId,
-};
 use anyhow::Context;
 use async_stream::stream;
 use aws_sdk_s3::Client;
 use camino::Utf8PathBuf;
 use futures::{StreamExt, TryStreamExt};
+use pageserver::tenant::IndexPart;
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver::tenant::storage_layer::LayerName;
-use pageserver::tenant::IndexPart;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::{GenericRemoteStorage, S3Config};
 use utils::generation::Generation;
 use utils::id::TenantId;
+
+use crate::checks::{BlobDataParseResult, RemoteTimelineBlobData, list_timeline_blobs};
+use crate::metadata_stream::{stream_tenant_shards, stream_tenant_timelines};
+use crate::{
+    BucketConfig, NodeKind, RootTarget, TenantShardTimelineId, download_object_to_file_s3,
+    init_remote, init_remote_s3,
+};
 
 pub struct SnapshotDownloader {
     s3_client: Arc<Client>,
@@ -268,6 +269,8 @@ impl SnapshotDownloader {
                         index_part,
                         index_part_generation,
                         s3_layers: _,
+                        index_part_last_modified_time: _,
+                        index_part_snapshot_time: _,
                     } => {
                         self.download_timeline(
                             ttid,

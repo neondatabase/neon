@@ -14,6 +14,10 @@
 //! len <  128: 0XXXXXXX
 //! len >= 128: 1CCCXXXX XXXXXXXX XXXXXXXX XXXXXXXX
 //!
+use std::cmp::min;
+use std::io::{Error, ErrorKind};
+use std::sync::Arc;
+
 use async_compression::Level;
 use bytes::{BufMut, BytesMut};
 use pageserver_api::models::ImageCompressionAlgorithm;
@@ -24,12 +28,10 @@ use tracing::warn;
 use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::tenant::block_io::BlockCursor;
+use crate::virtual_file::IoBufferMut;
+use crate::virtual_file::VirtualFile;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
 use crate::virtual_file::owned_buffers_io::write::BufferedWriter;
-use crate::virtual_file::{IoBufferMut, VirtualFile};
-use std::cmp::min;
-use std::io::{Error, ErrorKind};
-use std::sync::Arc;
 
 #[derive(Copy, Clone, Debug)]
 pub struct CompressionInfo {
@@ -37,7 +39,7 @@ pub struct CompressionInfo {
     pub compressed_size: Option<usize>,
 }
 
-impl<'a> BlockCursor<'a> {
+impl BlockCursor<'_> {
     /// Read a blob into a new buffer.
     pub async fn read_blob(
         &self,
@@ -326,11 +328,14 @@ impl BlobWriter {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::*;
-    use crate::{context::DownloadBehavior, task_mgr::TaskKind, tenant::block_io::BlockReaderRef};
     use camino::Utf8PathBuf;
     use camino_tempfile::Utf8TempDir;
     use rand::{Rng, SeedableRng};
+
+    use super::*;
+    use crate::context::DownloadBehavior;
+    use crate::task_mgr::TaskKind;
+    use crate::tenant::block_io::BlockReaderRef;
 
     async fn round_trip_test(blobs: &[Vec<u8>]) -> Result<(), Error> {
         round_trip_test_compressed(blobs, false).await
@@ -397,7 +402,7 @@ pub(crate) mod tests {
 
     pub(crate) fn random_array(len: usize) -> Vec<u8> {
         let mut rng = rand::thread_rng();
-        (0..len).map(|_| rng.gen()).collect::<_>()
+        (0..len).map(|_| rng.r#gen()).collect::<_>()
     }
 
     #[tokio::test]
@@ -449,9 +454,9 @@ pub(crate) mod tests {
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
         let blobs = (0..1024)
             .map(|_| {
-                let mut sz: u16 = rng.gen();
+                let mut sz: u16 = rng.r#gen();
                 // Make 50% of the arrays small
-                if rng.gen() {
+                if rng.r#gen() {
                     sz &= 63;
                 }
                 random_array(sz.into())

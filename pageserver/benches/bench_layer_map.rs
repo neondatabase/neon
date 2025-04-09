@@ -1,22 +1,20 @@
-use criterion::measurement::WallTime;
-use pageserver::keyspace::{KeyPartitioning, KeySpace};
-use pageserver::tenant::layer_map::LayerMap;
-use pageserver::tenant::storage_layer::LayerName;
-use pageserver::tenant::storage_layer::PersistentLayerDesc;
-use pageserver_api::key::Key;
-use pageserver_api::shard::TenantShardId;
-use rand::prelude::{SeedableRng, SliceRandom, StdRng};
 use std::cmp::{max, min};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Instant;
+
+use criterion::measurement::WallTime;
+use criterion::{BenchmarkGroup, Criterion, black_box, criterion_group, criterion_main};
+use pageserver::keyspace::{KeyPartitioning, KeySpace};
+use pageserver::tenant::layer_map::LayerMap;
+use pageserver::tenant::storage_layer::{LayerName, PersistentLayerDesc};
+use pageserver_api::key::Key;
+use pageserver_api::shard::TenantShardId;
+use rand::prelude::{SeedableRng, SliceRandom, StdRng};
 use utils::id::{TenantId, TimelineId};
-
 use utils::lsn::Lsn;
-
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkGroup, Criterion};
 
 fn fixture_path(relative: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)

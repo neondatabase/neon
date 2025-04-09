@@ -3,33 +3,34 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use ed25519_dalek::SigningKey;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use p256::ecdsa::SigningKey;
-use p256::elliptic_curve::JwkEcKey;
+use jose_jwk::jose_b64;
 use rand::rngs::OsRng;
-use tokio::net::{lookup_host, TcpStream};
+use tokio::net::{TcpStream, lookup_host};
 use tracing::field::display;
 use tracing::{debug, info};
 
 use super::conn_pool::poll_client;
 use super::conn_pool_lib::{Client, ConnInfo, EndpointConnPool, GlobalConnPool};
-use super::http_conn_pool::{self, poll_http2_client, HttpConnPool, Send};
-use super::local_conn_pool::{self, LocalConnPool, EXT_NAME, EXT_SCHEMA, EXT_VERSION};
+use super::http_conn_pool::{self, HttpConnPool, Send, poll_http2_client};
+use super::local_conn_pool::{self, EXT_NAME, EXT_SCHEMA, EXT_VERSION, LocalConnPool};
 use crate::auth::backend::local::StaticAuthRules;
 use crate::auth::backend::{ComputeCredentials, ComputeUserInfo};
-use crate::auth::{self, check_peer_addr_is_in_list, AuthError};
+use crate::auth::{self, AuthError, check_peer_addr_is_in_list};
 use crate::compute;
 use crate::compute_ctl::{
     ComputeCtlError, ExtensionInstallRequest, Privilege, SetRoleGrantsRequest,
 };
-use crate::config::ProxyConfig;
+use crate::config::{ComputeConfig, ProxyConfig};
 use crate::context::RequestContext;
+use crate::control_plane::CachedNodeInfo;
 use crate::control_plane::client::ApiLockError;
 use crate::control_plane::errors::{GetAuthInfoError, WakeComputeError};
 use crate::control_plane::locks::ApiLocks;
-use crate::control_plane::CachedNodeInfo;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::intern::EndpointIdInt;
+use crate::protocol2::ConnectionInfoExtra;
 use crate::proxy::connect_compute::ConnectMechanism;
 use crate::proxy::retry::{CouldRetry, ShouldRetryWakeCompute};
 use crate::rate_limiter::EndpointRateLimiter;
@@ -57,23 +58,49 @@ impl PoolingBackend {
 
         let user_info = user_info.clone();
         let backend = self.auth_backend.as_ref().map(|()| user_info.clone());
-        let (allowed_ips, maybe_secret) = backend.get_allowed_ips_and_secret(ctx).await?;
+        let allowed_ips = backend.get_allowed_ips(ctx).await?;
+
         if self.config.authentication_config.ip_allowlist_check_enabled
             && !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips)
         {
             return Err(AuthError::ip_address_not_allowed(ctx.peer_addr()));
         }
+
+        let access_blocker_flags = backend.get_block_public_or_vpc_access(ctx).await?;
+        if self.config.authentication_config.is_vpc_acccess_proxy {
+            if access_blocker_flags.vpc_access_blocked {
+                return Err(AuthError::NetworkNotAllowed);
+            }
+
+            let extra = ctx.extra();
+            let incoming_endpoint_id = match extra {
+                None => String::new(),
+                Some(ConnectionInfoExtra::Aws { vpce_id }) => vpce_id.to_string(),
+                Some(ConnectionInfoExtra::Azure { link_id }) => link_id.to_string(),
+            };
+
+            if incoming_endpoint_id.is_empty() {
+                return Err(AuthError::MissingVPCEndpointId);
+            }
+
+            let allowed_vpc_endpoint_ids = backend.get_allowed_vpc_endpoint_ids(ctx).await?;
+            // TODO: For now an empty VPC endpoint ID list means all are allowed. We should replace that.
+            if !allowed_vpc_endpoint_ids.is_empty()
+                && !allowed_vpc_endpoint_ids.contains(&incoming_endpoint_id)
+            {
+                return Err(AuthError::vpc_endpoint_id_not_allowed(incoming_endpoint_id));
+            }
+        } else if access_blocker_flags.public_access_blocked {
+            return Err(AuthError::NetworkNotAllowed);
+        }
+
         if !self
             .endpoint_rate_limiter
             .check(user_info.endpoint.clone().into(), 1)
         {
             return Err(AuthError::too_many_connections());
         }
-        let cached_secret = match maybe_secret {
-            Some(secret) => secret,
-            None => backend.get_role_secret(ctx).await?,
-        };
-
+        let cached_secret = backend.get_role_secret(ctx).await?;
         let secret = match cached_secret.value.clone() {
             Some(secret) => self.config.authentication_config.check_rate_limit(
                 ctx,
@@ -195,9 +222,8 @@ impl PoolingBackend {
                 locks: &self.config.connect_compute_locks,
             },
             &backend,
-            false, // do not allow self signed compute for http flow
             self.config.wake_compute_retry_config,
-            self.config.connect_to_compute_retry_config,
+            &self.config.connect_to_compute,
         )
         .await
     }
@@ -237,9 +263,8 @@ impl PoolingBackend {
                 locks: &self.config.connect_compute_locks,
             },
             &backend,
-            false, // do not allow self signed compute for http flow
             self.config.wake_compute_retry_config,
-            self.config.connect_to_compute_retry_config,
+            &self.config.connect_to_compute,
         )
         .await
     }
@@ -270,7 +295,11 @@ impl PoolingBackend {
 
         if !self.local_pool.initialized(&conn_info) {
             // only install and grant usage one at a time.
-            let _permit = local_backend.initialize.acquire().await.unwrap();
+            let _permit = local_backend
+                .initialize
+                .acquire()
+                .await
+                .expect("semaphore should never be closed");
 
             // check again for race
             if !self.local_pool.initialized(&conn_info) {
@@ -340,7 +369,7 @@ impl PoolingBackend {
             debug!("setting up backend session state");
 
             // initiates the auth session
-            if let Err(e) = client.execute("select auth.init()", &[]).await {
+            if let Err(e) = client.batch_execute("select auth.init();").await {
                 discard.discard();
                 return Err(e.into());
             }
@@ -352,9 +381,15 @@ impl PoolingBackend {
     }
 }
 
-fn create_random_jwk() -> (SigningKey, JwkEcKey) {
-    let key = SigningKey::random(&mut OsRng);
-    let jwk = p256::PublicKey::from(key.verifying_key()).to_jwk();
+fn create_random_jwk() -> (SigningKey, jose_jwk::Key) {
+    let key = SigningKey::generate(&mut OsRng);
+
+    let jwk = jose_jwk::Key::Okp(jose_jwk::Okp {
+        crv: jose_jwk::OkpCurves::Ed25519,
+        x: jose_b64::serde::Bytes::from(key.verifying_key().to_bytes().to_vec()),
+        d: None,
+    });
+
     (key, jwk)
 }
 
@@ -362,9 +397,9 @@ fn create_random_jwk() -> (SigningKey, JwkEcKey) {
 pub(crate) enum HttpConnError {
     #[error("pooled connection closed at inconsistent state")]
     ConnectionClosedAbruptly(#[from] tokio::sync::watch::error::SendError<uuid::Uuid>),
-    #[error("could not connection to postgres in compute")]
+    #[error("could not connect to postgres in compute")]
     PostgresConnectionError(#[from] postgres_client::Error),
-    #[error("could not connection to local-proxy in compute")]
+    #[error("could not connect to local-proxy in compute")]
     LocalProxyConnectionError(#[from] LocalProxyConnError),
     #[error("could not parse JWT payload")]
     JwtPayloadError(serde_json::Error),
@@ -500,7 +535,7 @@ impl ConnectMechanism for TokioMechanism {
         &self,
         ctx: &RequestContext,
         node_info: &CachedNodeInfo,
-        timeout: Duration,
+        compute_config: &ComputeConfig,
     ) -> Result<Self::Connection, Self::ConnectError> {
         let host = node_info.config.get_host();
         let permit = self.locks.get_permit(&host).await?;
@@ -509,7 +544,7 @@ impl ConnectMechanism for TokioMechanism {
         let config = config
             .user(&self.conn_info.user_info.user)
             .dbname(&self.conn_info.dbname)
-            .connect_timeout(timeout);
+            .connect_timeout(compute_config.timeout);
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let res = config.connect(postgres_client::NoTls).await;
@@ -550,7 +585,7 @@ impl ConnectMechanism for HyperMechanism {
         &self,
         ctx: &RequestContext,
         node_info: &CachedNodeInfo,
-        timeout: Duration,
+        config: &ComputeConfig,
     ) -> Result<Self::Connection, Self::ConnectError> {
         let host = node_info.config.get_host();
         let permit = self.locks.get_permit(&host).await?;
@@ -558,7 +593,7 @@ impl ConnectMechanism for HyperMechanism {
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
 
         let port = node_info.config.get_port();
-        let res = connect_http2(&host, port, timeout).await;
+        let res = connect_http2(&host, port, config.timeout).await;
         drop(pause);
         let (client, connection) = permit.release_result(res)?;
 
@@ -613,7 +648,7 @@ async fn connect_http2(
                     e,
                 )));
             }
-        };
+        }
     };
 
     let (client, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())

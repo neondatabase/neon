@@ -1,40 +1,57 @@
 //! Failpoint support code shared between pageserver and safekeepers.
 
-use crate::http::{
-    error::ApiError,
-    json::{json_request, json_response},
-};
-use hyper::{Body, Request, Response, StatusCode};
-use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
-use tracing::*;
 
-/// Declare a failpoint that can use the `pause` failpoint action.
+/// Declare a failpoint that can use to `pause` failpoint action.
 /// We don't want to block the executor thread, hence, spawn_blocking + await.
+///
+/// Optionally pass a cancellation token, and this failpoint will drop out of
+/// its pause when the cancellation token fires. This is useful for testing
+/// cases where we would like to block something, but test its clean shutdown behavior.
+/// The macro evaluates to a Result in that case, where Ok(()) is the case
+/// where the failpoint was not paused, and Err() is the case where cancellation
+/// token fired while evaluating the failpoint.
+///
+/// Remember to unpause the failpoint in the test; until that happens, one of the
+/// limited number of spawn_blocking thread pool threads is leaked.
 #[macro_export]
 macro_rules! pausable_failpoint {
-    ($name:literal) => {
+    ($name:literal) => {{
         if cfg!(feature = "testing") {
-            tokio::task::spawn_blocking({
-                let current = tracing::Span::current();
+            let cancel = ::tokio_util::sync::CancellationToken::new();
+            let _ = $crate::pausable_failpoint!($name, &cancel);
+        }
+    }};
+    ($name:literal, $cancel:expr) => {{
+        if cfg!(feature = "testing") {
+            let failpoint_fut = ::tokio::task::spawn_blocking({
+                let current = ::tracing::Span::current();
                 move || {
                     let _entered = current.entered();
-                    tracing::info!("at failpoint {}", $name);
-                    fail::fail_point!($name);
+                    ::tracing::info!("at failpoint {}", $name);
+                    ::fail::fail_point!($name);
                 }
-            })
-            .await
-            .expect("spawn_blocking");
-        }
-    };
-    ($name:literal, $cond:expr) => {
-        if cfg!(feature = "testing") {
-            if $cond {
-                pausable_failpoint!($name)
+            });
+            let cancel_fut = async move {
+                $cancel.cancelled().await;
+            };
+            ::tokio::select! {
+                res = failpoint_fut => {
+                    res.expect("spawn_blocking");
+                    // continue with execution
+                    Ok(())
+                },
+                _ = cancel_fut => {
+                    Err(())
+                }
             }
+        } else {
+            Ok(())
         }
-    };
+    }};
 }
+
+pub use pausable_failpoint;
 
 /// use with fail::cfg("$name", "return(2000)")
 ///
@@ -159,46 +176,4 @@ pub fn apply_failpoint(name: &str, actions: &str) -> Result<(), String> {
 fn exit_failpoint() {
     tracing::info!("Exit requested by failpoint");
     std::process::exit(1);
-}
-
-pub type ConfigureFailpointsRequest = Vec<FailpointConfig>;
-
-/// Information for configuring a single fail point
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FailpointConfig {
-    /// Name of the fail point
-    pub name: String,
-    /// List of actions to take, using the format described in `fail::cfg`
-    ///
-    /// We also support `actions = "exit"` to cause the fail point to immediately exit.
-    pub actions: String,
-}
-
-/// Configure failpoints through http.
-pub async fn failpoints_handler(
-    mut request: Request<Body>,
-    _cancel: CancellationToken,
-) -> Result<Response<Body>, ApiError> {
-    if !fail::has_failpoints() {
-        return Err(ApiError::BadRequest(anyhow::anyhow!(
-            "Cannot manage failpoints because storage was compiled without failpoints support"
-        )));
-    }
-
-    let failpoints: ConfigureFailpointsRequest = json_request(&mut request).await?;
-    for fp in failpoints {
-        info!("cfg failpoint: {} {}", fp.name, fp.actions);
-
-        // We recognize one extra "action" that's not natively recognized
-        // by the failpoints crate: exit, to immediately kill the process
-        let cfg_result = apply_failpoint(&fp.name, &fp.actions);
-
-        if let Err(err_msg) = cfg_result {
-            return Err(ApiError::BadRequest(anyhow::anyhow!(
-                "Failed to configure failpoints: {err_msg}"
-            )));
-        }
-    }
-
-    json_response(StatusCode::OK, ())
 }

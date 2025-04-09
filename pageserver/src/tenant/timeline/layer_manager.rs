@@ -1,27 +1,22 @@
-use anyhow::{bail, ensure, Context};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use anyhow::{Context, bail, ensure};
 use itertools::Itertools;
 use pageserver_api::shard::TenantShardId;
-use std::{collections::HashMap, sync::Arc};
 use tracing::trace;
-use utils::{
-    id::TimelineId,
-    lsn::{AtomicLsn, Lsn},
-};
-
-use crate::{
-    config::PageServerConf,
-    context::RequestContext,
-    metrics::TimelineMetrics,
-    tenant::{
-        layer_map::{BatchedUpdates, LayerMap},
-        storage_layer::{
-            AsLayerDesc, InMemoryLayer, Layer, PersistentLayerDesc, PersistentLayerKey,
-            ResidentLayer,
-        },
-    },
-};
+use utils::id::TimelineId;
+use utils::lsn::{AtomicLsn, Lsn};
 
 use super::TimelineWriterState;
+use crate::config::PageServerConf;
+use crate::context::RequestContext;
+use crate::metrics::TimelineMetrics;
+use crate::tenant::layer_map::{BatchedUpdates, LayerMap};
+use crate::tenant::storage_layer::{
+    AsLayerDesc, InMemoryLayer, Layer, LayerVisibilityHint, PersistentLayerDesc,
+    PersistentLayerKey, ResidentLayer,
+};
 
 /// Provides semantic APIs to manipulate the layer map.
 pub(crate) enum LayerManager {
@@ -91,6 +86,7 @@ impl LayerManager {
                 layer_map,
                 layer_fmgr: LayerFileManager(hashmap),
             }) => {
+                // NB: no need to decrement layer metrics; metrics are removed on timeline shutdown.
                 let open = layer_map.open_layer.take();
                 let frozen = layer_map.frozen_layers.len();
                 let taken_writer_state = writer_state.take();
@@ -115,6 +111,12 @@ impl LayerManager {
 
     pub(crate) fn likely_resident_layers(&self) -> impl Iterator<Item = &'_ Layer> + '_ {
         self.layers().values().filter(|l| l.is_likely_resident())
+    }
+
+    pub(crate) fn visible_layers(&self) -> impl Iterator<Item = &'_ Layer> + '_ {
+        self.layers()
+            .values()
+            .filter(|l| l.visibility() == LayerVisibilityHint::Visible)
     }
 
     pub(crate) fn contains(&self, layer: &Layer) -> bool {
@@ -207,9 +209,7 @@ impl OpenLayerManager {
 
             trace!(
                 "creating in-memory layer at {}/{} for record at {}",
-                timeline_id,
-                start_lsn,
-                lsn
+                timeline_id, start_lsn, lsn
             );
 
             let new_layer =
@@ -234,6 +234,7 @@ impl OpenLayerManager {
         lsn: Lsn,
         last_freeze_at: &AtomicLsn,
         write_lock: &mut tokio::sync::MutexGuard<'_, Option<TimelineWriterState>>,
+        metrics: &TimelineMetrics,
     ) -> bool {
         let Lsn(last_record_lsn) = lsn;
         let end_lsn = Lsn(last_record_lsn + 1);
@@ -241,6 +242,11 @@ impl OpenLayerManager {
         let froze = if let Some(open_layer) = &self.layer_map.open_layer {
             let open_layer_rc = Arc::clone(open_layer);
             open_layer.freeze(end_lsn).await;
+
+            // Increment the frozen layer metrics. This is decremented in `finish_flush_l0_layer()`.
+            // TODO: It would be nicer to do this via `InMemoryLayer::drop()`, but it requires a
+            // reference to the timeline metrics. Other methods use a metrics borrow as well.
+            metrics.inc_frozen_layer(open_layer);
 
             // The layer is no longer open, update the layer map to reflect this.
             // We will replace it with on-disk historics below.
@@ -298,6 +304,7 @@ impl OpenLayerManager {
             .frozen_layers
             .pop_front()
             .expect("there must be a inmem layer to flush");
+        metrics.dec_frozen_layer(&inmem);
 
         // Only one task may call this function at a time (for this
         // timeline). If two tasks tried to flush the same frozen
@@ -337,15 +344,44 @@ impl OpenLayerManager {
         compact_to: &[ResidentLayer],
         metrics: &TimelineMetrics,
     ) {
-        // We can simply reuse compact l0 logic. Use a different function name to indicate a different type of layer map modification.
-        self.finish_compact_l0(compact_from, compact_to, metrics)
+        // gc-compaction could contain layer rewrites. We need to delete the old layers and insert the new ones.
+
+        // Match the old layers with the new layers
+        let mut add_layers = HashMap::new();
+        let mut rewrite_layers = HashMap::new();
+        let mut drop_layers = HashMap::new();
+        for layer in compact_from {
+            drop_layers.insert(layer.layer_desc().key(), layer.clone());
+        }
+        for layer in compact_to {
+            if let Some(old_layer) = drop_layers.remove(&layer.layer_desc().key()) {
+                rewrite_layers.insert(layer.layer_desc().key(), (old_layer.clone(), layer.clone()));
+            } else {
+                add_layers.insert(layer.layer_desc().key(), layer.clone());
+            }
+        }
+        let add_layers = add_layers.values().cloned().collect::<Vec<_>>();
+        let drop_layers = drop_layers.values().cloned().collect::<Vec<_>>();
+        let rewrite_layers = rewrite_layers.values().cloned().collect::<Vec<_>>();
+
+        self.rewrite_layers_inner(&rewrite_layers, &drop_layers, &add_layers, metrics);
     }
 
     /// Called post-compaction when some previous generation image layers were trimmed.
-    pub(crate) fn rewrite_layers(
+    pub fn rewrite_layers(
         &mut self,
         rewrite_layers: &[(Layer, ResidentLayer)],
         drop_layers: &[Layer],
+        metrics: &TimelineMetrics,
+    ) {
+        self.rewrite_layers_inner(rewrite_layers, drop_layers, &[], metrics);
+    }
+
+    fn rewrite_layers_inner(
+        &mut self,
+        rewrite_layers: &[(Layer, ResidentLayer)],
+        drop_layers: &[Layer],
+        add_layers: &[ResidentLayer],
         metrics: &TimelineMetrics,
     ) {
         let mut updates = self.layer_map.batch_update();
@@ -381,6 +417,10 @@ impl OpenLayerManager {
         }
         for l in drop_layers {
             Self::delete_historic_layer(l, &mut updates, &mut self.layer_fmgr);
+        }
+        for l in add_layers {
+            Self::insert_historic_layer(l.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
+            metrics.record_new_file_metrics(l.layer_desc().file_size);
         }
         updates.flush();
     }

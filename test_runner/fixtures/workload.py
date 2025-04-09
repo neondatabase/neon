@@ -53,6 +53,24 @@ class Workload:
         self._endpoint: Endpoint | None = None
         self._endpoint_opts = endpoint_opts or {}
 
+        self._configured_pageserver: int | None = None
+
+    def branch(
+        self,
+        timeline_id: TimelineId,
+        branch_name: str | None = None,
+        endpoint_opts: dict[str, Any] | None = None,
+    ) -> Workload:
+        """
+        Checkpoint the current status of the workload in case of branching
+        """
+        branch_workload = Workload(
+            self.env, self.tenant_id, timeline_id, branch_name, endpoint_opts
+        )
+        branch_workload.expect_rows = self.expect_rows
+        branch_workload.churn_cursor = self.churn_cursor
+        return branch_workload
+
     def reconfigure(self) -> None:
         """
         Request the endpoint to reconfigure based on location reported by storage controller
@@ -76,8 +94,12 @@ class Workload:
                     **self._endpoint_opts,
                 )
                 self._endpoint.start(pageserver_id=pageserver_id)
+                self._configured_pageserver = pageserver_id
             else:
-                self._endpoint.reconfigure(pageserver_id=pageserver_id)
+                if self._configured_pageserver != pageserver_id:
+                    self._configured_pageserver = pageserver_id
+                    self._endpoint.reconfigure(pageserver_id=pageserver_id)
+                    self._endpoint_config = pageserver_id
 
         connstring = self._endpoint.safe_psql(
             "SELECT setting FROM pg_settings WHERE name='neon.pageserver_connstring'"
@@ -106,6 +128,7 @@ class Workload:
 
     def write_rows(self, n: int, pageserver_id: int | None = None, upload: bool = True):
         endpoint = self.endpoint(pageserver_id)
+
         start = self.expect_rows
         end = start + n - 1
         self.expect_rows += n

@@ -10,7 +10,14 @@
 //!
 //! Only safekeeper message is supported, but it is not hard to add something
 //! else with generics.
-use clap::{command, Parser};
+use std::collections::HashMap;
+use std::convert::Infallible;
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+
+use clap::{Parser, command};
 use futures_core::Stream;
 use futures_util::StreamExt;
 use http_body_util::Full;
@@ -19,28 +26,10 @@ use hyper::header::CONTENT_TYPE;
 use hyper::service::service_fn;
 use hyper::{Method, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use parking_lot::RwLock;
-use std::collections::HashMap;
-use std::convert::Infallible;
-use std::net::SocketAddr;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::net::TcpListener;
-use tokio::sync::broadcast;
-use tokio::sync::broadcast::error::RecvError;
-use tokio::time;
-use tonic::body::{self, empty_body, BoxBody};
-use tonic::codegen::Service;
-use tonic::transport::server::Connected;
-use tonic::Code;
-use tonic::{Request, Response, Status};
-use tracing::*;
-use utils::signals::ShutdownSignals;
-
 use metrics::{Encoder, TextEncoder};
+use parking_lot::RwLock;
 use storage_broker::metrics::{
-    BROADCASTED_MESSAGES_TOTAL, BROADCAST_DROPPED_MESSAGES_TOTAL, NUM_PUBS, NUM_SUBS_ALL,
+    BROADCAST_DROPPED_MESSAGES_TOTAL, BROADCASTED_MESSAGES_TOTAL, NUM_PUBS, NUM_SUBS_ALL,
     NUM_SUBS_TIMELINE, PROCESSED_MESSAGES_TOTAL, PUBLISHED_ONEOFF_MESSAGES_TOTAL,
 };
 use storage_broker::proto::broker_service_server::{BrokerService, BrokerServiceServer};
@@ -49,10 +38,19 @@ use storage_broker::proto::{
     FilterTenantTimelineId, MessageType, SafekeeperDiscoveryRequest, SafekeeperDiscoveryResponse,
     SafekeeperTimelineInfo, SubscribeByFilterRequest, SubscribeSafekeeperInfoRequest, TypedMessage,
 };
-use storage_broker::{parse_proto_ttid, DEFAULT_KEEPALIVE_INTERVAL, DEFAULT_LISTEN_ADDR};
+use storage_broker::{DEFAULT_KEEPALIVE_INTERVAL, DEFAULT_LISTEN_ADDR, parse_proto_ttid};
+use tokio::net::TcpListener;
+use tokio::sync::broadcast;
+use tokio::sync::broadcast::error::RecvError;
+use tokio::time;
+use tonic::body::{self, BoxBody, empty_body};
+use tonic::codegen::Service;
+use tonic::{Code, Request, Response, Status};
+use tracing::*;
 use utils::id::TenantTimelineId;
 use utils::logging::{self, LogFormat};
 use utils::sentry_init::init_sentry;
+use utils::signals::ShutdownSignals;
 use utils::{project_build_tag, project_git_version};
 
 project_git_version!(GIT_VERSION);
@@ -459,9 +457,10 @@ impl BrokerService for Broker {
         &self,
         request: Request<tonic::Streaming<SafekeeperTimelineInfo>>,
     ) -> Result<Response<()>, Status> {
-        let remote_addr = request
-            .remote_addr()
-            .expect("TCPConnectInfo inserted by handler");
+        let &RemoteAddr(remote_addr) = request
+            .extensions()
+            .get()
+            .expect("RemoteAddr inserted by handler");
         let mut publisher = self.registry.register_publisher(remote_addr);
 
         let mut stream = request.into_inner();
@@ -484,9 +483,10 @@ impl BrokerService for Broker {
         &self,
         request: Request<SubscribeSafekeeperInfoRequest>,
     ) -> Result<Response<Self::SubscribeSafekeeperInfoStream>, Status> {
-        let remote_addr = request
-            .remote_addr()
-            .expect("TCPConnectInfo inserted by handler");
+        let &RemoteAddr(remote_addr) = request
+            .extensions()
+            .get()
+            .expect("RemoteAddr inserted by handler");
         let proto_key = request
             .into_inner()
             .subscription_key
@@ -537,9 +537,10 @@ impl BrokerService for Broker {
         &self,
         request: Request<SubscribeByFilterRequest>,
     ) -> std::result::Result<Response<Self::SubscribeByFilterStream>, Status> {
-        let remote_addr = request
-            .remote_addr()
-            .expect("TCPConnectInfo inserted by handler");
+        let &RemoteAddr(remote_addr) = request
+            .extensions()
+            .get()
+            .expect("RemoteAddr inserted by handler");
         let proto_filter = request.into_inner();
         let ttid_filter = proto_filter.tenant_timeline_id.as_ref();
 
@@ -628,6 +629,9 @@ async fn http1_handler(
     Ok(resp)
 }
 
+#[derive(Clone, Copy)]
+struct RemoteAddr(SocketAddr);
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
@@ -687,13 +691,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .max_concurrent_streams(None);
 
         let storage_broker_server_cloned = storage_broker_server.clone();
-        let connect_info = stream.connect_info();
+        let remote_addr = RemoteAddr(addr);
         let service_fn_ = async move {
             service_fn(move |mut req| {
                 // That's what tonic's MakeSvc.call does to pass conninfo to
                 // the request handler (and where its request.remote_addr()
                 // expects it to find).
-                req.extensions_mut().insert(connect_info.clone());
+                req.extensions_mut().insert(remote_addr);
 
                 // Technically this second clone is not needed, but consume
                 // by async block is apparently unavoidable. BTW, error
@@ -738,10 +742,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
     use tokio::sync::broadcast::error::TryRecvError;
     use utils::id::{TenantId, TimelineId};
+
+    use super::*;
 
     fn msg(timeline_id: Vec<u8>) -> Message {
         Message::SafekeeperTimelineInfo(SafekeeperTimelineInfo {

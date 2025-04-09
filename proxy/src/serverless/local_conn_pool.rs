@@ -11,26 +11,24 @@
 
 use std::collections::HashMap;
 use std::pin::pin;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
-use std::task::{ready, Poll};
+use std::sync::atomic::AtomicUsize;
+use std::task::{Poll, ready};
 use std::time::Duration;
 
-use futures::future::poll_fn;
+use ed25519_dalek::{Signature, Signer, SigningKey};
 use futures::Future;
+use futures::future::poll_fn;
 use indexmap::IndexMap;
 use jose_jwk::jose_b64::base64ct::{Base64UrlUnpadded, Encoding};
-use p256::ecdsa::{Signature, SigningKey};
 use parking_lot::RwLock;
-use postgres_client::tls::NoTlsStream;
-use postgres_client::types::ToSql;
 use postgres_client::AsyncMessage;
+use postgres_client::tls::NoTlsStream;
 use serde_json::value::RawValue;
-use signature::Signer;
 use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, info_span, warn, Instrument};
+use tracing::{Instrument, debug, error, info, info_span, warn};
 
 use super::backend::HttpConnError;
 use super::conn_pool_lib::{
@@ -42,7 +40,7 @@ use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::Metrics;
 
 pub(crate) const EXT_NAME: &str = "pg_session_jwt";
-pub(crate) const EXT_VERSION: &str = "0.1.2";
+pub(crate) const EXT_VERSION: &str = "0.2.0";
 pub(crate) const EXT_SCHEMA: &str = "auth";
 
 #[derive(Clone)]
@@ -179,7 +177,6 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
         info!(cold_start_info = cold_start_info.as_str(), %conn_info, %session_id, "new connection");
     });
     let pool = Arc::downgrade(&global_pool);
-    let pool_clone = pool.clone();
 
     let db_user = conn_info.db_and_user();
     let idle = global_pool.get_idle_timeout();
@@ -273,11 +270,7 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
         }),
     };
 
-    Client::new(
-        inner,
-        conn_info,
-        Arc::downgrade(&pool_clone.upgrade().unwrap().global_pool),
-    )
+    Client::new(inner, conn_info, Arc::downgrade(&global_pool.global_pool))
 }
 
 impl ClientInnerCommon<postgres_client::Client> {
@@ -286,14 +279,13 @@ impl ClientInnerCommon<postgres_client::Client> {
             local_data.jti += 1;
             let token = resign_jwt(&local_data.key, payload, local_data.jti)?;
 
-            // initiates the auth session
+            // discard all cannot run in a transaction. must be executed alone.
             self.inner.batch_execute("discard all").await?;
-            self.inner
-                .execute(
-                    "select auth.jwt_session_init($1)",
-                    &[&&*token as &(dyn ToSql + Sync)],
-                )
-                .await?;
+
+            // initiates the auth session
+            // this is safe from query injections as the jwt format free of any escape characters.
+            let query = format!("select auth.jwt_session_init('{token}')");
+            self.inner.batch_execute(&query).await?;
 
             let pid = self.inner.get_process_id();
             info!(pid, jti = local_data.jti, "user session state init");
@@ -321,7 +313,8 @@ fn resign_jwt(sk: &SigningKey, payload: &[u8], jti: u64) -> Result<String, HttpC
     let mut buffer = itoa::Buffer::new();
 
     // encode the jti integer to a json rawvalue
-    let jti = serde_json::from_str::<&RawValue>(buffer.format(jti)).unwrap();
+    let jti = serde_json::from_str::<&RawValue>(buffer.format(jti))
+        .expect("itoa formatted integer should be guaranteed valid json");
 
     // update the jti in-place
     let payload =
@@ -343,8 +336,8 @@ fn sign_jwt(sk: &SigningKey, payload: &[u8]) -> String {
     let cap = jwt.capacity();
 
     // we only need an empty header with the alg specified.
-    // base64url(r#"{"alg":"ES256"}"#) == "eyJhbGciOiJFUzI1NiJ9"
-    jwt.push_str("eyJhbGciOiJFUzI1NiJ9.");
+    // base64url(r#"{"alg":"EdDSA"}"#) == "eyJhbGciOiJFZERTQSJ9"
+    jwt.push_str("eyJhbGciOiJFZERTQSJ9.");
 
     // encode the jwt payload in-place
     base64::encode_config_buf(payload, base64::URL_SAFE_NO_PAD, &mut jwt);
@@ -368,15 +361,16 @@ fn sign_jwt(sk: &SigningKey, payload: &[u8]) -> String {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
-    use p256::ecdsa::SigningKey;
+    use ed25519_dalek::SigningKey;
     use typed_json::json;
 
     use super::resign_jwt;
 
     #[test]
     fn jwt_token_snapshot() {
-        let key = SigningKey::from_bytes(&[1; 32].into()).unwrap();
+        let key = SigningKey::from_bytes(&[1; 32]);
         let data =
             json!({"foo":"bar","jti":"foo\nbar","nested":{"jti":"tricky nesting"}}).to_string();
 
@@ -384,12 +378,20 @@ mod tests {
 
         // To validate the JWT, copy the JWT string and paste it into https://jwt.io/.
         // In the public-key box, paste the following jwk public key
-        // `{"kty":"EC","crv":"P-256","x":"b_A7lJJBzh2t1DUZ5pYOCoW0GmmgXDKBA6orzhWUyhY","y":"PE91OlW_AdxT9sCwx-7ni0DG_30lqW4igrmJzvccFEo"}`
+        // `{"kty":"OKP","crv":"Ed25519","x":"iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w"}`
+        // Note - jwt.io doesn't support EdDSA :(
+        // https://github.com/jsonwebtoken/jsonwebtoken.github.io/issues/509
 
-        // let pub_key = p256::ecdsa::VerifyingKey::from(&key);
-        // let pub_key = p256::PublicKey::from(pub_key);
-        // println!("{}", pub_key.to_jwk_string());
+        // let jwk = jose_jwk::Key::Okp(jose_jwk::Okp {
+        //     crv: jose_jwk::OkpCurves::Ed25519,
+        //     x: jose_jwk::jose_b64::serde::Bytes::from(key.verifying_key().to_bytes().to_vec()),
+        //     d: None,
+        // });
+        // println!("{}", serde_json::to_string(&jwk).unwrap());
 
-        assert_eq!(jwt, "eyJhbGciOiJFUzI1NiJ9.eyJmb28iOiJiYXIiLCJqdGkiOjIsIm5lc3RlZCI6eyJqdGkiOiJ0cmlja3kgbmVzdGluZyJ9fQ.pYf0LxoJ8sDgpmsYOgrbNecOSipnPBEGwnZzB-JhW2cONrKlqRsgXwK8_cOsyolGy-hTTe8GXbWTl_UdpF5RyA");
+        assert_eq!(
+            jwt,
+            "eyJhbGciOiJFZERTQSJ9.eyJmb28iOiJiYXIiLCJqdGkiOjIsIm5lc3RlZCI6eyJqdGkiOiJ0cmlja3kgbmVzdGluZyJ9fQ.Cvyc2By33KI0f0obystwdy8PN111L3Sc9_Mr2CU3XshtSqSdxuRxNEZGbb_RvyJf2IzheC_s7aBZ-jLeQ9N0Bg"
+        );
     }
 }

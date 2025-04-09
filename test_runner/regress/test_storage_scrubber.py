@@ -32,6 +32,12 @@ def test_scrubber_tenant_snapshot(neon_env_builder: NeonEnvBuilder, shard_count:
     neon_env_builder.num_pageservers = shard_count if shard_count is not None else 1
 
     env = neon_env_builder.init_start()
+    # We restart pageserver(s), which will cause storage storage controller
+    # requests to fail and warn.
+    env.storage_controller.allowed_errors.append(".*management API still failed.*")
+    env.storage_controller.allowed_errors.append(
+        ".*Reconcile error.*error sending request for url.*"
+    )
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
     branch = "main"
@@ -64,6 +70,10 @@ def test_scrubber_tenant_snapshot(neon_env_builder: NeonEnvBuilder, shard_count:
         workload.write_rows(128)
     else:
         tenant_shard_ids = [TenantShardId(tenant_id, 0, 0)]
+
+    # Let shards finish rescheduling to other pageservers: this makes the rest of the test more stable
+    # is it won't overlap with migrations
+    env.storage_controller.reconcile_until_idle(max_interval=0.1, timeout_secs=120)
 
     output_path = neon_env_builder.test_output_dir / "snapshot"
     os.makedirs(output_path)
@@ -227,7 +237,9 @@ def test_scrubber_physical_gc_ancestors(neon_env_builder: NeonEnvBuilder, shard_
     new_shard_count = 4
     assert shard_count is None or new_shard_count > shard_count
     shards = env.storage_controller.tenant_shard_split(tenant_id, shard_count=new_shard_count)
-    env.storage_controller.reconcile_until_idle()  # Move shards to their final locations immediately
+    env.storage_controller.reconcile_until_idle(
+        timeout_secs=120
+    )  # Move shards to their final locations immediately
 
     # Create a timeline after split, to ensure scrubber can handle timelines that exist in child shards but not ancestors
     env.storage_controller.pageserver_api().timeline_create(
@@ -266,7 +278,17 @@ def test_scrubber_physical_gc_ancestors(neon_env_builder: NeonEnvBuilder, shard_
     for shard in shards:
         ps = env.get_tenant_pageserver(shard)
         assert ps is not None
-        ps.http_client().timeline_compact(shard, timeline_id, force_image_layer_creation=True)
+        ps.http_client().timeline_compact(
+            shard, timeline_id, force_image_layer_creation=True, wait_until_uploaded=True
+        )
+
+    # Add some WAL so that we don't gc at the latest remote consistent lsn
+    workload.churn_rows(10)
+
+    # Now gc the old stuff away
+    for shard in shards:
+        ps = env.get_tenant_pageserver(shard)
+        assert ps is not None
         ps.http_client().timeline_gc(shard, timeline_id, 0)
 
     # We will use a min_age_secs=1 threshold for deletion, let it pass
@@ -289,6 +311,17 @@ def test_scrubber_physical_gc_ancestors(neon_env_builder: NeonEnvBuilder, shard_
     workload.stop()
     drop_local_state(env, tenant_id)
     workload.validate()
+
+    for ps in env.pageservers:
+        # This is not okay, but it's not a scrubber bug: it's a pageserver issue that is exposed by
+        # the specific pattern of aggressive checkpointing+image layer generation + GC that this test does.
+        # TODO: remove when https://github.com/neondatabase/neon/issues/10720 is fixed
+        ps.allowed_errors.extend(
+            [
+                ".*could not find data for key.*",
+                ".*could not ingest record.*",
+            ]
+        )
 
 
 def test_scrubber_physical_gc_timeline_deletion(neon_env_builder: NeonEnvBuilder):

@@ -1,55 +1,41 @@
-use hyper::{Body, Request, Response, StatusCode};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::io::Write as _;
 use std::str::FromStr;
 use std::sync::Arc;
-use storage_broker::proto::SafekeeperTimelineInfo;
-use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
+
+use http_utils::endpoint::{
+    self, ChannelWriter, auth_middleware, check_permission_with, profile_cpu_handler,
+    profile_heap_handler, prometheus_metrics_handler, request_span,
+};
+use http_utils::error::ApiError;
+use http_utils::failpoints::failpoints_handler;
+use http_utils::json::{json_request, json_response};
+use http_utils::request::{ensure_no_body, parse_query_param, parse_request_param};
+use http_utils::{RequestExt, RouterBuilder};
+use hyper::{Body, Request, Response, StatusCode};
+use postgres_ffi::WAL_SEGMENT_SIZE;
+use safekeeper_api::models::{
+    AcceptorStateStatus, PullTimelineRequest, SafekeeperStatus, SkTimelineInfo, TermSwitchApiEntry,
+    TimelineCopyRequest, TimelineCreateRequest, TimelineStatus, TimelineTermBumpRequest,
+};
+use safekeeper_api::{ServerInfo, models};
+use storage_broker::proto::{SafekeeperTimelineInfo, TenantTimelineId as ProtoTenantTimelineId};
 use tokio::sync::mpsc;
 use tokio::task;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
-use tracing::{info_span, Instrument};
-use utils::failpoint_support::failpoints_handler;
-use utils::http::endpoint::{
-    profile_cpu_handler, profile_heap_handler, prometheus_metrics_handler, request_span,
-    ChannelWriter,
-};
-use utils::http::request::parse_query_param;
-
-use postgres_ffi::WAL_SEGMENT_SIZE;
-use safekeeper_api::models::{SkTimelineInfo, TimelineCopyRequest};
-use safekeeper_api::models::{TimelineCreateRequest, TimelineTermBumpRequest};
-use utils::{
-    auth::SwappableJwtAuth,
-    http::{
-        endpoint::{self, auth_middleware, check_permission_with},
-        error::ApiError,
-        json::{json_request, json_response},
-        request::{ensure_no_body, parse_request_param},
-        RequestExt, RouterBuilder,
-    },
-    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
-    lsn::Lsn,
-};
+use tracing::{Instrument, info_span};
+use utils::auth::SwappableJwtAuth;
+use utils::id::{TenantId, TenantTimelineId, TimelineId};
+use utils::lsn::Lsn;
 
 use crate::debug_dump::TimelineDigestRequest;
-use crate::receive_wal::WalReceiverState;
-use crate::safekeeper::Term;
-use crate::safekeeper::{ServerInfo, TermLsn};
-use crate::send_wal::WalSenderState;
-use crate::timeline::PeerInfo;
+use crate::safekeeper::TermLsn;
 use crate::timelines_global_map::TimelineDeleteForceResult;
-use crate::GlobalTimelines;
-use crate::SafeKeeperConf;
-use crate::{copy_timeline, debug_dump, patch_control_file, pull_timeline};
-
-#[derive(Debug, Serialize)]
-struct SafekeeperStatus {
-    id: NodeId,
-}
+use crate::{
+    GlobalTimelines, SafeKeeperConf, copy_timeline, debug_dump, patch_control_file, pull_timeline,
+};
 
 /// Healthcheck handler.
 async fn status_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -71,50 +57,6 @@ fn get_global_timelines(request: &Request<Body>) -> Arc<GlobalTimelines> {
         .data::<Arc<GlobalTimelines>>()
         .expect("unknown state type")
         .clone()
-}
-
-/// Same as TermLsn, but serializes LSN using display serializer
-/// in Postgres format, i.e. 0/FFFFFFFF. Used only for the API response.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct TermSwitchApiEntry {
-    pub term: Term,
-    pub lsn: Lsn,
-}
-
-impl From<TermSwitchApiEntry> for TermLsn {
-    fn from(api_val: TermSwitchApiEntry) -> Self {
-        TermLsn {
-            term: api_val.term,
-            lsn: api_val.lsn,
-        }
-    }
-}
-
-/// Augment AcceptorState with last_log_term for convenience
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AcceptorStateStatus {
-    pub term: Term,
-    pub epoch: Term, // aka last_log_term
-    pub term_history: Vec<TermSwitchApiEntry>,
-}
-
-/// Info about timeline on safekeeper ready for reporting.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TimelineStatus {
-    pub tenant_id: TenantId,
-    pub timeline_id: TimelineId,
-    pub acceptor_state: AcceptorStateStatus,
-    pub pg_info: ServerInfo,
-    pub flush_lsn: Lsn,
-    pub timeline_start_lsn: Lsn,
-    pub local_start_lsn: Lsn,
-    pub commit_lsn: Lsn,
-    pub backup_lsn: Lsn,
-    pub peer_horizon_lsn: Lsn,
-    pub remote_consistent_lsn: Lsn,
-    pub peers: Vec<PeerInfo>,
-    pub walsenders: Vec<WalSenderState>,
-    pub walreceivers: Vec<WalReceiverState>,
 }
 
 fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Result<(), ApiError> {
@@ -160,18 +102,26 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
         system_id: request_data.system_id.unwrap_or(0),
         wal_seg_size: request_data.wal_seg_size.unwrap_or(WAL_SEGMENT_SIZE as u32),
     };
-    let local_start_lsn = request_data.local_start_lsn.unwrap_or_else(|| {
-        request_data
-            .commit_lsn
-            .segment_lsn(server_info.wal_seg_size as usize)
-    });
     let global_timelines = get_global_timelines(&request);
     global_timelines
-        .create(ttid, server_info, request_data.commit_lsn, local_start_lsn)
+        .create(
+            ttid,
+            request_data.mconf,
+            server_info,
+            request_data.start_lsn,
+            request_data.commit_lsn.unwrap_or(request_data.start_lsn),
+        )
         .await
         .map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, ())
+}
+
+async fn utilization_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+    let global_timelines = get_global_timelines(&request);
+    let utilization = global_timelines.get_timeline_counts();
+    json_response(StatusCode::OK, utilization)
 }
 
 /// List all (not deleted) timelines.
@@ -185,6 +135,15 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
         .map(|tli| tli.ttid)
         .collect();
     json_response(StatusCode::OK, res)
+}
+
+impl From<TermSwitchApiEntry> for TermLsn {
+    fn from(api_val: TermSwitchApiEntry) -> Self {
+        TermLsn {
+            term: api_val.term,
+            lsn: api_val.lsn,
+        }
+    }
 }
 
 /// Report info about timeline.
@@ -222,6 +181,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
     let status = TimelineStatus {
         tenant_id: ttid.tenant_id,
         timeline_id: ttid.timeline_id,
+        mconf: state.mconf,
         acceptor_state: acc_state,
         pg_info: state.server,
         flush_lsn,
@@ -232,7 +192,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
         peer_horizon_lsn: inmem.peer_horizon_lsn,
         remote_consistent_lsn: inmem.remote_consistent_lsn,
         peers: tli.get_peers(conf).await,
-        walsenders: tli.get_walsenders().get_all(),
+        walsenders: tli.get_walsenders().get_all_public(),
         walreceivers: tli.get_walreceivers().get_all(),
     };
     json_response(StatusCode::OK, status)
@@ -261,7 +221,7 @@ async fn timeline_delete_handler(mut request: Request<Body>) -> Result<Response<
 async fn timeline_pull_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permission(&request, None)?;
 
-    let data: pull_timeline::Request = json_request(&mut request).await?;
+    let data: PullTimelineRequest = json_request(&mut request).await?;
     let conf = get_conf(&request);
     let global_timelines = get_global_timelines(&request);
 
@@ -305,6 +265,28 @@ async fn timeline_snapshot_handler(request: Request<Body>) -> Result<Response<Bo
         .unwrap();
 
     Ok(response)
+}
+
+/// Consider switching timeline membership configuration to the provided one.
+async fn timeline_membership_handler(
+    mut request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let ttid = TenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "timeline_id")?,
+    );
+    check_permission(&request, Some(ttid.tenant_id))?;
+
+    let global_timelines = get_global_timelines(&request);
+    let tli = global_timelines.get(ttid).map_err(ApiError::from)?;
+
+    let data: models::TimelineMembershipSwitchRequest = json_request(&mut request).await?;
+    let response = tli
+        .membership_switch(data.mconf)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, response)
 }
 
 async fn timeline_copy_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -604,7 +586,7 @@ pub fn make_router(
     if conf.http_auth.is_some() {
         router = router.middleware(auth_middleware(|request| {
             const ALLOWLIST_ROUTES: &[&str] =
-                &["/v1/status", "/metrics", "/profile/cpu", "profile/heap"];
+                &["/v1/status", "/metrics", "/profile/cpu", "/profile/heap"];
             if ALLOWLIST_ROUTES.contains(&request.uri().path()) {
                 None
             } else {
@@ -635,6 +617,7 @@ pub fn make_router(
                 failpoints_handler(r, cancel).await
             })
         })
+        .get("/v1/utilization", |r| request_span(r, utilization_handler))
         .delete("/v1/tenant/:tenant_id", |r| {
             request_span(r, tenant_delete_handler)
         })
@@ -657,6 +640,10 @@ pub fn make_router(
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/snapshot/:destination_id",
             |r| request_span(r, timeline_snapshot_handler),
+        )
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/membership",
+            |r| request_span(r, timeline_membership_handler),
         )
         .post(
             "/v1/tenant/:tenant_id/timeline/:source_timeline_id/copy",

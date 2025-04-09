@@ -33,10 +33,6 @@ concurrency:
 # No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
 permissions: {}
 
-env:
-  FROM_TAG: ${{ inputs.from-tag }}
-  TO_TAG: pinned
-
 jobs:
   check-manifests:
     runs-on: ubuntu-22.04
@@ -46,11 +42,14 @@ jobs:
     steps:
       - name: Check if we really need to pin the image
         id: check-manifests
+        env:
+          FROM_TAG: ${{ inputs.from-tag }}
+          TO_TAG: pinned
         run: |
-          docker manifest inspect neondatabase/build-tools:${FROM_TAG} > ${FROM_TAG}.json
-          docker manifest inspect neondatabase/build-tools:${TO_TAG}   > ${TO_TAG}.json
+          docker manifest inspect "docker.io/neondatabase/build-tools:${FROM_TAG}" > "${FROM_TAG}.json"
+          docker manifest inspect "docker.io/neondatabase/build-tools:${TO_TAG}"   > "${TO_TAG}.json"
 
-          if diff ${FROM_TAG}.json ${TO_TAG}.json; then
+          if diff "${FROM_TAG}.json" "${TO_TAG}.json"; then
             skip=true
           else
             skip=false
@@ -64,51 +63,36 @@ jobs:
     # use format(..) to catch both inputs.force = true AND inputs.force = 'true'
     if: needs.check-manifests.outputs.skip == 'false' || format('{0}', inputs.force) == 'true'
 
-    runs-on: ubuntu-22.04
-
     permissions:
-      id-token: write # for `azure/login`
+      id-token: write  # Required for aws/azure login
+      packages: write  # required for pushing to GHCR
 
-    steps:
-      - uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
-
-      - uses: docker/login-action@v3
-        with:
-          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
-          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
-
-      - name: Azure login
-        uses: azure/login@6c251865b4e6290e7b78be643ea2d005bc51f69a  # @v2.1.1
-        with:
-          client-id: ${{ secrets.AZURE_DEV_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_DEV_SUBSCRIPTION_ID }}
-
-      - name: Login to ACR
-        run: |
-          az acr login --name=neoneastus2
-
-      - name: Tag build-tools with `${{ env.TO_TAG }}` in Docker Hub, ECR, and ACR
-        env:
-          DEFAULT_DEBIAN_VERSION: bookworm
-        run: |
-          for debian_version in bullseye bookworm; do
-            tags=()
-
-            tags+=("-t" "neondatabase/build-tools:${TO_TAG}-${debian_version}")
-            tags+=("-t" "369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${TO_TAG}-${debian_version}")
-            tags+=("-t" "neoneastus2.azurecr.io/neondatabase/build-tools:${TO_TAG}-${debian_version}")
-
-            if [ "${debian_version}" == "${DEFAULT_DEBIAN_VERSION}" ]; then
-              tags+=("-t" "neondatabase/build-tools:${TO_TAG}")
-              tags+=("-t" "369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${TO_TAG}")
-              tags+=("-t" "neoneastus2.azurecr.io/neondatabase/build-tools:${TO_TAG}")
-            fi
-
-            docker buildx imagetools create "${tags[@]}" \
-                                              neondatabase/build-tools:${FROM_TAG}-${debian_version}
-          done
+    uses: ./.github/workflows/_push-to-container-registry.yml
+    with:
+      image-map: |
+        {
+          "docker.io/neondatabase/build-tools:${{ inputs.from-tag }}-bullseye": [
+            "docker.io/neondatabase/build-tools:pinned-bullseye",
+            "ghcr.io/neondatabase/build-tools:pinned-bullseye",
+            "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/build-tools:pinned-bullseye",
+            "${{ vars.AZURE_DEV_REGISTRY_NAME }}.azurecr.io/neondatabase/build-tools:pinned-bullseye"
+          ],
+          "docker.io/neondatabase/build-tools:${{ inputs.from-tag }}-bookworm": [
+            "docker.io/neondatabase/build-tools:pinned-bookworm",
+            "docker.io/neondatabase/build-tools:pinned",
+            "ghcr.io/neondatabase/build-tools:pinned-bookworm",
+            "ghcr.io/neondatabase/build-tools:pinned",
+            "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/build-tools:pinned-bookworm",
+            "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_ECR_REGION }}.amazonaws.com/build-tools:pinned",
+            "${{ vars.AZURE_DEV_REGISTRY_NAME }}.azurecr.io/neondatabase/build-tools:pinned-bookworm",
+            "${{ vars.AZURE_DEV_REGISTRY_NAME }}.azurecr.io/neondatabase/build-tools:pinned"
+          ]
+        }
+      aws-region: ${{ vars.AWS_ECR_REGION }}
+      aws-account-id: "${{ vars.NEON_DEV_AWS_ACCOUNT_ID }}"
+      aws-role-to-assume: "gha-oidc-neon-admin"
+      azure-client-id: ${{ vars.AZURE_DEV_CLIENT_ID }}
+      azure-subscription-id: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
+      azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+      acr-registry-name: ${{ vars.AZURE_DEV_REGISTRY_NAME }}
+    secrets: inherit

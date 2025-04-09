@@ -1,14 +1,15 @@
-use crate::config::SslMode;
-use crate::tls::TlsConnect;
-
-use crate::{cancel_query, client::SocketConfig, tls::MakeTlsConnect};
-use crate::{cancel_query_raw, Error};
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 
+use crate::client::SocketConfig;
+use crate::config::SslMode;
+use crate::tls::{MakeTlsConnect, TlsConnect};
+use crate::{Error, cancel_query, cancel_query_raw};
+
 /// The capability to request cancellation of in-progress queries on a
 /// connection.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CancelToken {
     pub socket_config: Option<SocketConfig>,
     pub ssl_mode: SslMode,

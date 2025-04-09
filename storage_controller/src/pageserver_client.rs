@@ -1,16 +1,13 @@
-use pageserver_api::{
-    models::{
-        detach_ancestor::AncestorDetached, LocationConfig, LocationConfigListResponse,
-        PageserverUtilization, SecondaryProgress, TenantScanRemoteStorageResponse,
-        TenantShardSplitRequest, TenantShardSplitResponse, TimelineArchivalConfigRequest,
-        TimelineCreateRequest, TimelineInfo, TopTenantShardsRequest, TopTenantShardsResponse,
-    },
-    shard::TenantShardId,
+use pageserver_api::models::detach_ancestor::AncestorDetached;
+use pageserver_api::models::{
+    LocationConfig, LocationConfigListResponse, PageserverUtilization, SecondaryProgress,
+    TenantScanRemoteStorageResponse, TenantShardSplitRequest, TenantShardSplitResponse,
+    TenantWaitLsnRequest, TimelineArchivalConfigRequest, TimelineCreateRequest, TimelineInfo,
+    TopTenantShardsRequest, TopTenantShardsResponse,
 };
-use pageserver_client::{
-    mgmt_api::{Client, Result},
-    BlockUnblock,
-};
+use pageserver_api::shard::TenantShardId;
+use pageserver_client::BlockUnblock;
+use pageserver_client::mgmt_api::{Client, Result};
 use reqwest::StatusCode;
 use utils::id::{NodeId, TenantId, TimelineId};
 
@@ -279,6 +276,22 @@ impl PageserverClient {
         )
     }
 
+    pub(crate) async fn timeline_download_heatmap_layers(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        concurrency: Option<usize>,
+    ) -> Result<()> {
+        measured_request!(
+            "download_heatmap_layers",
+            crate::metrics::Method::Post,
+            &self.node_id_label,
+            self.inner
+                .timeline_download_heatmap_layers(tenant_shard_id, timeline_id, concurrency)
+                .await
+        )
+    }
+
     pub(crate) async fn get_utilization(&self) -> Result<PageserverUtilization> {
         measured_request!(
             "utilization",
@@ -297,6 +310,19 @@ impl PageserverClient {
             crate::metrics::Method::Post,
             &self.node_id_label,
             self.inner.top_tenant_shards(request).await
+        )
+    }
+
+    pub(crate) async fn wait_lsn(
+        &self,
+        tenant_shard_id: TenantShardId,
+        request: TenantWaitLsnRequest,
+    ) -> Result<StatusCode> {
+        measured_request!(
+            "wait_lsn",
+            crate::metrics::Method::Post,
+            &self.node_id_label,
+            self.inner.wait_lsn(tenant_shard_id, request).await
         )
     }
 }

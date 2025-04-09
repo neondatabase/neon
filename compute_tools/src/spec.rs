@@ -1,16 +1,19 @@
 use anyhow::{anyhow, bail, Result};
-use postgres::Client;
 use reqwest::StatusCode;
 use std::fs::File;
 use std::path::Path;
+use tokio_postgres::Client;
 use tracing::{error, info, instrument, warn};
 
 use crate::config;
+use crate::metrics::{CPlaneRequestRPC, CPLANE_REQUESTS_TOTAL, UNKNOWN_HTTP_STATUS};
 use crate::migration::MigrationRunner;
 use crate::params::PG_HBA_ALL_MD5;
 use crate::pg_helpers::*;
 
-use compute_api::responses::{ControlPlaneComputeStatus, ControlPlaneSpecResponse};
+use compute_api::responses::{
+    ComputeCtlConfig, ControlPlaneComputeStatus, ControlPlaneSpecResponse,
+};
 use compute_api::spec::ComputeSpec;
 
 // Do control plane request and return response if any. In case of error it
@@ -19,7 +22,7 @@ use compute_api::spec::ComputeSpec;
 fn do_control_plane_request(
     uri: &str,
     jwt: &str,
-) -> Result<ControlPlaneSpecResponse, (bool, String)> {
+) -> Result<ControlPlaneSpecResponse, (bool, String, String)> {
     let resp = reqwest::blocking::Client::new()
         .get(uri)
         .header("Authorization", format!("Bearer {}", jwt))
@@ -27,35 +30,42 @@ fn do_control_plane_request(
         .map_err(|e| {
             (
                 true,
-                format!("could not perform spec request to control plane: {}", e),
+                format!("could not perform spec request to control plane: {:?}", e),
+                UNKNOWN_HTTP_STATUS.to_string(),
             )
         })?;
 
-    match resp.status() {
+    let status = resp.status();
+    match status {
         StatusCode::OK => match resp.json::<ControlPlaneSpecResponse>() {
             Ok(spec_resp) => Ok(spec_resp),
             Err(e) => Err((
                 true,
-                format!("could not deserialize control plane response: {}", e),
+                format!("could not deserialize control plane response: {:?}", e),
+                status.to_string(),
             )),
         },
-        StatusCode::SERVICE_UNAVAILABLE => {
-            Err((true, "control plane is temporarily unavailable".to_string()))
-        }
+        StatusCode::SERVICE_UNAVAILABLE => Err((
+            true,
+            "control plane is temporarily unavailable".to_string(),
+            status.to_string(),
+        )),
         StatusCode::BAD_GATEWAY => {
             // We have a problem with intermittent 502 errors now
             // https://github.com/neondatabase/cloud/issues/2353
             // It's fine to retry GET request in this case.
-            Err((true, "control plane request failed with 502".to_string()))
+            Err((
+                true,
+                "control plane request failed with 502".to_string(),
+                status.to_string(),
+            ))
         }
         // Another code, likely 500 or 404, means that compute is unknown to the control plane
         // or some internal failure happened. Doesn't make much sense to retry in this case.
         _ => Err((
             false,
-            format!(
-                "unexpected control plane response status code: {}",
-                resp.status()
-            ),
+            format!("unexpected control plane response status code: {}", status),
+            status.to_string(),
         )),
     }
 }
@@ -65,14 +75,13 @@ fn do_control_plane_request(
 pub fn get_spec_from_control_plane(
     base_uri: &str,
     compute_id: &str,
-) -> Result<Option<ComputeSpec>> {
+) -> Result<(Option<ComputeSpec>, ComputeCtlConfig)> {
     let cp_uri = format!("{base_uri}/compute/api/v2/computes/{compute_id}/spec");
     let jwt: String = match std::env::var("NEON_CONTROL_PLANE_TOKEN") {
         Ok(v) => v,
         Err(_) => "".to_string(),
     };
     let mut attempt = 1;
-    let mut spec: Result<Option<ComputeSpec>> = Ok(None);
 
     info!("getting spec from control plane: {}", cp_uri);
 
@@ -82,18 +91,29 @@ pub fn get_spec_from_control_plane(
     // - no spec for compute yet (Empty state) -> return Ok(None)
     // - got spec -> return Ok(Some(spec))
     while attempt < 4 {
-        spec = match do_control_plane_request(&cp_uri, &jwt) {
-            Ok(spec_resp) => match spec_resp.status {
-                ControlPlaneComputeStatus::Empty => Ok(None),
-                ControlPlaneComputeStatus::Attached => {
-                    if let Some(spec) = spec_resp.spec {
-                        Ok(Some(spec))
-                    } else {
-                        bail!("compute is attached, but spec is empty")
+        let result = match do_control_plane_request(&cp_uri, &jwt) {
+            Ok(spec_resp) => {
+                CPLANE_REQUESTS_TOTAL
+                    .with_label_values(&[
+                        CPlaneRequestRPC::GetSpec.as_str(),
+                        &StatusCode::OK.to_string(),
+                    ])
+                    .inc();
+                match spec_resp.status {
+                    ControlPlaneComputeStatus::Empty => Ok((None, spec_resp.compute_ctl_config)),
+                    ControlPlaneComputeStatus::Attached => {
+                        if let Some(spec) = spec_resp.spec {
+                            Ok((Some(spec), spec_resp.compute_ctl_config))
+                        } else {
+                            bail!("compute is attached, but spec is empty")
+                        }
                     }
                 }
-            },
-            Err((retry, msg)) => {
+            }
+            Err((retry, msg, status)) => {
+                CPLANE_REQUESTS_TOTAL
+                    .with_label_values(&[CPlaneRequestRPC::GetSpec.as_str(), &status])
+                    .inc();
                 if retry {
                     Err(anyhow!(msg))
                 } else {
@@ -102,10 +122,10 @@ pub fn get_spec_from_control_plane(
             }
         };
 
-        if let Err(e) = &spec {
+        if let Err(e) = &result {
             error!("attempt {} to get spec failed with: {}", attempt, e);
         } else {
-            return spec;
+            return result;
         }
 
         attempt += 1;
@@ -113,7 +133,9 @@ pub fn get_spec_from_control_plane(
     }
 
     // All attempts failed, return error.
-    spec
+    Err(anyhow::anyhow!(
+        "Exhausted all attempts to retrieve the spec from the control plane"
+    ))
 }
 
 /// Check `pg_hba.conf` and update if needed to allow external connections.
@@ -147,17 +169,17 @@ pub fn add_standby_signal(pgdata_path: &Path) -> Result<()> {
 }
 
 #[instrument(skip_all)]
-pub fn handle_neon_extension_upgrade(client: &mut Client) -> Result<()> {
+pub async fn handle_neon_extension_upgrade(client: &mut Client) -> Result<()> {
     info!("handle neon extension upgrade");
     let query = "ALTER EXTENSION neon UPDATE";
     info!("update neon extension version with query: {}", query);
-    client.simple_query(query)?;
+    client.simple_query(query).await?;
 
     Ok(())
 }
 
 #[instrument(skip_all)]
-pub fn handle_migrations(client: &mut Client) -> Result<()> {
+pub async fn handle_migrations(client: &mut Client) -> Result<()> {
     info!("handle migrations");
 
     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -187,7 +209,9 @@ pub fn handle_migrations(client: &mut Client) -> Result<()> {
         ),
     ];
 
-    MigrationRunner::new(client, &migrations).run_migrations()?;
+    MigrationRunner::new(client, &migrations)
+        .run_migrations()
+        .await?;
 
     Ok(())
 }
@@ -195,7 +219,7 @@ pub fn handle_migrations(client: &mut Client) -> Result<()> {
 /// Connect to the database as superuser and pre-create anon extension
 /// if it is present in shared_preload_libraries
 #[instrument(skip_all)]
-pub fn handle_extension_anon(
+pub async fn handle_extension_anon(
     spec: &ComputeSpec,
     db_owner: &str,
     db_client: &mut Client,
@@ -208,7 +232,7 @@ pub fn handle_extension_anon(
             if !grants_only {
                 // check if extension is already initialized using anon.is_initialized()
                 let query = "SELECT anon.is_initialized()";
-                match db_client.query(query, &[]) {
+                match db_client.query(query, &[]).await {
                     Ok(rows) => {
                         if !rows.is_empty() {
                             let is_initialized: bool = rows[0].get(0);
@@ -230,7 +254,7 @@ pub fn handle_extension_anon(
                 // Users cannot create it themselves, because superuser is required.
                 let mut query = "CREATE EXTENSION IF NOT EXISTS anon CASCADE";
                 info!("creating anon extension with query: {}", query);
-                match db_client.query(query, &[]) {
+                match db_client.query(query, &[]).await {
                     Ok(_) => {}
                     Err(e) => {
                         error!("anon extension creation failed with error: {}", e);
@@ -240,7 +264,7 @@ pub fn handle_extension_anon(
 
                 // check that extension is installed
                 query = "SELECT extname FROM pg_extension WHERE extname = 'anon'";
-                let rows = db_client.query(query, &[])?;
+                let rows = db_client.query(query, &[]).await?;
                 if rows.is_empty() {
                     error!("anon extension is not installed");
                     return Ok(());
@@ -249,7 +273,7 @@ pub fn handle_extension_anon(
                 // Initialize anon extension
                 // This also requires superuser privileges, so users cannot do it themselves.
                 query = "SELECT anon.init()";
-                match db_client.query(query, &[]) {
+                match db_client.query(query, &[]).await {
                     Ok(_) => {}
                     Err(e) => {
                         error!("anon.init() failed with error: {}", e);
@@ -260,7 +284,7 @@ pub fn handle_extension_anon(
 
             // check that extension is installed, if not bail early
             let query = "SELECT extname FROM pg_extension WHERE extname = 'anon'";
-            match db_client.query(query, &[]) {
+            match db_client.query(query, &[]).await {
                 Ok(rows) => {
                     if rows.is_empty() {
                         error!("anon extension is not installed");
@@ -275,12 +299,12 @@ pub fn handle_extension_anon(
 
             let query = format!("GRANT ALL ON SCHEMA anon TO {}", db_owner);
             info!("granting anon extension permissions with query: {}", query);
-            db_client.simple_query(&query)?;
+            db_client.simple_query(&query).await?;
 
             // Grant permissions to db_owner to use anon extension functions
             let query = format!("GRANT ALL ON ALL FUNCTIONS IN SCHEMA anon TO {}", db_owner);
             info!("granting anon extension permissions with query: {}", query);
-            db_client.simple_query(&query)?;
+            db_client.simple_query(&query).await?;
 
             // This is needed, because some functions are defined as SECURITY DEFINER.
             // In Postgres SECURITY DEFINER functions are executed with the privileges
@@ -295,16 +319,16 @@ pub fn handle_extension_anon(
                 where nsp.nspname = 'anon';", db_owner);
 
             info!("change anon extension functions owner to db owner");
-            db_client.simple_query(&query)?;
+            db_client.simple_query(&query).await?;
 
             //  affects views as well
             let query = format!("GRANT ALL ON ALL TABLES IN SCHEMA anon TO {}", db_owner);
             info!("granting anon extension permissions with query: {}", query);
-            db_client.simple_query(&query)?;
+            db_client.simple_query(&query).await?;
 
             let query = format!("GRANT ALL ON ALL SEQUENCES IN SCHEMA anon TO {}", db_owner);
             info!("granting anon extension permissions with query: {}", query);
-            db_client.simple_query(&query)?;
+            db_client.simple_query(&query).await?;
         }
     }
 

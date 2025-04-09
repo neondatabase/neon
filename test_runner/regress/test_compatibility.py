@@ -141,11 +141,18 @@ def test_create_snapshot(
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            # Miniature layers to enable generating non-trivial layer map without writing lots of data.
+            "checkpoint_distance": f"{128 * 1024}",
+            "compaction_threshold": "1",
+            "compaction_target_size": f"{128 * 1024}",
+        }
+    )
     endpoint = env.endpoints.create_start("main")
 
-    pg_bin.run_capture(["pgbench", "--initialize", "--scale=10", endpoint.connstr()])
-    pg_bin.run_capture(["pgbench", "--time=60", "--progress=2", endpoint.connstr()])
+    pg_bin.run_capture(["pgbench", "--initialize", "--scale=1", endpoint.connstr()])
+    pg_bin.run_capture(["pgbench", "--time=30", "--progress=2", endpoint.connstr()])
     pg_bin.run_capture(
         ["pg_dumpall", f"--dbname={endpoint.connstr()}", f"--file={test_output_dir / 'dump.sql'}"]
     )
@@ -157,7 +164,9 @@ def test_create_snapshot(
     pageserver_http = env.pageserver.http_client()
 
     flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id)
-    pageserver_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
+    pageserver_http.timeline_checkpoint(
+        tenant_id, timeline_id, wait_until_uploaded=True, force_image_layer_creation=True
+    )
 
     env.endpoints.stop_all()
     for sk in env.safekeepers:
@@ -242,6 +251,8 @@ def test_forward_compatibility(
         os.environ.get("ALLOW_FORWARD_COMPATIBILITY_BREAKAGE", "false").lower() == "true"
     )
 
+    neon_env_builder.test_may_use_compatibility_snapshot_binaries = True
+
     try:
         neon_env_builder.num_safekeepers = 3
 
@@ -303,7 +314,10 @@ def test_forward_compatibility(
 
 
 def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, repo_dir: Path):
-    ep = env.endpoints.create_start("main")
+    ep = env.endpoints.create("main")
+    ep_env = {"LD_LIBRARY_PATH": str(env.pg_distrib_dir / f"v{env.pg_version}/lib")}
+    ep.start(env=ep_env)
+
     connstr = ep.connstr()
 
     pg_bin = PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version)
@@ -352,7 +366,7 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
     )
 
     # Timeline exists again: restart the endpoint
-    ep.start()
+    ep.start(env=ep_env)
 
     pg_bin.run_capture(
         ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump-from-wal.sql'}"]
@@ -459,6 +473,14 @@ HISTORIC_DATA_SETS = [
         TenantId("17bf64a53509714687664b3a84e9b3ba"),
         PgVersion.V16,
         "https://neon-github-public-dev.s3.eu-central-1.amazonaws.com/compatibility-data-snapshots/2024-07-18-pgv16.tar.zst",
+    ),
+    # This dataset created on a pageserver running modern code at time of capture, but configured with no generation.  This
+    # is our regression test that we can load data written without generations in layer file names & indices
+    HistoricDataSet(
+        "2025-02-07-nogenerations",
+        TenantId("e1411ca6562d6ff62419f693a5695d67"),
+        PgVersion.V17,
+        "https://neon-github-public-dev.s3.eu-central-1.amazonaws.com/compatibility-data-snapshots/2025-02-07-pgv17-nogenerations.tar.zst",
     ),
 ]
 

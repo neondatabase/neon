@@ -1,14 +1,16 @@
-use crate::tenant_shard::ObservedState;
-use pageserver_api::shard::TenantShardId;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error as _;
 use std::time::Duration;
-use tokio_util::sync::CancellationToken;
 
+use http_utils::error::HttpErrorBody;
 use hyper::Uri;
+use pageserver_api::shard::TenantShardId;
 use reqwest::{StatusCode, Url};
-use utils::{backoff, http::error::HttpErrorBody};
+use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
+use utils::backoff;
+
+use crate::tenant_shard::ObservedState;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PeerClient {

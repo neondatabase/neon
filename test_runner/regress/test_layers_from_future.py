@@ -132,7 +132,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder, attach_mode: str):
     ), "sanity check for what above loop is supposed to do"
 
     # create the image layer from the future
-    env.storage_controller.pageserver_api().patch_tenant_config_client_side(
+    env.storage_controller.pageserver_api().update_tenant_config(
         tenant_id, {"image_creation_threshold": image_creation_threshold}, None
     )
     assert ps_http.tenant_config(tenant_id).effective_config["image_creation_threshold"] == 1
@@ -172,7 +172,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder, attach_mode: str):
     # force removal of layers from the future
     tenant_conf = ps_http.tenant_config(tenant_id)
     generation_before_detach = get_generation_number()
-    env.pageserver.tenant_detach(tenant_id)
+    env.pageserver.http_client().tenant_detach(tenant_id)
     failpoint_deletion_queue = "deletion-queue-before-execute-pause"
 
     ps_http.configure_failpoints((failpoint_deletion_queue, "pause"))

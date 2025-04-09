@@ -1,23 +1,18 @@
+use std::ops::Range;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
+use std::time::{Duration, SystemTime};
+
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::HistoricLayerInfo;
 use pageserver_api::shard::{ShardIdentity, ShardIndex, TenantShardId};
-use std::ops::Range;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Weak};
-use std::time::{Duration, SystemTime};
 use tracing::Instrument;
+use utils::generation::Generation;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
 use utils::sync::{gate, heavier_once_cell};
-
-use crate::config::PageServerConf;
-use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
-use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
-use crate::task_mgr::TaskKind;
-use crate::tenant::timeline::{CompactionError, GetVectoredError};
-use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
 
 use super::delta_layer::{self};
 use super::image_layer::{self};
@@ -25,8 +20,13 @@ use super::{
     AsLayerDesc, ImageLayerWriter, LayerAccessStats, LayerAccessStatsReset, LayerName,
     LayerVisibilityHint, PersistentLayerDesc, ValuesReconstructState,
 };
-
-use utils::generation::Generation;
+use crate::config::PageServerConf;
+use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
+use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
+use crate::task_mgr::TaskKind;
+use crate::tenant::Timeline;
+use crate::tenant::remote_timeline_client::LayerFileMetadata;
+use crate::tenant::timeline::{CompactionError, GetVectoredError};
 
 #[cfg(test)]
 mod tests;
@@ -133,6 +133,22 @@ pub(crate) fn local_layer_path(
         timeline_path.join(layer_file_name.to_string())
     } else {
         timeline_path.join(format!("{}-v1{}", layer_file_name, generation.get_suffix()))
+    }
+}
+
+pub(crate) enum LastEviction {
+    Never,
+    At(std::time::Instant),
+    Evicting,
+}
+
+impl LastEviction {
+    pub(crate) fn happened_after(&self, timepoint: std::time::Instant) -> bool {
+        match self {
+            LastEviction::Never => false,
+            LastEviction::At(evicted_at) => evicted_at > &timepoint,
+            LastEviction::Evicting => true,
+        }
     }
 }
 
@@ -308,7 +324,7 @@ impl Layer {
         reconstruct_data: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
-        let layer = self
+        let downloaded = self
             .0
             .get_or_maybe_download(true, Some(ctx))
             .await
@@ -318,11 +334,15 @@ impl Layer {
                 }
                 other => GetVectoredError::Other(anyhow::anyhow!(other)),
             })?;
+        let this = ResidentLayer {
+            downloaded: downloaded.clone(),
+            owner: self.clone(),
+        };
 
         self.record_access(ctx);
 
-        layer
-            .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, &self.0, ctx)
+        downloaded
+            .get_values_reconstruct_data(this, keyspace, lsn_range, reconstruct_data, ctx)
             .instrument(tracing::debug_span!("get_values_reconstruct_data", layer=%self))
             .await
             .map_err(|err| match err {
@@ -336,7 +356,7 @@ impl Layer {
     /// Download the layer if evicted.
     ///
     /// Will not error when the layer is already downloaded.
-    pub(crate) async fn download(&self) -> anyhow::Result<()> {
+    pub(crate) async fn download(&self) -> Result<(), DownloadError> {
         self.0.get_or_maybe_download(true, None).await?;
         Ok(())
     }
@@ -349,7 +369,6 @@ impl Layer {
     /// while the guard exists.
     ///
     /// Returns None if the layer is currently evicted or becoming evicted.
-    #[cfg(test)]
     pub(crate) async fn keep_resident(&self) -> Option<ResidentLayer> {
         let downloaded = self.0.inner.get().and_then(|rowe| rowe.get())?;
 
@@ -400,6 +419,17 @@ impl Layer {
 
     pub(crate) fn metadata(&self) -> LayerFileMetadata {
         self.0.metadata()
+    }
+
+    pub(crate) fn last_evicted_at(&self) -> LastEviction {
+        match self.0.last_evicted_at.try_lock() {
+            Ok(lock) => match *lock {
+                None => LastEviction::Never,
+                Some(at) => LastEviction::At(at),
+            },
+            Err(std::sync::TryLockError::WouldBlock) => LastEviction::Evicting,
+            Err(std::sync::TryLockError::Poisoned(p)) => panic!("Lock poisoned: {p}"),
+        }
     }
 
     pub(crate) fn get_timeline_id(&self) -> Option<TimelineId> {
@@ -526,7 +556,6 @@ impl ResidentOrWantedEvicted {
     /// This is not used on the read path (anything that calls
     /// [`LayerInner::get_or_maybe_download`]) because it was decided that reads always win
     /// evictions, and part of that winning is using [`ResidentOrWantedEvicted::get_and_upgrade`].
-    #[cfg(test)]
     fn get(&self) -> Option<Arc<DownloadedLayer>> {
         match self {
             ResidentOrWantedEvicted::Resident(strong) => Some(strong.clone()),
@@ -654,7 +683,9 @@ struct LayerInner {
 
     /// When the Layer was last evicted but has not been downloaded since.
     ///
-    /// This is used solely for updating metrics. See [`LayerImplMetrics::redownload_after`].
+    /// This is used for skipping evicted layers from the previous heatmap (see
+    /// `[Timeline::generate_heatmap]`) and for updating metrics
+    /// (see [`LayerImplMetrics::redownload_after`]).
     last_evicted_at: std::sync::Mutex<Option<std::time::Instant>>,
 
     #[cfg(test)]
@@ -697,13 +728,7 @@ impl Drop for LayerInner {
         if let Some(timeline) = timeline.as_ref() {
             // Only need to decrement metrics if the timeline still exists: otherwise
             // it will have already de-registered these metrics via TimelineMetrics::shutdown
-            if self.desc.is_delta() {
-                timeline.metrics.layer_count_delta.dec();
-                timeline.metrics.layer_size_delta.sub(self.desc.file_size);
-            } else {
-                timeline.metrics.layer_count_image.dec();
-                timeline.metrics.layer_size_image.sub(self.desc.file_size);
-            }
+            timeline.metrics.dec_layer(&self.desc);
 
             if matches!(self.access_stats.visibility(), LayerVisibilityHint::Visible) {
                 debug_assert!(
@@ -813,13 +838,7 @@ impl LayerInner {
         };
 
         // This object acts as a RAII guard on these metrics: increment on construction
-        if desc.is_delta() {
-            timeline.metrics.layer_count_delta.inc();
-            timeline.metrics.layer_size_delta.add(desc.file_size);
-        } else {
-            timeline.metrics.layer_count_image.inc();
-            timeline.metrics.layer_size_image.add(desc.file_size);
-        }
+        timeline.metrics.inc_layer(&desc);
 
         // New layers are visible by default. This metric is later updated on drop or in set_visibility
         timeline
@@ -1768,25 +1787,25 @@ impl DownloadedLayer {
 
     async fn get_values_reconstruct_data(
         &self,
+        this: ResidentLayer,
         keyspace: KeySpace,
         lsn_range: Range<Lsn>,
         reconstruct_data: &mut ValuesReconstructState,
-        owner: &Arc<LayerInner>,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
         use LayerKind::*;
 
         match self
-            .get(owner, ctx)
+            .get(&this.owner.0, ctx)
             .await
             .map_err(GetVectoredError::Other)?
         {
             Delta(d) => {
-                d.get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, ctx)
+                d.get_values_reconstruct_data(this, keyspace, lsn_range, reconstruct_data, ctx)
                     .await
             }
             Image(i) => {
-                i.get_values_reconstruct_data(keyspace, reconstruct_data, ctx)
+                i.get_values_reconstruct_data(this, keyspace, reconstruct_data, ctx)
                     .await
             }
         }
@@ -1812,7 +1831,7 @@ enum LayerKind {
 
 /// Guard for forcing a layer be resident while it exists.
 #[derive(Clone)]
-pub(crate) struct ResidentLayer {
+pub struct ResidentLayer {
     owner: Layer,
     downloaded: Arc<DownloadedLayer>,
 }
@@ -1854,8 +1873,8 @@ impl ResidentLayer {
         self.owner.record_access(ctx);
 
         let res = match inner {
-            Delta(ref d) => delta_layer::DeltaLayerInner::load_keys(d, ctx).await,
-            Image(ref i) => image_layer::ImageLayerInner::load_keys(i, ctx).await,
+            Delta(d) => delta_layer::DeltaLayerInner::load_keys(d, ctx).await,
+            Image(i) => image_layer::ImageLayerInner::load_keys(i, ctx).await,
         };
         res.with_context(|| format!("Layer index is corrupted for {self}"))
     }
@@ -1901,7 +1920,7 @@ impl ResidentLayer {
         let owner = &self.owner.0;
 
         match self.downloaded.get(owner, ctx).await? {
-            Delta(ref d) => d
+            Delta(d) => d
                 .copy_prefix(writer, until, ctx)
                 .await
                 .with_context(|| format!("copy_delta_prefix until {until} of {self}")),
@@ -1924,7 +1943,7 @@ impl ResidentLayer {
     ) -> anyhow::Result<&delta_layer::DeltaLayerInner> {
         use LayerKind::*;
         match self.downloaded.get(&self.owner.0, ctx).await? {
-            Delta(ref d) => Ok(d),
+            Delta(d) => Ok(d),
             Image(_) => Err(anyhow::anyhow!("image layer")),
         }
     }
@@ -1936,7 +1955,7 @@ impl ResidentLayer {
     ) -> anyhow::Result<&image_layer::ImageLayerInner> {
         use LayerKind::*;
         match self.downloaded.get(&self.owner.0, ctx).await? {
-            Image(ref d) => Ok(d),
+            Image(d) => Ok(d),
             Delta(_) => Err(anyhow::anyhow!("delta layer")),
         }
     }

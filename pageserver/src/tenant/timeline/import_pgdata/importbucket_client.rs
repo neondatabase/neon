@@ -1,4 +1,5 @@
-use std::{ops::Bound, sync::Arc};
+use std::ops::Bound;
+use std::sync::Arc;
 
 use anyhow::Context;
 use bytes::Bytes;
@@ -12,9 +13,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument};
 use utils::lsn::Lsn;
 
-use crate::{assert_u64_eq_usize::U64IsUsize, config::PageServerConf};
-
 use super::{importbucket_format, index_part_format};
+use crate::assert_u64_eq_usize::U64IsUsize;
+use crate::config::PageServerConf;
 
 pub async fn new(
     conf: &'static PageServerConf,
@@ -308,7 +309,7 @@ impl ControlFile {
             202107181 => 14,
             202209061 => 15,
             202307071 => 16,
-            /* XXX pg17 */
+            202406281 => 17,
             catversion => {
                 anyhow::bail!("unrecognized catalog version {catversion}")
             }

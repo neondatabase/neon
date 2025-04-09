@@ -25,6 +25,38 @@
 //! layer, and offsets to the other parts. The "index" is a B-tree,
 //! mapping from Key to an offset in the "values" part.  The
 //! actual page images are stored in the "values" part.
+use std::collections::{HashMap, VecDeque};
+use std::fs::File;
+use std::ops::Range;
+use std::os::unix::prelude::FileExt;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+
+use anyhow::{Context, Result, bail, ensure};
+use bytes::Bytes;
+use camino::{Utf8Path, Utf8PathBuf};
+use hex;
+use itertools::Itertools;
+use pageserver_api::config::MaxVectoredReadBytes;
+use pageserver_api::key::{DBDIR_KEY, KEY_SIZE, Key};
+use pageserver_api::keyspace::KeySpace;
+use pageserver_api::shard::{ShardIdentity, TenantShardId};
+use pageserver_api::value::Value;
+use serde::{Deserialize, Serialize};
+use tokio::sync::OnceCell;
+use tokio_stream::StreamExt;
+use tracing::*;
+use utils::bin_ser::BeSer;
+use utils::bin_ser::SerializeError;
+use utils::id::{TenantId, TimelineId};
+use utils::lsn::Lsn;
+
+use super::layer_name::ImageLayerName;
+use super::{
+    AsLayerDesc, LayerName, OnDiskValue, OnDiskValueIo, PersistentLayerDesc, ResidentLayer,
+    ValuesReconstructState,
+};
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::page_cache::{self, FileId, PAGE_SZ};
@@ -38,44 +70,10 @@ use crate::tenant::vectored_blob_io::{
     BlobFlag, BufView, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadPlanner,
 };
-use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::virtual_file::owned_buffers_io::write::Buffer;
-use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
-use crate::virtual_file::{IoBuffer, IoBufferMut};
+use crate::virtual_file::{self, IoBuffer, IoBufferMut, MaybeFatalIo, VirtualFile};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
-use anyhow::{anyhow, bail, ensure, Context, Result};
-use bytes::Bytes;
-use camino::{Utf8Path, Utf8PathBuf};
-use hex;
-use itertools::Itertools;
-use pageserver_api::config::MaxVectoredReadBytes;
-use pageserver_api::key::DBDIR_KEY;
-use pageserver_api::key::{Key, KEY_SIZE};
-use pageserver_api::keyspace::KeySpace;
-use pageserver_api::shard::{ShardIdentity, TenantShardId};
-use pageserver_api::value::Value;
-use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
-use std::fs::File;
-use std::ops::Range;
-use std::os::unix::prelude::FileExt;
-use std::str::FromStr;
-use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
-use tokio::sync::OnceCell;
-use tokio_stream::StreamExt;
-use tracing::*;
-use utils::bin_ser::SerializeError;
-
-use utils::{
-    bin_ser::BeSer,
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
-
-use super::layer_name::ImageLayerName;
-use super::{AsLayerDesc, LayerName, PersistentLayerDesc, ValuesReconstructState};
 
 ///
 /// Header stored in the beginning of the file
@@ -175,7 +173,7 @@ pub struct ImageLayerInner {
     key_range: Range<Key>,
     lsn: Lsn,
 
-    file: VirtualFile,
+    file: Arc<VirtualFile>,
     file_id: FileId,
 
     max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
@@ -404,9 +402,11 @@ impl ImageLayerInner {
         max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
-        let file = VirtualFile::open_v2(path, ctx)
-            .await
-            .context("open layer file")?;
+        let file = Arc::new(
+            VirtualFile::open_v2(path, ctx)
+                .await
+                .context("open layer file")?,
+        );
         let file_id = page_cache::next_file_id();
         let block_reader = FileBlockReader::new(&file, file_id);
         let summary_blk = block_reader
@@ -452,6 +452,7 @@ impl ImageLayerInner {
     // the reconstruct state with whatever is found.
     pub(super) async fn get_values_reconstruct_data(
         &self,
+        this: ResidentLayer,
         keyspace: KeySpace,
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
@@ -461,7 +462,7 @@ impl ImageLayerInner {
             .await
             .map_err(GetVectoredError::Other)?;
 
-        self.do_reads_and_update_state(reads, reconstruct_state, ctx)
+        self.do_reads_and_update_state(this, reads, reconstruct_state, ctx)
             .await;
 
         reconstruct_state.on_image_layer_visited(&self.key_range);
@@ -583,6 +584,7 @@ impl ImageLayerInner {
 
     async fn do_reads_and_update_state(
         &self,
+        this: ResidentLayer,
         reads: Vec<VectoredRead>,
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
@@ -593,8 +595,13 @@ impl ImageLayerInner {
             .0
             .into();
 
-        let vectored_blob_reader = VectoredBlobReader::new(&self.file);
         for read in reads.into_iter() {
+            let mut ios: HashMap<(Key, Lsn), OnDiskValueIo> = Default::default();
+            for (_, blob_meta) in read.blobs_at.as_slice() {
+                let io = reconstruct_state.update_key(&blob_meta.key, blob_meta.lsn, true);
+                ios.insert((blob_meta.key, blob_meta.lsn), io);
+            }
+
             let buf_size = read.size();
 
             if buf_size > max_vectored_read_bytes {
@@ -604,7 +611,10 @@ impl ImageLayerInner {
                     .as_slice()
                     .iter()
                     .filter_map(|(_, blob_meta)| {
-                        if blob_meta.key.is_rel_dir_key() || blob_meta.key == DBDIR_KEY {
+                        if blob_meta.key.is_rel_dir_key()
+                            || blob_meta.key == DBDIR_KEY
+                            || blob_meta.key.is_aux_file_key()
+                        {
                             // The size of values for these keys is unbounded and can
                             // grow very large in pathological cases.
                             None
@@ -624,50 +634,51 @@ impl ImageLayerInner {
                 }
             }
 
-            let buf = IoBufferMut::with_capacity(buf_size);
-            let res = vectored_blob_reader.read_blobs(&read, buf, ctx).await;
+            let read_extend_residency = this.clone();
+            let read_from = self.file.clone();
+            let read_ctx = ctx.attached_child();
+            reconstruct_state
+                .spawn_io(async move {
+                    let buf = IoBufferMut::with_capacity(buf_size);
+                    let vectored_blob_reader = VectoredBlobReader::new(&read_from);
+                    let res = vectored_blob_reader.read_blobs(&read, buf, &read_ctx).await;
 
-            match res {
-                Ok(blobs_buf) => {
-                    let view = BufView::new_slice(&blobs_buf.buf);
-                    for meta in blobs_buf.blobs.iter() {
-                        let img_buf = meta.read(&view).await;
+                    match res {
+                        Ok(blobs_buf) => {
+                            let view = BufView::new_slice(&blobs_buf.buf);
+                            for meta in blobs_buf.blobs.iter() {
+                                let io: OnDiskValueIo =
+                                    ios.remove(&(meta.meta.key, meta.meta.lsn)).unwrap();
+                                let img_buf = meta.read(&view).await;
 
-                        let img_buf = match img_buf {
-                            Ok(img_buf) => img_buf,
-                            Err(e) => {
-                                reconstruct_state.on_key_error(
-                                    meta.meta.key,
-                                    PageReconstructError::Other(anyhow!(e).context(format!(
-                                        "Failed to decompress blob from virtual file {}",
-                                        self.file.path(),
-                                    ))),
-                                );
+                                let img_buf = match img_buf {
+                                    Ok(img_buf) => img_buf,
+                                    Err(e) => {
+                                        io.complete(Err(e));
+                                        continue;
+                                    }
+                                };
 
-                                continue;
+                                io.complete(Ok(OnDiskValue::RawImage(img_buf.into_bytes())));
                             }
-                        };
-                        reconstruct_state.update_key(
-                            &meta.meta.key,
-                            self.lsn,
-                            Value::Image(img_buf.into_bytes()),
-                        );
+
+                            assert!(ios.is_empty());
+                        }
+                        Err(err) => {
+                            for (_, io) in ios {
+                                io.complete(Err(std::io::Error::new(
+                                    err.kind(),
+                                    "vec read failed",
+                                )));
+                            }
+                        }
                     }
-                }
-                Err(err) => {
-                    let kind = err.kind();
-                    for (_, blob_meta) in read.blobs_at.as_slice() {
-                        reconstruct_state.on_key_error(
-                            blob_meta.key,
-                            PageReconstructError::from(anyhow!(
-                                "Failed to read blobs from virtual file {}: {}",
-                                self.file.path(),
-                                kind
-                            )),
-                        );
-                    }
-                }
-            };
+
+                    // keep layer resident until this IO is done; this spawned IO future generally outlives the
+                    // call to `self` / the `Arc<DownloadedLayer>` / the `ResidentLayer` that guarantees residency
+                    drop(read_extend_residency);
+                })
+                .await;
         }
     }
 
@@ -1122,7 +1133,7 @@ pub struct ImageLayerIterator<'a> {
     is_end: bool,
 }
 
-impl<'a> ImageLayerIterator<'a> {
+impl ImageLayerIterator<'_> {
     pub(crate) fn layer_dbg_info(&self) -> String {
         self.image_layer.layer_dbg_info()
     }
@@ -1139,6 +1150,7 @@ impl<'a> ImageLayerIterator<'a> {
                     Key::from_slice(&raw_key[..KEY_SIZE]),
                     self.image_layer.lsn,
                     offset,
+                    true,
                 ) {
                     break batch_plan;
                 }
@@ -1189,34 +1201,26 @@ impl<'a> ImageLayerIterator<'a> {
 
 #[cfg(test)]
 mod test {
-    use std::{sync::Arc, time::Duration};
+    use std::sync::Arc;
+    use std::time::Duration;
 
     use bytes::Bytes;
     use itertools::Itertools;
-    use pageserver_api::{
-        key::Key,
-        shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize},
-        value::Value,
-    };
-    use utils::{
-        generation::Generation,
-        id::{TenantId, TimelineId},
-        lsn::Lsn,
-    };
-
-    use crate::{
-        context::RequestContext,
-        tenant::{
-            config::TenantConf,
-            harness::{TenantHarness, TIMELINE_ID},
-            storage_layer::{Layer, ResidentLayer},
-            vectored_blob_io::StreamingVectoredReadPlanner,
-            Tenant, Timeline,
-        },
-        DEFAULT_PG_VERSION,
-    };
+    use pageserver_api::key::Key;
+    use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
+    use pageserver_api::value::Value;
+    use utils::generation::Generation;
+    use utils::id::{TenantId, TimelineId};
+    use utils::lsn::Lsn;
 
     use super::{ImageLayerIterator, ImageLayerWriter};
+    use crate::DEFAULT_PG_VERSION;
+    use crate::context::RequestContext;
+    use crate::tenant::config::TenantConf;
+    use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
+    use crate::tenant::storage_layer::{Layer, ResidentLayer};
+    use crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner;
+    use crate::tenant::{Tenant, Timeline};
 
     #[tokio::test]
     async fn image_layer_rewrite() {
@@ -1226,10 +1230,10 @@ mod test {
             ..TenantConf::default()
         };
         let tenant_id = TenantId::generate();
-        let mut gen = Generation::new(0xdead0001);
+        let mut gen_ = Generation::new(0xdead0001);
         let mut get_next_gen = || {
-            let ret = gen;
-            gen = gen.next();
+            let ret = gen_;
+            gen_ = gen_.next();
             ret
         };
         // The LSN at which we will create an image layer to filter

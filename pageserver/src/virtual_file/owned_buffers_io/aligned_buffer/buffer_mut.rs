@@ -1,13 +1,9 @@
-use std::{
-    mem::MaybeUninit,
-    ops::{Deref, DerefMut},
-};
+use std::mem::MaybeUninit;
+use std::ops::{Deref, DerefMut};
 
-use super::{
-    alignment::{Alignment, ConstAlign},
-    buffer::AlignedBuffer,
-    raw::RawAlignedBuffer,
-};
+use super::alignment::{Alignment, ConstAlign};
+use super::buffer::AlignedBuffer;
+use super::raw::RawAlignedBuffer;
 
 /// A mutable aligned buffer type.
 #[derive(Debug)]
@@ -75,7 +71,8 @@ impl<A: Alignment> AlignedBufferMut<A> {
     /// Force the length of the buffer to `new_len`.
     #[inline]
     unsafe fn set_len(&mut self, new_len: usize) {
-        self.raw.set_len(new_len)
+        // SAFETY: the caller is unsafe
+        unsafe { self.raw.set_len(new_len) }
     }
 
     #[inline]
@@ -222,8 +219,10 @@ unsafe impl<A: Alignment> bytes::BufMut for AlignedBufferMut<A> {
             panic_advance(cnt, remaining);
         }
 
-        // Addition will not overflow since the sum is at most the capacity.
-        self.set_len(len + cnt);
+        // SAFETY: Addition will not overflow since the sum is at most the capacity.
+        unsafe {
+            self.set_len(len + cnt);
+        }
     }
 
     #[inline]
@@ -275,7 +274,10 @@ unsafe impl<A: Alignment> tokio_epoll_uring::IoBufMut for AlignedBufferMut<A> {
 
     unsafe fn set_init(&mut self, init_len: usize) {
         if self.len() < init_len {
-            self.set_len(init_len);
+            // SAFETY: caller function is unsafe
+            unsafe {
+                self.set_len(init_len);
+            }
         }
     }
 }

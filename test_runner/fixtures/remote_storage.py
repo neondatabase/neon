@@ -70,6 +70,9 @@ class MockS3Server:
     def secret_key(self) -> str:
         return "test"
 
+    def session_token(self) -> str:
+        return "test"
+
     def kill(self):
         self.server.stop()
 
@@ -161,6 +164,7 @@ class S3Storage:
     bucket_region: str
     access_key: str | None
     secret_key: str | None
+    session_token: str | None
     aws_profile: str | None
     prefix_in_bucket: str
     client: S3Client
@@ -181,13 +185,18 @@ class S3Storage:
             if home is not None:
                 env["HOME"] = home
             return env
-        if self.access_key is not None and self.secret_key is not None:
+        if (
+            self.access_key is not None
+            and self.secret_key is not None
+            and self.session_token is not None
+        ):
             return {
                 "AWS_ACCESS_KEY_ID": self.access_key,
                 "AWS_SECRET_ACCESS_KEY": self.secret_key,
+                "AWS_SESSION_TOKEN": self.session_token,
             }
         raise RuntimeError(
-            "Either AWS_PROFILE or (AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY) have to be set for S3Storage"
+            "Either AWS_PROFILE or (AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY and AWS_SESSION_TOKEN) have to be set for S3Storage"
         )
 
     def to_string(self) -> str:
@@ -273,18 +282,35 @@ class S3Storage:
     def timeline_path(self, tenant_id: TenantShardId | TenantId, timeline_id: TimelineId) -> str:
         return f"{self.tenant_path(tenant_id)}/timelines/{timeline_id}"
 
+    def get_latest_generation_key(self, prefix: str, suffix: str, keys: list[str]) -> str:
+        """
+        Gets the latest generation key from a list of keys.
+
+        @param index_keys: A list of keys of different generations, which start with `prefix`
+        """
+
+        def parse_gen(key: str) -> int:
+            shortname = key.split("/")[-1]
+            generation_str = shortname.removeprefix(prefix).removesuffix(suffix)
+            try:
+                return int(generation_str, base=16)
+            except ValueError:
+                log.info(f"Ignoring non-matching key: {key}")
+                return -1
+
+        if len(keys) == 0:
+            raise IndexError("No keys found")
+
+        return max(keys, key=parse_gen)
+
     def get_latest_index_key(self, index_keys: list[str]) -> str:
         """
         Gets the latest index file key.
 
         @param index_keys: A list of index keys of different generations.
         """
-
-        def parse_gen(index_key: str) -> int:
-            parts = index_key.split("index_part.json-")
-            return int(parts[-1], base=16) if len(parts) == 2 else -1
-
-        return max(index_keys, key=parse_gen)
+        key = self.get_latest_generation_key(prefix="index_part.json-", suffix="", keys=index_keys)
+        return key
 
     def download_index_part(self, index_key: str) -> IndexPartDump:
         """
@@ -296,6 +322,29 @@ class S3Storage:
         body = response["Body"].read().decode("utf-8")
         log.info(f"index_part.json: {body}")
         return IndexPartDump.from_json(json.loads(body))
+
+    def download_tenant_manifest(self, tenant_id: TenantId) -> dict[str, Any] | None:
+        tenant_prefix = self.tenant_path(tenant_id)
+
+        objects = self.client.list_objects_v2(Bucket=self.bucket_name, Prefix=f"{tenant_prefix}/")[
+            "Contents"
+        ]
+        keys = [obj["Key"] for obj in objects if obj["Key"].find("tenant-manifest") != -1]
+        try:
+            manifest_key = self.get_latest_generation_key("tenant-manifest-", ".json", keys)
+        except IndexError:
+            log.info(
+                f"No manifest found for tenant {tenant_id}, this is normal if it didn't offload anything yet"
+            )
+            return None
+
+        response = self.client.get_object(Bucket=self.bucket_name, Key=manifest_key)
+        body = response["Body"].read().decode("utf-8")
+        log.info(f"Downloaded manifest {manifest_key}: {body}")
+
+        manifest = json.loads(body)
+        assert isinstance(manifest, dict)
+        return manifest
 
     def heatmap_key(self, tenant_id: TenantId) -> str:
         return f"{self.tenant_path(tenant_id)}/{TENANT_HEATMAP_FILE_NAME}"
@@ -352,6 +401,7 @@ class RemoteStorageKind(StrEnum):
             mock_region = mock_s3_server.region()
 
             access_key, secret_key = mock_s3_server.access_key(), mock_s3_server.secret_key()
+            session_token = mock_s3_server.session_token()
 
             client = boto3.client(
                 "s3",
@@ -359,6 +409,7 @@ class RemoteStorageKind(StrEnum):
                 region_name=mock_region,
                 aws_access_key_id=access_key,
                 aws_secret_access_key=secret_key,
+                aws_session_token=session_token,
             )
 
             bucket_name = to_bucket_name(user, test_name)
@@ -372,6 +423,7 @@ class RemoteStorageKind(StrEnum):
                 bucket_region=mock_region,
                 access_key=access_key,
                 secret_key=secret_key,
+                session_token=session_token,
                 aws_profile=None,
                 prefix_in_bucket="",
                 client=client,
@@ -383,9 +435,10 @@ class RemoteStorageKind(StrEnum):
 
         env_access_key = os.getenv("AWS_ACCESS_KEY_ID")
         env_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+        env_access_token = os.getenv("AWS_SESSION_TOKEN")
         env_profile = os.getenv("AWS_PROFILE")
         assert (
-            env_access_key and env_secret_key
+            env_access_key and env_secret_key and env_access_token
         ) or env_profile, "need to specify either access key and secret access key or profile"
 
         bucket_name = bucket_name or os.getenv("REMOTE_STORAGE_S3_BUCKET")
@@ -398,6 +451,9 @@ class RemoteStorageKind(StrEnum):
         client = boto3.client(
             "s3",
             region_name=bucket_region,
+            aws_access_key_id=env_access_key,
+            aws_secret_access_key=env_secret_key,
+            aws_session_token=env_access_token,
         )
 
         return S3Storage(
@@ -405,6 +461,7 @@ class RemoteStorageKind(StrEnum):
             bucket_region=bucket_region,
             access_key=env_access_key,
             secret_key=env_secret_key,
+            session_token=env_access_token,
             aws_profile=env_profile,
             prefix_in_bucket=prefix_in_bucket,
             client=client,

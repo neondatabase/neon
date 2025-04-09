@@ -2,30 +2,26 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::env;
 use std::fmt::Display;
-use std::io;
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::str::FromStr;
-use std::time::Duration;
-use std::time::SystemTime;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+use std::{env, io};
 
-use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
-use anyhow::Context;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use azure_core::request_options::{IfMatchCondition, MaxResults, Metadata, Range};
-use azure_core::{Continuable, RetryOptions};
+use azure_core::{Continuable, HttpClient, RetryOptions, TransportOptions};
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::blob::CopyStatus;
-use azure_storage_blobs::prelude::ClientBuilder;
-use azure_storage_blobs::{blob::operations::GetBlobBuilder, prelude::ContainerClient};
+use azure_storage_blobs::blob::operations::GetBlobBuilder;
+use azure_storage_blobs::prelude::{ClientBuilder, ContainerClient};
 use bytes::Bytes;
+use futures::FutureExt;
 use futures::future::Either;
 use futures::stream::Stream;
-use futures::FutureExt;
-use futures_util::StreamExt;
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use http_types::{StatusCode, Url};
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
@@ -33,12 +29,13 @@ use tracing::debug;
 use utils::backoff;
 use utils::backoff::exponential_backoff_duration_seconds;
 
-use crate::metrics::{start_measuring_requests, AttemptOutcome, RequestKind};
-use crate::DownloadKind;
+use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
+use crate::config::AzureConfig;
+use crate::error::Cancelled;
+use crate::metrics::{AttemptOutcome, RequestKind, start_measuring_requests};
 use crate::{
-    config::AzureConfig, error::Cancelled, ConcurrencyLimiter, Download, DownloadError,
-    DownloadOpts, Listing, ListingMode, ListingObject, RemotePath, RemoteStorage, StorageMetadata,
-    TimeTravelError, TimeoutOrCancel,
+    ConcurrencyLimiter, Download, DownloadError, DownloadKind, DownloadOpts, Listing, ListingMode,
+    ListingObject, RemotePath, RemoteStorage, StorageMetadata, TimeTravelError, TimeoutOrCancel,
 };
 
 pub struct AzureBlobStorage {
@@ -80,8 +77,13 @@ impl AzureBlobStorage {
             StorageCredentials::token_credential(token_credential)
         };
 
-        // we have an outer retry
-        let builder = ClientBuilder::new(account, credentials).retry(RetryOptions::none());
+        let builder = ClientBuilder::new(account, credentials)
+            // we have an outer retry
+            .retry(RetryOptions::none())
+            // Customize transport to configure conneciton pooling
+            .transport(TransportOptions::new(Self::reqwest_client(
+                azure_config.conn_pool_size,
+            )));
 
         let client = builder.container_client(azure_config.container_name.to_owned());
 
@@ -104,6 +106,14 @@ impl AzureBlobStorage {
             timeout,
             small_timeout,
         })
+    }
+
+    fn reqwest_client(conn_pool_size: usize) -> Arc<dyn HttpClient> {
+        let client = reqwest::ClientBuilder::new()
+            .pool_max_idle_per_host(conn_pool_size)
+            .build()
+            .expect("failed to build `reqwest` client");
+        Arc::new(client)
     }
 
     pub fn relative_path_to_name(&self, path: &RemotePath) -> String {
@@ -361,7 +371,8 @@ impl RemoteStorage for AzureBlobStorage {
 
                 let next_item = next_item?;
 
-                if timeout_try_cnt >= 2 {
+                // Log a warning if we saw two timeouts in a row before a successful request
+                if timeout_try_cnt > 2 {
                     tracing::warn!("Azure Blob Storage list timed out and succeeded after {} tries", timeout_try_cnt);
                 }
                 timeout_try_cnt = 1;
@@ -544,9 +555,9 @@ impl RemoteStorage for AzureBlobStorage {
             .await
     }
 
-    async fn delete_objects<'a>(
+    async fn delete_objects(
         &self,
-        paths: &'a [RemotePath],
+        paths: &[RemotePath],
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let kind = RequestKind::Delete;

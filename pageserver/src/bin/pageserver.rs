@@ -3,49 +3,41 @@
 //! Main entry point for the Page Server executable.
 
 use std::env;
-use std::env::{var, VarError};
+use std::env::{VarError, var};
 use std::io::Read;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use camino::Utf8Path;
 use clap::{Arg, ArgAction, Command};
-
-use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
-use pageserver::config::PageserverIdentity;
+use metrics::launch_timestamp::{LaunchTimestamp, set_launch_timestamp_metric};
+use metrics::set_build_info_metric;
+use pageserver::config::{PageServerConf, PageserverIdentity};
 use pageserver::controller_upcall_client::ControllerUpcallClient;
+use pageserver::deletion_queue::DeletionQueue;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
-use pageserver::task_mgr::{COMPUTE_REQUEST_RUNTIME, WALRECEIVER_RUNTIME};
-use pageserver::tenant::{secondary, TenantSharedResources};
-use pageserver::{CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener};
+use pageserver::task_mgr::{
+    BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
+};
+use pageserver::tenant::{TenantSharedResources, mgr, secondary};
+use pageserver::{
+    CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener, http, page_cache, page_service,
+    task_mgr, virtual_file,
+};
+use postgres_backend::AuthType;
 use remote_storage::GenericRemoteStorage;
 use tokio::signal::unix::SignalKind;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-
-use metrics::set_build_info_metric;
-use pageserver::{
-    config::PageServerConf,
-    deletion_queue::DeletionQueue,
-    http, page_cache, page_service, task_mgr,
-    task_mgr::{BACKGROUND_RUNTIME, MGMT_REQUEST_RUNTIME},
-    tenant::mgr,
-    virtual_file,
-};
-use postgres_backend::AuthType;
+use utils::auth::{JwtAuth, SwappableJwtAuth};
 use utils::crashsafe::syncfs;
-use utils::failpoint_support;
 use utils::logging::TracingErrorLayerEnablement;
-use utils::{
-    auth::{JwtAuth, SwappableJwtAuth},
-    logging, project_build_tag, project_git_version,
-    sentry_init::init_sentry,
-    tcp_listener,
-};
+use utils::sentry_init::init_sentry;
+use utils::{failpoint_support, logging, project_build_tag, project_git_version, tcp_listener};
 
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
@@ -53,10 +45,12 @@ project_build_tag!(BUILD_TAG);
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-/// Configure jemalloc to sample allocations for profiles every 1 MB (1 << 20).
+/// Configure jemalloc to profile heap allocations by sampling stack traces every 2 MB (1 << 21).
+/// This adds roughly 3% overhead for allocations on average, which is acceptable considering
+/// performance-sensitive code will avoid allocations as far as possible anyway.
 #[allow(non_upper_case_globals)]
-#[export_name = "malloc_conf"]
-pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:20\0";
+#[unsafe(export_name = "malloc_conf")]
+pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:21\0";
 
 const PID_FILE_NAME: &str = "pageserver.pid";
 
@@ -82,6 +76,9 @@ fn main() -> anyhow::Result<()> {
         println!("{{\"features\": {FEATURES:?} }}");
         return Ok(());
     }
+
+    // Initialize up failpoints support
+    let scenario = failpoint_support::init();
 
     let workdir = arg_matches
         .get_one::<String>("workdir")
@@ -132,7 +129,9 @@ fn main() -> anyhow::Result<()> {
     info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
     info!(?conf.virtual_file_io_mode, "starting with virtual_file IO mode");
     info!(?conf.wal_receiver_protocol, "starting with WAL receiver protocol");
+    info!(?conf.validate_wal_contiguity, "starting with WAL contiguity validation");
     info!(?conf.page_service_pipelining, "starting with page service pipelining config");
+    info!(?conf.get_vectored_concurrent_io, "starting with get_vectored IO concurrency config");
 
     // The tenants directory contains all the pageserver local disk state.
     // Create if not exists and make sure all the contents are durable before proceeding.
@@ -174,9 +173,6 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Initialize up failpoints support
-    let scenario = failpoint_support::init();
-
     // Basic initialization of things that don't change after startup
     tracing::info!("Initializing virtual_file...");
     virtual_file::init(
@@ -213,7 +209,9 @@ fn initialize_config(
         Ok(mut f) => {
             let md = f.metadata().context("stat config file")?;
             if !md.is_file() {
-                anyhow::bail!("Pageserver found identity file but it is a dir entry: {identity_file_path}. Aborting start up ...");
+                anyhow::bail!(
+                    "Pageserver found identity file but it is a dir entry: {identity_file_path}. Aborting start up ..."
+                );
             }
 
             let mut s = String::new();
@@ -221,7 +219,9 @@ fn initialize_config(
             toml_edit::de::from_str::<PageserverIdentity>(&s)?
         }
         Err(e) => {
-            anyhow::bail!("Pageserver could not read identity file: {identity_file_path}: {e}. Aborting start up ...");
+            anyhow::bail!(
+                "Pageserver could not read identity file: {identity_file_path}: {e}. Aborting start up ..."
+            );
         }
     };
 
@@ -397,11 +397,9 @@ fn start_pageserver(
         Err(VarError::NotPresent) => {
             info!("No JWT token for authentication with Safekeeper detected");
         }
-        Err(e) => {
-            return Err(e).with_context(|| {
-                "Failed to either load to detect non-present NEON_AUTH_TOKEN environment variable"
-            })
-        }
+        Err(e) => return Err(e).with_context(
+            || "Failed to either load to detect non-present NEON_AUTH_TOKEN environment variable",
+        ),
     };
 
     // Top-level cancellation token for the process
@@ -589,7 +587,7 @@ fn start_pageserver(
         let router = http::make_router(router_state, launch_ts, http_auth.clone())?
             .build()
             .map_err(|err| anyhow!(err))?;
-        let service = utils::http::RouterService::new(router).unwrap();
+        let service = http_utils::RouterService::new(router).unwrap();
         let server = hyper0::Server::from_tcp(http_listener)?
             .serve(service)
             .with_graceful_shutdown({
@@ -707,7 +705,9 @@ async fn create_remote_storage_client(
     // wrapper that simulates failures.
     if conf.test_remote_failures > 0 {
         if !cfg!(feature = "testing") {
-            anyhow::bail!("test_remote_failures option is not available because pageserver was compiled without the 'testing' feature");
+            anyhow::bail!(
+                "test_remote_failures option is not available because pageserver was compiled without the 'testing' feature"
+            );
         }
         info!(
             "Simulating remote failures for first {} attempts of each op",

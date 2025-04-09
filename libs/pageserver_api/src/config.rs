@@ -9,19 +9,18 @@ pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN
 pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 9898;
 pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
 
+use std::collections::HashMap;
+use std::num::{NonZeroU64, NonZeroUsize};
+use std::str::FromStr;
+use std::time::Duration;
+
 use postgres_backend::AuthType;
 use remote_storage::RemoteStorageConfig;
 use serde_with::serde_as;
-use std::{
-    collections::HashMap,
-    num::{NonZeroU64, NonZeroUsize},
-    str::FromStr,
-    time::Duration,
-};
-use utils::{logging::LogFormat, postgres_client::PostgresClientProtocol};
+use utils::logging::LogFormat;
+use utils::postgres_client::PostgresClientProtocol;
 
-use crate::models::ImageCompressionAlgorithm;
-use crate::models::LsnLease;
+use crate::models::{ImageCompressionAlgorithm, LsnLease};
 
 // Certain metadata (e.g. externally-addressable name, AZ) is delivered
 // as a separate structure.  This information is not neeed by the pageserver
@@ -120,6 +119,10 @@ pub struct ConfigToml {
     pub no_sync: Option<bool>,
     pub wal_receiver_protocol: PostgresClientProtocol,
     pub page_service_pipelining: PageServicePipeliningConfig,
+    pub get_vectored_concurrent_io: GetVectoredConcurrentIo,
+    pub enable_read_path_debugging: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validate_wal_contiguity: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -156,6 +159,25 @@ pub struct PageServicePipeliningConfigPipelined {
 pub enum PageServiceProtocolPipelinedExecutionStrategy {
     ConcurrentFutures,
     Tasks,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mode", rename_all = "kebab-case")]
+#[serde(deny_unknown_fields)]
+pub enum GetVectoredConcurrentIo {
+    /// The read path is fully sequential: layers are visited
+    /// one after the other and IOs are issued and waited upon
+    /// from the same task that traverses the layers.
+    Sequential,
+    /// The read path still traverses layers sequentially, and
+    /// index blocks will be read into the PS PageCache from
+    /// that task, with waiting.
+    /// But data IOs are dispatched and waited upon from a sidecar
+    /// task so that the traversing task can continue to traverse
+    /// layers while the IOs are in flight.
+    /// If the PS PageCache miss rate is low, this improves
+    /// throughput dramatically.
+    SidecarTask,
 }
 
 pub mod statvfs {
@@ -234,9 +256,31 @@ pub struct TenantConfigToml {
     // Duration::ZERO means automatic compaction is disabled.
     #[serde(with = "humantime_serde")]
     pub compaction_period: Duration,
-    // Level0 delta layer threshold for compaction.
+    /// Level0 delta layer threshold for compaction.
     pub compaction_threshold: usize,
+    /// Controls the amount of L0 included in a single compaction iteration.
+    /// The unit is `checkpoint_distance`, i.e., a size.
+    /// We add L0s to the set of layers to compact until their cumulative
+    /// size exceeds `compaction_upper_limit * checkpoint_distance`.
+    pub compaction_upper_limit: usize,
     pub compaction_algorithm: crate::models::CompactionAlgorithmSettings,
+    /// If true, compact down L0 across all tenant timelines before doing regular compaction.
+    pub compaction_l0_first: bool,
+    /// If true, use a separate semaphore (i.e. concurrency limit) for the L0 compaction pass. Only
+    /// has an effect if `compaction_l0_first` is `true`.
+    pub compaction_l0_semaphore: bool,
+    /// Level0 delta layer threshold at which to delay layer flushes for compaction backpressure,
+    /// such that they take 2x as long, and start waiting for layer flushes during ephemeral layer
+    /// rolls. This helps compaction keep up with WAL ingestion, and avoids read amplification
+    /// blowing up. Should be >compaction_threshold. 0 to disable. Disabled by default.
+    pub l0_flush_delay_threshold: Option<usize>,
+    /// Level0 delta layer threshold at which to stall layer flushes. Must be >compaction_threshold
+    /// to avoid deadlock. 0 to disable. Disabled by default.
+    pub l0_flush_stall_threshold: Option<usize>,
+    /// If true, Level0 delta layer flushes will wait for S3 upload before flushing the next
+    /// layer. This is a temporary backpressure mechanism which should be removed once
+    /// l0_flush_{delay,stall}_threshold is fully enabled.
+    pub l0_flush_wait_upload: bool,
     // Determines how much history is retained, to allow
     // branching and read replicas at an older point in time.
     // The unit is #of bytes of WAL.
@@ -286,6 +330,10 @@ pub struct TenantConfigToml {
     // Expresed in multiples of checkpoint distance.
     pub image_layer_creation_check_threshold: u8,
 
+    // How many multiples of L0 `compaction_threshold` will preempt image layer creation and do L0 compaction.
+    // Set to 0 to disable preemption.
+    pub image_creation_preempt_threshold: usize,
+
     /// The length for an explicit LSN lease request.
     /// Layers needed to reconstruct pages at LSN will not be GC-ed during this interval.
     #[serde(with = "humantime_serde")]
@@ -301,12 +349,26 @@ pub struct TenantConfigToml {
     pub timeline_offloading: bool,
 
     pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
+
+    /// Enable rel_size_v2 for this tenant. Once enabled, the tenant will persist this information into
+    /// `index_part.json`, and it cannot be reversed.
+    pub rel_size_v2_enabled: bool,
+
+    // gc-compaction related configs
+    /// Enable automatic gc-compaction trigger on this tenant.
+    pub gc_compaction_enabled: bool,
+    /// The initial threshold for gc-compaction in KB. Once the total size of layers below the gc-horizon is above this threshold,
+    /// gc-compaction will be triggered.
+    pub gc_compaction_initial_threshold_kb: u64,
+    /// The ratio that triggers the auto gc-compaction. If (the total size of layers between L2 LSN and gc-horizon) / (size below the L2 LSN)
+    /// is above this ratio, gc-compaction will be triggered.
+    pub gc_compaction_ratio_percent: u64,
 }
 
 pub mod defaults {
-    use crate::models::ImageCompressionAlgorithm;
-
     pub use storage_broker::DEFAULT_ENDPOINT as BROKER_DEFAULT_ENDPOINT;
+
+    use crate::models::ImageCompressionAlgorithm;
 
     pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "300 s";
     pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
@@ -435,7 +497,7 @@ impl Default for ConfigToml {
                 NonZeroUsize::new(DEFAULT_MAX_VECTORED_READ_BYTES).unwrap(),
             )),
             image_compression: (DEFAULT_IMAGE_COMPRESSION),
-            timeline_offloading: false,
+            timeline_offloading: true,
             ephemeral_bytes_per_memory_kb: (DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
             l0_flush: None,
             virtual_file_io_mode: None,
@@ -450,6 +512,17 @@ impl Default for ConfigToml {
                     execution: PageServiceProtocolPipelinedExecutionStrategy::ConcurrentFutures,
                 })
             },
+            get_vectored_concurrent_io: if !cfg!(test) {
+                GetVectoredConcurrentIo::Sequential
+            } else {
+                GetVectoredConcurrentIo::SidecarTask
+            },
+            enable_read_path_debugging: if cfg!(test) || cfg!(feature = "testing") {
+                Some(true)
+            } else {
+                None
+            },
+            validate_wal_contiguity: None,
         }
     }
 }
@@ -472,8 +545,19 @@ pub mod tenant_conf_defaults {
 
     pub const DEFAULT_COMPACTION_PERIOD: &str = "20 s";
     pub const DEFAULT_COMPACTION_THRESHOLD: usize = 10;
+
+    // This value needs to be tuned to avoid OOM. We have 3/4*CPUs threads for L0 compaction, that's
+    // 3/4*16=9 on most of our pageservers. Compacting 20 layers requires about 1 GB memory (could
+    // be reduced later by optimizing L0 hole calculation to avoid loading all keys into memory). So
+    // with this config, we can get a maximum peak compaction usage of 9 GB.
+    pub const DEFAULT_COMPACTION_UPPER_LIMIT: usize = 20;
+    pub const DEFAULT_COMPACTION_L0_FIRST: bool = false;
+    pub const DEFAULT_COMPACTION_L0_SEMAPHORE: bool = true;
+
     pub const DEFAULT_COMPACTION_ALGORITHM: crate::models::CompactionAlgorithm =
         crate::models::CompactionAlgorithm::Legacy;
+
+    pub const DEFAULT_L0_FLUSH_WAIT_UPLOAD: bool = true;
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
 
@@ -483,6 +567,10 @@ pub mod tenant_conf_defaults {
     // Relevant: https://github.com/neondatabase/neon/issues/3394
     pub const DEFAULT_GC_PERIOD: &str = "1 hr";
     pub const DEFAULT_IMAGE_CREATION_THRESHOLD: usize = 3;
+    // If there are more than threshold * compaction_threshold (that is 3 * 10 in the default config) L0 layers, image
+    // layer creation will end immediately. Set to 0 to disable. The target default will be 3 once we
+    // want to enable this feature.
+    pub const DEFAULT_IMAGE_CREATION_PREEMPT_THRESHOLD: usize = 0;
     pub const DEFAULT_PITR_INTERVAL: &str = "7 days";
     pub const DEFAULT_WALRECEIVER_CONNECT_TIMEOUT: &str = "10 seconds";
     pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "10 seconds";
@@ -494,6 +582,9 @@ pub mod tenant_conf_defaults {
     // By default ingest enough WAL for two new L0 layers before checking if new image
     // image layers should be created.
     pub const DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD: u8 = 2;
+    pub const DEFAULT_GC_COMPACTION_ENABLED: bool = false;
+    pub const DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB: u64 = 5 * 1024 * 1024; // 5GB
+    pub const DEFAULT_GC_COMPACTION_RATIO_PERCENT: u64 = 100;
 }
 
 impl Default for TenantConfigToml {
@@ -507,9 +598,15 @@ impl Default for TenantConfigToml {
             compaction_period: humantime::parse_duration(DEFAULT_COMPACTION_PERIOD)
                 .expect("cannot parse default compaction period"),
             compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
+            compaction_upper_limit: DEFAULT_COMPACTION_UPPER_LIMIT,
             compaction_algorithm: crate::models::CompactionAlgorithmSettings {
                 kind: DEFAULT_COMPACTION_ALGORITHM,
             },
+            compaction_l0_first: DEFAULT_COMPACTION_L0_FIRST,
+            compaction_l0_semaphore: DEFAULT_COMPACTION_L0_SEMAPHORE,
+            l0_flush_delay_threshold: None,
+            l0_flush_stall_threshold: None,
+            l0_flush_wait_upload: DEFAULT_L0_FLUSH_WAIT_UPLOAD,
             gc_horizon: DEFAULT_GC_HORIZON,
             gc_period: humantime::parse_duration(DEFAULT_GC_PERIOD)
                 .expect("cannot parse default gc period"),
@@ -534,10 +631,15 @@ impl Default for TenantConfigToml {
             lazy_slru_download: false,
             timeline_get_throttle: crate::models::ThrottleConfig::disabled(),
             image_layer_creation_check_threshold: DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD,
+            image_creation_preempt_threshold: DEFAULT_IMAGE_CREATION_PREEMPT_THRESHOLD,
             lsn_lease_length: LsnLease::DEFAULT_LENGTH,
             lsn_lease_length_for_ts: LsnLease::DEFAULT_LENGTH_FOR_TS,
-            timeline_offloading: false,
+            timeline_offloading: true,
             wal_receiver_protocol_override: None,
+            rel_size_v2_enabled: false,
+            gc_compaction_enabled: DEFAULT_GC_COMPACTION_ENABLED,
+            gc_compaction_initial_threshold_kb: DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB,
+            gc_compaction_ratio_percent: DEFAULT_GC_COMPACTION_RATIO_PERCENT,
         }
     }
 }

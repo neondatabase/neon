@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from contextlib import closing
 
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PgBin, fork_at_current_lsn
 from fixtures.utils import query_scalar
@@ -202,6 +203,9 @@ def test_vm_bit_clear_on_heap_lock_blackbox(neon_env_builder: NeonEnvBuilder):
         "checkpoint_distance": f"{128 * 1024}",
         "compaction_target_size": f"{128 * 1024}",
         "compaction_threshold": "1",
+        # disable L0 backpressure
+        "l0_flush_delay_threshold": "0",
+        "l0_flush_stall_threshold": "0",
         # create image layers eagerly, so that GC can remove some layers
         "image_creation_threshold": "1",
         # set PITR interval to be small, so we can do GC
@@ -294,6 +298,7 @@ def test_vm_bit_clear_on_heap_lock_blackbox(neon_env_builder: NeonEnvBuilder):
     cur.execute("commit transaction")
 
 
+@pytest.mark.timeout(600)  # slow in debug builds
 def test_check_visibility_map(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     """
     Runs pgbench across a few databases on a sharded tenant, then performs a visibility map

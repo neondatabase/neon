@@ -4,10 +4,14 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
+[features]
+testing = [ "pageserver_api/testing" ]
+
 [dependencies]
 pageserver_api.workspace = true
 thiserror.workspace = true
 reqwest = { workspace = true, features = [ "stream" ] }
+http-utils.workspace = true
 utils.workspace = true
 serde.workspace = true
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }
@@ -17,5 +21,4 @@ tokio.workspace = true
 futures.workspace = true
 tokio-util.workspace = true
 anyhow.workspace = true
-postgres.workspace = true
 bytes.workspace = true

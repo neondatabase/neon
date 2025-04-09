@@ -31,12 +31,15 @@
 //! - In a tenant with 4 shards, each shard has ShardCount(N), ShardNumber(i) where i in 0..N-1 (inclusive),
 //!   and their slugs are 0004, 0104, 0204, and 0304.
 
-use crate::{key::Key, models::ShardParameters};
-use postgres_ffi::relfile_utils::INIT_FORKNUM;
-use serde::{Deserialize, Serialize};
+use std::hash::{Hash, Hasher};
 
 #[doc(inline)]
 pub use ::utils::shard::*;
+use postgres_ffi::relfile_utils::INIT_FORKNUM;
+use serde::{Deserialize, Serialize};
+
+use crate::key::Key;
+use crate::models::ShardParameters;
 
 /// The ShardIdentity contains enough information to map a [`Key`] to a [`ShardNumber`],
 /// and to check whether that [`ShardNumber`] is the same as the current shard.
@@ -46,6 +49,23 @@ pub struct ShardIdentity {
     pub count: ShardCount,
     pub stripe_size: ShardStripeSize,
     layout: ShardLayout,
+}
+
+/// Hash implementation
+///
+/// The stripe size cannot change dynamically, so it can be ignored for efficiency reasons.
+impl Hash for ShardIdentity {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let ShardIdentity {
+            number,
+            count,
+            stripe_size: _,
+            layout: _,
+        } = self;
+
+        number.0.hash(state);
+        count.0.hash(state);
+    }
 }
 
 /// Stripe size in number of pages
@@ -59,7 +79,7 @@ impl Default for ShardStripeSize {
 }
 
 /// Layout version: for future upgrades where we might change how the key->shard mapping works
-#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
+#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Hash, Debug)]
 pub struct ShardLayout(u8);
 
 const LAYOUT_V1: ShardLayout = ShardLayout(1);
@@ -173,7 +193,11 @@ impl ShardIdentity {
 
     /// Return true if the key should be stored on all shards, not just one.
     pub fn is_key_global(&self, key: &Key) -> bool {
-        if key.is_slru_block_key() || key.is_slru_segment_size_key() || key.is_aux_file_key() {
+        if key.is_slru_block_key()
+            || key.is_slru_segment_size_key()
+            || key.is_aux_file_key()
+            || key.is_slru_dir_key()
+        {
             // Special keys that are only stored on shard 0
             false
         } else if key.is_rel_block_key() {
@@ -314,7 +338,8 @@ pub fn describe(
 mod tests {
     use std::str::FromStr;
 
-    use utils::{id::TenantId, Hex};
+    use utils::Hex;
+    use utils::id::TenantId;
 
     use super::*;
 

@@ -42,14 +42,14 @@ pub enum Privilege {
 #[derive(Error, Debug)]
 pub enum ComputeCtlError {
     #[error("connection error: {0}")]
-    ConnectionError(#[source] reqwest_middleware::Error),
+    Connection(#[source] reqwest_middleware::Error),
     #[error("request error [{status}]: {body:?}")]
-    RequestError {
+    Request {
         status: StatusCode,
         body: Option<GenericAPIError>,
     },
     #[error("response parsing error: {0}")]
-    ResponseError(#[source] reqwest::Error),
+    Response(#[source] reqwest::Error),
 }
 
 impl ComputeCtlApi {
@@ -89,14 +89,14 @@ impl ComputeCtlApi {
             .json(req)
             .send()
             .await
-            .map_err(ComputeCtlError::ConnectionError)?;
+            .map_err(ComputeCtlError::Connection)?;
 
         let status = resp.status();
         if status.is_client_error() || status.is_server_error() {
             let body = resp.json().await.ok();
-            return Err(ComputeCtlError::RequestError { status, body });
+            return Err(ComputeCtlError::Request { status, body });
         }
 
-        resp.json().await.map_err(ComputeCtlError::ResponseError)
+        resp.json().await.map_err(ComputeCtlError::Response)
     }
 }

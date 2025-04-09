@@ -7,41 +7,36 @@
 //! Be aware that you need to be extra careful with manager code, because it is not respawned on panic.
 //! Also, if it will stuck in some branch, it will prevent any further progress in the timeline.
 
-use std::{
-    sync::{atomic::AtomicUsize, Arc},
-    time::Duration,
-};
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::time::Duration;
 
 use futures::channel::oneshot;
 use postgres_ffi::XLogSegNo;
+use safekeeper_api::Term;
+use safekeeper_api::models::PeerInfo;
 use serde::{Deserialize, Serialize};
-use tokio::{
-    task::{JoinError, JoinHandle},
-    time::Instant,
-};
+use tokio::task::{JoinError, JoinHandle};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, info_span, instrument, warn, Instrument};
+use tracing::{Instrument, debug, info, info_span, instrument, warn};
 use utils::lsn::Lsn;
 
-use crate::{
-    control_file::{FileStorage, Storage},
-    metrics::{
-        MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL, MISC_OPERATION_SECONDS,
-        NUM_EVICTED_TIMELINES,
-    },
-    rate_limit::{rand_duration, RateLimiter},
-    recovery::recovery_main,
-    remove_wal::calc_horizon_lsn,
-    safekeeper::Term,
-    send_wal::WalSenders,
-    state::TimelineState,
-    timeline::{ManagerTimeline, PeerInfo, ReadGuardSharedState, StateSK, WalResidentTimeline},
-    timeline_guard::{AccessService, GuardId, ResidenceGuard},
-    timelines_set::{TimelineSetGuard, TimelinesSet},
-    wal_backup::{self, WalBackupTaskHandle},
-    wal_backup_partial::{self, PartialBackup, PartialRemoteSegment},
-    SafeKeeperConf,
+use crate::SafeKeeperConf;
+use crate::control_file::{FileStorage, Storage};
+use crate::metrics::{
+    MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL, MISC_OPERATION_SECONDS, NUM_EVICTED_TIMELINES,
 };
+use crate::rate_limit::{RateLimiter, rand_duration};
+use crate::recovery::recovery_main;
+use crate::remove_wal::calc_horizon_lsn;
+use crate::send_wal::WalSenders;
+use crate::state::TimelineState;
+use crate::timeline::{ManagerTimeline, ReadGuardSharedState, StateSK, WalResidentTimeline};
+use crate::timeline_guard::{AccessService, GuardId, ResidenceGuard};
+use crate::timelines_set::{TimelineSetGuard, TimelinesSet};
+use crate::wal_backup::{self, WalBackupTaskHandle};
+use crate::wal_backup_partial::{self, PartialBackup, PartialRemoteSegment};
 
 pub(crate) struct StateSnapshot {
     // inmem values

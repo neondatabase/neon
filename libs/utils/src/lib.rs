@@ -2,8 +2,6 @@
 //! between other crates in this repository.
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-extern crate hyper0 as hyper;
-
 pub mod backoff;
 
 /// `Lsn` type implements common tasks on Log Sequence Numbers
@@ -32,9 +30,6 @@ pub mod shard;
 
 mod hex;
 pub use hex::Hex;
-
-// http endpoint utils
-pub mod http;
 
 // definition of the Generation type for pageserver attachment APIs
 pub mod generation;
@@ -93,6 +88,13 @@ pub mod poison;
 pub mod toml_edit_ext;
 
 pub mod circuit_breaker;
+
+pub mod try_rcu;
+
+pub mod guard_arc_swap;
+
+#[cfg(target_os = "linux")]
+pub mod linux_socket_ioctl;
 
 // Re-export used in macro. Avoids adding git-version as dep in target crates.
 #[doc(hidden)]

@@ -261,7 +261,13 @@ fn fill_rust_env_vars(cmd: &mut Command) -> &mut Command {
     let mut filled_cmd = cmd.env_clear().env("RUST_BACKTRACE", backtrace_setting);
 
     // Pass through these environment variables to the command
-    for var in ["LLVM_PROFILE_FILE", "FAILPOINTS", "RUST_LOG"] {
+    for var in [
+        "LLVM_PROFILE_FILE",
+        "FAILPOINTS",
+        "RUST_LOG",
+        "ASAN_OPTIONS",
+        "UBSAN_OPTIONS",
+    ] {
         if let Some(val) = std::env::var_os(var) {
             filled_cmd = filled_cmd.env(var, val);
         }
@@ -274,6 +280,7 @@ fn fill_remote_storage_secrets_vars(mut cmd: &mut Command) -> &mut Command {
     for env_key in [
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
         "AWS_PROFILE",
         // HOME is needed in combination with `AWS_PROFILE` to pick up the SSO sessions.
         "HOME",

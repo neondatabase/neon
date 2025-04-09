@@ -1,7 +1,7 @@
 [package]
 name = "proxy"
 version = "0.1.0"
-edition.workspace = true
+edition = "2024"
 license.workspace = true
 
 [features]
@@ -24,9 +24,9 @@ bytes = { workspace = true, features = ["serde"] }
 camino.workspace = true
 chrono.workspace = true
 clap = { workspace = true, features = ["derive", "env"] }
+clashmap.workspace = true
 compute_api.workspace = true
 consumption_metrics.workspace = true
-dashmap.workspace = true
 env_logger.workspace = true
 framed-websockets.workspace = true
 futures.workspace = true
@@ -36,12 +36,14 @@ hex.workspace = true
 hmac.workspace = true
 hostname.workspace = true
 http.workspace = true
+http-utils.workspace = true
 humantime.workspace = true
 humantime-serde.workspace = true
 hyper0.workspace = true
 hyper = { workspace = true, features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
 http-body-util = { version = "0.1" }
+gettid = "0.1.3"
 indexmap = { workspace = true, features = ["serde"] }
 ipnet.workspace = true
 itertools.workspace = true
@@ -50,6 +52,8 @@ lasso = { workspace = true, features = ["multi-threaded"] }
 measured = { workspace = true, features = ["lasso"] }
 metrics.workspace = true
 once_cell.workspace = true
+opentelemetry = { workspace = true, features = ["trace"] }
+papaya = "0.1.8"
 parking_lot.workspace = true
 parquet.workspace = true
 parquet_derive.workspace = true
@@ -58,7 +62,6 @@ postgres_backend.workspace = true
 postgres-client = { package = "tokio-postgres2", path = "../libs/proxy/tokio-postgres2" }
 postgres-protocol = { package = "postgres-protocol2", path = "../libs/proxy/postgres-protocol2" }
 pq_proto.workspace = true
-prometheus.workspace = true
 rand.workspace = true
 regex.workspace = true
 remote_storage = { version = "0.1", path = "../libs/remote_storage/" }
@@ -76,7 +79,6 @@ sha2 = { workspace = true, features = ["asm", "oid"] }
 smol_str.workspace = true
 smallvec.workspace = true
 socket2.workspace = true
-strum.workspace = true
 strum_macros.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
@@ -89,6 +91,8 @@ tokio = { workspace = true, features = ["signal"] }
 tracing-subscriber.workspace = true
 tracing-utils.workspace = true
 tracing.workspace = true
+tracing-log.workspace = true
+tracing-opentelemetry.workspace = true
 try-lock.workspace = true
 typed-json.workspace = true
 url.workspace = true
@@ -106,11 +110,13 @@ jose-jwk = { version = "0.1.2", features = ["p256", "p384", "rsa"] }
 signature = "2"
 ecdsa = "0.16"
 p256 = { version = "0.13", features = ["jwk"] }
+ed25519-dalek = { version = "2", default-features = false, features = ["rand_core"] }
 rsa = "0.9"
 
 workspace_hack.workspace = true
 
 [dev-dependencies]
+assert-json-diff.workspace = true
 camino-tempfile.workspace = true
 fallible-iterator.workspace = true
 flate2.workspace = true

@@ -9,12 +9,12 @@
 //!
 //! This library assumes that the `client_encoding` backend parameter has been
 //! set to `UTF8`. It will most likely not behave properly if that is not the case.
-#![doc(html_root_url = "https://docs.rs/postgres-protocol/0.6")]
-#![warn(missing_docs, rust_2018_idioms, clippy::all)]
+#![warn(missing_docs, clippy::all)]
+
+use std::io;
 
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
-use std::io;
 
 pub mod authentication;
 pub mod escape;

@@ -167,7 +167,8 @@ impl TryFrom<InterpretedWalRecords> for proto::InterpretedWalRecords {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(proto::InterpretedWalRecords {
             records,
-            next_record_lsn: value.next_record_lsn.map(|l| l.0),
+            next_record_lsn: Some(value.next_record_lsn.0),
+            raw_wal_start_lsn: value.raw_wal_start_lsn.map(|l| l.0),
         })
     }
 }
@@ -236,8 +237,8 @@ impl From<ValueMeta> for proto::ValueMeta {
 impl From<CompactKey> for proto::CompactKey {
     fn from(value: CompactKey) -> Self {
         proto::CompactKey {
-            high: (value.raw() >> 64) as i64,
-            low: value.raw() as i64,
+            high: (value.raw() >> 64) as u64,
+            low: value.raw() as u64,
         }
     }
 }
@@ -254,7 +255,11 @@ impl TryFrom<proto::InterpretedWalRecords> for InterpretedWalRecords {
 
         Ok(InterpretedWalRecords {
             records,
-            next_record_lsn: value.next_record_lsn.map(Lsn::from),
+            next_record_lsn: value
+                .next_record_lsn
+                .map(Lsn::from)
+                .expect("Always provided"),
+            raw_wal_start_lsn: value.raw_wal_start_lsn.map(Lsn::from),
         })
     }
 }
@@ -352,5 +357,66 @@ impl TryFrom<proto::ValueMeta> for ValueMeta {
 impl From<proto::CompactKey> for CompactKey {
     fn from(value: proto::CompactKey) -> Self {
         (((value.high as i128) << 64) | (value.low as i128)).into()
+    }
+}
+
+#[test]
+fn test_compact_key_with_large_relnode() {
+    use pageserver_api::key::Key;
+
+    let inputs = vec![
+        Key {
+            field1: 0,
+            field2: 0x100,
+            field3: 0x200,
+            field4: 0,
+            field5: 0x10,
+            field6: 0x5,
+        },
+        Key {
+            field1: 0,
+            field2: 0x100,
+            field3: 0x200,
+            field4: 0x007FFFFF,
+            field5: 0x10,
+            field6: 0x5,
+        },
+        Key {
+            field1: 0,
+            field2: 0x100,
+            field3: 0x200,
+            field4: 0x00800000,
+            field5: 0x10,
+            field6: 0x5,
+        },
+        Key {
+            field1: 0,
+            field2: 0x100,
+            field3: 0x200,
+            field4: 0x00800001,
+            field5: 0x10,
+            field6: 0x5,
+        },
+        Key {
+            field1: 0,
+            field2: 0xFFFFFFFF,
+            field3: 0xFFFFFFFF,
+            field4: 0xFFFFFFFF,
+            field5: 0x0,
+            field6: 0x0,
+        },
+    ];
+
+    for input in inputs {
+        assert!(input.is_valid_key_on_write_path());
+        let compact = input.to_compact();
+        let proto: proto::CompactKey = compact.into();
+        let from_proto: CompactKey = proto.into();
+
+        assert_eq!(
+            compact, from_proto,
+            "Round trip failed for key with relnode={:#x}",
+            input.field4
+        );
     }
 }

@@ -28,52 +28,38 @@
 //! An incomplete set of TODOs from the Hackathon:
 //! - version-specific CheckPointData (=> pgv abstraction, already exists for regular walingest)
 
+use std::collections::HashSet;
+use std::ops::Range;
 use std::sync::Arc;
 
 use anyhow::{bail, ensure};
 use bytes::Bytes;
-
 use itertools::Itertools;
-use pageserver_api::{
-    key::{rel_block_to_key, rel_dir_to_key, rel_size_to_key, relmap_file_key, DBDIR_KEY},
-    reltag::RelTag,
-    shard::ShardIdentity,
-};
-use postgres_ffi::{pg_constants, relfile_utils::parse_relfilename, BLCKSZ};
-use tokio::task::JoinSet;
-use tracing::{debug, info_span, instrument, Instrument};
-
-use crate::{
-    assert_u64_eq_usize::UsizeIsU64,
-    pgdatadir_mapping::{SlruSegmentDirectory, TwoPhaseDirectory},
-};
-use crate::{
-    context::{DownloadBehavior, RequestContext},
-    pgdatadir_mapping::{DbDirectory, RelDirectory},
-    task_mgr::TaskKind,
-    tenant::storage_layer::{ImageLayerWriter, Layer},
-};
-
-use pageserver_api::key::Key;
 use pageserver_api::key::{
-    slru_block_to_key, slru_dir_to_key, slru_segment_size_to_key, CHECKPOINT_KEY, CONTROLFILE_KEY,
-    TWOPHASEDIR_KEY,
+    CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, Key, TWOPHASEDIR_KEY, rel_block_to_key,
+    rel_dir_to_key, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
+    slru_segment_size_to_key,
 };
-use pageserver_api::keyspace::singleton_range;
-use pageserver_api::keyspace::{contiguous_range_len, is_contiguous_range};
-use pageserver_api::reltag::SlruKind;
+use pageserver_api::keyspace::{contiguous_range_len, is_contiguous_range, singleton_range};
+use pageserver_api::reltag::{RelTag, SlruKind};
+use pageserver_api::shard::ShardIdentity;
+use postgres_ffi::relfile_utils::parse_relfilename;
+use postgres_ffi::{BLCKSZ, pg_constants};
+use remote_storage::RemotePath;
+use tokio::task::JoinSet;
+use tracing::{Instrument, debug, info_span, instrument};
 use utils::bin_ser::BeSer;
 use utils::lsn::Lsn;
 
-use std::collections::HashSet;
-use std::ops::Range;
-
-use super::{
-    importbucket_client::{ControlFile, RemoteStorageWrapper},
-    Timeline,
+use super::Timeline;
+use super::importbucket_client::{ControlFile, RemoteStorageWrapper};
+use crate::assert_u64_eq_usize::UsizeIsU64;
+use crate::context::{DownloadBehavior, RequestContext};
+use crate::pgdatadir_mapping::{
+    DbDirectory, RelDirectory, SlruSegmentDirectory, TwoPhaseDirectory,
 };
-
-use remote_storage::RemotePath;
+use crate::task_mgr::TaskKind;
+use crate::tenant::storage_layer::{ImageLayerWriter, Layer};
 
 pub async fn run(
     timeline: Arc<Timeline>,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import os
 import re
@@ -21,6 +22,7 @@ import zstandard
 from psycopg2.extensions import cursor
 from typing_extensions import override
 
+from fixtures.common_types import Id, Lsn
 from fixtures.log_helper import log
 from fixtures.pageserver.common_types import (
     parse_delta_layer,
@@ -50,17 +52,19 @@ COMPONENT_BINARIES = {
 # Disable auto-formatting for better readability
 # fmt: off
 VERSIONS_COMBINATIONS = (
-    {"storage_controller": "new", "storage_broker": "new", "compute": "new", "safekeeper": "new", "pageserver": "new"},
-    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "old", "pageserver": "old"},
-    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "old", "pageserver": "new"},
-    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "new", "pageserver": "new"},
-    {"storage_controller": "old", "storage_broker": "old", "compute": "new", "safekeeper": "new", "pageserver": "new"},
+    {"storage_controller": "new", "storage_broker": "new", "compute": "new", "safekeeper": "new", "pageserver": "new"}, # combination: nnnnn
+    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "old", "pageserver": "old"}, # combination: ooonn
+    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "old", "pageserver": "new"}, # combination: ononn
+    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "new", "pageserver": "new"}, # combination: onnnn
+    {"storage_controller": "old", "storage_broker": "old", "compute": "new", "safekeeper": "new", "pageserver": "new"}, # combination: nnnoo
 )
 # fmt: on
 
 # If the environment variable USE_LFC is set and its value is "false", then LFC is disabled for tests.
 # If it is not set or set to a value not equal to "false", LFC is enabled by default.
 USE_LFC = os.environ.get("USE_LFC") != "false"
+
+WITH_SANITIZERS = os.environ.get("SANITIZERS") == "enabled"
 
 
 def subprocess_capture(
@@ -308,62 +312,46 @@ def allure_attach_from_dir(dir: Path, preserve_database_files: bool = False):
 
 
 GRAFANA_URL = "https://neonprod.grafana.net"
-GRAFANA_EXPLORE_URL = f"{GRAFANA_URL}/explore"
-GRAFANA_TIMELINE_INSPECTOR_DASHBOARD_URL = f"{GRAFANA_URL}/d/8G011dlnk/timeline-inspector"
-LOGS_STAGING_DATASOURCE_ID = "xHHYY0dVz"
+GRAFANA_DASHBOARD_URL = f"{GRAFANA_URL}/d/cdya0okb81zwga/cross-service-endpoint-debugging"
 
 
-def allure_add_grafana_links(host: str, timeline_id: TimelineId, start_ms: int, end_ms: int):
-    """Add links to server logs in Grafana to Allure report"""
-    links: dict[str, str] = {}
-    # We expect host to be in format like ep-divine-night-159320.us-east-2.aws.neon.build
+def allure_add_grafana_link(host: str, timeline_id: TimelineId, start_ms: int, end_ms: int):
+    """
+    Add a link to the cross-service endpoint debugging dashboard in Grafana to Allure report.
+
+    Args:
+        host (str): The host string in the format 'ep-<endpoint_id>.<region_id>.<domain>'.
+        timeline_id (TimelineId): The timeline identifier for the Grafana dashboard.
+            (currently ignored but may be needed in future verions of the dashboard)
+        start_ms (int): The start time in milliseconds for the Grafana dashboard.
+        end_ms (int): The end time in milliseconds for the Grafana dashboard.
+
+    Example:
+        Given
+        host = ''
+        timeline_id = '996926d1f5ddbe7381b8840083f8fc9a'
+
+        The generated link would be something like:
+        https://neonprod.grafana.net/d/cdya0okb81zwga/cross-service-endpoint-debugging?orgId=1&from=2025-02-17T21:10:00.000Z&to=2025-02-17T21:20:00.000Z&timezone=utc&var-env=dev%7Cstaging&var-input_endpoint_id=ep-holy-mouse-w2u462gi
+
+    """
+    # We expect host to be in format like ep-holy-mouse-w2u462gi.us-east-2.aws.neon.build
     endpoint_id, region_id, _ = host.split(".", 2)
 
-    expressions = {
-        "compute logs": f'{{app="compute-node-{endpoint_id}", neon_region="{region_id}"}}',
-        "k8s events": f'{{job="integrations/kubernetes/eventhandler"}} |~ "name=compute-node-{endpoint_id}-"',
-        "console logs": f'{{neon_service="console", neon_region="{region_id}"}} | json | endpoint_id = "{endpoint_id}"',
-        "proxy logs": f'{{neon_service="proxy-scram", neon_region="{region_id}"}}',
+    params = {
+        "orgId": 1,
+        "from": start_ms,
+        "to": end_ms,
+        "timezone": "utc",
+        "var-env": "dev|staging",
+        "var-input_endpoint_id": endpoint_id,
     }
 
-    params: dict[str, Any] = {
-        "datasource": LOGS_STAGING_DATASOURCE_ID,
-        "queries": [
-            {
-                "expr": "<PUT AN EXPRESSION HERE>",
-                "refId": "A",
-                "datasource": {"type": "loki", "uid": LOGS_STAGING_DATASOURCE_ID},
-                "editorMode": "code",
-                "queryType": "range",
-            }
-        ],
-        "range": {
-            "from": str(start_ms),
-            "to": str(end_ms),
-        },
-    }
-    for name, expr in expressions.items():
-        params["queries"][0]["expr"] = expr
-        query_string = urlencode({"orgId": 1, "left": json.dumps(params)})
-        links[name] = f"{GRAFANA_EXPLORE_URL}?{query_string}"
+    query_string = urlencode(params)
+    link = f"{GRAFANA_DASHBOARD_URL}?{query_string}"
 
-    timeline_qs = urlencode(
-        {
-            "orgId": 1,
-            "var-environment": "victoria-metrics-aws-dev",
-            "var-timeline_id": timeline_id,
-            "var-endpoint_id": endpoint_id,
-            "var-log_datasource": "grafanacloud-neonstaging-logs",
-            "from": start_ms,
-            "to": end_ms,
-        }
-    )
-    link = f"{GRAFANA_TIMELINE_INSPECTOR_DASHBOARD_URL}?{timeline_qs}"
-    links["Timeline Inspector"] = link
-
-    for name, link in links.items():
-        allure.dynamic.link(link, name=name)
-        log.info(f"{name}: {link}")
+    allure.dynamic.link(link, name="Cross-Service Endpoint Debugging")
+    log.info(f"Cross-Service Endpoint Debugging: {link}")
 
 
 def start_in_background(
@@ -603,6 +591,22 @@ class PropagatingThread(threading.Thread):
         if self.exc:
             raise self.exc
         return self.ret
+
+
+class EnhancedJSONEncoder(json.JSONEncoder):
+    """
+    Default json.JSONEncoder works only on primitive builtins. Extend it to any
+    dataclass plus our custom types.
+    """
+
+    def default(self, o):
+        if dataclasses.is_dataclass(o) and not isinstance(o, type):
+            return dataclasses.asdict(o)
+        elif isinstance(o, Id):
+            return o.id.hex()
+        elif isinstance(o, Lsn):
+            return str(o)  # standard hex notation
+        return super().default(o)
 
 
 def human_bytes(amt: float) -> str:

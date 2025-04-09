@@ -120,6 +120,9 @@ static bool (*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block
 
 static BlockNumber neon_nblocks(SMgrRelation reln, ForkNumber forknum);
 
+static uint32 local_request_counter;
+#define GENERATE_REQUEST_ID() (((NeonRequestId)MyProcPid << 32) | ++local_request_counter)
+
 /*
  * Prefetch implementation:
  *
@@ -159,7 +162,7 @@ static BlockNumber neon_nblocks(SMgrRelation reln, ForkNumber forknum);
  * UNUSED ------> REQUESTED --> RECEIVED
  *   ^         :      |            |
  *   |         :      v            |
- *   |         : TAG_UNUSED        |
+ *   |         : TAG_REMAINS       |
  *   |         :      |            |
  *   +----------------+------------+
  *             :
@@ -178,7 +181,7 @@ typedef enum PrefetchStatus
 /* must fit in uint8; bits 0x1 are used */
 typedef enum {
 	PRFSF_NONE	= 0x0,
-	PRFSF_SEQ	= 0x1,
+	PRFSF_LFC	= 0x1  /* received prefetch result is stored in LFC */
 } PrefetchRequestFlags;
 
 typedef struct PrefetchRequest
@@ -188,14 +191,10 @@ typedef struct PrefetchRequest
 	uint8		status;		/* see PrefetchStatus for valid values */
 	uint8		flags;		/* see PrefetchRequestFlags */
 	neon_request_lsns request_lsns;
+	NeonRequestId reqid;
 	NeonResponse *response;		/* may be null */
 	uint64		my_ring_index;
 } PrefetchRequest;
-
-StaticAssertDecl(sizeof(PrefetchRequest) == 64,
-				 "We prefer to have a power-of-2 size for this struct. Please"
-				 " try to find an alternative solution before reaching to"
-				 " increase the expected size here");
 
 /* prefetch buffer lookup hash table */
 
@@ -306,7 +305,7 @@ GetLastWrittenLSNv(NRelFileInfo relfilenode, ForkNumber forknum,
 static void
 neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum,
 					  BlockNumber blkno, neon_request_lsns *output,
-					  BlockNumber nblocks, const bits8 *mask);
+					  BlockNumber nblocks);
 static bool neon_prefetch_response_usable(neon_request_lsns *request_lsns,
 										  PrefetchRequest *slot);
 
@@ -364,7 +363,9 @@ compact_prefetch_buffers(void)
 		target_slot->buftag = source_slot->buftag;
 		target_slot->shard_no = source_slot->shard_no;
 		target_slot->status = source_slot->status;
+		target_slot->flags = source_slot->flags;
 		target_slot->response = source_slot->response;
+		target_slot->reqid = source_slot->reqid;
 		target_slot->request_lsns = source_slot->request_lsns;
 		target_slot->my_ring_index = empty_ring_index;
 
@@ -405,6 +406,68 @@ compact_prefetch_buffers(void)
 	return false;
 }
 
+/*
+ * If there might be responses still in the TCP buffer, then
+ * we should try to use those, so as to reduce any TCP backpressure
+ * on the OS/PS side.
+ *
+ * This procedure handles that.
+ *
+ * Note that this is only valid as long as the only pipelined
+ * operations in the TCP buffer are getPage@Lsn requests.
+ */
+static void
+prefetch_pump_state(void)
+{
+	while (MyPState->ring_receive != MyPState->ring_flush)
+	{
+		NeonResponse   *response;
+		PrefetchRequest *slot;
+		MemoryContext	old;
+
+		slot = GetPrfSlot(MyPState->ring_receive);
+
+		old = MemoryContextSwitchTo(MyPState->errctx);
+		response = page_server->try_receive(slot->shard_no);
+		MemoryContextSwitchTo(old);
+
+		if (response == NULL)
+			break;
+
+		/* The slot should still be valid */
+		if (slot->status != PRFS_REQUESTED ||
+			slot->response != NULL ||
+			slot->my_ring_index != MyPState->ring_receive)
+			neon_shard_log(slot->shard_no, ERROR,
+						   "Incorrect prefetch slot state after receive: status=%d response=%p my=%lu receive=%lu",
+						   slot->status, slot->response,
+						   (long) slot->my_ring_index, (long) MyPState->ring_receive);
+
+		/* update prefetch state */
+		MyPState->n_responses_buffered += 1;
+		MyPState->n_requests_inflight -= 1;
+		MyPState->ring_receive += 1;
+		MyNeonCounters->getpage_prefetches_buffered =
+			MyPState->n_responses_buffered;
+
+		/* update slot state */
+		slot->status = PRFS_RECEIVED;
+		slot->response = response;
+
+		if (response->tag == T_NeonGetPageResponse && !(slot->flags & PRFSF_LFC) && lfc_store_prefetch_result)
+		{
+			/*
+			 * Store prefetched result in LFC (please read comments to lfc_prefetch
+			 * explaining why it can be done without holding shared buffer lock
+			 */
+			if (lfc_prefetch(BufTagGetNRelFileInfo(slot->buftag), slot->buftag.forkNum, slot->buftag.blockNum, ((NeonGetPageResponse*)response)->page, slot->request_lsns.not_modified_since))
+			{
+				slot->flags |= PRFSF_LFC;
+			}
+		}
+	}
+}
+
 void
 readahead_buffer_resize(int newsize, void *extra)
 {
@@ -424,8 +487,7 @@ readahead_buffer_resize(int newsize, void *extra)
 	 */
 	if (MyPState->n_requests_inflight > newsize)
 	{
-		Assert(MyPState->ring_unused >= MyPState->n_requests_inflight - newsize);
-		prefetch_wait_for(MyPState->ring_unused - (MyPState->n_requests_inflight - newsize));
+		prefetch_wait_for(MyPState->ring_unused - newsize - 1);
 		Assert(MyPState->n_requests_inflight <= newsize);
 	}
 
@@ -664,6 +726,18 @@ prefetch_read(PrefetchRequest *slot)
 		/* update slot state */
 		slot->status = PRFS_RECEIVED;
 		slot->response = response;
+
+		if (response->tag == T_NeonGetPageResponse && !(slot->flags & PRFSF_LFC) && lfc_store_prefetch_result)
+		{
+			/*
+			 * Store prefetched result in LFC (please read comments to lfc_prefetch
+			 * explaining why it can be done without holding shared buffer lock
+			 */
+			if (lfc_prefetch(BufTagGetNRelFileInfo(buftag), buftag.forkNum, buftag.blockNum, ((NeonGetPageResponse*)response)->page, slot->request_lsns.not_modified_since))
+			{
+				slot->flags |= PRFSF_LFC;
+			}
+		}
 		return true;
 	}
 	else
@@ -716,6 +790,8 @@ prefetch_on_ps_disconnect(void)
 		MyPState->ring_receive += 1;
 
 		prefetch_set_unused(ring_index);
+		pgBufferUsage.prefetch.expired += 1;
+		MyNeonCounters->getpage_prefetch_discards_total += 1;
 	}
 
 	/*
@@ -796,7 +872,8 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 	uint64		mySlotNo PG_USED_FOR_ASSERTS_ONLY = slot->my_ring_index;
 
 	NeonGetPageRequest request = {
-		.req.tag = T_NeonGetPageRequest,
+		.hdr.tag = T_NeonGetPageRequest,
+		.hdr.reqid = GENERATE_REQUEST_ID(),
 		/* lsn and not_modified_since are filled in below */
 		.rinfo = BufTagGetNRelFileInfo(slot->buftag),
 		.forknum = slot->buftag.forkNum,
@@ -805,14 +882,16 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 
 	Assert(mySlotNo == MyPState->ring_unused);
 
+	slot->reqid = request.hdr.reqid;
+
 	if (force_request_lsns)
 		slot->request_lsns = *force_request_lsns;
 	else
 		neon_get_request_lsns(BufTagGetNRelFileInfo(slot->buftag),
 							  slot->buftag.forkNum, slot->buftag.blockNum,
-							  &slot->request_lsns, 1, NULL);
-	request.req.lsn = slot->request_lsns.request_lsn;
-	request.req.not_modified_since = slot->request_lsns.not_modified_since;
+							  &slot->request_lsns, 1);
+	request.hdr.lsn = slot->request_lsns.request_lsn;
+	request.hdr.not_modified_since = slot->request_lsns.not_modified_since;
 
 	Assert(slot->response == NULL);
 	Assert(slot->my_ring_index == MyPState->ring_unused);
@@ -835,6 +914,74 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 	prfh_insert(MyPState->prf_hash, slot, &found);
 	Assert(!found);
 }
+
+/*
+ * Lookup of already received prefetch requests. Only already received responses matching required LSNs are accepted.
+ * Present pages are marked in "mask" bitmap and total number of such pages is returned.
+ */
+static int
+prefetch_lookupv(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blocknum, neon_request_lsns *lsns,
+				 BlockNumber nblocks, void **buffers, bits8 *mask)
+{
+	int hits = 0;
+	PrefetchRequest hashkey;
+
+	/*
+	 * Use an intermediate PrefetchRequest struct as the hash key to ensure
+	 * correct alignment and that the padding bytes are cleared.
+	 */
+	memset(&hashkey.buftag, 0, sizeof(BufferTag));
+	CopyNRelFileInfoToBufTag(hashkey.buftag, rinfo);
+	hashkey.buftag.forkNum = forknum;
+
+	for (int i = 0; i < nblocks; i++)
+	{
+		PrfHashEntry *entry;
+
+		hashkey.buftag.blockNum = blocknum + i;
+		entry = prfh_lookup(MyPState->prf_hash, &hashkey);
+
+		if (entry != NULL)
+		{
+			PrefetchRequest *slot = entry->slot;
+			uint64 ring_index = slot->my_ring_index;
+			Assert(slot == GetPrfSlot(ring_index));
+
+			Assert(slot->status != PRFS_UNUSED);
+			Assert(MyPState->ring_last <= ring_index &&
+				   ring_index < MyPState->ring_unused);
+			Assert(BufferTagsEqual(&slot->buftag, &hashkey.buftag));
+
+			if (slot->status != PRFS_RECEIVED)
+				continue;
+
+			/*
+			 * If the caller specified a request LSN to use, only accept
+			 * prefetch responses that satisfy that request.
+			 */
+			if (!neon_prefetch_response_usable(&lsns[i], slot))
+				continue;
+
+			memcpy(buffers[i], ((NeonGetPageResponse*)slot->response)->page, BLCKSZ);
+			prefetch_set_unused(ring_index);
+			BITMAP_SET(mask, i);
+
+			hits += 1;
+			inc_getpage_wait(0);
+		}
+	}
+	pgBufferUsage.prefetch.hits += hits;
+	return hits;
+}
+
+#if PG_MAJORVERSION_NUM < 17
+static bool
+prefetch_lookup(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkn, neon_request_lsns *lsns, void *buffer)
+{
+	bits8 present = 0;
+	return prefetch_lookupv(rinfo, forkNum, blkn, lsns, 1, &buffer, &present) != 0;
+}
+#endif
 
 /*
  * prefetch_register_bufferv() - register and prefetch buffers
@@ -861,7 +1008,7 @@ prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frlsns,
 {
 	uint64		min_ring_index;
 	PrefetchRequest hashkey;
-#if USE_ASSERT_CHECKING
+#ifdef USE_ASSERT_CHECKING
 	bool		any_hits = false;
 #endif
 	/* We will never read further ahead than our buffer can store. */
@@ -900,7 +1047,7 @@ Retry:
 		else
 			lsns = NULL;
 
-#if USE_ASSERT_CHECKING
+#ifdef USE_ASSERT_CHECKING
 		any_hits = true;
 #endif
 
@@ -935,7 +1082,8 @@ Retry:
 					prefetch_set_unused(ring_index);
 					entry = NULL;
 					slot = NULL;
-					MyNeonCounters->getpage_prefetch_discards_total++;
+					pgBufferUsage.prefetch.expired += 1;
+					MyNeonCounters->getpage_prefetch_discards_total += 1;
 				}
 			}
 
@@ -958,8 +1106,6 @@ Retry:
 					/* The buffered request is good enough, return that index */
 					if (is_prefetch)
 						pgBufferUsage.prefetch.duplicates++;
-					else
-						pgBufferUsage.prefetch.hits++;
 					continue;
 				}
 			}
@@ -1026,10 +1172,14 @@ Retry:
 						if (!prefetch_wait_for(cleanup_index))
 							goto Retry;
 						prefetch_set_unused(cleanup_index);
+						pgBufferUsage.prefetch.expired += 1;
+						MyNeonCounters->getpage_prefetch_discards_total += 1;
 						break;
 					case PRFS_RECEIVED:
 					case PRFS_TAG_REMAINS:
 						prefetch_set_unused(cleanup_index);
+						pgBufferUsage.prefetch.expired += 1;
+						MyNeonCounters->getpage_prefetch_discards_total += 1;
 						break;
 					default:
 						pg_unreachable();
@@ -1057,6 +1207,7 @@ Retry:
 		slot->buftag = hashkey.buftag;
 		slot->shard_no = get_shard_number(&tag);
 		slot->my_ring_index = ring_index;
+		slot->flags = 0;
 
 		min_ring_index = Min(min_ring_index, ring_index);
 
@@ -1093,6 +1244,12 @@ Retry:
 	}
 
 	return min_ring_index;
+}
+
+static bool
+equal_requests(NeonRequest* a, NeonRequest* b)
+{
+	return a->reqid == b->reqid && a->lsn == b->lsn && a->not_modified_since == b->not_modified_since;
 }
 
 
@@ -1177,6 +1334,10 @@ nm_pack_request(NeonRequest *msg)
 	initStringInfo(&s);
 
 	pq_sendbyte(&s, msg->tag);
+	if (neon_protocol_version >= 3)
+	{
+		pq_sendint64(&s, msg->reqid);
+	}
 	pq_sendint64(&s, msg->lsn);
 	pq_sendint64(&s, msg->not_modified_since);
 
@@ -1254,8 +1415,16 @@ NeonResponse *
 nm_unpack_response(StringInfo s)
 {
 	NeonMessageTag tag = pq_getmsgbyte(s);
+	NeonResponse resp_hdr = {0}; /* make valgrind happy */
 	NeonResponse *resp = NULL;
 
+	resp_hdr.tag = tag;
+	if (neon_protocol_version >= 3)
+	{
+		resp_hdr.reqid = pq_getmsgint64(s);
+		resp_hdr.lsn = pq_getmsgint64(s);
+		resp_hdr.not_modified_since = pq_getmsgint64(s);
+	}
 	switch (tag)
 	{
 			/* pagestore -> pagestore_client */
@@ -1263,7 +1432,14 @@ nm_unpack_response(StringInfo s)
 			{
 				NeonExistsResponse *msg_resp = palloc0(sizeof(NeonExistsResponse));
 
-				msg_resp->tag = tag;
+				if (neon_protocol_version >= 3)
+				{
+					NInfoGetSpcOid(msg_resp->req.rinfo) = pq_getmsgint(s, 4);
+					NInfoGetDbOid(msg_resp->req.rinfo) = pq_getmsgint(s, 4);
+					NInfoGetRelNumber(msg_resp->req.rinfo) = pq_getmsgint(s, 4);
+					msg_resp->req.forknum = pq_getmsgbyte(s);
+				}
+				msg_resp->req.hdr = resp_hdr;
 				msg_resp->exists = pq_getmsgbyte(s);
 				pq_getmsgend(s);
 
@@ -1275,7 +1451,14 @@ nm_unpack_response(StringInfo s)
 			{
 				NeonNblocksResponse *msg_resp = palloc0(sizeof(NeonNblocksResponse));
 
-				msg_resp->tag = tag;
+				if (neon_protocol_version >= 3)
+				{
+					NInfoGetSpcOid(msg_resp->req.rinfo) = pq_getmsgint(s, 4);
+					NInfoGetDbOid(msg_resp->req.rinfo) = pq_getmsgint(s, 4);
+					NInfoGetRelNumber(msg_resp->req.rinfo) = pq_getmsgint(s, 4);
+					msg_resp->req.forknum = pq_getmsgbyte(s);
+				}
+				msg_resp->req.hdr = resp_hdr;
 				msg_resp->n_blocks = pq_getmsgint(s, 4);
 				pq_getmsgend(s);
 
@@ -1288,12 +1471,20 @@ nm_unpack_response(StringInfo s)
 				NeonGetPageResponse *msg_resp;
 
 				msg_resp = MemoryContextAllocZero(MyPState->bufctx, PS_GETPAGERESPONSE_SIZE);
-				msg_resp->tag = tag;
+				if (neon_protocol_version >= 3)
+				{
+					NInfoGetSpcOid(msg_resp->req.rinfo) = pq_getmsgint(s, 4);
+					NInfoGetDbOid(msg_resp->req.rinfo) = pq_getmsgint(s, 4);
+					NInfoGetRelNumber(msg_resp->req.rinfo) = pq_getmsgint(s, 4);
+					msg_resp->req.forknum = pq_getmsgbyte(s);
+					msg_resp->req.blkno = pq_getmsgint(s, 4);
+				}
+				msg_resp->req.hdr = resp_hdr;
 				/* XXX:	should be varlena */
 				memcpy(msg_resp->page, pq_getmsgbytes(s, BLCKSZ), BLCKSZ);
 				pq_getmsgend(s);
 
-				Assert(msg_resp->tag == T_NeonGetPageResponse);
+				Assert(msg_resp->req.hdr.tag == T_NeonGetPageResponse);
 
 				resp = (NeonResponse *) msg_resp;
 				break;
@@ -1303,7 +1494,11 @@ nm_unpack_response(StringInfo s)
 			{
 				NeonDbSizeResponse *msg_resp = palloc0(sizeof(NeonDbSizeResponse));
 
-				msg_resp->tag = tag;
+				if (neon_protocol_version >= 3)
+				{
+					msg_resp->req.dbNode = pq_getmsgint(s, 4);
+				}
+				msg_resp->req.hdr = resp_hdr;
 				msg_resp->db_size = pq_getmsgint64(s);
 				pq_getmsgend(s);
 
@@ -1321,7 +1516,7 @@ nm_unpack_response(StringInfo s)
 				msglen = strlen(msgtext);
 
 				msg_resp = palloc0(sizeof(NeonErrorResponse) + msglen + 1);
-				msg_resp->tag = tag;
+				msg_resp->req = resp_hdr;
 				memcpy(msg_resp->message, msgtext, msglen + 1);
 				pq_getmsgend(s);
 
@@ -1332,9 +1527,17 @@ nm_unpack_response(StringInfo s)
 		case T_NeonGetSlruSegmentResponse:
 		    {
 				NeonGetSlruSegmentResponse *msg_resp;
-				int n_blocks = pq_getmsgint(s, 4);
-				msg_resp = palloc(sizeof(NeonGetSlruSegmentResponse));
-				msg_resp->tag = tag;
+				int n_blocks;
+				msg_resp = palloc0(sizeof(NeonGetSlruSegmentResponse));
+
+				if (neon_protocol_version >= 3)
+				{
+					msg_resp->req.kind = pq_getmsgbyte(s);
+					msg_resp->req.segno = pq_getmsgint(s, 4);
+				}
+				msg_resp->req.hdr = resp_hdr;
+
+				n_blocks = pq_getmsgint(s, 4);
 				msg_resp->n_blocks = n_blocks;
 				memcpy(msg_resp->data, pq_getmsgbytes(s, n_blocks * BLCKSZ), n_blocks * BLCKSZ);
 				pq_getmsgend(s);
@@ -1379,8 +1582,8 @@ nm_to_string(NeonMessage *msg)
 				appendStringInfoString(&s, "{\"type\": \"NeonExistsRequest\"");
 				appendStringInfo(&s, ", \"rinfo\": \"%u/%u/%u\"", RelFileInfoFmt(msg_req->rinfo));
 				appendStringInfo(&s, ", \"forknum\": %d", msg_req->forknum);
-				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
-				appendStringInfo(&s, ", \"not_modified_since\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.not_modified_since));
+				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->hdr.lsn));
+				appendStringInfo(&s, ", \"not_modified_since\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->hdr.not_modified_since));
 				appendStringInfoChar(&s, '}');
 				break;
 			}
@@ -1392,8 +1595,8 @@ nm_to_string(NeonMessage *msg)
 				appendStringInfoString(&s, "{\"type\": \"NeonNblocksRequest\"");
 				appendStringInfo(&s, ", \"rinfo\": \"%u/%u/%u\"", RelFileInfoFmt(msg_req->rinfo));
 				appendStringInfo(&s, ", \"forknum\": %d", msg_req->forknum);
-				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
-				appendStringInfo(&s, ", \"not_modified_since\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.not_modified_since));
+				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->hdr.lsn));
+				appendStringInfo(&s, ", \"not_modified_since\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->hdr.not_modified_since));
 				appendStringInfoChar(&s, '}');
 				break;
 			}
@@ -1406,8 +1609,8 @@ nm_to_string(NeonMessage *msg)
 				appendStringInfo(&s, ", \"rinfo\": \"%u/%u/%u\"", RelFileInfoFmt(msg_req->rinfo));
 				appendStringInfo(&s, ", \"forknum\": %d", msg_req->forknum);
 				appendStringInfo(&s, ", \"blkno\": %u", msg_req->blkno);
-				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
-				appendStringInfo(&s, ", \"not_modified_since\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.not_modified_since));
+				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->hdr.lsn));
+				appendStringInfo(&s, ", \"not_modified_since\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->hdr.not_modified_since));
 				appendStringInfoChar(&s, '}');
 				break;
 			}
@@ -1417,8 +1620,8 @@ nm_to_string(NeonMessage *msg)
 
 				appendStringInfoString(&s, "{\"type\": \"NeonDbSizeRequest\"");
 				appendStringInfo(&s, ", \"dbnode\": \"%u\"", msg_req->dbNode);
-				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
-				appendStringInfo(&s, ", \"not_modified_since\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.not_modified_since));
+				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->hdr.lsn));
+				appendStringInfo(&s, ", \"not_modified_since\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->hdr.not_modified_since));
 				appendStringInfoChar(&s, '}');
 				break;
 			}
@@ -1429,8 +1632,8 @@ nm_to_string(NeonMessage *msg)
 				appendStringInfoString(&s, "{\"type\": \"NeonGetSlruSegmentRequest\"");
 				appendStringInfo(&s, ", \"kind\": %u", msg_req->kind);
 				appendStringInfo(&s, ", \"segno\": %u", msg_req->segno);
-				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
-				appendStringInfo(&s, ", \"not_modified_since\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.not_modified_since));
+				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->hdr.lsn));
+				appendStringInfo(&s, ", \"not_modified_since\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->hdr.not_modified_since));
 				appendStringInfoChar(&s, '}');
 				break;
 			}
@@ -1945,8 +2148,7 @@ GetLastWrittenLSNv(NRelFileInfo relfilenode, ForkNumber forknum,
  */
 static void
 neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
-					  neon_request_lsns *output, BlockNumber nblocks,
-					  const bits8 *mask)
+					  neon_request_lsns *output, BlockNumber nblocks)
 {
 	XLogRecPtr	last_written_lsns[PG_IOV_MAX];
 
@@ -2034,9 +2236,6 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 			neon_request_lsns *result = &output[i];
 			XLogRecPtr	last_written_lsn = last_written_lsns[i];
 
-			if (PointerIsValid(mask) && !BITMAP_ISSET(mask, i))
-				continue;
-
 			if (last_written_lsn > replay_lsn)
 			{
 				/* GetCurrentReplayRecPtr was introduced in v15 */
@@ -2079,8 +2278,6 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 			neon_request_lsns *result = &output[i];
 			XLogRecPtr	last_written_lsn = last_written_lsns[i];
 
-			if (PointerIsValid(mask) && !BITMAP_ISSET(mask, i))
-				continue;
 			/*
 			 * Use the latest LSN that was evicted from the buffer cache as the
 			 * 'not_modified_since' hint. Any pages modified by later WAL records
@@ -2302,42 +2499,67 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 	}
 
 	neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum,
-						  REL_METADATA_PSEUDO_BLOCKNO, &request_lsns, 1, NULL);
+						  REL_METADATA_PSEUDO_BLOCKNO, &request_lsns, 1);
 	{
 		NeonExistsRequest request = {
-			.req.tag = T_NeonExistsRequest,
-			.req.lsn = request_lsns.request_lsn,
-			.req.not_modified_since = request_lsns.not_modified_since,
+			.hdr.tag = T_NeonExistsRequest,
+			.hdr.reqid = GENERATE_REQUEST_ID(),
+			.hdr.lsn = request_lsns.request_lsn,
+			.hdr.not_modified_since = request_lsns.not_modified_since,
 			.rinfo = InfoFromSMgrRel(reln),
 			.forknum = forkNum
 		};
 
 		resp = page_server_request(&request);
+
+		switch (resp->tag)
+		{
+			case T_NeonExistsResponse:
+			{
+				NeonExistsResponse* exists_resp = (NeonExistsResponse *) resp;
+				if (neon_protocol_version >= 3)
+				{
+					if (!equal_requests(resp, &request.hdr) ||
+						!RelFileInfoEquals(exists_resp->req.rinfo, request.rinfo) ||
+						exists_resp->req.forknum != request.forknum)
+					{
+						NEON_PANIC_CONNECTION_STATE(-1, PANIC,
+													"Unexpect response {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u} to exits request {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u}",
+													resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), RelFileInfoFmt(exists_resp->req.rinfo), exists_resp->req.forknum,
+													request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since), RelFileInfoFmt(request.rinfo), request.forknum);
+					}
+				}
+				exists = exists_resp->exists;
+				break;
+			}
+			case T_NeonErrorResponse:
+				if (neon_protocol_version >= 3)
+				{
+					if (!equal_requests(resp, &request.hdr))
+					{
+						elog(WARNING, NEON_TAG "Error message {reqid=%lx,lsn=%X/%08X, since=%X/%08X} doesn't match exists request {reqid=%lx,lsn=%X/%08X, since=%X/%08X}",
+							 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
+							 request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since));
+					}
+				}
+				ereport(ERROR,
+						(errcode(ERRCODE_IO_ERROR),
+						 errmsg(NEON_TAG "[reqid %lx] could not read relation existence of rel %u/%u/%u.%u from page server at lsn %X/%08X",
+								resp->reqid,
+								RelFileInfoFmt(InfoFromSMgrRel(reln)),
+								forkNum,
+								LSN_FORMAT_ARGS(request_lsns.effective_request_lsn)),
+						 errdetail("page server returned error: %s",
+								   ((NeonErrorResponse *) resp)->message)));
+				break;
+
+			default:
+				NEON_PANIC_CONNECTION_STATE(-1, PANIC,
+											"Expected Exists (0x%02x) or Error (0x%02x) response to ExistsRequest, but got 0x%02x",
+											T_NeonExistsResponse, T_NeonErrorResponse, resp->tag);
+		}
+		pfree(resp);
 	}
-
-	switch (resp->tag)
-	{
-		case T_NeonExistsResponse:
-			exists = ((NeonExistsResponse *) resp)->exists;
-			break;
-
-		case T_NeonErrorResponse:
-			ereport(ERROR,
-					(errcode(ERRCODE_IO_ERROR),
-					 errmsg(NEON_TAG "could not read relation existence of rel %u/%u/%u.%u from page server at lsn %X/%08X",
-							RelFileInfoFmt(InfoFromSMgrRel(reln)),
-							forkNum,
-							LSN_FORMAT_ARGS(request_lsns.effective_request_lsn)),
-					 errdetail("page server returned error: %s",
-							   ((NeonErrorResponse *) resp)->message)));
-			break;
-
-		default:
-			NEON_PANIC_CONNECTION_STATE(-1, PANIC,
-										"Expected Exists (0x%02x) or Error (0x%02x) response to ExistsRequest, but got 0x%02x",
-										T_NeonExistsResponse, T_NeonErrorResponse, resp->tag);
-	}
-	pfree(resp);
 	return exists;
 }
 
@@ -2696,8 +2918,7 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	while (nblocks > 0)
 	{
 		int		iterblocks = Min(nblocks, PG_IOV_MAX);
-		bits8		lfc_present[PG_IOV_MAX / 8];
-		memset(lfc_present, 0, sizeof(lfc_present));
+		bits8	lfc_present[PG_IOV_MAX / 8] = {0};
 
 		if (lfc_cache_containsv(InfoFromSMgrRel(reln), forknum, blocknum,
 								iterblocks, lfc_present) == iterblocks)
@@ -2708,18 +2929,21 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		}
 
 		tag.blockNum = blocknum;
-		
+
 		for (int i = 0; i < PG_IOV_MAX / 8; i++)
 			lfc_present[i] = ~(lfc_present[i]);
 
 		ring_index = prefetch_register_bufferv(tag, NULL, iterblocks,
 											   lfc_present, true);
+
 		nblocks -= iterblocks;
 		blocknum += iterblocks;
 
 		Assert(ring_index < MyPState->ring_unused &&
 			   MyPState->ring_last <= ring_index);
 	}
+
+	prefetch_pump_state();
 
 	return false;
 }
@@ -2762,6 +2986,8 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 	Assert(ring_index < MyPState->ring_unused &&
 		   MyPState->ring_last <= ring_index);
 
+	prefetch_pump_state();
+
 	return false;
 }
 #endif /* PG_MAJORVERSION_NUM < 17 */
@@ -2803,6 +3029,8 @@ neon_writeback(SMgrRelation reln, ForkNumber forknum,
 	 * properties of this smgr API call.
 	 */
 	neon_log(SmgrTrace, "writeback noop");
+
+	prefetch_pump_state();
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -2868,7 +3096,7 @@ neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber base_block
 		start_ts = GetCurrentTimestamp();
 
 		if (RecoveryInProgress() && MyBackendType != B_STARTUP)
-			XLogWaitForReplayOf(reqlsns[0].request_lsn);
+			XLogWaitForReplayOf(reqlsns->request_lsn);
 
 		/*
 		 * Try to find prefetched page in the list of received pages.
@@ -2945,15 +3173,44 @@ Retry:
 		switch (resp->tag)
 		{
 			case T_NeonGetPageResponse:
-				memcpy(buffer, ((NeonGetPageResponse *) resp)->page, BLCKSZ);
-				lfc_write(rinfo, forkNum, blockno, buffer);
+			{
+				NeonGetPageResponse* getpage_resp = (NeonGetPageResponse *) resp;
+				if (neon_protocol_version >= 3)
+				{
+					if (resp->reqid != slot->reqid ||
+						resp->lsn != slot->request_lsns.request_lsn ||
+						resp->not_modified_since != slot->request_lsns.not_modified_since ||
+						!RelFileInfoEquals(getpage_resp->req.rinfo, rinfo) ||
+						getpage_resp->req.forknum != forkNum ||
+						getpage_resp->req.blkno != base_blockno + i)
+					{
+						NEON_PANIC_CONNECTION_STATE(-1, PANIC,
+													"Unexpect response {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u, block=%u} to get page request {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u, block=%u}",
+													resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), RelFileInfoFmt(getpage_resp->req.rinfo), getpage_resp->req.forknum, getpage_resp->req.blkno,
+													slot->reqid, LSN_FORMAT_ARGS(slot->request_lsns.request_lsn), LSN_FORMAT_ARGS(slot->request_lsns.not_modified_since), RelFileInfoFmt(rinfo), forkNum, base_blockno + i);
+					}
+				}
+				memcpy(buffer, getpage_resp->page, BLCKSZ);
+				if (!lfc_store_prefetch_result)
+					lfc_write(rinfo, forkNum, blockno, buffer);
 				break;
-
+			}
 			case T_NeonErrorResponse:
+				if (neon_protocol_version >= 3)
+				{
+					if (resp->reqid != slot->reqid ||
+						resp->lsn != slot->request_lsns.request_lsn ||
+						resp->not_modified_since != slot->request_lsns.not_modified_since)
+					{
+						elog(WARNING, NEON_TAG "Error message {reqid=%lx,lsn=%X/%08X, since=%X/%08X} doesn't match get relsize request {reqid=%lx,lsn=%X/%08X, since=%X/%08X}",
+							 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
+							 slot->reqid, LSN_FORMAT_ARGS(slot->request_lsns.request_lsn), LSN_FORMAT_ARGS(slot->request_lsns.not_modified_since));
+					}
+				}
 				ereport(ERROR,
 						(errcode(ERRCODE_IO_ERROR),
-						 errmsg(NEON_TAG "[shard %d] could not read block %u in rel %u/%u/%u.%u from page server at lsn %X/%08X",
-								slot->shard_no, blockno, RelFileInfoFmt(rinfo),
+						 errmsg(NEON_TAG "[shard %d, reqid %lx] could not read block %u in rel %u/%u/%u.%u from page server at lsn %X/%08X",
+								slot->shard_no, resp->reqid, blockno, RelFileInfoFmt(rinfo),
 								forkNum, LSN_FORMAT_ARGS(reqlsns->effective_request_lsn)),
 						 errdetail("page server returned error: %s",
 								   ((NeonErrorResponse *) resp)->message)));
@@ -3020,6 +3277,17 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
+	/* Try to read PS results if they are available */
+	prefetch_pump_state();
+
+	neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum, blkno, &request_lsns, 1);
+
+	if (prefetch_lookup(InfoFromSMgrRel(reln), forkNum, blkno, &request_lsns, buffer))
+	{
+		/* Prefetch hit */
+		return;
+	}
+
 	/* Try to read from local file cache */
 	if (lfc_read(InfoFromSMgrRel(reln), forkNum, blkno, buffer))
 	{
@@ -3027,8 +3295,12 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 		return;
 	}
 
-	neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum, blkno, &request_lsns, 1, NULL);
 	neon_read_at_lsn(InfoFromSMgrRel(reln), forkNum, blkno, request_lsns, buffer);
+
+	/*
+	 * Try to receive prefetch results once again just to make sure we don't leave the smgr code while the OS might still have buffered bytes.
+	 */
+	prefetch_pump_state();
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (forkNum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
@@ -3108,11 +3380,14 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 #if PG_MAJORVERSION_NUM >= 17
 static void
 neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-		void **buffers, BlockNumber nblocks)
+		   void **buffers, BlockNumber nblocks)
 {
+	bits8		prefetch_hits[PG_IOV_MAX / 8] = {0};
+	bits8		lfc_hits[PG_IOV_MAX / 8];
 	bits8		read[PG_IOV_MAX / 8];
 	neon_request_lsns request_lsns[PG_IOV_MAX];
 	int			lfc_result;
+	int			prefetch_result;
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -3135,37 +3410,53 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		neon_log(ERROR, "Read request too large: %d is larger than max %d",
 				 nblocks, PG_IOV_MAX);
 
-	memset(read, 0, sizeof(read));
+	/* Try to read PS results if they are available */
+	prefetch_pump_state();
+
+	neon_get_request_lsns(InfoFromSMgrRel(reln), forknum, blocknum,
+						  request_lsns, nblocks);
+
+
+	prefetch_result = prefetch_lookupv(InfoFromSMgrRel(reln), forknum, blocknum, request_lsns, nblocks, buffers, prefetch_hits);
+
+	if (prefetch_result == nblocks)
+		return;
+
+	/* invert the result: exclude prefetched blocks */
+	for (int i = 0; i < PG_IOV_MAX / 8; i++)
+		lfc_hits[i] = ~prefetch_hits[i];
 
 	/* Try to read from local file cache */
 	lfc_result = lfc_readv_select(InfoFromSMgrRel(reln), forknum, blocknum, buffers,
-								  nblocks, read);
+								  nblocks, lfc_hits);
 
 	if (lfc_result > 0)
 		MyNeonCounters->file_cache_hits_total += lfc_result;
 
 	/* Read all blocks from LFC, so we're done */
-	if (lfc_result == nblocks)
+	if (prefetch_result + lfc_result == nblocks)
 		return;
 
-	if (lfc_result == -1)
+	if (lfc_result <= 0)
 	{
 		/* can't use the LFC result, so read all blocks from PS */
 		for (int i = 0; i < PG_IOV_MAX / 8; i++)
-			read[i] = 0xFF;
+			read[i] = ~prefetch_hits[i];
 	}
 	else
 	{
 		/* invert the result: exclude blocks read from lfc */
 		for (int i = 0; i < PG_IOV_MAX / 8; i++)
-			read[i] = ~(read[i]);
+			read[i] = ~(prefetch_hits[i] | lfc_hits[i]);
 	}
-
-	neon_get_request_lsns(InfoFromSMgrRel(reln), forknum, blocknum,
-						  request_lsns, nblocks, read);
 
 	neon_read_at_lsnv(InfoFromSMgrRel(reln), forknum, blocknum, request_lsns,
 					  buffers, nblocks, read);
+
+	/*
+	 * Try to receive prefetch results once again just to make sure we don't leave the smgr code while the OS might still have buffered bytes.
+	 */
+	prefetch_pump_state();
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (forkNum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
@@ -3335,6 +3626,8 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 
 	lfc_write(InfoFromSMgrRel(reln), forknum, blocknum, buffer);
 
+	prefetch_pump_state();
+
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
 		#if PG_MAJORVERSION_NUM >= 17
@@ -3388,6 +3681,8 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 
 	lfc_writev(InfoFromSMgrRel(reln), forknum, blkno, buffers, nblocks);
 
+	prefetch_pump_state();
+
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
 		mdwritev(reln, forknum, blocknum, &buffer, 1, skipFsync);
@@ -3432,51 +3727,76 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 	}
 
 	neon_get_request_lsns(InfoFromSMgrRel(reln), forknum,
-						  REL_METADATA_PSEUDO_BLOCKNO, &request_lsns, 1, NULL);
+						  REL_METADATA_PSEUDO_BLOCKNO, &request_lsns, 1);
 
 	{
 		NeonNblocksRequest request = {
-			.req.tag = T_NeonNblocksRequest,
-			.req.lsn = request_lsns.request_lsn,
-			.req.not_modified_since = request_lsns.not_modified_since,
+			.hdr.tag = T_NeonNblocksRequest,
+			.hdr.reqid = GENERATE_REQUEST_ID(),
+			.hdr.lsn = request_lsns.request_lsn,
+			.hdr.not_modified_since = request_lsns.not_modified_since,
 			.rinfo = InfoFromSMgrRel(reln),
 			.forknum = forknum,
 		};
 
 		resp = page_server_request(&request);
+
+		switch (resp->tag)
+		{
+			case T_NeonNblocksResponse:
+			{
+				NeonNblocksResponse * relsize_resp = (NeonNblocksResponse *) resp;
+				if (neon_protocol_version >= 3)
+				{
+					if (!equal_requests(resp, &request.hdr) ||
+						!RelFileInfoEquals(relsize_resp->req.rinfo, request.rinfo) ||
+						relsize_resp->req.forknum != forknum)
+					{
+						NEON_PANIC_CONNECTION_STATE(-1, PANIC,
+													"Unexpect response {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u} to get relsize request {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u}",
+													resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), RelFileInfoFmt(relsize_resp->req.rinfo), relsize_resp->req.forknum,
+													request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since), RelFileInfoFmt(request.rinfo), forknum);
+					}
+				}
+				n_blocks = relsize_resp->n_blocks;
+				break;
+			}
+			case T_NeonErrorResponse:
+				if (neon_protocol_version >= 3)
+				{
+					if (!equal_requests(resp, &request.hdr))
+					{
+						elog(WARNING, NEON_TAG "Error message {reqid=%lx,lsn=%X/%08X, since=%X/%08X} doesn't match get relsize request {reqid=%lx,lsn=%X/%08X, since=%X/%08X}",
+							 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
+							 request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since));
+					}
+				}
+				ereport(ERROR,
+						(errcode(ERRCODE_IO_ERROR),
+						 errmsg(NEON_TAG "[reqid %lx] could not read relation size of rel %u/%u/%u.%u from page server at lsn %X/%08X",
+								resp->reqid,
+								RelFileInfoFmt(InfoFromSMgrRel(reln)),
+								forknum,
+								LSN_FORMAT_ARGS(request_lsns.effective_request_lsn)),
+						 errdetail("page server returned error: %s",
+								   ((NeonErrorResponse *) resp)->message)));
+				break;
+
+			default:
+				NEON_PANIC_CONNECTION_STATE(-1, PANIC,
+											"Expected Nblocks (0x%02x) or Error (0x%02x) response to NblocksRequest, but got 0x%02x",
+											T_NeonNblocksResponse, T_NeonErrorResponse, resp->tag);
+		}
+		update_cached_relsize(InfoFromSMgrRel(reln), forknum, n_blocks);
+
+		neon_log(SmgrTrace, "neon_nblocks: rel %u/%u/%u fork %u (request LSN %X/%08X): %u blocks",
+				 RelFileInfoFmt(InfoFromSMgrRel(reln)),
+				 forknum,
+				 LSN_FORMAT_ARGS(request_lsns.effective_request_lsn),
+				 n_blocks);
+
+		pfree(resp);
 	}
-
-	switch (resp->tag)
-	{
-		case T_NeonNblocksResponse:
-			n_blocks = ((NeonNblocksResponse *) resp)->n_blocks;
-			break;
-
-		case T_NeonErrorResponse:
-			ereport(ERROR,
-					(errcode(ERRCODE_IO_ERROR),
-					 errmsg(NEON_TAG "could not read relation size of rel %u/%u/%u.%u from page server at lsn %X/%08X",
-							RelFileInfoFmt(InfoFromSMgrRel(reln)),
-							forknum,
-							LSN_FORMAT_ARGS(request_lsns.effective_request_lsn)),
-					 errdetail("page server returned error: %s",
-							   ((NeonErrorResponse *) resp)->message)));
-			break;
-
-		default:
-			NEON_PANIC_CONNECTION_STATE(-1, PANIC,
-										"Expected Nblocks (0x%02x) or Error (0x%02x) response to NblocksRequest, but got 0x%02x",
-										T_NeonNblocksResponse, T_NeonErrorResponse, resp->tag);
-	}
-	update_cached_relsize(InfoFromSMgrRel(reln), forknum, n_blocks);
-
-	neon_log(SmgrTrace, "neon_nblocks: rel %u/%u/%u fork %u (request LSN %X/%08X): %u blocks",
-			 RelFileInfoFmt(InfoFromSMgrRel(reln)),
-			 forknum,
-			 LSN_FORMAT_ARGS(request_lsns.effective_request_lsn),
-			 n_blocks);
-
-	pfree(resp);
 	return n_blocks;
 }
 
@@ -3492,44 +3812,68 @@ neon_dbsize(Oid dbNode)
 	NRelFileInfo dummy_node = {0};
 
 	neon_get_request_lsns(dummy_node, MAIN_FORKNUM,
-						  REL_METADATA_PSEUDO_BLOCKNO, &request_lsns, 1, NULL);
+						  REL_METADATA_PSEUDO_BLOCKNO, &request_lsns, 1);
 
 	{
 		NeonDbSizeRequest request = {
-			.req.tag = T_NeonDbSizeRequest,
-			.req.lsn = request_lsns.request_lsn,
-			.req.not_modified_since = request_lsns.not_modified_since,
+			.hdr.tag = T_NeonDbSizeRequest,
+			.hdr.reqid = GENERATE_REQUEST_ID(),
+			.hdr.lsn = request_lsns.request_lsn,
+			.hdr.not_modified_since = request_lsns.not_modified_since,
 			.dbNode = dbNode,
 		};
 
 		resp = page_server_request(&request);
+
+		switch (resp->tag)
+		{
+			case T_NeonDbSizeResponse:
+			{
+				NeonDbSizeResponse* dbsize_resp = (NeonDbSizeResponse *) resp;
+				if (neon_protocol_version >= 3)
+				{
+					if (!equal_requests(resp, &request.hdr) ||
+						dbsize_resp->req.dbNode != dbNode)
+					{
+						NEON_PANIC_CONNECTION_STATE(-1, PANIC,
+													"Unexpect response {reqid=%lx,lsn=%X/%08X, since=%X/%08X, dbNode=%u} to get DB size request {reqid=%lx,lsn=%X/%08X, since=%X/%08X, dbNode=%u}",
+													resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), dbsize_resp->req.dbNode,
+													request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since), dbNode);
+					}
+				}
+				db_size = dbsize_resp->db_size;
+				break;
+			}
+			case T_NeonErrorResponse:
+				if (neon_protocol_version >= 3)
+				{
+					if (!equal_requests(resp, &request.hdr))
+					{
+						elog(WARNING, NEON_TAG "Error message {reqid=%lx,lsn=%X/%08X, since=%X/%08X} doesn't match get DB size request {reqid=%lx,lsn=%X/%08X, since=%X/%08X}",
+							 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
+							 request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since));
+					}
+				}
+				ereport(ERROR,
+						(errcode(ERRCODE_IO_ERROR),
+						 errmsg(NEON_TAG "[reqid %lx] could not read db size of db %u from page server at lsn %X/%08X",
+								resp->reqid,
+								dbNode, LSN_FORMAT_ARGS(request_lsns.effective_request_lsn)),
+						 errdetail("page server returned error: %s",
+								   ((NeonErrorResponse *) resp)->message)));
+				break;
+
+			default:
+				NEON_PANIC_CONNECTION_STATE(-1, PANIC,
+											"Expected DbSize (0x%02x) or Error (0x%02x) response to DbSizeRequest, but got 0x%02x",
+											T_NeonDbSizeResponse, T_NeonErrorResponse, resp->tag);
+		}
+
+		neon_log(SmgrTrace, "neon_dbsize: db %u (request LSN %X/%08X): %ld bytes",
+				 dbNode, LSN_FORMAT_ARGS(request_lsns.effective_request_lsn), db_size);
+
+		pfree(resp);
 	}
-
-	switch (resp->tag)
-	{
-		case T_NeonDbSizeResponse:
-			db_size = ((NeonDbSizeResponse *) resp)->db_size;
-			break;
-
-		case T_NeonErrorResponse:
-			ereport(ERROR,
-					(errcode(ERRCODE_IO_ERROR),
-					 errmsg(NEON_TAG "could not read db size of db %u from page server at lsn %X/%08X",
-							dbNode, LSN_FORMAT_ARGS(request_lsns.effective_request_lsn)),
-					 errdetail("page server returned error: %s",
-							   ((NeonErrorResponse *) resp)->message)));
-			break;
-
-		default:
-			NEON_PANIC_CONNECTION_STATE(-1, PANIC,
-										"Expected DbSize (0x%02x) or Error (0x%02x) response to DbSizeRequest, but got 0x%02x",
-										T_NeonDbSizeResponse, T_NeonErrorResponse, resp->tag);
-	}
-
-	neon_log(SmgrTrace, "neon_dbsize: db %u (request LSN %X/%08X): %ld bytes",
-			 dbNode, LSN_FORMAT_ARGS(request_lsns.effective_request_lsn), db_size);
-
-	pfree(resp);
 	return db_size;
 }
 
@@ -3537,7 +3881,7 @@ neon_dbsize(Oid dbNode)
  *	neon_truncate() -- Truncate relation to specified number of blocks.
  */
 static void
-neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
+neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber old_blocks, BlockNumber nblocks)
 {
 	XLogRecPtr	lsn;
 
@@ -3552,7 +3896,7 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
-			mdtruncate(reln, forknum, nblocks);
+			mdtruncate(reln, forknum, old_blocks, nblocks);
 			return;
 
 		default:
@@ -3590,7 +3934,7 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
-		mdtruncate(reln, forknum, nblocks);
+		mdtruncate(reln, forknum, old_blocks, nblocks);
 #endif
 }
 
@@ -3627,6 +3971,8 @@ neon_immedsync(SMgrRelation reln, ForkNumber forknum)
 	}
 
 	neon_log(SmgrTrace, "[NEON_SMGR] immedsync noop");
+
+	prefetch_pump_state();
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -3861,16 +4207,17 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 		return -1;
 
 	request = (NeonGetSlruSegmentRequest) {
-		.req.tag = T_NeonGetSlruSegmentRequest,
-		.req.lsn = request_lsn,
-		.req.not_modified_since = not_modified_since,
+		.hdr.tag = T_NeonGetSlruSegmentRequest,
+		.hdr.reqid = GENERATE_REQUEST_ID(),
+		.hdr.lsn = request_lsn,
+		.hdr.not_modified_since = not_modified_since,
 		.kind = kind,
 		.segno = segno
 	};
 
 	do
 	{
-		while (!page_server->send(shard_no, &request.req) || !page_server->flush(shard_no));
+		while (!page_server->send(shard_no, &request.hdr) || !page_server->flush(shard_no));
 
 		consume_prefetch_responses();
 
@@ -3880,14 +4227,38 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 	switch (resp->tag)
 	{
 		case T_NeonGetSlruSegmentResponse:
-			n_blocks = ((NeonGetSlruSegmentResponse *) resp)->n_blocks;
-			memcpy(buffer, ((NeonGetSlruSegmentResponse *) resp)->data, n_blocks*BLCKSZ);
+		{
+			NeonGetSlruSegmentResponse* slru_resp = (NeonGetSlruSegmentResponse *) resp;
+			if (neon_protocol_version >= 3)
+			{
+				if (!equal_requests(resp, &request.hdr) ||
+					slru_resp->req.kind != kind ||
+					slru_resp->req.segno != segno)
+				{
+					NEON_PANIC_CONNECTION_STATE(-1, PANIC,
+												"Unexpect response {reqid=%lx,lsn=%X/%08X, since=%X/%08X, kind=%u, segno=%u} to get SLRU segment request {reqid=%lx,lsn=%X/%08X, since=%X/%08X, kind=%u, segno=%u}",
+												resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), slru_resp->req.kind, slru_resp->req.segno,
+												request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since), kind, segno);
+				}
+			}
+			n_blocks = slru_resp->n_blocks;
+			memcpy(buffer, slru_resp->data, n_blocks*BLCKSZ);
 			break;
-
+		}
 		case T_NeonErrorResponse:
+			if (neon_protocol_version >= 3)
+			{
+				if (!equal_requests(resp, &request.hdr))
+				{
+					elog(WARNING, NEON_TAG "Error message {reqid=%lx,lsn=%X/%08X, since=%X/%08X} doesn't match get SLRU segment request {reqid=%lx,lsn=%X/%08X, since=%X/%08X}",
+						 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
+						 request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since));
+				}
+			}
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
-					 errmsg(NEON_TAG "could not read SLRU %d segment %d at lsn %X/%08X",
+					 errmsg(NEON_TAG "[reqid %lx] could not read SLRU %d segment %d at lsn %X/%08X",
+							resp->reqid,
 							kind,
 							segno,
 							LSN_FORMAT_ARGS(request_lsn)),
@@ -4026,8 +4397,9 @@ neon_extend_rel_size(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno, 
 		NeonResponse *response;
 		NeonNblocksResponse *nbresponse;
 		NeonNblocksRequest request = {
-			.req = (NeonRequest) {
+			.hdr = (NeonRequest) {
 				.tag = T_NeonNblocksRequest,
+				.reqid = GENERATE_REQUEST_ID(),
 				.lsn = end_recptr,
 				.not_modified_since = end_recptr,
 			},
@@ -4175,7 +4547,12 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	if (no_redo_needed)
 	{
 		SetLastWrittenLSNForBlock(end_recptr, rinfo, forknum, blkno);
-		lfc_evict(rinfo, forknum, blkno);
+		/*
+		 * Redo changes if page exists in LFC.
+		 * We should perform this check after assigning LwLSN to prevent
+		 * prefetching of some older version of the page by some other backend.
+		 */
+		no_redo_needed = !lfc_cache_contains(rinfo, forknum, blkno);
 	}
 
 	LWLockRelease(partitionLock);

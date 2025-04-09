@@ -2,20 +2,21 @@
 //! and push them to a HTTP endpoint.
 use std::borrow::Cow;
 use std::convert::Infallible;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use async_compression::tokio::write::GzipEncoder;
 use bytes::Bytes;
 use chrono::{DateTime, Datelike, Timelike, Utc};
-use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
-use dashmap::mapref::entry::Entry;
-use dashmap::DashMap;
+use clashmap::ClashMap;
+use clashmap::mapref::entry::Entry;
+use consumption_metrics::{CHUNK_SIZE, Event, EventChunk, EventType, idempotency_key};
 use once_cell::sync::Lazy;
 use remote_storage::{GenericRemoteStorage, RemotePath, TimeoutOrCancel};
 use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, trace, warn};
@@ -43,6 +44,33 @@ const HTTP_REPORTING_RETRY_DURATION: Duration = Duration::from_secs(60);
 pub(crate) struct Ids {
     pub(crate) endpoint_id: EndpointIdInt,
     pub(crate) branch_id: BranchIdInt,
+    pub(crate) direction: TrafficDirection,
+    #[serde(with = "none_as_empty_string")]
+    pub(crate) private_link_id: Option<SmolStr>,
+}
+
+mod none_as_empty_string {
+    use serde::Deserialize;
+    use smol_str::SmolStr;
+
+    #[allow(clippy::ref_option)]
+    pub fn serialize<S: serde::Serializer>(t: &Option<SmolStr>, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(t.as_deref().unwrap_or(""))
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<SmolStr>, D::Error> {
+        let s = SmolStr::deserialize(d)?;
+        if s.is_empty() { Ok(None) } else { Ok(Some(s)) }
+    }
+}
+
+#[derive(Eq, Hash, PartialEq, Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum TrafficDirection {
+    Ingress,
+    Egress,
 }
 
 pub(crate) trait MetricCounterRecorder {
@@ -137,7 +165,7 @@ type FastHasher = std::hash::BuildHasherDefault<rustc_hash::FxHasher>;
 
 #[derive(Default)]
 pub(crate) struct Metrics {
-    endpoints: DashMap<Ids, Arc<MetricCounter>, FastHasher>,
+    endpoints: ClashMap<Ids, Arc<MetricCounter>, FastHasher>,
 }
 
 impl Metrics {
@@ -213,7 +241,7 @@ pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<Infall
 }
 
 fn collect_and_clear_metrics<C: Clearable>(
-    endpoints: &DashMap<Ids, Arc<C>, FastHasher>,
+    endpoints: &ClashMap<Ids, Arc<C>, FastHasher>,
 ) -> Vec<(Ids, u64)> {
     let mut metrics_to_clear = Vec::new();
 
@@ -271,7 +299,7 @@ fn create_event_chunks<'a>(
 #[expect(clippy::too_many_arguments)]
 #[instrument(skip_all)]
 async fn collect_metrics_iteration(
-    endpoints: &DashMap<Ids, Arc<MetricCounter>, FastHasher>,
+    endpoints: &ClashMap<Ids, Arc<MetricCounter>, FastHasher>,
     client: &http::ClientWithMiddleware,
     metric_collection_endpoint: &reqwest::Url,
     storage: Option<&GenericRemoteStorage>,
@@ -396,17 +424,18 @@ async fn upload_backup_events(
         TimeoutOrCancel::caused_by_cancel,
         FAILED_UPLOAD_WARN_THRESHOLD,
         FAILED_UPLOAD_MAX_RETRIES,
-        "request_data_upload",
+        "usage_metrics_upload",
         cancel,
     )
     .await
     .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
     .and_then(|x| x)
-    .context("request_data_upload")?;
+    .with_context(|| format!("usage_metrics_upload: path={remote_path}"))?;
     Ok(())
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
     use std::fs;
     use std::io::BufReader;
@@ -504,6 +533,8 @@ mod tests {
         let counter = metrics.register(Ids {
             endpoint_id: (&EndpointId::from("e1")).into(),
             branch_id: (&BranchId::from("b1")).into(),
+            direction: TrafficDirection::Egress,
+            private_link_id: None,
         });
 
         // the counter should be observed despite 0 egress

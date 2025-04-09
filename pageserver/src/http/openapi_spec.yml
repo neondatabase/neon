@@ -767,7 +767,27 @@ paths:
   /v1/tenant/config:
     put:
       description: |
-        Update tenant's config.
+        Update tenant's config by setting it to the provided value
+
+        Invalid fields in the tenant config will cause the request to be rejected with status 400.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantConfigRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TenantInfo"
+    patch:
+      description: |
+        Update tenant's config additively by patching the updated fields provided.
+        Null values unset the field and non-null values upsert it.
 
         Invalid fields in the tenant config will cause the request to be rejected with status 400.
       requestBody:
@@ -803,6 +823,38 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TenantConfigResponse"
+
+  /v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/download_heatmap_layers:
+    parameters:
+      - name: tenant_shard_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: concurrency
+        description: Maximum number of concurrent downloads (capped at remote storage concurrency)
+        in: query
+        required: false
+        schema:
+          type: integer
+    post:
+      description: |
+        Download all layers in the specified timeline's heatmap. The `tenant_shard_id` parameter
+        may be used to target all shards of a tenant when the unsharded form is used, or a specific
+        tenant shard with the sharded form.
+      responses:
+        "200":
+          description: Success
+    delete:
+      description: Stop any on-going background downloads of heatmap layers for the specified timeline.
+      responses:
+        "200":
+          description: Success
 
   /v1/utilization:
     get:
@@ -862,6 +914,8 @@ components:
               properties:
                 reason:
                   type: string
+        gc_blocking:
+          type: string
 
     TenantCreateRequest:
       allOf:
@@ -964,6 +1018,8 @@ components:
           type: string
         compaction_threshold:
           type: string
+        compaction_upper_limit:
+          type: string
         image_creation_threshold:
           type: integer
         walreceiver_connect_timeout:
@@ -1058,7 +1114,13 @@ components:
           type: integer
         state:
           type: string
+        min_readable_lsn:
+          type: string
+          format: hex
         latest_gc_cutoff_lsn:
+          type: string
+          format: hex
+        applied_gc_cutoff_lsn:
           type: string
           format: hex
 

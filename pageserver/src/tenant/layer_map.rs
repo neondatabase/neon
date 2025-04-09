@@ -46,28 +46,28 @@
 mod historic_layer_coverage;
 mod layer_coverage;
 
-use crate::context::RequestContext;
-use crate::keyspace::KeyPartitioning;
-use crate::tenant::storage_layer::InMemoryLayer;
-use anyhow::Result;
-use pageserver_api::key::Key;
-use pageserver_api::keyspace::{KeySpace, KeySpaceAccum};
-use range_set_blaze::{CheckSortedDisjoint, RangeSetBlaze};
 use std::collections::{HashMap, VecDeque};
 use std::iter::Peekable;
 use std::ops::Range;
 use std::sync::Arc;
-use utils::lsn::Lsn;
 
+use anyhow::Result;
 use historic_layer_coverage::BufferedHistoricLayerCoverage;
 pub use historic_layer_coverage::LayerKey;
+use pageserver_api::key::Key;
+use pageserver_api::keyspace::{KeySpace, KeySpaceAccum};
+use range_set_blaze::{CheckSortedDisjoint, RangeSetBlaze};
+use tokio::sync::watch;
+use utils::lsn::Lsn;
 
 use super::storage_layer::{LayerVisibilityHint, PersistentLayerDesc};
+use crate::context::RequestContext;
+use crate::keyspace::KeyPartitioning;
+use crate::tenant::storage_layer::InMemoryLayer;
 
 ///
 /// LayerMap tracks what layers exist on a timeline.
 ///
-#[derive(Default)]
 pub struct LayerMap {
     //
     // 'open_layer' holds the current InMemoryLayer that is accepting new
@@ -93,7 +93,25 @@ pub struct LayerMap {
 
     /// L0 layers have key range Key::MIN..Key::MAX, and locating them using R-Tree search is very inefficient.
     /// So L0 layers are held in l0_delta_layers vector, in addition to the R-tree.
+    ///
+    /// NB: make sure to notify `watch_l0_deltas` on changes.
     l0_delta_layers: Vec<Arc<PersistentLayerDesc>>,
+
+    /// Notifies about L0 delta layer changes, sending the current number of L0 layers.
+    watch_l0_deltas: watch::Sender<usize>,
+}
+
+impl Default for LayerMap {
+    fn default() -> Self {
+        Self {
+            open_layer: Default::default(),
+            next_open_layer_at: Default::default(),
+            frozen_layers: Default::default(),
+            historic: Default::default(),
+            l0_delta_layers: Default::default(),
+            watch_l0_deltas: watch::channel(0).0,
+        }
+    }
 }
 
 /// The primary update API for the layer map.
@@ -392,8 +410,8 @@ impl LayerMap {
         image_layer: Option<Arc<PersistentLayerDesc>>,
         end_lsn: Lsn,
     ) -> Option<SearchResult> {
-        assert!(delta_layer.as_ref().map_or(true, |l| l.is_delta()));
-        assert!(image_layer.as_ref().map_or(true, |l| !l.is_delta()));
+        assert!(delta_layer.as_ref().is_none_or(|l| l.is_delta()));
+        assert!(image_layer.as_ref().is_none_or(|l| !l.is_delta()));
 
         match (delta_layer, image_layer) {
             (None, None) => None,
@@ -466,6 +484,8 @@ impl LayerMap {
 
         if Self::is_l0(&layer_desc.key_range, layer_desc.is_delta) {
             self.l0_delta_layers.push(layer_desc.clone().into());
+            self.watch_l0_deltas
+                .send_replace(self.l0_delta_layers.len());
         }
 
         self.historic.insert(
@@ -488,6 +508,8 @@ impl LayerMap {
             let mut l0_delta_layers = std::mem::take(&mut self.l0_delta_layers);
             l0_delta_layers.retain(|other| other.key() != layer_key);
             self.l0_delta_layers = l0_delta_layers;
+            self.watch_l0_deltas
+                .send_replace(self.l0_delta_layers.len());
             // this assertion is related to use of Arc::ptr_eq in Self::compare_arced_layers,
             // there's a chance that the comparison fails at runtime due to it comparing (pointer,
             // vtable) pairs.
@@ -850,6 +872,11 @@ impl LayerMap {
         &self.l0_delta_layers
     }
 
+    /// Subscribes to L0 delta layer changes, sending the current number of L0 delta layers.
+    pub fn watch_level0_deltas(&self) -> watch::Receiver<usize> {
+        self.watch_l0_deltas.subscribe()
+    }
+
     /// debugging function to print out the contents of the layer map
     #[allow(unused)]
     pub async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
@@ -1039,18 +1066,17 @@ impl LayerMap {
 
 #[cfg(test)]
 mod tests {
-    use crate::tenant::{storage_layer::LayerName, IndexPart};
-    use pageserver_api::{
-        key::DBDIR_KEY,
-        keyspace::{KeySpace, KeySpaceRandomAccum},
-    };
-    use std::{collections::HashMap, path::PathBuf};
-    use utils::{
-        id::{TenantId, TimelineId},
-        shard::TenantShardId,
-    };
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use pageserver_api::key::DBDIR_KEY;
+    use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
+    use utils::id::{TenantId, TimelineId};
+    use utils::shard::TenantShardId;
 
     use super::*;
+    use crate::tenant::IndexPart;
+    use crate::tenant::storage_layer::LayerName;
 
     #[derive(Clone)]
     struct LayerDesc {
@@ -1390,9 +1416,11 @@ mod tests {
         assert!(!shadow.ranges.is_empty());
 
         // At least some layers should be marked covered
-        assert!(layer_visibilities
-            .iter()
-            .any(|i| matches!(i.1, LayerVisibilityHint::Covered)));
+        assert!(
+            layer_visibilities
+                .iter()
+                .any(|i| matches!(i.1, LayerVisibilityHint::Covered))
+        );
 
         let layer_visibilities = layer_visibilities.into_iter().collect::<HashMap<_, _>>();
 

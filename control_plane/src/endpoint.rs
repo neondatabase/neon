@@ -37,6 +37,8 @@
 //! ```
 //!
 use std::collections::BTreeMap;
+use std::net::IpAddr;
+use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -44,8 +46,12 @@ use std::process::Command;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use anyhow::{anyhow, bail, Context, Result};
+use compute_api::requests::ConfigurationRequest;
+use compute_api::responses::ComputeCtlConfig;
 use compute_api::spec::Database;
 use compute_api::spec::PgIdent;
 use compute_api::spec::RemoteExtSpec;
@@ -55,6 +61,7 @@ use nix::sys::signal::Signal;
 use pageserver_api::shard::ShardStripeSize;
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
 
@@ -62,7 +69,7 @@ use crate::local_env::LocalEnv;
 use crate::postgresql_conf::PostgresConf;
 use crate::storage_controller::StorageController;
 
-use compute_api::responses::{ComputeState, ComputeStatus};
+use compute_api::responses::{ComputeStatus, ComputeStatusResponse};
 use compute_api::spec::{Cluster, ComputeFeature, ComputeMode, ComputeSpec};
 
 // contents of a endpoint.json file
@@ -73,10 +80,14 @@ pub struct EndpointConf {
     timeline_id: TimelineId,
     mode: ComputeMode,
     pg_port: u16,
-    http_port: u16,
+    external_http_port: u16,
+    internal_http_port: u16,
     pg_version: u32,
     skip_pg_catalog_updates: bool,
+    reconfigure_concurrency: usize,
+    drop_subscriptions_before_start: bool,
     features: Vec<ComputeFeature>,
+    cluster: Option<Cluster>,
 }
 
 //
@@ -127,7 +138,7 @@ impl ComputeControlPlane {
         1 + self
             .endpoints
             .values()
-            .map(|ep| std::cmp::max(ep.pg_address.port(), ep.http_address.port()))
+            .map(|ep| std::cmp::max(ep.pg_address.port(), ep.external_http_address.port()))
             .max()
             .unwrap_or(self.base_port)
     }
@@ -139,17 +150,27 @@ impl ComputeControlPlane {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         pg_port: Option<u16>,
-        http_port: Option<u16>,
+        external_http_port: Option<u16>,
+        internal_http_port: Option<u16>,
         pg_version: u32,
         mode: ComputeMode,
         skip_pg_catalog_updates: bool,
+        drop_subscriptions_before_start: bool,
     ) -> Result<Arc<Endpoint>> {
         let pg_port = pg_port.unwrap_or_else(|| self.get_port());
-        let http_port = http_port.unwrap_or_else(|| self.get_port() + 1);
+        let external_http_port = external_http_port.unwrap_or_else(|| self.get_port() + 1);
+        let internal_http_port = internal_http_port.unwrap_or_else(|| external_http_port + 1);
         let ep = Arc::new(Endpoint {
             endpoint_id: endpoint_id.to_owned(),
-            pg_address: SocketAddr::new("127.0.0.1".parse().unwrap(), pg_port),
-            http_address: SocketAddr::new("127.0.0.1".parse().unwrap(), http_port),
+            pg_address: SocketAddr::new(IpAddr::from(Ipv4Addr::LOCALHOST), pg_port),
+            external_http_address: SocketAddr::new(
+                IpAddr::from(Ipv4Addr::UNSPECIFIED),
+                external_http_port,
+            ),
+            internal_http_address: SocketAddr::new(
+                IpAddr::from(Ipv4Addr::LOCALHOST),
+                internal_http_port,
+            ),
             env: self.env.clone(),
             timeline_id,
             mode,
@@ -162,7 +183,10 @@ impl ComputeControlPlane {
             // with this we basically test a case of waking up an idle compute, where
             // we also skip catalog updates in the cloud.
             skip_pg_catalog_updates,
+            drop_subscriptions_before_start,
+            reconfigure_concurrency: 1,
             features: vec![],
+            cluster: None,
         });
 
         ep.create_endpoint_dir()?;
@@ -173,11 +197,15 @@ impl ComputeControlPlane {
                 tenant_id,
                 timeline_id,
                 mode,
-                http_port,
+                external_http_port,
+                internal_http_port,
                 pg_port,
                 pg_version,
                 skip_pg_catalog_updates,
+                drop_subscriptions_before_start,
+                reconfigure_concurrency: 1,
                 features: vec![],
+                cluster: None,
             })?,
         )?;
         std::fs::write(
@@ -226,9 +254,10 @@ pub struct Endpoint {
     pub timeline_id: TimelineId,
     pub mode: ComputeMode,
 
-    // port and address of the Postgres server and `compute_ctl`'s HTTP API
+    // port and address of the Postgres server and `compute_ctl`'s HTTP APIs
     pub pg_address: SocketAddr,
-    pub http_address: SocketAddr,
+    pub external_http_address: SocketAddr,
+    pub internal_http_address: SocketAddr,
 
     // postgres major version in the format: 14, 15, etc.
     pg_version: u32,
@@ -240,8 +269,12 @@ pub struct Endpoint {
     // Optimizations
     skip_pg_catalog_updates: bool,
 
+    drop_subscriptions_before_start: bool,
+    reconfigure_concurrency: usize,
     // Feature flags
     features: Vec<ComputeFeature>,
+    // Cluster settings
+    cluster: Option<Cluster>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -281,9 +314,18 @@ impl Endpoint {
         let conf: EndpointConf =
             serde_json::from_slice(&std::fs::read(entry.path().join("endpoint.json"))?)?;
 
+        debug!("serialized endpoint conf: {:?}", conf);
+
         Ok(Endpoint {
-            pg_address: SocketAddr::new("127.0.0.1".parse().unwrap(), conf.pg_port),
-            http_address: SocketAddr::new("127.0.0.1".parse().unwrap(), conf.http_port),
+            pg_address: SocketAddr::new(IpAddr::from(Ipv4Addr::LOCALHOST), conf.pg_port),
+            external_http_address: SocketAddr::new(
+                IpAddr::from(Ipv4Addr::UNSPECIFIED),
+                conf.external_http_port,
+            ),
+            internal_http_address: SocketAddr::new(
+                IpAddr::from(Ipv4Addr::LOCALHOST),
+                conf.internal_http_port,
+            ),
             endpoint_id,
             env: env.clone(),
             timeline_id: conf.timeline_id,
@@ -291,7 +333,10 @@ impl Endpoint {
             tenant_id: conf.tenant_id,
             pg_version: conf.pg_version,
             skip_pg_catalog_updates: conf.skip_pg_catalog_updates,
+            reconfigure_concurrency: conf.reconfigure_concurrency,
+            drop_subscriptions_before_start: conf.drop_subscriptions_before_start,
             features: conf.features,
+            cluster: conf.cluster,
         })
     }
 
@@ -316,6 +361,10 @@ impl Endpoint {
         // and can cause errors like 'no unpinned buffers available', see
         // <https://github.com/neondatabase/neon/issues/9956>
         conf.append("shared_buffers", "1MB");
+        // Postgres defaults to effective_io_concurrency=1, which does not exercise the pageserver's
+        // batching logic.  Set this to 2 so that we exercise the code a bit without letting
+        // individual tests do a lot of concurrent work on underpowered test machines
+        conf.append("effective_io_concurrency", "2");
         conf.append("fsync", "off");
         conf.append("max_connections", "100");
         conf.append("wal_level", "logical");
@@ -574,13 +623,14 @@ impl Endpoint {
         };
 
         // Create spec file
-        let spec = ComputeSpec {
+        let mut spec = ComputeSpec {
             skip_pg_catalog_updates: self.skip_pg_catalog_updates,
             format_version: 1.0,
             operation_uuid: None,
             features: self.features.clone(),
             swap_size_bytes: None,
             disk_quota_bytes: None,
+            disable_lfc_resizing: None,
             cluster: Cluster {
                 cluster_id: None, // project ID: not used
                 name: None,       // project name: not used
@@ -606,7 +656,7 @@ impl Endpoint {
                     Vec::new()
                 },
                 settings: None,
-                postgresql_conf: Some(postgresql_conf),
+                postgresql_conf: Some(postgresql_conf.clone()),
             },
             delta_operations: None,
             tenant_id: Some(self.tenant_id),
@@ -619,8 +669,35 @@ impl Endpoint {
             pgbouncer_settings: None,
             shard_stripe_size: Some(shard_stripe_size),
             local_proxy_config: None,
-            reconfigure_concurrency: 1,
+            reconfigure_concurrency: self.reconfigure_concurrency,
+            drop_subscriptions_before_start: self.drop_subscriptions_before_start,
         };
+
+        // this strange code is needed to support respec() in tests
+        if self.cluster.is_some() {
+            debug!("Cluster is already set in the endpoint spec, using it");
+            spec.cluster = self.cluster.clone().unwrap();
+
+            debug!("spec.cluster {:?}", spec.cluster);
+
+            // fill missing fields again
+            if create_test_user {
+                spec.cluster.roles.push(Role {
+                    name: PgIdent::from_str("test").unwrap(),
+                    encrypted_password: None,
+                    options: None,
+                });
+                spec.cluster.databases.push(Database {
+                    name: PgIdent::from_str("neondb").unwrap(),
+                    owner: PgIdent::from_str("test").unwrap(),
+                    options: None,
+                    restrict_conn: false,
+                    invalid: false,
+                });
+            }
+            spec.cluster.postgresql_conf = Some(postgresql_conf);
+        }
+
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
 
@@ -638,24 +715,43 @@ impl Endpoint {
             println!("Also at '{}'", conn_str);
         }
         let mut cmd = Command::new(self.env.neon_distrib_dir.join("compute_ctl"));
-        cmd.args(["--http-port", &self.http_address.port().to_string()])
-            .args(["--pgdata", self.pgdata().to_str().unwrap()])
-            .args(["--connstr", &conn_str])
-            .args([
-                "--spec-path",
-                self.endpoint_path().join("spec.json").to_str().unwrap(),
-            ])
-            .args([
-                "--pgbin",
-                self.env
-                    .pg_bin_dir(self.pg_version)?
-                    .join("postgres")
-                    .to_str()
-                    .unwrap(),
-            ])
-            .stdin(std::process::Stdio::null())
-            .stderr(logfile.try_clone()?)
-            .stdout(logfile);
+        cmd.args([
+            "--external-http-port",
+            &self.external_http_address.port().to_string(),
+        ])
+        .args([
+            "--internal-http-port",
+            &self.internal_http_address.port().to_string(),
+        ])
+        .args(["--pgdata", self.pgdata().to_str().unwrap()])
+        .args(["--connstr", &conn_str])
+        .args([
+            "--spec-path",
+            self.endpoint_path().join("spec.json").to_str().unwrap(),
+        ])
+        .args([
+            "--pgbin",
+            self.env
+                .pg_bin_dir(self.pg_version)?
+                .join("postgres")
+                .to_str()
+                .unwrap(),
+        ])
+        // TODO: It would be nice if we generated compute IDs with the same
+        // algorithm as the real control plane.
+        .args([
+            "--compute-id",
+            &format!(
+                "compute-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+            ),
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(logfile.try_clone()?)
+        .stdout(logfile);
 
         if let Some(remote_ext_config) = remote_ext_config {
             cmd.args(["--remote-ext-config", remote_ext_config]);
@@ -734,7 +830,7 @@ impl Endpoint {
     }
 
     // Call the /status HTTP API
-    pub async fn get_status(&self) -> Result<ComputeState> {
+    pub async fn get_status(&self) -> Result<ComputeStatusResponse> {
         let client = reqwest::Client::new();
 
         let response = client
@@ -742,8 +838,8 @@ impl Endpoint {
                 reqwest::Method::GET,
                 format!(
                     "http://{}:{}/status",
-                    self.http_address.ip(),
-                    self.http_address.port()
+                    self.external_http_address.ip(),
+                    self.external_http_address.port()
                 ),
             )
             .send()
@@ -810,20 +906,23 @@ impl Endpoint {
         }
 
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(120))
             .build()
             .unwrap();
         let response = client
             .post(format!(
                 "http://{}:{}/configure",
-                self.http_address.ip(),
-                self.http_address.port()
+                self.external_http_address.ip(),
+                self.external_http_address.port()
             ))
             .header(CONTENT_TYPE.as_str(), "application/json")
-            .body(format!(
-                "{{\"spec\":{}}}",
-                serde_json::to_string_pretty(&spec)?
-            ))
+            .body(
+                serde_json::to_string(&ConfigurationRequest {
+                    spec,
+                    compute_ctl_config: ComputeCtlConfig::default(),
+                })
+                .unwrap(),
+            )
             .send()
             .await?;
 

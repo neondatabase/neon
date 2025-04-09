@@ -8,8 +8,8 @@ use crate::auth::backend::jwt::FetchAuthRulesError;
 use crate::compute::ConnCfg;
 use crate::compute_ctl::ComputeCtlApi;
 use crate::context::RequestContext;
-use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, MetricsAuxInfo};
 use crate::control_plane::NodeInfo;
+use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, MetricsAuxInfo};
 use crate::http;
 use crate::intern::{BranchIdTag, EndpointIdTag, InternId, ProjectIdTag};
 use crate::types::EndpointId;
@@ -37,7 +37,6 @@ impl LocalBackend {
                     branch_id: BranchIdTag::get_interner().get_or_intern("local"),
                     cold_start_info: ColdStartInfo::WarmCached,
                 },
-                allow_self_signed_compute: false,
             },
         }
     }

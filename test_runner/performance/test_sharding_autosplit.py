@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import re
+import threading
 from pathlib import Path
 
 import pytest
@@ -188,7 +189,20 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
 
         check_pgbench_output(out_path)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=tenant_count) as pgbench_threads:
+    stop_pump = threading.Event()
+
+    def pump_controller():
+        # Run a background loop to force the storage controller to run its
+        # background work faster than it otherwise would: this helps
+        # us:
+        #  A) to create a test that runs in a shorter time
+        #  B) to create a test that is more intensive by doing the shard migrations
+        #     after splits happen more rapidly.
+        while not stop_pump.is_set():
+            env.storage_controller.reconcile_all()
+            stop_pump.wait(0.1)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=tenant_count + 1) as pgbench_threads:
         pgbench_futs = []
         for tenant_state in tenants.values():
             fut = pgbench_threads.submit(run_pgbench_init, tenant_state.endpoint)
@@ -198,6 +212,8 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         for fut in pgbench_futs:
             fut.result()
 
+        pump_fut = pgbench_threads.submit(pump_controller)
+
         pgbench_futs = []
         for tenant_state in tenants.values():
             fut = pgbench_threads.submit(run_pgbench_main, tenant_state.endpoint)
@@ -206,6 +222,9 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         log.info("Waiting for pgbench read/write pass")
         for fut in pgbench_futs:
             fut.result()
+
+        stop_pump.set()
+        pump_fut.result()
 
     def assert_all_split():
         for tenant_id in tenants.keys():
@@ -228,7 +247,7 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         log.info(f"{shard_zero_id} timeline: {timeline_info}")
 
     # Run compaction for all tenants, restart endpoint so that on subsequent reads we will
-    # definitely hit pageserver for reads.  This compaction passis expected to drop unwanted
+    # definitely hit pageserver for reads.  This compaction pass is expected to drop unwanted
     # layers but not do any rewrites (we're still in the same generation)
     for tenant_id, tenant_state in tenants.items():
         tenant_state.endpoint.stop()
@@ -276,6 +295,16 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         log.info("Waiting for pgbench read pass")
         for fut in pgbench_futs:
             fut.result()
+
+    # Run a full forced compaction, to detect any data corruption.
+    for tenant_id, tenant_state in tenants.items():
+        for shard_id, shard_ps in tenant_get_shards(env, tenant_id):
+            shard_ps.http_client().timeline_compact(
+                shard_id,
+                tenant_state.timeline_id,
+                force_image_layer_creation=True,
+                force_l0_compaction=True,
+            )
 
     # Assert that some rewrites happened
     # TODO: uncomment this after https://github.com/neondatabase/neon/pull/7531 is merged

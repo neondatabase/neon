@@ -27,6 +27,10 @@ commands:
     user: nobody
     sysvInitAction: respawn
     shell: 'DATA_SOURCE_NAME="user=cloud_admin sslmode=disable dbname=postgres application_name=postgres-exporter" /bin/postgres_exporter --config.file=/etc/postgres_exporter.yml'
+  - name: pgbouncer-exporter
+    user: postgres
+    sysvInitAction: respawn
+    shell: '/bin/pgbouncer_exporter --pgBouncer.connectionString="postgres:///pgbouncer?host=/tmp&port=6432&dbname=pgbouncer&user=pgbouncer"'
   - name: sql-exporter
     user: nobody
     sysvInitAction: respawn
@@ -43,7 +47,9 @@ files:
       # Allow postgres user (which is what compute_ctl runs as) to run /neonvm/bin/resize-swap
       # and /neonvm/bin/set-disk-quota as root without requiring entering a password (NOPASSWD),
       # regardless of hostname (ALL)
-      postgres ALL=(root) NOPASSWD: /neonvm/bin/resize-swap, /neonvm/bin/set-disk-quota
+      #
+      # Also allow it to shut down the VM. The fast_import job does that when it's finished.
+      postgres ALL=(root) NOPASSWD: /neonvm/bin/resize-swap, /neonvm/bin/set-disk-quota, /neonvm/bin/poweroff
   - filename: cgconfig.conf
     content: |
       # Configuration for cgroups in VM compute nodes
@@ -64,7 +70,8 @@ build: |
   # At time of writing (2023-03-14), debian bullseye has a version of cgroup-tools (technically
   # libcgroup) that doesn't support cgroup v2 (version 0.41-11). Unfortunately, the vm-monitor
   # requires cgroup v2, so we'll build cgroup-tools ourselves.
-  FROM debian:bullseye-slim as libcgroup-builder
+  ARG BULLSEYE_SLIM_SHA=sha256:e831d9a884d63734fe3dd9c491ed9a5a3d4c6a6d32c5b14f2067357c49b0b7e1
+  FROM debian@$BULLSEYE_SLIM_SHA as libcgroup-builder
   ENV LIBCGROUP_VERSION=v2.0.3
 
   RUN set -exu \

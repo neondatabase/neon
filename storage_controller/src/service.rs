@@ -1,104 +1,97 @@
 pub mod chaos_injector;
 mod context_iterator;
 
-use hyper::Uri;
-use std::{
-    borrow::Cow,
-    cmp::Ordering,
-    collections::{BTreeMap, HashMap, HashSet},
-    error::Error,
-    ops::Deref,
-    path::PathBuf,
-    str::FromStr,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::borrow::Cow;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::error::Error;
+use std::ops::Deref;
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use crate::{
-    background_node_operations::{
-        Drain, Fill, Operation, OperationError, OperationHandler, MAX_RECONCILES_PER_OPERATION,
-    },
-    compute_hook::NotifyError,
-    drain_utils::{self, TenantShardDrain, TenantShardIterator},
-    id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, TracingExclusiveGuard},
-    leadership::Leadership,
-    metrics,
-    peer_client::GlobalObservedState,
-    persistence::{
-        AbortShardSplitStatus, ControllerPersistence, DatabaseResult, MetadataHealthPersistence,
-        ShardGenerationState, TenantFilter,
-    },
-    reconciler::{ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder},
-    scheduler::{MaySchedule, ScheduleContext, ScheduleError, ScheduleMode},
-    tenant_shard::{
-        MigrateAttachment, ObservedStateDelta, ReconcileNeeded, ReconcilerStatus,
-        ScheduleOptimization, ScheduleOptimizationAction,
-    },
-};
 use anyhow::Context;
+use context_iterator::TenantShardContextIterator;
 use control_plane::storage_controller::{
     AttachHookRequest, AttachHookResponse, InspectRequest, InspectResponse,
 };
 use diesel::result::DatabaseErrorKind;
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
+use http_utils::error::ApiError;
+use hyper::Uri;
 use itertools::Itertools;
-use pageserver_api::{
-    controller_api::{
-        AvailabilityZone, MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability,
-        NodeRegisterRequest, NodeSchedulingPolicy, NodeShard, NodeShardResponse, PlacementPolicy,
-        ShardSchedulingPolicy, ShardsPreferredAzsRequest, ShardsPreferredAzsResponse,
-        TenantCreateRequest, TenantCreateResponse, TenantCreateResponseShard,
-        TenantDescribeResponse, TenantDescribeResponseShard, TenantLocateResponse,
-        TenantPolicyRequest, TenantShardMigrateRequest, TenantShardMigrateResponse,
-    },
-    models::{
-        SecondaryProgress, TenantConfigRequest, TimelineArchivalConfigRequest,
-        TopTenantShardsRequest,
-    },
+use pageserver_api::controller_api::{
+    AvailabilityZone, MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability,
+    NodeRegisterRequest, NodeSchedulingPolicy, NodeShard, NodeShardResponse, PlacementPolicy,
+    SafekeeperDescribeResponse, ShardSchedulingPolicy, ShardsPreferredAzsRequest,
+    ShardsPreferredAzsResponse, SkSchedulingPolicy, TenantCreateRequest, TenantCreateResponse,
+    TenantCreateResponseShard, TenantDescribeResponse, TenantDescribeResponseShard,
+    TenantLocateResponse, TenantPolicyRequest, TenantShardMigrateRequest,
+    TenantShardMigrateResponse,
 };
+use pageserver_api::models::{
+    self, LocationConfig, LocationConfigListResponse, LocationConfigMode, PageserverUtilization,
+    SecondaryProgress, ShardParameters, TenantConfig, TenantConfigPatchRequest,
+    TenantConfigRequest, TenantLocationConfigRequest, TenantLocationConfigResponse,
+    TenantShardLocation, TenantShardSplitRequest, TenantShardSplitResponse,
+    TenantTimeTravelRequest, TimelineArchivalConfigRequest, TimelineCreateRequest, TimelineInfo,
+    TopTenantShardsRequest,
+};
+use pageserver_api::shard::{
+    ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId,
+};
+use pageserver_api::upcall_api::{
+    ReAttachRequest, ReAttachResponse, ReAttachResponseTenant, ValidateRequest, ValidateResponse,
+    ValidateResponseTenant,
+};
+use pageserver_client::{BlockUnblock, mgmt_api};
 use reqwest::StatusCode;
-use tracing::{instrument, Instrument};
-
-use crate::pageserver_client::PageserverClient;
-use pageserver_api::{
-    models::{
-        self, LocationConfig, LocationConfigListResponse, LocationConfigMode,
-        PageserverUtilization, ShardParameters, TenantConfig, TenantLocationConfigRequest,
-        TenantLocationConfigResponse, TenantShardLocation, TenantShardSplitRequest,
-        TenantShardSplitResponse, TenantTimeTravelRequest, TimelineCreateRequest, TimelineInfo,
-    },
-    shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId},
-    upcall_api::{
-        ReAttachRequest, ReAttachResponse, ReAttachResponseTenant, ValidateRequest,
-        ValidateResponse, ValidateResponseTenant,
-    },
-};
-use pageserver_client::{mgmt_api, BlockUnblock};
+use safekeeper_api::models::SafekeeperUtilization;
+use tokio::sync::TryAcquireError;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::sync::CancellationToken;
-use utils::{
-    completion::Barrier,
-    failpoint_support,
-    generation::Generation,
-    http::error::ApiError,
-    id::{NodeId, TenantId, TimelineId},
-    sync::gate::Gate,
+use tracing::{Instrument, instrument};
+use utils::completion::Barrier;
+use utils::generation::Generation;
+use utils::id::{NodeId, TenantId, TimelineId};
+use utils::sync::gate::Gate;
+use utils::{failpoint_support, pausable_failpoint};
+
+use crate::background_node_operations::{
+    Drain, Fill, MAX_RECONCILES_PER_OPERATION, Operation, OperationError, OperationHandler,
+};
+use crate::compute_hook::{self, ComputeHook, NotifyError};
+use crate::drain_utils::{self, TenantShardDrain, TenantShardIterator};
+use crate::heartbeater::{Heartbeater, PageserverState, SafekeeperState};
+use crate::id_lock_map::{
+    IdLockMap, TracingExclusiveGuard, trace_exclusive_lock, trace_shared_lock,
+};
+use crate::leadership::Leadership;
+use crate::metrics;
+use crate::node::{AvailabilityTransition, Node};
+use crate::pageserver_client::PageserverClient;
+use crate::peer_client::GlobalObservedState;
+use crate::persistence::split_state::SplitState;
+use crate::persistence::{
+    AbortShardSplitStatus, ControllerPersistence, DatabaseError, DatabaseResult,
+    MetadataHealthPersistence, Persistence, ShardGenerationState, TenantFilter,
+    TenantShardPersistence,
+};
+use crate::reconciler::{
+    ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder, ReconcilerPriority,
+    attached_location_conf,
+};
+use crate::safekeeper::Safekeeper;
+use crate::scheduler::{MaySchedule, ScheduleContext, ScheduleError, ScheduleMode, Scheduler};
+use crate::tenant_shard::{
+    IntentState, MigrateAttachment, ObservedState, ObservedStateDelta, ObservedStateLocation,
+    ReconcileNeeded, ReconcileResult, ReconcileWaitError, ReconcilerStatus, ReconcilerWaiter,
+    ScheduleOptimization, ScheduleOptimizationAction, TenantShard,
 };
 
-use crate::{
-    compute_hook::ComputeHook,
-    heartbeater::{Heartbeater, PageserverState},
-    node::{AvailabilityTransition, Node},
-    persistence::{split_state::SplitState, DatabaseError, Persistence, TenantShardPersistence},
-    reconciler::attached_location_conf,
-    scheduler::Scheduler,
-    tenant_shard::{
-        IntentState, ObservedState, ObservedStateLocation, ReconcileResult, ReconcileWaitError,
-        ReconcilerWaiter, TenantShard,
-    },
-};
-
-use context_iterator::TenantShardContextIterator;
+const WAITER_FILL_DRAIN_POLL_TIMEOUT: Duration = Duration::from_millis(500);
 
 // For operations that should be quick, like attaching a new tenant
 const SHORT_RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -139,6 +132,7 @@ enum TenantOperations {
     Create,
     LocationConfig,
     ConfigSet,
+    ConfigPatch,
     TimeTravelRemoteStorage,
     Delete,
     UpdatePolicy,
@@ -150,6 +144,8 @@ enum TenantOperations {
     TimelineArchivalConfig,
     TimelineDetachAncestor,
     TimelineGcBlockUnblock,
+    DropDetached,
+    DownloadHeatmapLayers,
 }
 
 #[derive(Clone, strum_macros::Display)]
@@ -186,6 +182,7 @@ pub(crate) enum LeadershipStatus {
 }
 
 pub const RECONCILER_CONCURRENCY_DEFAULT: usize = 128;
+pub const PRIORITY_RECONCILER_CONCURRENCY_DEFAULT: usize = 256;
 
 // Depth of the channel used to enqueue shards for reconciliation when they can't do it immediately.
 // This channel is finite-size to avoid using excessive memory if we get into a state where reconciles are finishing more slowly
@@ -199,6 +196,8 @@ struct ServiceState {
     tenants: BTreeMap<TenantShardId, TenantShard>,
 
     nodes: Arc<HashMap<NodeId, Node>>,
+
+    safekeepers: Arc<HashMap<NodeId, Safekeeper>>,
 
     scheduler: Scheduler,
 
@@ -266,6 +265,7 @@ fn passthrough_api_error(node: &Node, e: mgmt_api::Error) -> ApiError {
 impl ServiceState {
     fn new(
         nodes: HashMap<NodeId, Node>,
+        safekeepers: HashMap<NodeId, Safekeeper>,
         tenants: BTreeMap<TenantShardId, TenantShard>,
         scheduler: Scheduler,
         delayed_reconcile_rx: tokio::sync::mpsc::Receiver<TenantShardId>,
@@ -277,6 +277,7 @@ impl ServiceState {
             leadership_status: initial_leadership_status,
             tenants,
             nodes: Arc::new(nodes),
+            safekeepers: Arc::new(safekeepers),
             scheduler,
             ongoing_operation: None,
             delayed_reconcile_rx,
@@ -291,6 +292,23 @@ impl ServiceState {
         &mut Scheduler,
     ) {
         (&mut self.nodes, &mut self.tenants, &mut self.scheduler)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn parts_mut_sk(
+        &mut self,
+    ) -> (
+        &mut Arc<HashMap<NodeId, Node>>,
+        &mut Arc<HashMap<NodeId, Safekeeper>>,
+        &mut BTreeMap<TenantShardId, TenantShard>,
+        &mut Scheduler,
+    ) {
+        (
+            &mut self.nodes,
+            &mut self.safekeepers,
+            &mut self.tenants,
+            &mut self.scheduler,
+        )
     }
 
     fn get_leadership_status(&self) -> LeadershipStatus {
@@ -313,7 +331,12 @@ pub struct Config {
     // All pageservers managed by one instance of this service must have
     // the same public key.  This JWT token will be used to authenticate
     // this service to the pageservers it manages.
-    pub jwt_token: Option<String>,
+    pub pageserver_jwt_token: Option<String>,
+
+    // All safekeepers managed by one instance of this service must have
+    // the same public key. This JWT token will be used to authenticate
+    // this service to the safekeepers it manages.
+    pub safekeeper_jwt_token: Option<String>,
 
     // This JWT token will be used to authenticate this service to the control plane.
     pub control_plane_jwt_token: Option<String>,
@@ -336,8 +359,11 @@ pub struct Config {
     /// and/or upon handling the re-attach request from a node.
     pub max_warming_up_interval: Duration,
 
-    /// How many Reconcilers may be spawned concurrently
+    /// How many normal-priority Reconcilers may be spawned concurrently
     pub reconciler_concurrency: usize,
+
+    /// How many high-priority Reconcilers may be spawned concurrently
+    pub priority_reconciler_concurrency: usize,
 
     /// How large must a shard grow in bytes before we split it?
     /// None disables auto-splitting.
@@ -361,6 +387,8 @@ pub struct Config {
     pub http_service_port: i32,
 
     pub long_reconcile_threshold: Duration,
+
+    pub use_https_pageserver_api: bool,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -391,7 +419,8 @@ pub struct Service {
     compute_hook: Arc<ComputeHook>,
     result_tx: tokio::sync::mpsc::UnboundedSender<ReconcileResultRequest>,
 
-    heartbeater: Heartbeater,
+    heartbeater_ps: Heartbeater<Node, PageserverState>,
+    heartbeater_sk: Heartbeater<Safekeeper, SafekeeperState>,
 
     // Channel for background cleanup from failed operations that require cleanup, such as shard split
     abort_tx: tokio::sync::mpsc::UnboundedSender<TenantShardSplitAbort>,
@@ -405,14 +434,19 @@ pub struct Service {
     // that transition it to/from Active.
     node_op_locks: IdLockMap<NodeId, NodeOperations>,
 
-    // Limit how many Reconcilers we will spawn concurrently
+    // Limit how many Reconcilers we will spawn concurrently for normal-priority tasks such as background reconciliations
+    // and reconciliation on startup.
     reconciler_concurrency: Arc<tokio::sync::Semaphore>,
+
+    // Limit how many Reconcilers we will spawn concurrently for high-priority tasks such as tenant/timeline CRUD, which
+    // a human user might be waiting for.
+    priority_reconciler_concurrency: Arc<tokio::sync::Semaphore>,
 
     /// Queue of tenants who are waiting for concurrency limits to permit them to reconcile
     /// Send into this queue to promptly attempt to reconcile this shard next time units are available.
     ///
-    /// Note that this state logically lives inside ServiceInner, but carrying Sender here makes the code simpler
-    /// by avoiding needing a &mut ref to something inside the ServiceInner.  This could be optimized to
+    /// Note that this state logically lives inside ServiceState, but carrying Sender here makes the code simpler
+    /// by avoiding needing a &mut ref to something inside the ServiceState.  This could be optimized to
     /// use a VecDeque instead of a channel to reduce synchronization overhead, at the cost of some code complexity.
     delayed_reconcile_tx: tokio::sync::mpsc::Sender<TenantShardId>,
 
@@ -601,7 +635,8 @@ impl Service {
             let locked = self.inner.read().unwrap();
             locked.nodes.clone()
         };
-        let mut nodes_online = self.initial_heartbeat_round(all_nodes.keys()).await;
+        let (mut nodes_online, mut sks_online) =
+            self.initial_heartbeat_round(all_nodes.keys()).await;
 
         // List of tenants for which we will attempt to notify compute of their location at startup
         let mut compute_notifications = Vec::new();
@@ -610,7 +645,7 @@ impl Service {
         tracing::info!("Populating tenant shards' states from initial pageserver scan...");
         let shard_count = {
             let mut locked = self.inner.write().unwrap();
-            let (nodes, tenants, scheduler) = locked.parts_mut();
+            let (nodes, safekeepers, tenants, scheduler) = locked.parts_mut_sk();
 
             // Mark nodes online if they responded to us: nodes are offline by default after a restart.
             let mut new_nodes = (**nodes).clone();
@@ -621,6 +656,17 @@ impl Service {
                 }
             }
             *nodes = Arc::new(new_nodes);
+
+            let mut new_sks = (**safekeepers).clone();
+            for (node_id, node) in new_sks.iter_mut() {
+                if let Some((utilization, last_seen_at)) = sks_online.remove(node_id) {
+                    node.set_availability(SafekeeperState::Available {
+                        utilization,
+                        last_seen_at,
+                    });
+                }
+            }
+            *safekeepers = Arc::new(new_sks);
 
             for (tenant_shard_id, observed_state) in observed.0 {
                 let Some(tenant_shard) = tenants.get_mut(&tenant_shard_id) else {
@@ -653,11 +699,14 @@ impl Service {
                     // emit a compute notification for this. In the case where our observed state does not
                     // yet match our intent, we will eventually reconcile, and that will emit a compute notification.
                     if let Some(attached_at) = tenant_shard.stably_attached() {
-                        compute_notifications.push((
-                            *tenant_shard_id,
-                            attached_at,
-                            tenant_shard.shard.stripe_size,
-                        ));
+                        compute_notifications.push(compute_hook::ShardUpdate {
+                            tenant_shard_id: *tenant_shard_id,
+                            node_id: attached_at,
+                            stripe_size: tenant_shard.shard.stripe_size,
+                            preferred_az: tenant_shard
+                                .preferred_az()
+                                .map(|az| Cow::Owned(az.clone())),
+                        });
                     }
                 }
             }
@@ -721,13 +770,18 @@ impl Service {
             });
         }
 
-        tracing::info!("Startup complete, spawned {reconcile_tasks} reconciliation tasks ({shard_count} shards total)");
+        tracing::info!(
+            "Startup complete, spawned {reconcile_tasks} reconciliation tasks ({shard_count} shards total)"
+        );
     }
 
     async fn initial_heartbeat_round<'a>(
         &self,
         node_ids: impl Iterator<Item = &'a NodeId>,
-    ) -> HashMap<NodeId, PageserverUtilization> {
+    ) -> (
+        HashMap<NodeId, PageserverUtilization>,
+        HashMap<NodeId, (SafekeeperUtilization, Instant)>,
+    ) {
         assert!(!self.startup_complete.is_ready());
 
         let all_nodes = {
@@ -747,14 +801,21 @@ impl Service {
             }
         }
 
+        let all_sks = {
+            let locked = self.inner.read().unwrap();
+            locked.safekeepers.clone()
+        };
+
         tracing::info!("Sending initial heartbeats...");
-        let res = self
-            .heartbeater
-            .heartbeat(Arc::new(nodes_to_heartbeat))
-            .await;
+        // Put a small, but reasonable timeout to get the initial heartbeats of the safekeepers to avoid a storage controller downtime
+        const SK_TIMEOUT: Duration = Duration::from_secs(5);
+        let (res_ps, res_sk) = tokio::join!(
+            self.heartbeater_ps.heartbeat(Arc::new(nodes_to_heartbeat)),
+            tokio::time::timeout(SK_TIMEOUT, self.heartbeater_sk.heartbeat(all_sks))
+        );
 
         let mut online_nodes = HashMap::new();
-        if let Ok(deltas) = res {
+        if let Ok(deltas) = res_ps {
             for (node_id, status) in deltas.0 {
                 match status {
                     PageserverState::Available { utilization, .. } => {
@@ -768,7 +829,22 @@ impl Service {
             }
         }
 
-        online_nodes
+        let mut online_sks = HashMap::new();
+        if let Ok(Ok(deltas)) = res_sk {
+            for (node_id, status) in deltas.0 {
+                match status {
+                    SafekeeperState::Available {
+                        utilization,
+                        last_seen_at,
+                    } => {
+                        online_sks.insert(node_id, (utilization, last_seen_at));
+                    }
+                    SafekeeperState::Offline => {}
+                }
+            }
+        }
+
+        (online_nodes, online_sks)
     }
 
     /// Used during [`Self::startup_reconcile`]: issue GETs to all nodes concurrently, with a deadline.
@@ -796,7 +872,7 @@ impl Service {
                     let response = node
                         .with_client_retries(
                             |client| async move { client.list_location_config().await },
-                            &self.config.jwt_token,
+                            &self.config.pageserver_jwt_token,
                             1,
                             5,
                             timeout,
@@ -897,7 +973,7 @@ impl Service {
             let client = PageserverClient::new(
                 node.get_id(),
                 node.base_url(),
-                self.config.jwt_token.as_deref(),
+                self.config.pageserver_jwt_token.as_deref(),
             );
             match client
                 .location_config(
@@ -948,12 +1024,11 @@ impl Service {
                 let reconciles_spawned = self.reconcile_all();
                 if reconciles_spawned == 0 {
                     // Run optimizer only when we didn't find any other work to do
-                    let optimizations = self.optimize_all().await;
-                    if optimizations == 0 {
-                        // Run new splits only when no optimizations are pending
-                        self.autosplit_tenants().await;
-                    }
+                    self.optimize_all().await;
                 }
+                // Always attempt autosplits. Sharding is crucial for bulk ingest performance, so we
+                // must be responsive when new projects begin ingesting and reach the threshold.
+                self.autosplit_tenants().await;
             }
               _ = self.reconcilers_cancel.cancelled() => return
             }
@@ -975,8 +1050,18 @@ impl Service {
                 locked.nodes.clone()
             };
 
-            let res = self.heartbeater.heartbeat(nodes).await;
-            if let Ok(deltas) = res {
+            let safekeepers = {
+                let locked = self.inner.read().unwrap();
+                locked.safekeepers.clone()
+            };
+
+            const SK_TIMEOUT: Duration = Duration::from_secs(3);
+            let (res_ps, res_sk) = tokio::join!(
+                self.heartbeater_ps.heartbeat(nodes),
+                tokio::time::timeout(SK_TIMEOUT, self.heartbeater_sk.heartbeat(safekeepers))
+            );
+
+            if let Ok(deltas) = res_ps {
                 let mut to_handle = Vec::default();
 
                 for (node_id, state) in deltas.0 {
@@ -1017,6 +1102,8 @@ impl Service {
                     )
                     .await;
 
+                    pausable_failpoint!("heartbeat-pre-node-state-configure");
+
                     // This is the code path for geniune availability transitions (i.e node
                     // goes unavailable and/or comes back online).
                     let res = self
@@ -1035,6 +1122,9 @@ impl Service {
                             // This should be rare, but legitimate since the heartbeats are done
                             // on a snapshot of the nodes.
                             tracing::info!("Node {} was not found after heartbeat round", node_id);
+                        }
+                        Err(ApiError::ShuttingDown) => {
+                            // No-op: we're shutting down, no need to try and update any nodes' statuses
                         }
                         Err(err) => {
                             // Transition to active involves reconciling: if a node responds to a heartbeat then
@@ -1071,6 +1161,20 @@ impl Service {
                         }
                     }
                 }
+            }
+            if let Ok(Ok(deltas)) = res_sk {
+                let mut locked = self.inner.write().unwrap();
+                let mut safekeepers = (*locked.safekeepers).clone();
+                for (id, state) in deltas.0 {
+                    let Some(sk) = safekeepers.get_mut(&id) else {
+                        tracing::info!(
+                            "Couldn't update safekeeper safekeeper state for id {id} from heartbeat={state:?}"
+                        );
+                        continue;
+                    };
+                    sk.set_availability(state);
+                }
+                locked.safekeepers = Arc::new(safekeepers);
             }
         }
     }
@@ -1155,13 +1259,30 @@ impl Service {
             }
         }
 
+        // If we just finished detaching all shards for a tenant, it might be time to drop it from memory.
+        if tenant.policy == PlacementPolicy::Detached {
+            // We may only drop a tenant from memory while holding the exclusive lock on the tenant ID: this protects us
+            // from concurrent execution wrt a request handler that might expect the tenant to remain in memory for the
+            // duration of the request.
+            let guard = self.tenant_op_locks.try_exclusive(
+                tenant.tenant_shard_id.tenant_id,
+                TenantOperations::DropDetached,
+            );
+            if let Some(guard) = guard {
+                self.maybe_drop_tenant(tenant.tenant_shard_id.tenant_id, &mut locked, &guard);
+            }
+        }
+
         // Maybe some other work can proceed now that this job finished.
+        //
+        // Only bother with this if we have some semaphore units available in the normal-priority semaphore (these
+        // reconciles are scheduled at `[ReconcilerPriority::Normal]`).
         if self.reconciler_concurrency.available_permits() > 0 {
             while let Ok(tenant_shard_id) = locked.delayed_reconcile_rx.try_recv() {
                 let (nodes, tenants, _scheduler) = locked.parts_mut();
                 if let Some(shard) = tenants.get_mut(&tenant_shard_id) {
                     shard.delayed_reconcile = false;
-                    self.maybe_reconcile_shard(shard, nodes);
+                    self.maybe_reconcile_shard(shard, nodes, ReconcilerPriority::Normal);
                 }
 
                 if self.reconciler_concurrency.available_permits() == 0 {
@@ -1274,8 +1395,8 @@ impl Service {
             .list_nodes()
             .await?
             .into_iter()
-            .map(Node::from_persistent)
-            .collect::<Vec<_>>();
+            .map(|x| Node::from_persistent(x, config.use_https_pageserver_api))
+            .collect::<anyhow::Result<Vec<Node>>>()?;
         let nodes: HashMap<NodeId, Node> = nodes.into_iter().map(|n| (n.get_id(), n)).collect();
         tracing::info!("Loaded {} nodes from database.", nodes.len());
         metrics::METRICS_REGISTRY
@@ -1283,8 +1404,19 @@ impl Service {
             .storage_controller_pageserver_nodes
             .set(nodes.len() as i64);
 
+        tracing::info!("Loading safekeepers from database...");
+        let safekeepers = persistence
+            .list_safekeepers()
+            .await?
+            .into_iter()
+            .map(|skp| Safekeeper::from_persistence(skp, CancellationToken::new()))
+            .collect::<Vec<_>>();
+        let safekeepers: HashMap<NodeId, Safekeeper> =
+            safekeepers.into_iter().map(|n| (n.get_id(), n)).collect();
+        tracing::info!("Loaded {} safekeepers from database.", safekeepers.len());
+
         tracing::info!("Loading shards from database...");
-        let mut tenant_shard_persistence = persistence.list_tenant_shards().await?;
+        let mut tenant_shard_persistence = persistence.load_active_tenant_shards().await?;
         tracing::info!(
             "Loaded {} shards from database.",
             tenant_shard_persistence.len()
@@ -1363,10 +1495,13 @@ impl Service {
                     NodeId(node_id as u64),
                     "".to_string(),
                     123,
+                    None,
                     "".to_string(),
                     123,
                     AvailabilityZone("test_az".to_string()),
-                );
+                    false,
+                )
+                .unwrap();
 
                 scheduler.node_upsert(&node);
             }
@@ -1376,7 +1511,11 @@ impl Service {
 
             // We will populate intent properly later in [`Self::startup_reconcile`], initially populate
             // it with what we can infer: the node for which a generation was most recently issued.
-            let mut intent = IntentState::new();
+            let mut intent = IntentState::new(
+                tsp.preferred_az_id
+                    .as_ref()
+                    .map(|az| AvailabilityZone(az.clone())),
+            );
             if let Some(generation_pageserver) = tsp.generation_pageserver.map(|n| NodeId(n as u64))
             {
                 if nodes.contains_key(&generation_pageserver) {
@@ -1385,7 +1524,9 @@ impl Service {
                     // If a node was removed before being completely drained, it is legal for it to leave behind a `generation_pageserver` referring
                     // to a non-existent node, because node deletion doesn't block on completing the reconciliations that will issue new generations
                     // on different pageservers.
-                    tracing::warn!("Tenant shard {tenant_shard_id} references non-existent node {generation_pageserver} in database, will be rescheduled");
+                    tracing::warn!(
+                        "Tenant shard {tenant_shard_id} references non-existent node {generation_pageserver} in database, will be rescheduled"
+                    );
                 }
             }
             let new_tenant = TenantShard::from_persistent(tsp, intent)?;
@@ -1405,8 +1546,15 @@ impl Service {
         let cancel = CancellationToken::new();
         let reconcilers_cancel = cancel.child_token();
 
-        let heartbeater = Heartbeater::new(
-            config.jwt_token.clone(),
+        let heartbeater_ps = Heartbeater::new(
+            config.pageserver_jwt_token.clone(),
+            config.max_offline_interval,
+            config.max_warming_up_interval,
+            cancel.clone(),
+        );
+
+        let heartbeater_sk = Heartbeater::new(
+            config.safekeeper_jwt_token.clone(),
             config.max_offline_interval,
             config.max_warming_up_interval,
             cancel.clone(),
@@ -1421,6 +1569,7 @@ impl Service {
         let this = Arc::new(Self {
             inner: Arc::new(std::sync::RwLock::new(ServiceState::new(
                 nodes,
+                safekeepers,
                 tenants,
                 scheduler,
                 delayed_reconcile_rx,
@@ -1430,9 +1579,13 @@ impl Service {
             persistence,
             compute_hook: Arc::new(ComputeHook::new(config.clone())),
             result_tx,
-            heartbeater,
+            heartbeater_ps,
+            heartbeater_sk,
             reconciler_concurrency: Arc::new(tokio::sync::Semaphore::new(
                 config.reconciler_concurrency,
+            )),
+            priority_reconciler_concurrency: Arc::new(tokio::sync::Semaphore::new(
+                config.priority_reconciler_concurrency,
             )),
             delayed_reconcile_tx,
             abort_tx,
@@ -1536,8 +1689,14 @@ impl Service {
         // the pageserver API (not via this service), we will auto-create any missing tenant
         // shards with default state.
         let insert = {
-            let locked = self.inner.write().unwrap();
-            !locked.tenants.contains_key(&attach_req.tenant_shard_id)
+            match self
+                .maybe_load_tenant(attach_req.tenant_shard_id.tenant_id, &_tenant_lock)
+                .await
+            {
+                Ok(_) => false,
+                Err(ApiError::NotFound(_)) => true,
+                Err(e) => return Err(e.into()),
+            }
         };
 
         if insert {
@@ -1579,6 +1738,7 @@ impl Service {
                             attach_req.tenant_shard_id,
                             ShardIdentity::unsharded(),
                             PlacementPolicy::Attached(0),
+                            None,
                         ),
                     );
                     tracing::info!("Inserted shard {} in memory", attach_req.tenant_shard_id);
@@ -1696,7 +1856,7 @@ impl Service {
         }
 
         Ok(AttachHookResponse {
-            gen: attach_req
+            r#gen: attach_req
                 .node_id
                 .map(|_| tenant_shard.generation.expect("Test hook, not used on tenants that are mid-onboarding with a NULL generation").into().unwrap()),
         })
@@ -1741,7 +1901,7 @@ impl Service {
         let configs = match node
             .with_client_retries(
                 |client| async move { client.list_location_config().await },
-                &self.config.jwt_token,
+                &self.config.pageserver_jwt_token,
                 1,
                 5,
                 SHORT_RECONCILE_TIMEOUT,
@@ -1799,7 +1959,7 @@ impl Service {
                             .location_config(tenant_shard_id, config, None, false)
                             .await
                     },
-                    &self.config.jwt_token,
+                    &self.config.pageserver_jwt_token,
                     1,
                     5,
                     SHORT_RECONCILE_TIMEOUT,
@@ -1868,7 +2028,7 @@ impl Service {
                 let new_gen = *new_gen;
                 response.tenants.push(ReAttachResponseTenant {
                     id: *tenant_shard_id,
-                    gen: Some(new_gen.into().unwrap()),
+                    r#gen: Some(new_gen.into().unwrap()),
                     // A tenant is only put into multi or stale modes in the middle of a [`Reconciler::live_migrate`]
                     // execution.  If a pageserver is restarted during that process, then the reconcile pass will
                     // fail, and start from scratch, so it doesn't make sense for us to try and preserve
@@ -1905,7 +2065,7 @@ impl Service {
 
                 response.tenants.push(ReAttachResponseTenant {
                     id: *tenant_shard_id,
-                    gen: None,
+                    r#gen: None,
                     mode: LocationConfigMode::Secondary,
                 });
 
@@ -1967,15 +2127,19 @@ impl Service {
             let locked = self.inner.read().unwrap();
             for req_tenant in validate_req.tenants {
                 if let Some(tenant_shard) = locked.tenants.get(&req_tenant.id) {
-                    let valid = tenant_shard.generation == Some(Generation::new(req_tenant.gen));
+                    let valid = tenant_shard.generation == Some(Generation::new(req_tenant.r#gen));
                     tracing::info!(
                         "handle_validate: {}(gen {}): valid={valid} (latest {:?})",
                         req_tenant.id,
-                        req_tenant.gen,
+                        req_tenant.r#gen,
                         tenant_shard.generation
                     );
 
-                    in_memory_result.push((req_tenant.id, Generation::new(req_tenant.gen), valid));
+                    in_memory_result.push((
+                        req_tenant.id,
+                        Generation::new(req_tenant.r#gen),
+                        valid,
+                    ));
                 } else {
                     // This is legal: for example during a shard split the pageserver may still
                     // have deletions in its queue from the old pre-split shard, or after deletion
@@ -1994,13 +2158,11 @@ impl Service {
         // in case of controller split-brain, where some other controller process might have incremented the generation.
         let db_generations = self
             .persistence
-            .shard_generations(in_memory_result.iter().filter_map(|i| {
-                if i.2 {
-                    Some(&i.0)
-                } else {
-                    None
-                }
-            }))
+            .shard_generations(
+                in_memory_result
+                    .iter()
+                    .filter_map(|i| if i.2 { Some(&i.0) } else { None }),
+            )
             .await?;
         let db_generations = db_generations.into_iter().collect::<HashMap<_, _>>();
 
@@ -2106,6 +2268,16 @@ impl Service {
             )
         };
 
+        let preferred_az_id = {
+            let locked = self.inner.read().unwrap();
+            // Idempotency: take the existing value if the tenant already exists
+            if let Some(shard) = locked.tenants.get(create_ids.first().unwrap()) {
+                shard.preferred_az().cloned()
+            } else {
+                locked.scheduler.get_az_for_new_tenant()
+            }
+        };
+
         // Ordering: we persist tenant shards before creating them on the pageserver.  This enables a caller
         // to clean up after themselves by issuing a tenant deletion if something goes wrong and we restart
         // during the creation, rather than risking leaving orphan objects in S3.
@@ -2125,7 +2297,7 @@ impl Service {
                 splitting: SplitState::default(),
                 scheduling_policy: serde_json::to_string(&ShardSchedulingPolicy::default())
                     .unwrap(),
-                preferred_az_id: None,
+                preferred_az_id: preferred_az_id.as_ref().map(|az| az.to_string()),
             })
             .collect();
 
@@ -2142,7 +2314,9 @@ impl Service {
                 // Unique key violation: this is probably a retry.  Because the shard count is part of the unique key,
                 // if we see a unique key violation it means that the creation request's shard count matches the previous
                 // creation's shard count.
-                tracing::info!("Tenant shards already present in database, proceeding with idempotent creation...");
+                tracing::info!(
+                    "Tenant shards already present in database, proceeding with idempotent creation..."
+                );
             }
             // Any other database error is unexpected and a bug.
             Err(e) => return Err(ApiError::InternalServerError(anyhow::anyhow!(e))),
@@ -2161,6 +2335,7 @@ impl Service {
                     &create_req.shard_parameters,
                     create_req.config.clone(),
                     placement_policy.clone(),
+                    preferred_az_id.as_ref(),
                     &mut schedule_context,
                 )
                 .await;
@@ -2170,44 +2345,6 @@ impl Service {
                 InitialShardScheduleOutcome::NotScheduled => {}
                 InitialShardScheduleOutcome::ShardScheduleError(err) => {
                     schedule_error = Some(err);
-                }
-            }
-        }
-
-        let preferred_azs = {
-            let locked = self.inner.read().unwrap();
-            response_shards
-                .iter()
-                .filter_map(|resp| {
-                    let az_id = locked
-                        .nodes
-                        .get(&resp.node_id)
-                        .map(|n| n.get_availability_zone_id().clone())?;
-
-                    Some((resp.shard_id, az_id))
-                })
-                .collect::<Vec<_>>()
-        };
-
-        // Note that we persist the preferred AZ for the new shards separately.
-        // In theory, we could "peek" the scheduler to determine where the shard will
-        // land, but the subsequent "real" call into the scheduler might select a different
-        // node. Hence, we do this awkward update to keep things consistent.
-        let updated = self
-            .persistence
-            .set_tenant_shard_preferred_azs(preferred_azs)
-            .await
-            .map_err(|err| {
-                ApiError::InternalServerError(anyhow::anyhow!(
-                    "Failed to persist preferred az ids: {err}"
-                ))
-            })?;
-
-        {
-            let mut locked = self.inner.write().unwrap();
-            for (tid, az_id) in updated {
-                if let Some(shard) = locked.tenants.get_mut(&tid) {
-                    shard.set_preferred_az(az_id);
                 }
             }
         }
@@ -2226,9 +2363,14 @@ impl Service {
         let waiters = {
             let mut locked = self.inner.write().unwrap();
             let (nodes, tenants, _scheduler) = locked.parts_mut();
+            let config = ReconcilerConfigBuilder::new(ReconcilerPriority::High)
+                .tenant_creation_hint(true)
+                .build();
             tenants
                 .range_mut(TenantShardId::tenant_range(tenant_id))
-                .filter_map(|(_shard_id, shard)| self.maybe_reconcile_shard(shard, nodes))
+                .filter_map(|(_shard_id, shard)| {
+                    self.maybe_configured_reconcile_shard(shard, nodes, config)
+                })
                 .collect::<Vec<_>>()
         };
 
@@ -2242,6 +2384,7 @@ impl Service {
 
     /// Helper for tenant creation that does the scheduling for an individual shard. Covers both the
     /// case of a new tenant and a pre-existing one.
+    #[allow(clippy::too_many_arguments)]
     async fn do_initial_shard_scheduling(
         &self,
         tenant_shard_id: TenantShardId,
@@ -2249,6 +2392,7 @@ impl Service {
         shard_params: &ShardParameters,
         config: TenantConfig,
         placement_policy: PlacementPolicy,
+        preferred_az_id: Option<&AvailabilityZone>,
         schedule_context: &mut ScheduleContext,
     ) -> InitialShardScheduleOutcome {
         let mut locked = self.inner.write().unwrap();
@@ -2258,10 +2402,6 @@ impl Service {
         match tenants.entry(tenant_shard_id) {
             Entry::Occupied(mut entry) => {
                 tracing::info!("Tenant shard {tenant_shard_id} already exists while creating");
-
-                // TODO: schedule() should take an anti-affinity expression that pushes
-                // attached and secondary locations (independently) away frorm those
-                // pageservers also holding a shard for this tenant.
 
                 if let Err(err) = entry.get_mut().schedule(scheduler, schedule_context) {
                     return InitialShardScheduleOutcome::ShardScheduleError(err);
@@ -2286,6 +2426,7 @@ impl Service {
                     tenant_shard_id,
                     ShardIdentity::from_params(tenant_shard_id.shard_number, shard_params),
                     placement_policy,
+                    preferred_az_id.cloned(),
                 ));
 
                 state.generation = initial_generation;
@@ -2456,6 +2597,122 @@ impl Service {
         }
     }
 
+    /// For APIs that might act on tenants with [`PlacementPolicy::Detached`], first check if
+    /// the tenant is present in memory. If not, load it from the database.  If it is found
+    /// in neither location, return a NotFound error.
+    ///
+    /// Caller must demonstrate they hold a lock guard, as otherwise two callers might try and load
+    /// it at the same time, or we might race with [`Self::maybe_drop_tenant`]
+    async fn maybe_load_tenant(
+        &self,
+        tenant_id: TenantId,
+        _guard: &TracingExclusiveGuard<TenantOperations>,
+    ) -> Result<(), ApiError> {
+        // Check if the tenant is present in memory, and select an AZ to use when loading
+        // if we will load it.
+        let load_in_az = {
+            let locked = self.inner.read().unwrap();
+            let existing = locked
+                .tenants
+                .range(TenantShardId::tenant_range(tenant_id))
+                .next();
+
+            // If the tenant is not present in memory, we expect to load it from database,
+            // so let's figure out what AZ to load it into while we have self.inner locked.
+            if existing.is_none() {
+                locked
+                    .scheduler
+                    .get_az_for_new_tenant()
+                    .ok_or(ApiError::BadRequest(anyhow::anyhow!(
+                        "No AZ with nodes found to load tenant"
+                    )))?
+            } else {
+                // We already have this tenant in memory
+                return Ok(());
+            }
+        };
+
+        let tenant_shards = self.persistence.load_tenant(tenant_id).await?;
+        if tenant_shards.is_empty() {
+            return Err(ApiError::NotFound(
+                anyhow::anyhow!("Tenant {} not found", tenant_id).into(),
+            ));
+        }
+
+        // Update the persistent shards with the AZ that we are about to apply to in-memory state
+        self.persistence
+            .set_tenant_shard_preferred_azs(
+                tenant_shards
+                    .iter()
+                    .map(|t| {
+                        (
+                            t.get_tenant_shard_id().expect("Corrupt shard in database"),
+                            Some(load_in_az.clone()),
+                        )
+                    })
+                    .collect(),
+            )
+            .await?;
+
+        let mut locked = self.inner.write().unwrap();
+        tracing::info!(
+            "Loaded {} shards for tenant {}",
+            tenant_shards.len(),
+            tenant_id
+        );
+
+        locked.tenants.extend(tenant_shards.into_iter().map(|p| {
+            let intent = IntentState::new(Some(load_in_az.clone()));
+            let shard =
+                TenantShard::from_persistent(p, intent).expect("Corrupt shard row in database");
+
+            // Sanity check: when loading on-demand, we should always be loaded something Detached
+            debug_assert!(shard.policy == PlacementPolicy::Detached);
+            if shard.policy != PlacementPolicy::Detached {
+                tracing::error!(
+                    "Tenant shard {} loaded on-demand, but has non-Detached policy {:?}",
+                    shard.tenant_shard_id,
+                    shard.policy
+                );
+            }
+
+            (shard.tenant_shard_id, shard)
+        }));
+
+        Ok(())
+    }
+
+    /// If all shards for a tenant are detached, and in a fully quiescent state (no observed locations on pageservers),
+    /// and have no reconciler running, then we can drop the tenant from memory.  It will be reloaded on-demand
+    /// if we are asked to attach it again (see [`Self::maybe_load_tenant`]).
+    ///
+    /// Caller must demonstrate they hold a lock guard, as otherwise it is unsafe to drop a tenant from
+    /// memory while some other function might assume it continues to exist while not holding the lock on Self::inner.
+    fn maybe_drop_tenant(
+        &self,
+        tenant_id: TenantId,
+        locked: &mut std::sync::RwLockWriteGuard<ServiceState>,
+        _guard: &TracingExclusiveGuard<TenantOperations>,
+    ) {
+        let mut tenant_shards = locked.tenants.range(TenantShardId::tenant_range(tenant_id));
+        if tenant_shards.all(|(_id, shard)| {
+            shard.policy == PlacementPolicy::Detached
+                && shard.reconciler.is_none()
+                && shard.observed.is_empty()
+        }) {
+            let keys = locked
+                .tenants
+                .range(TenantShardId::tenant_range(tenant_id))
+                .map(|(id, _)| id)
+                .copied()
+                .collect::<Vec<_>>();
+            for key in keys {
+                tracing::info!("Dropping detached tenant shard {} from memory", key);
+                locked.tenants.remove(&key);
+            }
+        }
+    }
+
     /// This API is used by the cloud control plane to migrate unsharded tenants that it created
     /// directly with pageservers into this service.
     ///
@@ -2482,14 +2739,26 @@ impl Service {
         )
         .await;
 
-        if !tenant_shard_id.is_unsharded() {
+        let tenant_id = if !tenant_shard_id.is_unsharded() {
             return Err(ApiError::BadRequest(anyhow::anyhow!(
                 "This API is for importing single-sharded or unsharded tenants"
             )));
-        }
+        } else {
+            tenant_shard_id.tenant_id
+        };
+
+        // In case we are waking up a Detached tenant
+        match self.maybe_load_tenant(tenant_id, &_tenant_lock).await {
+            Ok(()) | Err(ApiError::NotFound(_)) => {
+                // This is a creation or an update
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        };
 
         // First check if this is a creation or an update
-        let create_or_update = self.tenant_location_config_prepare(tenant_shard_id.tenant_id, req);
+        let create_or_update = self.tenant_location_config_prepare(tenant_id, req);
 
         let mut result = TenantLocationConfigResponse {
             shards: Vec::new(),
@@ -2512,6 +2781,7 @@ impl Service {
                 // Persist updates
                 // Ordering: write to the database before applying changes in-memory, so that
                 // we will not appear time-travel backwards on a restart.
+
                 let mut schedule_context = ScheduleContext::default();
                 for ShardUpdate {
                     tenant_shard_id,
@@ -2568,7 +2838,8 @@ impl Service {
 
                         shard.schedule(scheduler, &mut schedule_context)?;
 
-                        let maybe_waiter = self.maybe_reconcile_shard(shard, nodes);
+                        let maybe_waiter =
+                            self.maybe_reconcile_shard(shard, nodes, ReconcilerPriority::High);
                         if let Some(waiter) = maybe_waiter {
                             waiters.push(waiter);
                         }
@@ -2602,6 +2873,59 @@ impl Service {
         Ok(result)
     }
 
+    pub(crate) async fn tenant_config_patch(
+        &self,
+        req: TenantConfigPatchRequest,
+    ) -> Result<(), ApiError> {
+        let _tenant_lock = trace_exclusive_lock(
+            &self.tenant_op_locks,
+            req.tenant_id,
+            TenantOperations::ConfigPatch,
+        )
+        .await;
+
+        let tenant_id = req.tenant_id;
+        let patch = req.config;
+
+        self.maybe_load_tenant(tenant_id, &_tenant_lock).await?;
+
+        let base = {
+            let locked = self.inner.read().unwrap();
+            let shards = locked
+                .tenants
+                .range(TenantShardId::tenant_range(req.tenant_id));
+
+            let mut configs = shards.map(|(_sid, shard)| &shard.config).peekable();
+
+            let first = match configs.peek() {
+                Some(first) => (*first).clone(),
+                None => {
+                    return Err(ApiError::NotFound(
+                        anyhow::anyhow!("Tenant {} not found", req.tenant_id).into(),
+                    ));
+                }
+            };
+
+            if !configs.all_equal() {
+                tracing::error!("Tenant configs for {} are mismatched. ", req.tenant_id);
+                // This can't happen because we atomically update the database records
+                // of all shards to the new value in [`Self::set_tenant_config_and_reconcile`].
+                return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                    "Tenant configs for {} are mismatched",
+                    req.tenant_id
+                )));
+            }
+
+            first
+        };
+
+        let updated_config = base
+            .apply_patch(patch)
+            .map_err(|err| ApiError::BadRequest(anyhow::anyhow!(err)))?;
+        self.set_tenant_config_and_reconcile(tenant_id, updated_config)
+            .await
+    }
+
     pub(crate) async fn tenant_config_set(&self, req: TenantConfigRequest) -> Result<(), ApiError> {
         // We require an exclusive lock, because we are updating persistent and in-memory state
         let _tenant_lock = trace_exclusive_lock(
@@ -2611,12 +2935,20 @@ impl Service {
         )
         .await;
 
-        let tenant_id = req.tenant_id;
-        let config = req.config;
+        self.maybe_load_tenant(req.tenant_id, &_tenant_lock).await?;
 
+        self.set_tenant_config_and_reconcile(req.tenant_id, req.config)
+            .await
+    }
+
+    async fn set_tenant_config_and_reconcile(
+        &self,
+        tenant_id: TenantId,
+        config: TenantConfig,
+    ) -> Result<(), ApiError> {
         self.persistence
             .update_tenant_shard(
-                TenantFilter::Tenant(req.tenant_id),
+                TenantFilter::Tenant(tenant_id),
                 None,
                 Some(config.clone()),
                 None,
@@ -2630,7 +2962,9 @@ impl Service {
             let (nodes, tenants, _scheduler) = locked.parts_mut();
             for (_shard_id, shard) in tenants.range_mut(TenantShardId::tenant_range(tenant_id)) {
                 shard.config = config.clone();
-                if let Some(waiter) = self.maybe_reconcile_shard(shard, nodes) {
+                if let Some(waiter) =
+                    self.maybe_reconcile_shard(shard, nodes, ReconcilerPriority::High)
+                {
                     waiters.push(waiter);
                 }
             }
@@ -2663,7 +2997,7 @@ impl Service {
                 None => {
                     return Err(ApiError::NotFound(
                         anyhow::anyhow!("Tenant not found").into(),
-                    ))
+                    ));
                 }
             }
         };
@@ -2730,7 +3064,9 @@ impl Service {
                     })
                     .find(|(_, _, mode)| *mode != LocationConfigMode::Detached);
                 if let Some((node_id, _observed_location, mode)) = maybe_attached {
-                    return Err(ApiError::InternalServerError(anyhow::anyhow!("We observed attached={mode:?} tenant in node_id={node_id} shard with tenant_shard_id={shard_id}")));
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                        "We observed attached={mode:?} tenant in node_id={node_id} shard with tenant_shard_id={shard_id}"
+                    )));
                 }
             }
             let scheduler = &mut locked.scheduler;
@@ -2766,7 +3102,7 @@ impl Service {
                 let client = PageserverClient::new(
                     node.get_id(),
                     node.base_url(),
-                    self.config.jwt_token.as_deref(),
+                    self.config.pageserver_jwt_token.as_deref(),
                 );
 
                 tracing::info!("Doing time travel recovery for shard {tenant_shard_id}",);
@@ -2827,7 +3163,7 @@ impl Service {
             let client = PageserverClient::new(
                 node.get_id(),
                 node.base_url(),
-                self.config.jwt_token.as_deref(),
+                self.config.pageserver_jwt_token.as_deref(),
             );
             futs.push(async move {
                 let result = client
@@ -2896,6 +3232,8 @@ impl Service {
         let _tenant_lock =
             trace_exclusive_lock(&self.tenant_op_locks, tenant_id, TenantOperations::Delete).await;
 
+        self.maybe_load_tenant(tenant_id, &_tenant_lock).await?;
+
         // Detach all shards. This also deletes local pageserver shard data.
         let (detach_waiters, node) = {
             let mut detach_waiters = Vec::new();
@@ -2910,7 +3248,9 @@ impl Service {
                 debug_assert!(shard.intent.get_attached().is_none());
                 debug_assert!(shard.intent.get_secondary().is_empty());
 
-                if let Some(waiter) = self.maybe_reconcile_shard(shard, nodes) {
+                if let Some(waiter) =
+                    self.maybe_reconcile_shard(shard, nodes, ReconcilerPriority::High)
+                {
                     detach_waiters.push(waiter);
                 }
             }
@@ -2946,7 +3286,7 @@ impl Service {
                         .tenant_delete(TenantShardId::unsharded(tenant_id))
                         .await
                 },
-                &self.config.jwt_token,
+                &self.config.pageserver_jwt_token,
                 1,
                 3,
                 RECONCILE_TIMEOUT,
@@ -3015,6 +3355,8 @@ impl Service {
         )
         .await;
 
+        self.maybe_load_tenant(tenant_id, &_tenant_lock).await?;
+
         failpoint_support::sleep_millis_async!("tenant-update-policy-exclusive-lock");
 
         let TenantPolicyRequest {
@@ -3060,7 +3402,7 @@ impl Service {
 
             // In case scheduling is being switched back on, try it now.
             shard.schedule(scheduler, &mut schedule_context).ok();
-            self.maybe_reconcile_shard(shard, nodes);
+            self.maybe_reconcile_shard(shard, nodes, ReconcilerPriority::High);
         }
 
         Ok(())
@@ -3163,7 +3505,7 @@ impl Service {
             let timeline_info = create_one(
                 shard_zero_tid,
                 shard_zero_locations,
-                self.config.jwt_token.clone(),
+                self.config.pageserver_jwt_token.clone(),
                 create_req.clone(),
             )
             .await?;
@@ -3179,7 +3521,7 @@ impl Service {
             // Create timeline on remaining shards with number >0
             if !targets.0.is_empty() {
                 // If we had multiple shards, issue requests for the remainder now.
-                let jwt = &self.config.jwt_token;
+                let jwt = &self.config.pageserver_jwt_token;
                 self.tenant_for_shards(
                     targets
                         .0
@@ -3262,7 +3604,7 @@ impl Service {
                         tenant_shard_id,
                         timeline_id,
                         node,
-                        self.config.jwt_token.clone(),
+                        self.config.pageserver_jwt_token.clone(),
                         req.clone(),
                     ))
                 })
@@ -3343,7 +3685,7 @@ impl Service {
                         tenant_shard_id,
                         timeline_id,
                         node,
-                        self.config.jwt_token.clone(),
+                        self.config.pageserver_jwt_token.clone(),
                     ))
                 })
                 .await?;
@@ -3417,13 +3759,68 @@ impl Service {
                     tenant_shard_id,
                     timeline_id,
                     node,
-                    self.config.jwt_token.clone(),
+                    self.config.pageserver_jwt_token.clone(),
                     dir,
                 ))
             })
             .await
         })
         .await??;
+        Ok(())
+    }
+
+    pub(crate) async fn tenant_timeline_download_heatmap_layers(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        concurrency: Option<usize>,
+    ) -> Result<(), ApiError> {
+        let _tenant_lock = trace_shared_lock(
+            &self.tenant_op_locks,
+            tenant_shard_id.tenant_id,
+            TenantOperations::DownloadHeatmapLayers,
+        )
+        .await;
+
+        let targets = {
+            let locked = self.inner.read().unwrap();
+            let mut targets = Vec::new();
+
+            // If the request got an unsharded tenant id, then apply
+            // the operation to all shards. Otherwise, apply it to a specific shard.
+            let shards_range = if tenant_shard_id.is_unsharded() {
+                TenantShardId::tenant_range(tenant_shard_id.tenant_id)
+            } else {
+                tenant_shard_id.range()
+            };
+
+            for (tenant_shard_id, shard) in locked.tenants.range(shards_range) {
+                if let Some(node_id) = shard.intent.get_attached() {
+                    let node = locked
+                        .nodes
+                        .get(node_id)
+                        .expect("Pageservers may not be deleted while referenced");
+
+                    targets.push((*tenant_shard_id, node.clone()));
+                }
+            }
+            targets
+        };
+
+        self.tenant_for_shards_api(
+            targets,
+            |tenant_shard_id, client| async move {
+                client
+                    .timeline_download_heatmap_layers(tenant_shard_id, timeline_id, concurrency)
+                    .await
+            },
+            1,
+            1,
+            SHORT_RECONCILE_TIMEOUT,
+            &self.cancel,
+        )
+        .await;
+
         Ok(())
     }
 
@@ -3477,7 +3874,7 @@ impl Service {
             futs.push(async move {
                 node.with_client_retries(
                     |client| op(tenant_shard_id, client),
-                    &self.config.jwt_token,
+                    &self.config.pageserver_jwt_token,
                     warn_threshold,
                     max_retries,
                     timeout,
@@ -3523,6 +3920,11 @@ impl Service {
                 .iter()
                 .any(|i| i.generation.is_none() || i.generation_pageserver.is_none())
             {
+                let shard_generations = generations
+                    .into_iter()
+                    .map(|i| (i.tenant_shard_id, (i.generation, i.generation_pageserver)))
+                    .collect::<HashMap<_, _>>();
+
                 // One or more shards has not been attached to a pageserver.  Check if this is because it's configured
                 // to be detached (409: caller should give up), or because it's meant to be attached but isn't yet (503: caller should retry)
                 let locked = self.inner.read().unwrap();
@@ -3533,6 +3935,34 @@ impl Service {
                         PlacementPolicy::Attached(_) => {
                             // This shard is meant to be attached: the caller is not wrong to try and
                             // use this function, but we can't service the request right now.
+                            let Some(generation) = shard_generations.get(shard_id) else {
+                                // This can only happen if there is a split brain controller modifying the database.  This should
+                                // never happen when testing, and if it happens in production we can only log the issue.
+                                debug_assert!(false);
+                                tracing::error!(
+                                    "Shard {shard_id} not found in generation state!  Is another rogue controller running?"
+                                );
+                                continue;
+                            };
+                            let (generation, generation_pageserver) = generation;
+                            if let Some(generation) = generation {
+                                if generation_pageserver.is_none() {
+                                    // This is legitimate only in a very narrow window where the shard was only just configured into
+                                    // Attached mode after being created in Secondary or Detached mode, and it has had its generation
+                                    // set but not yet had a Reconciler run (reconciler is the only thing that sets generation_pageserver).
+                                    tracing::warn!(
+                                        "Shard {shard_id} generation is set ({generation:?}) but generation_pageserver is None, reconciler not run yet?"
+                                    );
+                                }
+                            } else {
+                                // This should never happen: a shard with no generation is only permitted when it was created in some state
+                                // other than PlacementPolicy::Attached (and generation is always written to DB before setting Attached in memory)
+                                debug_assert!(false);
+                                tracing::error!(
+                                    "Shard {shard_id} generation is None, but it is in PlacementPolicy::Attached mode!"
+                                );
+                                continue;
+                            }
                         }
                         PlacementPolicy::Secondary | PlacementPolicy::Detached => {
                             return Err(ApiError::Conflict(format!(
@@ -3699,7 +4129,7 @@ impl Service {
                         tenant_shard_id,
                         timeline_id,
                         node,
-                        self.config.jwt_token.clone(),
+                        self.config.pageserver_jwt_token.clone(),
                     ))
                 })
                 .await?;
@@ -3721,7 +4151,7 @@ impl Service {
                 shard_zero_tid,
                 timeline_id,
                 shard_zero_locations.latest.node,
-                self.config.jwt_token.clone(),
+                self.config.pageserver_jwt_token.clone(),
             )
             .await?;
             Ok(shard_zero_status)
@@ -3928,17 +4358,42 @@ impl Service {
         .ok_or_else(|| ApiError::NotFound(anyhow::anyhow!("Tenant {tenant_id} not found").into()))
     }
 
-    pub(crate) fn tenant_list(&self) -> Vec<TenantDescribeResponse> {
+    /// limit & offset are pagination parameters. Since we are walking an in-memory HashMap, `offset` does not
+    /// avoid traversing data, it just avoid returning it. This is suitable for our purposes, since our in memory
+    /// maps are small enough to traverse fast, our pagination is just to avoid serializing huge JSON responses
+    /// in our external API.
+    pub(crate) fn tenant_list(
+        &self,
+        limit: Option<usize>,
+        start_after: Option<TenantId>,
+    ) -> Vec<TenantDescribeResponse> {
         let locked = self.inner.read().unwrap();
 
+        // Apply start_from parameter
+        let shard_range = match start_after {
+            None => locked.tenants.range(..),
+            Some(tenant_id) => locked.tenants.range(
+                TenantShardId {
+                    tenant_id,
+                    shard_number: ShardNumber(u8::MAX),
+                    shard_count: ShardCount(u8::MAX),
+                }..,
+            ),
+        };
+
         let mut result = Vec::new();
-        for (_tenant_id, tenant_shards) in
-            &locked.tenants.iter().group_by(|(id, _shard)| id.tenant_id)
-        {
+        for (_tenant_id, tenant_shards) in &shard_range.group_by(|(id, _shard)| id.tenant_id) {
             result.push(
                 self.tenant_describe_impl(tenant_shards.map(|(_k, v)| v))
                     .expect("Groups are always non-empty"),
             );
+
+            // Enforce `limit` parameter
+            if let Some(limit) = limit {
+                if result.len() >= limit {
+                    break;
+                }
+            }
         }
 
         result
@@ -4033,6 +4488,26 @@ impl Service {
                 }
 
                 tracing::info!("Restoring parent shard {tenant_shard_id}");
+
+                // Drop any intents that refer to unavailable nodes, to enable this abort to proceed even
+                // if the original attachment location is offline.
+                if let Some(node_id) = shard.intent.get_attached() {
+                    if !nodes.get(node_id).unwrap().is_available() {
+                        tracing::info!(
+                            "Demoting attached intent for {tenant_shard_id} on unavailable node {node_id}"
+                        );
+                        shard.intent.demote_attached(scheduler, *node_id);
+                    }
+                }
+                for node_id in shard.intent.get_secondary().clone() {
+                    if !nodes.get(&node_id).unwrap().is_available() {
+                        tracing::info!(
+                            "Dropping secondary intent for {tenant_shard_id} on unavailable node {node_id}"
+                        );
+                        shard.intent.remove_secondary(scheduler, node_id);
+                    }
+                }
+
                 shard.splitting = SplitState::Idle;
                 if let Err(e) = shard.schedule(scheduler, &mut ScheduleContext::default()) {
                     // If this shard can't be scheduled now (perhaps due to offline nodes or
@@ -4041,7 +4516,7 @@ impl Service {
                     tracing::warn!("Failed to schedule {tenant_shard_id} during shard abort: {e}")
                 }
 
-                self.maybe_reconcile_shard(shard, nodes);
+                self.maybe_reconcile_shard(shard, nodes, ReconcilerPriority::High);
             }
 
             // We don't expect any new_shard_count shards to exist here, but drop them just in case
@@ -4056,7 +4531,9 @@ impl Service {
                 // rely on the reconciliation that happens when a node transitions to Active to clean up. Since we have
                 // removed child shards from our in-memory state and database, the reconciliation will implicitly remove
                 // them from the node.
-                tracing::warn!("Node {node} unavailable, can't clean up during split abort. It will be cleaned up when it is reactivated.");
+                tracing::warn!(
+                    "Node {node} unavailable, can't clean up during split abort. It will be cleaned up when it is reactivated."
+                );
                 continue;
             }
 
@@ -4079,7 +4556,7 @@ impl Service {
 
                         client.location_config(child_id, config, None, false).await
                     },
-                    &self.config.jwt_token,
+                    &self.config.pageserver_jwt_token,
                     1,
                     10,
                     Duration::from_secs(5),
@@ -4184,16 +4661,15 @@ impl Service {
                         },
                     );
 
-                    let mut child_state = TenantShard::new(child, child_shard, policy.clone());
-                    child_state.intent = IntentState::single(scheduler, Some(pageserver));
+                    let mut child_state =
+                        TenantShard::new(child, child_shard, policy.clone(), preferred_az.clone());
+                    child_state.intent =
+                        IntentState::single(scheduler, Some(pageserver), preferred_az.clone());
                     child_state.observed = ObservedState {
                         locations: child_observed,
                     };
                     child_state.generation = Some(generation);
                     child_state.config = config.clone();
-                    if let Some(preferred_az) = &preferred_az {
-                        child_state.set_preferred_az(preferred_az.clone());
-                    }
 
                     // The child's TenantShard::splitting is intentionally left at the default value of Idle,
                     // as at this point in the split process we have succeeded and this part is infallible:
@@ -4208,7 +4684,11 @@ impl Service {
                         tracing::warn!("Failed to schedule child shard {child}: {e}");
                     }
                     // In the background, attach secondary locations for the new shards
-                    if let Some(waiter) = self.maybe_reconcile_shard(&mut child_state, nodes) {
+                    if let Some(waiter) = self.maybe_reconcile_shard(
+                        &mut child_state,
+                        nodes,
+                        ReconcilerPriority::High,
+                    ) {
                         waiters.push(waiter);
                     }
 
@@ -4498,7 +4978,10 @@ impl Service {
             // applies the new stripe size to the children.
             let mut shard_ident = shard_ident.unwrap();
             if shard_ident.count.count() > 1 && shard_ident.stripe_size != new_stripe_size {
-                return Err(ApiError::BadRequest(anyhow::anyhow!("Attempted to change stripe size ({:?}->{new_stripe_size:?}) on a tenant with multiple shards", shard_ident.stripe_size)));
+                return Err(ApiError::BadRequest(anyhow::anyhow!(
+                    "Attempted to change stripe size ({:?}->{new_stripe_size:?}) on a tenant with multiple shards",
+                    shard_ident.stripe_size
+                )));
             }
 
             shard_ident.stripe_size = new_stripe_size;
@@ -4573,7 +5056,9 @@ impl Service {
                 shard.intent.clear_secondary(scheduler);
 
                 // Run Reconciler to execute detach fo secondary locations.
-                if let Some(waiter) = self.maybe_reconcile_shard(shard, nodes) {
+                if let Some(waiter) =
+                    self.maybe_reconcile_shard(shard, nodes, ReconcilerPriority::High)
+                {
                     waiters.push(waiter);
                 }
             }
@@ -4674,7 +5159,7 @@ impl Service {
             let client = PageserverClient::new(
                 node.get_id(),
                 node.base_url(),
-                self.config.jwt_token.as_deref(),
+                self.config.pageserver_jwt_token.as_deref(),
             );
             let response = client
                 .tenant_shard_split(
@@ -4740,11 +5225,22 @@ impl Service {
         for (child_id, child_ps, stripe_size) in child_locations {
             if let Err(e) = self
                 .compute_hook
-                .notify(child_id, child_ps, stripe_size, &self.cancel)
+                .notify(
+                    compute_hook::ShardUpdate {
+                        tenant_shard_id: child_id,
+                        node_id: child_ps,
+                        stripe_size,
+                        preferred_az: preferred_az_id.as_ref().map(Cow::Borrowed),
+                    },
+                    &self.cancel,
+                )
                 .await
             {
-                tracing::warn!("Failed to update compute of {}->{} during split, proceeding anyway to complete split ({e})",
-                        child_id, child_ps);
+                tracing::warn!(
+                    "Failed to update compute of {}->{} during split, proceeding anyway to complete split ({e})",
+                    child_id,
+                    child_ps
+                );
                 failed_notifications.push(child_id);
             }
         }
@@ -4800,7 +5296,13 @@ impl Service {
                 match shard.policy {
                     PlacementPolicy::Attached(n) => {
                         // If our new attached node was a secondary, it no longer should be.
-                        shard.intent.remove_secondary(scheduler, migrate_req.node_id);
+                        shard
+                            .intent
+                            .remove_secondary(scheduler, migrate_req.node_id);
+
+                        shard
+                            .intent
+                            .set_attached(scheduler, Some(migrate_req.node_id));
 
                         // If we were already attached to something, demote that to a secondary
                         if let Some(old_attached) = old_attached {
@@ -4813,8 +5315,6 @@ impl Service {
                                 shard.intent.push_secondary(scheduler, old_attached);
                             }
                         }
-
-                        shard.intent.set_attached(scheduler, Some(migrate_req.node_id));
                     }
                     PlacementPolicy::Secondary => {
                         shard.intent.clear(scheduler);
@@ -4823,7 +5323,7 @@ impl Service {
                     PlacementPolicy::Detached => {
                         return Err(ApiError::BadRequest(anyhow::anyhow!(
                             "Cannot migrate a tenant that is PlacementPolicy::Detached: configure it to an attached policy first"
-                        )))
+                        )));
                     }
                 }
 
@@ -4831,7 +5331,77 @@ impl Service {
                 shard.sequence = shard.sequence.next();
             }
 
-            self.maybe_reconcile_shard(shard, nodes)
+            let reconciler_config = match migrate_req.migration_config {
+                Some(cfg) => (&cfg).into(),
+                None => ReconcilerConfig::new(ReconcilerPriority::High),
+            };
+
+            self.maybe_configured_reconcile_shard(shard, nodes, reconciler_config)
+        };
+
+        if let Some(waiter) = waiter {
+            waiter.wait_timeout(RECONCILE_TIMEOUT).await?;
+        } else {
+            tracing::info!("Migration is a no-op");
+        }
+
+        Ok(TenantShardMigrateResponse {})
+    }
+
+    pub(crate) async fn tenant_shard_migrate_secondary(
+        &self,
+        tenant_shard_id: TenantShardId,
+        migrate_req: TenantShardMigrateRequest,
+    ) -> Result<TenantShardMigrateResponse, ApiError> {
+        let waiter = {
+            let mut locked = self.inner.write().unwrap();
+            let (nodes, tenants, scheduler) = locked.parts_mut();
+
+            let Some(node) = nodes.get(&migrate_req.node_id) else {
+                return Err(ApiError::BadRequest(anyhow::anyhow!(
+                    "Node {} not found",
+                    migrate_req.node_id
+                )));
+            };
+
+            if !node.is_available() {
+                // Warn but proceed: the caller may intend to manually adjust the placement of
+                // a shard even if the node is down, e.g. if intervening during an incident.
+                tracing::warn!("Migrating to unavailable node {node}");
+            }
+
+            let Some(shard) = tenants.get_mut(&tenant_shard_id) else {
+                return Err(ApiError::NotFound(
+                    anyhow::anyhow!("Tenant shard not found").into(),
+                ));
+            };
+
+            if shard.intent.get_secondary().len() == 1
+                && shard.intent.get_secondary()[0] == migrate_req.node_id
+            {
+                tracing::info!(
+                    "Migrating secondary to {node}: intent is unchanged {:?}",
+                    shard.intent
+                );
+            } else if shard.intent.get_attached() == &Some(migrate_req.node_id) {
+                tracing::info!(
+                    "Migrating secondary to {node}: already attached where we were asked to create a secondary"
+                );
+            } else {
+                let old_secondaries = shard.intent.get_secondary().clone();
+                for secondary in old_secondaries {
+                    shard.intent.remove_secondary(scheduler, secondary);
+                }
+
+                shard.intent.push_secondary(scheduler, migrate_req.node_id);
+                shard.sequence = shard.sequence.next();
+                tracing::info!(
+                    "Migrating secondary to {node}: new intent {:?}",
+                    shard.intent
+                );
+            }
+
+            self.maybe_reconcile_shard(shard, nodes, ReconcilerPriority::High)
         };
 
         if let Some(waiter) = waiter {
@@ -4924,7 +5494,7 @@ impl Service {
         let client = PageserverClient::new(
             node.get_id(),
             node.base_url(),
-            self.config.jwt_token.as_deref(),
+            self.config.pageserver_jwt_token.as_deref(),
         );
 
         let scan_result = client
@@ -5044,7 +5614,8 @@ impl Service {
         expect_nodes.sort_by_key(|n| n.node_id);
         nodes.sort_by_key(|n| n.node_id);
 
-        if nodes != expect_nodes {
+        // Errors relating to nodes are deferred so that we don't skip the shard checks below if we have a node error
+        let node_result = if nodes != expect_nodes {
             tracing::error!("Consistency check failed on nodes.");
             tracing::error!(
                 "Nodes in memory: {}",
@@ -5056,17 +5627,31 @@ impl Service {
                 serde_json::to_string(&nodes)
                     .map_err(|e| ApiError::InternalServerError(e.into()))?
             );
-            return Err(ApiError::InternalServerError(anyhow::anyhow!(
+            Err(ApiError::InternalServerError(anyhow::anyhow!(
                 "Node consistency failure"
-            )));
-        }
+            )))
+        } else {
+            Ok(())
+        };
 
-        let mut shards = self.persistence.list_tenant_shards().await?;
-        shards.sort_by_key(|tsp| (tsp.tenant_id.clone(), tsp.shard_number, tsp.shard_count));
+        let mut persistent_shards = self.persistence.load_active_tenant_shards().await?;
+        persistent_shards
+            .sort_by_key(|tsp| (tsp.tenant_id.clone(), tsp.shard_number, tsp.shard_count));
+
         expect_shards.sort_by_key(|tsp| (tsp.tenant_id.clone(), tsp.shard_number, tsp.shard_count));
 
-        if shards != expect_shards {
+        // Because JSON contents of persistent tenants might disagree with the fields in current `TenantConfig`
+        // definition, we will do an encode/decode cycle to ensure any legacy fields are dropped and any new
+        // fields are added, before doing a comparison.
+        for tsp in &mut persistent_shards {
+            let config: TenantConfig = serde_json::from_str(&tsp.config)
+                .map_err(|e| ApiError::InternalServerError(e.into()))?;
+            tsp.config = serde_json::to_string(&config).expect("Encoding config is infallible");
+        }
+
+        if persistent_shards != expect_shards {
             tracing::error!("Consistency check failed on shards.");
+
             tracing::error!(
                 "Shards in memory: {}",
                 serde_json::to_string(&expect_shards)
@@ -5074,15 +5659,60 @@ impl Service {
             );
             tracing::error!(
                 "Shards in database: {}",
-                serde_json::to_string(&shards)
+                serde_json::to_string(&persistent_shards)
                     .map_err(|e| ApiError::InternalServerError(e.into()))?
             );
+
+            // The total dump log lines above are useful in testing but in the field grafana will
+            // usually just drop them because they're so large. So we also do some explicit logging
+            // of just the diffs.
+            let persistent_shards = persistent_shards
+                .into_iter()
+                .map(|tsp| (tsp.get_tenant_shard_id().unwrap(), tsp))
+                .collect::<HashMap<_, _>>();
+            let expect_shards = expect_shards
+                .into_iter()
+                .map(|tsp| (tsp.get_tenant_shard_id().unwrap(), tsp))
+                .collect::<HashMap<_, _>>();
+            for (tenant_shard_id, persistent_tsp) in &persistent_shards {
+                match expect_shards.get(tenant_shard_id) {
+                    None => {
+                        tracing::error!(
+                            "Shard {} found in database but not in memory",
+                            tenant_shard_id
+                        );
+                    }
+                    Some(expect_tsp) => {
+                        if expect_tsp != persistent_tsp {
+                            tracing::error!(
+                                "Shard {} is inconsistent.  In memory: {}, database has: {}",
+                                tenant_shard_id,
+                                serde_json::to_string(expect_tsp).unwrap(),
+                                serde_json::to_string(&persistent_tsp).unwrap()
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Having already logged any differences, log any shards that simply aren't present in the database
+            for (tenant_shard_id, memory_tsp) in &expect_shards {
+                if !persistent_shards.contains_key(tenant_shard_id) {
+                    tracing::error!(
+                        "Shard {} found in memory but not in database: {}",
+                        tenant_shard_id,
+                        serde_json::to_string(memory_tsp)
+                            .map_err(|e| ApiError::InternalServerError(e.into()))?
+                    );
+                }
+            }
+
             return Err(ApiError::InternalServerError(anyhow::anyhow!(
                 "Shard consistency failure"
             )));
         }
 
-        Ok(())
+        node_result
     }
 
     /// For debug/support: a JSON dump of the [`Scheduler`].  Returns a response so that
@@ -5183,7 +5813,7 @@ impl Service {
                             )
                         }
 
-                        self.maybe_reconcile_shard(shard, nodes);
+                        self.maybe_reconcile_shard(shard, nodes, ReconcilerPriority::Normal);
                     }
 
                     // Here we remove an existing observed location for the node we're removing, and it will
@@ -5269,7 +5899,7 @@ impl Service {
                     return Err(ApiError::InternalServerError(anyhow::anyhow!(
                         "{} attached as primary+secondary on the same node",
                         tid
-                    )))
+                    )));
                 }
                 (true, false) => Some(false),
                 (false, true) => Some(true),
@@ -5308,8 +5938,10 @@ impl Service {
         )
         .await;
 
+        #[derive(PartialEq)]
         enum RegistrationStatus {
-            Matched,
+            UpToDate,
+            NeedUpdate,
             Mismatched,
             New,
         }
@@ -5318,7 +5950,11 @@ impl Service {
             let locked = self.inner.read().unwrap();
             if let Some(node) = locked.nodes.get(&register_req.node_id) {
                 if node.registration_match(&register_req) {
-                    RegistrationStatus::Matched
+                    if node.need_update(&register_req) {
+                        RegistrationStatus::NeedUpdate
+                    } else {
+                        RegistrationStatus::UpToDate
+                    }
                 } else {
                     RegistrationStatus::Mismatched
                 }
@@ -5328,9 +5964,9 @@ impl Service {
         };
 
         match registration_status {
-            RegistrationStatus::Matched => {
+            RegistrationStatus::UpToDate => {
                 tracing::info!(
-                    "Node {} re-registered with matching address",
+                    "Node {} re-registered with matching address and is up to date",
                     register_req.node_id
                 );
 
@@ -5348,7 +5984,7 @@ impl Service {
                     "Node is already registered with different address".to_string(),
                 ));
             }
-            RegistrationStatus::New => {
+            RegistrationStatus::New | RegistrationStatus::NeedUpdate => {
                 // fallthrough
             }
         }
@@ -5377,6 +6013,16 @@ impl Service {
             ));
         }
 
+        if self.config.use_https_pageserver_api && register_req.listen_https_port.is_none() {
+            return Err(ApiError::PreconditionFailed(
+                format!(
+                    "Node {} has no https port, but use_https is enabled",
+                    register_req.node_id
+                )
+                .into(),
+            ));
+        }
+
         // Ordering: we must persist the new node _before_ adding it to in-memory state.
         // This ensures that before we use it for anything or expose it via any external
         // API, it is guaranteed to be available after a restart.
@@ -5384,13 +6030,29 @@ impl Service {
             register_req.node_id,
             register_req.listen_http_addr,
             register_req.listen_http_port,
+            register_req.listen_https_port,
             register_req.listen_pg_addr,
             register_req.listen_pg_port,
-            register_req.availability_zone_id,
+            register_req.availability_zone_id.clone(),
+            self.config.use_https_pageserver_api,
         );
+        let new_node = match new_node {
+            Ok(new_node) => new_node,
+            Err(error) => return Err(ApiError::InternalServerError(error)),
+        };
 
-        // TODO: idempotency if the node already exists in the database
-        self.persistence.insert_node(&new_node).await?;
+        match registration_status {
+            RegistrationStatus::New => self.persistence.insert_node(&new_node).await?,
+            RegistrationStatus::NeedUpdate => {
+                self.persistence
+                    .update_node_on_registration(
+                        register_req.node_id,
+                        register_req.listen_https_port,
+                    )
+                    .await?
+            }
+            _ => unreachable!("Other statuses have been processed earlier"),
+        }
 
         let mut locked = self.inner.write().unwrap();
         let mut new_nodes = (*locked.nodes).clone();
@@ -5405,11 +6067,24 @@ impl Service {
             .storage_controller_pageserver_nodes
             .set(locked.nodes.len() as i64);
 
-        tracing::info!(
-            "Registered pageserver {}, now have {} pageservers",
-            register_req.node_id,
-            locked.nodes.len()
-        );
+        match registration_status {
+            RegistrationStatus::New => {
+                tracing::info!(
+                    "Registered pageserver {} ({}), now have {} pageservers",
+                    register_req.node_id,
+                    register_req.availability_zone_id,
+                    locked.nodes.len()
+                );
+            }
+            RegistrationStatus::NeedUpdate => {
+                tracing::info!(
+                    "Re-registered and updated node {} ({})",
+                    register_req.node_id,
+                    register_req.availability_zone_id,
+                );
+            }
+            _ => unreachable!("Other statuses have been processed earlier"),
+        }
         Ok(())
     }
 
@@ -5427,7 +6102,9 @@ impl Service {
         if let Some(scheduling) = scheduling {
             // Scheduling is a persistent part of Node: we must write updates to the database before
             // applying them in memory
-            self.persistence.update_node(node_id, scheduling).await?;
+            self.persistence
+                .update_node_scheduling_policy(node_id, scheduling)
+                .await?;
         }
 
         // If we're activating a node, then before setting it active we must reconcile any shard locations
@@ -5551,7 +6228,14 @@ impl Service {
                                     tracing::warn!(%tenant_shard_id, "Scheduling error when marking pageserver {} offline: {e}", node_id);
                                 }
                                 Ok(()) => {
-                                    if self.maybe_reconcile_shard(tenant_shard, nodes).is_some() {
+                                    if self
+                                        .maybe_reconcile_shard(
+                                            tenant_shard,
+                                            nodes,
+                                            ReconcilerPriority::Normal,
+                                        )
+                                        .is_some()
+                                    {
                                         tenants_affected += 1;
                                     };
                                 }
@@ -5582,7 +6266,11 @@ impl Service {
 
                     if let Some(observed_loc) = tenant_shard.observed.locations.get_mut(&node_id) {
                         if observed_loc.conf.is_none() {
-                            self.maybe_reconcile_shard(tenant_shard, nodes);
+                            self.maybe_reconcile_shard(
+                                tenant_shard,
+                                nodes,
+                                ReconcilerPriority::Normal,
+                            );
                         }
                     }
                 }
@@ -5946,8 +6634,36 @@ impl Service {
         &self,
         shard: &mut TenantShard,
         nodes: &Arc<HashMap<NodeId, Node>>,
+        priority: ReconcilerPriority,
     ) -> Option<ReconcilerWaiter> {
-        self.maybe_configured_reconcile_shard(shard, nodes, ReconcilerConfig::default())
+        self.maybe_configured_reconcile_shard(shard, nodes, ReconcilerConfig::new(priority))
+    }
+
+    /// Before constructing a Reconciler, acquire semaphore units from the appropriate concurrency limit (depends on priority)
+    fn get_reconciler_units(
+        &self,
+        priority: ReconcilerPriority,
+    ) -> Result<ReconcileUnits, TryAcquireError> {
+        let units = match priority {
+            ReconcilerPriority::Normal => self.reconciler_concurrency.clone().try_acquire_owned(),
+            ReconcilerPriority::High => {
+                match self
+                    .priority_reconciler_concurrency
+                    .clone()
+                    .try_acquire_owned()
+                {
+                    Ok(u) => Ok(u),
+                    Err(TryAcquireError::NoPermits) => {
+                        // If the high priority semaphore is exhausted, then high priority tasks may steal units from
+                        // the normal priority semaphore.
+                        self.reconciler_concurrency.clone().try_acquire_owned()
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+        };
+
+        units.map(ReconcileUnits::new)
     }
 
     /// Wrap [`TenantShard`] reconciliation methods with acquisition of [`Gate`] and [`ReconcileUnits`],
@@ -5959,16 +6675,17 @@ impl Service {
     ) -> Option<ReconcilerWaiter> {
         let reconcile_needed = shard.get_reconcile_needed(nodes);
 
-        match reconcile_needed {
+        let reconcile_reason = match reconcile_needed {
             ReconcileNeeded::No => return None,
             ReconcileNeeded::WaitExisting(waiter) => return Some(waiter),
-            ReconcileNeeded::Yes => {
+            ReconcileNeeded::Yes(reason) => {
                 // Fall through to try and acquire units for spawning reconciler
+                reason
             }
         };
 
-        let units = match self.reconciler_concurrency.clone().try_acquire_owned() {
-            Ok(u) => ReconcileUnits::new(u),
+        let units = match self.get_reconciler_units(reconciler_config.priority) {
+            Ok(u) => u,
             Err(_) => {
                 tracing::info!(tenant_id=%shard.tenant_shard_id.tenant_id, shard_id=%shard.tenant_shard_id.shard_slug(),
                     "Concurrency limited: enqueued for reconcile later");
@@ -6002,6 +6719,7 @@ impl Service {
         };
 
         shard.spawn_reconciler(
+            reconcile_reason,
             &self.result_tx,
             nodes,
             &self.compute_hook,
@@ -6022,13 +6740,17 @@ impl Service {
     /// available.  A return value of 0 indicates that everything is fully reconciled already.
     fn reconcile_all(&self) -> usize {
         let mut locked = self.inner.write().unwrap();
-        let (nodes, tenants, _scheduler) = locked.parts_mut();
+        let (nodes, tenants, scheduler) = locked.parts_mut();
         let pageservers = nodes.clone();
 
         // This function is an efficient place to update lazy statistics, since we are walking
         // all tenants.
         let mut pending_reconciles = 0;
         let mut az_violations = 0;
+
+        // If we find any tenants to drop from memory, stash them to offload after
+        // we're done traversing the map of tenants.
+        let mut drop_detached_tenants = Vec::new();
 
         let mut reconciles_spawned = 0;
         for shard in tenants.values_mut() {
@@ -6057,12 +6779,37 @@ impl Service {
 
             // Eventual consistency: if an earlier reconcile job failed, and the shard is still
             // dirty, spawn another rone
-            if self.maybe_reconcile_shard(shard, &pageservers).is_some() {
+            if self
+                .maybe_reconcile_shard(shard, &pageservers, ReconcilerPriority::Normal)
+                .is_some()
+            {
                 reconciles_spawned += 1;
             } else if shard.delayed_reconcile {
                 // Shard wanted to reconcile but for some reason couldn't.
                 pending_reconciles += 1;
             }
+
+            // If this tenant is detached, try dropping it from memory. This is usually done
+            // proactively in [`Self::process_results`], but we do it here to handle the edge
+            // case where a reconcile completes while someone else is holding an op lock for the tenant.
+            if shard.tenant_shard_id.shard_number == ShardNumber(0)
+                && shard.policy == PlacementPolicy::Detached
+            {
+                if let Some(guard) = self.tenant_op_locks.try_exclusive(
+                    shard.tenant_shard_id.tenant_id,
+                    TenantOperations::DropDetached,
+                ) {
+                    drop_detached_tenants.push((shard.tenant_shard_id.tenant_id, guard));
+                }
+            }
+        }
+
+        // Some metrics are calculated from SchedulerNode state, update these periodically
+        scheduler.update_metrics();
+
+        // Process any deferred tenant drops
+        for (tenant_id, guard) in drop_detached_tenants {
+            self.maybe_drop_tenant(tenant_id, &mut locked, &guard);
         }
 
         metrics::METRICS_REGISTRY
@@ -6097,7 +6844,7 @@ impl Service {
         // with the frequency of background calls, this acts as an implicit rate limit that runs a small
         // trickle of optimizations in the background, rather than executing a large number in parallel
         // when a change occurs.
-        const MAX_OPTIMIZATIONS_EXEC_PER_PASS: usize = 2;
+        const MAX_OPTIMIZATIONS_EXEC_PER_PASS: usize = 16;
 
         // Synchronous prepare: scan shards for possible scheduling optimizations
         let candidate_work = self.optimize_all_plan();
@@ -6118,9 +6865,13 @@ impl Service {
                 // Shard was dropped between planning and execution;
                 continue;
             };
+            tracing::info!(tenant_shard_id=%tenant_shard_id, "Applying optimization: {optimization:?}");
             if shard.apply_optimization(scheduler, optimization) {
                 optimizations_applied += 1;
-                if self.maybe_reconcile_shard(shard, nodes).is_some() {
+                if self
+                    .maybe_reconcile_shard(shard, nodes, ReconcilerPriority::Normal)
+                    .is_some()
+                {
                     reconciles_spawned += 1;
                 }
             }
@@ -6144,11 +6895,17 @@ impl Service {
         // How many candidate optimizations we will generate, before evaluating them for readniess: setting
         // this higher than the execution limit gives us a chance to execute some work even if the first
         // few optimizations we find are not ready.
-        const MAX_OPTIMIZATIONS_PLAN_PER_PASS: usize = 8;
+        const MAX_OPTIMIZATIONS_PLAN_PER_PASS: usize = 64;
 
         let mut work = Vec::new();
         let mut locked = self.inner.write().unwrap();
-        let (nodes, tenants, scheduler) = locked.parts_mut();
+        let (_nodes, tenants, scheduler) = locked.parts_mut();
+
+        // We are going to plan a bunch of optimisations before applying any of them, so the
+        // utilisation stats on nodes will be effectively stale for the >1st optimisation we
+        // generate.  To avoid this causing unstable migrations/flapping, it's important that the
+        // code in TenantShard for finding optimisations uses [`NodeAttachmentSchedulingScore::disregard_utilization`]
+        // to ignore the utilisation component of the score.
 
         for (_tenant_id, schedule_context, shards) in
             TenantShardContextIterator::new(tenants, ScheduleMode::Speculative)
@@ -6179,13 +6936,32 @@ impl Service {
                     continue;
                 }
 
-                // TODO: optimization calculations are relatively expensive: create some fast-path for
-                // the common idle case (avoiding the search on tenants that we have recently checked)
+                // Fast path: we may quickly identify shards that don't have any possible optimisations
+                if !shard.maybe_optimizable(scheduler, &schedule_context) {
+                    if cfg!(feature = "testing") {
+                        // Check that maybe_optimizable doesn't disagree with the actual optimization functions.
+                        // Only do this in testing builds because it is not a correctness-critical check, so we shouldn't
+                        // panic in prod if we hit this, or spend cycles on it in prod.
+                        assert!(
+                            shard
+                                .optimize_attachment(scheduler, &schedule_context)
+                                .is_none()
+                        );
+                        assert!(
+                            shard
+                                .optimize_secondary(scheduler, &schedule_context)
+                                .is_none()
+                        );
+                    }
+                    continue;
+                }
+
                 if let Some(optimization) =
-                    // If idle, maybe ptimize attachments: if a shard has a secondary location that is preferable to
+                    // If idle, maybe optimize attachments: if a shard has a secondary location that is preferable to
                     // its primary location based on soft constraints, cut it over.
-                    shard.optimize_attachment(nodes, &schedule_context)
+                    shard.optimize_attachment(scheduler, &schedule_context)
                 {
+                    tracing::info!(tenant_shard_id=%shard.tenant_shard_id, "Identified optimization for attachment: {optimization:?}");
                     work.push((shard.tenant_shard_id, optimization));
                     break;
                 } else if let Some(optimization) =
@@ -6195,6 +6971,7 @@ impl Service {
                     // in the same tenant with secondary locations on the node where they originally split.
                     shard.optimize_secondary(scheduler, &schedule_context)
                 {
+                    tracing::info!(tenant_shard_id=%shard.tenant_shard_id, "Identified optimization for secondary: {optimization:?}");
                     work.push((shard.tenant_shard_id, optimization));
                     break;
                 }
@@ -6230,7 +7007,9 @@ impl Service {
                         }
                         Some(node) => {
                             if !node.is_available() {
-                                tracing::info!("Skipping optimization migration of {tenant_shard_id} to {new_attached_node_id} because node unavailable");
+                                tracing::info!(
+                                    "Skipping optimization migration of {tenant_shard_id} to {new_attached_node_id} because node unavailable"
+                                );
                             } else {
                                 // Accumulate optimizations that require fetching secondary status, so that we can execute these
                                 // remote API requests concurrently.
@@ -6243,8 +7022,10 @@ impl Service {
                         }
                     }
                 }
-                ScheduleOptimizationAction::ReplaceSecondary(_) => {
-                    // No extra checks needed to replace a secondary: this does not interrupt client access
+                ScheduleOptimizationAction::ReplaceSecondary(_)
+                | ScheduleOptimizationAction::CreateSecondary(_)
+                | ScheduleOptimizationAction::RemoveSecondary(_) => {
+                    // No extra checks needed to manage secondaries: this does not interrupt client access
                     validated_work.push((tenant_shard_id, optimization))
                 }
             };
@@ -6274,7 +7055,9 @@ impl Service {
         {
             match secondary_status {
                 Err(e) => {
-                    tracing::info!("Skipping migration of {tenant_shard_id} to {node}, error querying secondary: {e}");
+                    tracing::info!(
+                        "Skipping migration of {tenant_shard_id} to {node}, error querying secondary: {e}"
+                    );
                 }
                 Ok(progress) => {
                     // We require secondary locations to have less than 10GiB of downloads pending before we will use
@@ -6287,7 +7070,9 @@ impl Service {
                         || progress.bytes_total - progress.bytes_downloaded
                             > DOWNLOAD_FRESHNESS_THRESHOLD
                     {
-                        tracing::info!("Skipping migration of {tenant_shard_id} to {node} because secondary isn't ready: {progress:?}");
+                        tracing::info!(
+                            "Skipping migration of {tenant_shard_id} to {node} because secondary isn't ready: {progress:?}"
+                        );
 
                         #[cfg(feature = "testing")]
                         if progress.heatmap_mtime.is_none() {
@@ -6316,50 +7101,98 @@ impl Service {
     /// we have this helper to move things along faster.
     #[cfg(feature = "testing")]
     async fn kick_secondary_download(&self, tenant_shard_id: TenantShardId) {
-        let (attached_node, secondary_node) = {
+        let (attached_node, secondaries) = {
             let locked = self.inner.read().unwrap();
             let Some(shard) = locked.tenants.get(&tenant_shard_id) else {
+                tracing::warn!(
+                    "Skipping kick of secondary download for {tenant_shard_id}: not found"
+                );
                 return;
             };
-            let (Some(attached), Some(secondary)) = (
-                shard.intent.get_attached(),
-                shard.intent.get_secondary().first(),
-            ) else {
+
+            let Some(attached) = shard.intent.get_attached() else {
+                tracing::warn!(
+                    "Skipping kick of secondary download for {tenant_shard_id}: no attached"
+                );
                 return;
             };
-            (
-                locked.nodes.get(attached).unwrap().clone(),
-                locked.nodes.get(secondary).unwrap().clone(),
-            )
+
+            let secondaries = shard
+                .intent
+                .get_secondary()
+                .iter()
+                .map(|n| locked.nodes.get(n).unwrap().clone())
+                .collect::<Vec<_>>();
+
+            (locked.nodes.get(attached).unwrap().clone(), secondaries)
         };
 
         // Make remote API calls to upload + download heatmaps: we ignore errors because this is just
         // a 'kick' to let scheduling optimisation run more promptly.
-        attached_node
+        match attached_node
             .with_client_retries(
                 |client| async move { client.tenant_heatmap_upload(tenant_shard_id).await },
-                &self.config.jwt_token,
+                &self.config.pageserver_jwt_token,
                 3,
                 10,
                 SHORT_RECONCILE_TIMEOUT,
                 &self.cancel,
             )
-            .await;
+            .await
+        {
+            Some(Err(e)) => {
+                tracing::info!(
+                    "Failed to upload heatmap from {attached_node} for {tenant_shard_id}: {e}"
+                );
+            }
+            None => {
+                tracing::info!(
+                    "Cancelled while uploading heatmap from {attached_node} for {tenant_shard_id}"
+                );
+            }
+            Some(Ok(_)) => {
+                tracing::info!(
+                    "Successfully uploaded heatmap from {attached_node} for {tenant_shard_id}"
+                );
+            }
+        }
 
-        secondary_node
-            .with_client_retries(
-                |client| async move {
-                    client
-                        .tenant_secondary_download(tenant_shard_id, Some(Duration::from_secs(1)))
-                        .await
-                },
-                &self.config.jwt_token,
-                3,
-                10,
-                SHORT_RECONCILE_TIMEOUT,
-                &self.cancel,
-            )
-            .await;
+        for secondary_node in secondaries {
+            match secondary_node
+                .with_client_retries(
+                    |client| async move {
+                        client
+                            .tenant_secondary_download(
+                                tenant_shard_id,
+                                Some(Duration::from_secs(1)),
+                            )
+                            .await
+                    },
+                    &self.config.pageserver_jwt_token,
+                    3,
+                    10,
+                    SHORT_RECONCILE_TIMEOUT,
+                    &self.cancel,
+                )
+                .await
+            {
+                Some(Err(e)) => {
+                    tracing::info!(
+                        "Failed to download heatmap from {secondary_node} for {tenant_shard_id}: {e}"
+                    );
+                }
+                None => {
+                    tracing::info!(
+                        "Cancelled while downloading heatmap from {secondary_node} for {tenant_shard_id}"
+                    );
+                }
+                Some(Ok(progress)) => {
+                    tracing::info!(
+                        "Successfully downloaded heatmap from {secondary_node} for {tenant_shard_id}: {progress:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// Look for shards which are oversized and in need of splitting
@@ -6394,7 +7227,7 @@ impl Service {
                         let request = request_ref.clone();
                         client.top_tenant_shards(request.clone()).await
                     },
-                    &self.config.jwt_token,
+                    &self.config.pageserver_jwt_token,
                     3,
                     3,
                     Duration::from_secs(5),
@@ -6441,7 +7274,9 @@ impl Service {
 
         // We spawn a task to run this, so it's exactly like some external API client requesting it.  We don't
         // want to block the background reconcile loop on this.
-        tracing::info!("Auto-splitting tenant for size threshold {split_threshold}: current size {split_candidate:?}");
+        tracing::info!(
+            "Auto-splitting tenant for size threshold {split_threshold}: current size {split_candidate:?}"
+        );
 
         let this = self.clone();
         tokio::spawn(
@@ -6567,7 +7402,7 @@ impl Service {
         match node
             .with_client_retries(
                 |client| async move { client.tenant_secondary_status(tenant_shard_id).await },
-                &self.config.jwt_token,
+                &self.config.pageserver_jwt_token,
                 1,
                 3,
                 Duration::from_millis(250),
@@ -6602,7 +7437,7 @@ impl Service {
         // to not stall the operation when a cold secondary is encountered.
         const SECONDARY_WARMUP_TIMEOUT: Duration = Duration::from_secs(20);
         const SECONDARY_DOWNLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-        let reconciler_config = ReconcilerConfigBuilder::new()
+        let reconciler_config = ReconcilerConfigBuilder::new(ReconcilerPriority::Normal)
             .secondary_warmup_timeout(SECONDARY_WARMUP_TIMEOUT)
             .secondary_download_request_timeout(SECONDARY_DOWNLOAD_REQUEST_TIMEOUT)
             .build();
@@ -6728,7 +7563,7 @@ impl Service {
             }
 
             waiters = self
-                .await_waiters_remainder(waiters, SHORT_RECONCILE_TIMEOUT)
+                .await_waiters_remainder(waiters, WAITER_FILL_DRAIN_POLL_TIMEOUT)
                 .await;
 
             failpoint_support::sleep_millis_async!("sleepy-drain-loop", &cancel);
@@ -6782,61 +7617,104 @@ impl Service {
         Ok(())
     }
 
-    /// Create a node fill plan (pick secondaries to promote) that meets the following requirements:
-    /// 1. The node should be filled until it reaches the expected cluster average of
-    ///    attached shards. If there are not enough secondaries on the node, the plan stops early.
-    /// 2. Select tenant shards to promote such that the number of attached shards is balanced
-    ///    throughout the cluster. We achieve this by picking tenant shards from each node,
-    ///    starting from the ones with the largest number of attached shards, until the node
-    ///    reaches the expected cluster average.
-    /// 3. Avoid promoting more shards of the same tenant than required. The upper bound
-    ///    for the number of tenants from the same shard promoted to the node being filled is:
-    ///    shard count for the tenant divided by the number of nodes in the cluster.
+    /// Create a node fill plan (pick secondaries to promote), based on:
+    /// 1. Shards which have a secondary on this node, and this node is in their home AZ, and are currently attached to a node
+    ///    outside their home AZ, should be migrated back here.
+    /// 2. If after step 1 we have not migrated enough shards for this node to have its fair share of
+    ///    attached shards, we will promote more shards from the nodes with the most attached shards, unless
+    ///    those shards have a home AZ that doesn't match the node we're filling.
     fn fill_node_plan(&self, node_id: NodeId) -> Vec<TenantShardId> {
         let mut locked = self.inner.write().unwrap();
-        let fill_requirement = locked.scheduler.compute_fill_requirement(node_id);
+        let (nodes, tenants, _scheduler) = locked.parts_mut();
 
-        let mut tids_by_node = locked
-            .tenants
-            .iter_mut()
-            .filter_map(|(tid, tenant_shard)| {
-                if !matches!(
-                    tenant_shard.get_scheduling_policy(),
-                    ShardSchedulingPolicy::Active
-                ) {
-                    // Only include tenants in fills if they have a normal (Active) scheduling policy.  We
-                    // even exclude Essential, because moving to fill a node is not essential to keeping this
-                    // tenant available.
-                    return None;
-                }
+        let node_az = nodes
+            .get(&node_id)
+            .expect("Node must exist")
+            .get_availability_zone_id()
+            .clone();
 
-                if tenant_shard.intent.get_secondary().contains(&node_id) {
+        // The tenant shard IDs that we plan to promote from secondary to attached on this node
+        let mut plan = Vec::new();
+
+        // Collect shards which do not have a preferred AZ & are elegible for moving in stage 2
+        let mut free_tids_by_node: HashMap<NodeId, Vec<TenantShardId>> = HashMap::new();
+
+        // Don't respect AZ preferences if there is only one AZ.  This comes up in tests, but it could
+        // conceivably come up in real life if deploying a single-AZ region intentionally.
+        let respect_azs = nodes
+            .values()
+            .map(|n| n.get_availability_zone_id())
+            .unique()
+            .count()
+            > 1;
+
+        // Step 1: collect all shards that we are required to migrate back to this node because their AZ preference
+        // requires it.
+        for (tsid, tenant_shard) in tenants {
+            if !tenant_shard.intent.get_secondary().contains(&node_id) {
+                // Shard doesn't have a secondary on this node, ignore it.
+                continue;
+            }
+
+            // AZ check: when filling nodes after a restart, our intent is to move _back_ the
+            // shards which belong on this node, not to promote shards whose scheduling preference
+            // would be on their currently attached node.  So will avoid promoting shards whose
+            // home AZ doesn't match the AZ of the node we're filling.
+            match tenant_shard.preferred_az() {
+                _ if !respect_azs => {
                     if let Some(primary) = tenant_shard.intent.get_attached() {
-                        return Some((*primary, *tid));
+                        free_tids_by_node.entry(*primary).or_default().push(*tsid);
                     }
                 }
+                None => {
+                    // Shard doesn't have an AZ preference: it is elegible to be moved, but we
+                    // will only do so if our target shard count requires it.
+                    if let Some(primary) = tenant_shard.intent.get_attached() {
+                        free_tids_by_node.entry(*primary).or_default().push(*tsid);
+                    }
+                }
+                Some(az) if az == &node_az => {
+                    // This shard's home AZ is equal to the node we're filling: it should
+                    // be moved back to this node as part of filling, unless its currently
+                    // attached location is also in its home AZ.
+                    if let Some(primary) = tenant_shard.intent.get_attached() {
+                        if nodes
+                            .get(primary)
+                            .expect("referenced node must exist")
+                            .get_availability_zone_id()
+                            != tenant_shard
+                                .preferred_az()
+                                .expect("tenant must have an AZ preference")
+                        {
+                            plan.push(*tsid)
+                        }
+                    } else {
+                        plan.push(*tsid)
+                    }
+                }
+                Some(_) => {
+                    // This shard's home AZ is somewhere other than the node we're filling,
+                    // it may not be moved back to this node as part of filling.  Ignore it
+                }
+            }
+        }
 
-                None
-            })
-            .into_group_map();
+        // Step 2: also promote any AZ-agnostic shards as required to achieve the target number of attachments
+        let fill_requirement = locked.scheduler.compute_fill_requirement(node_id);
 
         let expected_attached = locked.scheduler.expected_attached_shard_count();
         let nodes_by_load = locked.scheduler.nodes_by_attached_shard_count();
 
         let mut promoted_per_tenant: HashMap<TenantId, usize> = HashMap::new();
-        let mut plan = Vec::new();
 
         for (node_id, attached) in nodes_by_load {
-            let available = locked
-                .nodes
-                .get(&node_id)
-                .map_or(false, |n| n.is_available());
+            let available = locked.nodes.get(&node_id).is_some_and(|n| n.is_available());
             if !available {
                 continue;
             }
 
             if plan.len() >= fill_requirement
-                || tids_by_node.is_empty()
+                || free_tids_by_node.is_empty()
                 || attached <= expected_attached
             {
                 break;
@@ -6848,7 +7726,7 @@ impl Service {
 
             let mut remove_node = false;
             while take > 0 {
-                match tids_by_node.get_mut(&node_id) {
+                match free_tids_by_node.get_mut(&node_id) {
                     Some(tids) => match tids.pop() {
                         Some(tid) => {
                             let max_promote_for_tenant = std::cmp::max(
@@ -6874,7 +7752,7 @@ impl Service {
             }
 
             if remove_node {
-                tids_by_node.remove(&node_id);
+                free_tids_by_node.remove(&node_id);
             }
         }
 
@@ -6892,7 +7770,7 @@ impl Service {
     ) -> Result<(), OperationError> {
         const SECONDARY_WARMUP_TIMEOUT: Duration = Duration::from_secs(20);
         const SECONDARY_DOWNLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-        let reconciler_config = ReconcilerConfigBuilder::new()
+        let reconciler_config = ReconcilerConfigBuilder::new(ReconcilerPriority::Normal)
             .secondary_warmup_timeout(SECONDARY_WARMUP_TIMEOUT)
             .secondary_download_request_timeout(SECONDARY_DOWNLOAD_REQUEST_TIMEOUT)
             .build();
@@ -6981,7 +7859,7 @@ impl Service {
             }
 
             waiters = self
-                .await_waiters_remainder(waiters, SHORT_RECONCILE_TIMEOUT)
+                .await_waiters_remainder(waiters, WAITER_FILL_DRAIN_POLL_TIMEOUT)
                 .await;
         }
 
@@ -7113,18 +7991,80 @@ impl Service {
         global_observed
     }
 
+    pub(crate) async fn safekeepers_list(
+        &self,
+    ) -> Result<Vec<SafekeeperDescribeResponse>, DatabaseError> {
+        let locked = self.inner.read().unwrap();
+        let mut list = locked
+            .safekeepers
+            .iter()
+            .map(|sk| sk.1.describe_response())
+            .collect::<Result<Vec<_>, _>>()?;
+        list.sort_by_key(|v| v.id);
+        Ok(list)
+    }
+
     pub(crate) async fn get_safekeeper(
         &self,
         id: i64,
-    ) -> Result<crate::persistence::SafekeeperPersistence, DatabaseError> {
-        self.persistence.safekeeper_get(id).await
+    ) -> Result<SafekeeperDescribeResponse, DatabaseError> {
+        let locked = self.inner.read().unwrap();
+        let sk = locked
+            .safekeepers
+            .get(&NodeId(id as u64))
+            .ok_or(diesel::result::Error::NotFound)?;
+        sk.describe_response()
     }
 
     pub(crate) async fn upsert_safekeeper(
         &self,
-        record: crate::persistence::SafekeeperPersistence,
+        record: crate::persistence::SafekeeperUpsert,
     ) -> Result<(), DatabaseError> {
-        self.persistence.safekeeper_upsert(record).await
+        let node_id = NodeId(record.id as u64);
+        self.persistence.safekeeper_upsert(record.clone()).await?;
+        {
+            let mut locked = self.inner.write().unwrap();
+            let mut safekeepers = (*locked.safekeepers).clone();
+            match safekeepers.entry(node_id) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().update_from_record(record);
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(Safekeeper::from_persistence(
+                        crate::persistence::SafekeeperPersistence::from_upsert(
+                            record,
+                            SkSchedulingPolicy::Pause,
+                        ),
+                        CancellationToken::new(),
+                    ));
+                }
+            }
+            locked.safekeepers = Arc::new(safekeepers);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn set_safekeeper_scheduling_policy(
+        &self,
+        id: i64,
+        scheduling_policy: SkSchedulingPolicy,
+    ) -> Result<(), DatabaseError> {
+        self.persistence
+            .set_safekeeper_scheduling_policy(id, scheduling_policy)
+            .await?;
+        let node_id = NodeId(id as u64);
+        // After the change has been persisted successfully, update the in-memory state
+        {
+            let mut locked = self.inner.write().unwrap();
+            let mut safekeepers = (*locked.safekeepers).clone();
+            let sk = safekeepers
+                .get_mut(&node_id)
+                .ok_or(DatabaseError::Logical("Not found".to_string()))?;
+            sk.set_scheduling_policy(scheduling_policy);
+
+            locked.safekeepers = Arc::new(safekeepers);
+        }
+        Ok(())
     }
 
     pub(crate) async fn update_shards_preferred_azs(

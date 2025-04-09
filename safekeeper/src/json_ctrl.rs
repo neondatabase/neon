@@ -7,24 +7,23 @@
 //!
 
 use anyhow::Context;
-use postgres_backend::QueryError;
+use postgres_backend::{PostgresBackend, QueryError};
+use postgres_ffi::{WAL_SEGMENT_SIZE, encode_logical_message};
+use pq_proto::{BeMessage, RowDescriptor, TEXT_OID};
+use safekeeper_api::membership::{Configuration, INVALID_GENERATION};
+use safekeeper_api::{ServerInfo, Term};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::*;
+use utils::lsn::Lsn;
 
 use crate::handler::SafekeeperPostgresHandler;
-use crate::safekeeper::{AcceptorProposerMessage, AppendResponse, ServerInfo};
 use crate::safekeeper::{
-    AppendRequest, AppendRequestHeader, ProposerAcceptorMessage, ProposerElected,
+    AcceptorProposerMessage, AppendRequest, AppendRequestHeader, AppendResponse,
+    ProposerAcceptorMessage, ProposerElected, TermHistory, TermLsn,
 };
-use crate::safekeeper::{Term, TermHistory, TermLsn};
 use crate::state::TimelinePersistentState;
 use crate::timeline::WalResidentTimeline;
-use postgres_backend::PostgresBackend;
-use postgres_ffi::encode_logical_message;
-use postgres_ffi::WAL_SEGMENT_SIZE;
-use pq_proto::{BeMessage, RowDescriptor, TEXT_OID};
-use utils::lsn::Lsn;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AppendLogicalMessage {
@@ -104,6 +103,7 @@ async fn prepare_safekeeper(
         .global_timelines
         .create(
             spg.ttid,
+            Configuration::empty(),
             ServerInfo {
                 pg_version,
                 wal_seg_size: WAL_SEGMENT_SIZE as u32,
@@ -130,10 +130,10 @@ async fn send_proposer_elected(
     let history = TermHistory(history_entries);
 
     let proposer_elected_request = ProposerAcceptorMessage::Elected(ProposerElected {
+        generation: INVALID_GENERATION,
         term,
         start_streaming_at: lsn,
         term_history: history,
-        timeline_start_lsn: lsn,
     });
 
     tli.process_msg(&proposer_elected_request).await?;
@@ -167,13 +167,12 @@ pub async fn append_logical_message(
 
     let append_request = ProposerAcceptorMessage::AppendRequest(AppendRequest {
         h: AppendRequestHeader {
+            generation: INVALID_GENERATION,
             term: msg.term,
-            term_start_lsn: begin_lsn,
             begin_lsn,
             end_lsn,
             commit_lsn,
             truncate_lsn: msg.truncate_lsn,
-            proposer_uuid: [0u8; 16],
         },
         wal_data,
     });

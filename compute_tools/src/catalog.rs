@@ -36,11 +36,11 @@ pub async fn get_dbs_and_roles(compute: &Arc<ComputeNode>) -> anyhow::Result<Cat
 
 #[derive(Debug, thiserror::Error)]
 pub enum SchemaDumpError {
-    #[error("Database does not exist.")]
+    #[error("database does not exist")]
     DatabaseDoesNotExist,
-    #[error("Failed to execute pg_dump.")]
+    #[error("failed to execute pg_dump")]
     IO(#[from] std::io::Error),
-    #[error("Unexpected error.")]
+    #[error("unexpected I/O error")]
     Unexpected,
 }
 
@@ -140,5 +140,34 @@ pub async fn get_database_schema(
             warn!("pg_dump stderr: {}", line)
         }
     });
-    Ok(initial_stream.chain(stdout_reader.map(|res| res.map(|b| b.freeze()))))
+
+    #[allow(dead_code)]
+    struct SchemaStream<S> {
+        // We keep a reference to the child process to ensure it stays alive
+        // while the stream is being consumed. When SchemaStream is dropped,
+        // cmd will be dropped, which triggers kill_on_drop and terminates pg_dump
+        cmd: tokio::process::Child,
+        stream: S,
+    }
+
+    impl<S> Stream for SchemaStream<S>
+    where
+        S: Stream<Item = Result<bytes::Bytes, std::io::Error>> + Unpin,
+    {
+        type Item = Result<bytes::Bytes, std::io::Error>;
+
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            Stream::poll_next(std::pin::Pin::new(&mut self.stream), cx)
+        }
+    }
+
+    let schema_stream = SchemaStream {
+        cmd,
+        stream: initial_stream.chain(stdout_reader.map(|res| res.map(|b| b.freeze()))),
+    };
+
+    Ok(schema_stream)
 }

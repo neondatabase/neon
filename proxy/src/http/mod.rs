@@ -13,8 +13,8 @@ use hyper::body::Body;
 pub(crate) use reqwest::{Request, Response};
 use reqwest_middleware::RequestBuilder;
 pub(crate) use reqwest_middleware::{ClientWithMiddleware, Error};
-pub(crate) use reqwest_retry::policies::ExponentialBackoff;
 pub(crate) use reqwest_retry::RetryTransientMiddleware;
+pub(crate) use reqwest_retry::policies::ExponentialBackoff;
 use thiserror::Error;
 
 use crate::metrics::{ConsoleRequest, Metrics};

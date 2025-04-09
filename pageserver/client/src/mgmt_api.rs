@@ -1,11 +1,12 @@
 use std::{collections::HashMap, error::Error as _};
 
 use bytes::Bytes;
-use detach_ancestor::AncestorDetached;
-use pageserver_api::{models::*, shard::TenantShardId};
 use reqwest::{IntoUrl, Method, StatusCode};
+
+use detach_ancestor::AncestorDetached;
+use http_utils::error::HttpErrorBody;
+use pageserver_api::{models::*, shard::TenantShardId};
 use utils::{
-    http::error::HttpErrorBody,
     id::{TenantId, TimelineId},
     lsn::Lsn,
 };
@@ -270,9 +271,15 @@ impl Client {
         Ok(body)
     }
 
-    pub async fn tenant_config(&self, req: &TenantConfigRequest) -> Result<()> {
+    pub async fn set_tenant_config(&self, req: &TenantConfigRequest) -> Result<()> {
         let uri = format!("{}/v1/tenant/config", self.mgmt_api_endpoint);
         self.request(Method::PUT, &uri, req).await?;
+        Ok(())
+    }
+
+    pub async fn patch_tenant_config(&self, req: &TenantConfigPatchRequest) -> Result<()> {
+        let uri = format!("{}/v1/tenant/config", self.mgmt_api_endpoint);
+        self.request(Method::PATCH, &uri, req).await?;
         Ok(())
     }
 
@@ -468,6 +475,26 @@ impl Client {
         );
 
         self.request(Method::POST, &uri, ()).await.map(|_| ())
+    }
+
+    pub async fn timeline_download_heatmap_layers(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        concurrency: Option<usize>,
+    ) -> Result<()> {
+        let mut path = reqwest::Url::parse(&format!(
+            "{}/v1/tenant/{}/timeline/{}/download_heatmap_layers",
+            self.mgmt_api_endpoint, tenant_shard_id, timeline_id
+        ))
+        .expect("Cannot build URL");
+
+        if let Some(concurrency) = concurrency {
+            path.query_pairs_mut()
+                .append_pair("concurrency", &format!("{}", concurrency));
+        }
+
+        self.request(Method::POST, path, ()).await.map(|_| ())
     }
 
     pub async fn tenant_reset(&self, tenant_shard_id: TenantShardId) -> Result<()> {
@@ -756,5 +783,20 @@ impl Client {
             .json()
             .await
             .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn wait_lsn(
+        &self,
+        tenant_shard_id: TenantShardId,
+        request: TenantWaitLsnRequest,
+    ) -> Result<StatusCode> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_shard_id}/wait_lsn",
+            self.mgmt_api_endpoint,
+        );
+
+        self.request_noerror(Method::POST, uri, request)
+            .await
+            .map(|resp| resp.status())
     }
 }
