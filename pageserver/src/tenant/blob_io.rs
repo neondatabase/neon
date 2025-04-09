@@ -175,6 +175,7 @@ impl BlobWriter {
         start_offset: u64,
         gate: &utils::sync::gate::Gate,
         ctx: &RequestContext,
+        flush_task_span: tracing::Span,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             io_buf: Some(BytesMut::new()),
@@ -184,6 +185,7 @@ impl BlobWriter {
                 || IoBufferMut::with_capacity(Self::CAPACITY),
                 gate.enter()?,
                 ctx,
+                flush_task_span,
             ),
             offset: start_offset,
         })
@@ -331,6 +333,7 @@ pub(crate) mod tests {
     use camino::Utf8PathBuf;
     use camino_tempfile::Utf8TempDir;
     use rand::{Rng, SeedableRng};
+    use tracing::info_span;
 
     use super::*;
     use crate::context::DownloadBehavior;
@@ -354,7 +357,7 @@ pub(crate) mod tests {
         let mut offsets = Vec::new();
         {
             let file = Arc::new(VirtualFile::create_v2(pathbuf.as_path(), ctx).await?);
-            let mut wtr = BlobWriter::new(file, 0, &gate, ctx).unwrap();
+            let mut wtr = BlobWriter::new(file, 0, &gate, ctx, info_span!("test")).unwrap();
             for blob in blobs.iter() {
                 let (_, res) = if compression {
                     let res = wtr

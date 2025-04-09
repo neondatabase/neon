@@ -433,7 +433,13 @@ impl DeltaLayerWriterInner {
         let file = Arc::new(VirtualFile::create_v2(&path, ctx).await?);
 
         // Start at PAGE_SZ, make room for the header block
-        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64, gate, ctx)?;
+        let blob_writer = BlobWriter::new(
+            file,
+            PAGE_SZ as u64,
+            gate,
+            ctx,
+            info_span!(parent: None, "delta_layer_writer_flush_task", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), timeline_id=%timeline_id, path = %path),
+        )?;
 
         // Initialize the b-tree index builder
         let block_buf = BlockBuf::new();
