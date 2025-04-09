@@ -137,12 +137,8 @@ impl From<PageReconstructError> for CalculateLogicalSizeError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RelationError {
-    #[error("Relation Already Exists")]
-    AlreadyExists,
     #[error("invalid relnode")]
     InvalidRelnode,
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
 }
 
 ///
