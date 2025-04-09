@@ -414,15 +414,10 @@ fn start_pageserver(
 
     // Launch broker client
     // The storage_broker::connect call needs to happen inside a tokio runtime thread.
-
     let broker_client = WALRECEIVER_RUNTIME
         .block_on(async {
             // Note: we do not attempt connecting here (but validate endpoints sanity).
-            storage_broker::connect(
-                conf.broker_endpoint.clone(),
-                conf.broker_keepalive_interval,
-                conf.ssl_ca_certs.into_iter().map(),
-            )
+            storage_broker::connect(conf.broker_endpoint.clone(), conf.broker_keepalive_interval)
         })
         .with_context(|| {
             format!(
