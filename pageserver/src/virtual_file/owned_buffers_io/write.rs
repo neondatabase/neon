@@ -340,7 +340,7 @@ mod tests {
         writer.write_buffered_borrowed(b"j", ctx).await?;
         writer.write_buffered_borrowed(b"klmno", ctx).await?;
 
-        let (_, recorder) = writer.shutdown(|buf| Some(buf)).await?;
+        let (_, recorder) = writer.shutdown(Some).await?;
         assert_eq!(
             recorder.get_writes(),
             {

@@ -116,7 +116,7 @@ impl Summary {
     /// Serializes the summary header into an aligned buffer of lenth `PAGE_SZ`.
     pub fn ser_into_page(&self) -> Result<IoBuffer, SerializeError> {
         let mut buf = IoBufferMut::with_capacity(PAGE_SZ);
-        Self::ser_into(&self, &mut buf)?;
+        Self::ser_into(self, &mut buf)?;
         // Pad zeroes to the buffer so the length is a multiple of the alignment.
         buf.extend_with(0, buf.capacity() - buf.len());
         Ok(buf.freeze())
