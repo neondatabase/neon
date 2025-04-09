@@ -157,22 +157,26 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
 
     latest_attached = env.pageservers[0].id
 
-    for _i in range(0, 64):
-        # Pick a pageserver
-        pageserver = rng.choice(env.pageservers)
 
-        # Pick a pseudorandom state
-        modes = [
-            "AttachedSingle",
-            "AttachedMulti",
-            "AttachedStale",
-            "Secondary",
-            "Detached",
-            "_Evictions",
-            "_Restart",
-        ]
+    ps_modes = [
+        [3, 'AttachedStale'],
+        [2, 'AttachedSingle'],
+        [3, 'AttachedSingle'],
+        [1, '_Evictions'],
+        [1, 'AttachedSingle'],
+        [1, "CompactCheckpoint"],
+        [0, "Sleep"],
+        [2, '_Evictions'],
+        [2, 'AttachedStale'],
+    ]
 
-        mode = rng.choice(modes)
+    for _i in range(0, len(ps_modes)):
+        mode = ps_modes[_i][1]
+        log.info(f"i: {_i}, mode: {mode}")
+        if mode == "Sleep":
+            time.sleep(20)
+            continue
+        pageserver = env.pageservers[ps_modes[_i][0] - 1]
 
         last_state_ps = last_state[pageserver.id]
         if mode == "_Evictions":
@@ -183,6 +187,9 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
                 log.info(
                     f"Action: skipping evictions on pageserver {pageserver.id}, is not attached"
                 )
+        elif mode == "CompactCheckpoint":
+            pageserver.http_client().timeline_compact(tenant_id, timeline_id, force_l0_compaction=True)
+            pageserver.http_client().timeline_checkpoint(tenant_id, timeline_id)
         elif mode == "_Restart":
             log.info(f"Action: restarting pageserver {pageserver.id}")
             pageserver.stop()
