@@ -1024,67 +1024,6 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) && \
 
 #########################################################################################
 #
-# Layer "pg_embedding-build"
-# compile pg_embedding extension
-#
-#########################################################################################
-FROM build-deps AS pg_embedding-src
-ARG PG_VERSION
-
-# This is our extension, support stopped in favor of pgvector
-# TODO: deprecate it
-WORKDIR /ext-src
-RUN case "${PG_VERSION:?}" in \
-      "v14" | "v15") \
-        export PG_EMBEDDING_VERSION=0.3.5 \
-        export PG_EMBEDDING_CHECKSUM=0e95b27b8b6196e2cf0a0c9ec143fe2219b82e54c5bb4ee064e76398cbe69ae9 \
-        ;; \
-      *) \
-        echo "pg_embedding not supported on this PostgreSQL version. Use pgvector instead." && exit 0;; \
-    esac && \
-    wget https://github.com/neondatabase/pg_embedding/archive/refs/tags/${PG_EMBEDDING_VERSION}.tar.gz -O pg_embedding.tar.gz && \
-    echo "${PG_EMBEDDING_CHECKSUM} pg_embedding.tar.gz" | sha256sum --check && \
-    mkdir pg_embedding-src && cd pg_embedding-src && tar xzf ../pg_embedding.tar.gz --strip-components=1 -C .
-
-FROM pg-build AS pg_embedding-build
-COPY --from=pg_embedding-src /ext-src/ /ext-src/
-WORKDIR /ext-src/
-RUN  if [ -d pg_embedding-src ]; then \
-        cd pg_embedding-src && \
-        make -j $(getconf _NPROCESSORS_ONLN) && \
-        make -j $(getconf _NPROCESSORS_ONLN) install; \
-    fi
-
-#########################################################################################
-#
-# Layer "pg_anon-build"
-# compile anon extension
-#
-#########################################################################################
-FROM build-deps AS pg_anon-src
-ARG PG_VERSION
-
-# This is an experimental extension, never got to real production.
-# !Do not remove! It can be present in shared_preload_libraries and compute will fail to start if library is not found.
-WORKDIR /ext-src
-RUN case "${PG_VERSION:?}" in "v17") \
-    echo "postgresql_anonymizer does not yet support PG17" && exit 0;; \
-    esac && \
-    wget  https://github.com/neondatabase/postgresql_anonymizer/archive/refs/tags/neon_1.1.1.tar.gz -O pg_anon.tar.gz && \
-    echo "321ea8d5c1648880aafde850a2c576e4a9e7b9933a34ce272efc839328999fa9  pg_anon.tar.gz" | sha256sum --check && \
-    mkdir pg_anon-src && cd pg_anon-src && tar xzf ../pg_anon.tar.gz --strip-components=1 -C .
-
-FROM pg-build AS pg_anon-build
-COPY --from=pg_anon-src /ext-src/ /ext-src/
-WORKDIR /ext-src
-RUN if [ -d pg_anon-src ]; then \
-        cd pg_anon-src && \
-        make -j $(getconf _NPROCESSORS_ONLN) install && \
-        echo 'trusted = true' >> /usr/local/pgsql/share/extension/anon.control; \
-    fi
-
-#########################################################################################
-#
 # Layer "pg build with nonroot user and cargo installed"
 # This layer is base and common for layers with `pgrx`
 #
@@ -1675,9 +1614,7 @@ COPY --from=rdkit-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_uuidv7-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_roaringbitmap-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_semver-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pg_embedding-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=wal2json-build /usr/local/pgsql /usr/local/pgsql
-COPY --from=pg_anon-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_ivm-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_partman-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_mooncake-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -1853,7 +1790,6 @@ COPY --from=pg_cron-src /ext-src/ /ext-src/
 COPY --from=pg_uuidv7-src /ext-src/ /ext-src/
 COPY --from=pg_roaringbitmap-src /ext-src/ /ext-src/
 COPY --from=pg_semver-src /ext-src/ /ext-src/
-#COPY --from=pg_embedding-src /ext-src/ /ext-src/
 #COPY --from=wal2json-src /ext-src/ /ext-src/
 COPY --from=pg_ivm-src /ext-src/ /ext-src/
 COPY --from=pg_partman-src /ext-src/ /ext-src/

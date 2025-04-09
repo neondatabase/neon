@@ -376,6 +376,28 @@ class PageserverWalReceiverProtocol(StrEnum):
             raise ValueError(f"Unknown protocol type: {proto}")
 
 
+@dataclass
+class PageserverTracingConfig:
+    sampling_ratio: tuple[int, int]
+    endpoint: str
+    protocol: str
+    timeout: str
+
+    def to_config_key_value(self) -> tuple[str, dict[str, Any]]:
+        value = {
+            "sampling_ratio": {
+                "numerator": self.sampling_ratio[0],
+                "denominator": self.sampling_ratio[1],
+            },
+            "export_config": {
+                "endpoint": self.endpoint,
+                "protocol": self.protocol,
+                "timeout": self.timeout,
+            },
+        }
+        return ("tracing", value)
+
+
 class NeonEnvBuilder:
     """
     Builder object to create a Neon runtime environment
@@ -425,6 +447,7 @@ class NeonEnvBuilder:
         pageserver_virtual_file_io_mode: str | None = None,
         pageserver_wal_receiver_protocol: PageserverWalReceiverProtocol | None = None,
         pageserver_get_vectored_concurrent_io: str | None = None,
+        pageserver_tracing_config: PageserverTracingConfig | None = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -477,6 +500,8 @@ class NeonEnvBuilder:
         self.pageserver_get_vectored_concurrent_io: str | None = (
             pageserver_get_vectored_concurrent_io
         )
+
+        self.pageserver_tracing_config = pageserver_tracing_config
 
         self.pageserver_default_tenant_config_compaction_algorithm: dict[str, Any] | None = (
             pageserver_default_tenant_config_compaction_algorithm
@@ -998,6 +1023,8 @@ class NeonEnvBuilder:
 
             self.env.broker.assert_no_errors()
 
+            self.env.object_storage.assert_no_errors()
+
         try:
             self.overlay_cleanup_teardown()
         except Exception as e:
@@ -1093,6 +1120,8 @@ class NeonEnv:
             pagectl_env_vars["RUST_LOG"] = self.rust_log_override
         self.pagectl = Pagectl(extra_env=pagectl_env_vars, binpath=self.neon_binpath)
 
+        self.object_storage = ObjectStorage(self)
+
         # The URL for the pageserver to use as its control_plane_api config
         if config.storage_controller_port_override is not None:
             log.info(
@@ -1138,6 +1167,7 @@ class NeonEnv:
         self.pageserver_virtual_file_io_mode = config.pageserver_virtual_file_io_mode
         self.pageserver_wal_receiver_protocol = config.pageserver_wal_receiver_protocol
         self.pageserver_get_vectored_concurrent_io = config.pageserver_get_vectored_concurrent_io
+        self.pageserver_tracing_config = config.pageserver_tracing_config
 
         # Create the neon_local's `NeonLocalInitConf`
         cfg: dict[str, Any] = {
@@ -1147,6 +1177,7 @@ class NeonEnv:
             },
             "safekeepers": [],
             "pageservers": [],
+            "object_storage": {"port": self.port_distributor.get_port()},
             "generate_local_ssl_certs": self.generate_local_ssl_certs,
         }
 
@@ -1262,10 +1293,29 @@ class NeonEnv:
                 if key not in ps_cfg:
                     ps_cfg[key] = value
 
+            if self.pageserver_tracing_config is not None:
+                key, value = self.pageserver_tracing_config.to_config_key_value()
+
+                if key not in ps_cfg:
+                    ps_cfg[key] = value
+
+                ps_cfg[key] = value
+
             # Create a corresponding NeonPageserver object
-            self.pageservers.append(
-                NeonPageserver(self, ps_id, port=pageserver_port, az_id=ps_cfg["availability_zone"])
+            ps = NeonPageserver(
+                self, ps_id, port=pageserver_port, az_id=ps_cfg["availability_zone"]
             )
+
+            if config.test_may_use_compatibility_snapshot_binaries:
+                # New features gated by pageserver config usually get rolled out in the
+                # test suite first, by enabling it in the `ps_cfg` abve.
+                # Compatibility tests run with old binaries that predate feature code & config.
+                # So, old binaries will warn about the flag's presence.
+                # Silence those warnings categorically.
+                log.info("test may use old binaries, ignoring warnings about unknown config items")
+                ps.allowed_errors.append(".*ignoring unknown configuration item.*")
+
+            self.pageservers.append(ps)
             cfg["pageservers"].append(ps_cfg)
 
         # Create config and a Safekeeper object for each safekeeper
@@ -1284,6 +1334,7 @@ class NeonEnv:
                 "http_port": port.http,
                 "https_port": port.https,
                 "sync": config.safekeepers_enable_fsync,
+                "use_https_safekeeper_api": config.use_https_safekeeper_api,
             }
             if config.auth_enabled:
                 sk_cfg["auth_enabled"] = True
@@ -1362,6 +1413,8 @@ class NeonEnv:
                 self.storage_controller.on_safekeeper_deploy(sk_id, body)
                 self.storage_controller.safekeeper_scheduling_policy(sk_id, "Active")
 
+        self.object_storage.start(timeout_in_seconds=timeout_in_seconds)
+
     def stop(self, immediate=False, ps_assert_metric_no_errors=False, fail_on_endpoint_errors=True):
         """
         After this method returns, there should be no child processes running.
@@ -1378,6 +1431,8 @@ class NeonEnv:
             self.endpoints.stop_all(fail_on_endpoint_errors)
         except Exception as e:
             raise_later = e
+
+        self.object_storage.stop(immediate=immediate)
 
         # Stop storage controller before pageservers: we don't want it to spuriously
         # detect a pageserver "failure" during test teardown
@@ -2587,6 +2642,26 @@ class NeonStorageController(MetricsGetter, LogUtils):
         tb: TracebackType | None,
     ):
         self.stop(immediate=True)
+
+
+class ObjectStorage(LogUtils):
+    def __init__(self, env: NeonEnv):
+        service_dir = env.repo_dir / "object_storage"
+        super().__init__(logfile=service_dir / "object_storage.log")
+        self.conf_path = service_dir / "object_storage.json"
+        self.env = env
+
+    def base_url(self):
+        return json.loads(self.conf_path.read_text())["listen"]
+
+    def start(self, timeout_in_seconds: int | None = None):
+        self.env.neon_cli.object_storage_start(timeout_in_seconds)
+
+    def stop(self, immediate: bool = False):
+        self.env.neon_cli.object_storage_stop(immediate)
+
+    def assert_no_errors(self):
+        assert_no_errors(self.logfile, "object_storage", [])
 
 
 class NeonProxiedStorageController(NeonStorageController):

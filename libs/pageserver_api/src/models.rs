@@ -23,9 +23,10 @@ use utils::lsn::Lsn;
 use utils::postgres_client::PostgresClientProtocol;
 use utils::{completion, serde_system_time};
 
+use crate::config::Ratio;
 use crate::key::{CompactKey, Key};
 use crate::reltag::RelTag;
-use crate::shard::{ShardCount, ShardStripeSize, TenantShardId};
+use crate::shard::{DEFAULT_STRIPE_SIZE, ShardCount, ShardStripeSize, TenantShardId};
 
 /// The state of a tenant in this pageserver.
 ///
@@ -79,10 +80,22 @@ pub enum TenantState {
     ///
     /// Transitions out of this state are possible through `set_broken()`.
     Stopping {
+        /// The barrier can be used to wait for shutdown to complete. The first caller to set
+        /// Some(Barrier) is responsible for driving shutdown to completion. Subsequent callers
+        /// will wait for the first caller's existing barrier.
+        ///
+        /// None is set when an attach is cancelled, to signal to shutdown that the attach has in
+        /// fact cancelled:
+        ///
+        /// 1. `shutdown` sees `TenantState::Attaching`, and cancels the tenant.
+        /// 2. `attach` sets `TenantState::Stopping(None)` and exits.
+        /// 3. `set_stopping` waits for `TenantState::Stopping(None)` and sets
+        ///    `TenantState::Stopping(Some)` to claim the barrier as the shutdown owner.
+        //
         // Because of https://github.com/serde-rs/serde/issues/2105 this has to be a named field,
         // otherwise it will not be skipped during deserialization
         #[serde(skip)]
-        progress: completion::Barrier,
+        progress: Option<completion::Barrier>,
     },
     /// The tenant is recognized by the pageserver, but can no longer be used for
     /// any operations.
@@ -425,8 +438,6 @@ pub struct ShardParameters {
 }
 
 impl ShardParameters {
-    pub const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
-
     pub fn is_unsharded(&self) -> bool {
         self.count.is_unsharded()
     }
@@ -436,7 +447,7 @@ impl Default for ShardParameters {
     fn default() -> Self {
         Self {
             count: ShardCount::new(0),
-            stripe_size: Self::DEFAULT_STRIPE_SIZE,
+            stripe_size: DEFAULT_STRIPE_SIZE,
         }
     }
 }
@@ -568,6 +579,8 @@ pub struct TenantConfigPatch {
     pub gc_compaction_initial_threshold_kb: FieldPatch<u64>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_compaction_ratio_percent: FieldPatch<u64>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub sampling_ratio: FieldPatch<Option<Ratio>>,
 }
 
 /// Like [`crate::config::TenantConfigToml`], but preserves the information
@@ -688,6 +701,9 @@ pub struct TenantConfig {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gc_compaction_ratio_percent: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sampling_ratio: Option<Option<Ratio>>,
 }
 
 impl TenantConfig {
@@ -730,6 +746,7 @@ impl TenantConfig {
             mut gc_compaction_enabled,
             mut gc_compaction_initial_threshold_kb,
             mut gc_compaction_ratio_percent,
+            mut sampling_ratio,
         } = self;
 
         patch.checkpoint_distance.apply(&mut checkpoint_distance);
@@ -824,6 +841,7 @@ impl TenantConfig {
         patch
             .gc_compaction_ratio_percent
             .apply(&mut gc_compaction_ratio_percent);
+        patch.sampling_ratio.apply(&mut sampling_ratio);
 
         Ok(Self {
             checkpoint_distance,
@@ -860,6 +878,7 @@ impl TenantConfig {
             gc_compaction_enabled,
             gc_compaction_initial_threshold_kb,
             gc_compaction_ratio_percent,
+            sampling_ratio,
         })
     }
 
@@ -961,6 +980,7 @@ impl TenantConfig {
             gc_compaction_ratio_percent: self
                 .gc_compaction_ratio_percent
                 .unwrap_or(global_conf.gc_compaction_ratio_percent),
+            sampling_ratio: self.sampling_ratio.unwrap_or(global_conf.sampling_ratio),
         }
     }
 }
@@ -1094,7 +1114,7 @@ pub struct CompactionAlgorithmSettings {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
-#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(tag = "mode", rename_all = "kebab-case")]
 pub enum L0FlushConfig {
     #[serde(rename_all = "snake_case")]
     Direct { max_concurrency: NonZeroUsize },
@@ -1658,6 +1678,7 @@ pub struct SecondaryProgress {
 pub struct TenantScanRemoteStorageShard {
     pub tenant_shard_id: TenantShardId,
     pub generation: Option<u32>,
+    pub stripe_size: Option<ShardStripeSize>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -2711,8 +2732,13 @@ mod tests {
             (line!(), TenantState::Active, "Active"),
             (
                 line!(),
+                TenantState::Stopping { progress: None },
+                "Stopping",
+            ),
+            (
+                line!(),
                 TenantState::Stopping {
-                    progress: utils::completion::Barrier::default(),
+                    progress: Some(completion::Barrier::default()),
                 },
                 "Stopping",
             ),

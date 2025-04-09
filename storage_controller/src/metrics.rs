@@ -44,6 +44,15 @@ pub(crate) struct StorageControllerMetricGroup {
     /// Size of the in-memory map of pageserver_nodes
     pub(crate) storage_controller_pageserver_nodes: measured::Gauge,
 
+    /// Count of how many pageserver nodes from in-memory map have https configured
+    pub(crate) storage_controller_https_pageserver_nodes: measured::Gauge,
+
+    /// Size of the in-memory map of safekeeper_nodes
+    pub(crate) storage_controller_safekeeper_nodes: measured::Gauge,
+
+    /// Count of how many safekeeper nodes from in-memory map have https configured
+    pub(crate) storage_controller_https_safekeeper_nodes: measured::Gauge,
+
     /// Reconciler tasks completed, broken down by success/failure/cancelled
     pub(crate) storage_controller_reconcile_complete:
         measured::CounterVec<ReconcileCompleteLabelGroupSet>,
