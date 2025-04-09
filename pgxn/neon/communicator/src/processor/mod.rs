@@ -11,11 +11,13 @@
 //! functions. They are async, and may be called from multiple threads.
 
 use std::collections::HashMap;
+use std::sync::RwLock;
 
 use http;
 use thiserror::Error;
 use tonic;
 use tonic::metadata::AsciiMetadataValue;
+use tonic::transport::Channel;
 
 use crate::neon_request::{DbSizeRequest, GetPageRequest, RelExistsRequest, RelSizeRequest};
 
@@ -26,6 +28,10 @@ mod page_service {
 }
 
 use page_service::page_service_client::PageServiceClient;
+
+type MyPageServiceClient = PageServiceClient<
+    tonic::service::interceptor::InterceptedService<tonic::transport::Channel, AuthInterceptor>,
+>;
 
 #[derive(Error, Debug)]
 pub enum CommunicatorError {
@@ -39,12 +45,16 @@ pub enum CommunicatorError {
 }
 
 pub struct CommunicatorProcessor {
-    tenant_id: String,
-    timeline_id: String,
+    _tenant_id: String,
+    _timeline_id: String,
 
-    auth_token: Option<String>,
+    _auth_token: Option<String>,
 
     shard_map: HashMap<Shardno, String>,
+
+    channels: RwLock<HashMap<Shardno, Channel>>,
+
+    auth_interceptor: AuthInterceptor,
 }
 
 impl CommunicatorProcessor {
@@ -56,10 +66,12 @@ impl CommunicatorProcessor {
         shard_map: HashMap<Shardno, String>,
     ) -> Self {
         Self {
-            tenant_id: tenant_id.to_string(),
-            timeline_id: timeline_id.to_string(),
-            auth_token: auth_token.clone(),
+            _tenant_id: tenant_id.to_string(),
+            _timeline_id: timeline_id.to_string(),
+            _auth_token: auth_token.clone(),
             shard_map,
+            channels: RwLock::new(HashMap::new()),
+            auth_interceptor: AuthInterceptor::new(tenant_id, timeline_id, auth_token.as_ref()),
         }
     }
 
@@ -144,8 +156,7 @@ impl CommunicatorProcessor {
         &self,
         request: &GetPageRequest,
     ) -> Result<Vec<u8>, CommunicatorError> {
-        // Current sharding model assumes that all metadata is present only at shard 0.
-        // FIXME
+        // FIXME: calculate the shard number correctly
         let shard_no = 0;
 
         let mut client = self.get_client(shard_no).await?;
@@ -169,29 +180,44 @@ impl CommunicatorProcessor {
         Ok(response.into_inner().page_image)
     }
 
+    /// Get a client for given shard
+    ///
+    /// This implements very basic caching. If we already have a client for the given shard,
+    /// reuse it. If not, create a new client and put it to the cache.
     async fn get_client(&self, shard_no: u16) -> Result<MyPageServiceClient, CommunicatorError> {
-        // FIXME: we create a new channel for every request. Inefficient
+        let reused_channel: Option<Channel> = {
+            let channels = self.channels.read().unwrap();
 
-        let endpoint: tonic::transport::Endpoint = self
-            .shard_map
-            .get(&shard_no)
-            .expect("no url for shard {shard_no}")
-            .parse()?;
-        let channel = endpoint.connect().await?;
+            channels.get(&shard_no).cloned()
+        };
 
-        let client = PageServiceClient::with_interceptor(
-            channel,
-            AuthInterceptor::new(&self.tenant_id, &self.timeline_id, self.auth_token.as_ref()),
-        );
+        let channel = if let Some(reused_channel) = reused_channel {
+            reused_channel
+        } else {
+            let endpoint: tonic::transport::Endpoint = self
+                .shard_map
+                .get(&shard_no)
+                .expect("no url for shard {shard_no}")
+                .parse()?;
+            let channel = endpoint.connect().await?;
+
+            // Insert it to the cache so that it can be reused on subsequent calls. It's possible
+            // that another thread did the same concurrently, in which case we will overwrite the
+            // client in the cache.
+            {
+                let mut channels = self.channels.write().unwrap();
+                channels.insert(shard_no, channel.clone());
+            }
+            channel
+        };
+
+        let client = PageServiceClient::with_interceptor(channel, self.auth_interceptor.clone());
         Ok(client)
     }
 }
 
-type MyPageServiceClient = PageServiceClient<
-    tonic::service::interceptor::InterceptedService<tonic::transport::Channel, AuthInterceptor>,
->;
-
 /// Inject tenant_id, timeline_id and authentication token to all pageserver requests.
+#[derive(Clone)]
 struct AuthInterceptor {
     tenant_id: AsciiMetadataValue,
     timeline_id: AsciiMetadataValue,
