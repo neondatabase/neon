@@ -16,6 +16,8 @@ use super::{
     Timeline,
 };
 
+use crate::tenant::timeline::DeltaEntry;
+use crate::walredo::RedoAttemptType;
 use anyhow::{Context, anyhow};
 use bytes::Bytes;
 use enumset::EnumSet;
@@ -2411,7 +2413,7 @@ impl Timeline {
                     lsn_split_points[i]
                 };
                 let img = self
-                    .reconstruct_value_wo_critical_error(key, request_lsn, state)
+                    .reconstruct_value(key, request_lsn, state, RedoAttemptType::GcCompaction)
                     .await?;
                 Some((request_lsn, img))
             } else {
@@ -3908,8 +3910,6 @@ impl CompactionLayer<Key> for OwnArc<DeltaLayer> {
         true
     }
 }
-
-use crate::tenant::timeline::DeltaEntry;
 
 impl CompactionLayer<Key> for ResidentDeltaLayer {
     fn key_range(&self) -> &Range<Key> {
