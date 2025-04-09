@@ -11,18 +11,10 @@ index 0cdc769..5ceb91c 100644
 +
 +GRANT EXECUTE ON FUNCTION pg_config to neon_superuser;
 diff --git a/sql/init.sql b/sql/init.sql
-index 7da6553..f09d15e 100644
+index 7da6553..d8476ee 100644
 --- a/sql/init.sql
 +++ b/sql/init.sql
-@@ -4,15 +4,19 @@
- 
- -- ADD unit tests in tests/sql/init.sql
- 
--CREATE OR REPLACE FUNCTION anon.load_csv(
-+CREATE OR REPLACE FUNCTION load_csv(
-   dest_table REGCLASS,
-   csv_file TEXT
- )
+@@ -11,8 +11,12 @@ CREATE OR REPLACE FUNCTION anon.load_csv(
  RETURNS BOOLEAN AS
  $$
  DECLARE
