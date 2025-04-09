@@ -722,6 +722,7 @@ pub(crate) enum LayerId {
 struct LayerToVisitId {
     layer_id: LayerId,
     lsn_floor: Lsn,
+    lsn_ceil: Lsn,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -805,6 +806,7 @@ impl LayerFringe {
         let layer_to_visit_id = LayerToVisitId {
             layer_id: layer.id(),
             lsn_floor: lsn_range.start,
+            lsn_ceil: lsn_range.end,
         };
 
         let entry = self.visit_reads.entry(layer_to_visit_id.clone());
