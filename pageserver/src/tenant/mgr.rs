@@ -14,7 +14,7 @@ use futures::StreamExt;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use pageserver_api::key::Key;
-use pageserver_api::models::LocationConfigMode;
+use pageserver_api::models::{DetachBehavior, LocationConfigMode};
 use pageserver_api::shard::{
     ShardCount, ShardIdentity, ShardIndex, ShardNumber, ShardStripeSize, TenantShardId,
 };
@@ -1914,6 +1914,7 @@ impl TenantManager {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         prepared: PreparedTimelineDetach,
+        behavior: DetachBehavior,
         mut attempt: detach_ancestor::Attempt,
         ctx: &RequestContext,
     ) -> Result<HashSet<TimelineId>, detach_ancestor::Error> {
@@ -1957,7 +1958,14 @@ impl TenantManager {
             .map_err(Error::NotFound)?;
 
         let resp = timeline
-            .detach_from_ancestor_and_reparent(&tenant, prepared, ctx)
+            .detach_from_ancestor_and_reparent(
+                &tenant,
+                prepared,
+                attempt.ancestor_timeline_id,
+                attempt.ancestor_lsn,
+                behavior,
+                ctx,
+            )
             .await?;
 
         let mut slot_guard = slot_guard;

@@ -24,7 +24,7 @@ use pageserver_api::controller_api::{
     ShardsPreferredAzsRequest, TenantCreateRequest, TenantPolicyRequest, TenantShardMigrateRequest,
 };
 use pageserver_api::models::{
-    TenantConfigPatchRequest, TenantConfigRequest, TenantLocationConfigRequest,
+    DetachBehavior, TenantConfigPatchRequest, TenantConfigRequest, TenantLocationConfigRequest,
     TenantShardSplitRequest, TenantTimeTravelRequest, TimelineArchivalConfigRequest,
     TimelineCreateRequest,
 };
@@ -525,6 +525,7 @@ async fn handle_tenant_timeline_detach_ancestor(
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+    let behavior: Option<DetachBehavior> = parse_query_param(&req, "detach_behavior")?;
 
     check_permissions(&req, Scope::PageServerApi)?;
     maybe_rate_limit(&req, tenant_id).await;
@@ -537,7 +538,7 @@ async fn handle_tenant_timeline_detach_ancestor(
     };
 
     let res = service
-        .tenant_timeline_detach_ancestor(tenant_id, timeline_id)
+        .tenant_timeline_detach_ancestor(tenant_id, timeline_id, behavior)
         .await?;
 
     json_response(StatusCode::OK, res)

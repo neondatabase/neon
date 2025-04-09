@@ -5754,7 +5754,7 @@ pub(crate) mod harness {
                 logging::TracingErrorLayerEnablement::EnableWithRustLogFilter,
                 logging::Output::Stdout,
             )
-            .expect("Failed to init test logging")
+            .expect("Failed to init test logging");
         });
     }
 
@@ -6559,7 +6559,11 @@ mod tests {
 
         tline.freeze_and_flush().await?;
         tline
-            .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+            .compact(
+                &CancellationToken::new(),
+                CompactFlags::NoYield.into(),
+                &ctx,
+            )
             .await?;
 
         let mut writer = tline.writer().await;
@@ -6576,7 +6580,11 @@ mod tests {
 
         tline.freeze_and_flush().await?;
         tline
-            .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+            .compact(
+                &CancellationToken::new(),
+                CompactFlags::NoYield.into(),
+                &ctx,
+            )
             .await?;
 
         let mut writer = tline.writer().await;
@@ -6593,7 +6601,11 @@ mod tests {
 
         tline.freeze_and_flush().await?;
         tline
-            .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+            .compact(
+                &CancellationToken::new(),
+                CompactFlags::NoYield.into(),
+                &ctx,
+            )
             .await?;
 
         let mut writer = tline.writer().await;
@@ -6610,7 +6622,11 @@ mod tests {
 
         tline.freeze_and_flush().await?;
         tline
-            .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+            .compact(
+                &CancellationToken::new(),
+                CompactFlags::NoYield.into(),
+                &ctx,
+            )
             .await?;
 
         assert_eq!(
@@ -6693,7 +6709,9 @@ mod tests {
             timeline.freeze_and_flush().await?;
             if compact {
                 // this requires timeline to be &Arc<Timeline>
-                timeline.compact(&cancel, EnumSet::empty(), ctx).await?;
+                timeline
+                    .compact(&cancel, CompactFlags::NoYield.into(), ctx)
+                    .await?;
             }
 
             // this doesn't really need to use the timeline_id target, but it is closer to what it
@@ -7020,6 +7038,7 @@ mod tests {
         child_timeline.freeze_and_flush().await?;
         let mut flags = EnumSet::new();
         flags.insert(CompactFlags::ForceRepartition);
+        flags.insert(CompactFlags::NoYield);
         child_timeline
             .compact(&CancellationToken::new(), flags, &ctx)
             .await?;
@@ -7398,7 +7417,9 @@ mod tests {
 
             // Perform a cycle of flush, compact, and GC
             tline.freeze_and_flush().await?;
-            tline.compact(&cancel, EnumSet::empty(), &ctx).await?;
+            tline
+                .compact(&cancel, CompactFlags::NoYield.into(), &ctx)
+                .await?;
             tenant
                 .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
                 .await?;
@@ -7727,6 +7748,7 @@ mod tests {
                             let mut flags = EnumSet::new();
                             flags.insert(CompactFlags::ForceImageLayerCreation);
                             flags.insert(CompactFlags::ForceRepartition);
+                            flags.insert(CompactFlags::NoYield);
                             flags
                         } else {
                             EnumSet::empty()
@@ -7777,7 +7799,9 @@ mod tests {
         let before_num_l0_delta_files =
             tline.layers.read().await.layer_map()?.level0_deltas().len();
 
-        tline.compact(&cancel, EnumSet::empty(), &ctx).await?;
+        tline
+            .compact(&cancel, CompactFlags::NoYield.into(), &ctx)
+            .await?;
 
         let after_num_l0_delta_files = tline.layers.read().await.layer_map()?.level0_deltas().len();
 
@@ -7893,7 +7917,6 @@ mod tests {
             Ok((res, reconstruct_state.get_delta_layers_visited() as usize))
         }
 
-        #[allow(clippy::needless_range_loop)]
         for blknum in 0..NUM_KEYS {
             lsn = Lsn(lsn.0 + 0x10);
             test_key.field6 = (blknum * STEP) as u32;
@@ -7943,6 +7966,7 @@ mod tests {
                             let mut flags = EnumSet::new();
                             flags.insert(CompactFlags::ForceImageLayerCreation);
                             flags.insert(CompactFlags::ForceRepartition);
+                            flags.insert(CompactFlags::NoYield);
                             flags
                         },
                         &ctx,
@@ -8405,6 +8429,7 @@ mod tests {
                     let mut flags = EnumSet::new();
                     flags.insert(CompactFlags::ForceImageLayerCreation);
                     flags.insert(CompactFlags::ForceRepartition);
+                    flags.insert(CompactFlags::NoYield);
                     flags
                 },
                 &ctx,
@@ -8472,6 +8497,7 @@ mod tests {
                     let mut flags = EnumSet::new();
                     flags.insert(CompactFlags::ForceImageLayerCreation);
                     flags.insert(CompactFlags::ForceRepartition);
+                    flags.insert(CompactFlags::NoYield);
                     flags
                 },
                 &ctx,

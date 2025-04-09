@@ -67,10 +67,10 @@ jobs:
       PGCOPYDB_LIB_PATH: /pgcopydb/lib
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: neondatabase/build-tools:pinned-bookworm
+      image: ghcr.io/neondatabase/build-tools:pinned-bookworm
       credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       options: --init
     timeout-minutes: 1440
 

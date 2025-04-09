@@ -176,6 +176,39 @@ impl LsnLease {
     }
 }
 
+/// Controls the detach ancestor behavior.
+/// - When set to `NoAncestorAndReparent`, we will only detach a branch if its ancestor is a root branch. It will automatically reparent any children of the ancestor before and at the branch point.
+/// - When set to `MultiLevelAndNoReparent`, we will detach a branch from multiple levels of ancestors, and no reparenting will happen at all.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum DetachBehavior {
+    #[default]
+    NoAncestorAndReparent,
+    MultiLevelAndNoReparent,
+}
+
+impl std::str::FromStr for DetachBehavior {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "no_ancestor_and_reparent" => Ok(DetachBehavior::NoAncestorAndReparent),
+            "multi_level_and_no_reparent" => Ok(DetachBehavior::MultiLevelAndNoReparent),
+            "v1" => Ok(DetachBehavior::NoAncestorAndReparent),
+            "v2" => Ok(DetachBehavior::MultiLevelAndNoReparent),
+            _ => Err("cannot parse detach behavior"),
+        }
+    }
+}
+
+impl std::fmt::Display for DetachBehavior {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DetachBehavior::NoAncestorAndReparent => write!(f, "no_ancestor_and_reparent"),
+            DetachBehavior::MultiLevelAndNoReparent => write!(f, "multi_level_and_no_reparent"),
+        }
+    }
+}
+
 /// The only [`TenantState`] variants we could be `TenantState::Activating` from.
 ///
 /// XXX: We used to have more variants here, but now it's just one, which makes this rather
@@ -1225,9 +1258,10 @@ pub struct TimelineInfo {
     pub last_record_lsn: Lsn,
     pub prev_record_lsn: Option<Lsn>,
 
-    /// Legacy field for compat with control plane.  Synonym of `min_readable_lsn`.
-    /// TODO: remove once control plane no longer reads it.
-    pub latest_gc_cutoff_lsn: Lsn,
+    /// Legacy field, retained for one version to enable old storage controller to
+    /// decode (it was a mandatory field).
+    #[serde(default, rename = "latest_gc_cutoff_lsn")]
+    pub _unused: Lsn,
 
     /// The LSN up to which GC has advanced: older data may still exist but it is not available for clients.
     /// This LSN is not suitable for deciding where to create branches etc: use [`TimelineInfo::min_readable_lsn`] instead,

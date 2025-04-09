@@ -77,7 +77,7 @@
 # build_and_test.yml github workflow for how that's done.
 
 ARG PG_VERSION
-ARG REPOSITORY=neondatabase
+ARG REPOSITORY=ghcr.io/neondatabase
 ARG IMAGE=build-tools
 ARG TAG=pinned
 ARG BUILD_TAG
@@ -1735,6 +1735,8 @@ RUN set -e \
         libevent-dev \
         libtool \
         pkg-config \
+        libcurl4-openssl-dev \
+        libssl-dev \
     && apt clean && rm -rf /var/lib/apt/lists/*
 
 # Use `dist_man_MANS=` to skip manpage generation (which requires python3/pandoc)
@@ -1743,7 +1745,7 @@ RUN set -e \
     && git clone --recurse-submodules --depth 1 --branch ${PGBOUNCER_TAG} https://github.com/pgbouncer/pgbouncer.git pgbouncer \
     && cd pgbouncer \
     && ./autogen.sh \
-    && ./configure --prefix=/usr/local/pgbouncer --without-openssl \
+    && ./configure --prefix=/usr/local/pgbouncer \
     && make -j $(nproc) dist_man_MANS= \
     && make install dist_man_MANS=
 

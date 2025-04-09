@@ -57,7 +57,8 @@ async fn ingest(
 
     tokio::fs::create_dir_all(conf.timeline_path(&tenant_shard_id, &timeline_id)).await?;
 
-    let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
+    let ctx =
+        RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error).with_scope_debug_tools();
 
     let gate = utils::sync::gate::Gate::default();
 

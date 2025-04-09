@@ -967,10 +967,26 @@ impl Persistence {
         &self,
         split_tenant_id: TenantId,
         old_shard_count: ShardCount,
+        new_shard_count: ShardCount,
     ) -> DatabaseResult<()> {
         use crate::schema::tenant_shards::dsl::*;
         self.with_measured_conn(DatabaseOperation::CompleteShardSplit, move |conn| {
             Box::pin(async move {
+                // Sanity: child shards must still exist, as we're deleting parent shards
+                let child_shards_query = tenant_shards
+                    .filter(tenant_id.eq(split_tenant_id.to_string()))
+                    .filter(shard_count.eq(new_shard_count.literal() as i32));
+                let child_shards = child_shards_query
+                    .load::<TenantShardPersistence>(conn)
+                    .await?;
+                if child_shards.len() != new_shard_count.count() as usize {
+                    return Err(DatabaseError::Logical(format!(
+                        "Unexpected child shard count {} while completing split to \
+                            count {new_shard_count:?} on tenant {split_tenant_id}",
+                        child_shards.len()
+                    )));
+                }
+
                 // Drop parent shards
                 diesel::delete(tenant_shards)
                     .filter(tenant_id.eq(split_tenant_id.to_string()))
@@ -1613,23 +1629,49 @@ pub(crate) struct TenantShardPersistence {
 }
 
 impl TenantShardPersistence {
+    fn get_shard_count(&self) -> Result<ShardCount, ShardConfigError> {
+        self.shard_count
+            .try_into()
+            .map(ShardCount)
+            .map_err(|_| ShardConfigError::InvalidCount)
+    }
+
+    fn get_shard_number(&self) -> Result<ShardNumber, ShardConfigError> {
+        self.shard_number
+            .try_into()
+            .map(ShardNumber)
+            .map_err(|_| ShardConfigError::InvalidNumber)
+    }
+
+    fn get_stripe_size(&self) -> Result<ShardStripeSize, ShardConfigError> {
+        self.shard_stripe_size
+            .try_into()
+            .map(ShardStripeSize)
+            .map_err(|_| ShardConfigError::InvalidStripeSize)
+    }
+
     pub(crate) fn get_shard_identity(&self) -> Result<ShardIdentity, ShardConfigError> {
         if self.shard_count == 0 {
-            Ok(ShardIdentity::unsharded())
+            // NB: carry over the stripe size from the persisted record, to avoid consistency check
+            // failures if the persisted value differs from the default stripe size. The stripe size
+            // doesn't really matter for unsharded tenants anyway.
+            Ok(ShardIdentity::unsharded_with_stripe_size(
+                self.get_stripe_size()?,
+            ))
         } else {
             Ok(ShardIdentity::new(
-                ShardNumber(self.shard_number as u8),
-                ShardCount::new(self.shard_count as u8),
-                ShardStripeSize(self.shard_stripe_size as u32),
+                self.get_shard_number()?,
+                self.get_shard_count()?,
+                self.get_stripe_size()?,
             )?)
         }
     }
 
-    pub(crate) fn get_tenant_shard_id(&self) -> Result<TenantShardId, hex::FromHexError> {
+    pub(crate) fn get_tenant_shard_id(&self) -> anyhow::Result<TenantShardId> {
         Ok(TenantShardId {
             tenant_id: TenantId::from_str(self.tenant_id.as_str())?,
-            shard_number: ShardNumber(self.shard_number as u8),
-            shard_count: ShardCount::new(self.shard_count as u8),
+            shard_number: self.get_shard_number()?,
+            shard_count: self.get_shard_count()?,
         })
     }
 }

@@ -28,9 +28,9 @@ use hyper::{Body, Request, Response, StatusCode, Uri, header};
 use metrics::launch_timestamp::LaunchTimestamp;
 use pageserver_api::models::virtual_file::IoMode;
 use pageserver_api::models::{
-    DownloadRemoteLayersTaskSpawnRequest, IngestAuxFilesRequest, ListAuxFilesRequest,
-    LocationConfig, LocationConfigListResponse, LocationConfigMode, LsnLease, LsnLeaseRequest,
-    OffloadedTimelineInfo, PageTraceEvent, ShardParameters, StatusResponse,
+    DetachBehavior, DownloadRemoteLayersTaskSpawnRequest, IngestAuxFilesRequest,
+    ListAuxFilesRequest, LocationConfig, LocationConfigListResponse, LocationConfigMode, LsnLease,
+    LsnLeaseRequest, OffloadedTimelineInfo, PageTraceEvent, ShardParameters, StatusResponse,
     TenantConfigPatchRequest, TenantConfigRequest, TenantDetails, TenantInfo,
     TenantLocationConfigRequest, TenantLocationConfigResponse, TenantScanRemoteStorageResponse,
     TenantScanRemoteStorageShard, TenantShardLocation, TenantShardSplitRequest,
@@ -460,10 +460,7 @@ async fn build_timeline_info_common(
         initdb_lsn,
         last_record_lsn,
         prev_record_lsn: Some(timeline.get_prev_record_lsn()),
-        // Externally, expose the lowest LSN that can be used to create a branch as the "GC cutoff", although internally
-        // we distinguish between the "planned" GC cutoff (PITR point) and the "latest" GC cutoff (where we
-        // actually trimmed data to), which can pass each other when PITR is changed.
-        latest_gc_cutoff_lsn: min_readable_lsn,
+        _unused: Default::default(), // Unused, for legacy decode only
         min_readable_lsn,
         applied_gc_cutoff_lsn: *timeline.get_applied_gc_cutoff_lsn(),
         current_logical_size: current_logical_size.size_dont_care_about_accuracy(),
@@ -2394,6 +2391,7 @@ async fn timeline_checkpoint_handler(
     let state = get_state(&request);
 
     let mut flags = EnumSet::empty();
+    flags |= CompactFlags::NoYield; // run compaction to completion
     if Some(true) == parse_query_param::<_, bool>(&request, "force_l0_compaction")? {
         flags |= CompactFlags::ForceL0Compaction;
     }
@@ -2508,6 +2506,9 @@ async fn timeline_detach_ancestor_handler(
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let behavior: Option<DetachBehavior> = parse_query_param(&request, "detach_behavior")?;
+
+    let behavior = behavior.unwrap_or_default();
 
     let span = tracing::info_span!("detach_ancestor", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id);
 
@@ -2557,7 +2558,7 @@ async fn timeline_detach_ancestor_handler(
         let ctx = &ctx.with_scope_timeline(&timeline);
 
         let progress = timeline
-            .prepare_to_detach_from_ancestor(&tenant, options, ctx)
+            .prepare_to_detach_from_ancestor(&tenant, options, behavior, ctx)
             .await?;
 
         // uncomment to allow early as possible Tenant::drop
@@ -2572,6 +2573,7 @@ async fn timeline_detach_ancestor_handler(
                         tenant_shard_id,
                         timeline_id,
                         prepared,
+                        behavior,
                         attempt,
                         ctx,
                     )

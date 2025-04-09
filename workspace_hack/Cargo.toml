@@ -16,6 +16,7 @@ license.workspace = true
 ### BEGIN HAKARI SECTION
 [dependencies]
 ahash = { version = "0.8" }
+anstream = { version = "0.6" }
 anyhow = { version = "1", features = ["backtrace"] }
 base64-594e8ee84c453af0 = { package = "base64", version = "0.13", features = ["alloc"] }
 base64-647d43efb71741da = { package = "base64", version = "0.21" }
@@ -25,11 +26,16 @@ camino = { version = "1", default-features = false, features = ["serde1"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "wasmbind"] }
 clap = { version = "4", features = ["derive", "env", "string"] }
 clap_builder = { version = "4", default-features = false, features = ["color", "env", "help", "std", "string", "suggestions", "usage"] }
+const-oid = { version = "0.9", default-features = false, features = ["db", "std"] }
 crypto-bigint = { version = "0.5", features = ["generic-array", "zeroize"] }
-der = { version = "0.7", default-features = false, features = ["oid", "pem", "std"] }
+der = { version = "0.7", default-features = false, features = ["derive", "flagset", "oid", "pem", "std"] }
 deranged = { version = "0.3", default-features = false, features = ["powerfmt", "serde", "std"] }
 digest = { version = "0.10", features = ["mac", "oid", "std"] }
+ecdsa = { version = "0.16", features = ["pem", "signing", "std", "verifying"] }
 either = { version = "1" }
+elliptic-curve = { version = "0.13", default-features = false, features = ["digest", "hazmat", "jwk", "pem", "std"] }
+env_filter = { version = "0.1", default-features = false, features = ["regex"] }
+env_logger = { version = "0.11" }
 fail = { version = "0.5", default-features = false, features = ["failpoints"] }
 form_urlencoded = { version = "1" }
 futures-channel = { version = "0.3", features = ["sink"] }
@@ -47,8 +53,7 @@ hyper-dff4ba8e3ae991db = { package = "hyper", version = "1", features = ["full"]
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "server", "service"] }
 indexmap-dff4ba8e3ae991db = { package = "indexmap", version = "1", default-features = false, features = ["std"] }
 indexmap-f595c2ba2a3f28df = { package = "indexmap", version = "2", features = ["serde"] }
-itertools-5ef9efb8ec2df382 = { package = "itertools", version = "0.12" }
-itertools-93f6ce9d446188ac = { package = "itertools", version = "0.10" }
+itertools = { version = "0.12" }
 lazy_static = { version = "1", default-features = false, features = ["spin_no_std"] }
 libc = { version = "0.2", features = ["extra_traits", "use_std"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
@@ -56,13 +61,14 @@ memchr = { version = "2" }
 nix = { version = "0.26" }
 nom = { version = "7" }
 num = { version = "0.4" }
-num-bigint = { version = "0.4" }
+num-bigint = { version = "0.4", default-features = false, features = ["std"] }
 num-complex = { version = "0.4", default-features = false, features = ["std"] }
 num-integer = { version = "0.1", features = ["i128"] }
 num-iter = { version = "0.1", default-features = false, features = ["i128", "std"] }
 num-rational = { version = "0.4", default-features = false, features = ["num-bigint-std", "std"] }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 once_cell = { version = "1" }
+p256 = { version = "0.13", features = ["jwk"] }
 parquet = { version = "53", default-features = false, features = ["zstd"] }
 prost = { version = "0.13", features = ["no-recursion-limit", "prost-derive"] }
 rand = { version = "0.8", features = ["small_rng"] }
@@ -72,6 +78,7 @@ regex-syntax = { version = "0.8" }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "rustls-tls-native-roots", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 scopeguard = { version = "1" }
+sec1 = { version = "0.7", features = ["pem", "serde", "std", "subtle"] }
 serde = { version = "1", features = ["alloc", "derive"] }
 serde_json = { version = "1", features = ["alloc", "raw_value"] }
 sha2 = { version = "0.10", features = ["asm", "oid"] }
@@ -108,21 +115,19 @@ anyhow = { version = "1", features = ["backtrace"] }
 bytes = { version = "1", features = ["serde"] }
 cc = { version = "1", default-features = false, features = ["parallel"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "wasmbind"] }
-displaydoc = { version = "0.2" }
 either = { version = "1" }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hashbrown = { version = "0.14", features = ["raw"] }
 indexmap-dff4ba8e3ae991db = { package = "indexmap", version = "1", default-features = false, features = ["std"] }
 indexmap-f595c2ba2a3f28df = { package = "indexmap", version = "2", features = ["serde"] }
-itertools-5ef9efb8ec2df382 = { package = "itertools", version = "0.12" }
-itertools-93f6ce9d446188ac = { package = "itertools", version = "0.10" }
+itertools = { version = "0.12" }
 libc = { version = "0.2", features = ["extra_traits", "use_std"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 memchr = { version = "2" }
 nom = { version = "7" }
 num = { version = "0.4" }
-num-bigint = { version = "0.4" }
+num-bigint = { version = "0.4", default-features = false, features = ["std"] }
 num-complex = { version = "0.4", default-features = false, features = ["std"] }
 num-integer = { version = "0.1", features = ["i128"] }
 num-iter = { version = "0.1", default-features = false, features = ["i128", "std"] }

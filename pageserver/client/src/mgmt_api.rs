@@ -7,7 +7,7 @@ use http_utils::error::HttpErrorBody;
 use pageserver_api::models::*;
 use pageserver_api::shard::TenantShardId;
 pub use reqwest::Body as ReqwestBody;
-use reqwest::{Certificate, IntoUrl, Method, StatusCode};
+use reqwest::{Certificate, IntoUrl, Method, StatusCode, Url};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
@@ -458,13 +458,21 @@ impl Client {
         &self,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
+        behavior: Option<DetachBehavior>,
     ) -> Result<AncestorDetached> {
         let uri = format!(
             "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/detach_ancestor",
             self.mgmt_api_endpoint
         );
+        let mut uri = Url::parse(&uri)
+            .map_err(|e| Error::ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
 
-        self.request(Method::PUT, &uri, ())
+        if let Some(behavior) = behavior {
+            uri.query_pairs_mut()
+                .append_pair("detach_behavior", &behavior.to_string());
+        }
+
+        self.request(Method::PUT, uri, ())
             .await?
             .json()
             .await

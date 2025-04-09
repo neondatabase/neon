@@ -30,7 +30,6 @@ use pageserver::{
 };
 use postgres_backend::AuthType;
 use remote_storage::GenericRemoteStorage;
-use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::signal::unix::SignalKind;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -111,6 +110,7 @@ fn main() -> anyhow::Result<()> {
     } else {
         TracingErrorLayerEnablement::Disabled
     };
+
     logging::init(
         conf.log_format,
         tracing_error_layer_enablement,
@@ -621,8 +621,8 @@ fn start_pageserver(
 
         let https_task = match https_listener {
             Some(https_listener) => {
-                let certs = load_certs(&conf.ssl_cert_file)?;
-                let key = load_private_key(&conf.ssl_key_file)?;
+                let certs = http_utils::tls_certs::load_cert_chain(&conf.ssl_cert_file)?;
+                let key = http_utils::tls_certs::load_private_key(&conf.ssl_key_file)?;
 
                 let server_config = rustls::ServerConfig::builder()
                     .with_no_client_auth()
@@ -732,25 +732,6 @@ fn start_pageserver(
         .await;
         unreachable!();
     })
-}
-
-fn load_certs(filename: &Utf8Path) -> std::io::Result<Vec<CertificateDer<'static>>> {
-    let file = std::fs::File::open(filename)?;
-    let mut reader = std::io::BufReader::new(file);
-
-    rustls_pemfile::certs(&mut reader).collect()
-}
-
-fn load_private_key(filename: &Utf8Path) -> anyhow::Result<PrivateKeyDer<'static>> {
-    let file = std::fs::File::open(filename)?;
-    let mut reader = std::io::BufReader::new(file);
-
-    let key = rustls_pemfile::private_key(&mut reader)?;
-
-    key.ok_or(anyhow::anyhow!(
-        "no private key found in {}",
-        filename.as_str(),
-    ))
 }
 
 async fn create_remote_storage_client(

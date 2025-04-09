@@ -76,6 +76,10 @@
 #include "access/xlogrecovery.h"
 #endif
 
+#if PG_VERSION_NUM < 160000
+typedef PGAlignedBlock PGIOAlignedBlock;
+#endif
+
 /*
  * If DEBUG_COMPARE_LOCAL is defined, we pass through all the SMGR API
  * calls to md.c, and *also* do the calls to the Page Server. On every
@@ -1803,7 +1807,7 @@ static XLogRecPtr
 log_newpage_copy(NRelFileInfo * rinfo, ForkNumber forkNum, BlockNumber blkno,
 				 Page page, bool page_std)
 {
-	PGAlignedBlock copied_buffer;
+	PGIOAlignedBlock copied_buffer;
 
 	memcpy(copied_buffer.data, page, BLCKSZ);
 	return log_newpage(rinfo, forkNum, blkno, copied_buffer.data, page_std);
@@ -1820,7 +1824,7 @@ static XLogRecPtr
 log_newpages_copy(NRelFileInfo * rinfo, ForkNumber forkNum, BlockNumber blkno,
 				  BlockNumber nblocks, Page *pages, bool page_std)
 {
-	PGAlignedBlock copied_buffer[XLR_MAX_BLOCK_ID];
+	PGIOAlignedBlock copied_buffer[XLR_MAX_BLOCK_ID];
 	BlockNumber	blknos[XLR_MAX_BLOCK_ID];
 	Page		pageptrs[XLR_MAX_BLOCK_ID];
 	int			nregistered = 0;
@@ -1858,7 +1862,7 @@ log_newpages_copy(NRelFileInfo * rinfo, ForkNumber forkNum, BlockNumber blkno,
 static bool
 PageIsEmptyHeapPage(char *buffer)
 {
-	PGAlignedBlock empty_page;
+	PGIOAlignedBlock empty_page;
 
 	PageInit((Page) empty_page.data, BLCKSZ, 0);
 
@@ -2774,6 +2778,9 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
 			mdextend(reln, forkNum, blkno, buffer, skipFsync);
+			/* Update LFC in case of unlogged index build */
+			if (reln == unlogged_build_rel && unlogged_build_phase == UNLOGGED_BUILD_PHASE_2)
+				lfc_write(InfoFromSMgrRel(reln), forkNum, blkno, buffer);
 			return;
 
 		default:
@@ -2847,7 +2854,7 @@ static void
 neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 				int nblocks, bool skipFsync)
 {
-	const PGAlignedBlock buffer = {0};
+	const PGIOAlignedBlock buffer = {0};
 	int			remblocks = nblocks;
 	XLogRecPtr	lsn = 0;
 
@@ -2862,6 +2869,14 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
 			mdzeroextend(reln, forkNum, blocknum, nblocks, skipFsync);
+			/* Update LFC in case of unlogged index build */
+			if (reln == unlogged_build_rel && unlogged_build_phase == UNLOGGED_BUILD_PHASE_2)
+			{
+				for (int i = 0; i < nblocks; i++)
+				{
+					lfc_write(InfoFromSMgrRel(reln), forkNum, blocknum + i, buffer.data);
+				}
+			}
 			return;
 
 		default:
@@ -2893,6 +2908,11 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 				 errmsg(NEON_TAG "cannot extend file \"%s\" beyond %u blocks",
 						relpath(reln->smgr_rlocator, forkNum),
 						InvalidBlockNumber)));
+
+#ifdef DEBUG_COMPARE_LOCAL
+	if (IS_LOCAL_REL(reln))
+		mdzeroextend(reln, forkNum, blocknum, nblocks, skipFsync);
+#endif
 
 	/* Don't log any pages if we're not allowed to do so. */
 	if (!XLogInsertAllowed())
@@ -3389,15 +3409,16 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 	if (forkNum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
 	{
 		char		pageserver_masked[BLCKSZ];
-		char		mdbuf[BLCKSZ];
-		char		mdbuf_masked[BLCKSZ];
+		PGIOAlignedBlock mdbuf;
+		PGIOAlignedBlock mdbuf_masked;
+		XLogRecPtr  request_lsn = request_lsns.request_lsn;
 
-		mdread(reln, forkNum, blkno, mdbuf);
+		mdread(reln, forkNum, blkno, mdbuf.data);
 
 		memcpy(pageserver_masked, buffer, BLCKSZ);
-		memcpy(mdbuf_masked, mdbuf, BLCKSZ);
+		memcpy(mdbuf_masked.data, mdbuf.data, BLCKSZ);
 
-		if (PageIsNew((Page) mdbuf))
+		if (PageIsNew((Page) mdbuf.data))
 		{
 			if (!PageIsNew((Page) pageserver_masked))
 			{
@@ -3416,41 +3437,41 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 				 RelFileInfoFmt(InfoFromSMgrRel(reln)),
 				 forkNum,
 				 (uint32) (request_lsn >> 32), (uint32) request_lsn,
-				 hexdump_page(mdbuf));
+				 hexdump_page(mdbuf.data));
 		}
-		else if (PageGetSpecialSize(mdbuf) == 0)
+		else if (PageGetSpecialSize(mdbuf.data) == 0)
 		{
 			/* assume heap */
-			RmgrTable[RM_HEAP_ID].rm_mask(mdbuf_masked, blkno);
+			RmgrTable[RM_HEAP_ID].rm_mask(mdbuf_masked.data, blkno);
 			RmgrTable[RM_HEAP_ID].rm_mask(pageserver_masked, blkno);
 
-			if (memcmp(mdbuf_masked, pageserver_masked, BLCKSZ) != 0)
+			if (memcmp(mdbuf_masked.data, pageserver_masked, BLCKSZ) != 0)
 			{
 				neon_log(PANIC, "heap buffers differ at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n------ MD ------\n%s\n------ Page Server ------\n%s\n",
 					 blkno,
 					 RelFileInfoFmt(InfoFromSMgrRel(reln)),
 					 forkNum,
 					 (uint32) (request_lsn >> 32), (uint32) request_lsn,
-					 hexdump_page(mdbuf_masked),
+					 hexdump_page(mdbuf_masked.data),
 					 hexdump_page(pageserver_masked));
 			}
 		}
-		else if (PageGetSpecialSize(mdbuf) == MAXALIGN(sizeof(BTPageOpaqueData)))
+		else if (PageGetSpecialSize(mdbuf.data) == MAXALIGN(sizeof(BTPageOpaqueData)))
 		{
-			if (((BTPageOpaqueData *) PageGetSpecialPointer(mdbuf))->btpo_cycleid < MAX_BT_CYCLE_ID)
+			if (((BTPageOpaqueData *) PageGetSpecialPointer(mdbuf.data))->btpo_cycleid < MAX_BT_CYCLE_ID)
 			{
 				/* assume btree */
-				RmgrTable[RM_BTREE_ID].rm_mask(mdbuf_masked, blkno);
+				RmgrTable[RM_BTREE_ID].rm_mask(mdbuf_masked.data, blkno);
 				RmgrTable[RM_BTREE_ID].rm_mask(pageserver_masked, blkno);
 
-				if (memcmp(mdbuf_masked, pageserver_masked, BLCKSZ) != 0)
+				if (memcmp(mdbuf_masked.data, pageserver_masked, BLCKSZ) != 0)
 				{
 					neon_log(PANIC, "btree buffers differ at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n------ MD ------\n%s\n------ Page Server ------\n%s\n",
 						 blkno,
 						 RelFileInfoFmt(InfoFromSMgrRel(reln)),
 						 forkNum,
 						 (uint32) (request_lsn >> 32), (uint32) request_lsn,
-						 hexdump_page(mdbuf_masked),
+						 hexdump_page(mdbuf_masked.data),
 						 hexdump_page(pageserver_masked));
 				}
 			}
@@ -3542,77 +3563,85 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	prefetch_pump_state(false);
 
 #ifdef DEBUG_COMPARE_LOCAL
-	if (forkNum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
+	if (forknum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
 	{
 		char		pageserver_masked[BLCKSZ];
-		char		mdbuf[BLCKSZ];
-		char		mdbuf_masked[BLCKSZ];
+		PGIOAlignedBlock mdbuf;
+		PGIOAlignedBlock mdbuf_masked;
+		XLogRecPtr  request_lsn = request_lsns->request_lsn;
 
 		for (int i = 0; i < nblocks; i++)
 		{
+			BlockNumber blkno = blocknum + i;
+			if (!BITMAP_ISSET(read, i))
+				continue;
+
 #if PG_MAJORVERSION_NUM >= 17
-			mdreadv(reln, forkNum, blkno + i, &mdbuf, 1);
+			{
+				void* mdbuffers[1] = { mdbuf.data };
+				mdreadv(reln, forknum, blkno, mdbuffers, 1);
+			}
 #else
-			mdread(reln, forkNum, blkno + i, mdbuf);
+			mdread(reln, forknum, blkno, mdbuf.data);
 #endif
 
-			memcpy(pageserver_masked, buffer, BLCKSZ);
-			memcpy(mdbuf_masked, mdbuf, BLCKSZ);
+			memcpy(pageserver_masked, buffers[i], BLCKSZ);
+			memcpy(mdbuf_masked.data, mdbuf.data, BLCKSZ);
 
-			if (PageIsNew((Page) mdbuf))
+			if (PageIsNew((Page) mdbuf.data))
 			{
 				if (!PageIsNew((Page) pageserver_masked))
 				{
 					neon_log(PANIC, "page is new in MD but not in Page Server at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n%s\n",
 						 blkno,
 						 RelFileInfoFmt(InfoFromSMgrRel(reln)),
-						 forkNum,
+						 forknum,
 						 (uint32) (request_lsn >> 32), (uint32) request_lsn,
-						 hexdump_page(buffer));
+						 hexdump_page(buffers[i]));
 				}
 			}
-			else if (PageIsNew((Page) buffer))
+			else if (PageIsNew((Page) buffers[i]))
 			{
 				neon_log(PANIC, "page is new in Page Server but not in MD at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n%s\n",
 					 blkno,
 					 RelFileInfoFmt(InfoFromSMgrRel(reln)),
-					 forkNum,
+					 forknum,
 					 (uint32) (request_lsn >> 32), (uint32) request_lsn,
-					 hexdump_page(mdbuf));
+					 hexdump_page(mdbuf.data));
 			}
-			else if (PageGetSpecialSize(mdbuf) == 0)
+			else if (PageGetSpecialSize(mdbuf.data) == 0)
 			{
 				/* assume heap */
-				RmgrTable[RM_HEAP_ID].rm_mask(mdbuf_masked, blkno);
+				RmgrTable[RM_HEAP_ID].rm_mask(mdbuf_masked.data, blkno);
 				RmgrTable[RM_HEAP_ID].rm_mask(pageserver_masked, blkno);
 
-				if (memcmp(mdbuf_masked, pageserver_masked, BLCKSZ) != 0)
+				if (memcmp(mdbuf_masked.data, pageserver_masked, BLCKSZ) != 0)
 				{
 					neon_log(PANIC, "heap buffers differ at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n------ MD ------\n%s\n------ Page Server ------\n%s\n",
 						 blkno,
 						 RelFileInfoFmt(InfoFromSMgrRel(reln)),
-						 forkNum,
+						 forknum,
 						 (uint32) (request_lsn >> 32), (uint32) request_lsn,
-						 hexdump_page(mdbuf_masked),
+						 hexdump_page(mdbuf_masked.data),
 						 hexdump_page(pageserver_masked));
 				}
 			}
-			else if (PageGetSpecialSize(mdbuf) == MAXALIGN(sizeof(BTPageOpaqueData)))
+			else if (PageGetSpecialSize(mdbuf.data) == MAXALIGN(sizeof(BTPageOpaqueData)))
 			{
-				if (((BTPageOpaqueData *) PageGetSpecialPointer(mdbuf))->btpo_cycleid < MAX_BT_CYCLE_ID)
+				if (((BTPageOpaqueData *) PageGetSpecialPointer(mdbuf.data))->btpo_cycleid < MAX_BT_CYCLE_ID)
 				{
 					/* assume btree */
-					RmgrTable[RM_BTREE_ID].rm_mask(mdbuf_masked, blkno);
+					RmgrTable[RM_BTREE_ID].rm_mask(mdbuf_masked.data, blkno);
 					RmgrTable[RM_BTREE_ID].rm_mask(pageserver_masked, blkno);
 	
-					if (memcmp(mdbuf_masked, pageserver_masked, BLCKSZ) != 0)
+					if (memcmp(mdbuf_masked.data, pageserver_masked, BLCKSZ) != 0)
 					{
 						neon_log(PANIC, "btree buffers differ at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n------ MD ------\n%s\n------ Page Server ------\n%s\n",
 							 blkno,
 							 RelFileInfoFmt(InfoFromSMgrRel(reln)),
-							 forkNum,
+							 forknum,
 							 (uint32) (request_lsn >> 32), (uint32) request_lsn,
-							 hexdump_page(mdbuf_masked),
+							 hexdump_page(mdbuf_masked.data),
 							 hexdump_page(pageserver_masked));
 					}
 				}
@@ -3664,6 +3693,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
+#ifndef DEBUG_COMPARE_LOCAL
 			/* This is a bit tricky. Check if the relation exists locally */
 			if (mdexists(reln, forknum))
 			{
@@ -3682,6 +3712,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 				 */
 				return;
 			}
+#endif
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
@@ -3694,6 +3725,9 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 			#else
 			mdwrite(reln, forknum, blocknum, buffer, skipFsync);
 			#endif
+			/* Update LFC in case of unlogged index build */
+			if (reln == unlogged_build_rel && unlogged_build_phase == UNLOGGED_BUILD_PHASE_2)
+				lfc_write(InfoFromSMgrRel(reln), forknum, blocknum, buffer);
 			return;
 		default:
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
@@ -3732,6 +3766,7 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
+#ifndef DEBUG_COMPARE_LOCAL
 			/* This is a bit tricky. Check if the relation exists locally */
 			if (mdexists(reln, forknum))
 			{
@@ -3747,6 +3782,7 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 				 */
 				return;
 			}
+#endif
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
@@ -3755,6 +3791,9 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
 			mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
+			/* Update LFC in case of unlogged index build */
+			if (reln == unlogged_build_rel && unlogged_build_phase == UNLOGGED_BUILD_PHASE_2)
+				lfc_writev(InfoFromSMgrRel(reln), forknum, blkno, buffers, nblocks);
 			return;
 		default:
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
@@ -3768,7 +3807,7 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
-		mdwritev(reln, forknum, blocknum, &buffer, 1, skipFsync);
+		mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
 #endif
 }
 
@@ -4154,8 +4193,10 @@ neon_start_unlogged_build(SMgrRelation reln)
 	 * FIXME: should we pass isRedo true to create the tablespace dir if it
 	 * doesn't exist? Is it needed?
 	 */
-	if (!IsParallelWorker())
+#ifndef DEBUG_COMPARE_LOCAL
+ 	if (!IsParallelWorker())
 		mdcreate(reln, MAIN_FORKNUM, false);
+#endif
 }
 
 /*
@@ -4230,8 +4271,10 @@ neon_end_unlogged_build(SMgrRelation reln)
 
 			forget_cached_relsize(InfoFromNInfoB(rinfob), forknum);
 			mdclose(reln, forknum);
+#ifndef DEBUG_COMPARE_LOCAL
 			/* use isRedo == true, so that we drop it immediately */
 			mdunlink(rinfob, forknum, true);
+#endif
 		}
 	}
 
