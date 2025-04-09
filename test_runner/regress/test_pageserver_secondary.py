@@ -242,7 +242,7 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
             pageserver.tenant_location_configure(tenant_id, location_conf)
             last_state[pageserver.id] = (mode, generation)
 
-            # It's only valid to read from the last generation. Newer generations may yank layer
+            # It's only valid to connect to the last generation. Newer generations may yank layer
             # files used in older generations.
             last_generation = max(
                 [ s[1] for s in last_state.values() if s[1] is not None ],
