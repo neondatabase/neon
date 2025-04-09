@@ -464,7 +464,7 @@ _PG_init(void)
 	pg_init_communicator();
 	if (neon_enable_new_communicator)
 		pg_init_communicator_new();
-	
+
 	Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 
 	InitUnstableExtensionsSupport();

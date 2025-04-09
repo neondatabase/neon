@@ -1,5 +1,5 @@
 //!
-//! The Compute Service listens for compute connections, and server requests, like
+//! The Compute Service listens for compute connections, and serves requests like
 //! the GetPage@LSN requests.
 //!
 //! We support two protocols:
@@ -9,14 +9,13 @@
 //!
 //! 2. gRPC based protocol. See compute_service_grpc.rs.
 //!
-//! To make the transition easier, without having to open up new
-//! firewall ports etc, both protocols are server on the same port, to
-//! make the transition smooth. When a new TCP connection is accepted,
-//! we peek at the first few bytes incoming from the client to determine
-//! which protocol it speaks.
+//! To make the transition smooth, without having to open up new firewall ports
+//! etc, both protocols are served on the same port. When a new TCP connection
+//! is accepted, we peek at the first few bytes incoming from the client to
+//! determine which protocol it speaks.
 //!
-//! TODO: This gets easier once we drop the legacy protocol
-//! support. Or once if we open a separate port for them.
+//! TODO: This gets easier once we drop the legacy protocol support. Or if we
+//! open a separate port for them.
 
 use std::sync::Arc;
 
@@ -95,8 +94,8 @@ pub fn spawn(
     );
 
     let task = COMPUTE_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
-        "libpq listener",
-        libpq_listener_main(
+        "compute connection listener",
+        compute_connection_listener_main(
             conf,
             tenant_manager,
             pg_auth,
@@ -129,7 +128,7 @@ impl Listener {
 /// open connections.
 ///
 #[allow(clippy::too_many_arguments)]
-pub async fn libpq_listener_main(
+pub async fn compute_connection_listener_main(
     conf: &'static PageServerConf,
     tenant_manager: Arc<TenantManager>,
     auth: Option<Arc<SwappableJwtAuth>>,

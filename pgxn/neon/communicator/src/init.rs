@@ -36,8 +36,8 @@ pub extern "C" fn rcommunicator_shmem_size(max_backends: u32) -> u64 {
     size as u64
 }
 
-/// Initialize the shared memory segment. Return a backend-private struct which can be inherited by backend processes through fork
-///
+/// Initialize the shared memory segment. Returns a backend-private
+/// struct, which will be inherited by backend processes through fork
 #[unsafe(no_mangle)]
 pub extern "C" fn rcommunicator_shmem_init(
     submission_pipe_read_fd: c_int,

@@ -1,16 +1,21 @@
 //! Ground rules
 //! ------------
 //!
-//! This module is supposed to operate under normal Rust rules, and be
-//! independent of any of the C code. If you wanted to build another
-//! client application, separate from Postgres, you should be able to
-//! take this module and embed it in standalone Rust program.
+//! This module is indendend of any of the C code, and doesn't rely on
+//! any PostgreSQL facilities. You are free to use any Rust crates,
+//! Tokio, threads, you name it. If you wanted to build another client
+//! application, separate from Postgres, you should be able to take
+//! this module and embed it in standalone Rust program.
+//!
+//! The interface to this module is public CommunicatorProcess::process_*()
+//! functions. They are async, and may be called from multiple threads.
 
 use std::collections::HashMap;
 
 use http;
 use thiserror::Error;
 use tonic;
+use tonic::metadata::AsciiMetadataValue;
 
 use crate::neon_request::DbSizeRequest;
 
@@ -58,6 +63,7 @@ impl CommunicatorProcessor {
         }
     }
 
+    /// Process a request to get a database size.
     pub async fn process_dbsize_request(
         &self,
         request: &DbSizeRequest,
@@ -93,7 +99,7 @@ impl CommunicatorProcessor {
     }
 }
 
-use tonic::metadata::AsciiMetadataValue;
+/// Inject tenant_id, timeline_id and authentication token to all pageserver requests.
 struct AuthInterceptor {
     tenant_id: AsciiMetadataValue,
     timeline_id: AsciiMetadataValue,

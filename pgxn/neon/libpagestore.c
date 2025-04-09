@@ -274,6 +274,7 @@ AssignPageserverConnstring(const char *newval, void *extra)
 	}
 }
 
+/* Return a copy of the whole shard map from shared memory */
 void
 get_shard_map(char ***connstrs_p, shardno_t *num_shards_p)
 {
@@ -286,8 +287,6 @@ get_shard_map(char ***connstrs_p, shardno_t *num_shards_p)
 
 	buf = palloc(MAX_SHARDS*MAX_PAGESERVER_CONNSTRING_SIZE);
 	connstrs = palloc(sizeof(char *) * MAX_SHARDS);
-
-	elog(LOG, "XX: connstrs: %p", connstrs);
 
 	/*
 	 * Postmaster can update the shared memory values concurrently, in which

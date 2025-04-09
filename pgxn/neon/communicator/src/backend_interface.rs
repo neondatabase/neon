@@ -1,5 +1,5 @@
 //! This code runs in each backend process. That means that launching Rust threads, panicking
-//! etc. is frowned upon.
+//! etc. is forbidden!
 
 use crate::CommunicatorInitStruct;
 use crate::neon_request::NeonIOHandleState;
@@ -40,8 +40,8 @@ pub extern "C" fn rcommunicator_backend_init(
 /// Start a request. You can poll for its completion and get the result by
 /// calling bcomm_poll_dbsize_request_completion(). The communicator will wake
 /// us up by setting our process latch, so to wait for the completion, wait on
-/// the latch and call bcomm_poll_dbsize_request_completion() every the latch is
-/// set.
+/// the latch and call bcomm_poll_dbsize_request_completion() every time the
+/// latch is set.
 #[unsafe(no_mangle)]
 pub extern "C" fn bcomm_start_dbsize_request(
     bs: *mut CommunicatorBackendStruct,
@@ -64,6 +64,8 @@ pub extern "C" fn bcomm_start_dbsize_request(
     return request_idx;
 }
 
+/// Check if a request has completed. If yes, returns 0, and stores the result
+/// in *result_p. If the request is still being processe, returns -1.
 #[unsafe(no_mangle)]
 pub extern "C" fn bcomm_poll_dbsize_request_completion(
     bs: *mut CommunicatorBackendStruct,
@@ -85,8 +87,8 @@ pub extern "C" fn bcomm_poll_dbsize_request_completion(
 }
 
 impl CommunicatorBackendStruct {
-    /// Send a wakeup
-    pub fn submit_request(self: &CommunicatorBackendStruct, request_idx: i32) {
+    /// Send a wakeup to the communicator process
+    fn submit_request(self: &CommunicatorBackendStruct, request_idx: i32) {
         // wake up communicator by writing the idx to the submission pipe
         //
         // This can block, if the pipe is full. That should be very rare,

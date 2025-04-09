@@ -5,11 +5,6 @@
 //! - the per-backend glue code, which submits requests
 //!
 
-//! Components:
-//! - backend_queue
-//! - main loop that picks up tasks and executes them
-//!
-
 mod backend_interface;
 mod init;
 mod neon_request;

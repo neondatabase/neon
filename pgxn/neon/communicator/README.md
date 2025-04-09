@@ -1,8 +1,11 @@
 # Communicator
 
 This package provides the so-called "compute-pageserver communicator",
-or just "communicator in short. It runs in a PostgreSQL server, and
-consists of a few parts:
+or just "communicator" in short. It runs in a PostgreSQL server, as
+part of the neon extension, and handles the communication with the
+pageservers. On the PostgreSQL side, the glue code in pgxn/neon/ uses
+the communicator to implement the PostgreSQL Storage Manager (SMGR)
+interface.
 
 ## Design criteria
 

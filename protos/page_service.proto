@@ -1,4 +1,4 @@
-// Page service presented by pagserver, for computes
+// Page service presented by pageservers, for computes
 //
 // Each request must come with the following metadata:
 // - neon-tenant-id
