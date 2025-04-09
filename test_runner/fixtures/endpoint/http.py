@@ -53,6 +53,18 @@ class EndpointHttpClient(requests.Session):
         res.raise_for_status()
         return res.text
 
+    # Current compute status.
+    def status(self):
+        res = self.get(f"http://localhost:{self.external_port}/status")
+        res.raise_for_status()
+        return res.json()
+
+    # Compute startup-related metrics.
+    def metrics_json(self):
+        res = self.get(f"http://localhost:{self.external_port}/metrics.json")
+        res.raise_for_status()
+        return res.json()
+
     def configure_failpoints(self, *args: tuple[str, str]) -> None:
         body: list[dict[str, str]] = []
 

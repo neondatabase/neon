@@ -3,17 +3,16 @@
 //! Partially copied from pageserver client; some parts might be better to be
 //! united.
 
+use std::error::Error as _;
+
 use http_utils::error::HttpErrorBody;
 use reqwest::{IntoUrl, Method, StatusCode};
 use safekeeper_api::models::{
     PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization, TimelineCreateRequest,
     TimelineStatus,
 };
-use std::error::Error as _;
-use utils::{
-    id::{NodeId, TenantId, TimelineId},
-    logging::SecretString,
-};
+use utils::id::{NodeId, TenantId, TimelineId};
+use utils::logging::SecretString;
 
 #[derive(Debug, Clone)]
 pub struct Client {
@@ -38,6 +37,10 @@ pub enum Error {
 
     #[error("Cancelled")]
     Cancelled,
+
+    /// Failed to create client.
+    #[error("create client: {0}{}", .0.source().map(|e| format!(": {e}")).unwrap_or_default())]
+    CreateClient(reqwest::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -65,11 +68,7 @@ impl ResponseErrorMessageExt for reqwest::Response {
 }
 
 impl Client {
-    pub fn new(mgmt_api_endpoint: String, jwt: Option<SecretString>) -> Self {
-        Self::from_client(reqwest::Client::new(), mgmt_api_endpoint, jwt)
-    }
-
-    pub fn from_client(
+    pub fn new(
         client: reqwest::Client,
         mgmt_api_endpoint: String,
         jwt: Option<SecretString>,
@@ -173,12 +172,10 @@ impl Client {
         uri: U,
         body: B,
     ) -> Result<reqwest::Response> {
-        let req = self.client.request(method, uri);
-        let req = if let Some(value) = &self.authorization_header {
-            req.header(reqwest::header::AUTHORIZATION, value.get_contents())
-        } else {
-            req
-        };
+        let mut req = self.client.request(method, uri);
+        if let Some(value) = &self.authorization_header {
+            req = req.header(reqwest::header::AUTHORIZATION, value.get_contents())
+        }
         req.json(&body).send().await.map_err(Error::ReceiveBody)
     }
 }

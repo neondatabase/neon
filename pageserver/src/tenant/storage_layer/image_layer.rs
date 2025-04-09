@@ -208,7 +208,7 @@ impl ImageLayerInner {
             block_reader,
         );
 
-        tree_reader.dump().await?;
+        tree_reader.dump(ctx).await?;
 
         tree_reader
             .visit(

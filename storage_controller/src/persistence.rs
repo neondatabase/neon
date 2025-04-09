@@ -1,10 +1,15 @@
 pub(crate) mod split_state;
 use std::collections::HashMap;
+use std::io::Write;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use diesel::deserialize::{FromSql, FromSqlRow};
+use diesel::expression::AsExpression;
+use diesel::pg::Pg;
 use diesel::prelude::*;
+use diesel::serialize::{IsNull, ToSql};
 use diesel_async::async_connection_wrapper::AsyncConnectionWrapper;
 use diesel_async::pooled_connection::bb8::Pool;
 use diesel_async::pooled_connection::{AsyncDieselConnectionManager, ManagerConfig};
@@ -27,7 +32,8 @@ use rustls::crypto::ring;
 use scoped_futures::ScopedBoxFuture;
 use serde::{Deserialize, Serialize};
 use utils::generation::Generation;
-use utils::id::{NodeId, TenantId};
+use utils::id::{NodeId, TenantId, TimelineId};
+use utils::lsn::Lsn;
 
 use self::split_state::SplitState;
 use crate::metrics::{
@@ -115,6 +121,11 @@ pub(crate) enum DatabaseOperation {
     GetLeader,
     UpdateLeader,
     SetPreferredAzs,
+    InsertTimeline,
+    GetTimeline,
+    InsertTimelineReconcile,
+    RemoveTimelineReconcile,
+    ListTimelineReconcile,
 }
 
 #[must_use]
@@ -1274,6 +1285,166 @@ impl Persistence {
         })
         .await
     }
+
+    /// Persist timeline. Returns if the timeline was newly inserted. If it wasn't, we haven't done any writes.
+    pub(crate) async fn insert_timeline(&self, entry: TimelinePersistence) -> DatabaseResult<bool> {
+        use crate::schema::timelines;
+
+        let entry = &entry;
+        self.with_measured_conn(DatabaseOperation::InsertTimeline, move |conn| {
+            Box::pin(async move {
+                let inserted_updated = diesel::insert_into(timelines::table)
+                    .values(entry)
+                    .on_conflict((timelines::tenant_id, timelines::timeline_id))
+                    .do_nothing()
+                    .execute(conn)
+                    .await?;
+
+                match inserted_updated {
+                    0 => Ok(false),
+                    1 => Ok(true),
+                    _ => Err(DatabaseError::Logical(format!(
+                        "unexpected number of rows ({})",
+                        inserted_updated
+                    ))),
+                }
+            })
+        })
+        .await
+    }
+
+    /// Load timeline from db. Returns `None` if not present.
+    pub(crate) async fn get_timeline(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> DatabaseResult<Option<TimelinePersistence>> {
+        use crate::schema::timelines::dsl;
+
+        let tenant_id = &tenant_id;
+        let timeline_id = &timeline_id;
+        let timeline_from_db = self
+            .with_measured_conn(DatabaseOperation::GetTimeline, move |conn| {
+                Box::pin(async move {
+                    let mut from_db: Vec<TimelineFromDb> = dsl::timelines
+                        .filter(
+                            dsl::tenant_id
+                                .eq(&tenant_id.to_string())
+                                .and(dsl::timeline_id.eq(&timeline_id.to_string())),
+                        )
+                        .load(conn)
+                        .await?;
+                    if from_db.is_empty() {
+                        return Ok(None);
+                    }
+                    if from_db.len() != 1 {
+                        return Err(DatabaseError::Logical(format!(
+                            "unexpected number of rows ({})",
+                            from_db.len()
+                        )));
+                    }
+
+                    Ok(Some(from_db.pop().unwrap().into_persistence()))
+                })
+            })
+            .await?;
+
+        Ok(timeline_from_db)
+    }
+    /// Persist pending op. Returns if it was newly inserted. If it wasn't, we haven't done any writes.
+    pub(crate) async fn insert_pending_op(
+        &self,
+        entry: TimelinePendingOpPersistence,
+    ) -> DatabaseResult<bool> {
+        use crate::schema::safekeeper_timeline_pending_ops as skpo;
+        // This overrides the `filter` fn used in other functions, so contain the mayhem via a function-local use
+        use diesel::query_dsl::methods::FilterDsl;
+
+        let entry = &entry;
+        self.with_measured_conn(DatabaseOperation::InsertTimelineReconcile, move |conn| {
+            Box::pin(async move {
+                // For simplicity it makes sense to keep only the last operation
+                // per (tenant, timeline, sk) tuple: if we migrated a timeline
+                // from node and adding it back it is not necessary to remove
+                // data on it. Hence, generation is not part of primary key and
+                // we override any rows with lower generations here.
+                let inserted_updated = diesel::insert_into(skpo::table)
+                    .values(entry)
+                    .on_conflict((skpo::tenant_id, skpo::timeline_id, skpo::sk_id))
+                    .do_update()
+                    .set(entry)
+                    .filter(skpo::generation.lt(entry.generation))
+                    .execute(conn)
+                    .await?;
+
+                match inserted_updated {
+                    0 => Ok(false),
+                    1 => Ok(true),
+                    _ => Err(DatabaseError::Logical(format!(
+                        "unexpected number of rows ({})",
+                        inserted_updated
+                    ))),
+                }
+            })
+        })
+        .await
+    }
+    /// Remove persisted pending op.
+    pub(crate) async fn remove_pending_op(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        sk_id: NodeId,
+        generation: u32,
+    ) -> DatabaseResult<()> {
+        use crate::schema::safekeeper_timeline_pending_ops::dsl;
+
+        let tenant_id = &tenant_id;
+        let timeline_id = &timeline_id;
+        self.with_measured_conn(DatabaseOperation::RemoveTimelineReconcile, move |conn| {
+            Box::pin(async move {
+                diesel::delete(dsl::safekeeper_timeline_pending_ops)
+                    .filter(dsl::tenant_id.eq(tenant_id.to_string()))
+                    .filter(dsl::timeline_id.eq(timeline_id.to_string()))
+                    .filter(dsl::sk_id.eq(sk_id.0 as i64))
+                    .filter(dsl::generation.eq(generation as i32))
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .await
+    }
+
+    /// Load pending operations from db.
+    pub(crate) async fn list_pending_ops(
+        &self,
+        filter_for_sk: Option<NodeId>,
+    ) -> DatabaseResult<Vec<TimelinePendingOpPersistence>> {
+        use crate::schema::safekeeper_timeline_pending_ops::dsl;
+
+        const FILTER_VAL_1: i64 = 1;
+        const FILTER_VAL_2: i64 = 2;
+        let filter_opt = filter_for_sk.map(|id| id.0 as i64);
+        let timeline_from_db = self
+            .with_measured_conn(DatabaseOperation::ListTimelineReconcile, move |conn| {
+                Box::pin(async move {
+                    let from_db: Vec<TimelinePendingOpPersistence> =
+                        dsl::safekeeper_timeline_pending_ops
+                            .filter(
+                                dsl::sk_id
+                                    .eq(filter_opt.unwrap_or(FILTER_VAL_1))
+                                    .and(dsl::sk_id.eq(filter_opt.unwrap_or(FILTER_VAL_2))),
+                            )
+                            .load(conn)
+                            .await?;
+                    Ok(from_db)
+                })
+            })
+            .await?;
+
+        Ok(timeline_from_db)
+    }
 }
 
 pub(crate) fn load_certs() -> anyhow::Result<Arc<rustls::RootCertStore>> {
@@ -1556,7 +1727,34 @@ pub(crate) struct SafekeeperPersistence {
     pub(crate) port: i32,
     pub(crate) http_port: i32,
     pub(crate) availability_zone_id: String,
-    pub(crate) scheduling_policy: String,
+    pub(crate) scheduling_policy: SkSchedulingPolicyFromSql,
+    pub(crate) https_port: Option<i32>,
+}
+
+/// Wrapper struct around [`SkSchedulingPolicy`] because both it and [`FromSql`] are from foreign crates,
+/// and we don't want to make [`safekeeper_api`] depend on [`diesel`].
+#[derive(Serialize, Deserialize, FromSqlRow, Eq, PartialEq, Debug, Copy, Clone)]
+pub(crate) struct SkSchedulingPolicyFromSql(pub(crate) SkSchedulingPolicy);
+
+impl From<SkSchedulingPolicy> for SkSchedulingPolicyFromSql {
+    fn from(value: SkSchedulingPolicy) -> Self {
+        SkSchedulingPolicyFromSql(value)
+    }
+}
+
+impl FromSql<diesel::sql_types::VarChar, Pg> for SkSchedulingPolicyFromSql {
+    fn from_sql(
+        bytes: <Pg as diesel::backend::Backend>::RawValue<'_>,
+    ) -> diesel::deserialize::Result<Self> {
+        let bytes = bytes.as_bytes();
+        match core::str::from_utf8(bytes) {
+            Ok(s) => match SkSchedulingPolicy::from_str(s) {
+                Ok(policy) => Ok(SkSchedulingPolicyFromSql(policy)),
+                Err(e) => Err(format!("can't parse: {e}").into()),
+            },
+            Err(e) => Err(format!("invalid UTF-8 for scheduling policy: {e}").into()),
+        }
+    }
 }
 
 impl SafekeeperPersistence {
@@ -1571,15 +1769,12 @@ impl SafekeeperPersistence {
             host: upsert.host,
             port: upsert.port,
             http_port: upsert.http_port,
+            https_port: upsert.https_port,
             availability_zone_id: upsert.availability_zone_id,
-            scheduling_policy: String::from(scheduling_policy),
+            scheduling_policy: SkSchedulingPolicyFromSql(scheduling_policy),
         }
     }
     pub(crate) fn as_describe_response(&self) -> Result<SafekeeperDescribeResponse, DatabaseError> {
-        let scheduling_policy =
-            SkSchedulingPolicy::from_str(&self.scheduling_policy).map_err(|e| {
-                DatabaseError::Logical(format!("can't construct SkSchedulingPolicy: {e:?}"))
-            })?;
         Ok(SafekeeperDescribeResponse {
             id: NodeId(self.id as u64),
             region_id: self.region_id.clone(),
@@ -1587,8 +1782,9 @@ impl SafekeeperPersistence {
             host: self.host.clone(),
             port: self.port,
             http_port: self.http_port,
+            https_port: self.https_port,
             availability_zone_id: self.availability_zone_id.clone(),
-            scheduling_policy,
+            scheduling_policy: self.scheduling_policy.0,
         })
     }
 }
@@ -1607,6 +1803,7 @@ pub(crate) struct SafekeeperUpsert {
     /// The active flag will not be stored in the database and will be ignored.
     pub(crate) active: Option<bool>,
     pub(crate) http_port: i32,
+    pub(crate) https_port: Option<i32>,
     pub(crate) availability_zone_id: String,
 }
 
@@ -1622,6 +1819,7 @@ impl SafekeeperUpsert {
             host: &self.host,
             port: self.port,
             http_port: self.http_port,
+            https_port: self.https_port,
             availability_zone_id: &self.availability_zone_id,
             // None means a wish to not update this column. We expose abilities to update it via other means.
             scheduling_policy: None,
@@ -1638,6 +1836,143 @@ struct InsertUpdateSafekeeper<'a> {
     host: &'a str,
     port: i32,
     http_port: i32,
+    https_port: Option<i32>,
     availability_zone_id: &'a str,
     scheduling_policy: Option<&'a str>,
+}
+
+#[derive(Serialize, Deserialize, FromSqlRow, AsExpression, Eq, PartialEq, Debug, Copy, Clone)]
+#[diesel(sql_type = crate::schema::sql_types::PgLsn)]
+pub(crate) struct LsnWrapper(pub(crate) Lsn);
+
+impl From<Lsn> for LsnWrapper {
+    fn from(value: Lsn) -> Self {
+        LsnWrapper(value)
+    }
+}
+
+impl FromSql<crate::schema::sql_types::PgLsn, Pg> for LsnWrapper {
+    fn from_sql(
+        bytes: <Pg as diesel::backend::Backend>::RawValue<'_>,
+    ) -> diesel::deserialize::Result<Self> {
+        let byte_arr: diesel::deserialize::Result<[u8; 8]> = bytes
+            .as_bytes()
+            .try_into()
+            .map_err(|_| "Can't obtain lsn from sql".into());
+        Ok(LsnWrapper(Lsn(u64::from_be_bytes(byte_arr?))))
+    }
+}
+
+impl ToSql<crate::schema::sql_types::PgLsn, Pg> for LsnWrapper {
+    fn to_sql<'b>(
+        &'b self,
+        out: &mut diesel::serialize::Output<'b, '_, Pg>,
+    ) -> diesel::serialize::Result {
+        out.write_all(&u64::to_be_bytes(self.0.0))
+            .map(|_| IsNull::No)
+            .map_err(Into::into)
+    }
+}
+
+#[derive(Insertable, AsChangeset, Queryable, Selectable, Clone)]
+#[diesel(table_name = crate::schema::timelines)]
+pub(crate) struct TimelinePersistence {
+    pub(crate) tenant_id: String,
+    pub(crate) timeline_id: String,
+    pub(crate) start_lsn: LsnWrapper,
+    pub(crate) generation: i32,
+    pub(crate) sk_set: Vec<i64>,
+    pub(crate) new_sk_set: Option<Vec<i64>>,
+    pub(crate) cplane_notified_generation: i32,
+    pub(crate) deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// This is separate from [TimelinePersistence] only because postgres allows NULLs
+/// in arrays and there is no way to forbid that at schema level. Hence diesel
+/// wants `sk_set` to be `Vec<Option<i64>>` instead of `Vec<i64>` for
+/// Queryable/Selectable. It does however allow insertions without redundant
+/// Option(s), so [TimelinePersistence] doesn't have them.
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = crate::schema::timelines)]
+pub(crate) struct TimelineFromDb {
+    pub(crate) tenant_id: String,
+    pub(crate) timeline_id: String,
+    pub(crate) start_lsn: LsnWrapper,
+    pub(crate) generation: i32,
+    pub(crate) sk_set: Vec<Option<i64>>,
+    pub(crate) new_sk_set: Option<Vec<Option<i64>>>,
+    pub(crate) cplane_notified_generation: i32,
+    pub(crate) deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl TimelineFromDb {
+    fn into_persistence(self) -> TimelinePersistence {
+        // We should never encounter null entries in the sets, but we need to filter them out.
+        // There is no way to forbid this in the schema that diesel recognizes (to our knowledge).
+        let sk_set = self.sk_set.into_iter().flatten().collect::<Vec<_>>();
+        let new_sk_set = self
+            .new_sk_set
+            .map(|s| s.into_iter().flatten().collect::<Vec<_>>());
+        TimelinePersistence {
+            tenant_id: self.tenant_id,
+            timeline_id: self.timeline_id,
+            start_lsn: self.start_lsn,
+            generation: self.generation,
+            sk_set,
+            new_sk_set,
+            cplane_notified_generation: self.cplane_notified_generation,
+            deleted_at: self.deleted_at,
+        }
+    }
+}
+
+#[derive(Insertable, AsChangeset, Queryable, Selectable, Clone)]
+#[diesel(table_name = crate::schema::safekeeper_timeline_pending_ops)]
+pub(crate) struct TimelinePendingOpPersistence {
+    pub(crate) sk_id: i64,
+    pub(crate) tenant_id: String,
+    pub(crate) timeline_id: String,
+    pub(crate) generation: i32,
+    pub(crate) op_kind: SafekeeperTimelineOpKind,
+}
+
+#[derive(Serialize, Deserialize, FromSqlRow, AsExpression, Eq, PartialEq, Debug, Copy, Clone)]
+#[diesel(sql_type = diesel::sql_types::VarChar)]
+pub(crate) enum SafekeeperTimelineOpKind {
+    Pull,
+    Exclude,
+    Delete,
+}
+
+impl FromSql<diesel::sql_types::VarChar, Pg> for SafekeeperTimelineOpKind {
+    fn from_sql(
+        bytes: <Pg as diesel::backend::Backend>::RawValue<'_>,
+    ) -> diesel::deserialize::Result<Self> {
+        let bytes = bytes.as_bytes();
+        match core::str::from_utf8(bytes) {
+            Ok(s) => match s {
+                "pull" => Ok(SafekeeperTimelineOpKind::Pull),
+                "exclude" => Ok(SafekeeperTimelineOpKind::Exclude),
+                "delete" => Ok(SafekeeperTimelineOpKind::Delete),
+                _ => Err(format!("can't parse: {s}").into()),
+            },
+            Err(e) => Err(format!("invalid UTF-8 for op_kind: {e}").into()),
+        }
+    }
+}
+
+impl ToSql<diesel::sql_types::VarChar, Pg> for SafekeeperTimelineOpKind {
+    fn to_sql<'b>(
+        &'b self,
+        out: &mut diesel::serialize::Output<'b, '_, Pg>,
+    ) -> diesel::serialize::Result {
+        let kind_str = match self {
+            SafekeeperTimelineOpKind::Pull => "pull",
+            SafekeeperTimelineOpKind::Exclude => "exclude",
+            SafekeeperTimelineOpKind::Delete => "delete",
+        };
+        out.write_all(kind_str.as_bytes())
+            .map(|_| IsNull::No)
+            .map_err(Into::into)
+    }
 }

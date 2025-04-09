@@ -289,15 +289,14 @@ fn log_compaction_error(
 ) {
     use CompactionError::*;
 
-    use crate::pgdatadir_mapping::CollectKeySpaceError;
     use crate::tenant::PageReconstructError;
     use crate::tenant::upload_queue::NotInitialized;
 
     let level = match err {
+        e if e.is_cancel() => return,
         ShuttingDown => return,
         Offload(_) => Level::ERROR,
         AlreadyRunning(_) => Level::ERROR,
-        CollectKeySpaceError(CollectKeySpaceError::Cancelled) => Level::INFO,
         CollectKeySpaceError(_) => Level::ERROR,
         _ if task_cancelled => Level::INFO,
         Other(err) => {
@@ -474,21 +473,15 @@ async fn wait_for_active_tenant(
     }
 
     let mut update_rx = tenant.subscribe_for_state_updates();
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => return ControlFlow::Break(()),
-            result = update_rx.changed() => if result.is_err() {
+    tokio::select! {
+        result = update_rx.wait_for(|s| s == &TenantState::Active) => {
+            if result.is_err() {
                 return ControlFlow::Break(());
             }
-        }
-
-        match &*update_rx.borrow() {
-            TenantState::Active => {
-                debug!("Tenant state changed to active, continuing the task loop");
-                return ControlFlow::Continue(());
-            }
-            state => debug!("Not running the task loop, tenant is not active: {state:?}"),
-        }
+            debug!("Tenant state changed to active, continuing the task loop");
+            ControlFlow::Continue(())
+        },
+        _ = cancel.cancelled() => ControlFlow::Break(()),
     }
 }
 

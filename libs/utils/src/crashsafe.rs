@@ -1,9 +1,7 @@
+use std::borrow::Cow;
+use std::fs::{self, File};
+use std::io::{self, Write};
 use std::os::fd::AsRawFd;
-use std::{
-    borrow::Cow,
-    fs::{self, File},
-    io::{self, Write},
-};
 
 use camino::{Utf8Path, Utf8PathBuf};
 

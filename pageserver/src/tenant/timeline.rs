@@ -46,7 +46,7 @@ use pageserver_api::keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPart
 use pageserver_api::models::{
     CompactKeyRange, CompactLsnRange, CompactionAlgorithm, CompactionAlgorithmSettings,
     DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
-    InMemoryLayerInfo, LayerMapInfo, LsnLease, PageTraceEvent, TimelineState,
+    InMemoryLayerInfo, LayerMapInfo, LsnLease, PageTraceEvent, RelSizeMigration, TimelineState,
 };
 use pageserver_api::reltag::{BlockNumber, RelTag};
 use pageserver_api::shard::{ShardIdentity, ShardIndex, ShardNumber, TenantShardId};
@@ -99,7 +99,8 @@ use crate::disk_usage_eviction_task::{DiskUsageEvictionInfo, EvictionCandidate, 
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::l0_flush::{self, L0FlushGlobalState};
 use crate::metrics::{
-    DELTAS_PER_READ_GLOBAL, LAYERS_PER_READ_GLOBAL, ScanLatencyOngoingRecording, TimelineMetrics,
+    DELTAS_PER_READ_GLOBAL, LAYERS_PER_READ_AMORTIZED_GLOBAL, LAYERS_PER_READ_BATCH_GLOBAL,
+    LAYERS_PER_READ_GLOBAL, ScanLatencyOngoingRecording, TimelineMetrics,
 };
 use crate::page_service::TenantManagerTypes;
 use crate::pgdatadir_mapping::{
@@ -286,7 +287,7 @@ pub struct Timeline {
     // The LSN of gc-compaction that was last applied to this timeline.
     gc_compaction_state: ArcSwap<Option<GcCompactionState>>,
 
-    pub(super) metrics: TimelineMetrics,
+    pub(crate) metrics: Arc<TimelineMetrics>,
 
     // `Timeline` doesn't write these metrics itself, but it manages the lifetime.  Code
     // in `crate::page_service` writes these metrics.
@@ -436,12 +437,16 @@ pub struct Timeline {
     /// May host a background Tokio task which downloads all the layers from the current
     /// heatmap on demand.
     heatmap_layers_downloader: Mutex<Option<heatmap_layers_downloader::HeatmapLayersDownloader>>,
+
+    pub(crate) rel_size_v2_status: ArcSwapOption<RelSizeMigration>,
 }
 
 pub(crate) enum PreviousHeatmap {
     Active {
         heatmap: HeatMapTimeline,
         read_at: std::time::Instant,
+        // End LSN covered by the heatmap if known
+        end_lsn: Option<Lsn>,
     },
     Obsolete,
 }
@@ -1326,10 +1331,6 @@ impl Timeline {
         // (this is a requirement, not a bug). Skip updating the metric in these cases
         // to avoid infinite results.
         if !results.is_empty() {
-            // Record the total number of layers visited towards each key in the batch. While some
-            // layers may not intersect with a given read, and the cost of layer visits are
-            // amortized across the batch, each visited layer contributes directly to the observed
-            // latency for every read in the batch, which is what we care about.
             if layers_visited >= Self::LAYERS_VISITED_WARN_THRESHOLD {
                 static LOG_PACER: Lazy<Mutex<RateLimit>> =
                     Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(60))));
@@ -1344,9 +1345,23 @@ impl Timeline {
                 });
             }
 
+            // Records the number of layers visited in a few different ways:
+            //
+            // * LAYERS_PER_READ: all layers count towards every read in the batch, because each
+            //   layer directly affects its observed latency.
+            //
+            // * LAYERS_PER_READ_BATCH: all layers count towards each batch, to get the per-batch
+            //   layer visits and access cost.
+            //
+            // * LAYERS_PER_READ_AMORTIZED: the average layer count per read, to get the amortized
+            //   read amplification after batching.
+            let layers_visited = layers_visited as f64;
+            let avg_layers_visited = layers_visited / results.len() as f64;
+            LAYERS_PER_READ_BATCH_GLOBAL.observe(layers_visited);
             for _ in &results {
-                self.metrics.layers_per_read.observe(layers_visited as f64);
-                LAYERS_PER_READ_GLOBAL.observe(layers_visited as f64);
+                self.metrics.layers_per_read.observe(layers_visited);
+                LAYERS_PER_READ_GLOBAL.observe(layers_visited);
+                LAYERS_PER_READ_AMORTIZED_GLOBAL.observe(avg_layers_visited);
             }
         }
 
@@ -1864,16 +1879,25 @@ impl Timeline {
         };
 
         // Signal compaction failure to avoid L0 flush stalls when it's broken.
-        match result {
+        match &result {
             Ok(_) => self.compaction_failed.store(false, AtomicOrdering::Relaxed),
-            Err(CompactionError::Other(_)) | Err(CompactionError::CollectKeySpaceError(_)) => {
+            Err(e) if e.is_cancel() => {}
+            Err(CompactionError::ShuttingDown) => {
+                // Covered by the `Err(e) if e.is_cancel()` branch.
+            }
+            Err(CompactionError::AlreadyRunning(_)) => {
+                // Covered by the `Err(e) if e.is_cancel()` branch.
+            }
+            Err(CompactionError::Other(_)) => {
+                self.compaction_failed.store(true, AtomicOrdering::Relaxed)
+            }
+            Err(CompactionError::CollectKeySpaceError(_)) => {
+                // Cancelled errors are covered by the `Err(e) if e.is_cancel()` branch.
                 self.compaction_failed.store(true, AtomicOrdering::Relaxed)
             }
             // Don't change the current value on offload failure or shutdown. We don't want to
             // abruptly stall nor resume L0 flushes in these cases.
             Err(CompactionError::Offload(_)) => {}
-            Err(CompactionError::ShuttingDown) => {}
-            Err(CompactionError::AlreadyRunning(_)) => {}
         };
 
         result
@@ -2188,6 +2212,7 @@ impl Timeline {
     pub(crate) async fn download_layer(
         &self,
         layer_file_name: &LayerName,
+        ctx: &RequestContext,
     ) -> Result<Option<bool>, super::storage_layer::layer::DownloadError> {
         let Some(layer) = self
             .find_layer(layer_file_name)
@@ -2201,7 +2226,7 @@ impl Timeline {
             return Ok(None);
         };
 
-        layer.download().await?;
+        layer.download(ctx).await?;
 
         Ok(Some(true))
     }
@@ -2356,12 +2381,23 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
     }
 
+    /// Returns `true` if the rel_size_v2 config is enabled. NOTE: the write path and read path
+    /// should look at `get_rel_size_v2_status()` to get the actual status of the timeline. It is
+    /// possible that the index part persists the state while the config doesn't get persisted.
     pub(crate) fn get_rel_size_v2_enabled(&self) -> bool {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
             .tenant_conf
             .rel_size_v2_enabled
             .unwrap_or(self.conf.default_tenant_conf.rel_size_v2_enabled)
+    }
+
+    pub(crate) fn get_rel_size_v2_status(&self) -> RelSizeMigration {
+        self.rel_size_v2_status
+            .load()
+            .as_ref()
+            .map(|s| s.as_ref().clone())
+            .unwrap_or(RelSizeMigration::Legacy)
     }
 
     fn get_compaction_upper_limit(&self) -> usize {
@@ -2624,6 +2660,7 @@ impl Timeline {
         attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
         create_idempotency: crate::tenant::CreateTimelineIdempotency,
         gc_compaction_state: Option<GcCompactionState>,
+        rel_size_v2_status: Option<RelSizeMigration>,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -2648,14 +2685,14 @@ impl Timeline {
         }
 
         Arc::new_cyclic(|myself| {
-            let metrics = TimelineMetrics::new(
+            let metrics = Arc::new(TimelineMetrics::new(
                 &tenant_shard_id,
                 &timeline_id,
                 crate::metrics::EvictionsWithLowResidenceDurationBuilder::new(
                     "mtime",
                     evictions_low_residence_duration_metric_threshold,
                 ),
-            );
+            ));
             let aux_file_metrics = metrics.aux_file_size_gauge.clone();
 
             let mut result = Timeline {
@@ -2782,6 +2819,8 @@ impl Timeline {
                 previous_heatmap: ArcSwapOption::from_pointee(previous_heatmap),
 
                 heatmap_layers_downloader: Mutex::new(None),
+
+                rel_size_v2_status: ArcSwapOption::from_pointee(rel_size_v2_status),
             };
 
             result.repartition_threshold =
@@ -2837,7 +2876,7 @@ impl Timeline {
             "layer flush task",
             async move {
                 let _guard = guard;
-                let background_ctx = RequestContext::todo_child(TaskKind::LayerFlushTask, DownloadBehavior::Error);
+                let background_ctx = RequestContext::todo_child(TaskKind::LayerFlushTask, DownloadBehavior::Error).with_scope_timeline(&self_clone);
                 self_clone.flush_loop(layer_flush_start_rx, &background_ctx).await;
                 let mut flush_loop_state = self_clone.flush_loop_state.lock().unwrap();
                 assert!(matches!(*flush_loop_state, FlushLoopState::Running{..}));
@@ -2856,6 +2895,16 @@ impl Timeline {
             .store(Arc::new(Some(gc_compaction_state.clone())));
         self.remote_client
             .schedule_index_upload_for_gc_compaction_state_update(gc_compaction_state)
+    }
+
+    pub(crate) fn update_rel_size_v2_status(
+        &self,
+        rel_size_v2_status: RelSizeMigration,
+    ) -> anyhow::Result<()> {
+        self.rel_size_v2_status
+            .store(Some(Arc::new(rel_size_v2_status.clone())));
+        self.remote_client
+            .schedule_index_upload_for_rel_size_v2_status_update(rel_size_v2_status)
     }
 
     pub(crate) fn get_gc_compaction_state(&self) -> Option<GcCompactionState> {
@@ -3560,12 +3609,16 @@ impl Timeline {
         Ok(layer)
     }
 
-    pub(super) fn is_previous_heatmap_active(&self) -> bool {
-        self.previous_heatmap
-            .load()
-            .as_ref()
-            .map(|prev| matches!(**prev, PreviousHeatmap::Active { .. }))
-            .unwrap_or(false)
+    pub(super) fn should_keep_previous_heatmap(&self, new_heatmap_end_lsn: Lsn) -> bool {
+        let crnt = self.previous_heatmap.load();
+        match crnt.as_deref() {
+            Some(PreviousHeatmap::Active { end_lsn, .. }) => match end_lsn {
+                Some(crnt_end_lsn) => *crnt_end_lsn > new_heatmap_end_lsn,
+                None => true,
+            },
+            Some(PreviousHeatmap::Obsolete) => false,
+            None => false,
+        }
     }
 
     /// The timeline heatmap is a hint to secondary locations from the primary location,
@@ -3593,26 +3646,26 @@ impl Timeline {
         // heatamp.
         let previous_heatmap = self.previous_heatmap.load();
         let visible_non_resident = match previous_heatmap.as_deref() {
-            Some(PreviousHeatmap::Active { heatmap, read_at }) => {
-                Some(heatmap.layers.iter().filter_map(|hl| {
-                    let desc: PersistentLayerDesc = hl.name.clone().into();
-                    let layer = guard.try_get_from_key(&desc.key())?;
+            Some(PreviousHeatmap::Active {
+                heatmap, read_at, ..
+            }) => Some(heatmap.all_layers().filter_map(|hl| {
+                let desc: PersistentLayerDesc = hl.name.clone().into();
+                let layer = guard.try_get_from_key(&desc.key())?;
 
-                    if layer.visibility() == LayerVisibilityHint::Covered {
-                        return None;
-                    }
+                if layer.visibility() == LayerVisibilityHint::Covered {
+                    return None;
+                }
 
-                    if layer.is_likely_resident() {
-                        return None;
-                    }
+                if layer.is_likely_resident() {
+                    return None;
+                }
 
-                    if layer.last_evicted_at().happened_after(*read_at) {
-                        return None;
-                    }
+                if layer.last_evicted_at().happened_after(*read_at) {
+                    return None;
+                }
 
-                    Some((desc, hl.metadata.clone(), hl.access_time))
-                }))
-            }
+                Some((desc, hl.metadata.clone(), hl.access_time, hl.cold))
+            })),
             Some(PreviousHeatmap::Obsolete) => None,
             None => None,
         };
@@ -3627,6 +3680,7 @@ impl Timeline {
                         layer.layer_desc().clone(),
                         layer.metadata(),
                         last_activity_ts,
+                        false, // these layers are not cold
                     ))
                 }
                 LayerVisibilityHint::Covered => {
@@ -3653,12 +3707,14 @@ impl Timeline {
         // Sort layers in order of which to download first.  For a large set of layers to download, we
         // want to prioritize those layers which are most likely to still be in the resident many minutes
         // or hours later:
+        // - Cold layers go last for convenience when a human inspects the heatmap.
         // - Download L0s last, because they churn the fastest: L0s on a fast-writing tenant might
         //   only exist for a few minutes before being compacted into L1s.
         // - For L1 & image layers, download most recent LSNs first: the older the LSN, the sooner
         //   the layer is likely to be covered by an image layer during compaction.
-        layers.sort_by_key(|(desc, _meta, _atime)| {
+        layers.sort_by_key(|(desc, _meta, _atime, cold)| {
             std::cmp::Reverse((
+                *cold,
                 !LayerMap::is_l0(&desc.key_range, desc.is_delta),
                 desc.lsn_range.end,
             ))
@@ -3666,7 +3722,9 @@ impl Timeline {
 
         let layers = layers
             .into_iter()
-            .map(|(desc, meta, atime)| HeatMapLayer::new(desc.layer_name(), meta, atime))
+            .map(|(desc, meta, atime, cold)| {
+                HeatMapLayer::new(desc.layer_name(), meta, atime, cold)
+            })
             .collect();
 
         Some(HeatMapTimeline::new(self.timeline_id, layers))
@@ -3686,6 +3744,7 @@ impl Timeline {
                 name: vl.layer_desc().layer_name(),
                 metadata: vl.metadata(),
                 access_time: now,
+                cold: true,
             };
             heatmap_layers.push(hl);
         }
@@ -3699,6 +3758,7 @@ impl Timeline {
         PreviousHeatmap::Active {
             heatmap,
             read_at: Instant::now(),
+            end_lsn: Some(end_lsn),
         }
     }
 
@@ -3897,39 +3957,22 @@ impl Timeline {
                 let guard = timeline.layers.read().await;
                 let layers = guard.layer_map()?;
 
-                let in_memory_layer = layers.find_in_memory_layer(|l| {
-                    let start_lsn = l.get_lsn_range().start;
-                    cont_lsn > start_lsn
-                });
+                for range in unmapped_keyspace.ranges.iter() {
+                    let results = layers.range_search(range.clone(), cont_lsn);
 
-                match in_memory_layer {
-                    Some(l) => {
-                        let lsn_range = l.get_lsn_range().start..cont_lsn;
-                        fringe.update(
-                            ReadableLayer::InMemoryLayer(l),
-                            unmapped_keyspace.clone(),
-                            lsn_range,
-                        );
-                    }
-                    None => {
-                        for range in unmapped_keyspace.ranges.iter() {
-                            let results = layers.range_search(range.clone(), cont_lsn);
-
-                            results
-                                .found
-                                .into_iter()
-                                .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
-                                    (
-                                        ReadableLayer::PersistentLayer(guard.get_from_desc(&layer)),
-                                        keyspace_accum.to_keyspace(),
-                                        lsn_floor..cont_lsn,
-                                    )
-                                })
-                                .for_each(|(layer, keyspace, lsn_range)| {
-                                    fringe.update(layer, keyspace, lsn_range)
-                                });
-                        }
-                    }
+                    results
+                        .found
+                        .into_iter()
+                        .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
+                            (
+                                guard.upgrade(layer),
+                                keyspace_accum.to_keyspace(),
+                                lsn_floor..cont_lsn,
+                            )
+                        })
+                        .for_each(|(layer, keyspace, lsn_range)| {
+                            fringe.update(layer, keyspace, lsn_range)
+                        });
                 }
 
                 // It's safe to drop the layer map lock after planning the next round of reads.
@@ -4202,10 +4245,6 @@ impl Timeline {
 
                 // Stall flushes to backpressure if compaction can't keep up. This is propagated up
                 // to WAL ingestion by having ephemeral layer rolls wait for flushes.
-                //
-                // NB: the compaction loop only checks `compaction_threshold` every 20 seconds, so
-                // we can end up stalling before compaction even starts. Consider making it more
-                // responsive (e.g. via `watch_level0_deltas`).
                 if let Some(stall_threshold) = self.get_l0_flush_stall_threshold() {
                     if l0_count >= stall_threshold {
                         warn!(
@@ -4693,10 +4732,7 @@ impl Timeline {
             ));
         }
 
-        let (dense_ks, sparse_ks) = self
-            .collect_keyspace(lsn, ctx)
-            .await
-            .map_err(CompactionError::CollectKeySpaceError)?;
+        let (dense_ks, sparse_ks) = self.collect_keyspace(lsn, ctx).await?;
         let dense_partitioning = dense_ks.partition(&self.shard_identity, partition_size);
         let sparse_partitioning = SparseKeyPartitioning {
             parts: vec![sparse_ks],
@@ -5423,11 +5459,40 @@ pub(crate) enum CompactionError {
     Offload(OffloadError),
     /// Compaction cannot be done right now; page reconstruction and so on.
     #[error("Failed to collect keyspace: {0}")]
-    CollectKeySpaceError(CollectKeySpaceError),
+    CollectKeySpaceError(#[from] CollectKeySpaceError),
     #[error(transparent)]
     Other(anyhow::Error),
     #[error("Compaction already running: {0}")]
     AlreadyRunning(&'static str),
+}
+
+impl CompactionError {
+    /// Errors that can be ignored, i.e., cancel and shutdown.
+    pub fn is_cancel(&self) -> bool {
+        matches!(
+            self,
+            Self::ShuttingDown
+                | Self::AlreadyRunning(_)
+                | Self::CollectKeySpaceError(CollectKeySpaceError::Cancelled)
+                | Self::CollectKeySpaceError(CollectKeySpaceError::PageRead(
+                    PageReconstructError::Cancelled
+                ))
+                | Self::Offload(OffloadError::Cancelled)
+        )
+    }
+
+    /// Critical errors that indicate data corruption.
+    pub fn is_critical(&self) -> bool {
+        matches!(
+            self,
+            Self::CollectKeySpaceError(
+                CollectKeySpaceError::Decode(_)
+                    | CollectKeySpaceError::PageRead(
+                        PageReconstructError::MissingKey(_) | PageReconstructError::WalRedo(_),
+                    )
+            )
+        )
+    }
 }
 
 impl From<OffloadError> for CompactionError {
@@ -5435,18 +5500,6 @@ impl From<OffloadError> for CompactionError {
         match e {
             OffloadError::Cancelled => Self::ShuttingDown,
             _ => Self::Offload(e),
-        }
-    }
-}
-
-impl From<CollectKeySpaceError> for CompactionError {
-    fn from(err: CollectKeySpaceError) -> Self {
-        match err {
-            CollectKeySpaceError::Cancelled
-            | CollectKeySpaceError::PageRead(PageReconstructError::Cancelled) => {
-                CompactionError::ShuttingDown
-            }
-            e => CompactionError::Other(e.into()),
         }
     }
 }
@@ -5532,6 +5585,14 @@ pub struct DeltaLayerTestDesc {
     pub lsn_range: Range<Lsn>,
     pub key_range: Range<Key>,
     pub data: Vec<(Key, Lsn, Value)>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub struct InMemoryLayerTestDesc {
+    pub lsn_range: Range<Lsn>,
+    pub data: Vec<(Key, Lsn, Value)>,
+    pub is_open: bool,
 }
 
 #[cfg(test)]
@@ -6193,6 +6254,7 @@ impl Timeline {
     pub(crate) async fn spawn_download_all_remote_layers(
         self: Arc<Self>,
         request: DownloadRemoteLayersTaskSpawnRequest,
+        ctx: &RequestContext,
     ) -> Result<DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskInfo> {
         use pageserver_api::models::DownloadRemoteLayersTaskState;
 
@@ -6213,6 +6275,10 @@ impl Timeline {
         }
 
         let self_clone = Arc::clone(&self);
+        let task_ctx = ctx.detached_child(
+            TaskKind::DownloadAllRemoteLayers,
+            DownloadBehavior::Download,
+        );
         let task_id = task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::DownloadAllRemoteLayers,
@@ -6220,7 +6286,7 @@ impl Timeline {
             Some(self.timeline_id),
             "download all remote layers task",
             async move {
-                self_clone.download_all_remote_layers(request).await;
+                self_clone.download_all_remote_layers(request, &task_ctx).await;
                 let mut status_guard = self_clone.download_all_remote_layers_task_info.write().unwrap();
                  match &mut *status_guard {
                     None => {
@@ -6255,6 +6321,7 @@ impl Timeline {
     async fn download_all_remote_layers(
         self: &Arc<Self>,
         request: DownloadRemoteLayersTaskSpawnRequest,
+        ctx: &RequestContext,
     ) {
         use pageserver_api::models::DownloadRemoteLayersTaskState;
 
@@ -6311,9 +6378,10 @@ impl Timeline {
 
                 let span = tracing::info_span!("download", layer = %next);
 
+                let ctx = ctx.attached_child();
                 js.spawn(
                     async move {
-                        let res = next.download().await;
+                        let res = next.download(&ctx).await;
                         (next, res)
                     }
                     .instrument(span),
@@ -6537,6 +6605,92 @@ impl Timeline {
         self.remote_client
             .schedule_layer_file_upload(delta_layer)
             .unwrap();
+
+        Ok(())
+    }
+
+    /// Force create an in-memory layer and place them into the layer map.
+    #[cfg(test)]
+    pub(super) async fn force_create_in_memory_layer(
+        self: &Arc<Timeline>,
+        mut in_memory: InMemoryLayerTestDesc,
+        check_start_lsn: Option<Lsn>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        use utils::bin_ser::BeSer;
+
+        // Validate LSNs
+        if let Some(check_start_lsn) = check_start_lsn {
+            assert!(in_memory.lsn_range.start >= check_start_lsn);
+        }
+
+        let last_record_lsn = self.get_last_record_lsn();
+        let layer_end_lsn = if in_memory.is_open {
+            in_memory
+                .data
+                .iter()
+                .map(|(_key, lsn, _value)| lsn)
+                .max()
+                .cloned()
+        } else {
+            Some(in_memory.lsn_range.end)
+        };
+
+        if let Some(end) = layer_end_lsn {
+            assert!(
+                end <= last_record_lsn,
+                "advance last record lsn before inserting a layer, end_lsn={}, last_record_lsn={}",
+                end,
+                last_record_lsn,
+            );
+        }
+
+        in_memory.data.iter().for_each(|(_key, lsn, _value)| {
+            assert!(*lsn >= in_memory.lsn_range.start);
+            assert!(*lsn < in_memory.lsn_range.end);
+        });
+
+        // Build the batch
+        in_memory
+            .data
+            .sort_unstable_by(|(ka, la, _), (kb, lb, _)| (ka, la).cmp(&(kb, lb)));
+
+        let data = in_memory
+            .data
+            .into_iter()
+            .map(|(key, lsn, value)| {
+                let value_size = value.serialized_size().unwrap() as usize;
+                (key.to_compact(), lsn, value_size, value)
+            })
+            .collect::<Vec<_>>();
+
+        let batch = SerializedValueBatch::from_values(data);
+
+        // Create the in-memory layer and write the batch into it
+        let layer = InMemoryLayer::create(
+            self.conf,
+            self.timeline_id,
+            self.tenant_shard_id,
+            in_memory.lsn_range.start,
+            &self.gate,
+            ctx,
+        )
+        .await
+        .unwrap();
+
+        layer.put_batch(batch, ctx).await.unwrap();
+        if !in_memory.is_open {
+            layer.freeze(in_memory.lsn_range.end).await;
+        }
+
+        info!("force created in-memory layer {:?}", in_memory.lsn_range);
+
+        // Link the layer to the layer map
+        {
+            let mut guard = self.layers.write().await;
+            let layer_map = guard.open_mut().unwrap();
+            layer_map.force_insert_in_memory_layer(Arc::new(layer));
+        }
 
         Ok(())
     }
@@ -6900,11 +7054,13 @@ mod tests {
 
     use pageserver_api::key::Key;
     use pageserver_api::value::Value;
+    use std::iter::Iterator;
     use tracing::Instrument;
     use utils::id::TimelineId;
     use utils::lsn::Lsn;
 
     use super::HeatMapTimeline;
+    use crate::context::RequestContextBuilder;
     use crate::tenant::harness::{TenantHarness, test_img};
     use crate::tenant::layer_map::LayerMap;
     use crate::tenant::storage_layer::{Layer, LayerName, LayerVisibilityHint};
@@ -6912,8 +7068,8 @@ mod tests {
     use crate::tenant::{PreviousHeatmap, Timeline};
 
     fn assert_heatmaps_have_same_layers(lhs: &HeatMapTimeline, rhs: &HeatMapTimeline) {
-        assert_eq!(lhs.layers.len(), rhs.layers.len());
-        let lhs_rhs = lhs.layers.iter().zip(rhs.layers.iter());
+        assert_eq!(lhs.all_layers().count(), rhs.all_layers().count());
+        let lhs_rhs = lhs.all_layers().zip(rhs.all_layers());
         for (l, r) in lhs_rhs {
             assert_eq!(l.name, r.name);
             assert_eq!(l.metadata, r.metadata);
@@ -6972,12 +7128,14 @@ mod tests {
                 Lsn(0x10),
                 14,
                 &ctx,
+                Vec::new(), // in-memory layers
                 delta_layers,
                 image_layers,
                 Lsn(0x100),
             )
             .await
             .unwrap();
+        let ctx = &ctx.with_scope_timeline(&timeline);
 
         // Layer visibility is an input to heatmap generation, so refresh it first
         timeline.update_layer_visibility().await.unwrap();
@@ -6990,10 +7148,11 @@ mod tests {
         assert_eq!(heatmap.timeline_id, timeline.timeline_id);
 
         // L0 should come last
-        assert_eq!(heatmap.layers.last().unwrap().name, l0_delta.layer_name());
+        let heatmap_layers = heatmap.all_layers().collect::<Vec<_>>();
+        assert_eq!(heatmap_layers.last().unwrap().name, l0_delta.layer_name());
 
         let mut last_lsn = Lsn::MAX;
-        for layer in &heatmap.layers {
+        for layer in heatmap_layers {
             // Covered layer should be omitted
             assert!(layer.name != covered_delta.layer_name());
 
@@ -7026,6 +7185,7 @@ mod tests {
             .store(Some(Arc::new(PreviousHeatmap::Active {
                 heatmap: heatmap.clone(),
                 read_at: std::time::Instant::now(),
+                end_lsn: None,
             })));
 
         // Generate a new heatmap and assert that it contains the same layers as the old one.
@@ -7041,8 +7201,12 @@ mod tests {
 
             eprintln!("Downloading {layer} and re-generating heatmap");
 
+            let ctx = &RequestContextBuilder::extend(ctx)
+                .download_behavior(crate::context::DownloadBehavior::Download)
+                .build();
+
             let _resident = layer
-                .download_and_keep_resident()
+                .download_and_keep_resident(ctx)
                 .instrument(tracing::info_span!(
                     parent: None,
                     "download_layer",
@@ -7100,6 +7264,7 @@ mod tests {
                 Lsn(0x10),
                 14,
                 &ctx,
+                Vec::new(), // in-memory layers
                 delta_layers,
                 image_layers,
                 Lsn(0x100),
@@ -7116,7 +7281,7 @@ mod tests {
             .expect("Infallible while timeline is not shut down");
 
         // Both layers should be in the heatmap
-        assert!(!heatmap.layers.is_empty());
+        assert!(heatmap.all_layers().count() > 0);
 
         // Now simulate a migration.
         timeline
@@ -7124,6 +7289,7 @@ mod tests {
             .store(Some(Arc::new(PreviousHeatmap::Active {
                 heatmap: heatmap.clone(),
                 read_at: std::time::Instant::now(),
+                end_lsn: None,
             })));
 
         // Evict all the layers in the previous heatmap
@@ -7141,7 +7307,7 @@ mod tests {
             .await
             .expect("Infallible while timeline is not shut down");
 
-        assert!(post_eviction_heatmap.layers.is_empty());
+        assert_eq!(post_eviction_heatmap.all_layers().count(), 0);
         assert!(matches!(
             timeline.previous_heatmap.load().as_deref(),
             Some(PreviousHeatmap::Obsolete)

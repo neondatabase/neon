@@ -53,6 +53,11 @@ pub struct PageServerConf {
     pub listen_pg_addr: String,
     /// Example (default): 127.0.0.1:9898
     pub listen_http_addr: String,
+    /// Example: 127.0.0.1:9899
+    pub listen_https_addr: Option<String>,
+
+    pub ssl_key_file: Utf8PathBuf,
+    pub ssl_cert_file: Utf8PathBuf,
 
     /// Current availability zone. Used for traffic metrics.
     pub availability_zone: Option<String>,
@@ -194,6 +199,13 @@ pub struct PageServerConf {
     /// Interpreted protocol feature: if enabled, validate that the logical WAL received from
     /// safekeepers does not have gaps.
     pub validate_wal_contiguity: bool,
+
+    /// When set, the previously written to disk heatmap is loaded on tenant attach and used
+    /// to avoid clobbering the heatmap from new, cold, attached locations.
+    pub load_previous_heatmap: bool,
+
+    /// When set, include visible layers in the next uploaded heatmaps of an unarchived timeline.
+    pub generate_unarchival_heatmap: bool,
 }
 
 /// Token for authentication to safekeepers
@@ -310,6 +322,9 @@ impl PageServerConf {
         let pageserver_api::config::ConfigToml {
             listen_pg_addr,
             listen_http_addr,
+            listen_https_addr,
+            ssl_key_file,
+            ssl_cert_file,
             availability_zone,
             wait_lsn_timeout,
             wal_redo_timeout,
@@ -358,6 +373,8 @@ impl PageServerConf {
             get_vectored_concurrent_io,
             enable_read_path_debugging,
             validate_wal_contiguity,
+            load_previous_heatmap,
+            generate_unarchival_heatmap,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -366,6 +383,9 @@ impl PageServerConf {
             // ------------------------------------------------------------
             listen_pg_addr,
             listen_http_addr,
+            listen_https_addr,
+            ssl_key_file,
+            ssl_cert_file,
             availability_zone,
             wait_lsn_timeout,
             wal_redo_timeout,
@@ -447,6 +467,8 @@ impl PageServerConf {
             no_sync: no_sync.unwrap_or(false),
             enable_read_path_debugging: enable_read_path_debugging.unwrap_or(false),
             validate_wal_contiguity: validate_wal_contiguity.unwrap_or(false),
+            load_previous_heatmap: load_previous_heatmap.unwrap_or(true),
+            generate_unarchival_heatmap: generate_unarchival_heatmap.unwrap_or(true),
         };
 
         // ------------------------------------------------------------
@@ -480,7 +502,9 @@ impl PageServerConf {
     #[cfg(test)]
     pub fn test_repo_dir(test_name: &str) -> Utf8PathBuf {
         let test_output_dir = std::env::var("TEST_OUTPUT").unwrap_or("../tmp_check".into());
-        Utf8PathBuf::from(format!("{test_output_dir}/test_{test_name}"))
+
+        let test_id = uuid::Uuid::new_v4();
+        Utf8PathBuf::from(format!("{test_output_dir}/test_{test_name}_{test_id}"))
     }
 
     pub fn dummy_conf(repo_dir: Utf8PathBuf) -> Self {
@@ -493,6 +517,8 @@ impl PageServerConf {
             metric_collection_interval: Duration::from_secs(60),
             synthetic_size_calculation_interval: Duration::from_secs(60),
             background_task_maximum_delay: Duration::ZERO,
+            load_previous_heatmap: Some(true),
+            generate_unarchival_heatmap: Some(true),
             ..Default::default()
         };
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &repo_dir).unwrap()

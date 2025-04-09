@@ -35,6 +35,7 @@ pub struct NodeMetadata {
     pub postgres_port: u16,
     pub http_host: String,
     pub http_port: u16,
+    pub https_port: Option<u16>,
 
     // Deployment tools may write fields to the metadata file beyond what we
     // use in this type: this type intentionally only names fields that require.
@@ -57,6 +58,9 @@ pub struct ConfigToml {
     // types mapped 1:1 into the runtime PageServerConfig type
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
+    pub listen_https_addr: Option<String>,
+    pub ssl_key_file: Utf8PathBuf,
+    pub ssl_cert_file: Utf8PathBuf,
     pub availability_zone: Option<String>,
     #[serde(with = "humantime_serde")]
     pub wait_lsn_timeout: Duration,
@@ -123,6 +127,10 @@ pub struct ConfigToml {
     pub enable_read_path_debugging: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validate_wal_contiguity: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load_previous_heatmap: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generate_unarchival_heatmap: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -417,6 +425,9 @@ pub mod defaults {
 
     pub const DEFAULT_WAL_RECEIVER_PROTOCOL: utils::postgres_client::PostgresClientProtocol =
         utils::postgres_client::PostgresClientProtocol::Vanilla;
+
+    pub const DEFAULT_SSL_KEY_FILE: &str = "server.key";
+    pub const DEFAULT_SSL_CERT_FILE: &str = "server.crt";
 }
 
 impl Default for ConfigToml {
@@ -426,6 +437,9 @@ impl Default for ConfigToml {
         Self {
             listen_pg_addr: (DEFAULT_PG_LISTEN_ADDR.to_string()),
             listen_http_addr: (DEFAULT_HTTP_LISTEN_ADDR.to_string()),
+            listen_https_addr: (None),
+            ssl_key_file: Utf8PathBuf::from(DEFAULT_SSL_KEY_FILE),
+            ssl_cert_file: Utf8PathBuf::from(DEFAULT_SSL_CERT_FILE),
             availability_zone: (None),
             wait_lsn_timeout: (humantime::parse_duration(DEFAULT_WAIT_LSN_TIMEOUT)
                 .expect("cannot parse default wait lsn timeout")),
@@ -523,6 +537,8 @@ impl Default for ConfigToml {
                 None
             },
             validate_wal_contiguity: None,
+            load_previous_heatmap: None,
+            generate_unarchival_heatmap: None,
         }
     }
 }

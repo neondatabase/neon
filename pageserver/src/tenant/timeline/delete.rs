@@ -11,6 +11,7 @@ use utils::id::TimelineId;
 use utils::{crashsafe, fs_ext, pausable_failpoint};
 
 use crate::config::PageServerConf;
+use crate::context::RequestContext;
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::remote_timeline_client::{
@@ -291,10 +292,11 @@ impl DeleteTimelineFlow {
         timeline_id: TimelineId,
         local_metadata: &TimelineMetadata,
         remote_client: RemoteTimelineClient,
+        ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // Note: here we even skip populating layer map. Timeline is essentially uninitialized.
         // RemoteTimelineClient is the only functioning part.
-        let timeline = tenant
+        let (timeline, _timeline_ctx) = tenant
             .create_timeline_struct(
                 timeline_id,
                 local_metadata,
@@ -306,6 +308,8 @@ impl DeleteTimelineFlow {
                 CreateTimelineCause::Delete,
                 crate::tenant::CreateTimelineIdempotency::FailWithConflict, // doesn't matter what we put here
                 None, // doesn't matter what we put here
+                None, // doesn't matter what we put here
+                ctx,
             )
             .context("create_timeline_struct")?;
 

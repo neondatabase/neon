@@ -181,7 +181,8 @@ where
         Err(self
             .shutdown()
             .await
-            .expect_err("flush task only disconnects duplex if it exits with an error"))
+            .err()
+            .expect("flush task only disconnects duplex if it exits with an error"))
     }
 
     /// Cleans up the channel, join the flush task.

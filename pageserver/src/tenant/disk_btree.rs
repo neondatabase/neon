@@ -32,8 +32,7 @@ use hex;
 use thiserror::Error;
 use tracing::error;
 
-use crate::context::{DownloadBehavior, RequestContext};
-use crate::task_mgr::TaskKind;
+use crate::context::RequestContext;
 use crate::tenant::block_io::{BlockReader, BlockWriter};
 use crate::virtual_file::{IoBuffer, IoBufferMut, owned_buffers_io::write::Buffer};
 
@@ -478,16 +477,15 @@ where
     }
 
     #[allow(dead_code)]
-    pub async fn dump(&self) -> Result<()> {
+    pub async fn dump(&self, ctx: &RequestContext) -> Result<()> {
         let mut stack = Vec::new();
-        let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
 
         stack.push((self.root_blk, String::new(), 0, 0, 0));
 
         let block_cursor = self.reader.block_cursor();
 
         while let Some((blknum, path, depth, child_idx, key_off)) = stack.pop() {
-            let blk = block_cursor.read_blk(self.start_blk + blknum, &ctx).await?;
+            let blk = block_cursor.read_blk(self.start_blk + blknum, ctx).await?;
             let buf: &[u8] = blk.as_ref();
             let node = OnDiskNode::<L>::deparse(buf)?;
 
@@ -836,6 +834,8 @@ pub(crate) mod tests {
     use rand::Rng;
 
     use super::*;
+    use crate::context::DownloadBehavior;
+    use crate::task_mgr::TaskKind;
     use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReaderRef};
 
     #[derive(Clone, Default)]
@@ -870,7 +870,8 @@ pub(crate) mod tests {
         let mut disk = TestDisk::new();
         let mut writer = DiskBtreeBuilder::<_, 6>::new(&mut disk);
 
-        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let ctx =
+            RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
 
         let all_keys: Vec<&[u8; 6]> = vec![
             b"xaaaaa", b"xaaaba", b"xaaaca", b"xabaaa", b"xababa", b"xabaca", b"xabada", b"xabadb",
@@ -888,7 +889,7 @@ pub(crate) mod tests {
 
         let reader = DiskBtreeReader::new(0, root_offset, disk);
 
-        reader.dump().await?;
+        reader.dump(&ctx).await?;
 
         // Test the `get` function on all the keys.
         for (key, val) in all_data.iter() {
@@ -980,7 +981,8 @@ pub(crate) mod tests {
     async fn lots_of_keys() -> Result<()> {
         let mut disk = TestDisk::new();
         let mut writer = DiskBtreeBuilder::<_, 8>::new(&mut disk);
-        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let ctx =
+            RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
 
         const NUM_KEYS: u64 = 1000;
 
@@ -998,7 +1000,7 @@ pub(crate) mod tests {
 
         let reader = DiskBtreeReader::new(0, root_offset, disk);
 
-        reader.dump().await?;
+        reader.dump(&ctx).await?;
 
         use std::sync::Mutex;
 
@@ -1168,7 +1170,8 @@ pub(crate) mod tests {
         // Build a tree from it
         let mut disk = TestDisk::new();
         let mut writer = DiskBtreeBuilder::<_, 26>::new(&mut disk);
-        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let ctx =
+            RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
 
         for (key, val) in disk_btree_test_data::TEST_DATA {
             writer.append(&key, val)?;
@@ -1199,7 +1202,7 @@ pub(crate) mod tests {
             .await?;
         assert_eq!(count, disk_btree_test_data::TEST_DATA.len());
 
-        reader.dump().await?;
+        reader.dump(&ctx).await?;
 
         Ok(())
     }

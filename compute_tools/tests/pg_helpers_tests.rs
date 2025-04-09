@@ -62,6 +62,23 @@ test.escaping = 'here''s a backslash \\ and a quote '' and a double-quote " hoor
     }
 
     #[test]
+    fn ident_pg_quote_dollar() {
+        let test_cases = vec![
+            ("name", ("$$name$$", "x")),
+            ("name$$", ("$x$name$$$x$", "xx")),
+            ("name$$$", ("$x$name$$$$x$", "xx")),
+            ("name$$$$", ("$x$name$$$$$x$", "xx")),
+            ("name$x$", ("$xx$name$x$$xx$", "xxx")),
+        ];
+
+        for (input, expected) in test_cases {
+            let (escaped, tag) = PgIdent::from(input).pg_quote_dollar();
+            assert_eq!(escaped, expected.0);
+            assert_eq!(tag, expected.1);
+        }
+    }
+
+    #[test]
     fn generic_options_search() {
         let generic_options: GenericOptions = Some(vec![
             GenericOption {

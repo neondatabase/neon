@@ -45,31 +45,18 @@ macro_rules! measured_request {
 }
 
 impl SafekeeperClient {
-    #[allow(dead_code)]
     pub(crate) fn new(
-        node_id: NodeId,
-        mgmt_api_endpoint: String,
-        jwt: Option<SecretString>,
-    ) -> Self {
-        Self {
-            inner: Client::from_client(reqwest::Client::new(), mgmt_api_endpoint, jwt),
-            node_id_label: node_id.0.to_string(),
-        }
-    }
-
-    pub(crate) fn from_client(
         node_id: NodeId,
         raw_client: reqwest::Client,
         mgmt_api_endpoint: String,
         jwt: Option<SecretString>,
     ) -> Self {
         Self {
-            inner: Client::from_client(raw_client, mgmt_api_endpoint, jwt),
+            inner: Client::new(raw_client, mgmt_api_endpoint, jwt),
             node_id_label: node_id.0.to_string(),
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn create_timeline(
         &self,
         req: &TimelineCreateRequest,
@@ -82,7 +69,6 @@ impl SafekeeperClient {
         )
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn delete_timeline(
         &self,
         tenant_id: TenantId,
@@ -96,7 +82,6 @@ impl SafekeeperClient {
         )
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn pull_timeline(
         &self,
         req: &PullTimelineRequest,

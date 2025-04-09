@@ -40,6 +40,7 @@ use utils::sync::gate::GateGuard;
 
 use self::inmemory_layer::InMemoryLayerFileId;
 use super::PageReconstructError;
+use super::layer_map::InMemoryLayerDesc;
 use super::timeline::{GetVectoredError, ReadPath};
 use crate::config::PageServerConf;
 use crate::context::{AccessStatsBehavior, RequestContext};
@@ -721,6 +722,12 @@ struct LayerToVisitId {
     lsn_floor: Lsn,
 }
 
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub enum ReadableLayerWeak {
+    PersistentLayer(Arc<PersistentLayerDesc>),
+    InMemoryLayer(InMemoryLayerDesc),
+}
+
 /// Layer wrapper for the read path. Note that it is valid
 /// to use these layers even after external operations have
 /// been performed on them (compaction, freeze, etc.).
@@ -873,7 +880,7 @@ impl ReadableLayer {
             }
             ReadableLayer::InMemoryLayer(layer) => {
                 layer
-                    .get_values_reconstruct_data(keyspace, lsn_range.end, reconstruct_state, ctx)
+                    .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, ctx)
                     .await
             }
         }

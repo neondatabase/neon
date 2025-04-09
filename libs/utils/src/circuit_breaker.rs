@@ -1,7 +1,5 @@
-use std::{
-    fmt::Display,
-    time::{Duration, Instant},
-};
+use std::fmt::Display;
+use std::time::{Duration, Instant};
 
 use metrics::IntCounter;
 

@@ -1,10 +1,11 @@
 use std::path::Path;
 
-use anyhow::{anyhow, Context};
-use tracing::warn;
+use anyhow::{Context, anyhow};
+use tracing::{instrument, warn};
 
 pub const RESIZE_SWAP_BIN: &str = "/neonvm/bin/resize-swap";
 
+#[instrument]
 pub fn resize_swap(size_bytes: u64) -> anyhow::Result<()> {
     // run `/neonvm/bin/resize-swap --once {size_bytes}`
     //

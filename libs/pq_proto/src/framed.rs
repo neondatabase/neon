@@ -10,11 +10,10 @@
 //! calls.
 //!
 //! [Box]: https://docs.rs/futures-util/0.3.26/src/futures_util/lock/bilock.rs.html#107
+use std::future::Future;
+use std::io::{self, ErrorKind};
+
 use bytes::{Buf, BytesMut};
-use std::{
-    future::Future,
-    io::{self, ErrorKind},
-};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 
 use crate::{BeMessage, FeMessage, FeStartupPacket, ProtocolError};

@@ -21,6 +21,7 @@ mod migration;
 pub mod monitor;
 pub mod params;
 pub mod pg_helpers;
+pub mod rsyslog;
 pub mod spec;
 mod spec_apply;
 pub mod swap;

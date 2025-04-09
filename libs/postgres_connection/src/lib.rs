@@ -1,9 +1,10 @@
 #![deny(unsafe_code)]
 #![deny(clippy::undocumented_unsafe_blocks)]
-use anyhow::{bail, Context};
-use itertools::Itertools;
 use std::borrow::Cow;
 use std::fmt;
+
+use anyhow::{Context, bail};
+use itertools::Itertools;
 use url::Host;
 
 /// Parses a string of format either `host:port` or `host` into a corresponding pair.
@@ -29,8 +30,9 @@ pub fn parse_host_port<S: AsRef<str>>(host_port: S) -> Result<(Host, Option<u16>
 
 #[cfg(test)]
 mod tests_parse_host_port {
-    use crate::parse_host_port;
     use url::Host;
+
+    use crate::parse_host_port;
 
     #[test]
     fn test_normal() {
@@ -207,9 +209,10 @@ impl fmt::Debug for PgConnectionConfig {
 
 #[cfg(test)]
 mod tests_pg_connection_config {
-    use crate::PgConnectionConfig;
     use once_cell::sync::Lazy;
     use url::Host;
+
+    use crate::PgConnectionConfig;
 
     static STUB_HOST: Lazy<Host> = Lazy::new(|| Host::Domain("stub.host.example".to_owned()));
 

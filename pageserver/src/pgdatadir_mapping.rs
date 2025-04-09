@@ -21,6 +21,7 @@ use pageserver_api::key::{
     slru_segment_key_range, slru_segment_size_to_key, twophase_file_key, twophase_key_range,
 };
 use pageserver_api::keyspace::SparseKeySpace;
+use pageserver_api::models::RelSizeMigration;
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
@@ -492,7 +493,9 @@ impl Timeline {
         // Otherwise, read the old reldir keyspace.
         // TODO: if IndexPart::rel_size_migration is `Migrated`, we only need to read from v2.
 
-        if self.get_rel_size_v2_enabled() {
+        if let RelSizeMigration::Migrated | RelSizeMigration::Migrating =
+            self.get_rel_size_v2_status()
+        {
             // fetch directory listing (new)
             let key = rel_tag_sparse_key(tag.spcnode, tag.dbnode, tag.relnode, tag.forknum);
             let buf = RelDirExists::decode_option(version.sparse_get(self, key, ctx).await?)
@@ -544,7 +547,7 @@ impl Timeline {
                 forknum: *forknum,
             }));
 
-        if !self.get_rel_size_v2_enabled() {
+        if let RelSizeMigration::Legacy = self.get_rel_size_v2_status() {
             return Ok(rels_v1);
         }
 
@@ -599,28 +602,36 @@ impl Timeline {
         let n_blocks = self
             .get_slru_segment_size(kind, segno, Version::Lsn(lsn), ctx)
             .await?;
-        let mut segment = BytesMut::with_capacity(n_blocks as usize * BLCKSZ as usize);
-        for blkno in 0..n_blocks {
-            let block = self
-                .get_slru_page_at_lsn(kind, segno, blkno, lsn, ctx)
-                .await?;
-            segment.extend_from_slice(&block[..BLCKSZ as usize]);
-        }
-        Ok(segment.freeze())
-    }
 
-    /// Look up given SLRU page version.
-    pub(crate) async fn get_slru_page_at_lsn(
-        &self,
-        kind: SlruKind,
-        segno: u32,
-        blknum: BlockNumber,
-        lsn: Lsn,
-        ctx: &RequestContext,
-    ) -> Result<Bytes, PageReconstructError> {
-        assert!(self.tenant_shard_id.is_shard_zero());
-        let key = slru_block_to_key(kind, segno, blknum);
-        self.get(key, lsn, ctx).await
+        let keyspace = KeySpace::single(
+            slru_block_to_key(kind, segno, 0)..slru_block_to_key(kind, segno, n_blocks),
+        );
+
+        let batches = keyspace.partition(
+            self.get_shard_identity(),
+            Timeline::MAX_GET_VECTORED_KEYS * BLCKSZ as u64,
+        );
+
+        let io_concurrency = IoConcurrency::spawn_from_conf(
+            self.conf,
+            self.gate
+                .enter()
+                .map_err(|_| PageReconstructError::Cancelled)?,
+        );
+
+        let mut segment = BytesMut::with_capacity(n_blocks as usize * BLCKSZ as usize);
+        for batch in batches.parts {
+            let blocks = self
+                .get_vectored(batch, lsn, io_concurrency.clone(), ctx)
+                .await?;
+
+            for (_key, block) in blocks {
+                let block = block?;
+                segment.extend_from_slice(&block[..BLCKSZ as usize]);
+            }
+        }
+
+        Ok(segment.freeze())
     }
 
     /// Get size of an SLRU segment
@@ -829,19 +840,41 @@ impl Timeline {
             let nblocks = self
                 .get_slru_segment_size(SlruKind::Clog, segno, Version::Lsn(probe_lsn), ctx)
                 .await?;
-            for blknum in (0..nblocks).rev() {
-                let clog_page = self
-                    .get_slru_page_at_lsn(SlruKind::Clog, segno, blknum, probe_lsn, ctx)
+
+            let keyspace = KeySpace::single(
+                slru_block_to_key(SlruKind::Clog, segno, 0)
+                    ..slru_block_to_key(SlruKind::Clog, segno, nblocks),
+            );
+
+            let batches = keyspace.partition(
+                self.get_shard_identity(),
+                Timeline::MAX_GET_VECTORED_KEYS * BLCKSZ as u64,
+            );
+
+            let io_concurrency = IoConcurrency::spawn_from_conf(
+                self.conf,
+                self.gate
+                    .enter()
+                    .map_err(|_| PageReconstructError::Cancelled)?,
+            );
+
+            for batch in batches.parts.into_iter().rev() {
+                let blocks = self
+                    .get_vectored(batch, probe_lsn, io_concurrency.clone(), ctx)
                     .await?;
 
-                if clog_page.len() == BLCKSZ as usize + 8 {
-                    let mut timestamp_bytes = [0u8; 8];
-                    timestamp_bytes.copy_from_slice(&clog_page[BLCKSZ as usize..]);
-                    let timestamp = TimestampTz::from_be_bytes(timestamp_bytes);
+                for (_key, clog_page) in blocks.into_iter().rev() {
+                    let clog_page = clog_page?;
 
-                    match f(timestamp) {
-                        ControlFlow::Break(b) => return Ok(b),
-                        ControlFlow::Continue(()) => (),
+                    if clog_page.len() == BLCKSZ as usize + 8 {
+                        let mut timestamp_bytes = [0u8; 8];
+                        timestamp_bytes.copy_from_slice(&clog_page[BLCKSZ as usize..]);
+                        let timestamp = TimestampTz::from_be_bytes(timestamp_bytes);
+
+                        match f(timestamp) {
+                            ControlFlow::Break(b) => return Ok(b),
+                            ControlFlow::Continue(()) => (),
+                        }
                     }
                 }
             }
@@ -1051,6 +1084,8 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
         debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
+
+        fail::fail_point!("skip-logical-size-calculation", |_| { Ok(0) });
 
         // Fetch list of database dirs and iterate them
         let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
@@ -1718,6 +1753,35 @@ impl DatadirModification<'_> {
         Ok(())
     }
 
+    /// Returns `true` if the rel_size_v2 write path is enabled. If it is the first time that
+    /// we enable it, we also need to persist it in `index_part.json`.
+    pub fn maybe_enable_rel_size_v2(&mut self) -> anyhow::Result<bool> {
+        let status = self.tline.get_rel_size_v2_status();
+        let config = self.tline.get_rel_size_v2_enabled();
+        match (config, status) {
+            (false, RelSizeMigration::Legacy) => {
+                // tenant config didn't enable it and we didn't write any reldir_v2 key yet
+                Ok(false)
+            }
+            (false, RelSizeMigration::Migrating | RelSizeMigration::Migrated) => {
+                // index_part already persisted that the timeline has enabled rel_size_v2
+                Ok(true)
+            }
+            (true, RelSizeMigration::Legacy) => {
+                // The first time we enable it, we need to persist it in `index_part.json`
+                self.tline
+                    .update_rel_size_v2_status(RelSizeMigration::Migrating)?;
+                tracing::info!("enabled rel_size_v2");
+                Ok(true)
+            }
+            (true, RelSizeMigration::Migrating | RelSizeMigration::Migrated) => {
+                // index_part already persisted that the timeline has enabled rel_size_v2
+                // and we don't need to do anything
+                Ok(true)
+            }
+        }
+    }
+
     /// Store a relmapper file (pg_filenode.map) in the repository
     pub async fn put_relmap_file(
         &mut self,
@@ -1726,6 +1790,8 @@ impl DatadirModification<'_> {
         img: Bytes,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        let v2_enabled = self.maybe_enable_rel_size_v2()?;
+
         // Add it to the directory (if it doesn't exist already)
         let buf = self.get(DBDIR_KEY, ctx).await?;
         let mut dbdir = DbDirectory::des(&buf)?;
@@ -1746,7 +1812,7 @@ impl DatadirModification<'_> {
             })?;
             self.pending_directory_entries
                 .push((DirectoryKind::Rel, MetricsUpdate::Set(0)));
-            if self.tline.get_rel_size_v2_enabled() {
+            if v2_enabled {
                 self.pending_directory_entries
                     .push((DirectoryKind::RelV2, MetricsUpdate::Set(0)));
             }
@@ -1898,12 +1964,12 @@ impl DatadirModification<'_> {
                 .context("deserialize db")?
         };
 
-        // Add the new relation to the rel directory entry, and write it back
-        if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
-            return Err(RelationError::AlreadyExists);
-        }
+        let v2_enabled = self.maybe_enable_rel_size_v2()?;
 
-        if self.tline.get_rel_size_v2_enabled() {
+        if v2_enabled {
+            if rel_dir.rels.contains(&(rel.relnode, rel.forknum)) {
+                return Err(RelationError::AlreadyExists);
+            }
             let sparse_rel_dir_key =
                 rel_tag_sparse_key(rel.spcnode, rel.dbnode, rel.relnode, rel.forknum);
             // check if the rel_dir_key exists in v2
@@ -1938,6 +2004,10 @@ impl DatadirModification<'_> {
             self.pending_directory_entries
                 .push((DirectoryKind::RelV2, MetricsUpdate::Add(1)));
         } else {
+            // Add the new relation to the rel directory entry, and write it back
+            if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
+                return Err(RelationError::AlreadyExists);
+            }
             if !dbdir_exists {
                 self.pending_directory_entries
                     .push((DirectoryKind::Rel, MetricsUpdate::Set(0)))
@@ -1951,6 +2021,7 @@ impl DatadirModification<'_> {
                 )),
             );
         }
+
         // Put size
         let size_key = rel_size_to_key(rel);
         let buf = nblocks.to_le_bytes();
@@ -2029,6 +2100,7 @@ impl DatadirModification<'_> {
         drop_relations: HashMap<(u32, u32), Vec<RelTag>>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        let v2_enabled = self.maybe_enable_rel_size_v2()?;
         for ((spc_node, db_node), rel_tags) in drop_relations {
             let dir_key = rel_dir_to_key(spc_node, db_node);
             let buf = self.get(dir_key, ctx).await?;
@@ -2041,7 +2113,7 @@ impl DatadirModification<'_> {
                         .push((DirectoryKind::Rel, MetricsUpdate::Sub(1)));
                     dirty = true;
                     true
-                } else if self.tline.get_rel_size_v2_enabled() {
+                } else if v2_enabled {
                     // The rel is not found in the old reldir key, so we need to check the new sparse keyspace.
                     // Note that a relation can only exist in one of the two keyspaces (guaranteed by the ingestion
                     // logic).
@@ -2072,7 +2144,7 @@ impl DatadirModification<'_> {
                     // Remove entry from relation size cache
                     self.tline.remove_cached_rel_size(&rel_tag);
 
-                    // Delete size entry, as well as all blocks
+                    // Delete size entry, as well as all blocks; this is currently a no-op because we haven't implemented tombstones in storage.
                     self.delete(rel_key_range(rel_tag));
                 }
             }
@@ -2686,7 +2758,7 @@ mod tests {
             TimelineId::from_array(hex!("11223344556677881122334455667788"));
 
         let (tenant, ctx) = harness.load().await;
-        let tline = tenant
+        let (tline, ctx) = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
         let tline = tline.raw_timeline().unwrap();

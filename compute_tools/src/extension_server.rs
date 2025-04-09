@@ -71,15 +71,15 @@ More specifically, here is an example ext_index.json
     }
 }
 */
-use anyhow::Result;
-use anyhow::{bail, Context};
+use std::path::Path;
+use std::str;
+
+use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use compute_api::spec::RemoteExtSpec;
 use regex::Regex;
 use remote_storage::*;
 use reqwest::StatusCode;
-use std::path::Path;
-use std::str;
 use tar::Archive;
 use tracing::info;
 use tracing::log::warn;
@@ -202,8 +202,24 @@ pub async fn download_extension(
     // move contents of the libdir / sharedir in unzipped archive to the correct local paths
     for paths in [sharedir_paths, libdir_paths] {
         let (zip_dir, real_dir) = paths;
+
+        let dir = match std::fs::read_dir(&zip_dir) {
+            Ok(dir) => dir,
+            Err(e) => match e.kind() {
+                // In the event of a SQL-only extension, there would be nothing
+                // to move from the lib/ directory, so note that in the log and
+                // move on.
+                std::io::ErrorKind::NotFound => {
+                    info!("nothing to move from {}", zip_dir);
+                    continue;
+                }
+                _ => return Err(anyhow::anyhow!(e)),
+            },
+        };
+
         info!("mv {zip_dir:?}/*  {real_dir:?}");
-        for file in std::fs::read_dir(zip_dir)? {
+
+        for file in dir {
             let old_file = file?.path();
             let new_file =
                 Path::new(&real_dir).join(old_file.file_name().context("error parsing file")?);
@@ -244,33 +260,40 @@ pub fn create_control_files(remote_extensions: &RemoteExtSpec, pgbin: &str) {
                 info!("writing file {:?}{:?}", control_path, control_content);
                 std::fs::write(control_path, control_content).unwrap();
             } else {
-                warn!("control file {:?} exists both locally and remotely. ignoring the remote version.", control_path);
+                warn!(
+                    "control file {:?} exists both locally and remotely. ignoring the remote version.",
+                    control_path
+                );
             }
         }
     }
 }
 
-// Do request to extension storage proxy, i.e.
+// Do request to extension storage proxy, e.g.,
 // curl http://pg-ext-s3-gateway/latest/v15/extensions/anon.tar.zst
-// using HHTP GET
-// and return the response body as bytes
-//
+// using HTTP GET and return the response body as bytes.
 async fn download_extension_tar(ext_remote_storage: &str, ext_path: &str) -> Result<Bytes> {
     let uri = format!("{}/{}", ext_remote_storage, ext_path);
+    let filename = Path::new(ext_path)
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
+        .to_str()
+        .unwrap_or("unknown")
+        .to_string();
 
-    info!("Download extension {} from uri {}", ext_path, uri);
+    info!("Downloading extension file '{}' from uri {}", filename, uri);
 
     match do_extension_server_request(&uri).await {
         Ok(resp) => {
             info!("Successfully downloaded remote extension data {}", ext_path);
             REMOTE_EXT_REQUESTS_TOTAL
-                .with_label_values(&[&StatusCode::OK.to_string()])
+                .with_label_values(&[&StatusCode::OK.to_string(), &filename])
                 .inc();
             Ok(resp)
         }
         Err((msg, status)) => {
             REMOTE_EXT_REQUESTS_TOTAL
-                .with_label_values(&[&status])
+                .with_label_values(&[&status, &filename])
                 .inc();
             bail!(msg);
         }

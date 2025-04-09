@@ -6,11 +6,9 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-backtrace.workspace = true
 bytes.workspace = true
-inferno.workspace = true
 fail.workspace = true
-flate2.workspace = true
+futures.workspace = true
 hyper0.workspace = true
 itertools.workspace = true
 jemalloc_pprof.workspace = true
@@ -24,6 +22,7 @@ serde_path_to_error.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 tokio-util.workspace = true
 url.workspace = true
 uuid.workspace = true

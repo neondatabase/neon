@@ -1,0 +1,147 @@
+name: large oltp benchmark
+
+on:
+  # uncomment to run on push for debugging your PR
+  push:
+    branches: [ bodobolero/synthetic_oltp_workload ]
+
+  schedule:
+    # * is a special character in YAML so you have to quote this string
+    #          ┌───────────── minute (0 - 59)
+    #          │ ┌───────────── hour (0 - 23)
+    #          │ │  ┌───────────── day of the month (1 - 31)
+    #          │ │  │ ┌───────────── month (1 - 12 or JAN-DEC)
+    #          │ │  │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
+    - cron:   '0 15 * * *' # run once a day, timezone is utc, avoid conflict with other benchmarks
+  workflow_dispatch: # adds ability to run this manually
+
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}
+
+concurrency:
+  # Allow only one workflow globally because we need dedicated resources which only exist once
+  group: large-oltp-bench-workflow
+  cancel-in-progress: true
+
+jobs:
+  oltp:
+    strategy:
+      fail-fast: false # allow other variants to continue even if one fails
+      matrix:
+        include:
+          - target: new_branch 
+            custom_scripts: insert_webhooks.sql@2 select_any_webhook_with_skew.sql@4 select_recent_webhook.sql@4 
+          - target: reuse_branch 
+            custom_scripts: insert_webhooks.sql@2 select_any_webhook_with_skew.sql@4 select_recent_webhook.sql@4 
+      max-parallel: 1 # we want to run each stripe size sequentially to be able to compare the results
+    permissions:
+      contents: write
+      statuses: write
+      id-token: write # aws-actions/configure-aws-credentials
+    env:
+      TEST_PG_BENCH_DURATIONS_MATRIX: "1h" # todo update to > 1 h 
+      TEST_PGBENCH_CUSTOM_SCRIPTS: ${{ matrix.custom_scripts }}
+      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+      PG_VERSION: 16 # pre-determined by pre-determined project
+      TEST_OUTPUT: /tmp/test_output
+      BUILD_TYPE: remote
+      SAVE_PERF_REPORT: ${{ github.ref_name == 'main' }}
+      PLATFORM: ${{ matrix.target }}
+
+    runs-on: [ self-hosted, us-east-2, x64 ]
+    container:
+      image: neondatabase/build-tools:pinned-bookworm
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+      options: --init
+
+    # Increase timeout to 8h, default timeout is 6h
+    timeout-minutes: 480
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Configure AWS credentials # necessary to download artefacts
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: eu-central-1
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 18000 # 5 hours is currently max associated with IAM role
+
+    - name: Download Neon artifact
+      uses: ./.github/actions/download
+      with:
+        name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
+        path: /tmp/neon/
+        prefix: latest
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+
+    - name: Create Neon Branch for large tenant
+      if: ${{ matrix.target == 'new_branch' }}
+      id: create-neon-branch-oltp-target
+      uses: ./.github/actions/neon-branch-create
+      with:
+          project_id: ${{ vars.BENCHMARK_LARGE_OLTP_PROJECTID }}
+          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+
+    - name: Set up Connection String
+      id: set-up-connstr
+      run: |
+          case "${{ matrix.target }}" in
+              new_branch)
+              CONNSTR=${{ steps.create-neon-branch-oltp-target.outputs.dsn }}
+              ;;
+              reuse_branch)
+              CONNSTR=${{ secrets.BENCHMARK_LARGE_OLTP_REUSE_CONNSTR }}
+              ;;
+              *)
+              echo >&2 "Unknown target=${{ matrix.target }}"
+              exit 1
+              ;;
+          esac
+
+          echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
+
+    - name: Benchmark pgbench with custom-scripts
+      uses: ./.github/actions/run-python-test-set
+      with:
+        build_type: ${{ env.BUILD_TYPE }}
+        test_selection: performance
+        run_in_parallel: false
+        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
+        extra_params: -m remote_cluster --timeout 21600 -k test_perf_oltp_large_tenant
+        pg_version: ${{ env.PG_VERSION }}
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+
+    - name: Delete Neon Branch for large tenant
+      if: ${{ always() && matrix.target == 'new_branch' }}
+      uses: ./.github/actions/neon-branch-delete
+      with:
+        project_id: ${{ vars.BENCHMARK_LARGE_OLTP_PROJECTID }}
+        branch_id: ${{ steps.create-neon-branch-oltp-target.outputs.branch_id }}
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+
+    - name: Create Allure report
+      id: create-allure-report
+      if: ${{ !cancelled() }}
+      uses: ./.github/actions/allure-report-generate
+      with:
+        aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+  
+    - name: Post to a Slack channel
+      if: ${{ github.event.schedule && failure() }}
+      uses: slackapi/slack-github-action@v1
+      with:
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
+        slack-message: |
+          Periodic large oltp perf testing: ${{ job.status }}
+          <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+          <${{ steps.create-allure-report.outputs.report-url }}|Allure report>
+      env:
+        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

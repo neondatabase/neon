@@ -8,6 +8,7 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use pageserver_api::controller_api::{NodeAvailability, SkSchedulingPolicy};
 use pageserver_api::models::PageserverUtilization;
+use reqwest::Certificate;
 use safekeeper_api::models::SafekeeperUtilization;
 use safekeeper_client::mgmt_api;
 use thiserror::Error;
@@ -27,6 +28,7 @@ struct HeartbeaterTask<Server, State> {
     max_offline_interval: Duration,
     max_warming_up_interval: Duration,
     jwt_token: Option<String>,
+    ssl_ca_cert: Option<Certificate>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +77,7 @@ where
 {
     pub(crate) fn new(
         jwt_token: Option<String>,
+        ssl_ca_cert: Option<Certificate>,
         max_offline_interval: Duration,
         max_warming_up_interval: Duration,
         cancel: CancellationToken,
@@ -84,6 +87,7 @@ where
         let mut heartbeater = HeartbeaterTask::new(
             receiver,
             jwt_token,
+            ssl_ca_cert,
             max_offline_interval,
             max_warming_up_interval,
             cancel,
@@ -119,6 +123,7 @@ where
     fn new(
         receiver: tokio::sync::mpsc::UnboundedReceiver<HeartbeatRequest<Server, State>>,
         jwt_token: Option<String>,
+        ssl_ca_cert: Option<Certificate>,
         max_offline_interval: Duration,
         max_warming_up_interval: Duration,
         cancel: CancellationToken,
@@ -130,6 +135,7 @@ where
             max_offline_interval,
             max_warming_up_interval,
             jwt_token,
+            ssl_ca_cert,
         }
     }
     async fn run(&mut self) {
@@ -172,6 +178,7 @@ impl HeartBeat<Node, PageserverState> for HeartbeaterTask<Node, PageserverState>
         let mut heartbeat_futs = FuturesUnordered::new();
         for (node_id, node) in &*pageservers {
             heartbeat_futs.push({
+                let ssl_ca_cert = self.ssl_ca_cert.clone();
                 let jwt_token = self.jwt_token.clone();
                 let cancel = self.cancel.clone();
 
@@ -187,6 +194,7 @@ impl HeartBeat<Node, PageserverState> for HeartbeaterTask<Node, PageserverState>
                         .with_client_retries(
                             |client| async move { client.get_utilization().await },
                             &jwt_token,
+                            &ssl_ca_cert,
                             3,
                             3,
                             Duration::from_secs(1),
@@ -325,6 +333,7 @@ impl HeartBeat<Safekeeper, SafekeeperState> for HeartbeaterTask<Safekeeper, Safe
                     .jwt_token
                     .as_ref()
                     .map(|t| SecretString::from(t.to_owned()));
+                let ssl_ca_cert = self.ssl_ca_cert.clone();
                 let cancel = self.cancel.clone();
 
                 async move {
@@ -332,6 +341,7 @@ impl HeartBeat<Safekeeper, SafekeeperState> for HeartbeaterTask<Safekeeper, Safe
                         .with_client_retries(
                             |client| async move { client.get_utilization().await },
                             &jwt_token,
+                            &ssl_ca_cert,
                             3,
                             3,
                             Duration::from_secs(1),

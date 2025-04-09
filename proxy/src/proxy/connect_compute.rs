@@ -81,7 +81,10 @@ impl ConnectMechanism for TcpMechanism<'_> {
     type ConnectError = compute::ConnectionError;
     type Error = compute::ConnectionError;
 
-    #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
+    #[tracing::instrument(skip_all, fields(
+        pid = tracing::field::Empty,
+        compute_id = tracing::field::Empty
+    ))]
     async fn connect_once(
         &self,
         ctx: &RequestContext,
