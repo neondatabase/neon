@@ -1177,7 +1177,6 @@ impl Timeline {
         io_concurrency: super::storage_layer::IoConcurrency,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
-        let max_request_lsn = query.high_watermark_lsn()?;
         let total_keyspace = query.total_keyspace();
 
         let key_count = total_keyspace.total_raw_size().try_into().unwrap();
@@ -1194,9 +1193,8 @@ impl Timeline {
         }
 
         trace!(
-            "get vectored request for {:?}@{} from task kind {:?}",
-            total_keyspace,
-            max_request_lsn,
+            "get vectored query {} from task kind {:?}",
+            query,
             ctx.task_kind(),
         );
 
@@ -4095,6 +4093,27 @@ impl VersionedKeySpaceQuery {
                 });
             }
         }
+    }
+}
+
+impl std::fmt::Display for VersionedKeySpaceQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[")?;
+
+        match self {
+            VersionedKeySpaceQuery::Uniform { keyspace, lsn } => {
+                write!(f, "{keyspace} @ {lsn}")?;
+            }
+            VersionedKeySpaceQuery::Scattered {
+                keyspaces_at_lsn, ..
+            } => {
+                for (lsn, keyspace) in keyspaces_at_lsn.iter() {
+                    write!(f, "{keyspace} @ {lsn},")?;
+                }
+            }
+        }
+
+        write!(f, "]")
     }
 }
 
