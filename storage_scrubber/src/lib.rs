@@ -295,8 +295,8 @@ pub struct ControllerClientConfig {
 }
 
 impl ControllerClientConfig {
-    pub fn build_client(self) -> control_api::Client {
-        control_api::Client::new(self.controller_api, Some(self.controller_jwt))
+    pub fn build_client(self, http_client: reqwest::Client) -> control_api::Client {
+        control_api::Client::new(http_client, self.controller_api, Some(self.controller_jwt))
     }
 }
 

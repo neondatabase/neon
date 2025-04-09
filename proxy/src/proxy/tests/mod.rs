@@ -568,7 +568,7 @@ fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeIn
 fn helper_create_connect_info(
     mechanism: &TestConnectMechanism,
 ) -> auth::Backend<'static, ComputeCredentials> {
-    let user_info = auth::Backend::ControlPlane(
+    auth::Backend::ControlPlane(
         MaybeOwned::Owned(ControlPlaneClient::Test(Box::new(mechanism.clone()))),
         ComputeCredentials {
             info: ComputeUserInfo {
@@ -578,8 +578,7 @@ fn helper_create_connect_info(
             },
             keys: ComputeCredentialKeys::Password("password".into()),
         },
-    );
-    user_info
+    )
 }
 
 fn config() -> ComputeConfig {

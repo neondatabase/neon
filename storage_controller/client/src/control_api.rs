@@ -10,13 +10,11 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(base_url: Url, jwt_token: Option<String>) -> Self {
+    pub fn new(http_client: reqwest::Client, base_url: Url, jwt_token: Option<String>) -> Self {
         Self {
             base_url,
             jwt_token,
-            client: reqwest::ClientBuilder::new()
-                .build()
-                .expect("Failed to construct http client"),
+            client: http_client,
         }
     }
 

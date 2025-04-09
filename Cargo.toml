@@ -40,6 +40,7 @@ members = [
     "libs/proxy/postgres-protocol2",
     "libs/proxy/postgres-types2",
     "libs/proxy/tokio-postgres2",
+    "object_storage",
 ]
 
 [workspace.package]
@@ -183,7 +184,7 @@ test-context = "0.3"
 thiserror = "1.0"
 tikv-jemallocator = { version = "0.6", features = ["profiling", "stats", "unprefixed_malloc_on_supported_platforms"] }
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
-tokio = { version = "1.41", features = ["macros"] }
+tokio = { version = "1.43.1", features = ["macros"] }
 tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "main" }
 tokio-io-timeout = "1.2.0"
 tokio-postgres-rustls = "0.12.0"
@@ -208,6 +209,7 @@ tracing-opentelemetry = "0.28"
 tracing-serde = "0.2.0"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json"] }
 try-lock = "0.2.5"
+test-log = { version = "0.2.17", default-features = false, features = ["log"] }
 twox-hash = { version = "1.6.3", default-features = false }
 typed-json = "0.1"
 url = "2.2"

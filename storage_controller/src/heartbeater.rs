@@ -12,6 +12,7 @@ use safekeeper_api::models::SafekeeperUtilization;
 use safekeeper_client::mgmt_api;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use utils::id::NodeId;
 use utils::logging::SecretString;
 
@@ -227,6 +228,7 @@ impl HeartBeat<Node, PageserverState> for HeartbeaterTask<Node, PageserverState>
 
                     Some((*node_id, status))
                 }
+                .instrument(tracing::info_span!("heartbeat_ps", %node_id))
             });
         }
 
@@ -253,7 +255,7 @@ impl HeartBeat<Node, PageserverState> for HeartbeaterTask<Node, PageserverState>
                 PageserverState::WarmingUp { .. } => {
                     warming_up += 1;
                 }
-                PageserverState::Offline { .. } => offline += 1,
+                PageserverState::Offline => offline += 1,
                 PageserverState::Available { .. } => {}
             }
         }
@@ -369,6 +371,7 @@ impl HeartBeat<Safekeeper, SafekeeperState> for HeartbeaterTask<Safekeeper, Safe
 
                     Some((*node_id, status))
                 }
+                .instrument(tracing::info_span!("heartbeat_sk", %node_id))
             });
         }
 
@@ -391,7 +394,7 @@ impl HeartBeat<Safekeeper, SafekeeperState> for HeartbeaterTask<Safekeeper, Safe
         let mut offline = 0;
         for state in new_state.values() {
             match state {
-                SafekeeperState::Offline { .. } => offline += 1,
+                SafekeeperState::Offline => offline += 1,
                 SafekeeperState::Available { .. } => {}
             }
         }

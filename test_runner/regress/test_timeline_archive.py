@@ -318,7 +318,7 @@ def test_timeline_offload_persist(neon_env_builder: NeonEnvBuilder, delete_timel
         neon_env_builder.pageserver_remote_storage,
         prefix=f"tenants/{str(tenant_id)}/",
     )
-    assert_prefix_empty(
+    assert_prefix_not_empty(
         neon_env_builder.pageserver_remote_storage,
         prefix=f"tenants/{str(tenant_id)}/tenant-manifest",
     )
@@ -387,7 +387,7 @@ def test_timeline_offload_persist(neon_env_builder: NeonEnvBuilder, delete_timel
             sum_again = endpoint.safe_psql("SELECT sum(key) from foo where key < 500")
             assert sum == sum_again
 
-        assert_prefix_empty(
+        assert_prefix_not_empty(
             neon_env_builder.pageserver_remote_storage,
             prefix=f"tenants/{str(env.initial_tenant)}/tenant-manifest",
         )
@@ -924,7 +924,7 @@ def test_timeline_offload_generations(neon_env_builder: NeonEnvBuilder):
         neon_env_builder.pageserver_remote_storage,
         prefix=f"tenants/{str(tenant_id)}/",
     )
-    assert_prefix_empty(
+    assert_prefix_not_empty(
         neon_env_builder.pageserver_remote_storage,
         prefix=f"tenants/{str(tenant_id)}/tenant-manifest",
     )

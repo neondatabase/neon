@@ -89,6 +89,9 @@ impl Safekeeper {
     pub(crate) fn availability(&self) -> SafekeeperState {
         self.availability.clone()
     }
+    pub(crate) fn has_https_port(&self) -> bool {
+        self.listen_https_port.is_some()
+    }
     /// Perform an operation (which is given a [`SafekeeperClient`]) with retries
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn with_client_retries<T, O, F>(
