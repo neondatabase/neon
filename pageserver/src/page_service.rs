@@ -18,7 +18,7 @@ use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pageserver_api::config::{
     PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
-    PageServiceProtocolPipelinedExecutionStrategy,
+    PageServiceProtocolPipelinedBatchingStrategy, PageServiceProtocolPipelinedExecutionStrategy,
 };
 use pageserver_api::key::rel_block_to_key;
 use pageserver_api::models::{
@@ -1066,6 +1066,7 @@ impl PageServerHandler {
     #[instrument(skip_all, level = tracing::Level::TRACE)]
     #[allow(clippy::boxed_local)]
     fn pagestream_do_batch(
+        batching_strategy: PageServiceProtocolPipelinedBatchingStrategy,
         max_batch_size: NonZeroUsize,
         batch: &mut Result<BatchedFeMessage, QueryError>,
         this_msg: Result<BatchedFeMessage, QueryError>,
@@ -1104,25 +1105,39 @@ impl PageServerHandler {
                     return false;
                 }
 
-                // The read path doesn't curently support serving the same page at different LSNs.
-                // While technically possible, it's uncertain if the complexity is worth it.
-                // Break the batch if such a case is encountered.
-                //
-                // TODO(vlad): Include a metric for batch breaks with a reason label.
-                let same_page_different_lsn = accum_pages.iter().any(|batched| {
-                    batched.req.rel == this_pages[0].req.rel
-                        && batched.req.blkno == this_pages[0].req.blkno
-                        && batched.effective_request_lsn != this_pages[0].effective_request_lsn
-                });
+                match batching_strategy {
+                    PageServiceProtocolPipelinedBatchingStrategy::UniformLsn => {
+                        if let Some(last_in_batch) = accum_pages.last() {
+                            if last_in_batch.effective_request_lsn
+                                != this_pages[0].effective_request_lsn
+                            {
+                                return false;
+                            }
+                        }
+                    }
+                    PageServiceProtocolPipelinedBatchingStrategy::ScatteredLsn => {
+                        // The read path doesn't curently support serving the same page at different LSNs.
+                        // While technically possible, it's uncertain if the complexity is worth it.
+                        // Break the batch if such a case is encountered.
+                        //
+                        // TODO(vlad): Include a metric for batch breaks with a reason label.
+                        let same_page_different_lsn = accum_pages.iter().any(|batched| {
+                            batched.req.rel == this_pages[0].req.rel
+                                && batched.req.blkno == this_pages[0].req.blkno
+                                && batched.effective_request_lsn
+                                    != this_pages[0].effective_request_lsn
+                        });
 
-                if same_page_different_lsn {
-                    trace!(
-                        rel=%this_pages[0].req.rel,
-                        blkno=%this_pages[0].req.blkno,
-                        lsn=%this_pages[0].effective_request_lsn,
-                        "stopping batching because same page was requested at different LSNs"
-                    );
-                    return false;
+                        if same_page_different_lsn {
+                            trace!(
+                                rel=%this_pages[0].req.rel,
+                                blkno=%this_pages[0].req.blkno,
+                                lsn=%this_pages[0].effective_request_lsn,
+                                "stopping batching because same page was requested at different LSNs"
+                            );
+                            return false;
+                        }
+                    }
                 }
 
                 true
@@ -1720,6 +1735,7 @@ impl PageServerHandler {
         let PageServicePipeliningConfigPipelined {
             max_batch_size,
             execution,
+            batching: batching_strategy,
         } = pipelining_config;
 
         // Macro to _define_ a pipeline stage.
@@ -1771,7 +1787,7 @@ impl PageServerHandler {
                     exit |= read_res.is_err();
                     let could_send = batch_tx
                         .send(read_res, |batch, res| {
-                            Self::pagestream_do_batch(max_batch_size, batch, res)
+                            Self::pagestream_do_batch(batching_strategy, max_batch_size, batch, res)
                         })
                         .await;
                     exit |= could_send.is_err();

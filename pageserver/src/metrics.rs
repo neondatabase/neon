@@ -17,7 +17,7 @@ use metrics::{
 use once_cell::sync::Lazy;
 use pageserver_api::config::{
     PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
-    PageServiceProtocolPipelinedExecutionStrategy,
+    PageServiceProtocolPipelinedBatchingStrategy, PageServiceProtocolPipelinedExecutionStrategy,
 };
 use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
@@ -1863,7 +1863,7 @@ pub(crate) static PAGE_SERVICE_CONFIG_MAX_BATCH_SIZE: Lazy<IntGaugeVec> = Lazy::
         "pageserver_page_service_config_max_batch_size",
         "Configured maximum batch size for the server-side batching functionality of page_service. \
          Labels expose more of the configuration parameters.",
-        &["mode", "execution"]
+        &["mode", "execution", "batching"]
     )
     .expect("failed to define a metric")
 });
@@ -1871,10 +1871,11 @@ pub(crate) static PAGE_SERVICE_CONFIG_MAX_BATCH_SIZE: Lazy<IntGaugeVec> = Lazy::
 fn set_page_service_config_max_batch_size(conf: &PageServicePipeliningConfig) {
     PAGE_SERVICE_CONFIG_MAX_BATCH_SIZE.reset();
     let (label_values, value) = match conf {
-        PageServicePipeliningConfig::Serial => (["serial", "-"], 1),
+        PageServicePipeliningConfig::Serial => (["serial", "-", "-"], 1),
         PageServicePipeliningConfig::Pipelined(PageServicePipeliningConfigPipelined {
             max_batch_size,
             execution,
+            batching,
         }) => {
             let mode = "pipelined";
             let execution = match execution {
@@ -1883,7 +1884,12 @@ fn set_page_service_config_max_batch_size(conf: &PageServicePipeliningConfig) {
                 }
                 PageServiceProtocolPipelinedExecutionStrategy::Tasks => "tasks",
             };
-            ([mode, execution], max_batch_size.get())
+            let batching = match batching {
+                PageServiceProtocolPipelinedBatchingStrategy::UniformLsn => "uniform-lsn",
+                PageServiceProtocolPipelinedBatchingStrategy::ScatteredLsn => "scattered-lsn",
+            };
+
+            ([mode, execution, batching], max_batch_size.get())
         }
     };
     PAGE_SERVICE_CONFIG_MAX_BATCH_SIZE
