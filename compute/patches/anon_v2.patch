@@ -11,32 +11,72 @@ index 0cdc769..5ceb91c 100644
 +
 +GRANT EXECUTE ON FUNCTION pg_config to neon_superuser;
 diff --git a/sql/init.sql b/sql/init.sql
-index 7da6553..8612dec 100644
+index 7da6553..f09d15e 100644
 --- a/sql/init.sql
 +++ b/sql/init.sql
-@@ -11,7 +11,6 @@ CREATE OR REPLACE FUNCTION anon.load_csv(
+@@ -4,15 +4,19 @@
+ 
+ -- ADD unit tests in tests/sql/init.sql
+ 
+-CREATE OR REPLACE FUNCTION anon.load_csv(
++CREATE OR REPLACE FUNCTION load_csv(
+   dest_table REGCLASS,
+   csv_file TEXT
+ )
  RETURNS BOOLEAN AS
  $$
  DECLARE
 -  csv_file_check TEXT;
    sequence TEXT;
++  csv_lines TEXT[];
++  column_names TEXT[];
++  column_values TEXT[];
++  current_line TEXT;
++  insert_query TEXT;
  BEGIN
  -- This check does not work with PG 10 and below (absolute path not supported)
-@@ -24,9 +23,10 @@ BEGIN
+ --
+@@ -24,9 +28,36 @@ BEGIN
  --    RETURN FALSE;
  --  END IF;
  
 -  -- load the csv file
 -  EXECUTE 'COPY ' || dest_table
 -      || ' FROM ' || quote_literal(csv_file);
-+  -- copy the csv data
-+  EXECUTE format(
-+    '\COPY %I FROM stdin WITH CSV', dest_table
-+  ) USING csv_file;
++ csv_lines := string_to_array(csv_file, E'\n');
++
++ IF array_length(csv_lines, 1) < 1 THEN
++    RAISE NOTICE 'CSV file has no data. Skipping.';
++    RETURN FALSE;
++  END IF;
++
++   column_names := string_to_array(csv_lines[1], ',');
++
++FOR i IN 2..array_length(csv_lines, 1) LOOP
++    current_line := csv_lines[i];
++   IF current_line IS NULL OR current_line = '' THEN
++      CONTINUE;
++    END IF;
++
++    column_values := string_to_array(current_line, ',');
++
++    insert_query := format(
++      'INSERT INTO %s (%s) VALUES (%s)',
++      dest_table,
++      array_to_string(column_names, ', '),
++      array_to_string(array_map(column_values, 'quote_literal'), ', ')
++    );
++
++    BEGIN
++      EXECUTE insert_query;
++    EXCEPTION WHEN OTHERS THEN
++      RAISE NOTICE 'Error inserting row %: %', i, SQLERRM;
++    END;
++  END LOOP;
  
    -- update the oid sequence (if any)
    SELECT pg_catalog.pg_get_serial_sequence(dest_table::TEXT,'oid')
-@@ -50,13 +50,13 @@ BEGIN
+@@ -50,13 +81,13 @@ BEGIN
  
  EXCEPTION
  
@@ -56,7 +96,7 @@ index 7da6553..8612dec 100644
  
    WHEN invalid_text_representation THEN
      RAISE NOTICE 'Data file ''%'' has a bad CSV format. Skipping.', csv_file;
-@@ -81,8 +81,10198 @@ CREATE OR REPLACE FUNCTION anon.init(
+@@ -81,8 +112,10198 @@ CREATE OR REPLACE FUNCTION anon.init(
  RETURNS BOOLEAN
  AS $$
  DECLARE
@@ -10256,7 +10296,7 @@ index 7da6553..8612dec 100644
  BEGIN
  
    IF anon.is_initialized() THEN
-@@ -90,22 +10280,24 @@ BEGIN
+@@ -90,22 +10311,24 @@ BEGIN
      RETURN TRUE;
    END IF;
  

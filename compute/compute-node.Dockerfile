@@ -1337,8 +1337,8 @@ ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN wget https://gitlab.com/dalibo/postgresql_anonymizer/-/archive/latest/postgresql_anonymizer-latest.tar.gz -O pg_anon.tar.gz && \
     mkdir pg_anon-src && cd pg_anon-src && tar xzf ../pg_anon.tar.gz --strip-components=1 -C . && \
     find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt && \
-    sed -i 's/pgrx = "0.12.9"/pgrx = { version = "=0.12.9", features = [ "unsafe-postgres" ] }/g' Cargo.toml
-    # patch -p1 < /ext-src/anon_v2.patch
+    sed -i 's/pgrx = "0.12.9"/pgrx = { version = "=0.12.9", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    patch -p1 < /ext-src/anon_v2.patch
 
 FROM rust-extensions-build-pgrx12 AS pg-anon-pg-build
 ARG PG_VERSION
