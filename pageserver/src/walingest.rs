@@ -27,7 +27,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use bytes::{Buf, Bytes};
-use pageserver_api::key::{rel_block_to_key, Key, ToRelBlockError};
+use pageserver_api::key::{Key, ToRelBlockError, rel_block_to_key};
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
