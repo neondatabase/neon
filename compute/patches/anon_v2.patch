@@ -1,8 +1,8 @@
 diff --git a/sql/anon.sql b/sql/anon.sql
-index 0cdc769..5ceb91c 100644
+index 0cdc769..b66bf67 100644
 --- a/sql/anon.sql
 +++ b/sql/anon.sql
-@@ -1141,3 +1141,7 @@ $$
+@@ -1141,3 +1141,22 @@ $$
  -- TODO : https://en.wikipedia.org/wiki/L-diversity
  
  -- TODO : https://en.wikipedia.org/wiki/T-closeness
@@ -10,8 +10,23 @@ index 0cdc769..5ceb91c 100644
 +-- NEON Patches
 +
 +GRANT EXECUTE ON FUNCTION pg_config to neon_superuser;
++GRANT ALL ON SCHEMA anon to neon_superuser;
++
++CREATE OR REPLACE FUNCTION set_transparent_dymanic_masking(dest_table TEXT)
++RETURNS void
++AS $$
++DECLARE
++  query TEXT;
++BEGIN
++  query := 'ALTER DATABASE ' || dest_table || ' SET anon.transparent_dynamic_masking TO true;';
++  EXECUTE query;
++END $$
++  LANGUAGE plpgsql
++  SECURITY DEFINER
++  SET search_path = ''
++;
 diff --git a/sql/init.sql b/sql/init.sql
-index 7da6553..d305538 100644
+index 7da6553..7c61d7d 100644
 --- a/sql/init.sql
 +++ b/sql/init.sql
 @@ -11,8 +11,19 @@ CREATE OR REPLACE FUNCTION anon.load_csv(
@@ -72,7 +87,7 @@ index 7da6553..d305538 100644
 +
 +IF NOT table_exists THEN
 +    -- Build CREATE TABLE statement
-+    create_table_query := 'CREATE TABLE ' || dest_table || ' (';
++    create_table_query := 'CREATE TABLE IF NOT EXISTS ' || dest_table || ' (';
 +    
 +    -- Add columns (assuming TEXT type for all columns)
 +    FOR i IN 1..column_count LOOP
