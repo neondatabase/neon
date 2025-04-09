@@ -6,11 +6,18 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import USE_LFC
-<<<<<<< HEAD
-from prometheus_client.parser import text_string_to_metric_families as parse_metrics
+from prometheus_client.parser import text_string_to_metric_families as prom_parse_impl
 
 prewarm_label = "compute_ctl_lfc_prewarm_requests_total"
 offload_label = "compute_ctl_lfc_prewarm_offload_requests_total"
+
+
+def prom_parse(http_client):
+    return {
+        sample.name: sample.value
+        for family in prom_parse_impl(http_client.metrics())
+        for sample in family.samples
+    }
 
 
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
@@ -37,8 +44,20 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, with_compute_ctl: bool):
 
     http_client = endpoint.http_client()
     if with_compute_ctl:
+        status = http_client.prewarm_lfc_status()
+        assert status["status"] == "not_prewarmed"
+        assert status["error"] == ""
+
         log.info("Pushing state to object storage")
         http_client.prewarm_lfc_offload()
+
+        status = http_client.prewarm_lfc_status()
+        assert status["status"] == "not_prewarmed"
+        assert status["error"] == ""
+
+        samples = prom_parse(http_client)
+        assert samples[offload_label] == 1
+        assert samples[prewarm_label] == 0
     else:
         cur.execute("select get_local_cache_state()")
         lfc_state = cur.fetchall()[0][0]
@@ -55,6 +74,10 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, with_compute_ctl: bool):
     if with_compute_ctl:
         log.info("Pulling state from object storage")
         http_client.prewarm_lfc()
+
+        status = http_client.prewarm_lfc_status()
+        assert status["status"] in ["completed", "prewarming"]
+        assert status["error"] == ""
     else:
         cur.execute("select prewarm_local_cache(%s)", (lfc_state,))
 
@@ -64,7 +87,8 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, with_compute_ctl: bool):
     cur.execute("select * from get_prewarm_info()")
     prewarm_info = cur.fetchall()[0]
     log.info(f"Prewarm info: {prewarm_info}")
-    log.info(f"Prewarm progress: {prewarm_info[1] * 100 // prewarm_info[0]}%")
+    segments, done, _, _ = prewarm_info
+    log.info(f"Prewarm progress: {done * 100 // segments}%")
 
     assert lfc_used_pages > 10000
     assert prewarm_info[0] > 0 and prewarm_info[0] == prewarm_info[1]
@@ -76,9 +100,13 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, with_compute_ctl: bool):
 
     if not with_compute_ctl:
         return
-    metrics = http_client.metrics()
-    assert f"{prewarm_label} 1" in metrics
-    assert f"{offload_label} 1" in metrics
+
+    desired = {"status": "completed", "segments": segments, "done": done, "error": ""}
+    assert http_client.prewarm_lfc_status() == desired
+
+    samples = prom_parse(http_client)
+    assert samples[offload_label] == 0
+    assert samples[prewarm_label] == 1
 
 
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
@@ -138,13 +166,11 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, with_compute_ctl: 
             cur.execute("select pg_reload_conf()")
 
             if with_compute_ctl:
-                log.info("Pulling state from object storage")
                 endpoint.http_client().prewarm_lfc()
             else:
                 cur.execute("select prewarm_local_cache(%s)", (lfc_state,))
 
             nonlocal n_prewarms
-            cur.execute("select prewarm_local_cache(%s)", (lfc_state,))
             n_prewarms += 1
         log.info(f"Number of prewarms: {n_prewarms}")
 
@@ -170,10 +196,6 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, with_compute_ctl: 
 
     if not with_compute_ctl:
         return
-    samples = {
-        sample.name: sample.value
-        for family in parse_metrics(http_client.metrics())
-        for sample in family.samples
-    }
+    samples = prom_parse(http_client)
     assert samples[offload_label] == 1
     assert samples[prewarm_label] == n_prewarms
