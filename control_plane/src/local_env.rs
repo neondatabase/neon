@@ -15,7 +15,7 @@ use clap::ValueEnum;
 use postgres_backend::AuthType;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use utils::auth::{Claims, encode_from_key_file};
+use utils::auth::encode_from_key_file;
 use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 
 use crate::object_storage::{OBJECT_STORAGE_REMOTE_STORAGE_DIR, ObjectStorage};
@@ -757,7 +757,7 @@ impl LocalEnv {
     }
 
     // this function is used only for testing purposes in CLI e g generate tokens during init
-    pub fn generate_auth_token(&self, claims: &Claims) -> anyhow::Result<String> {
+    pub fn generate_auth_token<S: Serialize>(&self, claims: &S) -> anyhow::Result<String> {
         let private_key_path = self.get_private_key_path();
         let key_data = fs::read(private_key_path)?;
         encode_from_key_file(claims, &key_data)
