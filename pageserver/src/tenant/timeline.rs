@@ -2723,6 +2723,10 @@ impl Timeline {
             .tenant_conf
             .gc_compaction_enabled
             .unwrap_or(self.conf.default_tenant_conf.gc_compaction_enabled);
+        let gc_compaction_verification = tenant_conf
+            .tenant_conf
+            .gc_compaction_verification
+            .unwrap_or(self.conf.default_tenant_conf.gc_compaction_verification);
         let gc_compaction_initial_threshold_kb = tenant_conf
             .tenant_conf
             .gc_compaction_initial_threshold_kb
@@ -2737,6 +2741,7 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.gc_compaction_ratio_percent);
         GcCompactionCombinedSettings {
             gc_compaction_enabled,
+            gc_compaction_verification,
             gc_compaction_initial_threshold_kb,
             gc_compaction_ratio_percent,
         }

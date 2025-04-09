@@ -9257,6 +9257,7 @@ mod tests {
                 &[Lsn(0x20), Lsn(0x40), Lsn(0x50)],
                 3,
                 None,
+                true,
             )
             .await
             .unwrap();
@@ -9381,7 +9382,15 @@ mod tests {
             ),
         ];
         let res = tline
-            .generate_key_retention(key, &history, Lsn(0x60), &[Lsn(0x40), Lsn(0x50)], 3, None)
+            .generate_key_retention(
+                key,
+                &history,
+                Lsn(0x60),
+                &[Lsn(0x40), Lsn(0x50)],
+                3,
+                None,
+                true,
+            )
             .await
             .unwrap();
         let expected_res = KeyHistoryRetention {
@@ -9460,6 +9469,7 @@ mod tests {
                 &[],
                 3,
                 Some((key, Lsn(0x10), Bytes::copy_from_slice(b"0x10"))),
+                true,
             )
             .await
             .unwrap();
@@ -9508,6 +9518,7 @@ mod tests {
                 &[Lsn(0x30)],
                 3,
                 Some((key, Lsn(0x10), Bytes::copy_from_slice(b"0x10"))),
+                true,
             )
             .await
             .unwrap();
