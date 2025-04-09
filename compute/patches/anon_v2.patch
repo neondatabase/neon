@@ -11,64 +11,137 @@ index 0cdc769..5ceb91c 100644
 +
 +GRANT EXECUTE ON FUNCTION pg_config to neon_superuser;
 diff --git a/sql/init.sql b/sql/init.sql
-index 7da6553..d8476ee 100644
+index 7da6553..aeb5fdf 100644
 --- a/sql/init.sql
 +++ b/sql/init.sql
-@@ -11,8 +11,12 @@ CREATE OR REPLACE FUNCTION anon.load_csv(
+@@ -11,8 +11,19 @@ CREATE OR REPLACE FUNCTION anon.load_csv(
  RETURNS BOOLEAN AS
  $$
  DECLARE
 -  csv_file_check TEXT;
    sequence TEXT;
 +  csv_lines TEXT[];
++  column_name TEXT;
 +  column_names TEXT[];
 +  column_values TEXT[];
 +  current_line TEXT;
++  create_table_query TEXT;
 +  insert_query TEXT;
++  table_exists BOOLEAN;
++  quoted_column_names TEXT[];
++  column_count INTEGER;
++  values_clause TEXT;
++  first_row TEXT;
  BEGIN
  -- This check does not work with PG 10 and below (absolute path not supported)
  --
-@@ -24,9 +28,36 @@ BEGIN
+@@ -24,9 +35,102 @@ BEGIN
  --    RETURN FALSE;
  --  END IF;
  
 -  -- load the csv file
 -  EXECUTE 'COPY ' || dest_table
 -      || ' FROM ' || quote_literal(csv_file);
++-- Check if the table exists
++SELECT EXISTS (
++    SELECT FROM pg_catalog.pg_class c
++    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
++    WHERE c.relname = dest_table::TEXT::name
++    AND pg_catalog.pg_table_is_visible(c.oid)
++  ) INTO table_exists;
++
++-- Get the count for column names
 + csv_lines := string_to_array(csv_file, E'\n');
++ first_row := csv_lines[1];
++  column_values := string_to_array(first_row, E'\t');
++  column_count := array_length(column_values, 1);
 +
 + IF array_length(csv_lines, 1) < 1 THEN
 +    RAISE NOTICE 'CSV file has no data. Skipping.';
 +    RETURN FALSE;
 +  END IF;
 +
-+   column_names := string_to_array(csv_lines[1], ',');
++-- Create artificial column names
++quoted_column_names := ARRAY[]::TEXT[];
++  FOR i IN 1..column_count LOOP
++    column_name := 'col' || i;
++    quoted_column_names := array_append(quoted_column_names, quote_ident(column_name));
++  END LOOP;
 +
-+FOR i IN 2..array_length(csv_lines, 1) LOOP
++IF NOT table_exists THEN
++    -- Build CREATE TABLE statement
++    create_table_query := 'CREATE TABLE ' || dest_table || ' (';
++    
++    -- Add columns (assuming TEXT type for all columns)
++    FOR i IN 1..column_count LOOP
++      column_name := 'col' || i;
++      create_table_query := create_table_query || quote_ident(column_name) || ' TEXT';
++      
++      -- Add comma if not the last column
++      IF i < column_count THEN
++        create_table_query := create_table_query || ', ';
++      END IF;
++    END LOOP;
++    
++    -- Close parenthesis
++    create_table_query := create_table_query || ')';
++    
++    -- Execute CREATE TABLE
++    EXECUTE create_table_query;
++    RAISE NOTICE 'Created table ''%'' with % columns', dest_table, column_count;
++  END IF;
++
++
++FOR i IN 1..array_length(csv_lines, 1) LOOP
 +    current_line := csv_lines[i];
-+   IF current_line IS NULL OR current_line = '' THEN
++    
++    -- Skip empty lines
++    IF current_line IS NULL OR current_line = '' THEN
 +      CONTINUE;
 +    END IF;
-+
-+    column_values := string_to_array(current_line, ',');
-+
-+    insert_query := format(
-+      'INSERT INTO %s (%s) VALUES (%s)',
-+      dest_table,
-+      array_to_string(column_names, ', '),
-+      array_to_string(array_map(column_values, 'quote_literal'), ', ')
-+    );
-+
-+    BEGIN
-+      EXECUTE insert_query;
-+    EXCEPTION WHEN OTHERS THEN
-+      RAISE NOTICE 'Error inserting row %: %', i, SQLERRM;
-+    END;
++    
++    -- Parse CSV values (simple parsing)
++    column_values := string_to_array(current_line, E'\t');
++    
++    -- Ensure we have the right number of values
++    IF array_length(column_values, 1) = column_count THEN
++      -- Build values clause manually
++      values_clause := '';
++      FOR j IN 1..array_length(column_values, 1) LOOP
++        -- Handle NULL values (empty strings)
++        IF column_values[j] = '' THEN
++          values_clause := values_clause || 'NULL';
++        ELSE
++          values_clause := values_clause || quote_literal(column_values[j]);
++        END IF;
++        
++        -- Add comma if not the last element
++        IF j < array_length(column_values, 1) THEN
++          values_clause := values_clause || ', ';
++        END IF;
++      END LOOP;
++      
++      -- Build and execute INSERT statement
++      insert_query := format(
++        'INSERT INTO %s (%s) VALUES (%s)',
++        dest_table,
++        array_to_string(quoted_column_names, ', '),
++        values_clause
++      );
++      
++      BEGIN
++        EXECUTE insert_query;
++      EXCEPTION WHEN OTHERS THEN
++        RAISE NOTICE 'Error inserting row %: %', i, SQLERRM;
++      END;
++    ELSE
++      RAISE NOTICE 'Skipping row % - expected % columns, got %', i, column_count, array_length(column_values, 1);
++    END IF;
 +  END LOOP;
  
    -- update the oid sequence (if any)
    SELECT pg_catalog.pg_get_serial_sequence(dest_table::TEXT,'oid')
-@@ -50,13 +81,13 @@ BEGIN
+@@ -50,13 +154,13 @@ BEGIN
  
  EXCEPTION
  
@@ -88,7 +161,7 @@ index 7da6553..d8476ee 100644
  
    WHEN invalid_text_representation THEN
      RAISE NOTICE 'Data file ''%'' has a bad CSV format. Skipping.', csv_file;
-@@ -81,8 +112,10198 @@ CREATE OR REPLACE FUNCTION anon.init(
+@@ -81,8 +185,10198 @@ CREATE OR REPLACE FUNCTION anon.init(
  RETURNS BOOLEAN
  AS $$
  DECLARE
@@ -10288,7 +10361,7 @@ index 7da6553..d8476ee 100644
  BEGIN
  
    IF anon.is_initialized() THEN
-@@ -90,22 +10311,24 @@ BEGIN
+@@ -90,22 +10384,24 @@ BEGIN
      RETURN TRUE;
    END IF;
  
