@@ -302,6 +302,7 @@ ARG CARGO_HACK_VERSION=0.6.33
 ARG CARGO_NEXTEST_VERSION=0.9.85
 ARG CARGO_CHEF_VERSION=0.1.71
 ARG CARGO_DIESEL_CLI_VERSION=2.2.6
+ARG ZIZMOR_VERSION=1.5.2
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && whoami && \
 	chmod +x rustup-init && \
 	./rustup-init -y --default-toolchain ${RUSTC_VERSION} && \
@@ -316,6 +317,7 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     cargo install cargo-hack          --version ${CARGO_HACK_VERSION} && \
     cargo install cargo-nextest       --version ${CARGO_NEXTEST_VERSION} && \
     cargo install cargo-chef --locked --version ${CARGO_CHEF_VERSION} && \
+    cargo install zizmor --locked     --version ${ZIZMOR_VERSION} && \
     cargo install diesel_cli          --version ${CARGO_DIESEL_CLI_VERSION} \
                                       --features postgres-bundled --no-default-features && \
     rm -rf /home/nonroot/.cargo/registry && \
