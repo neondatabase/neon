@@ -93,20 +93,6 @@ pub struct ComputeNodeParams {
 
     /// the address of extension storage proxy gateway
     pub ext_remote_storage: Option<String>,
-
-    /// We should only allow live re- / configuration of the compute node if
-    /// it uses 'pull model', i.e. it can go to control-plane and fetch
-    /// the latest configuration. Otherwise, there could be a case:
-    /// - we start compute with some spec provided as argument
-    /// - we push new spec and it does reconfiguration
-    /// - but then something happens and compute pod / VM is destroyed,
-    ///   so k8s controller starts it again with the **old** spec
-    ///
-    /// and the same for empty computes:
-    /// - we started compute without any spec
-    /// - we push spec and it does configuration
-    /// - but then it is restarted without any spec again
-    pub live_config_allowed: bool,
 }
 
 /// Compute node info shared across several `compute_ctl` threads.
