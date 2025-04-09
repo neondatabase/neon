@@ -145,7 +145,7 @@ def run_database_maintenance(env: PgCompare):
                 END $$;
                 """
             )
-            # in production a customer would likely use reindex concurrently 
+            # in production a customer would likely use reindex concurrently
             # but for our test we don't care about the downtime
             # and it would just about double the time we report in the test
             # because we need one more table scan for each index
