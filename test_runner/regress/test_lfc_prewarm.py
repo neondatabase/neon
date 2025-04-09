@@ -1,11 +1,14 @@
 import random
 import threading
 import time
-
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
+from fixtures.neon_fixtures import EndpointHttpClient, NeonEnv
 from fixtures.utils import USE_LFC
+from prometheus_client.parser import text_string_to_metric_families as prom_parse_impl
+
+prewarm_label = "compute_ctl_lfc_prewarm_requests_total"
+offload_label = "compute_ctl_lfc_prewarm_offload_requests_total"
 
 
 def check_pinned_entries(cur):
@@ -17,6 +20,15 @@ def check_pinned_entries(cur):
             break
         time.sleep(1)
     assert n_pinned == 0
+
+
+def prom_parse(client: EndpointHttpClient) -> dict[str, float]:
+    return {
+        sample.name: sample.value
+        for family in prom_parse_impl(client.metrics())
+        for sample in family.samples
+        if sample.name in (prewarm_label, offload_label)
+    }
 
 
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
@@ -39,8 +51,20 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv):
     cur.execute("create extension neon version '1.6'")
     cur.execute("create table t(pk integer primary key, payload text default repeat('?', 128))")
     cur.execute(f"insert into t (pk) values (generate_series(1,{n_records}))")
-    cur.execute("select get_local_cache_state()")
-    lfc_state = cur.fetchall()[0][0]
+
+    http_client = endpoint.http_client()
+    if with_compute_ctl:
+        status = http_client.prewarm_lfc_status()
+        assert status["status"] == "not_prewarmed"
+        assert status["error"] == ""
+
+        http_client.prewarm_lfc_offload()
+
+        assert http_client.prewarm_lfc_status()["status"] == "not_prewarmed"
+        assert prom_parse(http_client) == {offload_label: 1, prewarm_label: 0}
+    else:
+        cur.execute("select get_local_cache_state()")
+        lfc_state = cur.fetchall()[0][0]
 
     endpoint.stop()
     endpoint.start()
@@ -49,7 +73,12 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv):
     cur = conn.cursor()
     time.sleep(1)  # wait until compute_ctl complete downgrade of extension to default version
     cur.execute("alter extension neon update to '1.6'")
-    cur.execute("select prewarm_local_cache(%s)", (lfc_state,))
+
+    if with_compute_ctl:
+        http_client.prewarm_lfc()
+        assert http_client.prewarm_lfc_status()["status"] == "completed"
+    else:
+        cur.execute("select prewarm_local_cache(%s)", (lfc_state,))
 
     cur.execute("select lfc_value from neon_lfc_stats where lfc_key='file_cache_used_pages'")
     lfc_used_pages = cur.fetchall()[0][0]
@@ -57,7 +86,9 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv):
     cur.execute("select * from get_prewarm_info()")
     prewarm_info = cur.fetchall()[0]
     log.info(f"Prewarm info: {prewarm_info}")
-    log.info(f"Prewarm progress: {(prewarm_info[1] + prewarm_info[2]) * 100 // prewarm_info[0]}%")
+    total, prewarmed, skipped, _ = prewarm_info
+    progress = (prewarmed + skipped) * 100 // total
+    log.info(f"Prewarm progress: {progress}%")
 
     assert lfc_used_pages > 10000
     assert (
@@ -70,6 +101,11 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv):
     assert cur.fetchall()[0][0] == n_records * (n_records + 1) / 2
 
     check_pinned_entries(cur)
+    if with_compute_ctl:
+        desired = {"status": "completed", "total": total, "prewarmed": prewarmed,
+                   "skipped": skipped, "error": ""}
+        assert http_client.prewarm_lfc_status() == desired
+        assert prom_parse(http_client) == {offload_label: 0, prewarm_label: 1}
 
 
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
@@ -94,8 +130,18 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv):
         "create table accounts(id integer primary key, balance bigint default 0, payload text default repeat('?', 1000)) with (fillfactor=10)"
     )
     cur.execute(f"insert into accounts(id) values (generate_series(1,{n_records}))")
+<<<<<<< HEAD
     cur.execute("select get_local_cache_state()")
     lfc_state = cur.fetchall()[0][0]
+=======
+
+    http_client = endpoint.http_client()
+    if with_compute_ctl:
+        http_client.prewarm_lfc_offload()
+    else:
+        cur.execute("select get_local_cache_state()")
+        lfc_state = cur.fetchall()[0][0]
+>>>>>>> 28568dc49 (test)
 
     running = True
 
@@ -120,7 +166,17 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv):
             cur.execute("select pg_reload_conf()")
             cur.execute("alter system set neon.file_cache_size_limit='1GB'")
             cur.execute("select pg_reload_conf()")
+<<<<<<< HEAD
             cur.execute("select prewarm_local_cache(%s)", (lfc_state,))
+=======
+
+            if with_compute_ctl:
+                endpoint.http_client().prewarm_lfc()
+            else:
+                cur.execute("select prewarm_local_cache(%s)", (lfc_state,))
+
+            nonlocal n_prewarms
+>>>>>>> 28568dc49 (test)
             n_prewarms += 1
         log.info(f"Number of prewarms: {n_prewarms}")
 
@@ -144,4 +200,9 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv):
     total_balance = cur.fetchall()[0][0]
     assert total_balance == 0
 
+<<<<<<< HEAD
     check_pinned_entries(cur)
+=======
+    if with_compute_ctl:
+        assert prom_parse(http_client) == {offload_label: 1, prewarm_label: n_prewarms}
+>>>>>>> 28568dc49 (test)

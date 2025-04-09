@@ -3,8 +3,30 @@ from time import time
 import pytest
 from aiohttp import ClientSession
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
+from fixtures.neon_fixtures import Endpoint, NeonEnv
 from jwcrypto import jwk, jwt
+
+
+def headers_with_jwt(env: NeonEnv, ep: Endpoint):
+    tenant_id = str(ep.tenant_id)
+    timeline_id = str(ep.show_timeline_id())
+    endpoint_id = ep.endpoint_id
+    key_path = env.repo_dir / "auth_private_key.pem"
+    key = jwk.JWK.from_pem(key_path.read_bytes())
+    claims = {
+        "tenant_id": tenant_id,
+        "timeline_id": timeline_id,
+        "endpoint_id": endpoint_id,
+        "exp": round(time()) + 99,
+    }
+    log.info(f"key path {key_path}")
+    log.info(f"claims {claims}")
+    token = jwt.JWT(header={"alg": "EdDSA"}, claims=claims)
+    token.make_signed_token(key)
+    token = token.serialize()
+
+    log.info(f"token {token}")
+    return {"Authorization": f"Bearer {token}"}
 
 
 @pytest.mark.asyncio
@@ -32,10 +54,9 @@ async def test_endpoint_storage_insert_retrieve_delete(neon_simple_env: NeonEnv)
     token = token.serialize()
 
     base_url = env.endpoint_storage.base_url()
-    key = f"http://{base_url}/{tenant_id}/{timeline_id}/{endpoint_id}/key"
     headers = {"Authorization": f"Bearer {token}"}
+    key = f"http://{base_url}/{tenant_id}/{timeline_id}/{endpoint_id}/key"
     log.info(f"cache key url {key}")
-    log.info(f"token {token}")
 
     async with ClientSession(headers=headers) as session:
         async with session.get(key) as res:
