@@ -2059,9 +2059,6 @@ communicator_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber ba
 
 		start_ts = GetCurrentTimestamp();
 
-		if (RecoveryInProgress() && MyBackendType != B_STARTUP)
-			XLogWaitForReplayOf(reqlsns->request_lsn);
-
 		/*
 		 * Try to find prefetched page in the list of received pages.
 		 */
