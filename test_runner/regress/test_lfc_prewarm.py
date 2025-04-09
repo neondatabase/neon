@@ -6,6 +6,8 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import USE_LFC
+from test_endpoint_storage import headers_with_jwt
+import aiohttp
 
 
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
@@ -26,7 +28,8 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv):
     conn = endpoint.connect()
     cur = conn.cursor()
     cur.execute("create extension neon version '1.6'")
-    cur.execute("create table t(pk integer primary key, payload text default repeat('?', 128))")
+    cur.execute(
+        "create table t(pk integer primary key, payload text default repeat('?', 128))")
     cur.execute(f"insert into t (pk) values (generate_series(1,{n_records}))")
     cur.execute("select get_local_cache_state()")
     lfc_state = cur.fetchall()[0][0]
@@ -36,11 +39,13 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv):
 
     conn = endpoint.connect()
     cur = conn.cursor()
-    time.sleep(1)  # wait until compute_ctl complete downgrade of extension to default version
+    # wait until compute_ctl complete downgrade of extension to default version
+    time.sleep(1)
     cur.execute("alter extension neon update to '1.6'")
     cur.execute("select prewarm_local_cache(%s)", (lfc_state,))
 
-    cur.execute("select lfc_value from neon_lfc_stats where lfc_key='file_cache_used_pages'")
+    cur.execute(
+        "select lfc_value from neon_lfc_stats where lfc_key='file_cache_used_pages'")
     lfc_used_pages = cur.fetchall()[0][0]
     log.info(f"Used LFC size: {lfc_used_pages}")
     cur.execute("select * from get_prewarm_info()")
@@ -78,7 +83,8 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv):
     cur.execute(
         "create table accounts(id integer primary key, balance bigint default 0, payload text default repeat('?', 128))"
     )
-    cur.execute(f"insert into accounts(id) values (generate_series(1,{n_records}))")
+    cur.execute(
+        f"insert into accounts(id) values (generate_series(1,{n_records}))")
     cur.execute("select get_local_cache_state()")
     lfc_state = cur.fetchall()[0][0]
 
@@ -91,8 +97,10 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv):
         while running:
             src = random.randint(1, n_records)
             dst = random.randint(1, n_records)
-            cur.execute("update accounts set balance=balance-100 where id=%s", (src,))
-            cur.execute("update accounts set balance=balance+100 where id=%s", (dst,))
+            cur.execute(
+                "update accounts set balance=balance-100 where id=%s", (src,))
+            cur.execute(
+                "update accounts set balance=balance+100 where id=%s", (dst,))
             n_transfers += 1
         log.info(f"Number of transfers: {n_transfers}")
 
@@ -128,3 +136,74 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv):
     cur.execute("select sum(balance) from accounts")
     total_balance = cur.fetchall()[0][0]
     assert total_balance == 0
+
+
+# Note: not sure we should both test raw postgres prewarm interface and
+# compute ctl integration, maybe we should remove the first test
+@pytest.mark.asyncio
+@pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
+async def test_lfc_prewarm_compute_ctl(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+    n_records = 1000000
+
+    endpoint = env.endpoints.create_start(
+        branch_name="main",
+        config_lines=[
+            "autovacuum = off",
+            "shared_buffers=1MB",
+            "neon.max_file_cache_size=1GB",
+            "neon.file_cache_size_limit=1GB",
+            "neon.file_cache_prewarm_limit=1000",
+        ],
+    )
+    conn = endpoint.connect()
+    cur = conn.cursor()
+    cur.execute("create extension neon version '1.6'")
+    cur.execute(
+        "create table t(pk integer primary key, payload text default repeat('?', 128))")
+    cur.execute(f"insert into t (pk) values (generate_series(1,{n_records}))")
+
+    port = endpoint.http_client().external_port  # TODO patch EndpointHttpClient
+    session = aiohttp.ClientSession(
+        headers=headers_with_jwt(env, endpoint),
+        base_url=f"http://localhost:{port}/",
+        raise_for_status=True
+    )
+
+    log.info("Pushing state to object storage")
+    await session.post("/prewarm_lfc_offload")
+
+    endpoint.stop()
+    endpoint.start()
+
+    conn = endpoint.connect()
+    cur = conn.cursor()
+    # wait until compute_ctl complete downgrade of extension to default version
+    time.sleep(1)
+    cur.execute("alter extension neon update to '1.6'")
+
+    log.info("Pulling state from object storage")
+    await session.post("/prewarm_lfc")
+
+    cur.execute(
+        "select lfc_value from neon_lfc_stats where lfc_key='file_cache_used_pages'")
+    lfc_used_pages = cur.fetchall()[0][0]
+    log.info(f"Used LFC size: {lfc_used_pages}")
+    cur.execute("select * from get_prewarm_info()")
+    prewarm_info = cur.fetchall()[0]
+    log.info(f"Prewarm info: {prewarm_info}")
+    log.info(f"Prewarm progress: {prewarm_info[1] * 100 // prewarm_info[0]}%")
+
+    assert lfc_used_pages > 10000
+    assert prewarm_info[0] > 0 and prewarm_info[0] == prewarm_info[1]
+
+    cur.execute("select sum(pk) from t")
+    assert cur.fetchall()[0][0] == n_records * (n_records + 1) / 2
+
+    assert prewarm_info[1] > 0
+
+    session.stop()
+
+    metrics = endpoint.http_client().metrics_json()
+    assert metrics["compute_ctl_lfc_prewarm_requests_total"] == 1
+    assert metrics["compute_ctl_lfc_prewarm_offload_requests_total"] == 1
