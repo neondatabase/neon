@@ -3396,14 +3396,14 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 	if (prefetch_lookup(InfoFromSMgrRel(reln), forkNum, blkno, &request_lsns, buffer))
 	{
 		/* Prefetch hit */
-		return;
+		goto LocalCheck;
 	}
 
 	/* Try to read from local file cache */
 	if (lfc_read(InfoFromSMgrRel(reln), forkNum, blkno, buffer))
 	{
 		MyNeonCounters->file_cache_hits_total++;
-		return;
+		goto LocalCheck;
 	}
 
 	neon_read_at_lsn(InfoFromSMgrRel(reln), forkNum, blkno, request_lsns, buffer);
@@ -3413,6 +3413,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 	 */
 	prefetch_pump_state(false);
 
+ LocalCheck:;
 #ifdef DEBUG_COMPARE_LOCAL
 	if (forkNum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
 	{
@@ -3533,7 +3534,7 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 									   buffers, read_pages);
 
 	if (prefetch_result == nblocks)
-		return;
+		goto LocalCheck;
 
 	/* Try to read from local file cache */
 	lfc_result = lfc_readv_select(InfoFromSMgrRel(reln), forknum, blocknum, buffers,
@@ -3544,7 +3545,7 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 
 	/* Read all blocks from LFC, so we're done */
 	if (prefetch_result + lfc_result == nblocks)
-		return;
+		goto LocalCheck;
 
 	neon_read_at_lsnv(InfoFromSMgrRel(reln), forknum, blocknum, request_lsns,
 					  buffers, nblocks, read_pages);
@@ -3554,6 +3555,7 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	 */
 	prefetch_pump_state(false);
 
+ LocalCheck:;
 #ifdef DEBUG_COMPARE_LOCAL
 	if (forknum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
 	{
