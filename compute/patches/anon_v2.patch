@@ -11,7 +11,7 @@ index 0cdc769..5ceb91c 100644
 +
 +GRANT EXECUTE ON FUNCTION pg_config to neon_superuser;
 diff --git a/sql/init.sql b/sql/init.sql
-index 7da6553..aeb5fdf 100644
+index 7da6553..d305538 100644
 --- a/sql/init.sql
 +++ b/sql/init.sql
 @@ -11,8 +11,19 @@ CREATE OR REPLACE FUNCTION anon.load_csv(
@@ -35,7 +35,7 @@ index 7da6553..aeb5fdf 100644
  BEGIN
  -- This check does not work with PG 10 and below (absolute path not supported)
  --
-@@ -24,9 +35,102 @@ BEGIN
+@@ -24,9 +35,104 @@ BEGIN
  --    RETURN FALSE;
  --  END IF;
  
@@ -49,6 +49,8 @@ index 7da6553..aeb5fdf 100644
 +    WHERE c.relname = dest_table::TEXT::name
 +    AND pg_catalog.pg_table_is_visible(c.oid)
 +  ) INTO table_exists;
++
++RAISE NOTICE 'Table % exists %', dest_table, table_exists;
 +
 +-- Get the count for column names
 + csv_lines := string_to_array(csv_file, E'\n');
@@ -141,7 +143,7 @@ index 7da6553..aeb5fdf 100644
  
    -- update the oid sequence (if any)
    SELECT pg_catalog.pg_get_serial_sequence(dest_table::TEXT,'oid')
-@@ -50,13 +154,13 @@ BEGIN
+@@ -50,13 +156,13 @@ BEGIN
  
  EXCEPTION
  
@@ -161,7 +163,7 @@ index 7da6553..aeb5fdf 100644
  
    WHEN invalid_text_representation THEN
      RAISE NOTICE 'Data file ''%'' has a bad CSV format. Skipping.', csv_file;
-@@ -81,8 +185,10198 @@ CREATE OR REPLACE FUNCTION anon.init(
+@@ -81,8 +187,10198 @@ CREATE OR REPLACE FUNCTION anon.init(
  RETURNS BOOLEAN
  AS $$
  DECLARE
@@ -10361,7 +10363,7 @@ index 7da6553..aeb5fdf 100644
  BEGIN
  
    IF anon.is_initialized() THEN
-@@ -90,22 +10384,24 @@ BEGIN
+@@ -90,22 +10386,24 @@ BEGIN
      RETURN TRUE;
    END IF;
  
