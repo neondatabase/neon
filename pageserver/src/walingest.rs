@@ -21,12 +21,13 @@
 //! redo Postgres process, but some records it can handle directly with
 //! bespoken Rust code.
 
+use std::backtrace::Backtrace;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use bytes::{Buf, Bytes};
-use pageserver_api::key::{Key, rel_block_to_key};
+use pageserver_api::key::{rel_block_to_key, Key, ToRelBlockError};
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
@@ -103,8 +104,13 @@ struct WarnIngestLag {
     timestamp_invalid_msg_ratelimit: RateLimit,
 }
 
+pub struct WalIngestError {
+    pub backtrace: std::backtrace::Backtrace,
+    pub kind: WalIngestErrorKind,
+}
+
 #[derive(thiserror::Error, Debug)]
-pub enum WalIngestError {
+pub enum WalIngestErrorKind {
     #[error(transparent)]
     #[allow(private_interfaces)]
     PageReconstructError(#[from] PageReconstructError),
@@ -124,6 +130,8 @@ pub enum WalIngestError {
     InvalidRelnode,
     #[error("invalid reldir key")]
     InvalidRelDirKey,
+    #[error(transparent)]
+    ToRelBlockErr(#[from] ToRelBlockError),
 
     #[error(transparent)]
     AssertionError(anyhow::Error),
@@ -131,11 +139,52 @@ pub enum WalIngestError {
     EncodeAuxFileError(anyhow::Error),
     #[error(transparent)]
     MaybeRelSizeV2Error(anyhow::Error),
-    #[error(transparent)]
-    ToRelBlockErr(anyhow::Error),
 
     #[error("timeline shutting down")]
     Cancelled,
+}
+
+impl<T> From<T> for WalIngestError
+where
+    WalIngestErrorKind: From<T>,
+{
+    fn from(value: T) -> Self {
+        WalIngestError {
+            backtrace: Backtrace::capture(),
+            kind: WalIngestErrorKind::from(value),
+        }
+    }
+}
+
+impl std::error::Error for WalIngestError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.kind.source()
+    }
+}
+
+impl core::fmt::Display for WalIngestError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.kind.fmt(f)
+    }
+}
+
+impl core::fmt::Debug for WalIngestError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if f.alternate() {
+            f.debug_map()
+                .key(&"backtrace")
+                .value(&self.backtrace)
+                .key(&"kind")
+                .value(&self.kind)
+                .finish()
+        } else {
+            writeln!(f, "Error: {:?}", self.kind)?;
+            if self.backtrace.status() == std::backtrace::BacktraceStatus::Captured {
+                writeln!(f, "Stack backtrace: {:?}", self.backtrace)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 #[macro_export]
@@ -144,7 +193,7 @@ macro_rules! ensure_walingest {
         _ = || -> Result<(), anyhow::Error> {
             anyhow::ensure!($($t)*);
             Ok(())
-        }().map_err(|e| WalIngestError::AssertionError(e));
+        }().map_err(WalIngestErrorKind::AssertionError)?;
     };
 }
 
@@ -153,7 +202,7 @@ macro_rules! bail_walingest {
     ($($t:tt)*) => {
         _ = || -> Result<(), anyhow::Error> {
             anyhow::bail!($($t)*);
-        }().map_err(|e| WalIngestError::AssertionError(e));
+        }().map_err(WalIngestErrorKind::AssertionError)?;
     };
 }
 

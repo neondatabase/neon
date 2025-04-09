@@ -279,8 +279,8 @@ pub(super) async fn handle_walreceiver_connection(
 
     let mut walingest = WalIngest::new(timeline.as_ref(), startpoint, &ctx)
         .await
-        .map_err(|e| match e {
-            crate::walingest::WalIngestError::Cancelled => WalReceiverError::Cancelled,
+        .map_err(|e| match e.kind {
+            crate::walingest::WalIngestErrorKind::Cancelled => WalReceiverError::Cancelled,
             _ => WalReceiverError::Other(e.into()),
         })?;
 

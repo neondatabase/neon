@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, hash_map};
 use std::ops::{ControlFlow, Range};
 
-use crate::walingest::WalIngestError;
+use crate::walingest::{WalIngestError, WalIngestErrorKind};
 use crate::{PERF_TRACE_TARGET, ensure_walingest};
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
@@ -1594,8 +1594,7 @@ impl DatadirModification<'_> {
             .await?
         {
             // create it with 0 size initially, the logic below will extend it
-            self.put_rel_creation(rel, 0, ctx)
-                .await?;
+            self.put_rel_creation(rel, 0, ctx).await?;
             Ok(0)
         } else {
             Ok(self
@@ -1642,7 +1641,7 @@ impl DatadirModification<'_> {
         let mut gaps_at_lsns = Vec::default();
 
         for meta in batch.metadata.iter() {
-            let (rel, blkno) = Key::from_compact(meta.key()).to_rel_block().map_err(WalIngestError::ToRelBlockErr)?;
+            let (rel, blkno) = Key::from_compact(meta.key()).to_rel_block()?;
             let new_nblocks = blkno + 1;
 
             let old_nblocks = self.create_relation_if_required(rel, ctx).await?;
@@ -1719,7 +1718,7 @@ impl DatadirModification<'_> {
         ensure_walingest!(rel.relnode != 0, RelationError::InvalidRelnode);
         let key = rel_block_to_key(rel, blknum);
         if !key.is_valid_key_on_write_path() {
-            return Err(WalIngestError::InvalidKey(key, self.lsn));
+            Err(WalIngestErrorKind::InvalidKey(key, self.lsn))?;
         }
         self.put(rel_block_to_key(rel, blknum), Value::Image(img));
         Ok(())
@@ -1736,7 +1735,7 @@ impl DatadirModification<'_> {
 
         let key = slru_block_to_key(kind, segno, blknum);
         if !key.is_valid_key_on_write_path() {
-            return Err(WalIngestError::InvalidKey(key, self.lsn));
+            Err(WalIngestErrorKind::InvalidKey(key, self.lsn))?;
         }
         self.put(key, Value::Image(img));
         Ok(())
@@ -1750,7 +1749,7 @@ impl DatadirModification<'_> {
         ensure_walingest!(rel.relnode != 0, RelationError::InvalidRelnode);
         let key = rel_block_to_key(rel, blknum);
         if !key.is_valid_key_on_write_path() {
-            return Err(WalIngestError::InvalidKey(key, self.lsn));
+            Err(WalIngestErrorKind::InvalidKey(key, self.lsn))?;
         }
 
         let batch = self
@@ -1771,7 +1770,7 @@ impl DatadirModification<'_> {
         assert!(self.tline.tenant_shard_id.is_shard_zero());
         let key = slru_block_to_key(kind, segno, blknum);
         if !key.is_valid_key_on_write_path() {
-            return Err(WalIngestError::InvalidKey(key, self.lsn));
+            Err(WalIngestErrorKind::InvalidKey(key, self.lsn))?;
         }
 
         let batch = self
@@ -1822,7 +1821,7 @@ impl DatadirModification<'_> {
     ) -> Result<(), WalIngestError> {
         let v2_enabled = self
             .maybe_enable_rel_size_v2()
-            .map_err(WalIngestError::MaybeRelSizeV2Error)?;
+            .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
 
         // Add it to the directory (if it doesn't exist already)
         let buf = self.get(DBDIR_KEY, ctx).await?;
@@ -1869,7 +1868,7 @@ impl DatadirModification<'_> {
         let newdirbuf = if self.tline.pg_version >= 17 {
             let mut dir = TwoPhaseDirectoryV17::des(&dirbuf)?;
             if !dir.xids.insert(xid) {
-                return Err(WalIngestError::FileAlreadyExists(xid));
+                Err(WalIngestErrorKind::FileAlreadyExists(xid))?;
             }
             self.pending_directory_entries.push((
                 DirectoryKind::TwoPhase,
@@ -1880,7 +1879,7 @@ impl DatadirModification<'_> {
             let xid = xid as u32;
             let mut dir = TwoPhaseDirectory::des(&dirbuf)?;
             if !dir.xids.insert(xid) {
-                return Err(WalIngestError::FileAlreadyExists(xid.into()));
+                Err(WalIngestErrorKind::FileAlreadyExists(xid.into()))?;
             }
             self.pending_directory_entries.push((
                 DirectoryKind::TwoPhase,
@@ -1964,7 +1963,7 @@ impl DatadirModification<'_> {
         ctx: &RequestContext,
     ) -> Result<(), WalIngestError> {
         if rel.relnode == 0 {
-            return Err(WalIngestError::InvalidRelnode);
+            Err(WalIngestErrorKind::InvalidRelnode)?;
         }
         // It's possible that this is the first rel for this db in this
         // tablespace.  Create the reldir entry for it if so.
@@ -1996,20 +1995,20 @@ impl DatadirModification<'_> {
 
         let v2_enabled = self
             .maybe_enable_rel_size_v2()
-            .map_err(WalIngestError::MaybeRelSizeV2Error)?;
+            .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
 
         if v2_enabled {
             if rel_dir.rels.contains(&(rel.relnode, rel.forknum)) {
-                return Err(WalIngestError::RelationAlreadyExists);
+                Err(WalIngestErrorKind::RelationAlreadyExists)?;
             }
             let sparse_rel_dir_key =
                 rel_tag_sparse_key(rel.spcnode, rel.dbnode, rel.relnode, rel.forknum);
             // check if the rel_dir_key exists in v2
             let val = self.sparse_get(sparse_rel_dir_key, ctx).await?;
-            let val =
-                RelDirExists::decode_option(val).map_err(|_| WalIngestError::InvalidRelDirKey)?;
+            let val = RelDirExists::decode_option(val)
+                .map_err(|_| WalIngestErrorKind::InvalidRelDirKey)?;
             if val == RelDirExists::Exists {
-                return Err(WalIngestError::RelationAlreadyExists);
+                Err(WalIngestErrorKind::RelationAlreadyExists)?;
             }
             self.put(
                 sparse_rel_dir_key,
@@ -2033,7 +2032,7 @@ impl DatadirModification<'_> {
         } else {
             // Add the new relation to the rel directory entry, and write it back
             if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
-                return Err(WalIngestError::RelationAlreadyExists);
+                Err(WalIngestErrorKind::RelationAlreadyExists)?;
             }
             if !dbdir_exists {
                 self.pending_directory_entries
@@ -2127,7 +2126,7 @@ impl DatadirModification<'_> {
     ) -> Result<(), WalIngestError> {
         let v2_enabled = self
             .maybe_enable_rel_size_v2()
-            .map_err(WalIngestError::MaybeRelSizeV2Error)?;
+            .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
         for ((spc_node, db_node), rel_tags) in drop_relations {
             let dir_key = rel_dir_to_key(spc_node, db_node);
             let buf = self.get(dir_key, ctx).await?;
@@ -2147,7 +2146,7 @@ impl DatadirModification<'_> {
                     let key =
                         rel_tag_sparse_key(spc_node, db_node, rel_tag.relnode, rel_tag.forknum);
                     let val = RelDirExists::decode_option(self.sparse_get(key, ctx).await?)
-                        .map_err(|_| WalIngestError::InvalidKey(key, self.lsn))?;
+                        .map_err(|_| WalIngestErrorKind::InvalidKey(key, self.lsn))?;
                     if val == RelDirExists::Exists {
                         self.pending_directory_entries
                             .push((DirectoryKind::RelV2, MetricsUpdate::Sub(1)));
@@ -2199,7 +2198,7 @@ impl DatadirModification<'_> {
         let mut dir = SlruSegmentDirectory::des(&buf)?;
 
         if !dir.segments.insert(segno) {
-            return Err(WalIngestError::SlruAlreadyExists(kind, segno));
+            Err(WalIngestErrorKind::SlruAlreadyExists(kind, segno))?;
         }
         self.pending_directory_entries.push((
             DirectoryKind::SlruSegment(kind),
@@ -2293,7 +2292,7 @@ impl DatadirModification<'_> {
             Bytes::from(TwoPhaseDirectoryV17::ser(&dir)?)
         } else {
             let xid: u32 = u32::try_from(xid)
-                .map_err(|e| WalIngestError::AssertionError(anyhow::Error::from(e)))?;
+                .map_err(|e| WalIngestErrorKind::AssertionError(anyhow::Error::from(e)))?;
             let mut dir = TwoPhaseDirectory::des(&buf)?;
 
             if !dir.xids.remove(&xid) {
@@ -2327,7 +2326,7 @@ impl DatadirModification<'_> {
             Err(e) => return Err(e.into()),
         };
         let files: Vec<(&str, &[u8])> = if let Some(ref old_val) = old_val {
-            aux_file::decode_file_value(old_val).map_err(WalIngestError::EncodeAuxFileError)?
+            aux_file::decode_file_value(old_val).map_err(WalIngestErrorKind::EncodeAuxFileError)?
         } else {
             Vec::new()
         };
@@ -2373,7 +2372,7 @@ impl DatadirModification<'_> {
             (None, true) => warn!("removing non-existing aux file: {}", path),
         }
         let new_val = aux_file::encode_file_value(&new_files)
-            .map_err(WalIngestError::EncodeAuxFileError)?;
+            .map_err(WalIngestErrorKind::EncodeAuxFileError)?;
         self.put(key, Value::Image(new_val.into()));
 
         Ok(())
