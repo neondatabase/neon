@@ -145,6 +145,7 @@ typedef uint64 NNodeId;
  * This and following structs pair ones in membership.rs.
  */
 typedef uint32 Generation;
+#define INVALID_GENERATION 0
 
 typedef struct SafekeeperId
 {
@@ -771,7 +772,17 @@ typedef struct WalProposer
 	/* Current walproposer membership configuration */
 	MembershipConfiguration mconf;
 
-	/* (n_safekeepers / 2) + 1 */
+	/*
+	 * Parallels mconf.members with pointers to the member's slot in
+	 * safekeepers array of connections, or NULL if such member is not
+	 * connected. Helps to avoid looking slot per id through all
+	 * .safekeepers[] when doing quorum checks.
+	 */
+	Safekeeper *members_safekeepers[MAX_SAFEKEEPERS];
+	/* As above, but for new_members. */
+	Safekeeper *new_members_safekeepers[MAX_SAFEKEEPERS];
+
+	/* (n_safekeepers / 2) + 1. Used for static pre-generations quorum checks. */
 	int			quorum;
 
 	/*
@@ -829,7 +840,7 @@ typedef struct WalProposer
 	term_t		donorLastLogTerm;
 
 	/* Most advanced acceptor */
-	int			donor;
+	Safekeeper *donor;
 
 	/* timeline globally starts at this LSN */
 	XLogRecPtr	timelineStartLsn;
