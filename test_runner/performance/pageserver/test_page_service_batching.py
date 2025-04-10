@@ -1,3 +1,4 @@
+import concurrent.futures
 import dataclasses
 import json
 import re
@@ -7,7 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import concurrent.futures
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.log_helper import log
