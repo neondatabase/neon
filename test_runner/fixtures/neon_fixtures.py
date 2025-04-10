@@ -2985,7 +2985,7 @@ class NeonPageserver(PgProtocol, LogUtils):
             tenant_id,
             self.id,
             generation_override=generation if override_storage_controller_generation else None,
-            config=config
+            config=config,
         )
         return client.tenant_attach(
             tenant_id,

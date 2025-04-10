@@ -66,11 +66,11 @@ def single_timeline(
 
     def attach(tenant):
         env.pageserver.tenant_attach(
-             tenant,
-             config=template_config,
-             generation=100,
-             override_storage_controller_generation=True,
-         )
+            tenant,
+            config=template_config,
+            generation=100,
+            override_storage_controller_generation=True,
+        )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=22) as executor:
         executor.map(attach, tenants)
