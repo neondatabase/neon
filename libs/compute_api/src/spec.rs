@@ -289,16 +289,16 @@ pub enum ComputeAudit {
     Disabled,
     // Deprecated, use Base instead
     Log,
-    // (log = 'ddl', log_parameter='off')
+    // (pgaudit.log = 'ddl', pgaudit.log_parameter='off')
     // logged to the standard postgresql log stream
     Base,
     // Deprecated, use Full or Extended instead
     Hipaa,
-    // (log = 'all, -misc', log_parameter='off')
+    // (pgaudit.log = 'all, -misc', pgaudit.log_parameter='off')
     // logged to separate files collected by rsyslog
     // into dedicated log storage with strict access
     Extended,
-    // (log='all', log_parameter='on'),
+    // (pgaudit.log='all', pgaudit.log_parameter='on'),
     // logged to separate files collected by rsyslog
     // into dedicated log storage with strict access.
     Full,

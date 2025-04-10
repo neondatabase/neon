@@ -198,16 +198,14 @@ pub fn write_postgres_conf(
                 file,
                 "# Managed by compute_ctl compliance audit settings: begin"
             )?;
-            // This log level is very verbose
-            // but this is necessary for compliance.
-            // Exclude 'misc' category, because it doesn't contain anything relevant.
-            writeln!(file, "pgaudit.log='all, -misc'")?;
             // Enable logging of parameters.
             // This is very verbose and may contain sensitive data.
             if spec.audit_log_level == ComputeAudit::Full {
                 writeln!(file, "pgaudit.log_parameter=on")?;
+                writeln!(file, "pgaudit.log='all'")?;
             } else {
                 writeln!(file, "pgaudit.log_parameter=off")?;
+                writeln!(file, "pgaudit.log='all, -misc'")?;
             }
             // Disable logging of catalog queries
             // The catalog doesn't contain sensitive data, so we don't need to audit it.
