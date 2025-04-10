@@ -2274,6 +2274,7 @@ async fn timeline_compact_handler(
     if Some(true) == parse_query_param::<_, bool>(&request, "dry_run")? {
         flags |= CompactFlags::DryRun;
     }
+    // Manual compaction does not yield for L0.
 
     let wait_until_uploaded =
         parse_query_param::<_, bool>(&request, "wait_until_uploaded")?.unwrap_or(false);

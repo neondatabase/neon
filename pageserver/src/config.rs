@@ -219,6 +219,11 @@ pub struct PageServerConf {
     pub generate_unarchival_heatmap: bool,
 
     pub tracing: Option<pageserver_api::config::Tracing>,
+
+    /// Enable TLS in page service API.
+    /// Does not force TLS: the client negotiates TLS usage during the handshake.
+    /// Uses key and certificate from ssl_key_file/ssl_cert_file.
+    pub enable_tls_page_service_api: bool,
 }
 
 /// Token for authentication to safekeepers
@@ -391,6 +396,7 @@ impl PageServerConf {
             load_previous_heatmap,
             generate_unarchival_heatmap,
             tracing,
+            enable_tls_page_service_api,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -441,6 +447,7 @@ impl PageServerConf {
             page_service_pipelining,
             get_vectored_concurrent_io,
             tracing,
+            enable_tls_page_service_api,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling
