@@ -557,6 +557,9 @@ impl DeltaLayerWriterInner {
                 let cap = buf.cap();
 
                 // pad zeros to the next io alignment requirement.
+                // TODO: this is actually padding to next PAGE_SZ multiple, but only if the buffer capacity is larger than that.
+                // We can't let the fact that we do direct IO, or the buffer capacity, dictate the on-disk format we write here.
+                // Need to find a better API that allows writing the format we intend to.
                 let count = len.next_multiple_of(PAGE_SZ).min(cap) - len;
                 buf.extend_with(0, count);
 
