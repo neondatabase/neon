@@ -832,6 +832,12 @@ fn cli() -> Command {
                 .action(ArgAction::SetTrue)
                 .help("Show enabled compile time features"),
         )
+        .arg(
+            Arg::new("dev")
+                .long("dev")
+                .action(ArgAction::SetTrue)
+                .help("Run in development mode (disables security checks)"),
+        )
 }
 
 #[test]
