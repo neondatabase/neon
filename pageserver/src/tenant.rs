@@ -5932,14 +5932,20 @@ mod tests {
     #[cfg(feature = "testing")]
     use models::CompactLsnRange;
     use pageserver_api::key::{AUX_KEY_PREFIX, Key, NON_INHERITED_RANGE, RELATION_SIZE_PREFIX};
-    use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
+    use pageserver_api::keyspace::KeySpace;
+    #[cfg(feature = "testing")]
+    use pageserver_api::keyspace::KeySpaceRandomAccum;
     use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
     #[cfg(feature = "testing")]
     use pageserver_api::record::NeonWalRecord;
     use pageserver_api::value::Value;
     use pageserver_compaction::helpers::overlaps_with;
+    #[cfg(feature = "testing")]
+    use rand::SeedableRng;
+    #[cfg(feature = "testing")]
     use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng, thread_rng};
+    use rand::{Rng, thread_rng};
+    #[cfg(feature = "testing")]
     use std::ops::Range;
     use storage_layer::{IoConcurrency, PersistentLayerKey};
     use tests::storage_layer::ValuesReconstructState;
@@ -10860,20 +10866,55 @@ mod tests {
     // A randomized read path test. Generates a layer map according to a deterministic
     // specification. Fills the (key, LSN) space in random manner and then performs
     // random scattered queries validating the results against in-memory storage.
+    //
+    // See this internal Notion page for a diagram of the layer map:
+    // https://www.notion.so/neondatabase/Read-Path-Unit-Testing-Fuzzing-1d1f189e0047806c8e5cd37781b0a350?pvs=4
+    //
+    // A fuzzing mode is also supported. In this mode, the test will use a random
+    // seed instead of a hardcoded one. Use it in conjunction with `cargo stress`
+    // to run multiple instances in parallel:
+    //
+    // $ RUST_BACKTRACE=1 RUST_LOG=INFO \
+    //   cargo stress --package=pageserver --features=testing,fuzz-read-path --release -- test_read_path
     #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_read_path() -> anyhow::Result<()> {
-        const WILL_INIT_CHANCE: u8 = 1;
-        const GAP_CHANCE: u8 = 5;
-        const SEED: u64 = 0;
-        const QUERIES: u64 = 1000;
-        const KEY_DIMENSION_SIZE: u32 = 99;
+        let seed = if cfg!(feature = "fuzz-read-path") {
+            let seed: u64 = thread_rng().r#gen();
+            seed
+        } else {
+            // Use a hard-coded seed when not in fuzzing mode.
+            // Note that with the current approach results are not reproducible
+            // accross platforms and Rust releases.
+            const SEED: u64 = 0;
+            SEED
+        };
+
+        let mut random = StdRng::seed_from_u64(seed);
+
+        let (queries, will_init_chance, gap_chance) = if cfg!(feature = "fuzz-read-path") {
+            const QUERIES: u64 = 5000;
+            let will_init_chance: u8 = random.gen_range(0..=10);
+            let gap_chance: u8 = random.gen_range(0..=50);
+
+            (QUERIES, will_init_chance, gap_chance)
+        } else {
+            const QUERIES: u64 = 1000;
+            const WILL_INIT_CHANCE: u8 = 1;
+            const GAP_CHANCE: u8 = 5;
+
+            (QUERIES, WILL_INIT_CHANCE, GAP_CHANCE)
+        };
 
         let harness = TenantHarness::create("test_read_path").await?;
         let (tenant, ctx) = harness.load().await;
 
-        // Define the layer map shape
+        tracing::info!("Using random seed: {seed}");
+        tracing::info!(%will_init_chance, %gap_chance, "Fill params");
 
+        // Define the layer map shape. Note that this part is not randomized.
+
+        const KEY_DIMENSION_SIZE: u32 = 99;
         let start_key = Key::from_hex("110000000033333333444444445500000000").unwrap();
         let end_key = start_key.add(KEY_DIMENSION_SIZE);
         let total_key_range = start_key..end_key;
@@ -10919,19 +10960,17 @@ mod tests {
             (total_key_range.clone(), total_start_lsn),
         ];
 
-        let mut random = StdRng::seed_from_u64(SEED);
-
         let specification = TestTimelineSpecification {
             start_lsn: total_start_lsn,
             last_record_lsn,
             in_memory_layers_shape,
             delta_layers_shape,
             image_layers_shape,
-            gap_chance: GAP_CHANCE,
-            will_init_chance: WILL_INIT_CHANCE,
+            gap_chance,
+            will_init_chance,
         };
 
-        // Create and fill in the layers according to the specification
+        // Create and randomly fill in the layers according to the specification
         let (tline, storage, interesting_lsns) = randomize_timeline(
             &tenant,
             TIMELINE_ID,
@@ -10950,7 +10989,7 @@ mod tests {
         // (key, LSN) space.
 
         const PICK_NEXT_CHANCE: u8 = 50;
-        for _ in 0..QUERIES {
+        for _ in 0..queries {
             let query = {
                 let mut keyspaces_at_lsn: HashMap<Lsn, KeySpaceRandomAccum> = HashMap::default();
                 let mut used_keys: HashSet<Key> = HashSet::default();
@@ -10973,7 +11012,7 @@ mod tests {
                             .add_key(selected_key);
                         used_keys.insert(selected_key);
 
-                        let pick_next = random.gen_range(1..=100) <= PICK_NEXT_CHANCE;
+                        let pick_next = random.gen_range(0..=100) <= PICK_NEXT_CHANCE;
                         if pick_next {
                             selected_key = selected_key.next();
                         } else {
@@ -10990,24 +11029,39 @@ mod tests {
                 )
             };
 
-            tracing::info!("Query: {query}");
-
             // Run the query and validate the results
 
             let results = tline
                 .get_vectored(query.clone(), IoConcurrency::Sequential, &ctx)
-                .await
-                .expect("No vectored errors");
+                .await;
 
-            for (key, key_res) in results.into_iter() {
+            let blobs = match results {
+                Ok(ok) => ok,
+                Err(err) => {
+                    panic!("seed={seed} Error returned for query {query}: {err}");
+                }
+            };
+
+            for (key, key_res) in blobs.into_iter() {
                 match key_res {
                     Ok(blob) => {
                         let requested_at_lsn = query.map_key_to_lsn(&key);
                         let expected = storage.get(key, requested_at_lsn);
+
+                        if blob != expected {
+                            tracing::error!(
+                                "seed={seed} Mismatch for {key}@{requested_at_lsn} from query: {query}"
+                            );
+                        }
+
                         assert_eq!(blob, expected);
                     }
                     Err(err) => {
-                        panic!("Error returned for {key}: {err}");
+                        let requested_at_lsn = query.map_key_to_lsn(&key);
+
+                        panic!(
+                            "seed={seed} Error returned for {key}@{requested_at_lsn} from query {query}: {err}"
+                        );
                     }
                 }
             }
