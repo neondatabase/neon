@@ -162,6 +162,8 @@ def test_pageserver_compaction_preempt(
     conf = PREEMPT_COMPACTION_TENANT_CONF.copy()
     env = neon_env_builder.init_start(initial_tenant_conf=conf)
 
+    env.pageserver.allowed_errors.append(".*The timeline or pageserver is shutting down.*")
+
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
