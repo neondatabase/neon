@@ -645,19 +645,23 @@ impl ComputeNode {
             });
         }
 
-        // Configure and start rsyslog for HIPAA if necessary
-        if let ComputeAudit::Hipaa = pspec.spec.audit_log_level {
-            let remote_endpoint = std::env::var("AUDIT_LOGGING_ENDPOINT").unwrap_or("".to_string());
-            if remote_endpoint.is_empty() {
-                anyhow::bail!("AUDIT_LOGGING_ENDPOINT is empty");
+        // Configure and start rsyslog for compliance audit logging
+        match pspec.spec.audit_log_level {
+            ComputeAudit::Hipaa | ComputeAudit::Extended | ComputeAudit::Full => {
+                let remote_endpoint =
+                    std::env::var("AUDIT_LOGGING_ENDPOINT").unwrap_or("".to_string());
+                if remote_endpoint.is_empty() {
+                    anyhow::bail!("AUDIT_LOGGING_ENDPOINT is empty");
+                }
+
+                let log_directory_path = Path::new(&self.params.pgdata).join("log");
+                let log_directory_path = log_directory_path.to_string_lossy().to_string();
+                configure_audit_rsyslog(log_directory_path.clone(), "hipaa", &remote_endpoint)?;
+
+                // Launch a background task to clean up the audit logs
+                launch_pgaudit_gc(log_directory_path);
             }
-
-            let log_directory_path = Path::new(&self.params.pgdata).join("log");
-            let log_directory_path = log_directory_path.to_string_lossy().to_string();
-            configure_audit_rsyslog(log_directory_path.clone(), "hipaa", &remote_endpoint)?;
-
-            // Launch a background task to clean up the audit logs
-            launch_pgaudit_gc(log_directory_path);
+            _ => {}
         }
 
         // Configure and start rsyslog for Postgres logs export
