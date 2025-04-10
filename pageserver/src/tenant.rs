@@ -6262,7 +6262,7 @@ mod tests {
                 new_timeline_id,
                 spec.start_lsn,
                 pg_version,
-                &ctx,
+                ctx,
                 in_memory_test_layers,
                 delta_test_layers,
                 image_test_layers,
