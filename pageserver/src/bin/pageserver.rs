@@ -102,10 +102,14 @@ fn main() -> anyhow::Result<()> {
     let (conf, ignored) = initialize_config(&identity_file_path, &cfg_file_path, &workdir)?;
 
     if !dev_mode {
-        if matches!(conf.http_auth_type, AuthType::Trust) || matches!(conf.pg_auth_type, AuthType::Trust) {
-            bail!("Pageserver refuses to start with HTTP or PostgreSQL API authentication disabled.\n\
+        if matches!(conf.http_auth_type, AuthType::Trust)
+            || matches!(conf.pg_auth_type, AuthType::Trust)
+        {
+            bail!(
+                "Pageserver refuses to start with HTTP or PostgreSQL API authentication disabled.\n\
                   Run with --dev to allow running without authentication.\n\
-                  This is insecure and should only be used in development environments.");
+                  This is insecure and should only be used in development environments."
+            );
         }
     } else {
         warn!("Starting in dev mode: this may be an insecure configuration.");
