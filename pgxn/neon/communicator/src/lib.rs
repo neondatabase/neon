@@ -5,13 +5,14 @@
 //! - the per-backend glue code, which submits requests
 //!
 
+mod backend_comms;
 mod backend_interface;
 mod init;
 mod neon_request;
 mod processor;
 mod worker_process;
 
-use neon_request::NeonIOHandle;
+use backend_comms::NeonIOHandle;
 
 /// This struct is created in the postmaster process, and inherited to
 /// the communicator process and all backend processes through fork()

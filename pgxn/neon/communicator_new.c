@@ -201,7 +201,7 @@ communicator_new_init(void)
  * "mask" bitmap and total number of such pages is returned.
  */
 int
-communicator_new_prefetch_lookupv(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blocknum,
+communicator_new_prefetch_lookupv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blocknum,
 								  neon_request_lsns *lsns, BlockNumber nblocks,
 								  void **buffers, bits8 *mask)
 {
@@ -239,13 +239,17 @@ communicator_new_prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frl
 }
 
 /*
- *	Does the physical file exist?
+ * Perform an IO request in a synchronous fashion.
+ *
+ * Returns a pointer to the result slot. It is valid until the next time a
+ * request is submitted.
  */
-bool
-communicator_new_rel_exists(NRelFileInfo rinfo, ForkNumber forkNum, neon_request_lsns *request_lsns)
+static const NeonIOResult *
+perform_request(NeonIORequest *request)
 {
 	int32_t		request_idx;
 	int32_t		poll_res;
+	const NeonIOResult *result;
 
 	for (;;)
 	{
@@ -253,15 +257,7 @@ communicator_new_rel_exists(NRelFileInfo rinfo, ForkNumber forkNum, neon_request
 
 		CHECK_FOR_INTERRUPTS();
 
-		request_idx = bcomm_start_rel_exists_request(
-			my_bs,
-			NInfoGetSpcOid(rinfo),
-			NInfoGetDbOid(rinfo),
-			NInfoGetRelNumber(rinfo),
-			forkNum,
-			request_lsns->request_lsn,
-			request_lsns->not_modified_since
-		);
+		request_idx = bcomm_start_io_request(my_bs, request);
 		// fixme: check 'request_idx' ?
 
 		(void) WaitLatch(MyLatch,
@@ -269,19 +265,41 @@ communicator_new_rel_exists(NRelFileInfo rinfo, ForkNumber forkNum, neon_request
 						 0,
 						 WAIT_EVENT_NEON_PS_STARTING);
 
-		poll_res = bcomm_poll_rel_exists_completion(my_bs, request_idx);
+		poll_res = bcomm_poll_request_completion(my_bs, request_idx, &result);
 		if (poll_res == -1)
 			continue; /* still busy */
 		else if (poll_res == 0)
-			return false;
-		else if (poll_res == 1)
-			return true;
+			return result;
 		else
 		{
 			// FIXME: better error message
-			elog(ERROR, "get_rel_exists request failed");
+			elog(ERROR, "request failed");
 		}
 	}
+}
+
+/*
+ *	Does the physical file exist?
+ */
+bool
+communicator_new_rel_exists(NRelFileInfo rinfo, ForkNumber forkNum, neon_request_lsns *request_lsns)
+{
+	NeonIORequest request = {
+		.rel_exists = {
+			.spc_oid = NInfoGetSpcOid(rinfo),
+			.db_oid = NInfoGetDbOid(rinfo),
+			.rel_number = NInfoGetRelNumber(rinfo),
+			.fork_number = forkNum,
+			.request_lsn = request_lsns->request_lsn,
+			.not_modified_since = request_lsns->not_modified_since,
+		}
+	};
+	const NeonIOResult *result;
+
+	result = perform_request(&request);
+	Assert(result->tag == NeonIOResult_RelExists);
+
+	return result->rel_exists;
 }
 
 static void
@@ -289,42 +307,29 @@ communicator_new_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber
 							  neon_request_lsns *request_lsns,
 							  void *buffer)
 {
-	int32_t		request_idx;
-	int32_t		poll_res;
+	/*
+	 * FIXME: if 'buffer' points to local memory rather than a shared memory
+	 * area, we need a different way of getting the result from the
+	 * communicator.
+	 */
 
-	for (;;)
-	{
-		ResetLatch(MyLatch);
-
-		CHECK_FOR_INTERRUPTS();
-
-		request_idx = bcomm_start_get_page_request(
-			my_bs,
-			NInfoGetSpcOid(rinfo),
-			NInfoGetDbOid(rinfo),
-			NInfoGetRelNumber(rinfo),
-			forkNum,
-			blockno,
-			request_lsns->request_lsn,
-			request_lsns->not_modified_since,
-			(uint8_t *) buffer,
-			BLCKSZ
-		);
-		// fixme: check 'request_idx' ?
-
-		(void) WaitLatch(MyLatch,
-						 WL_EXIT_ON_PM_DEATH | WL_LATCH_SET,
-						 0,
-						 WAIT_EVENT_NEON_PS_STARTING);
-
-		poll_res = bcomm_poll_get_page_completion(my_bs, request_idx);
-		if (poll_res == -1)
-			continue; /* still busy */
-		else
-		{
-			return;
+	NeonIORequest request = {
+		.get_page = {
+			.spc_oid = NInfoGetSpcOid(rinfo),
+			.db_oid = NInfoGetDbOid(rinfo),
+			.rel_number = NInfoGetRelNumber(rinfo),
+			.fork_number = forkNum,
+			.block_number = blockno,
+			.request_lsn = request_lsns->request_lsn,
+			.not_modified_since = request_lsns->not_modified_since,
+			.dest_ptr = (uintptr_t) buffer,
+			.dest_size = BLCKSZ,
 		}
-	}
+	};
+	const NeonIOResult *result;
+
+	result = perform_request(&request);
+	Assert(result->tag == NeonIOResult_GetPage);
 }
 
 /*
@@ -361,42 +366,24 @@ communicator_new_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumbe
  *	neon_nblocks() -- Get the number of blocks stored in a relation.
  */
 BlockNumber
-communicator_new_rel_nblocks(NRelFileInfo rinfo, ForkNumber forknum, neon_request_lsns *request_lsns)
+communicator_new_rel_nblocks(NRelFileInfo rinfo, ForkNumber forkNum, neon_request_lsns *request_lsns)
 {
-	int32_t		request_idx;
-	int32_t		poll_res;
-	uint32_t	nblocks_result;
-
-	for (;;)
-	{
-		ResetLatch(MyLatch);
-
-		CHECK_FOR_INTERRUPTS();
-
-		request_idx = bcomm_start_rel_size_request(
-			my_bs,
-			NInfoGetSpcOid(rinfo),
-			NInfoGetDbOid(rinfo),
-			NInfoGetRelNumber(rinfo),
-			forknum,
-			request_lsns->request_lsn,
-			request_lsns->not_modified_since
-		);
-		// fixme: check 'request_idx' ?
-
-		(void) WaitLatch(MyLatch,
-						 WL_EXIT_ON_PM_DEATH | WL_LATCH_SET,
-						 0,
-						 WAIT_EVENT_NEON_PS_STARTING);
-
-		poll_res = bcomm_poll_rel_size_completion(my_bs, request_idx, &nblocks_result);
-		if (poll_res == -1)
-			continue; /* still busy */
-		else
-		{
-			return nblocks_result;
+	NeonIORequest request = {
+		.rel_size = {
+			.spc_oid = NInfoGetSpcOid(rinfo),
+			.db_oid = NInfoGetDbOid(rinfo),
+			.rel_number = NInfoGetRelNumber(rinfo),
+			.fork_number = forkNum,
+			.request_lsn = request_lsns->request_lsn,
+			.not_modified_since = request_lsns->not_modified_since,
 		}
-	}
+	};
+	const NeonIOResult *result;
+
+	result = perform_request(&request);
+	Assert(result->tag == NeonIOResult_RelSize);
+
+	return result->rel_size;
 }
 
 /*
@@ -405,30 +392,19 @@ communicator_new_rel_nblocks(NRelFileInfo rinfo, ForkNumber forknum, neon_reques
 int64
 communicator_new_dbsize(Oid dbNode, neon_request_lsns *request_lsns)
 {
-	int32_t		request_idx;
-	int32_t		poll_res;
-	uint64_t	dbsize_result;
+	NeonIORequest request = {
+		.db_size = {
+			.db_oid = dbNode,
+			.request_lsn = request_lsns->request_lsn,
+			.not_modified_since = request_lsns->not_modified_since,
+		}
+	};
+	const NeonIOResult *result;
 
-	for (;;)
-	{
-		ResetLatch(MyLatch);
+	result = perform_request(&request);
+	Assert(result->tag == NeonIOResult_DbSize);
 
-		CHECK_FOR_INTERRUPTS();
-
-		request_idx = bcomm_start_dbsize_request(my_bs, dbNode, request_lsns->request_lsn, request_lsns->not_modified_since);
-		// fixme: check 'request_idx' ?
-
-		(void) WaitLatch(MyLatch,
-						 WL_EXIT_ON_PM_DEATH | WL_LATCH_SET,
-						 0,
-						 WAIT_EVENT_NEON_PS_STARTING);
-
-		poll_res = bcomm_poll_dbsize_request_completion(my_bs, request_idx, &dbsize_result);
-		if (poll_res == -1)
-			continue; /* still busy */
-		else
-			return (int64) dbsize_result;
-	}
+	return (int64) result->db_size;
 }
 
 int
