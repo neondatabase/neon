@@ -127,11 +127,14 @@ def test_throughput(
 
     env = neon_env_builder.init_start()
     ps_http = env.pageserver.http_client()
-    endpoint = env.endpoints.create_start("main", config_lines=[
-        # minimal lfc & small shared buffers to force requests to pageserver
-        "neon.max_file_cache_size=1MB",
-        "shared_buffers=10MB",
-    ])
+    endpoint = env.endpoints.create_start(
+        "main",
+        config_lines=[
+            # minimal lfc & small shared buffers to force requests to pageserver
+            "neon.max_file_cache_size=1MB",
+            "shared_buffers=10MB",
+        ],
+    )
     conn = endpoint.connect()
     cur = conn.cursor()
 
@@ -250,7 +253,6 @@ def test_throughput(
         ndisruptions = disruptor_fut.result()
         log.info("Disruptor issued %d disrupting requests", ndisruptions)
 
-
     log.info("Results: %s", metrics)
 
     since_last_start = []
@@ -259,8 +261,10 @@ def test_throughput(
             since_last_start = []
         since_last_start.append(line)
 
-    stopping_batching_because_re = re.compile(r"stopping batching because (LSN changed|of batch size|timeline object mismatch|batch key changed|same page was requested at different LSNs|.*)")
-    reasons_for_stopping_batching =  {}
+    stopping_batching_because_re = re.compile(
+        r"stopping batching because (LSN changed|of batch size|timeline object mismatch|batch key changed|same page was requested at different LSNs|.*)"
+    )
+    reasons_for_stopping_batching = {}
     for line in since_last_start:
         match = stopping_batching_because_re.search(line)
         if match:
@@ -269,7 +273,6 @@ def test_throughput(
             reasons_for_stopping_batching[match.group(1)] += 1
 
     log.info("Reasons for stopping batching: %s", reasons_for_stopping_batching)
-
 
     #
     # Sanity-checks on the collected data
