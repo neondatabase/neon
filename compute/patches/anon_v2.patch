@@ -1,8 +1,8 @@
 diff --git a/sql/anon.sql b/sql/anon.sql
-index 0cdc769..c1cc0cc 100644
+index 0cdc769..ed7c1d9 100644
 --- a/sql/anon.sql
 +++ b/sql/anon.sql
-@@ -1141,3 +1141,23 @@ $$
+@@ -1141,3 +1141,9 @@ $$
  -- TODO : https://en.wikipedia.org/wiki/L-diversity
  
  -- TODO : https://en.wikipedia.org/wiki/T-closeness
@@ -12,20 +12,6 @@ index 0cdc769..c1cc0cc 100644
 +GRANT EXECUTE ON FUNCTION pg_config to neon_superuser;
 +GRANT ALL ON SCHEMA anon to neon_superuser;
 +GRANT ALL ON ALL TABLES IN SCHEMA anon TO neon_superuser;
-+
-+CREATE OR REPLACE FUNCTION set_transparent_dymanic_masking(dest_table TEXT)
-+RETURNS void
-+AS $$
-+DECLARE
-+  query TEXT;
-+BEGIN
-+  query := 'ALTER DATABASE ' || dest_table || ' SET anon.transparent_dynamic_masking TO true;';
-+  EXECUTE query;
-+END $$
-+  LANGUAGE plpgsql
-+  SECURITY DEFINER
-+  SET search_path = ''
-+;
 diff --git a/sql/init.sql b/sql/init.sql
 index 7da6553..222935c 100644
 --- a/sql/init.sql
