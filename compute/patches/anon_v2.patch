@@ -26,10 +26,18 @@ index 0cdc769..b66bf67 100644
 +  SET search_path = ''
 +;
 diff --git a/sql/init.sql b/sql/init.sql
-index 7da6553..7c61d7d 100644
+index 7da6553..17353f5 100644
 --- a/sql/init.sql
 +++ b/sql/init.sql
-@@ -11,8 +11,19 @@ CREATE OR REPLACE FUNCTION anon.load_csv(
+@@ -4,15 +4,26 @@
+ 
+ -- ADD unit tests in tests/sql/init.sql
+ 
+-CREATE OR REPLACE FUNCTION anon.load_csv(
++CREATE OR REPLACE FUNCTION load_csv(
+   dest_table REGCLASS,
+   csv_file TEXT
+ )
  RETURNS BOOLEAN AS
  $$
  DECLARE
@@ -50,7 +58,7 @@ index 7da6553..7c61d7d 100644
  BEGIN
  -- This check does not work with PG 10 and below (absolute path not supported)
  --
-@@ -24,9 +35,104 @@ BEGIN
+@@ -24,9 +35,122 @@ BEGIN
  --    RETURN FALSE;
  --  END IF;
  
@@ -85,7 +93,7 @@ index 7da6553..7c61d7d 100644
 +    quoted_column_names := array_append(quoted_column_names, quote_ident(column_name));
 +  END LOOP;
 +
-+IF NOT table_exists THEN
++IF NOT table_exists AND dest_table != 'identifiers_category' AND dest_table != 'identifiers' THEN
 +    -- Build CREATE TABLE statement
 +    create_table_query := 'CREATE TABLE IF NOT EXISTS ' || dest_table || ' (';
 +    
@@ -138,14 +146,32 @@ index 7da6553..7c61d7d 100644
 +        END IF;
 +      END LOOP;
 +      
-+      -- Build and execute INSERT statement
-+      insert_query := format(
-+        'INSERT INTO %s (%s) VALUES (%s)',
-+        dest_table,
-+        array_to_string(quoted_column_names, ', '),
-+        values_clause
-+      );
-+      
++      IF dest_table != 'identifiers_category' AND dest_table != 'identifiers' THEN
++        -- Build and execute INSERT statement
++        insert_query := format(
++          'INSERT INTO %s (%s) VALUES (%s)',
++          dest_table,
++          array_to_string(quoted_column_names, ', '),
++          values_clause
++        );
++      ELSE
++        IF dest_table = 'identifiers_category' THEN
++          insert_query := format(
++            'INSERT INTO %s (name, direct_identifier, anon_function) VALUES (%s)',
++            dest_table,
++            array_to_string(quoted_column_names, ', '),
++            values_clause
++          );
++        ELSE 
++          insert_query := format(
++            'INSERT INTO %s (lang, attname, fk_identifiers_category) VALUES (%s)',
++            dest_table,
++            array_to_string(quoted_column_names, ', '),
++            values_clause
++          );
++        END IF;
++      END IF;
++
 +      BEGIN
 +        EXECUTE insert_query;
 +      EXCEPTION WHEN OTHERS THEN
@@ -158,7 +184,7 @@ index 7da6553..7c61d7d 100644
  
    -- update the oid sequence (if any)
    SELECT pg_catalog.pg_get_serial_sequence(dest_table::TEXT,'oid')
-@@ -50,13 +156,13 @@ BEGIN
+@@ -50,13 +174,13 @@ BEGIN
  
  EXCEPTION
  
@@ -178,7 +204,7 @@ index 7da6553..7c61d7d 100644
  
    WHEN invalid_text_representation THEN
      RAISE NOTICE 'Data file ''%'' has a bad CSV format. Skipping.', csv_file;
-@@ -81,8 +187,10198 @@ CREATE OR REPLACE FUNCTION anon.init(
+@@ -81,8 +205,10198 @@ CREATE OR REPLACE FUNCTION anon.init(
  RETURNS BOOLEAN
  AS $$
  DECLARE
@@ -10378,7 +10404,7 @@ index 7da6553..7c61d7d 100644
  BEGIN
  
    IF anon.is_initialized() THEN
-@@ -90,22 +10386,24 @@ BEGIN
+@@ -90,22 +10404,24 @@ BEGIN
      RETURN TRUE;
    END IF;
  
