@@ -255,7 +255,7 @@ def test_throughput(
 
     log.info("Results: %s", metrics)
 
-    since_last_start = []
+    since_last_start: list[str] = []
     for line in env.pageserver.logfile.read_text().splitlines():
         if "git:" in line:
             since_last_start = []
