@@ -6786,7 +6786,7 @@ mod tests {
         for read in reads {
             info!("Doing vectored read on {:?}", read);
 
-            let query = VersionedKeySpaceQuery::uniform(keyspace, lsn);
+            let query = VersionedKeySpaceQuery::uniform(read.clone(), lsn);
 
             let vectored_res = tline
                 .get_vectored_impl(
