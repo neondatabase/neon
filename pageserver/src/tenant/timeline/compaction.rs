@@ -822,12 +822,16 @@ impl KeyHistoryRetention {
             history: &[(Lsn, &NeonWalRecord)],
             tline: &Arc<Timeline>,
         ) -> anyhow::Result<()> {
+            let mut records = history
+                .iter()
+                .map(|(lsn, val)| (*lsn, (*val).clone()))
+                .collect::<Vec<_>>();
+
+            // WAL redo requires records in the reverse LSN order
+            records.reverse();
             let data = ValueReconstructState {
                 img: base_img.as_ref().map(|(lsn, img)| (*lsn, (*img).clone())),
-                records: history
-                    .iter()
-                    .map(|(lsn, val)| (*lsn, (*val).clone()))
-                    .collect(),
+                records,
             };
 
             tline
@@ -2510,6 +2514,7 @@ impl Timeline {
                         records.push((lsn, rec));
                     }
                 }
+                // WAL redo requires records in the reverse LSN order
                 records.reverse();
                 let state = ValueReconstructState { img, records };
                 // last batch does not generate image so i is always in range, unless we force generate
