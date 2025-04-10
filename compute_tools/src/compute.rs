@@ -523,11 +523,14 @@ impl ComputeNode {
 
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
         info!(
-            "starting compute for project {}, operation {}, tenant {}, timeline {}, features {:?}, spec.remote_extensions {:?}",
+            "starting compute for project {}, operation {}, tenant {}, timeline {}, project {}, branch {}, endpoint {}, features {:?}, spec.remote_extensions {:?}",
             pspec.spec.cluster.cluster_id.as_deref().unwrap_or("None"),
             pspec.spec.operation_uuid.as_deref().unwrap_or("None"),
             pspec.tenant_id,
             pspec.timeline_id,
+            pspec.spec.project_id.as_deref().unwrap_or("None"),
+            pspec.spec.branch_id.as_deref().unwrap_or("None"),
+            pspec.spec.endpoint_id.as_deref().unwrap_or("None"),
             pspec.spec.features,
             pspec.spec.remote_extensions,
         );
