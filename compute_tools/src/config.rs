@@ -89,6 +89,15 @@ pub fn write_postgres_conf(
             escape_conf_value(&s.to_string())
         )?;
     }
+    if let Some(s) = &spec.project_id {
+        writeln!(file, "neon.project_id={}", escape_conf_value(s))?;
+    }
+    if let Some(s) = &spec.branch_id {
+        writeln!(file, "neon.branch_id={}", escape_conf_value(s))?;
+    }
+    if let Some(s) = &spec.endpoint_id {
+        writeln!(file, "neon.endpoint_id={}", escape_conf_value(s))?;
+    }
 
     // tls
     if let Some(tls_config) = tls_config {
