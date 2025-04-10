@@ -452,6 +452,23 @@ fn start_pageserver(
     info!("Using auth for http API: {:#?}", conf.http_auth_type);
     info!("Using auth for pg connections: {:#?}", conf.pg_auth_type);
 
+    let tls_server_config = if conf.listen_https_addr.is_some() || conf.enable_tls_page_service_api
+    {
+        let resolver = BACKGROUND_RUNTIME.block_on(ReloadingCertificateResolver::new(
+            &conf.ssl_key_file,
+            &conf.ssl_cert_file,
+            conf.ssl_cert_reload_period,
+        ))?;
+
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_cert_resolver(resolver);
+
+        Some(Arc::new(server_config))
+    } else {
+        None
+    };
+
     match var("NEON_AUTH_TOKEN") {
         Ok(v) => {
             info!("Loaded JWT token for authentication with Safekeeper");
@@ -670,17 +687,11 @@ fn start_pageserver(
 
         let https_task = match https_listener {
             Some(https_listener) => {
-                let resolver = MGMT_REQUEST_RUNTIME.block_on(ReloadingCertificateResolver::new(
-                    &conf.ssl_key_file,
-                    &conf.ssl_cert_file,
-                    conf.ssl_cert_reload_period,
-                ))?;
+                let tls_server_config = tls_server_config
+                    .clone()
+                    .expect("tls_server_config is set earlier if https is enabled");
 
-                let server_config = rustls::ServerConfig::builder()
-                    .with_no_client_auth()
-                    .with_cert_resolver(resolver);
-
-                let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+                let tls_acceptor = tokio_rustls::TlsAcceptor::from(tls_server_config);
 
                 let server =
                     http_utils::server::Server::new(service, https_listener, Some(tls_acceptor))?;
@@ -735,6 +746,11 @@ fn start_pageserver(
                 .context("set listener to nonblocking")?;
             tokio::net::TcpListener::from_std(pageserver_listener)
                 .context("create tokio listener")?
+        },
+        if conf.enable_tls_page_service_api {
+            tls_server_config
+        } else {
+            None
         },
     );
 

@@ -100,7 +100,7 @@ use crate::tenant::timeline::delete::DeleteTimelineFlow;
 use crate::tenant::timeline::uninit::cleanup_timeline_directory;
 use crate::virtual_file::VirtualFile;
 use crate::walingest::WalLagCooldown;
-use crate::walredo::PostgresRedoManager;
+use crate::walredo::{PostgresRedoManager, RedoAttemptType};
 use crate::{InitializationOrder, TEMP_FILE_SUFFIX, import_datadir, span, task_mgr, walredo};
 
 static INIT_DB_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(8));
@@ -473,15 +473,16 @@ impl WalRedoManager {
         base_img: Option<(Lsn, bytes::Bytes)>,
         records: Vec<(Lsn, pageserver_api::record::NeonWalRecord)>,
         pg_version: u32,
+        redo_attempt_type: RedoAttemptType,
     ) -> Result<bytes::Bytes, walredo::Error> {
         match self {
             Self::Prod(_, mgr) => {
-                mgr.request_redo(key, lsn, base_img, records, pg_version)
+                mgr.request_redo(key, lsn, base_img, records, pg_version, redo_attempt_type)
                     .await
             }
             #[cfg(test)]
             Self::Test(mgr) => {
-                mgr.request_redo(key, lsn, base_img, records, pg_version)
+                mgr.request_redo(key, lsn, base_img, records, pg_version, redo_attempt_type)
                     .await
             }
         }
@@ -920,6 +921,7 @@ enum StartCreatingTimelineResult {
     Idempotent(Arc<Timeline>),
 }
 
+#[allow(clippy::large_enum_variant, reason = "TODO")]
 enum TimelineInitAndSyncResult {
     ReadyToActivate(Arc<Timeline>),
     NeedsSpawnImportPgdata(TimelineInitAndSyncNeedsSpawnImportPgdata),
@@ -1006,6 +1008,7 @@ enum CreateTimelineCause {
     Delete,
 }
 
+#[allow(clippy::large_enum_variant, reason = "TODO")]
 enum LoadTimelineCause {
     Attach,
     Unoffload,
@@ -4399,10 +4402,7 @@ impl Tenant {
         .to_string();
 
         fail::fail_point!("tenant-config-before-write", |_| {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "tenant-config-before-write",
-            ))
+            Err(std::io::Error::other("tenant-config-before-write"))
         });
 
         // Convert the config to a toml file.
@@ -5880,6 +5880,7 @@ pub(crate) mod harness {
             base_img: Option<(Lsn, Bytes)>,
             records: Vec<(Lsn, NeonWalRecord)>,
             _pg_version: u32,
+            _redo_attempt_type: RedoAttemptType,
         ) -> Result<Bytes, walredo::Error> {
             let records_neon = records.iter().all(|r| apply_neon::can_apply_in_neon(&r.1));
             if records_neon {

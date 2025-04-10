@@ -7,7 +7,7 @@
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::ops::{Deref, Range};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::layer_manager::LayerManager;
 use super::{
@@ -16,6 +16,8 @@ use super::{
     Timeline,
 };
 
+use crate::tenant::timeline::DeltaEntry;
+use crate::walredo::RedoAttemptType;
 use anyhow::{Context, anyhow};
 use bytes::Bytes;
 use enumset::EnumSet;
@@ -315,6 +317,9 @@ impl GcCompactionQueue {
                     flags: {
                         let mut flags = EnumSet::new();
                         flags |= CompactFlags::EnhancedGcBottomMostCompaction;
+                        if timeline.get_compaction_l0_first() {
+                            flags |= CompactFlags::YieldForL0;
+                        }
                         flags
                     },
                     sub_compaction: true,
@@ -819,15 +824,16 @@ pub struct CompactionStatistics {
     time_acquire_lock_secs: f64,
     time_analyze_secs: f64,
     time_download_layer_secs: f64,
+    time_to_first_kv_pair_secs: f64,
     time_main_loop_secs: f64,
     time_final_phase_secs: f64,
     time_total_secs: f64,
 
     // Summary
-    /// Ratio of the key-value size before/after gc-compaction.
-    uncompressed_size_ratio: f64,
-    /// Ratio of the physical size before/after gc-compaction.
-    physical_size_ratio: f64,
+    /// Ratio of the key-value size after/before gc-compaction.
+    uncompressed_retention_ratio: f64,
+    /// Ratio of the physical size after/before gc-compaction.
+    compressed_retention_ratio: f64,
 }
 
 impl CompactionStatistics {
@@ -896,15 +902,15 @@ impl CompactionStatistics {
     fn finalize(&mut self) {
         let original_key_value_size = self.image_keys_visited.size + self.wal_keys_visited.size;
         let produced_key_value_size = self.image_produced.size + self.wal_produced.size;
-        self.uncompressed_size_ratio =
-            original_key_value_size as f64 / (produced_key_value_size as f64 + 1.0); // avoid div by 0
+        self.uncompressed_retention_ratio =
+            produced_key_value_size as f64 / (original_key_value_size as f64 + 1.0); // avoid div by 0
         let original_physical_size = self.image_layer_visited.size + self.delta_layer_visited.size;
         let produced_physical_size = self.image_layer_produced.size
             + self.delta_layer_produced.size
             + self.image_layer_discarded.size
             + self.delta_layer_discarded.size; // Also include the discarded layers to make the ratio accurate
-        self.physical_size_ratio =
-            original_physical_size as f64 / (produced_physical_size as f64 + 1.0); // avoid div by 0
+        self.compressed_retention_ratio =
+            produced_physical_size as f64 / (original_physical_size as f64 + 1.0); // avoid div by 0
     }
 }
 
@@ -2411,7 +2417,7 @@ impl Timeline {
                     lsn_split_points[i]
                 };
                 let img = self
-                    .reconstruct_value_wo_critical_error(key, request_lsn, state)
+                    .reconstruct_value(key, request_lsn, state, RedoAttemptType::GcCompaction)
                     .await?;
                 Some((request_lsn, img))
             } else {
@@ -3032,7 +3038,7 @@ impl Timeline {
         .map_err(CompactionError::Other)?;
 
         let time_download_layer = timer.elapsed();
-        let timer = Instant::now();
+        let mut timer = Instant::now();
 
         // Step 2: Produce images+deltas.
         let mut accumulated_values = Vec::new();
@@ -3107,6 +3113,7 @@ impl Timeline {
         // Actually, we can decide not to write to the image layer at all at this point because
         // the key and LSN range are determined. However, to keep things simple here, we still
         // create this writer, and discard the writer in the end.
+        let mut time_to_first_kv_pair = None;
 
         while let Some(((key, lsn, val), desc)) = merge_iter
             .next_with_trace()
@@ -3114,6 +3121,11 @@ impl Timeline {
             .context("failed to get next key-value pair")
             .map_err(CompactionError::Other)?
         {
+            if time_to_first_kv_pair.is_none() {
+                time_to_first_kv_pair = Some(timer.elapsed());
+                timer = Instant::now();
+            }
+
             if cancel.is_cancelled() {
                 return Err(CompactionError::ShuttingDown);
             }
@@ -3449,6 +3461,9 @@ impl Timeline {
         let time_final_phase = timer.elapsed();
 
         stat.time_final_phase_secs = time_final_phase.as_secs_f64();
+        stat.time_to_first_kv_pair_secs = time_to_first_kv_pair
+            .unwrap_or(Duration::ZERO)
+            .as_secs_f64();
         stat.time_main_loop_secs = time_main_loop.as_secs_f64();
         stat.time_acquire_lock_secs = time_acquire_lock.as_secs_f64();
         stat.time_download_layer_secs = time_download_layer.as_secs_f64();
@@ -3908,8 +3923,6 @@ impl CompactionLayer<Key> for OwnArc<DeltaLayer> {
         true
     }
 }
-
-use crate::tenant::timeline::DeltaEntry;
 
 impl CompactionLayer<Key> for ResidentDeltaLayer {
     fn key_range(&self) -> &Range<Key> {
