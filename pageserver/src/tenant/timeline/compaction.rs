@@ -795,6 +795,7 @@ impl KeyHistoryRetention {
     async fn verify(
         &self,
         key: Key,
+        base_img_from_ancestor: &Option<(Key, Lsn, Bytes)>,
         full_history: &[(Key, Lsn, Value)],
         tline: &Arc<Timeline>,
     ) -> anyhow::Result<()> {
@@ -807,7 +808,11 @@ impl KeyHistoryRetention {
             // This should never happen b/c if we don't have any history of a key, we won't even do `generate_key_retention`.
             return Ok(());
         };
-        let mut base_img = None;
+        let mut base_img = if let Some((_, lsn, img)) = base_img_from_ancestor {
+            Some((*lsn, img))
+        } else {
+            None
+        };
         let mut history = Vec::new();
 
         async fn collect_and_verify(
@@ -2347,8 +2352,8 @@ impl Timeline {
             "should have at least below + above horizon batches"
         );
         let mut replay_history: Vec<(Key, Lsn, Value)> = Vec::new();
-        if let Some((key, lsn, img)) = base_img_from_ancestor {
-            replay_history.push((key, lsn, Value::Image(img)));
+        if let Some((key, lsn, ref img)) = base_img_from_ancestor {
+            replay_history.push((key, lsn, Value::Image(img.clone())));
         }
 
         /// Generate debug information for the replay history
@@ -2542,7 +2547,9 @@ impl Timeline {
                     above_horizon: KeyLogAtLsn(logs),
                 };
                 if verification {
-                    retention.verify(key, full_history, self).await?;
+                    retention
+                        .verify(key, &base_img_from_ancestor, full_history, self)
+                        .await?;
                 }
                 return Ok(retention);
             } else {
