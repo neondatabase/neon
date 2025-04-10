@@ -47,11 +47,11 @@ pub struct BufferedWriter<B: Buffer, W> {
     /// - after an IO error => stays `None` forever
     ///
     /// In these exceptional cases, it's `None`.
-    tail: Option<B>,
+    mutable: Option<B>,
     /// A handle to the background flush task for writting data to disk.
     flush_handle: FlushHandle<B::IoBuf, W>,
-    /// The next offset to be submitted to the background task.
-    submit_offset: u64,
+    /// The number of bytes submitted to the background task.
+    bytes_submitted: u64,
 }
 
 impl<B, Buf, W> BufferedWriter<B, W>
@@ -73,7 +73,7 @@ where
     ) -> Self {
         Self {
             writer: writer.clone(),
-            tail: Some(buf_new()),
+            mutable: Some(buf_new()),
             flush_handle: FlushHandle::spawn_new(
                 writer,
                 buf_new(),
@@ -81,7 +81,7 @@ where
                 ctx.attached_child(),
                 flush_task_span,
             ),
-            submit_offset: start_offset,
+            bytes_submitted: start_offset,
         }
     }
 
@@ -90,13 +90,13 @@ where
     }
 
     /// Returns the number of bytes submitted to the background flush task.
-    pub fn submit_offset(&self) -> u64 {
-        self.submit_offset
+    pub fn bytes_submitted(&self) -> u64 {
+        self.bytes_submitted
     }
 
     /// Panics if used after any of the write paths returned an error
-    pub fn inspect_tail(&self) -> &B {
-        self.tail()
+    pub fn inspect_mutable(&self) -> &B {
+        self.mutable()
     }
 
     /// Gets a reference to the maybe flushed read-only buffer.
@@ -111,10 +111,10 @@ where
         mut handle_tail: impl FnMut(B) -> Option<B>,
     ) -> std::io::Result<(u64, W)> {
         let Self {
-            tail,
+            mutable: tail,
             writer,
             mut flush_handle,
-            submit_offset,
+            bytes_submitted: submit_offset,
         } = self;
 
         let ctx = flush_handle.shutdown().await?;
@@ -129,19 +129,11 @@ where
         Ok((bytes_amount, writer))
     }
 
-    /// Gets a immutable reference to the tail in-memory buffer.
+    /// Gets a reference to the mutable in-memory buffer.
     #[inline(always)]
-    fn tail(&self) -> &B {
-        self.tail
+    fn mutable(&self) -> &B {
+        self.mutable
             .as_ref()
-            .expect("must not use after we returned an error")
-    }
-
-    /// Gets a mutable reference to the tail in-memory buffer.
-    #[inline(always)]
-    fn tail_mut(&mut self) -> &mut B {
-        self.tail
-            .as_mut()
             .expect("must not use after we returned an error")
     }
 
@@ -167,7 +159,7 @@ where
         let chunk_len = chunk.len();
         let mut control: Option<FlushControl> = None;
         while !chunk.is_empty() {
-            let buf = self.tail_mut();
+            let buf = self.mutable.as_mut().expect("must not use after an error");
             let need = buf.cap() - buf.pending();
             let have = chunk.len();
             let n = std::cmp::min(need, have);
@@ -186,15 +178,15 @@ where
 
     #[must_use = "caller must explcitly check the flush control"]
     async fn flush(&mut self, _ctx: &RequestContext) -> std::io::Result<Option<FlushControl>> {
-        let buf = self.tail.take().expect("must not use after an error");
+        let buf = self.mutable.take().expect("must not use after an error");
         let buf_len = buf.pending();
         if buf_len == 0 {
-            self.tail = Some(buf);
+            self.mutable = Some(buf);
             return Ok(None);
         }
-        let (recycled, flush_control) = self.flush_handle.flush(buf, self.submit_offset).await?;
-        self.submit_offset += u64::try_from(buf_len).unwrap();
-        self.tail = Some(recycled);
+        let (recycled, flush_control) = self.flush_handle.flush(buf, self.bytes_submitted).await?;
+        self.bytes_submitted += u64::try_from(buf_len).unwrap();
+        self.mutable = Some(recycled);
         Ok(Some(flush_control))
     }
 }
