@@ -715,9 +715,29 @@ pub(crate) enum LayerId {
 }
 
 /// Uniquely identify a layer visit by the layer
-/// and LSN floor (or start LSN) of the reads.
-/// The layer itself is not enough since we may
-/// have different LSN lower bounds for delta layer reads.
+/// and LSN range of the reads. Note that the end of the range is exclusive.
+///
+/// The layer itself is not enough since we may have different LSN lower
+/// bounds for delta layer reads. Scenarios where this can happen are:
+///
+/// 1. Layer overlaps: imagine an image layer inside and in-memory layer
+///    and a query that only partially hits the image layer. Part of the query
+///    needs to read the whole in-memory layer and the other part needs to read
+///    only up to the image layer. Hence, they'll have different LSN floor values
+///    for the read.
+///
+/// 2. Scattered reads: the read path supports starting at different LSNs. Imagine
+///    The start LSN for one range is inside a layer and the start LSN for another range
+///    Is above the layer (includes all of it). Both ranges need to read the layer all the
+///    Way to the end but starting at different points. Hence, they'll have different LSN
+///    Ceil values.
+///
+/// The implication is that we might visit the same layer multiple times
+/// in order to read different LSN ranges from it. In practice, this isn't very concerning
+/// because:
+/// 1. Layer overlaps are rare and generally not intended
+/// 2. Scattered reads will stabilise after the first few layers provided their starting LSNs
+///    are grouped tightly enough (likely the case).
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
 struct LayerToVisitId {
     layer_id: LayerId,
