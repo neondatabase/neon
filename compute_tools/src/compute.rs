@@ -93,20 +93,6 @@ pub struct ComputeNodeParams {
 
     /// the address of extension storage proxy gateway
     pub ext_remote_storage: Option<String>,
-
-    /// We should only allow live re- / configuration of the compute node if
-    /// it uses 'pull model', i.e. it can go to control-plane and fetch
-    /// the latest configuration. Otherwise, there could be a case:
-    /// - we start compute with some spec provided as argument
-    /// - we push new spec and it does reconfiguration
-    /// - but then something happens and compute pod / VM is destroyed,
-    ///   so k8s controller starts it again with the **old** spec
-    ///
-    /// and the same for empty computes:
-    /// - we started compute without any spec
-    /// - we push spec and it does configuration
-    /// - but then it is restarted without any spec again
-    pub live_config_allowed: bool,
 }
 
 /// Compute node info shared across several `compute_ctl` threads.
@@ -661,15 +647,8 @@ impl ComputeNode {
         }
 
         // Configure and start rsyslog for Postgres logs export
-        if self.has_feature(ComputeFeature::PostgresLogsExport) {
-            if let Some(ref project_id) = pspec.spec.cluster.cluster_id {
-                let host = PostgresLogsRsyslogConfig::default_host(project_id);
-                let conf = PostgresLogsRsyslogConfig::new(Some(&host));
-                configure_postgres_logs_export(conf)?;
-            } else {
-                warn!("not configuring rsyslog for Postgres logs export: project ID is missing")
-            }
-        }
+        let conf = PostgresLogsRsyslogConfig::new(pspec.spec.logs_export_host.as_deref());
+        configure_postgres_logs_export(conf)?;
 
         // Launch remaining service threads
         let _monitor_handle = launch_monitor(self);
@@ -1572,6 +1551,10 @@ impl ComputeNode {
                 }
             });
         }
+
+        // Reconfigure rsyslog for Postgres logs export
+        let conf = PostgresLogsRsyslogConfig::new(spec.logs_export_host.as_deref());
+        configure_postgres_logs_export(conf)?;
 
         // Write new config
         let pgdata_path = Path::new(&self.params.pgdata);

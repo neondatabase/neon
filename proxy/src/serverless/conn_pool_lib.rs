@@ -47,6 +47,7 @@ impl ConnInfo {
 }
 
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant, reason = "TODO")]
 pub(crate) enum ClientDataEnum {
     Remote(ClientDataRemote),
     Local(ClientDataLocal),

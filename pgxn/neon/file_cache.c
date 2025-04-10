@@ -21,7 +21,6 @@
 #include "access/xlog.h"
 #include "funcapi.h"
 #include "miscadmin.h"
-#include "pagestore_client.h"
 #include "common/hashfn.h"
 #include "pgstat.h"
 #include "port/pg_iovec.h"
@@ -43,6 +42,7 @@
 
 #include "hll.h"
 #include "bitmap.h"
+#include "file_cache.h"
 #include "neon.h"
 #include "neon_lwlsncache.h"
 #include "neon_perf_counters.h"
@@ -1563,8 +1563,12 @@ local_cache_pages(PG_FUNCTION_ARGS)
 				hash_seq_init(&status, lfc_hash);
 				while ((entry = hash_seq_search(&status)) != NULL)
 				{
-					for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
-						n_pages += GET_STATE(entry, i) == AVAILABLE;
+					/* Skip hole tags */
+					if (NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key)) != 0)
+					{
+						for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
+							n_pages += GET_STATE(entry, i) == AVAILABLE;
+					}
 				}
 			}
 		}
@@ -1592,16 +1596,19 @@ local_cache_pages(PG_FUNCTION_ARGS)
 			{
 				for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
 				{
-					if (GET_STATE(entry, i) == AVAILABLE)
+					if (NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key)) != 0)
 					{
-						fctx->record[n].pageoffs = entry->offset * BLOCKS_PER_CHUNK + i;
-						fctx->record[n].relfilenode = NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key));
-						fctx->record[n].reltablespace = NInfoGetSpcOid(BufTagGetNRelFileInfo(entry->key));
-						fctx->record[n].reldatabase = NInfoGetDbOid(BufTagGetNRelFileInfo(entry->key));
-						fctx->record[n].forknum = entry->key.forkNum;
-						fctx->record[n].blocknum = entry->key.blockNum + i;
-						fctx->record[n].accesscount = entry->access_count;
-						n += 1;
+						if (GET_STATE(entry, i) == AVAILABLE)
+						{
+							fctx->record[n].pageoffs = entry->offset * BLOCKS_PER_CHUNK + i;
+							fctx->record[n].relfilenode = NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key));
+							fctx->record[n].reltablespace = NInfoGetSpcOid(BufTagGetNRelFileInfo(entry->key));
+							fctx->record[n].reldatabase = NInfoGetDbOid(BufTagGetNRelFileInfo(entry->key));
+							fctx->record[n].forknum = entry->key.forkNum;
+							fctx->record[n].blocknum = entry->key.blockNum + i;
+							fctx->record[n].accesscount = entry->access_count;
+							n += 1;
+						}
 					}
 				}
 			}
