@@ -354,7 +354,7 @@ async fn main() -> anyhow::Result<()> {
                   This is insecure and should only be used in development environments.");
         }
     } else {
-        info!("Starting in dev mode - authentication security checks are disabled");
+        warn!("Starting in dev mode: this may be an insecure configuration.");
     }
 
     // Load JWT auth token to connect to other safekeepers for pull_timeline.
