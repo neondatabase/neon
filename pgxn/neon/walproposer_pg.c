@@ -228,7 +228,7 @@ nwp_register_gucs(void)
 							"Version of compute <-> safekeeper protocol.",
 							"Used while migrating from 2 to 3.",
 							&safekeeper_proto_version,
-							2, 0, INT_MAX,
+							3, 0, INT_MAX,
 							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);
