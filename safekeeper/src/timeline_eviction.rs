@@ -35,7 +35,7 @@ impl Manager {
         next_event: &Option<tokio::time::Instant>,
         state: &StateSnapshot,
     ) -> bool {
-        let ready = self.backup_task.is_none()
+        self.backup_task.is_none()
             && self.recovery_task.is_none()
             && self.wal_removal_task.is_none()
             && self.partial_backup_task.is_none()
@@ -61,8 +61,7 @@ impl Manager {
                 .unwrap()
                 .flush_lsn
                 .segment_number(self.wal_seg_size)
-                == self.last_removed_segno + 1;
-        ready
+                == self.last_removed_segno + 1
     }
 
     /// Evict the timeline to remote storage. Returns whether the eviction was successful.

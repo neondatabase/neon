@@ -899,7 +899,7 @@ async fn handle_node_status(req: Request<Body>) -> Result<Response<Body>, ApiErr
     let state = get_state(&req);
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
 
-    let node_status = state.service.get_node(node_id).await?;
+    let node_status = state.service.get_node(node_id).await?.describe();
 
     json_response(StatusCode::OK, node_status)
 }
@@ -1235,8 +1235,18 @@ async fn handle_step_down(req: Request<Body>) -> Result<Response<Body>, ApiError
         ForwardOutcome::NotForwarded(req) => req,
     };
 
-    let state = get_state(&req);
-    json_response(StatusCode::OK, state.service.step_down().await)
+    // Spawn a background task: once we start stepping down, we must finish: if the client drops
+    // their request we should avoid stopping in some part-stepped-down state.
+    let handle = tokio::spawn(async move {
+        let state = get_state(&req);
+        state.service.step_down().await
+    });
+
+    let result = handle
+        .await
+        .map_err(|e| ApiError::InternalServerError(e.into()))?;
+
+    json_response(StatusCode::OK, result)
 }
 
 async fn handle_tenant_drop(req: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -1733,9 +1743,9 @@ async fn maybe_forward(req: Request<Body>) -> ForwardOutcome {
         };
 
         if *self_addr == leader_addr {
-            return ForwardOutcome::Forwarded(Err(ApiError::InternalServerError(anyhow::anyhow!(
-                "Leader is stepped down instance"
-            ))));
+            return ForwardOutcome::Forwarded(Err(ApiError::ResourceUnavailable(
+                "Leader is stepped down instance".into(),
+            )));
         }
     }
 
@@ -1744,19 +1754,17 @@ async fn maybe_forward(req: Request<Body>) -> ForwardOutcome {
     // Use [`RECONCILE_TIMEOUT`] as the max amount of time a request should block for and
     // include some leeway to get the timeout for proxied requests.
     const PROXIED_REQUEST_TIMEOUT: Duration = Duration::from_secs(RECONCILE_TIMEOUT.as_secs() + 10);
-    let client = reqwest::ClientBuilder::new()
-        .timeout(PROXIED_REQUEST_TIMEOUT)
-        .build();
-    let client = match client {
-        Ok(client) => client,
-        Err(err) => {
-            return ForwardOutcome::Forwarded(Err(ApiError::InternalServerError(anyhow::anyhow!(
-                "Failed to build leader client for forwarding while in stepped down state: {err}"
-            ))));
-        }
-    };
 
-    let request: reqwest::Request = match convert_request(req, &client, leader.address).await {
+    let client = state.service.get_http_client().clone();
+
+    let request: reqwest::Request = match convert_request(
+        req,
+        &client,
+        leader.address,
+        PROXIED_REQUEST_TIMEOUT,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(err) => {
             return ForwardOutcome::Forwarded(Err(ApiError::InternalServerError(anyhow::anyhow!(
@@ -1814,6 +1822,7 @@ async fn convert_request(
     req: hyper::Request<Body>,
     client: &reqwest::Client,
     to_address: String,
+    timeout: Duration,
 ) -> Result<reqwest::Request, ApiError> {
     use std::str::FromStr;
 
@@ -1868,6 +1877,7 @@ async fn convert_request(
         .request(method, uri)
         .headers(headers)
         .body(body)
+        .timeout(timeout)
         .build()
         .map_err(|err| {
             ApiError::InternalServerError(anyhow::anyhow!("Request conversion failed: {err}"))

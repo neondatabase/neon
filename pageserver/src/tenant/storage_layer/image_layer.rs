@@ -481,9 +481,9 @@ impl ImageLayerInner {
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
 
-        let ctx = RequestContextBuilder::extend(ctx)
+        let ctx = RequestContextBuilder::from(ctx)
             .page_content_kind(PageContentKind::ImageLayerBtreeNode)
-            .build();
+            .attached_child();
 
         for range in keyspace.ranges.iter() {
             let mut range_end_handled = false;
@@ -1192,7 +1192,7 @@ mod test {
 
         // This key range contains several 0x8000 page stripes, only one of which belongs to shard zero
         let input_start = Key::from_hex("000000067f00000001000000ae0000000000").unwrap();
-        let input_end = Key::from_hex("000000067f00000001000000ae0000020000").unwrap();
+        let input_end = Key::from_hex("000000067f00000001000000ae0000002000").unwrap();
         let range = input_start..input_end;
 
         // Build an image layer to filter
@@ -1235,7 +1235,7 @@ mod test {
             let shard_identity = ShardIdentity::new(
                 ShardNumber(shard_number),
                 shard_count,
-                ShardStripeSize(0x8000),
+                ShardStripeSize(0x800),
             )
             .unwrap();
             let harness = TenantHarness::create_custom(
@@ -1287,12 +1287,12 @@ mod test {
 
             // This exact size and those below will need updating as/when the layer encoding changes, but
             // should be deterministic for a given version of the format, as we used no randomness generating the input.
-            assert_eq!(original_size, 1597440);
+            assert_eq!(original_size, 122880);
 
             match shard_number {
                 0 => {
                     // We should have written out just one stripe for our shard identity
-                    assert_eq!(wrote_keys, 0x8000);
+                    assert_eq!(wrote_keys, 0x800);
                     let replacement = replacement.unwrap();
 
                     // We should have dropped some of the data
@@ -1300,7 +1300,7 @@ mod test {
                     assert!(replacement.metadata().file_size > 0);
 
                     // Assert that we dropped ~3/4 of the data.
-                    assert_eq!(replacement.metadata().file_size, 417792);
+                    assert_eq!(replacement.metadata().file_size, 49152);
                 }
                 1 => {
                     // Shard 1 has no keys in our input range
@@ -1309,19 +1309,19 @@ mod test {
                 }
                 2 => {
                     // Shard 2 has one stripes in the input range
-                    assert_eq!(wrote_keys, 0x8000);
+                    assert_eq!(wrote_keys, 0x800);
                     let replacement = replacement.unwrap();
                     assert!(replacement.metadata().file_size < original_size);
                     assert!(replacement.metadata().file_size > 0);
-                    assert_eq!(replacement.metadata().file_size, 417792);
+                    assert_eq!(replacement.metadata().file_size, 49152);
                 }
                 3 => {
                     // Shard 3 has two stripes in the input range
-                    assert_eq!(wrote_keys, 0x10000);
+                    assert_eq!(wrote_keys, 0x1000);
                     let replacement = replacement.unwrap();
                     assert!(replacement.metadata().file_size < original_size);
                     assert!(replacement.metadata().file_size > 0);
-                    assert_eq!(replacement.metadata().file_size, 811008);
+                    assert_eq!(replacement.metadata().file_size, 73728);
                 }
                 _ => unreachable!(),
             }

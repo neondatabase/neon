@@ -445,7 +445,7 @@ pub(super) async fn handle_walreceiver_connection(
                         .inspect_err(|err| {
                             // TODO: we can't differentiate cancellation errors with
                             // anyhow::Error, so just ignore it if we're cancelled.
-                            if !cancellation.is_cancelled() {
+                            if !cancellation.is_cancelled() && !timeline.is_stopping() {
                                 critical!("{err:?}")
                             }
                         })?;
@@ -577,7 +577,7 @@ pub(super) async fn handle_walreceiver_connection(
                             .inspect_err(|err| {
                                 // TODO: we can't differentiate cancellation errors with
                                 // anyhow::Error, so just ignore it if we're cancelled.
-                                if !cancellation.is_cancelled() {
+                                if !cancellation.is_cancelled() && !timeline.is_stopping() {
                                     critical!("{err:?}")
                                 }
                             })?;

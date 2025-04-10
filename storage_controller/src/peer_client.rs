@@ -59,11 +59,11 @@ impl ResponseErrorMessageExt for reqwest::Response {
 pub(crate) struct GlobalObservedState(pub(crate) HashMap<TenantShardId, ObservedState>);
 
 impl PeerClient {
-    pub(crate) fn new(uri: Uri, jwt: Option<String>) -> Self {
+    pub(crate) fn new(http_client: reqwest::Client, uri: Uri, jwt: Option<String>) -> Self {
         Self {
             uri,
             jwt,
-            client: reqwest::Client::new(),
+            client: http_client,
         }
     }
 

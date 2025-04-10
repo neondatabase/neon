@@ -45,6 +45,7 @@ use remote_timeline_client::manifest::{
 };
 use remote_timeline_client::{
     FAILED_REMOTE_OP_RETRIES, FAILED_UPLOAD_WARN_THRESHOLD, UploadQueueNotReadyError,
+    download_tenant_manifest,
 };
 use secondary::heatmap::{HeatMapTenant, HeatMapTimeline};
 use storage_broker::BrokerClientChannel;
@@ -99,7 +100,7 @@ use crate::tenant::timeline::delete::DeleteTimelineFlow;
 use crate::tenant::timeline::uninit::cleanup_timeline_directory;
 use crate::virtual_file::VirtualFile;
 use crate::walingest::WalLagCooldown;
-use crate::walredo::PostgresRedoManager;
+use crate::walredo::{PostgresRedoManager, RedoAttemptType};
 use crate::{InitializationOrder, TEMP_FILE_SUFFIX, import_datadir, span, task_mgr, walredo};
 
 static INIT_DB_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(8));
@@ -226,7 +227,8 @@ struct TimelinePreload {
 }
 
 pub(crate) struct TenantPreload {
-    tenant_manifest: TenantManifest,
+    /// The tenant manifest from remote storage, or None if no manifest was found.
+    tenant_manifest: Option<TenantManifest>,
     /// Map from timeline ID to a possible timeline preload. It is None iff the timeline is offloaded according to the manifest.
     timelines: HashMap<TimelineId, Option<TimelinePreload>>,
 }
@@ -282,12 +284,15 @@ pub struct Tenant {
     /// **Lock order**: if acquiring all (or a subset), acquire them in order `timelines`, `timelines_offloaded`, `timelines_creating`
     timelines_offloaded: Mutex<HashMap<TimelineId, Arc<OffloadedTimeline>>>,
 
-    /// Serialize writes of the tenant manifest to remote storage.  If there are concurrent operations
-    /// affecting the manifest, such as timeline deletion and timeline offload, they must wait for
-    /// each other (this could be optimized to coalesce writes if necessary).
+    /// The last tenant manifest known to be in remote storage. None if the manifest has not yet
+    /// been either downloaded or uploaded. Always Some after tenant attach.
     ///
-    /// The contents of the Mutex are the last manifest we successfully uploaded
-    tenant_manifest_upload: tokio::sync::Mutex<Option<TenantManifest>>,
+    /// Initially populated during tenant attach, updated via `maybe_upload_tenant_manifest`.
+    ///
+    /// Do not modify this directly. It is used to check whether a new manifest needs to be
+    /// uploaded. The manifest is constructed in `build_tenant_manifest`, and uploaded via
+    /// `maybe_upload_tenant_manifest`.
+    remote_tenant_manifest: tokio::sync::Mutex<Option<TenantManifest>>,
 
     // This mutex prevents creation of new timelines during GC.
     // Adding yet another mutex (in addition to `timelines`) is needed because holding
@@ -468,15 +473,16 @@ impl WalRedoManager {
         base_img: Option<(Lsn, bytes::Bytes)>,
         records: Vec<(Lsn, pageserver_api::record::NeonWalRecord)>,
         pg_version: u32,
+        redo_attempt_type: RedoAttemptType,
     ) -> Result<bytes::Bytes, walredo::Error> {
         match self {
             Self::Prod(_, mgr) => {
-                mgr.request_redo(key, lsn, base_img, records, pg_version)
+                mgr.request_redo(key, lsn, base_img, records, pg_version, redo_attempt_type)
                     .await
             }
             #[cfg(test)]
             Self::Test(mgr) => {
-                mgr.request_redo(key, lsn, base_img, records, pg_version)
+                mgr.request_redo(key, lsn, base_img, records, pg_version, redo_attempt_type)
                     .await
             }
         }
@@ -915,6 +921,7 @@ enum StartCreatingTimelineResult {
     Idempotent(Arc<Timeline>),
 }
 
+#[allow(clippy::large_enum_variant, reason = "TODO")]
 enum TimelineInitAndSyncResult {
     ReadyToActivate(Arc<Timeline>),
     NeedsSpawnImportPgdata(TimelineInitAndSyncNeedsSpawnImportPgdata),
@@ -1001,6 +1008,7 @@ enum CreateTimelineCause {
     Delete,
 }
 
+#[allow(clippy::large_enum_variant, reason = "TODO")]
 enum LoadTimelineCause {
     Attach,
     Unoffload,
@@ -1354,36 +1362,41 @@ impl Tenant {
                     }
                 }
 
-                // Ideally we should use Tenant::set_broken_no_wait, but it is not supposed to be used when tenant is in loading state.
-                enum BrokenVerbosity {
-                    Error,
-                    Info
-                }
-                let make_broken =
-                    |t: &Tenant, err: anyhow::Error, verbosity: BrokenVerbosity| {
-                        match verbosity {
-                            BrokenVerbosity::Info => {
-                                info!("attach cancelled, setting tenant state to Broken: {err}");
-                            },
-                            BrokenVerbosity::Error => {
-                                error!("attach failed, setting tenant state to Broken: {err:?}");
-                            }
+                fn make_broken_or_stopping(t: &Tenant, err: anyhow::Error) {
+                    t.state.send_modify(|state| match state {
+                        // TODO: the old code alluded to DeleteTenantFlow sometimes setting
+                        // TenantState::Stopping before we get here, but this may be outdated.
+                        // Let's find out with a testing assertion. If this doesn't fire, and the
+                        // logs don't show this happening in production, remove the Stopping cases.
+                        TenantState::Stopping{..} if cfg!(any(test, feature = "testing")) => {
+                            panic!("unexpected TenantState::Stopping during attach")
                         }
-                        t.state.send_modify(|state| {
-                            // The Stopping case is for when we have passed control on to DeleteTenantFlow:
-                            // if it errors, we will call make_broken when tenant is already in Stopping.
-                            assert!(
-                                matches!(*state, TenantState::Attaching | TenantState::Stopping { .. }),
-                                "the attach task owns the tenant state until activation is complete"
-                            );
-
-                            *state = TenantState::broken_from_reason(err.to_string());
-                        });
-                    };
+                        // If the tenant is cancelled, assume the error was caused by cancellation.
+                        TenantState::Attaching if t.cancel.is_cancelled() => {
+                            info!("attach cancelled, setting tenant state to Stopping: {err}");
+                            // NB: progress None tells `set_stopping` that attach has cancelled.
+                            *state = TenantState::Stopping { progress: None };
+                        }
+                        // According to the old code, DeleteTenantFlow may already have set this to
+                        // Stopping. Retain its progress.
+                        // TODO: there is no DeleteTenantFlow. Is this still needed? See above.
+                        TenantState::Stopping { progress } if t.cancel.is_cancelled() => {
+                            assert!(progress.is_some(), "concurrent attach cancellation");
+                            info!("attach cancelled, already Stopping: {err}");
+                        }
+                        // Mark the tenant as broken.
+                        TenantState::Attaching | TenantState::Stopping { .. } => {
+                            error!("attach failed, setting tenant state to Broken (was {state}): {err:?}");
+                            *state = TenantState::broken_from_reason(err.to_string())
+                        }
+                        // The attach task owns the tenant state until activated.
+                        state => panic!("invalid tenant state {state} during attach: {err:?}"),
+                    });
+                }
 
                 // TODO: should also be rejecting tenant conf changes that violate this check.
                 if let Err(e) = crate::tenant::storage_layer::inmemory_layer::IndexEntry::validate_checkpoint_distance(tenant_clone.get_checkpoint_distance()) {
-                    make_broken(&tenant_clone, anyhow::anyhow!(e), BrokenVerbosity::Error);
+                    make_broken_or_stopping(&tenant_clone, anyhow::anyhow!(e));
                     return Ok(());
                 }
 
@@ -1435,10 +1448,8 @@ impl Tenant {
                             // stayed in Activating for such a long time that shutdown found it in
                             // that state.
                             tracing::info!(state=%tenant_clone.current_state(), "Tenant shut down before activation");
-                            // Make the tenant broken so that set_stopping will not hang waiting for it to leave
-                            // the Attaching state.  This is an over-reaction (nothing really broke, the tenant is
-                            // just shutting down), but ensures progress.
-                            make_broken(&tenant_clone, anyhow::anyhow!("Shut down while Attaching"), BrokenVerbosity::Info);
+                            // Set the tenant to Stopping to signal `set_stopping` that we're done.
+                            make_broken_or_stopping(&tenant_clone, anyhow::anyhow!("Shut down while Attaching"));
                             return Ok(());
                         },
                     )
@@ -1457,7 +1468,7 @@ impl Tenant {
                         match res {
                             Ok(p) => Some(p),
                             Err(e) => {
-                                make_broken(&tenant_clone, anyhow::anyhow!(e), BrokenVerbosity::Error);
+                                make_broken_or_stopping(&tenant_clone, anyhow::anyhow!(e));
                                 return Ok(());
                             }
                         }
@@ -1483,9 +1494,7 @@ impl Tenant {
                         info!("attach finished, activating");
                         tenant_clone.activate(broker_client, None, &ctx);
                     }
-                    Err(e) => {
-                        make_broken(&tenant_clone, anyhow::anyhow!(e), BrokenVerbosity::Error);
-                    }
+                    Err(e) => make_broken_or_stopping(&tenant_clone, anyhow::anyhow!(e)),
                 }
 
                 // If we are doing an opportunistic warmup attachment at startup, initialize
@@ -1525,28 +1534,27 @@ impl Tenant {
             cancel.clone(),
         )
         .await?;
-        let (offloaded_add, tenant_manifest) =
-            match remote_timeline_client::download_tenant_manifest(
-                remote_storage,
-                &self.tenant_shard_id,
-                self.generation,
-                &cancel,
-            )
-            .await
-            {
-                Ok((tenant_manifest, _generation, _manifest_mtime)) => (
-                    format!("{} offloaded", tenant_manifest.offloaded_timelines.len()),
-                    tenant_manifest,
-                ),
-                Err(DownloadError::NotFound) => {
-                    ("no manifest".to_string(), TenantManifest::empty())
-                }
-                Err(e) => Err(e)?,
-            };
+
+        let tenant_manifest = match download_tenant_manifest(
+            remote_storage,
+            &self.tenant_shard_id,
+            self.generation,
+            &cancel,
+        )
+        .await
+        {
+            Ok((tenant_manifest, _, _)) => Some(tenant_manifest),
+            Err(DownloadError::NotFound) => None,
+            Err(err) => return Err(err.into()),
+        };
 
         info!(
-            "found {} timelines, and {offloaded_add}",
-            remote_timeline_ids.len()
+            "found {} timelines ({} offloaded timelines)",
+            remote_timeline_ids.len(),
+            tenant_manifest
+                .as_ref()
+                .map(|m| m.offloaded_timelines.len())
+                .unwrap_or(0)
         );
 
         for k in other_keys {
@@ -1555,11 +1563,13 @@ impl Tenant {
 
         // Avoid downloading IndexPart of offloaded timelines.
         let mut offloaded_with_prefix = HashSet::new();
-        for offloaded in tenant_manifest.offloaded_timelines.iter() {
-            if remote_timeline_ids.remove(&offloaded.timeline_id) {
-                offloaded_with_prefix.insert(offloaded.timeline_id);
-            } else {
-                // We'll take care later of timelines in the manifest without a prefix
+        if let Some(tenant_manifest) = &tenant_manifest {
+            for offloaded in tenant_manifest.offloaded_timelines.iter() {
+                if remote_timeline_ids.remove(&offloaded.timeline_id) {
+                    offloaded_with_prefix.insert(offloaded.timeline_id);
+                } else {
+                    // We'll take care later of timelines in the manifest without a prefix
+                }
             }
         }
 
@@ -1633,12 +1643,14 @@ impl Tenant {
 
         let mut offloaded_timeline_ids = HashSet::new();
         let mut offloaded_timelines_list = Vec::new();
-        for timeline_manifest in preload.tenant_manifest.offloaded_timelines.iter() {
-            let timeline_id = timeline_manifest.timeline_id;
-            let offloaded_timeline =
-                OffloadedTimeline::from_manifest(self.tenant_shard_id, timeline_manifest);
-            offloaded_timelines_list.push((timeline_id, Arc::new(offloaded_timeline)));
-            offloaded_timeline_ids.insert(timeline_id);
+        if let Some(tenant_manifest) = &preload.tenant_manifest {
+            for timeline_manifest in tenant_manifest.offloaded_timelines.iter() {
+                let timeline_id = timeline_manifest.timeline_id;
+                let offloaded_timeline =
+                    OffloadedTimeline::from_manifest(self.tenant_shard_id, timeline_manifest);
+                offloaded_timelines_list.push((timeline_id, Arc::new(offloaded_timeline)));
+                offloaded_timeline_ids.insert(timeline_id);
+            }
         }
         // Complete deletions for offloaded timeline id's from manifest.
         // The manifest will be uploaded later in this function.
@@ -1796,15 +1808,21 @@ impl Tenant {
             .context("resume_deletion")
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
         }
-        let needs_manifest_upload =
-            offloaded_timelines_list.len() != preload.tenant_manifest.offloaded_timelines.len();
         {
             let mut offloaded_timelines_accessor = self.timelines_offloaded.lock().unwrap();
             offloaded_timelines_accessor.extend(offloaded_timelines_list.into_iter());
         }
-        if needs_manifest_upload {
-            self.store_tenant_manifest().await?;
+
+        // Stash the preloaded tenant manifest, and upload a new manifest if changed.
+        //
+        // NB: this must happen after the tenant is fully populated above. In particular the
+        // offloaded timelines, which are included in the manifest.
+        {
+            let mut guard = self.remote_tenant_manifest.lock().await;
+            assert!(guard.is_none(), "tenant manifest set before preload"); // first populated here
+            *guard = preload.tenant_manifest;
         }
+        self.maybe_upload_tenant_manifest().await?;
 
         // The local filesystem contents are a cache of what's in the remote IndexPart;
         // IndexPart is the source of truth.
@@ -2218,7 +2236,7 @@ impl Tenant {
         };
 
         // Upload new list of offloaded timelines to S3
-        self.store_tenant_manifest().await?;
+        self.maybe_upload_tenant_manifest().await?;
 
         // Activate the timeline (if it makes sense)
         if !(timeline.is_broken() || timeline.is_stopping()) {
@@ -3429,7 +3447,7 @@ impl Tenant {
             shutdown_mode
         };
 
-        match self.set_stopping(shutdown_progress, false, false).await {
+        match self.set_stopping(shutdown_progress).await {
             Ok(()) => {}
             Err(SetStoppingError::Broken) => {
                 // assume that this is acceptable
@@ -3509,25 +3527,13 @@ impl Tenant {
     /// This function waits for the tenant to become active if it isn't already, before transitioning it into Stopping state.
     ///
     /// This function is not cancel-safe!
-    ///
-    /// `allow_transition_from_loading` is needed for the special case of loading task deleting the tenant.
-    /// `allow_transition_from_attaching` is needed for the special case of attaching deleted tenant.
-    async fn set_stopping(
-        &self,
-        progress: completion::Barrier,
-        _allow_transition_from_loading: bool,
-        allow_transition_from_attaching: bool,
-    ) -> Result<(), SetStoppingError> {
+    async fn set_stopping(&self, progress: completion::Barrier) -> Result<(), SetStoppingError> {
         let mut rx = self.state.subscribe();
 
         // cannot stop before we're done activating, so wait out until we're done activating
         rx.wait_for(|state| match state {
-            TenantState::Attaching if allow_transition_from_attaching => true,
             TenantState::Activating(_) | TenantState::Attaching => {
-                info!(
-                    "waiting for {} to turn Active|Broken|Stopping",
-                    <&'static str>::from(state)
-                );
+                info!("waiting for {state} to turn Active|Broken|Stopping");
                 false
             }
             TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping { .. } => true,
@@ -3538,23 +3544,22 @@ impl Tenant {
         // we now know we're done activating, let's see whether this task is the winner to transition into Stopping
         let mut err = None;
         let stopping = self.state.send_if_modified(|current_state| match current_state {
-            TenantState::Activating(_) => {
-                unreachable!("1we ensured above that we're done with activation, and, there is no re-activation")
-            }
-            TenantState::Attaching => {
-                if !allow_transition_from_attaching {
-                    unreachable!("2we ensured above that we're done with activation, and, there is no re-activation")
-                };
-                *current_state = TenantState::Stopping { progress };
-                true
+            TenantState::Activating(_) | TenantState::Attaching => {
+                unreachable!("we ensured above that we're done with activation, and, there is no re-activation")
             }
             TenantState::Active => {
                 // FIXME: due to time-of-check vs time-of-use issues, it can happen that new timelines
                 // are created after the transition to Stopping. That's harmless, as the Timelines
                 // won't be accessible to anyone afterwards, because the Tenant is in Stopping state.
-                *current_state = TenantState::Stopping { progress };
+                *current_state = TenantState::Stopping { progress: Some(progress) };
                 // Continue stopping outside the closure. We need to grab timelines.lock()
                 // and we plan to turn it into a tokio::sync::Mutex in a future patch.
+                true
+            }
+            TenantState::Stopping { progress: None } => {
+                // An attach was cancelled, and the attach transitioned the tenant from Attaching to
+                // Stopping(None) to let us know it exited. Register our progress and continue.
+                *current_state = TenantState::Stopping { progress: Some(progress) };
                 true
             }
             TenantState::Broken { reason, .. } => {
@@ -3564,7 +3569,7 @@ impl Tenant {
                 err = Some(SetStoppingError::Broken);
                 false
             }
-            TenantState::Stopping { progress } => {
+            TenantState::Stopping { progress: Some(progress) } => {
                 info!("Tenant is already in Stopping state");
                 err = Some(SetStoppingError::AlreadyStopping(progress.clone()));
                 false
@@ -4065,18 +4070,20 @@ impl Tenant {
 
     /// Generate an up-to-date TenantManifest based on the state of this Tenant.
     fn build_tenant_manifest(&self) -> TenantManifest {
-        let timelines_offloaded = self.timelines_offloaded.lock().unwrap();
-
-        let mut timeline_manifests = timelines_offloaded
-            .iter()
-            .map(|(_timeline_id, offloaded)| offloaded.manifest())
-            .collect::<Vec<_>>();
-        // Sort the manifests so that our output is deterministic
-        timeline_manifests.sort_by_key(|timeline_manifest| timeline_manifest.timeline_id);
+        // Collect the offloaded timelines, and sort them for deterministic output.
+        let offloaded_timelines = self
+            .timelines_offloaded
+            .lock()
+            .unwrap()
+            .values()
+            .map(|tli| tli.manifest())
+            .sorted_by_key(|m| m.timeline_id)
+            .collect_vec();
 
         TenantManifest {
             version: LATEST_TENANT_MANIFEST_VERSION,
-            offloaded_timelines: timeline_manifests,
+            stripe_size: Some(self.get_shard_stripe_size()),
+            offloaded_timelines,
         }
     }
 
@@ -4205,9 +4212,9 @@ impl Tenant {
             self.cancel.child_token(),
         );
 
-        let timeline_ctx = RequestContextBuilder::extend(ctx)
+        let timeline_ctx = RequestContextBuilder::from(ctx)
             .scope(context::Scope::new_timeline(&timeline))
-            .build();
+            .detached_child();
 
         Ok((timeline, timeline_ctx))
     }
@@ -4299,7 +4306,7 @@ impl Tenant {
             timelines: Mutex::new(HashMap::new()),
             timelines_creating: Mutex::new(HashSet::new()),
             timelines_offloaded: Mutex::new(HashMap::new()),
-            tenant_manifest_upload: Default::default(),
+            remote_tenant_manifest: Default::default(),
             gc_cs: tokio::sync::Mutex::new(()),
             walredo_mgr,
             remote_storage,
@@ -4395,10 +4402,7 @@ impl Tenant {
         .to_string();
 
         fail::fail_point!("tenant-config-before-write", |_| {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "tenant-config-before-write",
-            ))
+            Err(std::io::Error::other("tenant-config-before-write"))
         });
 
         // Convert the config to a toml file.
@@ -5532,27 +5536,35 @@ impl Tenant {
             .unwrap_or(0)
     }
 
-    /// Serialize and write the latest TenantManifest to remote storage.
-    pub(crate) async fn store_tenant_manifest(&self) -> Result<(), TenantManifestError> {
-        // Only one manifest write may be done at at time, and the contents of the manifest
-        // must be loaded while holding this lock. This makes it safe to call this function
-        // from anywhere without worrying about colliding updates.
+    /// Builds a new tenant manifest, and uploads it if it differs from the last-known tenant
+    /// manifest in `Self::remote_tenant_manifest`.
+    ///
+    /// TODO: instead of requiring callers to remember to call `maybe_upload_tenant_manifest` after
+    /// changing any `Tenant` state that's included in the manifest, consider making the manifest
+    /// the authoritative source of data with an API that automatically uploads on changes. Revisit
+    /// this when the manifest is more widely used and we have a better idea of the data model.
+    pub(crate) async fn maybe_upload_tenant_manifest(&self) -> Result<(), TenantManifestError> {
+        // Multiple tasks may call this function concurrently after mutating the Tenant runtime
+        // state, affecting the manifest generated by `build_tenant_manifest`. We use an async mutex
+        // to serialize these callers. `eq_ignoring_version` acts as a slightly inefficient but
+        // simple coalescing mechanism.
         let mut guard = tokio::select! {
-            g = self.tenant_manifest_upload.lock() => {
-                g
-            },
-            _ = self.cancel.cancelled() => {
-                return Err(TenantManifestError::Cancelled);
-            }
+            guard = self.remote_tenant_manifest.lock() => guard,
+            _ = self.cancel.cancelled() => return Err(TenantManifestError::Cancelled),
         };
 
+        // Build a new manifest.
         let manifest = self.build_tenant_manifest();
-        if Some(&manifest) == (*guard).as_ref() {
-            // Optimisation: skip uploads that don't change anything.
-            return Ok(());
+
+        // Check if the manifest has changed. We ignore the version number here, to avoid
+        // uploading every manifest on version number bumps.
+        if let Some(old) = guard.as_ref() {
+            if manifest.eq_ignoring_version(old) {
+                return Ok(());
+            }
         }
 
-        // Remote storage does no retries internally, so wrap it
+        // Upload the manifest. Remote storage does no retries internally, so retry here.
         match backoff::retry(
             || async {
                 upload_tenant_manifest(
@@ -5564,7 +5576,7 @@ impl Tenant {
                 )
                 .await
             },
-            |_e| self.cancel.is_cancelled(),
+            |_| self.cancel.is_cancelled(),
             FAILED_UPLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
             "uploading tenant manifest",
@@ -5868,6 +5880,7 @@ pub(crate) mod harness {
             base_img: Option<(Lsn, Bytes)>,
             records: Vec<(Lsn, NeonWalRecord)>,
             _pg_version: u32,
+            _redo_attempt_type: RedoAttemptType,
         ) -> Result<Bytes, walredo::Error> {
             let records_neon = records.iter().all(|r| apply_neon::can_apply_in_neon(&r.1));
             if records_neon {
@@ -8722,6 +8735,21 @@ mod tests {
                 Lsn(0x20),
                 Value::WalRecord(NeonWalRecord::wal_init("i")),
             ),
+            (
+                get_key(4),
+                Lsn(0x30),
+                Value::WalRecord(NeonWalRecord::wal_append_conditional("j", "i")),
+            ),
+            (
+                get_key(5),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_init("1")),
+            ),
+            (
+                get_key(5),
+                Lsn(0x30),
+                Value::WalRecord(NeonWalRecord::wal_append_conditional("j", "2")),
+            ),
         ];
         let image1 = vec![(get_key(1), "0x10".into())];
 
@@ -8752,8 +8780,18 @@ mod tests {
 
         // Need to remove the limit of "Neon WAL redo requires base image".
 
-        // assert_eq!(tline.get(get_key(3), Lsn(0x50), &ctx).await?, Bytes::new());
-        // assert_eq!(tline.get(get_key(4), Lsn(0x50), &ctx).await?, Bytes::new());
+        assert_eq!(
+            tline.get(get_key(3), Lsn(0x50), &ctx).await?,
+            Bytes::from_static(b"c")
+        );
+        assert_eq!(
+            tline.get(get_key(4), Lsn(0x50), &ctx).await?,
+            Bytes::from_static(b"ij")
+        );
+
+        // Manual testing required: currently, read errors will panic the process in debug mode. So we
+        // cannot enable this assertion in the unit test.
+        // assert!(tline.get(get_key(5), Lsn(0x50), &ctx).await.is_err());
 
         Ok(())
     }
@@ -11529,6 +11567,99 @@ mod tests {
                 },
             ],
         );
+
+        Ok(())
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn test_bottom_most_compation_redo_failure() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_bottom_most_compation_redo_failure").await?;
+        let (tenant, ctx) = harness.load().await;
+
+        fn get_key(id: u32) -> Key {
+            // using aux key here b/c they are guaranteed to be inside `collect_keyspace`.
+            let mut key = Key::from_hex("620000000033333333444444445500000000").unwrap();
+            key.field6 = id;
+            key
+        }
+
+        let img_layer = (0..10)
+            .map(|id| (get_key(id), Bytes::from(format!("value {id}@0x10"))))
+            .collect_vec();
+
+        let delta1 = vec![
+            (
+                get_key(1),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x20")),
+            ),
+            (
+                get_key(1),
+                Lsn(0x24),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x24")),
+            ),
+            (
+                get_key(1),
+                Lsn(0x28),
+                // This record will fail to redo
+                Value::WalRecord(NeonWalRecord::wal_append_conditional("@0x28", "???")),
+            ),
+        ];
+
+        let tline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                vec![], // in-memory layers
+                vec![DeltaLayerTestDesc::new_with_inferred_key_range(
+                    Lsn(0x20)..Lsn(0x30),
+                    delta1,
+                )], // delta layers
+                vec![(Lsn(0x10), img_layer)], // image layers
+                Lsn(0x50),
+            )
+            .await?;
+        {
+            tline
+                .applied_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x30))
+                .wait()
+                .await;
+            // Update GC info
+            let mut guard = tline.gc_info.write().unwrap();
+            *guard = GcInfo {
+                retain_lsns: vec![],
+                cutoffs: GcCutoffs {
+                    time: Lsn(0x30),
+                    space: Lsn(0x30),
+                },
+                leases: Default::default(),
+                within_ancestor_pitr: false,
+            };
+        }
+
+        let cancel = CancellationToken::new();
+
+        // Compaction will fail, but should not fire any critical error.
+        // Gc-compaction currently cannot figure out what keys are not in the keyspace during the compaction
+        // process. It will always try to redo the logs it reads and if it doesn't work, fail the entire
+        // compaction job. Tracked in <https://github.com/neondatabase/neon/issues/10395>.
+        let res = tline
+            .compact_with_gc(
+                &cancel,
+                CompactOptions {
+                    compact_key_range: None,
+                    compact_lsn_range: None,
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await;
+        assert!(res.is_err());
 
         Ok(())
     }
