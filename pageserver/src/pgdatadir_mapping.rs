@@ -265,7 +265,8 @@ impl Timeline {
         let mut keys_slots: HashMap<Key, smallvec::SmallVec<[(usize, RequestContext); 1]>> =
             HashMap::with_capacity(pages.len());
 
-        let mut req_keyspaces: HashMap<Lsn, KeySpaceRandomAccum> = HashMap::default();
+        let mut req_keyspaces: HashMap<Lsn, KeySpaceRandomAccum> =
+            HashMap::with_capacity(pages.len());
 
         for (response_slot_idx, (tag, blknum, lsn, ctx)) in pages.enumerate() {
             if tag.relnode == 0 {
