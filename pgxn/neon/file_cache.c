@@ -46,6 +46,8 @@
 #include "neon.h"
 #include "neon_lwlsncache.h"
 #include "neon_perf_counters.h"
+#include "pagestore_client.h"
+#include "communicator.h"
 
 #define CriticalAssert(cond) do if (!(cond)) elog(PANIC, "LFC: assertion %s failed at %s:%d: ", #cond, __FILE__, __LINE__); while (0)
 
@@ -747,7 +749,7 @@ lfc_prewarm(FileCacheState* fcs, uint32 worker_id, uint32 n_workers)
 				{
 					tag = fcs->chunks[snd_idx >> fcs_chunk_size_log];
 					tag.blockNum += snd_idx & ((1 << fcs_chunk_size_log) - 1);
-					(void)prefetch_register_bufferv(tag, NULL, 1, NULL, true);
+					(void)communicator_prefetch_register_bufferv(tag, NULL, 1, NULL);
 					n_sent += 1;
 				}
 				snd_idx += 1;
@@ -772,7 +774,7 @@ lfc_prewarm(FileCacheState* fcs, uint32 worker_id, uint32 n_workers)
 
 			tag = fcs->chunks[rcv_idx >> fcs_chunk_size_log];
 			tag.blockNum += rcv_idx & ((1 << fcs_chunk_size_log) - 1);
-			if (prefetch_receive(tag))
+			if (communicator_prefetch_receive(tag))
 			{
 				ws->prewarmed_pages += 1;
 			}
