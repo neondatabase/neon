@@ -26,10 +26,10 @@ index 0cdc769..b66bf67 100644
 +  SET search_path = ''
 +;
 diff --git a/sql/init.sql b/sql/init.sql
-index 7da6553..2b0d48c 100644
+index 7da6553..0c85755 100644
 --- a/sql/init.sql
 +++ b/sql/init.sql
-@@ -11,8 +11,19 @@ CREATE OR REPLACE FUNCTION anon.load_csv(
+@@ -11,8 +11,18 @@ CREATE OR REPLACE FUNCTION anon.load_csv(
  RETURNS BOOLEAN AS
  $$
  DECLARE
@@ -43,14 +43,13 @@ index 7da6553..2b0d48c 100644
 +  create_table_query TEXT;
 +  insert_query TEXT;
 +  table_exists BOOLEAN;
-+  quoted_column_names TEXT[];
 +  column_count INTEGER;
 +  values_clause TEXT;
 +  first_row TEXT;
  BEGIN
  -- This check does not work with PG 10 and below (absolute path not supported)
  --
-@@ -24,9 +35,122 @@ BEGIN
+@@ -24,9 +34,96 @@ BEGIN
  --    RETURN FALSE;
  --  END IF;
  
@@ -78,37 +77,7 @@ index 7da6553..2b0d48c 100644
 +    RETURN FALSE;
 +  END IF;
 +
-+-- Create artificial column names
-+quoted_column_names := ARRAY[]::TEXT[];
-+  FOR i IN 1..column_count LOOP
-+    column_name := 'col' || i;
-+    quoted_column_names := array_append(quoted_column_names, quote_ident(column_name));
-+  END LOOP;
-+
-+IF NOT table_exists AND dest_table != 'identifiers_category' AND dest_table != 'identifiers' THEN
-+    -- Build CREATE TABLE statement
-+    create_table_query := 'CREATE TABLE IF NOT EXISTS ' || dest_table || ' (';
-+    
-+    -- Add columns (assuming TEXT type for all columns)
-+    FOR i IN 1..column_count LOOP
-+      column_name := 'col' || i;
-+      create_table_query := create_table_query || quote_ident(column_name) || ' TEXT';
-+      
-+      -- Add comma if not the last column
-+      IF i < column_count THEN
-+        create_table_query := create_table_query || ', ';
-+      END IF;
-+    END LOOP;
-+    
-+    -- Close parenthesis
-+    create_table_query := create_table_query || ')';
-+    
-+    -- Execute CREATE TABLE
-+    EXECUTE create_table_query;
-+    RAISE NOTICE 'Created table ''%'' with % columns', dest_table, column_count;
-+  END IF;
-+
-+
++-- Start iterating over lines and creating insert statements
 +FOR i IN 1..array_length(csv_lines, 1) LOOP
 +    current_line := csv_lines[i];
 +    
@@ -138,27 +107,31 @@ index 7da6553..2b0d48c 100644
 +        END IF;
 +      END LOOP;
 +      
-+      IF dest_table != 'identifiers_category' AND dest_table != 'identifiers' THEN
-+        -- Build and execute INSERT statement
-+        insert_query := format(
-+          'INSERT INTO %s (%s) VALUES (%s)',
++      IF dest_table != 'anon.identifiers_category' AND dest_table != 'anon.identifiers' THEN
++        IF dest_table = 'anon.lorem_ipsum' THEN
++          insert_query := format(
++            'INSERT INTO %s (oid, paragraph) VALUES (%s)',
++            dest_table,
++            values_clause
++          );
++        ELSE
++          insert_query := format(
++          'INSERT INTO %s (oid, val) VALUES (%s)',
 +          dest_table,
-+          array_to_string(quoted_column_names, ', '),
 +          values_clause
 +        );
++        END IF;
 +      ELSE
-+        IF dest_table = 'identifiers_category' THEN
++        IF dest_table = 'anon.identifiers_category' THEN
 +          insert_query := format(
 +            'INSERT INTO %s (name, direct_identifier, anon_function) VALUES (%s)',
 +            dest_table,
-+            array_to_string(quoted_column_names, ', '),
 +            values_clause
 +          );
 +        ELSE 
 +          insert_query := format(
 +            'INSERT INTO %s (lang, attname, fk_identifiers_category) VALUES (%s)',
 +            dest_table,
-+            array_to_string(quoted_column_names, ', '),
 +            values_clause
 +          );
 +        END IF;
@@ -176,7 +149,7 @@ index 7da6553..2b0d48c 100644
  
    -- update the oid sequence (if any)
    SELECT pg_catalog.pg_get_serial_sequence(dest_table::TEXT,'oid')
-@@ -50,13 +174,13 @@ BEGIN
+@@ -50,16 +147,16 @@ BEGIN
  
  EXCEPTION
  
@@ -195,8 +168,12 @@ index 7da6553..2b0d48c 100644
 +  --   RETURN FALSE;
  
    WHEN invalid_text_representation THEN
-     RAISE NOTICE 'Data file ''%'' has a bad CSV format. Skipping.', csv_file;
-@@ -81,8 +205,10198 @@ CREATE OR REPLACE FUNCTION anon.init(
+-    RAISE NOTICE 'Data file ''%'' has a bad CSV format. Skipping.', csv_file;
++    RAISE NOTICE 'Data file ''%'' has a bad CSV format. Skipping.', dest_table;
+     RETURN FALSE;
+ 
+ END;
+@@ -81,8 +178,10198 @@ CREATE OR REPLACE FUNCTION anon.init(
  RETURNS BOOLEAN
  AS $$
  DECLARE
@@ -10396,7 +10373,7 @@ index 7da6553..2b0d48c 100644
  BEGIN
  
    IF anon.is_initialized() THEN
-@@ -90,22 +10404,24 @@ BEGIN
+@@ -90,22 +10377,24 @@ BEGIN
      RETURN TRUE;
    END IF;
  
