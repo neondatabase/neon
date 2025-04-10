@@ -26,14 +26,15 @@ index 0cdc769..b66bf67 100644
 +  SET search_path = ''
 +;
 diff --git a/sql/init.sql b/sql/init.sql
-index 7da6553..0c85755 100644
+index 7da6553..222935c 100644
 --- a/sql/init.sql
 +++ b/sql/init.sql
-@@ -11,8 +11,18 @@ CREATE OR REPLACE FUNCTION anon.load_csv(
+@@ -11,8 +11,22 @@ CREATE OR REPLACE FUNCTION anon.load_csv(
  RETURNS BOOLEAN AS
  $$
  DECLARE
 -  csv_file_check TEXT;
++table_name TEXT;
    sequence TEXT;
 +  csv_lines TEXT[];
 +  column_name TEXT;
@@ -45,28 +46,22 @@ index 7da6553..0c85755 100644
 +  table_exists BOOLEAN;
 +  column_count INTEGER;
 +  values_clause TEXT;
++  i INTEGER;
++  j INTEGER;
 +  first_row TEXT;
++  start_index INTEGER;
  BEGIN
  -- This check does not work with PG 10 and below (absolute path not supported)
  --
-@@ -24,9 +34,96 @@ BEGIN
+@@ -24,9 +38,104 @@ BEGIN
  --    RETURN FALSE;
  --  END IF;
  
 -  -- load the csv file
 -  EXECUTE 'COPY ' || dest_table
 -      || ' FROM ' || quote_literal(csv_file);
-+-- Check if the table exists
-+SELECT EXISTS (
-+    SELECT FROM pg_catalog.pg_class c
-+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-+    WHERE c.relname = dest_table::TEXT::name
-+    AND pg_catalog.pg_table_is_visible(c.oid)
-+  ) INTO table_exists;
-+
-+RAISE NOTICE 'Table % exists %', dest_table, table_exists;
-+
 +-- Get the count for column names
++
 + csv_lines := string_to_array(csv_file, E'\n');
 + first_row := csv_lines[1];
 +  column_values := string_to_array(first_row, E'\t');
@@ -77,7 +72,17 @@ index 7da6553..0c85755 100644
 +    RETURN FALSE;
 +  END IF;
 +
++
++table_name := dest_table::TEXT;
++
++ IF table_name = 'anon.identifiers_category' OR table_name = 'anon.identifier' THEN
++    start_index := 1;
++  ELSE
++    start_index := 2;
++  END IF;
++
 +-- Start iterating over lines and creating insert statements
++values_clause := '';
 +FOR i IN 1..array_length(csv_lines, 1) LOOP
 +    current_line := csv_lines[i];
 +    
@@ -88,12 +93,13 @@ index 7da6553..0c85755 100644
 +    
 +    -- Parse CSV values (simple parsing)
 +    column_values := string_to_array(current_line, E'\t');
-+    
++
++    values_clause := values_clause || '(';
++
 +    -- Ensure we have the right number of values
 +    IF array_length(column_values, 1) = column_count THEN
 +      -- Build values clause manually
-+      values_clause := '';
-+      FOR j IN 1..array_length(column_values, 1) LOOP
++      FOR j IN start_index..array_length(column_values, 1) LOOP
 +        -- Handle NULL values (empty strings)
 +        IF column_values[j] = '' THEN
 +          values_clause := values_clause || 'NULL';
@@ -104,52 +110,58 @@ index 7da6553..0c85755 100644
 +        -- Add comma if not the last element
 +        IF j < array_length(column_values, 1) THEN
 +          values_clause := values_clause || ', ';
++        ELSE
++          IF i < array_length(csv_lines, 1) THEN
++            values_clause := values_clause || '),' || E'\n';
++          ELSE
++            values_clause := values_clause || ');';
++          END IF;
 +        END IF;
 +      END LOOP;
-+      
-+      IF dest_table != 'anon.identifiers_category' AND dest_table != 'anon.identifiers' THEN
-+        IF dest_table = 'anon.lorem_ipsum' THEN
++    ELSE
++      RAISE NOTICE 'Skipping row % - expected % columns, got %', i, column_count, array_length(column_values, 1);
++    END IF;
++END LOOP;
++
++  IF table_name != 'anon.identifiers_category' AND table_name != 'anon.identifier' THEN
++        IF table_name = 'anon.lorem_ipsum' THEN
 +          insert_query := format(
-+            'INSERT INTO %s (oid, paragraph) VALUES (%s)',
-+            dest_table,
++            'INSERT INTO %s (paragraph) VALUES %s',
++            table_name,
 +            values_clause
 +          );
 +        ELSE
 +          insert_query := format(
-+          'INSERT INTO %s (oid, val) VALUES (%s)',
-+          dest_table,
++          'INSERT INTO %s (val) VALUES %s',
++          table_name,
 +          values_clause
 +        );
 +        END IF;
 +      ELSE
-+        IF dest_table = 'anon.identifiers_category' THEN
++        IF table_name = 'anon.identifiers_category' THEN
 +          insert_query := format(
-+            'INSERT INTO %s (name, direct_identifier, anon_function) VALUES (%s)',
-+            dest_table,
++            'INSERT INTO %s (name, direct_identifier, anon_function) VALUES %s',
++            table_name,
 +            values_clause
 +          );
 +        ELSE 
 +          insert_query := format(
-+            'INSERT INTO %s (lang, attname, fk_identifiers_category) VALUES (%s)',
-+            dest_table,
++            'INSERT INTO %s (lang, attname, fk_identifiers_category) VALUES %s',
++            table_name,
 +            values_clause
 +          );
 +        END IF;
-+      END IF;
++    END IF;
 +
 +      BEGIN
 +        EXECUTE insert_query;
 +      EXCEPTION WHEN OTHERS THEN
 +        RAISE NOTICE 'Error inserting row %: %', i, SQLERRM;
 +      END;
-+    ELSE
-+      RAISE NOTICE 'Skipping row % - expected % columns, got %', i, column_count, array_length(column_values, 1);
-+    END IF;
-+  END LOOP;
  
    -- update the oid sequence (if any)
    SELECT pg_catalog.pg_get_serial_sequence(dest_table::TEXT,'oid')
-@@ -50,16 +147,16 @@ BEGIN
+@@ -50,16 +159,16 @@ BEGIN
  
  EXCEPTION
  
@@ -169,11 +181,11 @@ index 7da6553..0c85755 100644
  
    WHEN invalid_text_representation THEN
 -    RAISE NOTICE 'Data file ''%'' has a bad CSV format. Skipping.', csv_file;
-+    RAISE NOTICE 'Data file ''%'' has a bad CSV format. Skipping.', dest_table;
++    RAISE NOTICE 'Data file ''%'' has a bad CSV format. Skipping. %', dest_table, SQLERRM;
      RETURN FALSE;
  
  END;
-@@ -81,8 +178,10198 @@ CREATE OR REPLACE FUNCTION anon.init(
+@@ -81,8 +190,10198 @@ CREATE OR REPLACE FUNCTION anon.init(
  RETURNS BOOLEAN
  AS $$
  DECLARE
@@ -10373,7 +10385,7 @@ index 7da6553..0c85755 100644
  BEGIN
  
    IF anon.is_initialized() THEN
-@@ -90,22 +10377,24 @@ BEGIN
+@@ -90,22 +10389,24 @@ BEGIN
      RETURN TRUE;
    END IF;
  
