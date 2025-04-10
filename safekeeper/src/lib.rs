@@ -215,6 +215,7 @@ pub static WAL_BACKUP_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
 pub static BACKGROUND_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .thread_name("background worker")
+        .worker_threads(1) // there is only one task now (ssl certificate reloading), having more threads doesn't make sense
         .enable_all()
         .build()
         .expect("Failed to create background runtime")

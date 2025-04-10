@@ -608,9 +608,7 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
             .spawn(http::task_main_https(
                 conf.clone(),
                 https_listener,
-                tls_server_config
-                    .clone()
-                    .expect("tls_server_config is set earlier if https is enabled"),
+                tls_server_config.expect("tls_server_config is set earlier if https is enabled"),
                 global_timelines.clone(),
             ))
             .map(|res| ("HTTPS service main".to_owned(), res));
