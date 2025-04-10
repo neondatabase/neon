@@ -1127,10 +1127,7 @@ impl Timeline {
 
         let mut reconstruct_state = ValuesReconstructState::new(IoConcurrency::sequential());
 
-        let query = VersionedKeySpaceQuery::Uniform {
-            keyspace: KeySpace::single(key..key.next()),
-            lsn,
-        };
+        let query = VersionedKeySpaceQuery::uniform(KeySpace::single(key..key.next()), lsn);
 
         let vectored_res = self
             .get_vectored_impl(query, &mut reconstruct_state, ctx)
@@ -1254,7 +1251,7 @@ impl Timeline {
             .for_task_kind(ctx.task_kind())
             .map(ScanLatencyOngoingRecording::start_recording);
 
-        let query = VersionedKeySpaceQuery::Uniform { keyspace, lsn };
+        let query = VersionedKeySpaceQuery::uniform(keyspace, lsn);
 
         let vectored_res = self
             .get_vectored_impl(query, &mut ValuesReconstructState::new(io_concurrency), ctx)
@@ -5190,10 +5187,8 @@ impl Timeline {
                 if key_request_accum.raw_size() >= Timeline::MAX_GET_VECTORED_KEYS
                     || (last_key_in_range && key_request_accum.raw_size() > 0)
                 {
-                    let query = VersionedKeySpaceQuery::Uniform {
-                        keyspace: key_request_accum.consume_keyspace(),
-                        lsn,
-                    };
+                    let query =
+                        VersionedKeySpaceQuery::uniform(key_request_accum.consume_keyspace(), lsn);
 
                     let results = self
                         .get_vectored(query, io_concurrency.clone(), ctx)
@@ -5286,10 +5281,7 @@ impl Timeline {
         // not contain too many keys, otherwise this takes a lot of memory.
         let data = self
             .get_vectored_impl(
-                VersionedKeySpaceQuery::Uniform {
-                    keyspace: partition.clone(),
-                    lsn,
-                },
+                VersionedKeySpaceQuery::uniform(partition.clone(), lsn),
                 &mut reconstruct_state,
                 ctx,
             )
