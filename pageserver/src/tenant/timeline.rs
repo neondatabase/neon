@@ -689,13 +689,21 @@ impl std::fmt::Display for ReadPath {
 
 #[derive(thiserror::Error)]
 pub struct MissingKeyError {
-    key: Key,
+    keyspace: KeySpace,
     shard: ShardNumber,
-    request_lsn: Lsn,
+    query: Option<VersionedKeySpaceQuery>,
+    // This is largest request LSN from the get page request batch
+    original_hwm_lsn: Lsn,
     ancestor_lsn: Option<Lsn>,
     /// Debug information about the read path if there's an error
     read_path: Option<ReadPath>,
     backtrace: Option<std::backtrace::Backtrace>,
+}
+
+impl MissingKeyError {
+    fn enrich(&mut self, query: VersionedKeySpaceQuery) {
+        self.query = Some(query);
+    }
 }
 
 impl std::fmt::Debug for MissingKeyError {
@@ -708,12 +716,16 @@ impl std::fmt::Display for MissingKeyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "could not find data for key {} (shard {:?}), request LSN {}",
-            self.key, self.shard, self.request_lsn
+            "could not find data for key {} (shard {:?}), original HWM LSN {}",
+            self.keyspace, self.shard, self.original_hwm_lsn
         )?;
 
         if let Some(ref ancestor_lsn) = self.ancestor_lsn {
             write!(f, ", ancestor {}", ancestor_lsn)?;
+        }
+
+        if let Some(ref query) = self.query {
+            write!(f, ", query {}", query)?;
         }
 
         if let Some(ref read_path) = self.read_path {
@@ -1150,12 +1162,13 @@ impl Timeline {
             }
             None => Err(PageReconstructError::MissingKey(Box::new(
                 MissingKeyError {
-                    key,
+                    keyspace: KeySpace::single(key..key.next()),
                     shard: self.shard_identity.get_shard_number(&key),
-                    request_lsn: lsn,
+                    original_hwm_lsn: lsn,
                     ancestor_lsn: None,
                     backtrace: None,
                     read_path: None,
+                    query: None,
                 },
             ))),
         }
@@ -1305,6 +1318,13 @@ impl Timeline {
                 .map(|state| state.collect_pending_ios())
                 .collect::<FuturesUnordered<_>>();
             while collect_futs.next().await.is_some() {}
+
+            // Enrich the missing key error with the original query.
+            if let GetVectoredError::MissingKey(mut missing_err) = err {
+                missing_err.enrich(query.clone());
+                return Err(GetVectoredError::MissingKey(missing_err));
+            }
+
             return Err(err);
         };
 
@@ -4204,14 +4224,13 @@ impl Timeline {
 
         if let Some(missing_keyspace) = missing_keyspace {
             return Err(GetVectoredError::MissingKey(Box::new(MissingKeyError {
-                key: missing_keyspace.start().unwrap(), /* better if we can store the full keyspace */
-                shard: self
-                    .shard_identity
-                    .get_shard_number(&missing_keyspace.start().unwrap()),
-                request_lsn: original_hwm_lsn,
+                keyspace: missing_keyspace, /* better if we can store the full keyspace */
+                shard: self.shard_identity.number,
+                original_hwm_lsn,
                 ancestor_lsn: Some(timeline.ancestor_lsn),
                 backtrace: None,
                 read_path: std::mem::take(&mut reconstruct_state.read_path),
+                query: None,
             })));
         }
 
