@@ -348,8 +348,9 @@ async fn main() -> anyhow::Result<()> {
 
     if !args.dev {
         let http_auth_enabled = args.http_auth_public_key_path.is_some();
-        if !http_auth_enabled {
-            bail!("Safekeeper refuses to start with HTTP API authentication disabled.\n\
+        let pg_auth_enabled = args.pg_auth_public_key_path.is_some();
+        if !http_auth_enabled || !pg_auth_enabled {
+            bail!("Safekeeper refuses to start with HTTP or PostgreSQL API authentication disabled.\n\
                   Run with --dev to allow running without authentication.\n\
                   This is insecure and should only be used in development environments.");
         }
