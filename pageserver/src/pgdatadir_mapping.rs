@@ -326,7 +326,14 @@ impl Timeline {
         let query = VersionedKeySpaceQuery::scattered(query);
         let res = self
             .get_vectored(query, io_concurrency, ctx)
-            .maybe_perf_instrument(ctx, |current_perf_span| current_perf_span.clone())
+            .maybe_perf_instrument(ctx, |current_perf_span| {
+                info_span!(
+                    target: PERF_TRACE_TARGET,
+                    parent: current_perf_span,
+                    "GET_BATCH",
+                    batch_size = %page_count,
+                )
+            })
             .await;
 
         match res {
