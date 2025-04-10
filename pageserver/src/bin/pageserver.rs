@@ -9,7 +9,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use camino::Utf8Path;
 use clap::{Arg, ArgAction, Command};
 use http_utils::tls_certs::ReloadingCertificateResolver;
