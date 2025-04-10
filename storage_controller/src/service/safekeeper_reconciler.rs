@@ -164,6 +164,7 @@ pub(crate) struct ScheduleRequest {
     pub(crate) kind: SafekeeperTimelineOpKind,
 }
 
+/// Handle to per safekeeper reconciler.
 struct ReconcilerHandle {
     tx: UnboundedSender<(ScheduleRequest, CancellationToken)>,
     ongoing_tokens: Arc<ClashMap<(TenantId, Option<TimelineId>), CancellationToken>>,
@@ -171,7 +172,10 @@ struct ReconcilerHandle {
 }
 
 impl ReconcilerHandle {
-    /// Obtain a new token slot, cancelling any existing reconciliations for that timeline
+    /// Obtain a new token slot, cancelling any existing reconciliations for
+    /// that timeline. It is not useful to have >1 operation per <tenant_id,
+    /// timeline_id, safekeeper>, hence scheduling op cancels current one if it
+    /// exists.
     fn new_token_slot(
         &self,
         tenant_id: TenantId,

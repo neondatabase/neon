@@ -42,6 +42,7 @@ impl Service {
             .map(SecretString::from);
         let mut joinset = JoinSet::new();
 
+        // Prepare membership::Configuration from choosen safekeepers.
         let safekeepers = {
             let locked = self.inner.read().unwrap();
             locked.safekeepers.clone()
