@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 from collections import defaultdict
+from collections.abc import Mapping
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -4296,28 +4297,29 @@ class Endpoint(PgProtocol, LogUtils):
 
     def respec_deep(self, **kwargs: Any) -> None:
         """
-        Update the endpoint.json file taking into account nested keys.
-        It does one level deep update. Should enough for most cases.
-        Distinct method from respec() to do not break existing functionality.
+        Update the spec.json file taking into account nested keys.
+        Distinct method from respec() to not break existing functionality.
         NOTE: This method also updates the spec.json file, not endpoint.json.
         We need it because neon_local also writes to spec.json, so intended
         use-case is i) start endpoint with some config, ii) respec_deep(),
         iii) call reconfigure() to apply the changes.
         """
+
+        def update(curr, patch):
+            for k, v in patch.items():
+                if isinstance(v, Mapping):
+                    curr[k] = update(curr.get(k, {}), v)
+                else:
+                    curr[k] = v
+            return curr
+
         config_path = os.path.join(self.endpoint_path(), "spec.json")
         with open(config_path) as f:
             data_dict: dict[str, Any] = json.load(f)
 
         log.debug("Current compute spec: %s", json.dumps(data_dict, indent=4))
 
-        for key, value in kwargs.items():
-            if isinstance(value, dict):
-                if key not in data_dict:
-                    data_dict[key] = value
-                else:
-                    data_dict[key] = {**data_dict[key], **value}
-            else:
-                data_dict[key] = value
+        update(data_dict, kwargs)
 
         with open(config_path, "w") as file:
             log.debug("Updating compute spec to: %s", json.dumps(data_dict, indent=4))
