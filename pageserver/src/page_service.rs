@@ -125,10 +125,10 @@ pub fn spawn(
             perf_trace_dispatch,
             tcp_listener,
             conf.pg_auth_type,
+            tls_config,
             conf.page_service_pipelining.clone(),
             libpq_ctx,
             cancel.clone(),
-            tls_config,
         )
         .map(anyhow::Ok),
     ));
@@ -183,10 +183,10 @@ pub async fn libpq_listener_main(
     perf_trace_dispatch: Option<Dispatch>,
     listener: tokio::net::TcpListener,
     auth_type: AuthType,
+    tls_config: Option<Arc<rustls::ServerConfig>>,
     pipelining_config: PageServicePipeliningConfig,
     listener_ctx: RequestContext,
     listener_cancel: CancellationToken,
-    tls_config: Option<Arc<rustls::ServerConfig>>,
 ) -> Connections {
     let connections_cancel = CancellationToken::new();
     let connections_gate = Gate::default();
@@ -226,11 +226,11 @@ pub async fn libpq_listener_main(
                     local_auth,
                     socket,
                     auth_type,
+                    tls_config.clone(),
                     pipelining_config.clone(),
                     connection_ctx,
                     connections_cancel.child_token(),
                     gate_guard,
-                    tls_config.clone(),
                 ));
             }
             Err(err) => {
@@ -268,11 +268,11 @@ async fn page_service_conn_main(
     auth: Option<Arc<SwappableJwtAuth>>,
     socket: tokio::net::TcpStream,
     auth_type: AuthType,
+    tls_config: Option<Arc<rustls::ServerConfig>>,
     pipelining_config: PageServicePipeliningConfig,
     connection_ctx: RequestContext,
     cancel: CancellationToken,
     gate_guard: GateGuard,
-    tls_config: Option<Arc<rustls::ServerConfig>>,
 ) -> ConnectionHandlerResult {
     let _guard = LIVE_CONNECTIONS
         .with_label_values(&["page_service"])
