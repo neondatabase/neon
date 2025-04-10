@@ -186,7 +186,7 @@ where
         Ok((recycled, flush_control))
     }
 
-    pub(super) async fn handle_error<T>(&mut self) -> std::io::Result<T> {
+    async fn handle_error<T>(&mut self) -> std::io::Result<T> {
         Err(self
             .shutdown()
             .await
@@ -196,7 +196,7 @@ where
 
     /// Cleans up the channel, join the flush task.
     pub async fn shutdown(&mut self) -> std::io::Result<RequestContext> {
-        let handle = self
+        let handle: FlushHandleInner<Buf, W> = self
             .inner
             .take()
             .expect("must not use after we returned an error");

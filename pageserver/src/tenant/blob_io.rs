@@ -235,7 +235,7 @@ impl BlobWriter {
         ctx: &RequestContext,
         algorithm: ImageCompressionAlgorithm,
     ) -> (FullSlice<Buf>, Result<(u64, CompressionInfo), Error>) {
-        let offset = self.size();
+        let offset = self.offset;
         let mut compression_info = CompressionInfo {
             written_compressed: false,
             compressed_size: None,

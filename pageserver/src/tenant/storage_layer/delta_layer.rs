@@ -772,7 +772,7 @@ impl Drop for DeltaLayerWriter {
             {
                 Ok(vfile) => vfile,
                 Err(e) => {
-                    error!(err=%e, "failed to remove image layer writer file");
+                    error!(err=%e, "failed to remove delta layer writer file");
                     drop(_gate_guard);
                     return;
                 }
@@ -781,7 +781,7 @@ impl Drop for DeltaLayerWriter {
             if let Err(e) = std::fs::remove_file(vfile.path())
                 .maybe_fatal_err("failed to remove the virtual file")
             {
-                error!(err=%e, path=%vfile.path(), "failed to remove image layer writer file");
+                error!(err=%e, path=%vfile.path(), "failed to remove delta layer writer file");
             }
             drop(_gate_guard);
         });

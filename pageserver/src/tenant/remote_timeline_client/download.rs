@@ -245,7 +245,7 @@ async fn download_object(
                         };
                         buffered.write_buffered_borrowed(&chunk, ctx).await?;
                     }
-                    let inner = buffered.shutdown(|_| None).await?;
+                    let inner = buffered.shutdown(|_| None).await?; // TODO: if we leave handle_tail=None here, it means we'll cut off layers that aren't a tail sz multiple
                     Ok(inner)
                 }
                 .await?;
