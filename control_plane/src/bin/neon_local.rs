@@ -1677,8 +1677,13 @@ async fn handle_safekeeper(subcmd: &SafekeeperCmd, env: &local_env::LocalEnv) ->
     match subcmd {
         SafekeeperCmd::Start(args) => {
             let safekeeper = get_safekeeper(env, args.id)?;
+            
+            let mut extra_opts = args.extra_opt.clone();
+            if !extra_opts.contains(&"--dev".to_string()) {
+                extra_opts.push("--dev".to_string());
+            }
 
-            if let Err(e) = safekeeper.start(&args.extra_opt, &args.start_timeout).await {
+            if let Err(e) = safekeeper.start(&extra_opts, &args.start_timeout).await {
                 eprintln!("safekeeper start failed: {}", e);
                 exit(1);
             }
@@ -1708,7 +1713,12 @@ async fn handle_safekeeper(subcmd: &SafekeeperCmd, env: &local_env::LocalEnv) ->
                 exit(1);
             }
 
-            if let Err(e) = safekeeper.start(&args.extra_opt, &args.start_timeout).await {
+            let mut extra_opts = args.extra_opt.clone();
+            if !extra_opts.contains(&"--dev".to_string()) {
+                extra_opts.push("--dev".to_string());
+            }
+
+            if let Err(e) = safekeeper.start(&extra_opts, &args.start_timeout).await {
                 eprintln!("safekeeper start failed: {}", e);
                 exit(1);
             }
@@ -1841,7 +1851,7 @@ async fn handle_start_all_impl(
             js.spawn(async move {
                 let safekeeper = SafekeeperNode::from_env(env, node);
                 safekeeper
-                    .start(&[], &retry_timeout)
+                    .start(&["--dev".to_string()], &retry_timeout)
                     .await
                     .map_err(|e| e.context(format!("start safekeeper {}", safekeeper.id)))
             });

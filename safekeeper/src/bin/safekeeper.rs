@@ -226,6 +226,9 @@ struct Args {
     /// Path to the JWT auth token used to authenticate with other safekeepers.
     #[arg(long)]
     auth_token_path: Option<Utf8PathBuf>,
+
+    #[arg(long, help = "Run in development mode (disables security checks)")]
+    dev: bool,
 }
 
 // Like PathBufValueParser, but allows empty string.
@@ -342,6 +345,17 @@ async fn main() -> anyhow::Result<()> {
             Some(Arc::new(SwappableJwtAuth::new(jwt_auth)))
         }
     };
+
+    if !args.dev {
+        let http_auth_enabled = args.http_auth_public_key_path.is_some();
+        if !http_auth_enabled {
+            bail!("Safekeeper refuses to start with HTTP API authentication disabled.\n\
+                  Run with --dev to allow running without authentication.\n\
+                  This is insecure and should only be used in development environments.");
+        }
+    } else {
+        info!("Starting in dev mode - authentication security checks are disabled");
+    }
 
     // Load JWT auth token to connect to other safekeepers for pull_timeline.
     // First check if the env var is present, then check the arg with the path.

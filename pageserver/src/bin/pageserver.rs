@@ -79,6 +79,8 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let dev_mode = arg_matches.get_flag("dev");
+
     // Initialize up failpoints support
     let scenario = failpoint_support::init();
 
@@ -98,6 +100,16 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("Failed to set application's current dir to '{workdir}'"))?;
 
     let (conf, ignored) = initialize_config(&identity_file_path, &cfg_file_path, &workdir)?;
+
+    if !dev_mode {
+        if matches!(conf.http_auth_type, AuthType::Trust) {
+            bail!("Pageserver refuses to start with HTTP API authentication disabled.\n\
+                  Run with --dev to allow running without authentication.\n\
+                  This is insecure and should only be used in development environments.");
+        }
+    } else {
+        info!("Starting in dev mode - authentication security checks are disabled");
+    }
 
     // Initialize logging.
     //
@@ -815,6 +827,12 @@ fn cli() -> Command {
                 .long("enabled-features")
                 .action(ArgAction::SetTrue)
                 .help("Show enabled compile time features"),
+        )
+        .arg(
+            Arg::new("dev")
+                .long("dev")
+                .action(ArgAction::SetTrue)
+                .help("Run in development mode (disables security checks)"),
         )
 }
 

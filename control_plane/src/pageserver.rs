@@ -318,7 +318,7 @@ impl PageServerNode {
                 self.conf.id, datadir,
             )
         })?;
-        let args = vec!["-D", datadir_path_str];
+        let args = vec!["-D", datadir_path_str, "--dev"];
 
         background_process::start_process(
             "pageserver",
