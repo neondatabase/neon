@@ -120,6 +120,8 @@ where
         mut self,
         ctx: &RequestContext,
     ) -> Result<(u64, Arc<W>), FlushTaskError> {
+        // TODO: this is incorrect/infeasible with direct IO because tail may be only be partially filled, e.g., 23 bytes in it.
+        // The buffer is guaranteed to be aligned, but the write system call will fail with EINVAL because the buffer size is not right.
         self.flush(ctx).await?;
 
         let Self {
