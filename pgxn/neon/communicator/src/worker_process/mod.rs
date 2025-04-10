@@ -13,7 +13,8 @@ use std::sync::atomic::Ordering;
 use std::sync::atomic::fence;
 
 use crate::CommunicatorInitStruct;
-use crate::neon_request::{NeonIOHandleState, NeonIORequest};
+use crate::backend_comms::NeonIOHandleState;
+use crate::neon_request::{NeonIORequest, NeonIOResult};
 use crate::processor::CommunicatorProcessor;
 
 use tokio::io::AsyncReadExt;
@@ -146,20 +147,20 @@ async fn communicator_process_main_loop(
             NeonIORequest::RelExists(req) => match processor.process_rel_exists_request(&req).await
             {
                 Ok(exists) => {
-                    slot.result = if exists { 1 } else { 0 };
+                    slot.result = NeonIOResult::RelExists(exists);
                 }
                 Err(err) => {
                     elog_log(&format!("tonic error: {err:?}"));
-                    slot.result = ((-1) as i64) as u64;
+                    slot.result = NeonIOResult::Error(-1);
                 }
             },
             NeonIORequest::RelSize(req) => match processor.process_rel_size_request(&req).await {
                 Ok(nblocks) => {
-                    slot.result = nblocks as u64;
+                    slot.result = NeonIOResult::RelSize(nblocks);
                 }
                 Err(err) => {
                     elog_log(&format!("tonic error: {err:?}"));
-                    slot.result = ((-1) as i64) as u64;
+                    slot.result = NeonIOResult::Error(-1);
                 }
             },
             NeonIORequest::GetPage(req) => match processor.process_get_page_request(&req).await {
@@ -172,20 +173,20 @@ async fn communicator_process_main_loop(
                     unsafe {
                         std::ptr::copy_nonoverlapping(src.as_ptr(), dst, len);
                     };
-                    slot.result = 0;
+                    slot.result = NeonIOResult::GetPage;
                 }
                 Err(err) => {
                     elog_log(&format!("tonic error: {err:?}"));
-                    slot.result = ((-1) as i64) as u64;
+                    slot.result = NeonIOResult::Error(-1);
                 }
             },
             NeonIORequest::DbSize(req) => match processor.process_dbsize_request(&req).await {
                 Ok(db_size) => {
-                    slot.result = db_size;
+                    slot.result = NeonIOResult::DbSize(db_size);
                 }
                 Err(err) => {
                     elog_log(&format!("tonic error: {err:?}"));
-                    slot.result = ((-1) as i64) as u64;
+                    slot.result = NeonIOResult::Error(-1);
                 }
             },
         };

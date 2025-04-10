@@ -22,7 +22,7 @@ use std::ffi::c_int;
 use std::mem;
 
 use crate::CommunicatorInitStruct;
-use crate::neon_request::NeonIOHandle;
+use crate::backend_comms::NeonIOHandle;
 
 const NUM_NEON_REQUEST_SLOTS_PER_BACKEND: u32 = 5;
 

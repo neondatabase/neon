@@ -2,13 +2,8 @@
 //! etc. is forbidden!
 
 use crate::CommunicatorInitStruct;
-use crate::neon_request::NeonIOHandleState;
-use crate::neon_request::{
-    DbSizeRequest, GetPageRequest, NeonIORequest, RelExistsRequest, RelSizeRequest,
-};
-
-type Lsn = u64;
-type Oid = u32;
+use crate::backend_comms::NeonIOHandleState;
+use crate::neon_request::{NeonIORequest, NeonIOResult};
 
 pub struct CommunicatorBackendStruct {
     pub my_proc_number: i32,
@@ -30,12 +25,9 @@ pub extern "C" fn rcommunicator_backend_init(
     let bs: &'static mut CommunicatorBackendStruct =
         Box::leak(Box::new(CommunicatorBackendStruct {
             my_proc_number,
-
             cis: cis.clone(),
-
             next_neon_request_idx: start_idx,
         }));
-
     bs
 }
 
@@ -45,26 +37,15 @@ pub extern "C" fn rcommunicator_backend_init(
 /// the latch and call bcomm_poll_dbsize_request_completion() every time the
 /// latch is set.
 #[unsafe(no_mangle)]
-pub extern "C" fn bcomm_start_rel_exists_request(
+pub extern "C" fn bcomm_start_io_request(
     bs: *mut CommunicatorBackendStruct,
-    spc_oid: Oid,
-    db_oid: Oid,
-    rel_number: u32,
-    fork_number: u8,
-    request_lsn: Lsn,
-    not_modified_since: Lsn,
+    request: *const NeonIORequest,
 ) -> i32 {
     let bs = unsafe { &mut *bs };
+    let request = unsafe { &*request };
 
     // Create neon request and submit it
-    let request_idx = bs.start_neon_request(&NeonIORequest::RelExists(RelExistsRequest {
-        spc_oid,
-        db_oid,
-        rel_number,
-        fork_number,
-        request_lsn,
-        not_modified_since,
-    }));
+    let request_idx = bs.start_neon_request(request);
 
     // Tell the communicator about it
     bs.submit_request(request_idx);
@@ -78,172 +59,17 @@ pub extern "C" fn bcomm_start_rel_exists_request(
 /// 0 if the relation does not exist
 /// 1 if the relation exists
 #[unsafe(no_mangle)]
-pub extern "C" fn bcomm_poll_rel_exists_completion(
+pub extern "C" fn bcomm_poll_request_completion(
     bs: *mut CommunicatorBackendStruct,
     request_idx: u32,
+    result_p: *mut *const NeonIOResult,
 ) -> i32 {
     let bs = unsafe { &mut *bs };
 
     let (state, result) = bs.poll_request_completion(request_idx);
 
     if state == NeonIOHandleState::Completed {
-        match result {
-            0 => 0,
-            1 => 1,
-
-            // Unexpected result for a RelExists request
-            _ => 2,
-        }
-    } else {
-        -1
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn bcomm_start_rel_size_request(
-    bs: *mut CommunicatorBackendStruct,
-    spc_oid: Oid,
-    db_oid: Oid,
-    rel_number: u32,
-    fork_number: u8,
-    request_lsn: Lsn,
-    not_modified_since: Lsn,
-) -> i32 {
-    let bs = unsafe { &mut *bs };
-
-    // Create neon request and submit it
-    let request_idx = bs.start_neon_request(&NeonIORequest::RelSize(RelSizeRequest {
-        spc_oid,
-        db_oid,
-        rel_number,
-        fork_number,
-        request_lsn,
-        not_modified_since,
-    }));
-
-    // Tell the communicator about it
-    bs.submit_request(request_idx);
-
-    return request_idx;
-}
-
-/// Check if a request has completed. Returns:
-///
-/// -1 if the request is still being processed
-/// 0 if the request completed
-#[unsafe(no_mangle)]
-pub extern "C" fn bcomm_poll_rel_size_completion(
-    bs: *mut CommunicatorBackendStruct,
-    request_idx: u32,
-    result_p: *mut u32,
-) -> i32 {
-    let bs = unsafe { &mut *bs };
-    let result_ref = unsafe { &mut *result_p };
-
-    let (state, result) = bs.poll_request_completion(request_idx);
-    if state == NeonIOHandleState::Completed {
-        *result_ref = result as u32;
-        0
-    } else {
-        -1
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn bcomm_start_get_page_request(
-    bs: *mut CommunicatorBackendStruct,
-    spc_oid: Oid,
-    db_oid: Oid,
-    rel_number: u32,
-    fork_number: u8,
-    block_number: u32,
-    request_lsn: Lsn,
-    not_modified_since: Lsn,
-    dest_ptr: *mut u8,
-    dest_size: u32,
-) -> i32 {
-    let bs = unsafe { &mut *bs };
-
-    // Create neon request and submit it
-    let request_idx = bs.start_neon_request(&NeonIORequest::GetPage(GetPageRequest {
-        spc_oid,
-        db_oid,
-        rel_number,
-        fork_number,
-        block_number,
-        request_lsn,
-        not_modified_since,
-        dest_ptr: dest_ptr.addr(),
-        dest_size,
-    }));
-
-    // Tell the communicator about it
-    bs.submit_request(request_idx);
-
-    return request_idx;
-}
-
-/// Check if a request has completed. Returns:
-///
-/// -1 if the request is still being processed
-/// 0 if the request completed
-#[unsafe(no_mangle)]
-pub extern "C" fn bcomm_poll_get_page_completion(
-    bs: *mut CommunicatorBackendStruct,
-    request_idx: u32,
-) -> i32 {
-    let bs = unsafe { &mut *bs };
-
-    let (state, _result) = bs.poll_request_completion(request_idx);
-    if state == NeonIOHandleState::Completed {
-        0
-    } else {
-        -1
-    }
-}
-
-/// Start a request. You can poll for its completion and get the result by
-/// calling bcomm_poll_dbsize_request_completion(). The communicator will wake
-/// us up by setting our process latch, so to wait for the completion, wait on
-/// the latch and call bcomm_poll_dbsize_request_completion() every time the
-/// latch is set.
-#[unsafe(no_mangle)]
-pub extern "C" fn bcomm_start_dbsize_request(
-    bs: *mut CommunicatorBackendStruct,
-    db_oid: Oid,
-    request_lsn: Lsn,
-    not_modified_since: Lsn,
-) -> i32 {
-    let bs = unsafe { &mut *bs };
-
-    // Create neon request and submit it
-    let request_idx = bs.start_neon_request(&NeonIORequest::DbSize(DbSizeRequest {
-        db_oid,
-        request_lsn,
-        not_modified_since,
-    }));
-
-    // Tell the communicator about it
-    bs.submit_request(request_idx);
-
-    return request_idx;
-}
-
-/// Check if a request has completed. If yes, returns 0, and stores the result
-/// in *result_p. If the request is still being processe, returns -1.
-#[unsafe(no_mangle)]
-pub extern "C" fn bcomm_poll_dbsize_request_completion(
-    bs: *mut CommunicatorBackendStruct,
-    request_idx: u32,
-    result_p: *mut u64,
-) -> i32 {
-    let bs = unsafe { &mut *bs };
-    let result_ref = unsafe { &mut *result_p };
-
-    let (state, result) = bs.poll_request_completion(request_idx);
-
-    if state == NeonIOHandleState::Completed {
-        *result_ref = result;
+        unsafe { *result_p = result}
         0
     } else {
         -1
