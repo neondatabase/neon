@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
@@ -9,16 +10,19 @@ from fixtures.neon_fixtures import (
     PgBin,
     last_flush_lsn_upload,
 )
-from fixtures.pageserver.http import LayerMapInfo
 from fixtures.remote_storage import RemoteStorageKind
-from pytest_httpserver import HTTPServer
+
+if TYPE_CHECKING:
+    from fixtures.httpserver import ListenAddress
+    from fixtures.pageserver.http import LayerMapInfo
+    from pytest_httpserver import HTTPServer
 
 # NB: basic config change tests are in test_tenant_conf.py
 
 
 def test_threshold_based_eviction(
     httpserver: HTTPServer,
-    httpserver_listen_address,
+    httpserver_listen_address: ListenAddress,
     pg_bin: PgBin,
     neon_env_builder: NeonEnvBuilder,
 ):
@@ -50,7 +54,12 @@ def test_threshold_based_eviction(
 
     ps_http = env.pageserver.http_client()
     vps_http = env.storage_controller.pageserver_api()
-    assert vps_http.tenant_config(tenant_id).effective_config["eviction_policy"] is None
+    # check config on pageserver, set via storcon; https://github.com/neondatabase/neon/issues/9621
+
+    assert ps_http.tenant_config(tenant_id).tenant_specific_overrides == {}
+    assert ps_http.tenant_config(tenant_id).effective_config["eviction_policy"] == {
+        "kind": "NoEviction"
+    }
 
     eviction_threshold = 10
     eviction_period = 2
@@ -64,7 +73,7 @@ def test_threshold_based_eviction(
             },
         },
     )
-    assert vps_http.tenant_config(tenant_id).effective_config["eviction_policy"] == {
+    assert ps_http.tenant_config(tenant_id).effective_config["eviction_policy"] == {
         "kind": "LayerAccessThreshold",
         "threshold": f"{eviction_threshold}s",
         "period": f"{eviction_period}s",
@@ -73,7 +82,7 @@ def test_threshold_based_eviction(
     # restart because changing tenant config is not instant
     env.pageserver.restart()
 
-    assert vps_http.tenant_config(tenant_id).effective_config["eviction_policy"] == {
+    assert ps_http.tenant_config(tenant_id).effective_config["eviction_policy"] == {
         "kind": "LayerAccessThreshold",
         "threshold": f"{eviction_threshold}s",
         "period": f"{eviction_period}s",
@@ -81,7 +90,7 @@ def test_threshold_based_eviction(
 
     # create a bunch of L1s, only the least of which will need to be resident
     compaction_threshold = 3  # create L1 layers quickly
-    vps_http.patch_tenant_config_client_side(
+    vps_http.update_tenant_config(
         tenant_id,
         inserts={
             # Disable gc and compaction to avoid on-demand downloads from their side.
@@ -172,14 +181,14 @@ def test_threshold_based_eviction(
 
     # TODO: can we be more precise here? E.g., require we're stable _within_ X*threshold,
     # instead of what we do here, i.e., stable _for at least_ X*threshold toward the end of the observation window
-    assert (
-        stable_for > consider_stable_when_no_change_for_seconds
-    ), "layer residencies did not become stable within the observation window"
+    assert stable_for > consider_stable_when_no_change_for_seconds, (
+        "layer residencies did not become stable within the observation window"
+    )
 
     post = map_info_changes[-1][1].by_local_and_remote()
     assert len(post.remote_layers) > 0, "some layers should be evicted once it's stabilized"
     assert len(post.local_layers) > 0, "the imitate accesses should keep some layers resident"
 
-    assert (
-        env.pageserver.log_contains(metrics_refused_log_line) is not None
-    ), "ensure the metrics collection worker ran"
+    assert env.pageserver.log_contains(metrics_refused_log_line) is not None, (
+        "ensure the metrics collection worker ran"
+    )

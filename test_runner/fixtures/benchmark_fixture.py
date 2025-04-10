@@ -15,17 +15,19 @@ from typing import TYPE_CHECKING
 
 import allure
 import pytest
-from _pytest.config import Config
-from _pytest.config.argparsing import Parser
-from _pytest.fixtures import FixtureRequest
-from _pytest.terminal import TerminalReporter
 
-from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonPageserver
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
+
+    from _pytest.config import Config
+    from _pytest.config.argparsing import Parser
+    from _pytest.fixtures import FixtureRequest
+    from _pytest.terminal import TerminalReporter
+
+    from fixtures.common_types import TenantId, TimelineId
+    from fixtures.neon_fixtures import NeonPageserver
 
 
 """
@@ -266,6 +268,16 @@ class NeonBenchmarker:
         name = f"{self.PROPERTY_PREFIX}_{metric_name}"
         if labels is None:
             labels = {}
+
+        # Sometimes mypy can't catch non-numeric values,
+        # so adding a check here
+        try:
+            float(metric_value)
+        except ValueError as e:
+            raise ValueError(
+                f"`metric_value` (`{metric_value}`) must be a NUMERIC-friendly data type"
+            ) from e
+
         self.property_recorder(
             name,
             {

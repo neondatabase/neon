@@ -1,0 +1,141 @@
+diff --git a/expected/ut-J.out b/expected/ut-J.out
+index 2fa3c70..314e929 100644
+--- a/expected/ut-J.out
++++ b/expected/ut-J.out
+@@ -789,38 +789,6 @@ NestLoop(st1 st2)
+ MergeJoin(t1 t2)
+ not used hint:
+ duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-NestLoop(st1 st2)
+-MergeJoin(t1 t2)
+-duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-NestLoop(st1 st2)
+-MergeJoin(t1 t2)
+-duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-NestLoop(st1 st2)
+-MergeJoin(t1 t2)
+-duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-NestLoop(st1 st2)
+-MergeJoin(t1 t2)
+-duplication hint:
+ error hint:
+ 
+                                        explain_filter                                        
+diff --git a/expected/ut-S.out b/expected/ut-S.out
+index 0bfcfb8..e75f581 100644
+--- a/expected/ut-S.out
++++ b/expected/ut-S.out
+@@ -4415,34 +4415,6 @@ used hint:
+ IndexScan(ti1 ti1_pred)
+ not used hint:
+ duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-IndexScan(ti1 ti1_pred)
+-duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-IndexScan(ti1 ti1_pred)
+-duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-IndexScan(ti1 ti1_pred)
+-duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-IndexScan(ti1 ti1_pred)
+-duplication hint:
+ error hint:
+ 
+                     explain_filter                     
+diff --git a/expected/ut-W.out b/expected/ut-W.out
+index a09bd34..0ad227c 100644
+--- a/expected/ut-W.out
++++ b/expected/ut-W.out
+@@ -1341,54 +1341,6 @@ IndexScan(ft1)
+ IndexScan(t)
+ Parallel(s1 3 hard)
+ duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-IndexScan(*VALUES*)
+-SeqScan(cte1)
+-IndexScan(ft1)
+-IndexScan(t)
+-Parallel(p1 5 hard)
+-Parallel(s1 3 hard)
+-duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-IndexScan(*VALUES*)
+-SeqScan(cte1)
+-IndexScan(ft1)
+-IndexScan(t)
+-Parallel(p1 5 hard)
+-Parallel(s1 3 hard)
+-duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-IndexScan(*VALUES*)
+-SeqScan(cte1)
+-IndexScan(ft1)
+-IndexScan(t)
+-Parallel(p1 5 hard)
+-Parallel(s1 3 hard)
+-duplication hint:
+-error hint:
+-
+-LOG:  pg_hint_plan:
+-used hint:
+-not used hint:
+-IndexScan(*VALUES*)
+-SeqScan(cte1)
+-IndexScan(ft1)
+-IndexScan(t)
+-Parallel(p1 5 hard)
+-Parallel(s1 3 hard)
+-duplication hint:
+ error hint:
+ 
+                     explain_filter                    

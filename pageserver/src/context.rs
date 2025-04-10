@@ -89,18 +89,129 @@
 //! [`RequestContext`] argument. Functions in the middle of the call chain
 //! only need to pass it on.
 
-use crate::task_mgr::TaskKind;
+use std::{sync::Arc, time::Duration};
 
-pub(crate) mod optional_counter;
+use once_cell::sync::Lazy;
+use tracing::warn;
+use utils::{id::TimelineId, shard::TenantShardId};
+
+use crate::{
+    metrics::{StorageIoSizeMetrics, TimelineMetrics},
+    task_mgr::TaskKind,
+    tenant::Timeline,
+};
+use futures::FutureExt;
+use futures::future::BoxFuture;
+use std::future::Future;
+use tracing_utils::perf_span::{PerfInstrument, PerfSpan};
+
+use tracing::{Dispatch, Span};
 
 // The main structure of this module, see module-level comment.
-#[derive(Debug)]
 pub struct RequestContext {
     task_kind: TaskKind,
     download_behavior: DownloadBehavior,
     access_stats_behavior: AccessStatsBehavior,
     page_content_kind: PageContentKind,
-    pub micros_spent_throttled: optional_counter::MicroSecondsCounterU32,
+    read_path_debug: bool,
+    scope: Scope,
+    perf_span: Option<PerfSpan>,
+    perf_span_dispatch: Option<Dispatch>,
+}
+
+#[derive(Clone)]
+pub(crate) enum Scope {
+    Global {
+        io_size_metrics: &'static crate::metrics::StorageIoSizeMetrics,
+    },
+    SecondaryTenant {
+        io_size_metrics: &'static crate::metrics::StorageIoSizeMetrics,
+    },
+    SecondaryTimeline {
+        io_size_metrics: crate::metrics::StorageIoSizeMetrics,
+    },
+    Timeline {
+        // We wrap the `Arc<TimelineMetrics>`s inside another Arc to avoid child
+        // context creation contending for the ref counters of the Arc<TimelineMetrics>,
+        // which are shared among all tasks that operate on the timeline, especially
+        // concurrent page_service connections.
+        #[allow(clippy::redundant_allocation)]
+        arc_arc: Arc<Arc<TimelineMetrics>>,
+    },
+    #[cfg(test)]
+    UnitTest {
+        io_size_metrics: &'static crate::metrics::StorageIoSizeMetrics,
+    },
+    DebugTools {
+        io_size_metrics: &'static crate::metrics::StorageIoSizeMetrics,
+    },
+}
+
+static GLOBAL_IO_SIZE_METRICS: Lazy<crate::metrics::StorageIoSizeMetrics> =
+    Lazy::new(|| crate::metrics::StorageIoSizeMetrics::new("*", "*", "*"));
+
+impl Scope {
+    pub(crate) fn new_global() -> Self {
+        Scope::Global {
+            io_size_metrics: &GLOBAL_IO_SIZE_METRICS,
+        }
+    }
+    /// NB: this allocates, so, use only at relatively long-lived roots, e.g., at start
+    /// of a compaction iteration.
+    pub(crate) fn new_timeline(timeline: &Timeline) -> Self {
+        Scope::Timeline {
+            arc_arc: Arc::new(Arc::clone(&timeline.metrics)),
+        }
+    }
+    pub(crate) fn new_page_service_pagestream(
+        timeline_handle: &crate::tenant::timeline::handle::Handle<
+            crate::page_service::TenantManagerTypes,
+        >,
+    ) -> Self {
+        Scope::Timeline {
+            arc_arc: Arc::clone(&timeline_handle.metrics),
+        }
+    }
+    pub(crate) fn new_secondary_timeline(
+        tenant_shard_id: &TenantShardId,
+        timeline_id: &TimelineId,
+    ) -> Self {
+        // TODO(https://github.com/neondatabase/neon/issues/11156): secondary timelines have no infrastructure for metrics lifecycle.
+
+        let tenant_id = tenant_shard_id.tenant_id.to_string();
+        let shard_id = tenant_shard_id.shard_slug().to_string();
+        let timeline_id = timeline_id.to_string();
+
+        let io_size_metrics =
+            crate::metrics::StorageIoSizeMetrics::new(&tenant_id, &shard_id, &timeline_id);
+        Scope::SecondaryTimeline { io_size_metrics }
+    }
+    pub(crate) fn new_secondary_tenant(_tenant_shard_id: &TenantShardId) -> Self {
+        // Before propagating metrics via RequestContext, the labels were inferred from file path.
+        // The only user of VirtualFile at tenant scope is the heatmap download & read.
+        // The inferred labels for the path of the heatmap file on local disk were that of the global metric (*,*,*).
+        // Thus, we do the same here, and extend that for anything secondary-tenant scoped.
+        //
+        // If we want to have (tenant_id, shard_id, '*') labels for secondary tenants in the future,
+        // we will need to think about the metric lifecycle, i.e., remove them during secondary tenant shutdown,
+        // like we do for attached timelines. (We don't have attached-tenant-scoped usage of VirtualFile
+        // at this point, so, we were able to completely side-step tenant-scoped stuff there).
+        Scope::SecondaryTenant {
+            io_size_metrics: &GLOBAL_IO_SIZE_METRICS,
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn new_unit_test() -> Self {
+        Scope::UnitTest {
+            io_size_metrics: &GLOBAL_IO_SIZE_METRICS,
+        }
+    }
+
+    pub(crate) fn new_debug_tools() -> Self {
+        Scope::DebugTools {
+            io_size_metrics: &GLOBAL_IO_SIZE_METRICS,
+        }
+    }
 }
 
 /// The kind of access to the page cache.
@@ -158,23 +269,23 @@ impl RequestContextBuilder {
                 download_behavior: DownloadBehavior::Download,
                 access_stats_behavior: AccessStatsBehavior::Update,
                 page_content_kind: PageContentKind::Unknown,
-                micros_spent_throttled: Default::default(),
+                read_path_debug: false,
+                scope: Scope::new_global(),
+                perf_span: None,
+                perf_span_dispatch: None,
             },
         }
     }
 
-    pub fn extend(original: &RequestContext) -> Self {
+    pub fn from(original: &RequestContext) -> Self {
         Self {
-            // This is like a Copy, but avoid implementing Copy because ordinary users of
-            // RequestContext should always move or ref it.
-            inner: RequestContext {
-                task_kind: original.task_kind,
-                download_behavior: original.download_behavior,
-                access_stats_behavior: original.access_stats_behavior,
-                page_content_kind: original.page_content_kind,
-                micros_spent_throttled: Default::default(),
-            },
+            inner: original.clone(),
         }
+    }
+
+    pub fn task_kind(mut self, k: TaskKind) -> Self {
+        self.inner.task_kind = k;
+        self
     }
 
     /// Configure the DownloadBehavior of the context: whether to
@@ -196,12 +307,84 @@ impl RequestContextBuilder {
         self
     }
 
-    pub fn build(self) -> RequestContext {
+    pub(crate) fn read_path_debug(mut self, b: bool) -> Self {
+        self.inner.read_path_debug = b;
+        self
+    }
+
+    pub(crate) fn scope(mut self, s: Scope) -> Self {
+        self.inner.scope = s;
+        self
+    }
+
+    pub(crate) fn perf_span_dispatch(mut self, dispatch: Option<Dispatch>) -> Self {
+        self.inner.perf_span_dispatch = dispatch;
+        self
+    }
+
+    pub fn root_perf_span<Fn>(mut self, make_span: Fn) -> Self
+    where
+        Fn: FnOnce() -> Span,
+    {
+        assert!(self.inner.perf_span.is_none());
+        assert!(self.inner.perf_span_dispatch.is_some());
+
+        let dispatcher = self.inner.perf_span_dispatch.as_ref().unwrap();
+        let new_span = tracing::dispatcher::with_default(dispatcher, make_span);
+
+        self.inner.perf_span = Some(PerfSpan::new(new_span, dispatcher.clone()));
+
+        self
+    }
+
+    pub fn perf_span<Fn>(mut self, make_span: Fn) -> Self
+    where
+        Fn: FnOnce(&Span) -> Span,
+    {
+        if let Some(ref perf_span) = self.inner.perf_span {
+            assert!(self.inner.perf_span_dispatch.is_some());
+            let dispatcher = self.inner.perf_span_dispatch.as_ref().unwrap();
+
+            let new_span =
+                tracing::dispatcher::with_default(dispatcher, || make_span(perf_span.inner()));
+
+            self.inner.perf_span = Some(PerfSpan::new(new_span, dispatcher.clone()));
+        }
+
+        self
+    }
+
+    pub fn root(self) -> RequestContext {
+        self.inner
+    }
+
+    pub fn attached_child(self) -> RequestContext {
+        self.inner
+    }
+
+    pub fn detached_child(self) -> RequestContext {
         self.inner
     }
 }
 
 impl RequestContext {
+    /// Private clone implementation
+    ///
+    /// Callers should use the [`RequestContextBuilder`] or child spaning APIs of
+    /// [`RequestContext`].
+    fn clone(&self) -> Self {
+        Self {
+            task_kind: self.task_kind,
+            download_behavior: self.download_behavior,
+            access_stats_behavior: self.access_stats_behavior,
+            page_content_kind: self.page_content_kind,
+            read_path_debug: self.read_path_debug,
+            scope: self.scope.clone(),
+            perf_span: self.perf_span.clone(),
+            perf_span_dispatch: self.perf_span_dispatch.clone(),
+        }
+    }
+
     /// Create a new RequestContext that has no parent.
     ///
     /// The function is called `new` because, once we add children
@@ -217,7 +400,7 @@ impl RequestContext {
     pub fn new(task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
         RequestContextBuilder::new(task_kind)
             .download_behavior(download_behavior)
-            .build()
+            .root()
     }
 
     /// Create a detached child context for a task that may outlive `self`.
@@ -238,7 +421,10 @@ impl RequestContext {
     ///
     /// We could make new calls to this function fail if `self` is already canceled.
     pub fn detached_child(&self, task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
-        self.child_impl(task_kind, download_behavior)
+        RequestContextBuilder::from(self)
+            .task_kind(task_kind)
+            .download_behavior(download_behavior)
+            .detached_child()
     }
 
     /// Create a child of context `self` for a task that shall not outlive `self`.
@@ -262,7 +448,7 @@ impl RequestContext {
     /// The method to wait for child tasks would return an error, indicating
     /// that the child task was not started because the context was canceled.
     pub fn attached_child(&self) -> Self {
-        self.child_impl(self.task_kind(), self.download_behavior())
+        RequestContextBuilder::from(self).attached_child()
     }
 
     /// Use this function when you should be creating a child context using
@@ -277,8 +463,52 @@ impl RequestContext {
         Self::new(task_kind, download_behavior)
     }
 
-    fn child_impl(&self, task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
-        Self::new(task_kind, download_behavior)
+    pub fn with_scope_timeline(&self, timeline: &Arc<Timeline>) -> Self {
+        RequestContextBuilder::from(self)
+            .scope(Scope::new_timeline(timeline))
+            .attached_child()
+    }
+
+    pub(crate) fn with_scope_page_service_pagestream(
+        &self,
+        timeline_handle: &crate::tenant::timeline::handle::Handle<
+            crate::page_service::TenantManagerTypes,
+        >,
+    ) -> Self {
+        RequestContextBuilder::from(self)
+            .scope(Scope::new_page_service_pagestream(timeline_handle))
+            .attached_child()
+    }
+
+    pub fn with_scope_secondary_timeline(
+        &self,
+        tenant_shard_id: &TenantShardId,
+        timeline_id: &TimelineId,
+    ) -> Self {
+        RequestContextBuilder::from(self)
+            .scope(Scope::new_secondary_timeline(tenant_shard_id, timeline_id))
+            .attached_child()
+    }
+
+    pub fn with_scope_secondary_tenant(&self, tenant_shard_id: &TenantShardId) -> Self {
+        RequestContextBuilder::from(self)
+            .scope(Scope::new_secondary_tenant(tenant_shard_id))
+            .attached_child()
+    }
+
+    #[cfg(test)]
+    pub fn with_scope_unit_test(&self) -> Self {
+        RequestContextBuilder::from(self)
+            .task_kind(TaskKind::UnitTest)
+            .scope(Scope::new_unit_test())
+            .attached_child()
+    }
+
+    pub fn with_scope_debug_tools(&self) -> Self {
+        RequestContextBuilder::from(self)
+            .task_kind(TaskKind::DebugTool)
+            .scope(Scope::new_debug_tools())
+            .attached_child()
     }
 
     pub fn task_kind(&self) -> TaskKind {
@@ -296,4 +526,115 @@ impl RequestContext {
     pub(crate) fn page_content_kind(&self) -> PageContentKind {
         self.page_content_kind
     }
+
+    pub(crate) fn read_path_debug(&self) -> bool {
+        self.read_path_debug
+    }
+
+    pub(crate) fn io_size_metrics(&self) -> &StorageIoSizeMetrics {
+        match &self.scope {
+            Scope::Global { io_size_metrics } => {
+                let is_unit_test = cfg!(test);
+                let is_regress_test_build = cfg!(feature = "testing");
+                if is_unit_test || is_regress_test_build {
+                    panic!("all VirtualFile instances are timeline-scoped");
+                } else {
+                    use once_cell::sync::Lazy;
+                    use std::sync::Mutex;
+                    use std::time::Duration;
+                    use utils::rate_limit::RateLimit;
+                    static LIMIT: Lazy<Mutex<RateLimit>> =
+                        Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(1))));
+                    let mut guard = LIMIT.lock().unwrap();
+                    guard.call2(|rate_limit_stats| {
+                        warn!(
+                            %rate_limit_stats,
+                            backtrace=%std::backtrace::Backtrace::force_capture(),
+                            "all VirtualFile instances are timeline-scoped",
+                        );
+                    });
+
+                    io_size_metrics
+                }
+            }
+            Scope::Timeline { arc_arc } => &arc_arc.storage_io_size,
+            Scope::SecondaryTimeline { io_size_metrics } => io_size_metrics,
+            Scope::SecondaryTenant { io_size_metrics } => io_size_metrics,
+            #[cfg(test)]
+            Scope::UnitTest { io_size_metrics } => io_size_metrics,
+            Scope::DebugTools { io_size_metrics } => io_size_metrics,
+        }
+    }
+
+    pub(crate) fn ondemand_download_wait_observe(&self, duration: Duration) {
+        if duration == Duration::ZERO {
+            return;
+        }
+
+        match &self.scope {
+            Scope::Timeline { arc_arc } => arc_arc
+                .wait_ondemand_download_time
+                .observe(self.task_kind, duration),
+            _ => {
+                use once_cell::sync::Lazy;
+                use std::sync::Mutex;
+                use std::time::Duration;
+                use utils::rate_limit::RateLimit;
+                static LIMIT: Lazy<Mutex<RateLimit>> =
+                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(1))));
+                let mut guard = LIMIT.lock().unwrap();
+                guard.call2(|rate_limit_stats| {
+                    warn!(
+                        %rate_limit_stats,
+                        backtrace=%std::backtrace::Backtrace::force_capture(),
+                        "ondemand downloads should always happen within timeline scope",
+                    );
+                });
+            }
+        }
+    }
+
+    pub(crate) fn perf_follows_from(&self, from: &RequestContext) {
+        if let (Some(span), Some(from_span)) = (&self.perf_span, &from.perf_span) {
+            span.inner().follows_from(from_span.inner());
+        }
+    }
+
+    pub(crate) fn has_perf_span(&self) -> bool {
+        self.perf_span.is_some()
+    }
 }
+
+/// [`Future`] extension trait that allow for creating performance
+/// spans on sampled requests
+pub(crate) trait PerfInstrumentFutureExt<'a>: Future + Send {
+    /// Instrument this future with a new performance span when the
+    /// provided request context indicates the originator request
+    /// was sampled. Otherwise, just box the future and return it as is.
+    fn maybe_perf_instrument<Fn>(
+        self,
+        ctx: &RequestContext,
+        make_span: Fn,
+    ) -> BoxFuture<'a, Self::Output>
+    where
+        Self: Sized + 'a,
+        Fn: FnOnce(&Span) -> Span,
+    {
+        match &ctx.perf_span {
+            Some(perf_span) => {
+                assert!(ctx.perf_span_dispatch.is_some());
+                let dispatcher = ctx.perf_span_dispatch.as_ref().unwrap();
+
+                let new_span =
+                    tracing::dispatcher::with_default(dispatcher, || make_span(perf_span.inner()));
+
+                let new_perf_span = PerfSpan::new(new_span, dispatcher.clone());
+                self.instrument(new_perf_span).boxed()
+            }
+            None => self.boxed(),
+        }
+    }
+}
+
+// Implement the trait for all types that satisfy the trait bounds
+impl<'a, T: Future + Send + 'a> PerfInstrumentFutureExt<'a> for T {}

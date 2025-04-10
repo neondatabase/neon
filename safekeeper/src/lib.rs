@@ -2,15 +2,17 @@
 
 extern crate hyper0 as hyper;
 
+use std::time::Duration;
+
 use camino::Utf8PathBuf;
 use once_cell::sync::Lazy;
 use remote_storage::RemoteStorageConfig;
-use tokio::runtime::Runtime;
-
-use std::time::Duration;
+use reqwest::Certificate;
 use storage_broker::Uri;
-
-use utils::{auth::SwappableJwtAuth, id::NodeId, logging::SecretString};
+use tokio::runtime::Runtime;
+use utils::auth::SwappableJwtAuth;
+use utils::id::NodeId;
+use utils::logging::SecretString;
 
 mod auth;
 pub mod broker;
@@ -20,7 +22,6 @@ pub mod copy_timeline;
 pub mod debug_dump;
 pub mod handler;
 pub mod http;
-pub mod json_ctrl;
 pub mod metrics;
 pub mod patch_control_file;
 pub mod pull_timeline;
@@ -43,8 +44,12 @@ pub mod wal_reader_stream;
 pub mod wal_service;
 pub mod wal_storage;
 
+#[cfg(any(test, feature = "benchmarking"))]
+pub mod test_utils;
+
 mod timelines_global_map;
 use std::sync::Arc;
+
 pub use timelines_global_map::GlobalTimelines;
 use utils::auth::JwtAuth;
 
@@ -65,6 +70,10 @@ pub mod defaults {
     // before uploading a partial segment, so that in normal operation the eviction can happen
     // as soon as we have done the partial segment upload.
     pub const DEFAULT_EVICTION_MIN_RESIDENT: &str = DEFAULT_PARTIAL_BACKUP_TIMEOUT;
+
+    pub const DEFAULT_SSL_KEY_FILE: &str = "server.key";
+    pub const DEFAULT_SSL_CERT_FILE: &str = "server.crt";
+    pub const DEFAULT_SSL_CERT_RELOAD_PERIOD: &str = "60s";
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +89,7 @@ pub struct SafeKeeperConf {
     pub listen_pg_addr: String,
     pub listen_pg_addr_tenant_only: Option<String>,
     pub listen_http_addr: String,
+    pub listen_https_addr: Option<String>,
     pub advertise_pg_addr: Option<String>,
     pub availability_zone: Option<String>,
     pub no_sync: bool,
@@ -105,6 +115,13 @@ pub struct SafeKeeperConf {
     pub control_file_save_interval: Duration,
     pub partial_backup_concurrency: usize,
     pub eviction_min_resident: Duration,
+    pub wal_reader_fanout: bool,
+    pub max_delta_for_fanout: Option<u64>,
+    pub ssl_key_file: Utf8PathBuf,
+    pub ssl_cert_file: Utf8PathBuf,
+    pub ssl_cert_reload_period: Duration,
+    pub ssl_ca_certs: Vec<Certificate>,
+    pub use_https_safekeeper_api: bool,
 }
 
 impl SafeKeeperConf {
@@ -121,6 +138,7 @@ impl SafeKeeperConf {
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
             listen_pg_addr_tenant_only: None,
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
+            listen_https_addr: None,
             advertise_pg_addr: None,
             availability_zone: None,
             remote_storage: None,
@@ -147,6 +165,13 @@ impl SafeKeeperConf {
             control_file_save_interval: Duration::from_secs(1),
             partial_backup_concurrency: 1,
             eviction_min_resident: Duration::ZERO,
+            wal_reader_fanout: false,
+            max_delta_for_fanout: None,
+            ssl_key_file: Utf8PathBuf::from(defaults::DEFAULT_SSL_KEY_FILE),
+            ssl_cert_file: Utf8PathBuf::from(defaults::DEFAULT_SSL_CERT_FILE),
+            ssl_cert_reload_period: Duration::from_secs(60),
+            ssl_ca_certs: Vec::new(),
+            use_https_safekeeper_api: false,
         }
     }
 }

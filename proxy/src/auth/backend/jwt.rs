@@ -4,11 +4,11 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use arc_swap::ArcSwapOption;
-use dashmap::DashMap;
+use clashmap::ClashMap;
 use jose_jwk::crypto::KeyInfo;
-use reqwest::{redirect, Client};
-use reqwest_retry::policies::ExponentialBackoff;
+use reqwest::{Client, redirect};
 use reqwest_retry::RetryTransientMiddleware;
+use reqwest_retry::policies::ExponentialBackoff;
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
@@ -64,7 +64,7 @@ pub(crate) struct AuthRule {
 pub struct JwkCache {
     client: reqwest_middleware::ClientWithMiddleware,
 
-    map: DashMap<(EndpointId, RoleName), Arc<JwkCacheEntryLock>>,
+    map: ClashMap<(EndpointId, RoleName), Arc<JwkCacheEntryLock>>,
 }
 
 pub(crate) struct JwkCacheEntry {
@@ -220,11 +220,11 @@ async fn fetch_jwks(
 }
 
 impl JwkCacheEntryLock {
-    async fn acquire_permit<'a>(self: &'a Arc<Self>) -> JwkRenewalPermit<'a> {
+    async fn acquire_permit(self: &Arc<Self>) -> JwkRenewalPermit<'_> {
         JwkRenewalPermit::acquire_permit(self).await
     }
 
-    fn try_acquire_permit<'a>(self: &'a Arc<Self>) -> Option<JwkRenewalPermit<'a>> {
+    fn try_acquire_permit(self: &Arc<Self>) -> Option<JwkRenewalPermit<'_>> {
         JwkRenewalPermit::try_acquire_permit(self)
     }
 
@@ -350,6 +350,13 @@ impl JwkCacheEntryLock {
         let header = base64::decode_config(header, base64::URL_SAFE_NO_PAD)?;
         let header = serde_json::from_slice::<JwtHeader<'_>>(&header)?;
 
+        let payloadb = base64::decode_config(payload, base64::URL_SAFE_NO_PAD)?;
+        let payload = serde_json::from_slice::<JwtPayload<'_>>(&payloadb)?;
+
+        if let Some(iss) = &payload.issuer {
+            ctx.set_jwt_issuer(iss.as_ref().to_owned());
+        }
+
         let sig = base64::decode_config(signature, base64::URL_SAFE_NO_PAD)?;
 
         let kid = header.key_id.ok_or(JwtError::MissingKeyId)?;
@@ -386,10 +393,7 @@ impl JwkCacheEntryLock {
                 verify_rsa_signature(header_payload.as_bytes(), &sig, key, &header.algorithm)?;
             }
             key => return Err(JwtError::UnsupportedKeyType(key.into())),
-        };
-
-        let payloadb = base64::decode_config(payload, base64::URL_SAFE_NO_PAD)?;
-        let payload = serde_json::from_slice::<JwtPayload<'_>>(&payloadb)?;
+        }
 
         tracing::debug!(?payload, "JWT signature valid with claims");
 
@@ -465,7 +469,7 @@ impl Default for JwkCache {
 
         JwkCache {
             client,
-            map: DashMap::default(),
+            map: ClashMap::default(),
         }
     }
 }
@@ -494,8 +498,8 @@ fn verify_rsa_signature(
     alg: &jose_jwa::Algorithm,
 ) -> Result<(), JwtError> {
     use jose_jwa::{Algorithm, Signing};
-    use rsa::pkcs1v15::{Signature, VerifyingKey};
     use rsa::RsaPublicKey;
+    use rsa::pkcs1v15::{Signature, VerifyingKey};
 
     let key = RsaPublicKey::try_from(key).map_err(JwtError::InvalidRsaKey)?;
 
@@ -506,7 +510,7 @@ fn verify_rsa_signature(
             key.verify(data, &sig)?;
         }
         _ => return Err(JwtError::InvalidRsaSigningAlgorithm),
-    };
+    }
 
     Ok(())
 }
@@ -772,6 +776,7 @@ impl From<&jose_jwk::Key> for KeyType {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
     use std::future::IntoFuture;
     use std::net::SocketAddr;

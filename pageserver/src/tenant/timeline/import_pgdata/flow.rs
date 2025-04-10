@@ -28,52 +28,38 @@
 //! An incomplete set of TODOs from the Hackathon:
 //! - version-specific CheckPointData (=> pgv abstraction, already exists for regular walingest)
 
+use std::collections::HashSet;
+use std::ops::Range;
 use std::sync::Arc;
 
 use anyhow::{bail, ensure};
 use bytes::Bytes;
-
 use itertools::Itertools;
-use pageserver_api::{
-    key::{rel_block_to_key, rel_dir_to_key, rel_size_to_key, relmap_file_key, DBDIR_KEY},
-    reltag::RelTag,
-    shard::ShardIdentity,
-};
-use postgres_ffi::{pg_constants, relfile_utils::parse_relfilename, BLCKSZ};
-use tokio::task::JoinSet;
-use tracing::{debug, info_span, instrument, Instrument};
-
-use crate::{
-    assert_u64_eq_usize::UsizeIsU64,
-    pgdatadir_mapping::{SlruSegmentDirectory, TwoPhaseDirectory},
-};
-use crate::{
-    context::{DownloadBehavior, RequestContext},
-    pgdatadir_mapping::{DbDirectory, RelDirectory},
-    task_mgr::TaskKind,
-    tenant::storage_layer::{ImageLayerWriter, Layer},
-};
-
-use pageserver_api::key::Key;
 use pageserver_api::key::{
-    slru_block_to_key, slru_dir_to_key, slru_segment_size_to_key, CHECKPOINT_KEY, CONTROLFILE_KEY,
-    TWOPHASEDIR_KEY,
+    CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, Key, TWOPHASEDIR_KEY, rel_block_to_key,
+    rel_dir_to_key, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
+    slru_segment_size_to_key,
 };
-use pageserver_api::keyspace::singleton_range;
-use pageserver_api::keyspace::{contiguous_range_len, is_contiguous_range};
-use pageserver_api::reltag::SlruKind;
+use pageserver_api::keyspace::{contiguous_range_len, is_contiguous_range, singleton_range};
+use pageserver_api::reltag::{RelTag, SlruKind};
+use pageserver_api::shard::ShardIdentity;
+use postgres_ffi::relfile_utils::parse_relfilename;
+use postgres_ffi::{BLCKSZ, pg_constants};
+use remote_storage::RemotePath;
+use tokio::task::JoinSet;
+use tracing::{Instrument, debug, info_span, instrument};
 use utils::bin_ser::BeSer;
 use utils::lsn::Lsn;
 
-use std::collections::HashSet;
-use std::ops::Range;
-
-use super::{
-    importbucket_client::{ControlFile, RemoteStorageWrapper},
-    Timeline,
+use super::Timeline;
+use super::importbucket_client::{ControlFile, RemoteStorageWrapper};
+use crate::assert_u64_eq_usize::UsizeIsU64;
+use crate::context::{DownloadBehavior, RequestContext};
+use crate::pgdatadir_mapping::{
+    DbDirectory, RelDirectory, SlruSegmentDirectory, TwoPhaseDirectory,
 };
-
-use remote_storage::RemotePath;
+use crate::task_mgr::TaskKind;
+use crate::tenant::storage_layer::{ImageLayerWriter, Layer};
 
 pub async fn run(
     timeline: Arc<Timeline>,
@@ -129,22 +115,23 @@ impl Flow {
         }
 
         // Import SLRUs
-
-        // pg_xact (01:00 keyspace)
-        self.import_slru(SlruKind::Clog, &self.storage.pgdata().join("pg_xact"))
+        if self.timeline.tenant_shard_id.is_shard_zero() {
+            // pg_xact (01:00 keyspace)
+            self.import_slru(SlruKind::Clog, &self.storage.pgdata().join("pg_xact"))
+                .await?;
+            // pg_multixact/members (01:01 keyspace)
+            self.import_slru(
+                SlruKind::MultiXactMembers,
+                &self.storage.pgdata().join("pg_multixact/members"),
+            )
             .await?;
-        // pg_multixact/members (01:01 keyspace)
-        self.import_slru(
-            SlruKind::MultiXactMembers,
-            &self.storage.pgdata().join("pg_multixact/members"),
-        )
-        .await?;
-        // pg_multixact/offsets (01:02 keyspace)
-        self.import_slru(
-            SlruKind::MultiXactOffsets,
-            &self.storage.pgdata().join("pg_multixact/offsets"),
-        )
-        .await?;
+            // pg_multixact/offsets (01:02 keyspace)
+            self.import_slru(
+                SlruKind::MultiXactOffsets,
+                &self.storage.pgdata().join("pg_multixact/offsets"),
+            )
+            .await?;
+        }
 
         // Import pg_twophase.
         // TODO: as empty
@@ -302,6 +289,8 @@ impl Flow {
     }
 
     async fn import_slru(&mut self, kind: SlruKind, path: &RemotePath) -> anyhow::Result<()> {
+        assert!(self.timeline.tenant_shard_id.is_shard_zero());
+
         let segments = self.storage.listfilesindir(path).await?;
         let segments: Vec<(String, u32, usize)> = segments
             .into_iter()
@@ -337,7 +326,6 @@ impl Flow {
             debug!(%p, segno=%segno, %size, %start_key, %end_key, "scheduling SLRU segment");
             self.tasks
                 .push(AnyImportTask::SlruBlocks(ImportSlruBlocksTask::new(
-                    *self.timeline.get_shard_identity(),
                     start_key..end_key,
                     &p,
                     self.storage.clone(),
@@ -631,21 +619,14 @@ impl ImportTask for ImportRelBlocksTask {
 }
 
 struct ImportSlruBlocksTask {
-    shard_identity: ShardIdentity,
     key_range: Range<Key>,
     path: RemotePath,
     storage: RemoteStorageWrapper,
 }
 
 impl ImportSlruBlocksTask {
-    fn new(
-        shard_identity: ShardIdentity,
-        key_range: Range<Key>,
-        path: &RemotePath,
-        storage: RemoteStorageWrapper,
-    ) -> Self {
+    fn new(key_range: Range<Key>, path: &RemotePath, storage: RemoteStorageWrapper) -> Self {
         ImportSlruBlocksTask {
-            shard_identity,
             key_range,
             path: path.clone(),
             storage,
@@ -673,17 +654,13 @@ impl ImportTask for ImportSlruBlocksTask {
         let mut file_offset = 0;
         while blknum < end_blk {
             let key = slru_block_to_key(kind, segno, blknum);
-            assert!(
-                !self.shard_identity.is_key_disposable(&key),
-                "SLRU keys need to go into every shard"
-            );
             let buf = &buf[file_offset..(file_offset + 8192)];
             file_offset += 8192;
             layer_writer
                 .put_image(key, Bytes::copy_from_slice(buf), ctx)
                 .await?;
-            blknum += 1;
             nimages += 1;
+            blknum += 1;
         }
         Ok(nimages)
     }

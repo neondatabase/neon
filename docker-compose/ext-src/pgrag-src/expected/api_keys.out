@@ -1,0 +1,49 @@
+-- API key function tests
+SELECT rag.anthropic_set_api_key('test_key');
+ anthropic_set_api_key 
+-----------------------
+ 
+(1 row)
+
+SELECT rag.anthropic_get_api_key();
+ anthropic_get_api_key 
+-----------------------
+ test_key
+(1 row)
+
+SELECT rag.openai_set_api_key('test_key');
+ openai_set_api_key 
+--------------------
+ 
+(1 row)
+
+SELECT rag.openai_get_api_key();
+ openai_get_api_key 
+--------------------
+ test_key
+(1 row)
+
+SELECT rag.fireworks_set_api_key('test_key');
+ fireworks_set_api_key 
+-----------------------
+ 
+(1 row)
+
+SELECT rag.fireworks_get_api_key();
+ fireworks_get_api_key 
+-----------------------
+ test_key
+(1 row)
+
+SELECT rag.voyageai_set_api_key('test_key');
+ voyageai_set_api_key 
+----------------------
+ 
+(1 row)
+
+SELECT rag.voyageai_get_api_key();
+ voyageai_get_api_key 
+----------------------
+ test_key
+(1 row)
+

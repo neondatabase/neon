@@ -20,23 +20,23 @@
 //! This way control file stores information about all potentially existing
 //! remote partial segments and can clean them up after uploading a newer version.
 use camino::Utf8PathBuf;
-use postgres_ffi::{XLogFileName, XLogSegNo, PG_TLI};
+use postgres_ffi::{PG_TLI, XLogFileName, XLogSegNo};
 use remote_storage::RemotePath;
+use safekeeper_api::Term;
 use serde::{Deserialize, Serialize};
-
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
-use utils::{id::NodeId, lsn::Lsn};
+use utils::id::NodeId;
+use utils::lsn::Lsn;
 
-use crate::{
-    metrics::{MISC_OPERATION_SECONDS, PARTIAL_BACKUP_UPLOADED_BYTES, PARTIAL_BACKUP_UPLOADS},
-    rate_limit::{rand_duration, RateLimiter},
-    safekeeper::Term,
-    timeline::WalResidentTimeline,
-    timeline_manager::StateSnapshot,
-    wal_backup::{self},
-    SafeKeeperConf,
+use crate::SafeKeeperConf;
+use crate::metrics::{
+    MISC_OPERATION_SECONDS, PARTIAL_BACKUP_UPLOADED_BYTES, PARTIAL_BACKUP_UPLOADS,
 };
+use crate::rate_limit::{RateLimiter, rand_duration};
+use crate::timeline::WalResidentTimeline;
+use crate::timeline_manager::StateSnapshot;
+use crate::wal_backup::{self};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum UploadStatus {
@@ -535,6 +535,10 @@ pub async fn main_task(
         // limit concurrent uploads
         let _upload_permit = tokio::select! {
             acq = limiter.acquire_partial_backup() => acq,
+            _ = backup.tli.cancel.cancelled() => {
+                info!("timeline canceled");
+                return None;
+            }
             _ = cancel.cancelled() => {
                 info!("task canceled");
                 return None;

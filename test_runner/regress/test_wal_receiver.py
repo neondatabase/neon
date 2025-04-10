@@ -5,11 +5,12 @@ from typing import TYPE_CHECKING
 
 from fixtures.common_types import Lsn, TenantId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
 from fixtures.utils import wait_until
 
 if TYPE_CHECKING:
     from typing import Any
+
+    from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
 
 
 # Checks that pageserver's walreceiver state is printed in the logs during WAL wait timeout.
@@ -33,9 +34,9 @@ def test_pageserver_lsn_wait_error_start(neon_env_builder: NeonEnvBuilder):
     except Exception as e:
         exception_string = str(e)
         assert expected_timeout_error in exception_string, "Should time out during waiting for WAL"
-        assert (
-            "WalReceiver status: Not active" in exception_string
-        ), "Walreceiver should not be active before any data writes"
+        assert "WalReceiver status: Not active" in exception_string, (
+            "Walreceiver should not be active before any data writes"
+        )
 
     insert_test_elements(env, tenant_id, start=0, count=1_000)
     try:
@@ -43,9 +44,9 @@ def test_pageserver_lsn_wait_error_start(neon_env_builder: NeonEnvBuilder):
     except Exception as e:
         exception_string = str(e)
         assert expected_timeout_error in exception_string, "Should time out during waiting for WAL"
-        assert (
-            "WalReceiver status: Not active" not in exception_string
-        ), "Should not be inactive anymore after INSERTs are made"
+        assert "WalReceiver status: Not active" not in exception_string, (
+            "Should not be inactive anymore after INSERTs are made"
+        )
         assert "WalReceiver status" in exception_string, "But still should have some other status"
 
 
@@ -88,16 +89,16 @@ def test_pageserver_lsn_wait_error_safekeeper_stop(neon_env_builder: NeonEnvBuil
             trigger_wait_lsn_timeout(env, tenant_id)
         except Exception as e:
             exception_string = str(e)
-            assert (
-                expected_timeout_error in exception_string
-            ), "Should time out during waiting for WAL"
+            assert expected_timeout_error in exception_string, (
+                "Should time out during waiting for WAL"
+            )
 
             for safekeeper in env.safekeepers:
-                assert (
-                    str(safekeeper.id) in exception_string
-                ), f"Should have safekeeper {safekeeper.id} printed in walreceiver state after WAL wait timeout"
+                assert str(safekeeper.id) in exception_string, (
+                    f"Should have safekeeper {safekeeper.id} printed in walreceiver state after WAL wait timeout"
+                )
 
-    wait_until(60, 0.5, all_sks_in_wareceiver_state)
+    wait_until(all_sks_in_wareceiver_state, timeout=30)
 
     stopped_safekeeper = env.safekeepers[-1]
     stopped_safekeeper_id = stopped_safekeeper.id
@@ -110,21 +111,21 @@ def test_pageserver_lsn_wait_error_safekeeper_stop(neon_env_builder: NeonEnvBuil
         except Exception as e:
             # Strip out the part before stdout, as it contains full command with the list of all safekeepers
             exception_string = str(e).split("stdout", 1)[-1]
-            assert (
-                expected_timeout_error in exception_string
-            ), "Should time out during waiting for WAL"
+            assert expected_timeout_error in exception_string, (
+                "Should time out during waiting for WAL"
+            )
 
             for safekeeper in env.safekeepers:
                 if safekeeper.id == stopped_safekeeper_id:
-                    assert (
-                        str(safekeeper.id) not in exception_string
-                    ), f"Should not have stopped safekeeper {safekeeper.id} printed in walreceiver state after 2nd WAL wait timeout"
+                    assert str(safekeeper.id) not in exception_string, (
+                        f"Should not have stopped safekeeper {safekeeper.id} printed in walreceiver state after 2nd WAL wait timeout"
+                    )
                 else:
-                    assert (
-                        str(safekeeper.id) in exception_string
-                    ), f"Should have safekeeper {safekeeper.id} printed in walreceiver state after 2nd WAL wait timeout"
+                    assert str(safekeeper.id) in exception_string, (
+                        f"Should have safekeeper {safekeeper.id} printed in walreceiver state after 2nd WAL wait timeout"
+                    )
 
-    wait_until(60, 0.5, all_but_stopped_sks_in_wareceiver_state)
+    wait_until(all_but_stopped_sks_in_wareceiver_state, timeout=30)
 
 
 def insert_test_elements(env: NeonEnv, tenant_id: TenantId, start: int, count: int):

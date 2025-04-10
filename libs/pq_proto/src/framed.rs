@@ -10,11 +10,10 @@
 //! calls.
 //!
 //! [Box]: https://docs.rs/futures-util/0.3.26/src/futures_util/lock/bilock.rs.html#107
+use std::future::Future;
+use std::io::{self, ErrorKind};
+
 use bytes::{Buf, BytesMut};
-use std::{
-    future::Future,
-    io::{self, ErrorKind},
-};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 
 use crate::{BeMessage, FeMessage, FeStartupPacket, ProtocolError};
@@ -36,7 +35,7 @@ impl ConnectionError {
     pub fn into_io_error(self) -> io::Error {
         match self {
             ConnectionError::Io(io) => io,
-            ConnectionError::Protocol(pe) => io::Error::new(io::ErrorKind::Other, pe.to_string()),
+            ConnectionError::Protocol(pe) => io::Error::other(pe.to_string()),
         }
     }
 }

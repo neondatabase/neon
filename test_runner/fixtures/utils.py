@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import os
 import re
@@ -9,6 +10,7 @@ import tarfile
 import threading
 import time
 from collections.abc import Callable, Iterable
+from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -17,9 +19,9 @@ from urllib.parse import urlencode
 import allure
 import pytest
 import zstandard
-from psycopg2.extensions import cursor
 from typing_extensions import override
 
+from fixtures.common_types import Id, Lsn
 from fixtures.log_helper import log
 from fixtures.pageserver.common_types import (
     parse_delta_layer,
@@ -30,6 +32,8 @@ from fixtures.pg_version import PgVersion
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from typing import IO
+
+    from psycopg2.extensions import cursor
 
     from fixtures.common_types import TimelineId
     from fixtures.neon_fixtures import PgBin
@@ -49,17 +53,19 @@ COMPONENT_BINARIES = {
 # Disable auto-formatting for better readability
 # fmt: off
 VERSIONS_COMBINATIONS = (
-    {"storage_controller": "new", "storage_broker": "new", "compute": "new", "safekeeper": "new", "pageserver": "new"},
-    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "old", "pageserver": "old"},
-    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "old", "pageserver": "new"},
-    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "new", "pageserver": "new"},
-    {"storage_controller": "old", "storage_broker": "old", "compute": "new", "safekeeper": "new", "pageserver": "new"},
+    {"storage_controller": "new", "storage_broker": "new", "compute": "new", "safekeeper": "new", "pageserver": "new"}, # combination: nnnnn
+    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "old", "pageserver": "old"}, # combination: ooonn
+    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "old", "pageserver": "new"}, # combination: ononn
+    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "new", "pageserver": "new"}, # combination: onnnn
+    {"storage_controller": "old", "storage_broker": "old", "compute": "new", "safekeeper": "new", "pageserver": "new"}, # combination: nnnoo
 )
 # fmt: on
 
 # If the environment variable USE_LFC is set and its value is "false", then LFC is disabled for tests.
 # If it is not set or set to a value not equal to "false", LFC is enabled by default.
 USE_LFC = os.environ.get("USE_LFC") != "false"
+
+WITH_SANITIZERS = os.environ.get("SANITIZERS") == "enabled"
 
 
 def subprocess_capture(
@@ -307,62 +313,48 @@ def allure_attach_from_dir(dir: Path, preserve_database_files: bool = False):
 
 
 GRAFANA_URL = "https://neonprod.grafana.net"
-GRAFANA_EXPLORE_URL = f"{GRAFANA_URL}/explore"
-GRAFANA_TIMELINE_INSPECTOR_DASHBOARD_URL = f"{GRAFANA_URL}/d/8G011dlnk/timeline-inspector"
-LOGS_STAGING_DATASOURCE_ID = "xHHYY0dVz"
+GRAFANA_DASHBOARD_URL = f"{GRAFANA_URL}/d/cdya0okb81zwga/cross-service-endpoint-debugging"
 
 
-def allure_add_grafana_links(host: str, timeline_id: TimelineId, start_ms: int, end_ms: int):
-    """Add links to server logs in Grafana to Allure report"""
-    links: dict[str, str] = {}
-    # We expect host to be in format like ep-divine-night-159320.us-east-2.aws.neon.build
+def allure_add_grafana_link(host: str, timeline_id: TimelineId, start_ms: int, end_ms: int):
+    """
+    Add a link to the cross-service endpoint debugging dashboard in Grafana to Allure report.
+
+    Args:
+        host (str): The host string in the format 'ep-<endpoint_id>.<region_id>.<domain>'.
+        timeline_id (TimelineId): The timeline identifier for the Grafana dashboard.
+            (currently ignored but may be needed in future verions of the dashboard)
+        start_ms (int): The start time in milliseconds for the Grafana dashboard.
+        end_ms (int): The end time in milliseconds for the Grafana dashboard.
+
+    Example:
+        Given
+        host = ''
+        timeline_id = '996926d1f5ddbe7381b8840083f8fc9a'
+
+        The generated link would be something like:
+        https://neonprod.grafana.net/d/cdya0okb81zwga/cross-service-endpoint-debugging?orgId=1&from=2025-02-17T21:10:00.000Z&to=2025-02-17T21:20:00.000Z&timezone=utc&var-env=dev%7Cstaging&var-input_endpoint_id=ep-holy-mouse-w2u462gi
+
+    """
+    # We expect host to be in format like ep-holy-mouse-w2u462gi.us-east-2.aws.neon.build
     endpoint_id, region_id, _ = host.split(".", 2)
+    # Remove "-pooler" suffix if present
+    endpoint_id = endpoint_id.removesuffix("-pooler")
 
-    expressions = {
-        "compute logs": f'{{app="compute-node-{endpoint_id}", neon_region="{region_id}"}}',
-        "k8s events": f'{{job="integrations/kubernetes/eventhandler"}} |~ "name=compute-node-{endpoint_id}-"',
-        "console logs": f'{{neon_service="console", neon_region="{region_id}"}} | json | endpoint_id = "{endpoint_id}"',
-        "proxy logs": f'{{neon_service="proxy-scram", neon_region="{region_id}"}}',
+    params = {
+        "orgId": 1,
+        "from": start_ms,
+        "to": end_ms,
+        "timezone": "utc",
+        "var-env": "dev|staging",
+        "var-input_endpoint_id": endpoint_id,
     }
 
-    params: dict[str, Any] = {
-        "datasource": LOGS_STAGING_DATASOURCE_ID,
-        "queries": [
-            {
-                "expr": "<PUT AN EXPRESSION HERE>",
-                "refId": "A",
-                "datasource": {"type": "loki", "uid": LOGS_STAGING_DATASOURCE_ID},
-                "editorMode": "code",
-                "queryType": "range",
-            }
-        ],
-        "range": {
-            "from": str(start_ms),
-            "to": str(end_ms),
-        },
-    }
-    for name, expr in expressions.items():
-        params["queries"][0]["expr"] = expr
-        query_string = urlencode({"orgId": 1, "left": json.dumps(params)})
-        links[name] = f"{GRAFANA_EXPLORE_URL}?{query_string}"
+    query_string = urlencode(params)
+    link = f"{GRAFANA_DASHBOARD_URL}?{query_string}"
 
-    timeline_qs = urlencode(
-        {
-            "orgId": 1,
-            "var-environment": "victoria-metrics-aws-dev",
-            "var-timeline_id": timeline_id,
-            "var-endpoint_id": endpoint_id,
-            "var-log_datasource": "grafanacloud-neonstaging-logs",
-            "from": start_ms,
-            "to": end_ms,
-        }
-    )
-    link = f"{GRAFANA_TIMELINE_INSPECTOR_DASHBOARD_URL}?{timeline_qs}"
-    links["Timeline Inspector"] = link
-
-    for name, link in links.items():
-        allure.dynamic.link(link, name=name)
-        log.info(f"{name}: {link}")
+    allure.dynamic.link(link, name="Cross-Service Endpoint Debugging")
+    log.info(f"Cross-Service Endpoint Debugging: {link}")
 
 
 def start_in_background(
@@ -380,15 +372,10 @@ def start_in_background(
             if return_code is not None:
                 error = f"expected subprocess to run but it exited with code {return_code}"
             else:
-                attempts = 10
                 try:
-                    wait_until(
-                        number_of_iterations=attempts,
-                        interval=1,
-                        func=is_started,
-                    )
+                    wait_until(is_started, timeout=10)
                 except Exception:
-                    error = f"Failed to get correct status from subprocess in {attempts} attempts"
+                    error = "Failed to get correct status from subprocess"
         except Exception as e:
             error = f"expected subprocess to start but it failed with exception: {e}"
 
@@ -402,28 +389,31 @@ def start_in_background(
 
 
 def wait_until(
-    number_of_iterations: int,
-    interval: float,
     func: Callable[[], WaitUntilRet],
-    show_intermediate_error: bool = False,
+    name: str | None = None,
+    timeout: float = 20.0,  # seconds
+    interval: float = 0.5,  # seconds
+    status_interval: float = 1.0,  # seconds
 ) -> WaitUntilRet:
     """
     Wait until 'func' returns successfully, without exception. Returns the
     last return value from the function.
     """
+    if name is None:
+        name = getattr(func, "__name__", repr(func))
+    deadline = datetime.now() + timedelta(seconds=timeout)
+    next_status = datetime.now()
     last_exception = None
-    for i in range(number_of_iterations):
+    while datetime.now() <= deadline:
         try:
-            res = func()
+            return func()
         except Exception as e:
-            log.info("waiting for %s iteration %s failed: %s", func, i + 1, e)
+            if datetime.now() >= next_status:
+                log.info("waiting for %s: %s", name, e)
+                next_status = datetime.now() + timedelta(seconds=status_interval)
             last_exception = e
-            if show_intermediate_error:
-                log.info(e)
             time.sleep(interval)
-            continue
-        return res
-    raise Exception(f"timed out while waiting for {func}") from last_exception
+    raise Exception(f"timed out while waiting for {name}") from last_exception
 
 
 def assert_eq(a, b) -> None:
@@ -523,7 +513,9 @@ def assert_no_errors(log_file: Path, service: str, allowed_errors: list[str]):
     for _lineno, error in errors:
         log.info(f"not allowed {service} error: {error.strip()}")
 
-    assert not errors, f"First log error on {service}: {errors[0]}\nHint: use scripts/check_allowed_errors.sh to test any new allowed_error you add"
+    assert not errors, (
+        f"First log error on {service}: {errors[0]}\nHint: use scripts/check_allowed_errors.sh to test any new allowed_error you add"
+    )
 
 
 def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: set[str]):
@@ -561,18 +553,18 @@ def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: set[str
 
     left_list, right_list = map(build_hash_list, [left, right])
 
-    assert len(left_list) == len(
-        right_list
-    ), f"unexpected number of files on tar files, {len(left_list)} != {len(right_list)}"
+    assert len(left_list) == len(right_list), (
+        f"unexpected number of files on tar files, {len(left_list)} != {len(right_list)}"
+    )
 
     mismatching: set[str] = set()
 
     for left_tuple, right_tuple in zip(left_list, right_list, strict=False):
         left_path, left_hash = left_tuple
         right_path, right_hash = right_tuple
-        assert (
-            left_path == right_path
-        ), f"file count matched, expected these to be same paths: {left_path}, {right_path}"
+        assert left_path == right_path, (
+            f"file count matched, expected these to be same paths: {left_path}, {right_path}"
+        )
         if left_hash != right_hash:
             mismatching.add(left_path)
 
@@ -604,6 +596,22 @@ class PropagatingThread(threading.Thread):
         if self.exc:
             raise self.exc
         return self.ret
+
+
+class EnhancedJSONEncoder(json.JSONEncoder):
+    """
+    Default json.JSONEncoder works only on primitive builtins. Extend it to any
+    dataclass plus our custom types.
+    """
+
+    def default(self, o):
+        if dataclasses.is_dataclass(o) and not isinstance(o, type):
+            return dataclasses.asdict(o)
+        elif isinstance(o, Id):
+            return o.id.hex()
+        elif isinstance(o, Lsn):
+            return str(o)  # standard hex notation
+        return super().default(o)
 
 
 def human_bytes(amt: float) -> str:
@@ -716,3 +724,20 @@ def skip_on_ci(reason: str):
         os.getenv("CI", "false") == "true",
         reason=reason,
     )
+
+
+def shared_buffers_for_max_cu(max_cu: float) -> str:
+    """
+    Returns the string value of shared_buffers for the given max CU.
+    Use shared_buffers size like in production for max CU compute.
+    See https://github.com/neondatabase/cloud/blob/877e33b4289a471b8f0a35c84009846358f3e5a3/goapp/controlplane/internal/pkg/compute/computespec/pg_settings.go#L405
+
+    e.g. // 2 CU: 225mb; 4 CU: 450mb; 8 CU: 900mb
+    """
+    ramBytes = int(4096 * max_cu * 1024 * 1024)
+    maxConnections = max(100, min(int(ramBytes / 9531392), 4000))
+    maxWorkerProcesses = 12 + int(max_cu * 2)
+    maxBackends = 1 + maxConnections + maxWorkerProcesses
+    sharedBuffersMb = int(max(128, (1023 + maxBackends * 256) / 1024))
+    sharedBuffers = int(sharedBuffersMb * 1024 / 8)
+    return str(sharedBuffers)

@@ -1,25 +1,23 @@
-use anyhow::Context;
-use camino::Utf8PathBuf;
-use pageserver_api::key::Key;
-use pageserver_api::keyspace::KeySpaceAccum;
-use pageserver_api::models::PagestreamGetPageRequest;
-
-use pageserver_api::shard::TenantShardId;
-use tokio_util::sync::CancellationToken;
-use utils::id::TenantTimelineId;
-use utils::lsn::Lsn;
-
-use rand::prelude::*;
-use tokio::task::JoinSet;
-use tracing::info;
-
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use anyhow::Context;
+use camino::Utf8PathBuf;
+use pageserver_api::key::Key;
+use pageserver_api::keyspace::KeySpaceAccum;
+use pageserver_api::models::{PagestreamGetPageRequest, PagestreamRequest};
+use pageserver_api::shard::TenantShardId;
+use rand::prelude::*;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
+use tracing::info;
+use utils::id::TenantTimelineId;
+use utils::lsn::Lsn;
 
 use crate::util::tokio_thread_local_stats::AllThreadLocalStats;
 use crate::util::{request_stats, tokio_thread_local_stats};
@@ -62,6 +60,10 @@ pub(crate) struct Args {
     /// Before starting the benchmark, live-reconfigure the pageserver to use specified io mode (buffered vs. direct).
     #[clap(long)]
     set_io_mode: Option<pageserver_api::models::virtual_file::IoMode>,
+
+    /// Queue depth generated in each client.
+    #[clap(long, default_value = "1")]
+    queue_depth: NonZeroUsize,
 
     targets: Option<Vec<TenantTimelineId>>,
 }
@@ -121,6 +123,7 @@ async fn main_impl(
     let args: &'static Args = Box::leak(Box::new(args));
 
     let mgmt_api_client = Arc::new(pageserver_client::mgmt_api::Client::new(
+        reqwest::Client::new(), // TODO: support ssl_ca_file for https APIs in pagebench.
         args.mgmt_api_endpoint.clone(),
         args.pageserver_jwt.as_deref(),
     ));
@@ -298,6 +301,7 @@ async fn main_impl(
             start_work_barrier.wait().await;
             let client_start = Instant::now();
             let mut ticks_processed = 0;
+            let mut inflight = VecDeque::new();
             while !cancel.is_cancelled() {
                 // Detect if a request took longer than the RPS rate
                 if let Some(period) = &rps_period {
@@ -311,28 +315,37 @@ async fn main_impl(
                     ticks_processed = periods_passed_until_now;
                 }
 
-                let start = Instant::now();
-                let req = {
-                    let mut rng = rand::thread_rng();
-                    let r = &ranges[weights.sample(&mut rng)];
-                    let key: i128 = rng.gen_range(r.start..r.end);
-                    let key = Key::from_i128(key);
-                    assert!(key.is_rel_block_key());
-                    let (rel_tag, block_no) = key
-                        .to_rel_block()
-                        .expect("we filter non-rel-block keys out above");
-                    PagestreamGetPageRequest {
-                        request_lsn: if rng.gen_bool(args.req_latest_probability) {
-                            Lsn::MAX
-                        } else {
-                            r.timeline_lsn
-                        },
-                        not_modified_since: r.timeline_lsn,
-                        rel: rel_tag,
-                        blkno: block_no,
-                    }
-                };
-                client.getpage(req).await.unwrap();
+                while inflight.len() < args.queue_depth.get() {
+                    let start = Instant::now();
+                    let req = {
+                        let mut rng = rand::thread_rng();
+                        let r = &ranges[weights.sample(&mut rng)];
+                        let key: i128 = rng.gen_range(r.start..r.end);
+                        let key = Key::from_i128(key);
+                        assert!(key.is_rel_block_key());
+                        let (rel_tag, block_no) = key
+                            .to_rel_block()
+                            .expect("we filter non-rel-block keys out above");
+                        PagestreamGetPageRequest {
+                            hdr: PagestreamRequest {
+                                reqid: 0,
+                                request_lsn: if rng.gen_bool(args.req_latest_probability) {
+                                    Lsn::MAX
+                                } else {
+                                    r.timeline_lsn
+                                },
+                                not_modified_since: r.timeline_lsn,
+                            },
+                            rel: rel_tag,
+                            blkno: block_no,
+                        }
+                    };
+                    client.getpage_send(req).await.unwrap();
+                    inflight.push_back(start);
+                }
+
+                let start = inflight.pop_front().unwrap();
+                client.getpage_recv().await.unwrap();
                 let end = Instant::now();
                 live_stats.request_done();
                 ticks_processed += 1;

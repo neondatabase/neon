@@ -1,29 +1,29 @@
-use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, PostgresCodec};
-use crate::config::{self, AuthKeys, Config, ReplicationMode};
-use crate::connect_tls::connect_tls;
-use crate::maybe_tls_stream::MaybeTlsStream;
-use crate::tls::{TlsConnect, TlsStream};
-use crate::{Client, Connection, Error};
-use bytes::BytesMut;
-use fallible_iterator::FallibleIterator;
-use futures_util::{ready, Sink, SinkExt, Stream, TryStreamExt};
-use postgres_protocol2::authentication;
-use postgres_protocol2::authentication::sasl;
-use postgres_protocol2::authentication::sasl::ScramSha256;
-use postgres_protocol2::message::backend::{AuthenticationSaslBody, Message};
-use postgres_protocol2::message::frontend;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+
+use bytes::BytesMut;
+use fallible_iterator::FallibleIterator;
+use futures_util::{Sink, SinkExt, Stream, TryStreamExt, ready};
+use postgres_protocol2::authentication::sasl;
+use postgres_protocol2::authentication::sasl::ScramSha256;
+use postgres_protocol2::message::backend::{AuthenticationSaslBody, Message, NoticeResponseBody};
+use postgres_protocol2::message::frontend;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::mpsc;
 use tokio_util::codec::Framed;
+
+use crate::Error;
+use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, PostgresCodec};
+use crate::config::{self, AuthKeys, Config};
+use crate::connect_tls::connect_tls;
+use crate::maybe_tls_stream::MaybeTlsStream;
+use crate::tls::{TlsConnect, TlsStream};
 
 pub struct StartupStream<S, T> {
     inner: Framed<MaybeTlsStream<S, T>, PostgresCodec>,
     buf: BackendMessages,
-    delayed: VecDeque<BackendMessage>,
+    delayed_notice: Vec<NoticeResponseBody>,
 }
 
 impl<S, T> Sink<FrontendMessage> for StartupStream<S, T>
@@ -78,11 +78,19 @@ where
     }
 }
 
+pub struct RawConnection<S, T> {
+    pub stream: Framed<MaybeTlsStream<S, T>, PostgresCodec>,
+    pub parameters: HashMap<String, String>,
+    pub delayed_notice: Vec<NoticeResponseBody>,
+    pub process_id: i32,
+    pub secret_key: i32,
+}
+
 pub async fn connect_raw<S, T>(
     stream: S,
     tls: T,
     config: &Config,
-) -> Result<(Client, Connection<S, T::Stream>), Error>
+) -> Result<RawConnection<S, T::Stream>, Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsConnect<S>,
@@ -90,25 +98,22 @@ where
     let stream = connect_tls(stream, config.ssl_mode, tls).await?;
 
     let mut stream = StartupStream {
-        inner: Framed::new(
-            stream,
-            PostgresCodec {
-                max_message_size: config.max_backend_message_size,
-            },
-        ),
+        inner: Framed::new(stream, PostgresCodec),
         buf: BackendMessages::empty(),
-        delayed: VecDeque::new(),
+        delayed_notice: Vec::new(),
     };
 
     startup(&mut stream, config).await?;
     authenticate(&mut stream, config).await?;
     let (process_id, secret_key, parameters) = read_info(&mut stream).await?;
 
-    let (sender, receiver) = mpsc::unbounded_channel();
-    let client = Client::new(sender, config.ssl_mode, process_id, secret_key);
-    let connection = Connection::new(stream.inner, stream.delayed, parameters, receiver);
-
-    Ok((client, connection))
+    Ok(RawConnection {
+        stream: stream.inner,
+        parameters,
+        delayed_notice: stream.delayed_notice,
+        process_id,
+        secret_key,
+    })
 }
 
 async fn startup<S, T>(stream: &mut StartupStream<S, T>, config: &Config) -> Result<(), Error>
@@ -116,28 +121,8 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut params = vec![("client_encoding", "UTF8")];
-    if let Some(user) = &config.user {
-        params.push(("user", &**user));
-    }
-    if let Some(dbname) = &config.dbname {
-        params.push(("database", &**dbname));
-    }
-    if let Some(options) = &config.options {
-        params.push(("options", &**options));
-    }
-    if let Some(application_name) = &config.application_name {
-        params.push(("application_name", &**application_name));
-    }
-    if let Some(replication_mode) = &config.replication_mode {
-        match replication_mode {
-            ReplicationMode::Physical => params.push(("replication", "true")),
-            ReplicationMode::Logical => params.push(("replication", "database")),
-        }
-    }
-
     let mut buf = BytesMut::new();
-    frontend::startup_message(params, &mut buf).map_err(Error::encode)?;
+    frontend::startup_message(&config.server_params, &mut buf).map_err(Error::encode)?;
 
     stream
         .send(FrontendMessage::Raw(buf.freeze()))
@@ -165,31 +150,17 @@ where
 
             authenticate_password(stream, pass).await?;
         }
-        Some(Message::AuthenticationMd5Password(body)) => {
-            can_skip_channel_binding(config)?;
-
-            let user = config
-                .user
-                .as_ref()
-                .ok_or_else(|| Error::config("user missing".into()))?;
-            let pass = config
-                .password
-                .as_ref()
-                .ok_or_else(|| Error::config("password missing".into()))?;
-
-            let output = authentication::md5_hash(user.as_bytes(), pass, body.salt());
-            authenticate_password(stream, output.as_bytes()).await?;
-        }
         Some(Message::AuthenticationSasl(body)) => {
             authenticate_sasl(stream, body, config).await?;
         }
-        Some(Message::AuthenticationKerberosV5)
+        Some(Message::AuthenticationMd5Password)
+        | Some(Message::AuthenticationKerberosV5)
         | Some(Message::AuthenticationScmCredential)
         | Some(Message::AuthenticationGss)
         | Some(Message::AuthenticationSspi) => {
             return Err(Error::authentication(
                 "unsupported authentication method".into(),
-            ))
+            ));
         }
         Some(Message::ErrorResponse(body)) => return Err(Error::db(body)),
         Some(_) => return Err(Error::unexpected_message()),
@@ -347,9 +318,7 @@ where
                     body.value().map_err(Error::parse)?.to_string(),
                 );
             }
-            Some(msg @ Message::NoticeResponse(_)) => {
-                stream.delayed.push_back(BackendMessage::Async(msg))
-            }
+            Some(Message::NoticeResponse(body)) => stream.delayed_notice.push(body),
             Some(Message::ReadyForQuery(_)) => return Ok((process_id, secret_key, parameters)),
             Some(Message::ErrorResponse(body)) => return Err(Error::db(body)),
             Some(_) => return Err(Error::unexpected_message()),

@@ -1,8 +1,10 @@
+use std::io;
+
 use thiserror::Error;
 
 use crate::control_plane::client::ApiLockError;
 use crate::control_plane::messages::{self, ControlPlaneErrorMessage, Reason};
-use crate::error::{io_error, ErrorKind, ReportableError, UserFacingError};
+use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::proxy::retry::CouldRetry;
 
 /// A go-to error message which doesn't leak any detail.
@@ -79,13 +81,13 @@ impl CouldRetry for ControlPlaneError {
 
 impl From<reqwest::Error> for ControlPlaneError {
     fn from(e: reqwest::Error) -> Self {
-        io_error(e).into()
+        io::Error::other(e).into()
     }
 }
 
 impl From<reqwest_middleware::Error> for ControlPlaneError {
     fn from(e: reqwest_middleware::Error) -> Self {
-        io_error(e).into()
+        io::Error::other(e).into()
     }
 }
 

@@ -13,9 +13,6 @@
  *        accumulate changes. On subtransaction commit, the top of the stack
  *        is merged with the table below it.
  *
- * IDENTIFICATION
- *	 contrib/neon/control_plane_connector.c
- *
  *-------------------------------------------------------------------------
  */
 
@@ -428,6 +425,8 @@ MergeTable()
 		hash_seq_init(&status, old_table->role_table);
 		while ((entry = hash_seq_search(&status)) != NULL)
 		{
+			RoleEntry * old;
+			bool found_old = false;
 			RoleEntry  *to_write = hash_search(
 											   CurrentDdlTable->role_table,
 											   entry->name,
@@ -435,30 +434,23 @@ MergeTable()
 											   NULL);
 
 			to_write->type = entry->type;
-			if (entry->password)
-				to_write->password = entry->password;
+			to_write->password = entry->password;
 			strlcpy(to_write->old_name, entry->old_name, NAMEDATALEN);
-			if (entry->old_name[0] != '\0')
-			{
-				bool		found_old = false;
-				RoleEntry  *old = hash_search(
-											  CurrentDdlTable->role_table,
-											  entry->old_name,
-											  HASH_FIND,
-											  &found_old);
+			if (entry->old_name[0] == '\0')
+				continue;
 
-				if (found_old)
-				{
-					if (old->old_name[0] != '\0')
-						strlcpy(to_write->old_name, old->old_name, NAMEDATALEN);
-					else
-						strlcpy(to_write->old_name, entry->old_name, NAMEDATALEN);
-					hash_search(CurrentDdlTable->role_table,
-								entry->old_name,
-								HASH_REMOVE,
-								NULL);
-				}
-			}
+			old = hash_search(
+							  CurrentDdlTable->role_table,
+							  entry->old_name,
+							  HASH_FIND,
+							  &found_old);
+			if (!found_old)
+				continue;
+			strlcpy(to_write->old_name, old->old_name, NAMEDATALEN);
+			hash_search(CurrentDdlTable->role_table,
+						entry->old_name,
+						HASH_REMOVE,
+						NULL);
 		}
 		hash_destroy(old_table->role_table);
 	}

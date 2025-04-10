@@ -1,38 +1,35 @@
 //! This module implements pulling WAL from peer safekeepers if compute can't
 //! provide it, i.e. safekeeper lags too much.
 
+use std::fmt;
+use std::pin::pin;
 use std::time::SystemTime;
-use std::{fmt, pin::pin};
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use futures::StreamExt;
 use postgres_protocol::message::backend::ReplicationMessage;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
-use tokio::time::timeout;
-use tokio::{
-    select,
-    time::sleep,
-    time::{self, Duration},
-};
+use safekeeper_api::Term;
+use safekeeper_api::membership::INVALID_GENERATION;
+use safekeeper_api::models::{PeerInfo, TimelineStatus};
+use tokio::select;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
+use tokio::time::{self, Duration, sleep, timeout};
 use tokio_postgres::replication::ReplicationStream;
 use tokio_postgres::types::PgLsn;
 use tracing::*;
-use utils::postgres_client::{ConnectionConfigArgs, PostgresClientProtocol};
-use utils::{id::NodeId, lsn::Lsn, postgres_client::wal_stream_connection_config};
-
-use crate::receive_wal::{WalAcceptor, REPLY_QUEUE_SIZE};
-use crate::safekeeper::{AppendRequest, AppendRequestHeader};
-use crate::timeline::WalResidentTimeline;
-use crate::{
-    http::routes::TimelineStatus,
-    receive_wal::MSG_QUEUE_SIZE,
-    safekeeper::{
-        AcceptorProposerMessage, ProposerAcceptorMessage, ProposerElected, Term, TermHistory,
-        TermLsn, VoteRequest,
-    },
-    timeline::PeerInfo,
-    SafeKeeperConf,
+use utils::id::NodeId;
+use utils::lsn::Lsn;
+use utils::postgres_client::{
+    ConnectionConfigArgs, PostgresClientProtocol, wal_stream_connection_config,
 };
+
+use crate::SafeKeeperConf;
+use crate::receive_wal::{MSG_QUEUE_SIZE, REPLY_QUEUE_SIZE, WalAcceptor};
+use crate::safekeeper::{
+    AcceptorProposerMessage, AppendRequest, AppendRequestHeader, ProposerAcceptorMessage,
+    ProposerElected, TermHistory, TermLsn, VoteRequest,
+};
+use crate::timeline::WalResidentTimeline;
 
 /// Entrypoint for per timeline task which always runs, checking whether
 /// recovery for this safekeeper is needed and starting it if so.
@@ -179,6 +176,7 @@ pub struct Donor {
     pub flush_lsn: Lsn,
     pub pg_connstr: String,
     pub http_connstr: String,
+    pub https_connstr: Option<String>,
 }
 
 impl From<&PeerInfo> for Donor {
@@ -189,6 +187,7 @@ impl From<&PeerInfo> for Donor {
             flush_lsn: p.flush_lsn,
             pg_connstr: p.pg_connstr.clone(),
             http_connstr: p.http_connstr.clone(),
+            https_connstr: p.https_connstr.clone(),
         }
     }
 }
@@ -239,11 +238,33 @@ async fn recover(
     conf: &SafeKeeperConf,
 ) -> anyhow::Result<String> {
     // Learn donor term switch history to figure out starting point.
-    let client = reqwest::Client::new();
+
+    let mut client = reqwest::Client::builder();
+    for cert in &conf.ssl_ca_certs {
+        client = client.add_root_certificate(cert.clone());
+    }
+    let client = client
+        .build()
+        .context("Failed to build http client for recover")?;
+
+    let url = if conf.use_https_safekeeper_api {
+        if let Some(https_connstr) = donor.https_connstr.as_ref() {
+            format!("https://{https_connstr}")
+        } else {
+            anyhow::bail!(
+                "cannot recover from donor {}: \
+                https is enabled, but https_connstr is not specified",
+                donor.sk_id
+            );
+        }
+    } else {
+        format!("http://{}", donor.http_connstr)
+    };
+
     let timeline_info: TimelineStatus = client
         .get(format!(
-            "http://{}/v1/tenant/{}/timeline/{}",
-            donor.http_connstr, tli.ttid.tenant_id, tli.ttid.timeline_id
+            "{}/v1/tenant/{}/timeline/{}",
+            url, tli.ttid.tenant_id, tli.ttid.timeline_id
         ))
         .send()
         .await?
@@ -267,7 +288,10 @@ async fn recover(
     );
 
     // Now understand our term history.
-    let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest { term: donor.term });
+    let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest {
+        generation: INVALID_GENERATION,
+        term: donor.term,
+    });
     let vote_response = match tli
         .process_msg(&vote_request)
         .await
@@ -302,10 +326,10 @@ async fn recover(
 
     // truncate WAL locally
     let pe = ProposerAcceptorMessage::Elected(ProposerElected {
+        generation: INVALID_GENERATION,
         term: donor.term,
         start_streaming_at: last_common_point.lsn,
         term_history: donor_th,
-        timeline_start_lsn: Lsn::INVALID,
     });
     // Successful ProposerElected handling always returns None. If term changed,
     // we'll find out that during the streaming. Note: it is expected to get
@@ -343,12 +367,17 @@ async fn recovery_stream(
     cfg.replication_mode(tokio_postgres::config::ReplicationMode::Physical);
 
     let connect_timeout = Duration::from_millis(10000);
-    let (client, connection) = match time::timeout(connect_timeout, cfg.connect(postgres::NoTls))
-        .await
+    let (client, connection) = match time::timeout(
+        connect_timeout,
+        cfg.connect(tokio_postgres::NoTls),
+    )
+    .await
     {
         Ok(client_and_conn) => client_and_conn?,
         Err(_elapsed) => {
-            bail!("timed out while waiting {connect_timeout:?} for connection to peer safekeeper to open");
+            bail!(
+                "timed out while waiting {connect_timeout:?} for connection to peer safekeeper to open"
+            );
         }
     };
     trace!("connected to {:?}", donor);
@@ -434,13 +463,12 @@ async fn network_io(
         match msg {
             ReplicationMessage::XLogData(xlog_data) => {
                 let ar_hdr = AppendRequestHeader {
+                    generation: INVALID_GENERATION,
                     term: donor.term,
-                    term_start_lsn: Lsn::INVALID, // unused
                     begin_lsn: Lsn(xlog_data.wal_start()),
                     end_lsn: Lsn(xlog_data.wal_start()) + xlog_data.data().len() as u64,
                     commit_lsn: Lsn::INVALID, // do not attempt to advance, peer communication anyway does it
                     truncate_lsn: Lsn::INVALID, // do not attempt to advance
-                    proposer_uuid: [0; 16],
                 };
                 let ar = AppendRequest {
                     h: ar_hdr,

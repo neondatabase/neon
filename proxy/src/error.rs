@@ -1,14 +1,8 @@
-use std::error::Error as StdError;
-use std::{fmt, io};
+use std::fmt;
 
 use anyhow::Context;
 use measured::FixedCardinalityLabel;
 use tokio::task::JoinError;
-
-/// Upcast (almost) any error into an opaque [`io::Error`].
-pub(crate) fn io_error(e: impl Into<Box<dyn StdError + Send + Sync>>) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, e)
-}
 
 /// Marks errors that may be safely shown to a client.
 /// This trait can be seen as a specialized version of [`ToString`].
@@ -84,7 +78,7 @@ pub(crate) trait ReportableError: fmt::Display + Send + 'static {
     fn get_error_kind(&self) -> ErrorKind;
 }
 
-impl ReportableError for tokio_postgres::error::Error {
+impl ReportableError for postgres_client::error::Error {
     fn get_error_kind(&self) -> ErrorKind {
         if self.as_db_error().is_some() {
             ErrorKind::Postgres

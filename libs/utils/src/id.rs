@@ -1,5 +1,6 @@
+use std::fmt;
 use std::num::ParseIntError;
-use std::{fmt, str::FromStr};
+use std::str::FromStr;
 
 use anyhow::Context;
 use hex::FromHex;
@@ -215,7 +216,7 @@ macro_rules! id_newtype {
 
         impl AsRef<[u8]> for $t {
             fn as_ref(&self) -> &[u8] {
-                &self.0 .0
+                &self.0.0
             }
         }
 
@@ -367,9 +368,8 @@ impl FromStr for NodeId {
 mod tests {
     use serde_assert::{Deserializer, Serializer, Token, Tokens};
 
-    use crate::bin_ser::BeSer;
-
     use super::*;
+    use crate::bin_ser::BeSer;
 
     #[test]
     fn test_id_serde_non_human_readable() {

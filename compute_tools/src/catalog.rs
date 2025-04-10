@@ -1,18 +1,20 @@
+use std::path::Path;
+use std::process::Stdio;
+use std::result::Result;
+use std::sync::Arc;
+
+use compute_api::responses::CatalogObjects;
 use futures::Stream;
 use postgres::NoTls;
-use std::{path::Path, process::Stdio, result::Result, sync::Arc};
-use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    process::Command,
-    spawn,
-};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
+use tokio::spawn;
 use tokio_stream::{self as stream, StreamExt};
 use tokio_util::codec::{BytesCodec, FramedRead};
 use tracing::warn;
 
 use crate::compute::ComputeNode;
 use crate::pg_helpers::{get_existing_dbs_async, get_existing_roles_async, postgres_conf_for_db};
-use compute_api::responses::CatalogObjects;
 
 pub async fn get_dbs_and_roles(compute: &Arc<ComputeNode>) -> anyhow::Result<CatalogObjects> {
     let conf = compute.get_tokio_conn_conf(Some("compute_ctl:get_dbs_and_roles"));
@@ -36,11 +38,11 @@ pub async fn get_dbs_and_roles(compute: &Arc<ComputeNode>) -> anyhow::Result<Cat
 
 #[derive(Debug, thiserror::Error)]
 pub enum SchemaDumpError {
-    #[error("Database does not exist.")]
+    #[error("database does not exist")]
     DatabaseDoesNotExist,
-    #[error("Failed to execute pg_dump.")]
+    #[error("failed to execute pg_dump")]
     IO(#[from] std::io::Error),
-    #[error("Unexpected error.")]
+    #[error("unexpected I/O error")]
     Unexpected,
 }
 
@@ -55,15 +57,15 @@ pub enum SchemaDumpError {
 pub async fn get_database_schema(
     compute: &Arc<ComputeNode>,
     dbname: &str,
-) -> Result<impl Stream<Item = Result<bytes::Bytes, std::io::Error>>, SchemaDumpError> {
-    let pgbin = &compute.pgbin;
+) -> Result<impl Stream<Item = Result<bytes::Bytes, std::io::Error>> + use<>, SchemaDumpError> {
+    let pgbin = &compute.params.pgbin;
     let basepath = Path::new(pgbin).parent().unwrap();
     let pgdump = basepath.join("pg_dump");
 
     // Replace the DB in the connection string and disable it to parts.
     // This is the only option to handle DBs with special characters.
-    let conf =
-        postgres_conf_for_db(&compute.connstr, dbname).map_err(|_| SchemaDumpError::Unexpected)?;
+    let conf = postgres_conf_for_db(&compute.params.connstr, dbname)
+        .map_err(|_| SchemaDumpError::Unexpected)?;
     let host = conf
         .get_hosts()
         .first()
@@ -96,13 +98,15 @@ pub async fn get_database_schema(
         .kill_on_drop(true)
         .spawn()?;
 
-    let stdout = cmd.stdout.take().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::Other, "Failed to capture stdout.")
-    })?;
+    let stdout = cmd
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("Failed to capture stdout."))?;
 
-    let stderr = cmd.stderr.take().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::Other, "Failed to capture stderr.")
-    })?;
+    let stderr = cmd
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("Failed to capture stderr."))?;
 
     let mut stdout_reader = FramedRead::new(stdout, BytesCodec::new());
     let stderr_reader = BufReader::new(stderr);
@@ -126,8 +130,7 @@ pub async fn get_database_schema(
                 }
             });
 
-            return Err(SchemaDumpError::IO(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(SchemaDumpError::IO(std::io::Error::other(
                 "failed to start pg_dump",
             )));
         }
@@ -140,5 +143,34 @@ pub async fn get_database_schema(
             warn!("pg_dump stderr: {}", line)
         }
     });
-    Ok(initial_stream.chain(stdout_reader.map(|res| res.map(|b| b.freeze()))))
+
+    #[allow(dead_code)]
+    struct SchemaStream<S> {
+        // We keep a reference to the child process to ensure it stays alive
+        // while the stream is being consumed. When SchemaStream is dropped,
+        // cmd will be dropped, which triggers kill_on_drop and terminates pg_dump
+        cmd: tokio::process::Child,
+        stream: S,
+    }
+
+    impl<S> Stream for SchemaStream<S>
+    where
+        S: Stream<Item = Result<bytes::Bytes, std::io::Error>> + Unpin,
+    {
+        type Item = Result<bytes::Bytes, std::io::Error>;
+
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            Stream::poll_next(std::pin::Pin::new(&mut self.stream), cx)
+        }
+    }
+
+    let schema_stream = SchemaStream {
+        cmd,
+        stream: initial_stream.chain(stdout_reader.map(|res| res.map(|b| b.freeze()))),
+    };
+
+    Ok(schema_stream)
 }

@@ -13,9 +13,11 @@
 
 #![warn(missing_docs)]
 
-use bincode::Options;
-use serde::{de::DeserializeOwned, Serialize};
 use std::io::{self, Read, Write};
+
+use bincode::Options;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 /// An error that occurred during a deserialize operation
@@ -261,9 +263,11 @@ impl<T> LeSer for T {}
 
 #[cfg(test)]
 mod tests {
-    use super::DeserializeError;
-    use serde::{Deserialize, Serialize};
     use std::io::Cursor;
+
+    use serde::{Deserialize, Serialize};
+
+    use super::DeserializeError;
 
     #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct ShortStruct {
@@ -285,6 +289,11 @@ mod tests {
     const SHORT2_ENC_BE_TRAILING: &[u8] = &[8, 7, 3, 0, 0, 0xff, 0xff, 0xff];
     const SHORT2_ENC_LE: &[u8] = &[8, 0, 0, 3, 7];
     const SHORT2_ENC_LE_TRAILING: &[u8] = &[8, 0, 0, 3, 7, 0xff, 0xff, 0xff];
+
+    #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+    struct NewTypeStruct(u32);
+    const NT1: NewTypeStruct = NewTypeStruct(414243);
+    const NT1_INNER: u32 = 414243;
 
     #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct LongMsg {
@@ -406,6 +415,44 @@ mod tests {
         assert_eq!(encoded, expected);
 
         let msg2 = LongMsg::des(&encoded).unwrap();
+        assert_eq!(msg, msg2);
+    }
+
+    #[test]
+    /// Ensure that newtype wrappers around u32 don't change the serialization format
+    fn be_nt() {
+        use super::BeSer;
+
+        assert_eq!(NT1.serialized_size().unwrap(), 4);
+
+        let msg = NT1;
+
+        let encoded = msg.ser().unwrap();
+        let expected = hex_literal::hex!("0006 5223");
+        assert_eq!(encoded, expected);
+
+        assert_eq!(encoded, NT1_INNER.ser().unwrap());
+
+        let msg2 = NewTypeStruct::des(&encoded).unwrap();
+        assert_eq!(msg, msg2);
+    }
+
+    #[test]
+    /// Ensure that newtype wrappers around u32 don't change the serialization format
+    fn le_nt() {
+        use super::LeSer;
+
+        assert_eq!(NT1.serialized_size().unwrap(), 4);
+
+        let msg = NT1;
+
+        let encoded = msg.ser().unwrap();
+        let expected = hex_literal::hex!("2352 0600");
+        assert_eq!(encoded, expected);
+
+        assert_eq!(encoded, NT1_INNER.ser().unwrap());
+
+        let msg2 = NewTypeStruct::des(&encoded).unwrap();
         assert_eq!(msg, msg2);
     }
 }

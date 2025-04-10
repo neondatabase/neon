@@ -1,10 +1,9 @@
-use anyhow::Context;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering as AtomicOrdering};
 
+use anyhow::Context;
 use once_cell::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 use utils::lsn::Lsn;
-
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering as AtomicOrdering};
 
 /// Internal structure to hold all data needed for logical size calculation.
 ///

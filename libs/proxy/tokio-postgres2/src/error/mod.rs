@@ -1,10 +1,10 @@
 //! Errors.
 
+use std::error::{self, Error as _Error};
+use std::{fmt, io};
+
 use fallible_iterator::FallibleIterator;
 use postgres_protocol2::message::backend::{ErrorFields, ErrorResponseBody};
-use std::error::{self, Error as _Error};
-use std::fmt;
-use std::io;
 
 pub use self::sqlstate::*;
 
@@ -349,7 +349,6 @@ enum Kind {
     Parse,
     Encode,
     Authentication,
-    ConfigParse,
     Config,
     Connect,
     Timeout,
@@ -386,7 +385,6 @@ impl fmt::Display for Error {
             Kind::Parse => fmt.write_str("error parsing response from server")?,
             Kind::Encode => fmt.write_str("error encoding message to server")?,
             Kind::Authentication => fmt.write_str("authentication error")?,
-            Kind::ConfigParse => fmt.write_str("invalid connection string")?,
             Kind::Config => fmt.write_str("invalid configuration")?,
             Kind::Connect => fmt.write_str("error connecting to server")?,
             Kind::Timeout => fmt.write_str("timeout waiting for server")?,
@@ -480,10 +478,6 @@ impl Error {
 
     pub(crate) fn authentication(e: Box<dyn error::Error + Sync + Send>) -> Error {
         Error::new(Kind::Authentication, Some(e))
-    }
-
-    pub(crate) fn config_parse(e: Box<dyn error::Error + Sync + Send>) -> Error {
-        Error::new(Kind::ConfigParse, Some(e))
     }
 
     pub(crate) fn config(e: Box<dyn error::Error + Sync + Send>) -> Error {

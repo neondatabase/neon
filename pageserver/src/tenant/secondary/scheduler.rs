@@ -1,18 +1,17 @@
-use futures::Future;
-use rand::Rng;
-use std::{
-    collections::HashMap,
-    marker::PhantomData,
-    pin::Pin,
-    time::{Duration, Instant},
-};
+use std::collections::HashMap;
+use std::marker::PhantomData;
+use std::pin::Pin;
+use std::time::{Duration, Instant};
 
+use futures::Future;
 use pageserver_api::shard::TenantShardId;
+use rand::Rng;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use utils::{completion::Barrier, yielding_loop::yielding_loop};
+use utils::completion::Barrier;
+use utils::yielding_loop::yielding_loop;
 
-use super::{CommandRequest, CommandResponse};
+use super::{CommandRequest, CommandResponse, SecondaryTenantError};
 
 /// Scheduling interval is the time between calls to JobGenerator::schedule.
 /// When we schedule jobs, the job generator may provide a hint of its preferred
@@ -112,7 +111,7 @@ where
 
     /// Called when a command is received.  A job will be spawned immediately if the return
     /// value is Some, ignoring concurrency limits and the pending queue.
-    fn on_command(&mut self, cmd: CMD) -> anyhow::Result<PJ>;
+    fn on_command(&mut self, cmd: CMD) -> Result<PJ, SecondaryTenantError>;
 }
 
 /// [`JobGenerator`] returns this to provide pending jobs, and hints about scheduling

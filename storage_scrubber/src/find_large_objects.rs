@@ -5,10 +5,9 @@ use pageserver::tenant::storage_layer::LayerName;
 use remote_storage::ListingMode;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    checks::parse_layer_object_name, init_remote, metadata_stream::stream_tenants,
-    stream_objects_with_retries, BucketConfig, NodeKind,
-};
+use crate::checks::parse_layer_object_name;
+use crate::metadata_stream::stream_tenants;
+use crate::{BucketConfig, NodeKind, init_remote, stream_objects_with_retries};
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 enum LargeObjectKind {
@@ -19,7 +18,7 @@ enum LargeObjectKind {
 
 impl LargeObjectKind {
     fn from_key(key: &str) -> Self {
-        let fname = key.split('/').last().unwrap();
+        let fname = key.split('/').next_back().unwrap();
 
         let Ok((layer_name, _generation)) = parse_layer_object_name(fname) else {
             return LargeObjectKind::Other;

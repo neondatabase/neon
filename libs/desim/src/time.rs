@@ -1,12 +1,8 @@
-use std::{
-    cmp::Ordering,
-    collections::BinaryHeap,
-    ops::DerefMut,
-    sync::{
-        atomic::{AtomicU32, AtomicU64},
-        Arc,
-    },
-};
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
+use std::ops::DerefMut;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64};
 
 use parking_lot::Mutex;
 use tracing::trace;
@@ -91,7 +87,7 @@ impl Timing {
 
     /// Return true if there is a ready event.
     fn is_event_ready(&self, queue: &mut BinaryHeap<Pending>) -> bool {
-        queue.peek().map_or(false, |x| x.time <= self.now())
+        queue.peek().is_some_and(|x| x.time <= self.now())
     }
 
     /// Clear all pending events.

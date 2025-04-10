@@ -3,8 +3,9 @@ name: Create Release Branch
 on:
   schedule:
     # It should be kept in sync with if-condition in jobs
-    - cron: '0 6 * * MON' # Storage release
-    - cron: '0 6 * * THU' # Proxy release
+    - cron: '0 6 * * TUE' # Proxy release
+    - cron: '0 6 * * FRI' # Storage release
+    - cron: '0 7 * * FRI' # Compute release
   workflow_dispatch:
     inputs:
       create-storage-release-branch:
@@ -14,6 +15,10 @@ on:
       create-proxy-release-branch:
         type: boolean
         description: 'Create Proxy release PR'
+        required: false
+      create-compute-release-branch:
+        type: boolean
+        description: 'Create Compute release PR'
         required: false
 
 # No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
@@ -25,20 +30,20 @@ defaults:
 
 jobs:
   create-storage-release-branch:
-    if: ${{ github.event.schedule == '0 6 * * MON' || format('{0}', inputs.create-storage-release-branch) == 'true' }}
+    if: ${{ github.event.schedule == '0 6 * * FRI' || inputs.create-storage-release-branch }}
 
     permissions:
       contents: write
 
     uses: ./.github/workflows/_create-release-pr.yml
     with:
-      component-name: 'Storage & Compute'
-      release-branch: 'release'
+      component-name: 'Storage'
+      source-branch: ${{ github.ref_name }}
     secrets:
       ci-access-token: ${{ secrets.CI_ACCESS_TOKEN }}
 
   create-proxy-release-branch:
-    if: ${{ github.event.schedule == '0 6 * * THU' || format('{0}', inputs.create-proxy-release-branch) == 'true' }}
+    if: ${{ github.event.schedule == '0 6 * * TUE' || inputs.create-proxy-release-branch }}
 
     permissions:
       contents: write
@@ -46,6 +51,19 @@ jobs:
     uses: ./.github/workflows/_create-release-pr.yml
     with:
       component-name: 'Proxy'
-      release-branch: 'release-proxy'
+      source-branch: ${{ github.ref_name }}
+    secrets:
+      ci-access-token: ${{ secrets.CI_ACCESS_TOKEN }}
+
+  create-compute-release-branch:
+    if: ${{ github.event.schedule == '0 7 * * FRI' || inputs.create-compute-release-branch }}
+
+    permissions:
+      contents: write
+
+    uses: ./.github/workflows/_create-release-pr.yml
+    with:
+      component-name: 'Compute'
+      source-branch: ${{ github.ref_name }}
     secrets:
       ci-access-token: ${{ secrets.CI_ACCESS_TOKEN }}

@@ -1,9 +1,34 @@
+use std::future::Future;
 use std::str::FromStr;
+use std::time::Duration;
 
 use anyhow::Context;
 use metrics::{IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
 use strum_macros::{EnumString, VariantNames};
+use tokio::time::Instant;
+use tracing::info;
+
+/// Logs a critical error, similarly to `tracing::error!`. This will:
+///
+/// * Emit an ERROR log message with prefix "CRITICAL:" and a backtrace.
+/// * Trigger a pageable alert (via the metric below).
+/// * Increment libmetrics_tracing_event_count{level="critical"}, and indirectly level="error".
+/// * In debug builds, panic the process.
+///
+/// When including errors in the message, please use {err:?} to include the error cause and original
+/// backtrace.
+#[macro_export]
+macro_rules! critical {
+    ($($arg:tt)*) => {{
+        if cfg!(debug_assertions) {
+            panic!($($arg)*);
+        }
+        $crate::logging::TRACING_EVENT_COUNT_METRIC.inc_critical();
+        let backtrace = std::backtrace::Backtrace::capture();
+        tracing::error!("CRITICAL: {}\n{backtrace}", format!($($arg)*));
+    }};
+}
 
 #[derive(EnumString, strum_macros::Display, VariantNames, Eq, PartialEq, Debug, Clone, Copy)]
 #[strum(serialize_all = "snake_case")]
@@ -25,7 +50,10 @@ impl LogFormat {
     }
 }
 
-struct TracingEventCountMetric {
+pub struct TracingEventCountMetric {
+    /// CRITICAL is not a `tracing` log level. Instead, we increment it in the `critical!` macro,
+    /// and also emit it as a regular error. These are thus double-counted, but that seems fine.
+    critical: IntCounter,
     error: IntCounter,
     warn: IntCounter,
     info: IntCounter,
@@ -33,7 +61,7 @@ struct TracingEventCountMetric {
     trace: IntCounter,
 }
 
-static TRACING_EVENT_COUNT_METRIC: Lazy<TracingEventCountMetric> = Lazy::new(|| {
+pub static TRACING_EVENT_COUNT_METRIC: Lazy<TracingEventCountMetric> = Lazy::new(|| {
     let vec = metrics::register_int_counter_vec!(
         "libmetrics_tracing_event_count",
         "Number of tracing events, by level",
@@ -46,12 +74,18 @@ static TRACING_EVENT_COUNT_METRIC: Lazy<TracingEventCountMetric> = Lazy::new(|| 
 impl TracingEventCountMetric {
     fn new(vec: IntCounterVec) -> Self {
         Self {
+            critical: vec.with_label_values(&["critical"]),
             error: vec.with_label_values(&["error"]),
             warn: vec.with_label_values(&["warn"]),
             info: vec.with_label_values(&["info"]),
             debug: vec.with_label_values(&["debug"]),
             trace: vec.with_label_values(&["trace"]),
         }
+    }
+
+    // Allow public access from `critical!` macro.
+    pub fn inc_critical(&self) {
+        self.critical.inc();
     }
 
     fn inc_for_level(&self, level: tracing::Level) {
@@ -131,6 +165,7 @@ pub fn init(
         };
         log_layer.with_filter(rust_log_env_filter())
     });
+
     let r = r.with(
         TracingEventCountLayer(&TRACING_EVENT_COUNT_METRIC).with_filter(rust_log_env_filter()),
     );
@@ -239,7 +274,9 @@ fn log_panic_to_stderr(
     location: Option<PrettyLocation<'_, '_>>,
     backtrace: &std::backtrace::Backtrace,
 ) {
-    eprintln!("panic while tracing is unconfigured: thread '{thread}' panicked at '{msg}', {location:?}\nStack backtrace:\n{backtrace}");
+    eprintln!(
+        "panic while tracing is unconfigured: thread '{thread}' panicked at '{msg}', {location:?}\nStack backtrace:\n{backtrace}"
+    );
 }
 
 struct PrettyLocation<'a, 'b>(&'a std::panic::Location<'b>);
@@ -288,9 +325,100 @@ impl std::fmt::Debug for SecretString {
     }
 }
 
+/// Logs a periodic message if a future is slow to complete.
+///
+/// This is performance-sensitive as it's used on the GetPage read path.
+///
+/// TODO: consider upgrading this to a warning, but currently it fires too often.
+#[inline]
+pub async fn log_slow<F, O>(name: &str, threshold: Duration, f: std::pin::Pin<&mut F>) -> O
+where
+    F: Future<Output = O>,
+{
+    monitor_slow_future(
+        threshold,
+        threshold, // period = threshold
+        f,
+        |MonitorSlowFutureCallback {
+             ready,
+             is_slow,
+             elapsed_total,
+             elapsed_since_last_callback: _,
+         }| {
+            if !is_slow {
+                return;
+            }
+            if ready {
+                info!(
+                    "slow {name} completed after {:.3}s",
+                    elapsed_total.as_secs_f64()
+                );
+            } else {
+                info!(
+                    "slow {name} still running after {:.3}s",
+                    elapsed_total.as_secs_f64()
+                );
+            }
+        },
+    )
+    .await
+}
+
+/// Poll future `fut` to completion, invoking callback `cb` at the given `threshold` and every
+/// `period` afterwards, and also unconditionally when the future completes.
+#[inline]
+pub async fn monitor_slow_future<F, O>(
+    threshold: Duration,
+    period: Duration,
+    mut fut: std::pin::Pin<&mut F>,
+    mut cb: impl FnMut(MonitorSlowFutureCallback),
+) -> O
+where
+    F: Future<Output = O>,
+{
+    let started = Instant::now();
+    let mut attempt = 1;
+    let mut last_cb = started;
+    loop {
+        // NB: use timeout_at() instead of timeout() to avoid an extra clock reading in the common
+        // case where the timeout doesn't fire.
+        let deadline = started + threshold + (attempt - 1) * period;
+        // TODO: still call the callback if the future panics? Copy how we do it for the page_service flush_in_progress counter.
+        let res = tokio::time::timeout_at(deadline, &mut fut).await;
+        let now = Instant::now();
+        let elapsed_total = now - started;
+        cb(MonitorSlowFutureCallback {
+            ready: res.is_ok(),
+            is_slow: elapsed_total >= threshold,
+            elapsed_total,
+            elapsed_since_last_callback: now - last_cb,
+        });
+        last_cb = now;
+        if let Ok(output) = res {
+            return output;
+        }
+        attempt += 1;
+    }
+}
+
+/// See [`monitor_slow_future`].
+pub struct MonitorSlowFutureCallback {
+    /// Whether the future completed. If true, there will be no more callbacks.
+    pub ready: bool,
+    /// Whether the future is taking `>=` the specififed threshold duration to complete.
+    /// Monotonic: if true in one callback invocation, true in all subsequent onces.
+    pub is_slow: bool,
+    /// The time elapsed since the [`monitor_slow_future`] was first polled.
+    pub elapsed_total: Duration,
+    /// The time elapsed since the last callback invocation.
+    /// For the initial callback invocation, the time elapsed since the [`monitor_slow_future`] was first polled.
+    pub elapsed_since_last_callback: Duration,
+}
+
 #[cfg(test)]
 mod tests {
-    use metrics::{core::Opts, IntCounterVec};
+    use metrics::IntCounterVec;
+    use metrics::core::Opts;
 
     use crate::logging::{TracingEventCountLayer, TracingEventCountMetric};
 

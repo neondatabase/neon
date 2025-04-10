@@ -1,13 +1,15 @@
-use std::{fmt::Debug, num::NonZeroUsize, str::FromStr, time::Duration};
+use std::fmt::Debug;
+use std::num::NonZeroUsize;
+use std::str::FromStr;
+use std::time::Duration;
 
 use aws_sdk_s3::types::StorageClass;
 use camino::Utf8PathBuf;
-
 use serde::{Deserialize, Serialize};
 
 use crate::{
     DEFAULT_MAX_KEYS_PER_LIST_RESPONSE, DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT,
-    DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT,
+    DEFAULT_REMOTE_STORAGE_LOCALFS_CONCURRENCY_LIMIT, DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT,
 };
 
 /// External backup storage configuration, enough for creating a client for that storage.
@@ -24,6 +26,13 @@ pub struct RemoteStorageConfig {
         skip_serializing_if = "is_default_timeout"
     )]
     pub timeout: Duration,
+    /// Alternative timeout used for metadata objects which are expected to be small
+    #[serde(
+        with = "humantime_serde",
+        default = "default_small_timeout",
+        skip_serializing_if = "is_default_small_timeout"
+    )]
+    pub small_timeout: Duration,
 }
 
 impl RemoteStorageKind {
@@ -36,12 +45,31 @@ impl RemoteStorageKind {
     }
 }
 
+impl RemoteStorageConfig {
+    /// Helper to fetch the configured concurrency limit.
+    pub fn concurrency_limit(&self) -> usize {
+        match &self.storage {
+            RemoteStorageKind::LocalFs { .. } => DEFAULT_REMOTE_STORAGE_LOCALFS_CONCURRENCY_LIMIT,
+            RemoteStorageKind::AwsS3(c) => c.concurrency_limit.into(),
+            RemoteStorageKind::AzureContainer(c) => c.concurrency_limit.into(),
+        }
+    }
+}
+
 fn default_timeout() -> Duration {
     RemoteStorageConfig::DEFAULT_TIMEOUT
 }
 
+fn default_small_timeout() -> Duration {
+    RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT
+}
+
 fn is_default_timeout(d: &Duration) -> bool {
     *d == RemoteStorageConfig::DEFAULT_TIMEOUT
+}
+
+fn is_default_small_timeout(d: &Duration) -> bool {
+    *d == RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT
 }
 
 /// A kind of a remote storage to connect to, with its connection configuration.
@@ -99,6 +127,18 @@ fn default_max_keys_per_list_response() -> Option<i32> {
     DEFAULT_MAX_KEYS_PER_LIST_RESPONSE
 }
 
+fn default_azure_conn_pool_size() -> usize {
+    // By default, the Azure SDK does no connection pooling, due to historic reports of hard-to-reproduce issues
+    // (https://github.com/hyperium/hyper/issues/2312)
+    //
+    // However, using connection pooling is important to avoid exhausting client ports when
+    // doing huge numbers of requests (https://github.com/neondatabase/cloud/issues/20971)
+    //
+    // We therefore enable a modest pool size by default: this may be configured to zero if
+    // issues like the alleged upstream hyper issue appear.
+    8
+}
+
 impl Debug for S3Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("S3Config")
@@ -131,6 +171,8 @@ pub struct AzureConfig {
     pub concurrency_limit: NonZeroUsize,
     #[serde(default = "default_max_keys_per_list_response")]
     pub max_keys_per_list_response: Option<i32>,
+    #[serde(default = "default_azure_conn_pool_size")]
+    pub conn_pool_size: usize,
 }
 
 fn default_remote_storage_azure_concurrency_limit() -> NonZeroUsize {
@@ -184,6 +226,7 @@ fn serialize_storage_class<S: serde::Serializer>(
 
 impl RemoteStorageConfig {
     pub const DEFAULT_TIMEOUT: Duration = std::time::Duration::from_secs(120);
+    pub const DEFAULT_SMALL_TIMEOUT: Duration = std::time::Duration::from_secs(30);
 
     pub fn from_toml(toml: &toml_edit::Item) -> anyhow::Result<RemoteStorageConfig> {
         Ok(utils::toml_edit_ext::deserialize_item(toml)?)
@@ -219,7 +262,8 @@ timeout = '5s'";
                 storage: RemoteStorageKind::LocalFs {
                     local_path: Utf8PathBuf::from(".")
                 },
-                timeout: Duration::from_secs(5)
+                timeout: Duration::from_secs(5),
+                small_timeout: RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT
             }
         );
     }
@@ -247,7 +291,8 @@ timeout = '5s'";
                     max_keys_per_list_response: DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
                     upload_storage_class: Some(StorageClass::IntelligentTiering),
                 }),
-                timeout: Duration::from_secs(7)
+                timeout: Duration::from_secs(7),
+                small_timeout: RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT
             }
         );
     }
@@ -284,6 +329,7 @@ timeout = '5s'";
     container_region = 'westeurope'
     upload_storage_class = 'INTELLIGENT_TIERING'
     timeout = '7s'
+    conn_pool_size = 8
     ";
 
         let config = parse(toml).unwrap();
@@ -298,8 +344,10 @@ timeout = '5s'";
                     prefix_in_container: None,
                     concurrency_limit: default_remote_storage_azure_concurrency_limit(),
                     max_keys_per_list_response: DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
+                    conn_pool_size: 8,
                 }),
-                timeout: Duration::from_secs(7)
+                timeout: Duration::from_secs(7),
+                small_timeout: RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT
             }
         );
     }

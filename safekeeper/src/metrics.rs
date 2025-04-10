@@ -1,30 +1,28 @@
 //! Global safekeeper mertics and per-timeline safekeeper metrics.
 
-use std::{
-    sync::{Arc, RwLock},
-    time::{Instant, SystemTime},
-};
+use std::sync::{Arc, RwLock};
+use std::time::{Instant, SystemTime};
 
 use anyhow::Result;
 use futures::Future;
+use metrics::core::{AtomicU64, Collector, Desc, GenericCounter, GenericGaugeVec, Opts};
+use metrics::proto::MetricFamily;
 use metrics::{
-    core::{AtomicU64, Collector, Desc, GenericCounter, GenericGaugeVec, Opts},
-    pow2_buckets,
-    proto::MetricFamily,
+    DISK_FSYNC_SECONDS_BUCKETS, Gauge, GaugeVec, Histogram, HistogramVec, IntCounter,
+    IntCounterPair, IntCounterPairVec, IntCounterVec, IntGauge, IntGaugeVec, pow2_buckets,
     register_histogram, register_histogram_vec, register_int_counter, register_int_counter_pair,
-    register_int_counter_pair_vec, register_int_counter_vec, register_int_gauge, Gauge, GaugeVec,
-    Histogram, HistogramVec, IntCounter, IntCounterPair, IntCounterPairVec, IntCounterVec,
-    IntGauge, IntGaugeVec, DISK_FSYNC_SECONDS_BUCKETS,
+    register_int_counter_pair_vec, register_int_counter_vec, register_int_gauge,
+    register_int_gauge_vec,
 };
 use once_cell::sync::Lazy;
 use postgres_ffi::XLogSegNo;
-use utils::{id::TenantTimelineId, lsn::Lsn, pageserver_feedback::PageserverFeedback};
+use utils::id::TenantTimelineId;
+use utils::lsn::Lsn;
+use utils::pageserver_feedback::PageserverFeedback;
 
-use crate::{
-    receive_wal::MSG_QUEUE_SIZE,
-    state::{TimelineMemState, TimelinePersistentState},
-    GlobalTimelines,
-};
+use crate::GlobalTimelines;
+use crate::receive_wal::MSG_QUEUE_SIZE;
+use crate::state::{TimelineMemState, TimelinePersistentState};
 
 // Global metrics across all timelines.
 pub static WRITE_WAL_BYTES: Lazy<Histogram> = Lazy::new(|| {
@@ -208,6 +206,14 @@ pub static WAL_RECEIVERS: Lazy<IntGauge> = Lazy::new(|| {
     register_int_gauge!(
         "safekeeper_wal_receivers",
         "Number of currently connected WAL receivers (i.e. connected computes)"
+    )
+    .expect("Failed to register safekeeper_wal_receivers")
+});
+pub static WAL_READERS: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "safekeeper_wal_readers",
+        "Number of active WAL readers (may serve pageservers or other safekeepers)",
+        &["kind", "target"]
     )
     .expect("Failed to register safekeeper_wal_receivers")
 });
@@ -443,6 +449,7 @@ pub struct FullTimelineInfo {
     pub timeline_is_active: bool,
     pub num_computes: u32,
     pub last_removed_segno: XLogSegNo,
+    pub interpreted_wal_reader_tasks: usize,
 
     pub epoch_start_lsn: Lsn,
     pub mem_state: TimelineMemState,
@@ -455,6 +462,7 @@ pub struct FullTimelineInfo {
 
 /// Collects metrics for all active timelines.
 pub struct TimelineCollector {
+    global_timelines: Arc<GlobalTimelines>,
     descs: Vec<Desc>,
     commit_lsn: GenericGaugeVec<AtomicU64>,
     backup_lsn: GenericGaugeVec<AtomicU64>,
@@ -471,6 +479,7 @@ pub struct TimelineCollector {
     disk_usage: GenericGaugeVec<AtomicU64>,
     acceptor_term: GenericGaugeVec<AtomicU64>,
     written_wal_bytes: GenericGaugeVec<AtomicU64>,
+    interpreted_wal_reader_tasks: GenericGaugeVec<AtomicU64>,
     written_wal_seconds: GaugeVec,
     flushed_wal_seconds: GaugeVec,
     collect_timeline_metrics: Gauge,
@@ -478,14 +487,8 @@ pub struct TimelineCollector {
     active_timelines_count: IntGauge,
 }
 
-impl Default for TimelineCollector {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl TimelineCollector {
-    pub fn new() -> TimelineCollector {
+    pub fn new(global_timelines: Arc<GlobalTimelines>) -> TimelineCollector {
         let mut descs = Vec::new();
 
         let commit_lsn = GenericGaugeVec::new(
@@ -675,7 +678,18 @@ impl TimelineCollector {
         .unwrap();
         descs.extend(active_timelines_count.desc().into_iter().cloned());
 
+        let interpreted_wal_reader_tasks = GenericGaugeVec::new(
+            Opts::new(
+                "safekeeper_interpreted_wal_reader_tasks",
+                "Number of active interpreted wal reader tasks, grouped by timeline",
+            ),
+            &["tenant_id", "timeline_id"],
+        )
+        .unwrap();
+        descs.extend(interpreted_wal_reader_tasks.desc().into_iter().cloned());
+
         TimelineCollector {
+            global_timelines,
             descs,
             commit_lsn,
             backup_lsn,
@@ -697,6 +711,7 @@ impl TimelineCollector {
             collect_timeline_metrics,
             timelines_count,
             active_timelines_count,
+            interpreted_wal_reader_tasks,
         }
     }
 }
@@ -725,20 +740,22 @@ impl Collector for TimelineCollector {
         self.disk_usage.reset();
         self.acceptor_term.reset();
         self.written_wal_bytes.reset();
+        self.interpreted_wal_reader_tasks.reset();
         self.written_wal_seconds.reset();
         self.flushed_wal_seconds.reset();
 
-        let timelines_count = GlobalTimelines::get_all().len();
+        let timelines_count = self.global_timelines.get_all().len();
         let mut active_timelines_count = 0;
 
         // Prometheus Collector is sync, and data is stored under async lock. To
         // bridge the gap with a crutch, collect data in spawned thread with
         // local tokio runtime.
+        let global_timelines = self.global_timelines.clone();
         let infos = std::thread::spawn(|| {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .expect("failed to create rt");
-            rt.block_on(collect_timeline_metrics())
+            rt.block_on(collect_timeline_metrics(global_timelines))
         })
         .join()
         .expect("collect_timeline_metrics thread panicked");
@@ -785,6 +802,9 @@ impl Collector for TimelineCollector {
             self.written_wal_bytes
                 .with_label_values(labels)
                 .set(tli.wal_storage.write_wal_bytes);
+            self.interpreted_wal_reader_tasks
+                .with_label_values(labels)
+                .set(tli.interpreted_wal_reader_tasks as u64);
             self.written_wal_seconds
                 .with_label_values(labels)
                 .set(tli.wal_storage.write_wal_seconds);
@@ -837,6 +857,7 @@ impl Collector for TimelineCollector {
         mfs.extend(self.disk_usage.collect());
         mfs.extend(self.acceptor_term.collect());
         mfs.extend(self.written_wal_bytes.collect());
+        mfs.extend(self.interpreted_wal_reader_tasks.collect());
         mfs.extend(self.written_wal_seconds.collect());
         mfs.extend(self.flushed_wal_seconds.collect());
 
@@ -857,9 +878,9 @@ impl Collector for TimelineCollector {
     }
 }
 
-async fn collect_timeline_metrics() -> Vec<FullTimelineInfo> {
+async fn collect_timeline_metrics(global_timelines: Arc<GlobalTimelines>) -> Vec<FullTimelineInfo> {
     let mut res = vec![];
-    let active_timelines = GlobalTimelines::get_global_broker_active_set().get_all();
+    let active_timelines = global_timelines.get_global_broker_active_set().get_all();
 
     for tli in active_timelines {
         if let Some(info) = tli.info_for_metrics().await {

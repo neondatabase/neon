@@ -2,14 +2,16 @@
 //! Low-level Block-oriented I/O functions
 //!
 
+use std::ops::Deref;
+
+use bytes::Bytes;
+
 use super::storage_layer::delta_layer::{Adapter, DeltaLayerInner};
 use crate::context::RequestContext;
-use crate::page_cache::{self, FileId, PageReadGuard, PageWriteGuard, ReadBufResult, PAGE_SZ};
+use crate::page_cache::{self, FileId, PAGE_SZ, PageReadGuard, PageWriteGuard, ReadBufResult};
 #[cfg(test)]
 use crate::virtual_file::IoBufferMut;
 use crate::virtual_file::VirtualFile;
-use bytes::Bytes;
-use std::ops::Deref;
 
 /// This is implemented by anything that can read 8 kB (PAGE_SZ)
 /// blocks, using the page cache
@@ -89,7 +91,7 @@ pub(crate) enum BlockReaderRef<'a> {
     VirtualFile(&'a VirtualFile),
 }
 
-impl<'a> BlockReaderRef<'a> {
+impl BlockReaderRef<'_> {
     #[inline(always)]
     async fn read_blk(
         &self,
@@ -214,12 +216,8 @@ impl<'a> FileBlockReader<'a> {
         match cache
             .read_immutable_buf(self.file_id, blknum, ctx)
             .await
-            .map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to read immutable buf: {e:#}"),
-                )
-            })? {
+            .map_err(|e| std::io::Error::other(format!("Failed to read immutable buf: {e:#}")))?
+        {
             ReadBufResult::Found(guard) => Ok(guard.into()),
             ReadBufResult::NotFound(write_guard) => {
                 // Read the page from disk into the buffer

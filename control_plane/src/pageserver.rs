@@ -7,7 +7,6 @@
 //! ```
 //!
 use std::collections::HashMap;
-
 use std::io;
 use std::io::Write;
 use std::num::NonZeroU64;
@@ -15,22 +14,20 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use camino::Utf8PathBuf;
 use pageserver_api::models::{self, TenantInfo, TimelineInfo};
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use postgres_backend::AuthType;
-use postgres_connection::{parse_host_port, PgConnectionConfig};
+use postgres_connection::{PgConnectionConfig, parse_host_port};
+use reqwest::Certificate;
 use utils::auth::{Claims, Scope};
-use utils::id::NodeId;
-use utils::{
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
+use utils::id::{NodeId, TenantId, TimelineId};
+use utils::lsn::Lsn;
 
-use crate::local_env::{NeonLocalInitPageserverConf, PageServerConf};
-use crate::{background_process, local_env::LocalEnv};
+use crate::background_process;
+use crate::local_env::{LocalEnv, NeonLocalInitPageserverConf, PageServerConf};
 
 /// Directory within .neon which will be used by default for LocalFs remote storage.
 pub const PAGESERVER_REMOTE_STORAGE_DIR: &str = "local_fs_remote_storage/pageserver";
@@ -53,12 +50,38 @@ impl PageServerNode {
         let (host, port) =
             parse_host_port(&conf.listen_pg_addr).expect("Unable to parse listen_pg_addr");
         let port = port.unwrap_or(5432);
+
+        let ssl_ca_certs = env.ssl_ca_cert_path().map(|ssl_ca_file| {
+            let buf = std::fs::read(ssl_ca_file).expect("SSL root CA file should exist");
+            Certificate::from_pem_bundle(&buf).expect("SSL CA file should be valid")
+        });
+
+        let mut http_client = reqwest::Client::builder();
+        for ssl_ca_cert in ssl_ca_certs.unwrap_or_default() {
+            http_client = http_client.add_root_certificate(ssl_ca_cert);
+        }
+        let http_client = http_client
+            .build()
+            .expect("Client constructs with no errors");
+
+        let endpoint = if env.storage_controller.use_https_pageserver_api {
+            format!(
+                "https://{}",
+                conf.listen_https_addr.as_ref().expect(
+                    "listen https address should be specified if use_https_pageserver_api is on"
+                )
+            )
+        } else {
+            format!("http://{}", conf.listen_http_addr)
+        };
+
         Self {
             pg_connection_config: PgConnectionConfig::new_host_port(host, port),
             conf: conf.clone(),
             env: env.clone(),
             http_client: mgmt_api::Client::new(
-                format!("http://{}", conf.listen_http_addr),
+                http_client,
+                endpoint,
                 {
                     match conf.http_auth_type {
                         AuthType::Trust => None,
@@ -81,7 +104,11 @@ impl PageServerNode {
         &self,
         conf: NeonLocalInitPageserverConf,
     ) -> anyhow::Result<toml_edit::DocumentMut> {
-        assert_eq!(&PageServerConf::from(&conf), &self.conf, "during neon_local init, we derive the runtime state of ps conf (self.conf) from the --config flag fully");
+        assert_eq!(
+            &PageServerConf::from(&conf),
+            &self.conf,
+            "during neon_local init, we derive the runtime state of ps conf (self.conf) from the --config flag fully"
+        );
 
         // TODO(christian): instead of what we do here, create a pageserver_api::config::ConfigToml (PR #7656)
 
@@ -95,21 +122,19 @@ impl PageServerNode {
 
         let mut overrides = vec![pg_distrib_dir_param, broker_endpoint_param];
 
-        if let Some(control_plane_api) = &self.env.control_plane_api {
-            overrides.push(format!(
-                "control_plane_api='{}'",
-                control_plane_api.as_str()
-            ));
+        overrides.push(format!(
+            "control_plane_api='{}'",
+            self.env.control_plane_api.as_str()
+        ));
 
-            // Storage controller uses the same auth as pageserver: if JWT is enabled
-            // for us, we will also need it to talk to them.
-            if matches!(conf.http_auth_type, AuthType::NeonJWT) {
-                let jwt_token = self
-                    .env
-                    .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
-                    .unwrap();
-                overrides.push(format!("control_plane_api_token='{}'", jwt_token));
-            }
+        // Storage controller uses the same auth as pageserver: if JWT is enabled
+        // for us, we will also need it to talk to them.
+        if matches!(conf.http_auth_type, AuthType::NeonJWT) {
+            let jwt_token = self
+                .env
+                .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
+                .unwrap();
+            overrides.push(format!("control_plane_api_token='{}'", jwt_token));
         }
 
         if !conf.other.contains_key("remote_storage") {
@@ -122,6 +147,10 @@ impl PageServerNode {
             // Keys are generated in the toplevel repo dir, pageservers' workdirs
             // are one level below that, so refer to keys with ../
             overrides.push("auth_validation_public_key_path='../auth_public_key.pem'".to_owned());
+        }
+
+        if let Some(ssl_ca_file) = self.env.ssl_ca_cert_path() {
+            overrides.push(format!("ssl_ca_file='{}'", ssl_ca_file.to_str().unwrap()));
         }
 
         // Apply the user-provided overrides
@@ -222,6 +251,13 @@ impl PageServerNode {
             .context("write identity toml")?;
         drop(identity_toml);
 
+        if self.env.generate_local_ssl_certs {
+            self.env.generate_ssl_cert(
+                datadir.join("server.crt").as_path(),
+                datadir.join("server.key").as_path(),
+            )?;
+        }
+
         // TODO: invoke a TBD config-check command to validate that pageserver will start with the written config
 
         // Write metadata file, used by pageserver on startup to register itself with
@@ -231,6 +267,15 @@ impl PageServerNode {
         let (_http_host, http_port) =
             parse_host_port(&self.conf.listen_http_addr).expect("Unable to parse listen_http_addr");
         let http_port = http_port.unwrap_or(9898);
+
+        let https_port = match self.conf.listen_https_addr.as_ref() {
+            Some(https_addr) => {
+                let (_https_host, https_port) =
+                    parse_host_port(https_addr).expect("Unable to parse listen_https_addr");
+                Some(https_port.unwrap_or(9899))
+            }
+            None => None,
+        };
 
         // Intentionally hand-craft JSON: this acts as an implicit format compat test
         // in case the pageserver-side structure is edited, and reflects the real life
@@ -242,6 +287,7 @@ impl PageServerNode {
                 postgres_port: self.pg_connection_config.port(),
                 http_host: "localhost".to_string(),
                 http_port,
+                https_port,
                 other: HashMap::from([(
                     "availability_zone_id".to_string(),
                     serde_json::json!(az_id),
@@ -337,29 +383,65 @@ impl PageServerNode {
                 .map(|x| x.parse::<u64>())
                 .transpose()
                 .context("Failed to parse 'checkpoint_distance' as an integer")?,
-            checkpoint_timeout: settings.remove("checkpoint_timeout").map(|x| x.to_string()),
+            checkpoint_timeout: settings
+                .remove("checkpoint_timeout")
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'checkpoint_timeout' as duration")?,
             compaction_target_size: settings
                 .remove("compaction_target_size")
                 .map(|x| x.parse::<u64>())
                 .transpose()
                 .context("Failed to parse 'compaction_target_size' as an integer")?,
-            compaction_period: settings.remove("compaction_period").map(|x| x.to_string()),
+            compaction_period: settings
+                .remove("compaction_period")
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'compaction_period' as duration")?,
             compaction_threshold: settings
                 .remove("compaction_threshold")
                 .map(|x| x.parse::<usize>())
                 .transpose()
                 .context("Failed to parse 'compaction_threshold' as an integer")?,
+            compaction_upper_limit: settings
+                .remove("compaction_upper_limit")
+                .map(|x| x.parse::<usize>())
+                .transpose()
+                .context("Failed to parse 'compaction_upper_limit' as an integer")?,
             compaction_algorithm: settings
                 .remove("compaction_algorithm")
                 .map(serde_json::from_str)
                 .transpose()
                 .context("Failed to parse 'compaction_algorithm' json")?,
+            compaction_l0_first: settings
+                .remove("compaction_l0_first")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'compaction_l0_first' as a bool")?,
+            compaction_l0_semaphore: settings
+                .remove("compaction_l0_semaphore")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'compaction_l0_semaphore' as a bool")?,
+            l0_flush_delay_threshold: settings
+                .remove("l0_flush_delay_threshold")
+                .map(|x| x.parse::<usize>())
+                .transpose()
+                .context("Failed to parse 'l0_flush_delay_threshold' as an integer")?,
+            l0_flush_stall_threshold: settings
+                .remove("l0_flush_stall_threshold")
+                .map(|x| x.parse::<usize>())
+                .transpose()
+                .context("Failed to parse 'l0_flush_stall_threshold' as an integer")?,
             gc_horizon: settings
                 .remove("gc_horizon")
                 .map(|x| x.parse::<u64>())
                 .transpose()
                 .context("Failed to parse 'gc_horizon' as an integer")?,
-            gc_period: settings.remove("gc_period").map(|x| x.to_string()),
+            gc_period: settings.remove("gc_period")
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'gc_period' as duration")?,
             image_creation_threshold: settings
                 .remove("image_creation_threshold")
                 .map(|x| x.parse::<usize>())
@@ -370,13 +452,25 @@ impl PageServerNode {
                 .map(|x| x.parse::<u8>())
                 .transpose()
                 .context("Failed to parse 'image_creation_check_threshold' as integer")?,
-            pitr_interval: settings.remove("pitr_interval").map(|x| x.to_string()),
+            image_creation_preempt_threshold: settings
+                .remove("image_creation_preempt_threshold")
+                .map(|x| x.parse::<usize>())
+                .transpose()
+                .context("Failed to parse 'image_creation_preempt_threshold' as integer")?,
+            pitr_interval: settings.remove("pitr_interval")
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'pitr_interval' as duration")?,
             walreceiver_connect_timeout: settings
                 .remove("walreceiver_connect_timeout")
-                .map(|x| x.to_string()),
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'walreceiver_connect_timeout' as duration")?,
             lagging_wal_timeout: settings
                 .remove("lagging_wal_timeout")
-                .map(|x| x.to_string()),
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'lagging_wal_timeout' as duration")?,
             max_lsn_wal_lag: settings
                 .remove("max_lsn_wal_lag")
                 .map(|x| x.parse::<NonZeroU64>())
@@ -394,8 +488,14 @@ impl PageServerNode {
                 .context("Failed to parse 'min_resident_size_override' as integer")?,
             evictions_low_residence_duration_metric_threshold: settings
                 .remove("evictions_low_residence_duration_metric_threshold")
-                .map(|x| x.to_string()),
-            heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'evictions_low_residence_duration_metric_threshold' as duration")?,
+            heatmap_period: settings
+                .remove("heatmap_period")
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'heatmap_period' as duration")?,
             lazy_slru_download: settings
                 .remove("lazy_slru_download")
                 .map(|x| x.parse::<bool>())
@@ -406,10 +506,15 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("parse `timeline_get_throttle` from json")?,
-            lsn_lease_length: settings.remove("lsn_lease_length").map(|x| x.to_string()),
+            lsn_lease_length: settings.remove("lsn_lease_length")
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'lsn_lease_length' as duration")?,
             lsn_lease_length_for_ts: settings
                 .remove("lsn_lease_length_for_ts")
-                .map(|x| x.to_string()),
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'lsn_lease_length_for_ts' as duration")?,
             timeline_offloading: settings
                 .remove("timeline_offloading")
                 .map(|x| x.parse::<bool>())
@@ -420,6 +525,31 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("parse `wal_receiver_protocol_override` from json")?,
+            rel_size_v2_enabled: settings
+                .remove("rel_size_v2_enabled")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'rel_size_v2_enabled' as bool")?,
+            gc_compaction_enabled: settings
+                .remove("gc_compaction_enabled")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'gc_compaction_enabled' as bool")?,
+            gc_compaction_initial_threshold_kb: settings
+                .remove("gc_compaction_initial_threshold_kb")
+                .map(|x| x.parse::<u64>())
+                .transpose()
+                .context("Failed to parse 'gc_compaction_initial_threshold_kb' as integer")?,
+            gc_compaction_ratio_percent: settings
+                .remove("gc_compaction_ratio_percent")
+                .map(|x| x.parse::<u64>())
+                .transpose()
+                .context("Failed to parse 'gc_compaction_ratio_percent' as integer")?,
+            sampling_ratio: settings
+                .remove("sampling_ratio")
+                .map(serde_json::from_str)
+                .transpose()
+                .context("Falied to parse 'sampling_ratio'")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -435,7 +565,7 @@ impl PageServerNode {
     ) -> anyhow::Result<()> {
         let config = Self::parse_config(settings)?;
         self.http_client
-            .tenant_config(&models::TenantConfigRequest { tenant_id, config })
+            .set_tenant_config(&models::TenantConfigRequest { tenant_id, config })
             .await?;
 
         Ok(())

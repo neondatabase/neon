@@ -27,6 +27,10 @@ commands:
     user: nobody
     sysvInitAction: respawn
     shell: 'DATA_SOURCE_NAME="user=cloud_admin sslmode=disable dbname=postgres application_name=postgres-exporter" /bin/postgres_exporter --config.file=/etc/postgres_exporter.yml'
+  - name: pgbouncer-exporter
+    user: postgres
+    sysvInitAction: respawn
+    shell: '/bin/pgbouncer_exporter --pgBouncer.connectionString="postgres:///pgbouncer?host=/tmp&port=6432&dbname=pgbouncer&user=pgbouncer"'
   - name: sql-exporter
     user: nobody
     sysvInitAction: respawn
@@ -35,15 +39,33 @@ commands:
     user: nobody
     sysvInitAction: respawn
     shell: '/bin/sql_exporter -config.file=/etc/sql_exporter_autoscaling.yml -web.listen-address=:9499'
+  # Rsyslog by default creates a unix socket under /dev/log . That's where Postgres sends logs also.
+  # We run syslog with postgres user so it can't create /dev/log. Instead we configure rsyslog to
+  # use a different path for the socket. The symlink actually points to our custom path.
+  - name: rsyslogd-socket-symlink
+    user: root
+    sysvInitAction: sysinit
+    shell: "ln -s /var/db/postgres/rsyslogpipe /dev/log"
+  - name: rsyslogd
+    user: postgres
+    sysvInitAction: respawn
+    shell: '/usr/sbin/rsyslogd -n -i /var/run/rsyslogd/rsyslogd.pid -f /etc/compute_rsyslog.conf'
 shutdownHook: |
   su -p postgres --session-command '/usr/local/bin/pg_ctl stop -D /var/db/postgres/compute/pgdata -m fast --wait -t 10'
 files:
   - filename: compute_ctl-sudoers
     content: |
+      # Reverse hostname lookup doesn't currently work, and isn't needed anyway when all
+      # the rules use ALL as the hostname. Avoid the pointless lookups and the "unable to
+      # resolve host" log messages that they generate.
+      Defaults !fqdn
+      
       # Allow postgres user (which is what compute_ctl runs as) to run /neonvm/bin/resize-swap
       # and /neonvm/bin/set-disk-quota as root without requiring entering a password (NOPASSWD),
       # regardless of hostname (ALL)
-      postgres ALL=(root) NOPASSWD: /neonvm/bin/resize-swap, /neonvm/bin/set-disk-quota
+      #
+      # Also allow it to shut down the VM. The fast_import job does that when it's finished.
+      postgres ALL=(root) NOPASSWD: /neonvm/bin/resize-swap, /neonvm/bin/set-disk-quota, /neonvm/bin/poweroff, /usr/sbin/rsyslogd
   - filename: cgconfig.conf
     content: |
       # Configuration for cgroups in VM compute nodes
@@ -58,13 +80,23 @@ files:
           }
           memory {}
       }
+# Create dummy rsyslog config, because it refuses to start without at least one action configured.
+# compute_ctl will rewrite this file with the actual configuration, if needed.
+  - filename: compute_rsyslog.conf
+    content: |
+      # Syslock.Name specifies a non-default pipe location that is writeable for the postgres user.
+      module(load="imuxsock" SysSock.Name="/var/db/postgres/rsyslogpipe") # provides support for local system logging
+
+      *.*    /dev/null
+      $IncludeConfig /etc/rsyslog.d/*.conf
 build: |
   # Build cgroup-tools
   #
   # At time of writing (2023-03-14), debian bullseye has a version of cgroup-tools (technically
   # libcgroup) that doesn't support cgroup v2 (version 0.41-11). Unfortunately, the vm-monitor
   # requires cgroup v2, so we'll build cgroup-tools ourselves.
-  FROM debian:bullseye-slim as libcgroup-builder
+  ARG BULLSEYE_SLIM_SHA=sha256:e831d9a884d63734fe3dd9c491ed9a5a3d4c6a6d32c5b14f2067357c49b0b7e1
+  FROM debian@$BULLSEYE_SLIM_SHA as libcgroup-builder
   ENV LIBCGROUP_VERSION=v2.0.3
 
   RUN set -exu \
@@ -115,6 +147,11 @@ merge: |
 
   RUN set -e \
       && chmod 0644 /etc/cgconfig.conf
+
+  COPY compute_rsyslog.conf /etc/compute_rsyslog.conf
+  RUN chmod 0666 /etc/compute_rsyslog.conf
+  RUN mkdir /var/log/rsyslog && chown -R postgres /var/log/rsyslog
+
 
   COPY --from=libcgroup-builder /libcgroup-install/bin/*  /usr/bin/
   COPY --from=libcgroup-builder /libcgroup-install/lib/*  /usr/lib/

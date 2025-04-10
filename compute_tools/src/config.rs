@@ -1,13 +1,18 @@
+use anyhow::Result;
+use std::fmt::Write as FmtWrite;
 use std::fs::{File, OpenOptions};
 use std::io;
+use std::io::Write;
 use std::io::prelude::*;
 use std::path::Path;
 
-use anyhow::Result;
+use compute_api::responses::TlsConfig;
+use compute_api::spec::{ComputeAudit, ComputeMode, ComputeSpec, GenericOption};
 
-use crate::pg_helpers::escape_conf_value;
-use crate::pg_helpers::{GenericOptionExt, PgOptionsSerialize};
-use compute_api::spec::{ComputeMode, ComputeSpec, GenericOption};
+use crate::pg_helpers::{
+    GenericOptionExt, GenericOptionsSearch, PgOptionsSerialize, escape_conf_value,
+};
+use crate::tls::{self, SERVER_CRT, SERVER_KEY};
 
 /// Check that `line` is inside a text file and put it there if it is not.
 /// Create file if it doesn't exist.
@@ -35,10 +40,12 @@ pub fn line_in_file(path: &Path, line: &str) -> Result<bool> {
 
 /// Create or completely rewrite configuration file specified by `path`
 pub fn write_postgres_conf(
-    path: &Path,
+    pgdata_path: &Path,
     spec: &ComputeSpec,
-    extension_server_port: Option<u16>,
+    extension_server_port: u16,
+    tls_config: &Option<TlsConfig>,
 ) -> Result<()> {
+    let path = pgdata_path.join("postgresql.conf");
     // File::create() destroys the file content if it exists.
     let mut file = File::create(path)?;
 
@@ -56,10 +63,20 @@ pub fn write_postgres_conf(
         writeln!(file, "neon.stripe_size={stripe_size}")?;
     }
     if !spec.safekeeper_connstrings.is_empty() {
+        let mut neon_safekeepers_value = String::new();
+        tracing::info!(
+            "safekeepers_connstrings is not zero, gen: {:?}",
+            spec.safekeepers_generation
+        );
+        // If generation is given, prepend sk list with g#number:
+        if let Some(generation) = spec.safekeepers_generation {
+            write!(neon_safekeepers_value, "g#{}:", generation)?;
+        }
+        neon_safekeepers_value.push_str(&spec.safekeeper_connstrings.join(","));
         writeln!(
             file,
             "neon.safekeepers={}",
-            escape_conf_value(&spec.safekeeper_connstrings.join(","))
+            escape_conf_value(&neon_safekeepers_value)
         )?;
     }
     if let Some(s) = &spec.tenant_id {
@@ -71,6 +88,20 @@ pub fn write_postgres_conf(
             "neon.timeline_id={}",
             escape_conf_value(&s.to_string())
         )?;
+    }
+
+    // tls
+    if let Some(tls_config) = tls_config {
+        writeln!(file, "ssl = on")?;
+
+        // postgres requires the keyfile to be in a secure file,
+        // currently too complicated to ensure that at the VM level,
+        // so we just copy them to another file instead. :shrug:
+        tls::update_key_path_blocking(pgdata_path, tls_config);
+
+        // these are the default, but good to be explicit.
+        writeln!(file, "ssl_cert_file = '{}'", SERVER_CRT)?;
+        writeln!(file, "ssl_key_file = '{}'", SERVER_KEY)?;
     }
 
     // Locales
@@ -86,6 +117,7 @@ pub fn write_postgres_conf(
         writeln!(file, "lc_numeric='C.UTF-8'")?;
     }
 
+    writeln!(file, "neon.compute_mode={}", spec.mode.to_type_str())?;
     match spec.mode {
         ComputeMode::Primary => {}
         ComputeMode::Static(lsn) => {
@@ -127,8 +159,104 @@ pub fn write_postgres_conf(
         writeln!(file, "# Managed by compute_ctl: end")?;
     }
 
-    if let Some(port) = extension_server_port {
-        writeln!(file, "neon.extension_server_port={}", port)?;
+    // If base audit logging is enabled, configure it.
+    // In this setup, the audit log will be written to the standard postgresql log.
+    //
+    // If compliance audit logging is enabled, configure pgaudit.
+    //
+    // Note, that this is called after the settings from spec are written.
+    // This way we always override the settings from the spec
+    // and don't allow the user or the control plane admin to change them.
+    match spec.audit_log_level {
+        ComputeAudit::Disabled => {}
+        ComputeAudit::Log => {
+            writeln!(file, "# Managed by compute_ctl base audit settings: start")?;
+            writeln!(file, "pgaudit.log='ddl,role'")?;
+            // Disable logging of catalog queries to reduce the noise
+            writeln!(file, "pgaudit.log_catalog=off")?;
+
+            if let Some(libs) = spec.cluster.settings.find("shared_preload_libraries") {
+                let mut extra_shared_preload_libraries = String::new();
+                if !libs.contains("pgaudit") {
+                    extra_shared_preload_libraries.push_str(",pgaudit");
+                }
+                writeln!(
+                    file,
+                    "shared_preload_libraries='{}{}'",
+                    libs, extra_shared_preload_libraries
+                )?;
+            } else {
+                // Typically, this should be unreacheable,
+                // because we always set at least some shared_preload_libraries in the spec
+                // but let's handle it explicitly anyway.
+                writeln!(file, "shared_preload_libraries='neon,pgaudit'")?;
+            }
+            writeln!(file, "# Managed by compute_ctl base audit settings: end")?;
+        }
+        ComputeAudit::Hipaa => {
+            writeln!(
+                file,
+                "# Managed by compute_ctl compliance audit settings: begin"
+            )?;
+            // This log level is very verbose
+            // but this is necessary for HIPAA compliance.
+            // Exclude 'misc' category, because it doesn't contain anythig relevant.
+            writeln!(file, "pgaudit.log='all, -misc'")?;
+            writeln!(file, "pgaudit.log_parameter=on")?;
+            // Disable logging of catalog queries
+            // The catalog doesn't contain sensitive data, so we don't need to audit it.
+            writeln!(file, "pgaudit.log_catalog=off")?;
+            // Set log rotation to 5 minutes
+            // TODO: tune this after performance testing
+            writeln!(file, "pgaudit.log_rotation_age=5")?;
+
+            // Add audit shared_preload_libraries, if they are not present.
+            //
+            // The caller who sets the flag is responsible for ensuring that the necessary
+            // shared_preload_libraries are present in the compute image,
+            // otherwise the compute start will fail.
+            if let Some(libs) = spec.cluster.settings.find("shared_preload_libraries") {
+                let mut extra_shared_preload_libraries = String::new();
+                if !libs.contains("pgaudit") {
+                    extra_shared_preload_libraries.push_str(",pgaudit");
+                }
+                if !libs.contains("pgauditlogtofile") {
+                    extra_shared_preload_libraries.push_str(",pgauditlogtofile");
+                }
+                writeln!(
+                    file,
+                    "shared_preload_libraries='{}{}'",
+                    libs, extra_shared_preload_libraries
+                )?;
+            } else {
+                // Typically, this should be unreacheable,
+                // because we always set at least some shared_preload_libraries in the spec
+                // but let's handle it explicitly anyway.
+                writeln!(
+                    file,
+                    "shared_preload_libraries='neon,pgaudit,pgauditlogtofile'"
+                )?;
+            }
+            writeln!(
+                file,
+                "# Managed by compute_ctl compliance audit settings: end"
+            )?;
+        }
+    }
+
+    writeln!(file, "neon.extension_server_port={}", extension_server_port)?;
+
+    if spec.drop_subscriptions_before_start {
+        writeln!(file, "neon.disable_logical_replication_subscribers=true")?;
+    } else {
+        // be explicit about the default value
+        writeln!(file, "neon.disable_logical_replication_subscribers=false")?;
+    }
+
+    // We need Postgres to send logs to rsyslog so that we can forward them
+    // further to customers' log aggregation systems.
+    if spec.logs_export_host.is_some() {
+        writeln!(file, "log_destination='stderr,syslog'")?;
     }
 
     // This is essential to keep this line at the end of the file,

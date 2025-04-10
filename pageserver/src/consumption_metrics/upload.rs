@@ -1,14 +1,16 @@
+use std::error::Error as _;
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
-use consumption_metrics::{Event, EventChunk, IdempotencyKey, CHUNK_SIZE};
+use consumption_metrics::{CHUNK_SIZE, Event, EventChunk, IdempotencyKey};
 use remote_storage::{GenericRemoteStorage, RemotePath};
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
-
-use super::{metrics::Name, Cache, MetricsKey, NewRawMetric, RawMetric};
 use utils::id::{TenantId, TimelineId};
+
+use super::metrics::Name;
+use super::{Cache, MetricsKey, NewRawMetric, RawMetric};
 
 /// How the metrics from pageserver are identified.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq)]
@@ -350,7 +352,11 @@ impl std::fmt::Display for UploadError {
 
         match self {
             Rejected(code) => write!(f, "server rejected the metrics with {code}"),
-            Reqwest(e) => write!(f, "request failed: {e}"),
+            Reqwest(e) => write!(
+                f,
+                "request failed: {e}{}",
+                e.source().map(|e| format!(": {e}")).unwrap_or_default()
+            ),
             Cancelled => write!(f, "cancelled"),
         }
     }
@@ -433,13 +439,12 @@ async fn upload(
 
 #[cfg(test)]
 mod tests {
-    use crate::consumption_metrics::{
-        disk_cache::read_metrics_from_serde_value, NewMetricsRefRoot,
-    };
-
-    use super::*;
     use chrono::{DateTime, Utc};
     use once_cell::sync::Lazy;
+
+    use super::*;
+    use crate::consumption_metrics::NewMetricsRefRoot;
+    use crate::consumption_metrics::disk_cache::read_metrics_from_serde_value;
 
     #[test]
     fn chunked_serialization() {

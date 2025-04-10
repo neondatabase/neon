@@ -4,8 +4,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from fixtures.log_helper import log
@@ -21,6 +20,8 @@ from fixtures.remote_storage import s3_storage
 from fixtures.utils import skip_in_debug_build
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from fixtures.neon_fixtures import PgBin
     from pytest import CaptureFixture
 
@@ -118,10 +119,20 @@ def post_checks(env: NeonEnv, test_output_dir: Path, db_name: str, endpoint: End
         pageserver.http_client().timeline_gc(shard, env.initial_timeline, None)
 
 
+def patch_tenant_conf(tenant_conf: dict[str, Any], reldir_type: str) -> dict[str, Any]:
+    tenant_conf = tenant_conf.copy()
+    if reldir_type == "v2":
+        tenant_conf["rel_size_v2_enabled"] = "true"
+    else:
+        tenant_conf["rel_size_v2_enabled"] = "false"
+    return tenant_conf
+
+
 # Run the main PostgreSQL regression tests, in src/test/regress.
 #
-@pytest.mark.timeout(900)  # Contains many sub-tests, is slow in debug builds
+@pytest.mark.timeout(3000)  # Contains many sub-tests, is slow in debug builds
 @pytest.mark.parametrize("shard_count", [None, 4])
+@pytest.mark.parametrize("reldir_type", ["v1", "v2"])
 def test_pg_regress(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
@@ -130,6 +141,7 @@ def test_pg_regress(
     base_dir: Path,
     pg_distrib_dir: Path,
     shard_count: int | None,
+    reldir_type: str,
 ):
     DBNAME = "regression"
 
@@ -142,7 +154,7 @@ def test_pg_regress(
 
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     env = neon_env_builder.init_start(
-        initial_tenant_conf=TENANT_CONF,
+        initial_tenant_conf=patch_tenant_conf(TENANT_CONF, reldir_type),
         initial_tenant_shard_count=shard_count,
     )
 
@@ -194,8 +206,9 @@ def test_pg_regress(
 
 # Run the PostgreSQL "isolation" tests, in src/test/isolation.
 #
-@pytest.mark.timeout(600)  # Contains many sub-tests, is slow in debug builds
+@pytest.mark.timeout(1500)  # Contains many sub-tests, is slow in debug builds
 @pytest.mark.parametrize("shard_count", [None, 4])
+@pytest.mark.parametrize("reldir_type", ["v1", "v2"])
 def test_isolation(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
@@ -204,6 +217,7 @@ def test_isolation(
     base_dir: Path,
     pg_distrib_dir: Path,
     shard_count: int | None,
+    reldir_type: str,
 ):
     DBNAME = "isolation_regression"
 
@@ -211,7 +225,8 @@ def test_isolation(
         neon_env_builder.num_pageservers = shard_count
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     env = neon_env_builder.init_start(
-        initial_tenant_conf=TENANT_CONF, initial_tenant_shard_count=shard_count
+        initial_tenant_conf=patch_tenant_conf(TENANT_CONF, reldir_type),
+        initial_tenant_shard_count=shard_count,
     )
 
     # Connect to postgres and create a database called "regression".
@@ -222,6 +237,8 @@ def test_isolation(
             "max_prepared_transactions=100",
             # Enable the test mode, so that we don't need to patch the test cases.
             "neon.regress_test_mode = true",
+            # Stack size should be increased for tests to pass with asan.
+            "max_stack_depth = 4MB",
         ],
     )
     endpoint.safe_psql(f"CREATE DATABASE {DBNAME}")
@@ -259,12 +276,13 @@ def test_isolation(
         pg_bin.run(pg_isolation_regress_command, env=env_vars, cwd=runpath)
 
     # This fails with a mismatch on `pg_multixact/offsets/0000`
-    # post_checks(env, test_output_dir, DBNAME, endpoint)
+    post_checks(env, test_output_dir, DBNAME, endpoint)
 
 
 # Run extra Neon-specific pg_regress-based tests. The tests and their
 # schedule file are in the sql_regress/ directory.
 @pytest.mark.parametrize("shard_count", [None, 4])
+@pytest.mark.parametrize("reldir_type", ["v1", "v2"])
 def test_sql_regress(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
@@ -273,6 +291,7 @@ def test_sql_regress(
     base_dir: Path,
     pg_distrib_dir: Path,
     shard_count: int | None,
+    reldir_type: str,
 ):
     DBNAME = "regression"
 
@@ -280,7 +299,8 @@ def test_sql_regress(
         neon_env_builder.num_pageservers = shard_count
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     env = neon_env_builder.init_start(
-        initial_tenant_conf=TENANT_CONF, initial_tenant_shard_count=shard_count
+        initial_tenant_conf=patch_tenant_conf(TENANT_CONF, reldir_type),
+        initial_tenant_shard_count=shard_count,
     )
 
     # Connect to postgres and create a database called "regression".
@@ -330,8 +350,10 @@ def test_sql_regress(
 
 
 @skip_in_debug_build("only run with release build")
+@pytest.mark.parametrize("reldir_type", ["v1", "v2"])
 def test_tx_abort_with_many_relations(
     neon_env_builder: NeonEnvBuilder,
+    reldir_type: str,
 ):
     """
     This is not a pg_regress test as such, but perhaps it should be -- this test exercises postgres
@@ -340,7 +362,9 @@ def test_tx_abort_with_many_relations(
     Reproducer for https://github.com/neondatabase/neon/issues/9505
     """
 
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(
+        initial_tenant_conf=patch_tenant_conf({}, reldir_type),
+    )
     ep = env.endpoints.create_start(
         "main",
         tenant_id=env.initial_tenant,
@@ -350,50 +374,78 @@ def test_tx_abort_with_many_relations(
         ],
     )
 
+    if reldir_type == "v1":
+        assert (
+            env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
+                "rel_size_migration"
+            ]
+            == "legacy"
+        )
+    else:
+        assert (
+            env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
+                "rel_size_migration"
+            ]
+            != "legacy"
+        )
+
     # How many relations: this number is tuned to be long enough to take tens of seconds
     # if the rollback code path is buggy, tripping the test's timeout.
-    n = 4000
+    n = 5000
+    step = 2500
 
     def create():
         # Create many relations
         log.info(f"Creating {n} relations...")
-        ep.safe_psql_many(
-            [
-                "BEGIN",
-                f"""DO $$
-            DECLARE
-                i INT;
-                table_name TEXT;
-            BEGIN
-                FOR i IN 1..{n} LOOP
-                    table_name := 'table_' || i;
-                    EXECUTE 'CREATE TABLE IF NOT EXISTS ' || table_name || ' (id SERIAL PRIMARY KEY, data TEXT)';
-                END LOOP;
-            END $$;
-            """,
-                "COMMIT",
-            ]
-        )
+        begin = 0
+        while True:
+            end = begin + step
+            ep.safe_psql_many(
+                [
+                    "BEGIN",
+                    f"""DO $$
+                DECLARE
+                    i INT;
+                    table_name TEXT;
+                BEGIN
+                    FOR i IN {begin}..{end} LOOP
+                        table_name := 'table_' || i;
+                        EXECUTE 'CREATE TABLE IF NOT EXISTS ' || table_name || ' (id SERIAL PRIMARY KEY, data TEXT)';
+                    END LOOP;
+                END $$;
+                """,
+                    "COMMIT",
+                ]
+            )
+            begin = end
+            if begin >= n:
+                break
 
     def truncate():
         # Truncate relations, then roll back the transaction containing the truncations
         log.info(f"Truncating {n} relations...")
-        ep.safe_psql_many(
-            [
-                "BEGIN",
-                f"""DO $$
-            DECLARE
-                i INT;
-                table_name TEXT;
-            BEGIN
-                FOR i IN 1..{n} LOOP
-                    table_name := 'table_' || i;
-                    EXECUTE 'TRUNCATE ' || table_name ;
-                END LOOP;
-            END $$;
-            """,
-            ]
-        )
+        begin = 0
+        while True:
+            end = begin + step
+            ep.safe_psql_many(
+                [
+                    "BEGIN",
+                    f"""DO $$
+                DECLARE
+                    i INT;
+                    table_name TEXT;
+                BEGIN
+                    FOR i IN {begin}..{end} LOOP
+                        table_name := 'table_' || i;
+                        EXECUTE 'TRUNCATE ' || table_name ;
+                    END LOOP;
+                END $$;
+                """,
+                ]
+            )
+            begin = end
+            if begin >= n:
+                break
 
     def rollback_and_wait():
         log.info(f"Rolling back after truncating {n} relations...")
@@ -417,7 +469,7 @@ def test_tx_abort_with_many_relations(
         try:
             # Rollback phase should be fast: this is one WAL record that we should process efficiently
             fut = exec.submit(rollback_and_wait)
-            fut.result(timeout=5)
+            fut.result(timeout=15)
         except:
             exec.shutdown(wait=False, cancel_futures=True)
             raise

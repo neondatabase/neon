@@ -4,21 +4,25 @@ import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import Lsn, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    Endpoint,
-    NeonEnv,
-    NeonEnvBuilder,
-    PgBin,
-)
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import wait_until_tenant_active
 from fixtures.utils import query_scalar
 from performance.test_perf_pgbench import get_scales_matrix
 from requests import RequestException
+from requests.exceptions import RetryError
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import (
+        Endpoint,
+        NeonEnv,
+        NeonEnvBuilder,
+        PgBin,
+    )
 
 
 # Test branch creation
@@ -42,9 +46,9 @@ def test_branching_with_pgbench(
     tenant, _ = env.create_tenant(
         conf={
             "gc_period": "5 s",
-            "gc_horizon": f"{1024 ** 2}",
-            "checkpoint_distance": f"{1024 ** 2}",
-            "compaction_target_size": f"{1024 ** 2}",
+            "gc_horizon": f"{1024**2}",
+            "checkpoint_distance": f"{1024**2}",
+            "compaction_target_size": f"{1024**2}",
             # set PITR interval to be small, so we can do GC
             "pitr_interval": "5 s",
         }
@@ -180,7 +184,6 @@ def test_cannot_create_endpoint_on_non_uploaded_timeline(neon_env_builder: NeonE
             env.endpoints.create_start(
                 initial_branch, tenant_id=env.initial_tenant, basebackup_request_tries=2
             )
-        ps_http.configure_failpoints(("before-upload-index-pausable", "off"))
     finally:
         env.pageserver.stop(immediate=True)
 
@@ -221,10 +224,7 @@ def test_cannot_branch_from_non_uploaded_branch(neon_env_builder: NeonEnvBuilder
 
         branch_id = TimelineId.generate()
 
-        with pytest.raises(
-            PageserverApiException,
-            match="Cannot branch off the timeline that's not present in pageserver",
-        ):
+        with pytest.raises(RetryError, match="too many 503 error responses"):
             ps_http.timeline_create(
                 env.pg_version,
                 env.initial_tenant,

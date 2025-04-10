@@ -1,14 +1,10 @@
 //! WAL ingestion benchmarks.
 
-#[path = "benchutils.rs"]
-mod benchutils;
-
 use std::io::Write as _;
 
-use benchutils::Env;
 use bytes::BytesMut;
 use camino_tempfile::tempfile;
-use criterion::{criterion_group, criterion_main, BatchSize, Bencher, Criterion};
+use criterion::{BatchSize, Bencher, Criterion, criterion_group, criterion_main};
 use itertools::Itertools as _;
 use postgres_ffi::v17::wal_generator::{LogicalMessageGenerator, WalGenerator};
 use pprof::criterion::{Output, PProfProfiler};
@@ -16,6 +12,8 @@ use safekeeper::receive_wal::{self, WalAcceptor};
 use safekeeper::safekeeper::{
     AcceptorProposerMessage, AppendRequest, AppendRequestHeader, ProposerAcceptorMessage,
 };
+use safekeeper::test_utils::Env;
+use safekeeper_api::membership::SafekeeperGeneration as Generation;
 use tokio::io::AsyncWriteExt as _;
 use utils::id::{NodeId, TenantTimelineId};
 use utils::lsn::Lsn;
@@ -24,8 +22,13 @@ const KB: usize = 1024;
 const MB: usize = 1024 * KB;
 const GB: usize = 1024 * MB;
 
+/// Use jemalloc and enable profiling, to mirror bin/safekeeper.rs.
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[allow(non_upper_case_globals)]
+#[unsafe(export_name = "malloc_conf")]
+pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:21\0";
 
 // Register benchmarks with Criterion.
 criterion_group!(
@@ -70,12 +73,15 @@ fn bench_process_msg(c: &mut Criterion) {
         assert!(size >= prefixlen);
         let message = vec![0; size - prefixlen];
 
-        let walgen = &mut WalGenerator::new(LogicalMessageGenerator::new(prefix, &message));
+        let walgen = &mut WalGenerator::new(LogicalMessageGenerator::new(prefix, &message), Lsn(0));
 
         // Set up the Safekeeper.
         let env = Env::new(fsync)?;
-        let mut safekeeper =
-            runtime.block_on(env.make_safekeeper(NodeId(1), TenantTimelineId::generate()))?;
+        let mut safekeeper = runtime.block_on(env.make_safekeeper(
+            NodeId(1),
+            TenantTimelineId::generate(),
+            Lsn(0),
+        ))?;
 
         b.iter_batched_ref(
             // Pre-construct WAL records and requests. Criterion will batch them.
@@ -83,13 +89,12 @@ fn bench_process_msg(c: &mut Criterion) {
                 let (lsn, record) = walgen.next().expect("endless WAL");
                 ProposerAcceptorMessage::AppendRequest(AppendRequest {
                     h: AppendRequestHeader {
+                        generation: Generation::new(0),
                         term: 1,
-                        term_start_lsn: Lsn(0),
                         begin_lsn: lsn,
                         end_lsn: lsn + record.len() as u64,
                         commit_lsn: if commit { lsn } else { Lsn(0) }, // commit previous record
                         truncate_lsn: Lsn(0),
-                        proposer_uuid: [0; 16],
                     },
                     wal_data: record,
                 })
@@ -128,7 +133,8 @@ fn bench_wal_acceptor(c: &mut Criterion) {
         let runtime = tokio::runtime::Runtime::new()?; // needs multithreaded
 
         let env = Env::new(fsync)?;
-        let walgen = &mut WalGenerator::new(LogicalMessageGenerator::new(c"prefix", b"message"));
+        let walgen =
+            &mut WalGenerator::new(LogicalMessageGenerator::new(c"prefix", b"message"), Lsn(0));
 
         // Create buffered channels that can fit all requests, to avoid blocking on channels.
         let (msg_tx, msg_rx) = tokio::sync::mpsc::channel(n);
@@ -139,7 +145,7 @@ fn bench_wal_acceptor(c: &mut Criterion) {
             // TODO: WalAcceptor doesn't actually need a full timeline, only
             // Safekeeper::process_msg(). Consider decoupling them to simplify the setup.
             let tli = env
-                .make_timeline(NodeId(1), TenantTimelineId::generate())
+                .make_timeline(NodeId(1), TenantTimelineId::generate(), Lsn(0))
                 .await?
                 .wal_residence_guard()
                 .await?;
@@ -154,13 +160,12 @@ fn bench_wal_acceptor(c: &mut Criterion) {
                     .take(n)
                     .map(|(lsn, record)| AppendRequest {
                         h: AppendRequestHeader {
+                            generation: Generation::new(0),
                             term: 1,
-                            term_start_lsn: Lsn(0),
                             begin_lsn: lsn,
                             end_lsn: lsn + record.len() as u64,
                             commit_lsn: Lsn(0),
                             truncate_lsn: Lsn(0),
-                            proposer_uuid: [0; 16],
                         },
                         wal_data: record,
                     })
@@ -233,7 +238,7 @@ fn bench_wal_acceptor_throughput(c: &mut Criterion) {
         assert!(size >= prefixlen);
         let message = vec![0; size - prefixlen];
 
-        let walgen = &mut WalGenerator::new(LogicalMessageGenerator::new(prefix, &message));
+        let walgen = &mut WalGenerator::new(LogicalMessageGenerator::new(prefix, &message), Lsn(0));
 
         // Construct and spawn the WalAcceptor task.
         let env = Env::new(fsync)?;
@@ -243,7 +248,7 @@ fn bench_wal_acceptor_throughput(c: &mut Criterion) {
 
         runtime.block_on(async {
             let tli = env
-                .make_timeline(NodeId(1), TenantTimelineId::generate())
+                .make_timeline(NodeId(1), TenantTimelineId::generate(), Lsn(0))
                 .await?
                 .wal_residence_guard()
                 .await?;
@@ -256,13 +261,12 @@ fn bench_wal_acceptor_throughput(c: &mut Criterion) {
             runtime.block_on(async {
                 let reqgen = walgen.take(count).map(|(lsn, record)| AppendRequest {
                     h: AppendRequestHeader {
+                        generation: Generation::new(0),
                         term: 1,
-                        term_start_lsn: Lsn(0),
                         begin_lsn: lsn,
                         end_lsn: lsn + record.len() as u64,
                         commit_lsn: if commit { lsn } else { Lsn(0) }, // commit previous record
                         truncate_lsn: Lsn(0),
-                        proposer_uuid: [0; 16],
                     },
                     wal_data: record,
                 });

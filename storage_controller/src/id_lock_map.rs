@@ -1,8 +1,7 @@
+use std::collections::HashMap;
 use std::fmt::Display;
-use std::time::Instant;
-use std::{collections::HashMap, sync::Arc};
-
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::service::RECONCILE_TIMEOUT;
 
@@ -110,6 +109,14 @@ where
             *guard.guard = Some(operation);
             guard
         }
+    }
+
+    pub(crate) fn try_exclusive(&self, key: T, operation: I) -> Option<TracingExclusiveGuard<I>> {
+        let mut locked = self.entities.lock().unwrap();
+        let entry = locked.entry(key).or_default().clone();
+        let mut guard = TracingExclusiveGuard::new(entry.try_write_owned().ok()?);
+        *guard.guard = Some(operation);
+        Some(guard)
     }
 
     /// Rather than building a lock guard that re-takes the [`Self::entities`] lock, we just do

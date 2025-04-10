@@ -47,6 +47,11 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
       - run: gh pr --repo "${GITHUB_REPOSITORY}" edit "${PR_NUMBER}" --remove-label "approved-for-ci-run"
 
   create-or-update-pr-for-ci-run:
@@ -63,13 +68,18 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
       - run: gh pr --repo "${GITHUB_REPOSITORY}" edit "${PR_NUMBER}" --remove-label "approved-for-ci-run"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: main
+          ref: ${{ github.event.pull_request.head.sha }}
           token: ${{ secrets.CI_ACCESS_TOKEN }}
-      
+
       - name: Look for existing PR
         id: get-pr
         env:
@@ -77,7 +87,7 @@ jobs:
         run: |
           ALREADY_CREATED="$(gh pr --repo ${GITHUB_REPOSITORY} list --head ${BRANCH} --base main --json number --jq '.[].number')"
           echo "ALREADY_CREATED=${ALREADY_CREATED}" >> ${GITHUB_OUTPUT}
-      
+
       - name: Get changed labels
         id: get-labels
         if: steps.get-pr.outputs.ALREADY_CREATED != ''
@@ -94,8 +104,6 @@ jobs:
           echo "LABELS_TO_ADD=${LABELS_TO_ADD}" >> ${GITHUB_OUTPUT}
           echo "LABELS_TO_REMOVE=${LABELS_TO_REMOVE}" >> ${GITHUB_OUTPUT}
 
-      - run: gh pr checkout "${PR_NUMBER}"
-
       - run: git checkout -b "${BRANCH}"
 
       - run: git push --force origin "${BRANCH}"
@@ -103,7 +111,7 @@ jobs:
 
       - name: Create a Pull Request for CI run (if required)
         if: steps.get-pr.outputs.ALREADY_CREATED == ''
-        env: 
+        env:
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
         run: |
           cat << EOF > body.md
@@ -140,7 +148,7 @@ jobs:
 
       - run: git push --force origin "${BRANCH}"
         if: steps.get-pr.outputs.ALREADY_CREATED != ''
-             
+
   cleanup:
     # Close PRs and delete branchs if the original PR is closed.
 
@@ -155,6 +163,11 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
       - name: Close PR and delete `ci-run/pr-${{ env.PR_NUMBER }}` branch
         run: |
           CLOSED="$(gh pr --repo ${GITHUB_REPOSITORY} list --head ${BRANCH} --json 'closed' --jq '.[].closed')"

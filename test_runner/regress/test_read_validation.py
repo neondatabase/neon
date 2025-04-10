@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from contextlib import closing
+from typing import TYPE_CHECKING
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import query_scalar
 from psycopg2.errors import IoError, UndefinedTable
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv
 
 pytest_plugins = "fixtures.neon_fixtures"
 

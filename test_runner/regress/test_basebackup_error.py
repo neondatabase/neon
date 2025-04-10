@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
-from fixtures.neon_fixtures import NeonEnv
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv
 
 
 #

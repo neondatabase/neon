@@ -18,27 +18,22 @@
 //! - An Iterator interface would be more convenient for the callers than the
 //!   'visit' function
 //!
+use std::cmp::Ordering;
+use std::iter::Rev;
+use std::ops::{Range, RangeInclusive};
+use std::{io, result};
+
 use async_stream::try_stream;
-use byteorder::{ReadBytesExt, BE};
+use byteorder::{BE, ReadBytesExt};
 use bytes::{BufMut, Bytes, BytesMut};
 use either::Either;
 use futures::{Stream, StreamExt};
 use hex;
-use std::{
-    cmp::Ordering,
-    io,
-    iter::Rev,
-    ops::{Range, RangeInclusive},
-    result,
-};
 use thiserror::Error;
 use tracing::error;
 
-use crate::{
-    context::{DownloadBehavior, RequestContext},
-    task_mgr::TaskKind,
-    tenant::block_io::{BlockReader, BlockWriter},
-};
+use crate::context::RequestContext;
+use crate::tenant::block_io::{BlockReader, BlockWriter};
 
 // The maximum size of a value stored in the B-tree. 5 bytes is enough currently.
 pub const VALUE_SZ: usize = 5;
@@ -84,17 +79,17 @@ impl Value {
 
     fn to_u64(self) -> u64 {
         let b = &self.0;
-        (b[0] as u64) << 32
-            | (b[1] as u64) << 24
-            | (b[2] as u64) << 16
-            | (b[3] as u64) << 8
+        ((b[0] as u64) << 32)
+            | ((b[1] as u64) << 24)
+            | ((b[2] as u64) << 16)
+            | ((b[3] as u64) << 8)
             | b[4] as u64
     }
 
     fn to_blknum(self) -> u32 {
         let b = &self.0;
         assert!(b[0] == 0x80);
-        (b[1] as u32) << 24 | (b[2] as u32) << 16 | (b[3] as u32) << 8 | b[4] as u32
+        ((b[1] as u32) << 24) | ((b[2] as u32) << 16) | ((b[3] as u32) << 8) | b[4] as u32
     }
 }
 
@@ -481,16 +476,15 @@ where
     }
 
     #[allow(dead_code)]
-    pub async fn dump(&self) -> Result<()> {
+    pub async fn dump(&self, ctx: &RequestContext) -> Result<()> {
         let mut stack = Vec::new();
-        let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
 
         stack.push((self.root_blk, String::new(), 0, 0, 0));
 
         let block_cursor = self.reader.block_cursor();
 
         while let Some((blknum, path, depth, child_idx, key_off)) = stack.pop() {
-            let blk = block_cursor.read_blk(self.start_blk + blknum, &ctx).await?;
+            let blk = block_cursor.read_blk(self.start_blk + blknum, ctx).await?;
             let buf: &[u8] = blk.as_ref();
             let node = OnDiskNode::<L>::deparse(buf)?;
 
@@ -532,7 +526,7 @@ pub struct DiskBtreeIterator<'a> {
     >,
 }
 
-impl<'a> DiskBtreeIterator<'a> {
+impl DiskBtreeIterator<'_> {
     pub async fn next(&mut self) -> Option<std::result::Result<(Vec<u8>, u64), DiskBtreeError>> {
         self.stream.next().await
     }
@@ -833,11 +827,15 @@ impl<const L: usize> BuildNode<L> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::*;
-    use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReaderRef};
-    use rand::Rng;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use rand::Rng;
+
+    use super::*;
+    use crate::context::DownloadBehavior;
+    use crate::task_mgr::TaskKind;
+    use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReaderRef};
 
     #[derive(Clone, Default)]
     pub(crate) struct TestDisk {
@@ -871,7 +869,8 @@ pub(crate) mod tests {
         let mut disk = TestDisk::new();
         let mut writer = DiskBtreeBuilder::<_, 6>::new(&mut disk);
 
-        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let ctx =
+            RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
 
         let all_keys: Vec<&[u8; 6]> = vec![
             b"xaaaaa", b"xaaaba", b"xaaaca", b"xabaaa", b"xababa", b"xabaca", b"xabada", b"xabadb",
@@ -889,7 +888,7 @@ pub(crate) mod tests {
 
         let reader = DiskBtreeReader::new(0, root_offset, disk);
 
-        reader.dump().await?;
+        reader.dump(&ctx).await?;
 
         // Test the `get` function on all the keys.
         for (key, val) in all_data.iter() {
@@ -981,7 +980,8 @@ pub(crate) mod tests {
     async fn lots_of_keys() -> Result<()> {
         let mut disk = TestDisk::new();
         let mut writer = DiskBtreeBuilder::<_, 8>::new(&mut disk);
-        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let ctx =
+            RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
 
         const NUM_KEYS: u64 = 1000;
 
@@ -999,7 +999,7 @@ pub(crate) mod tests {
 
         let reader = DiskBtreeReader::new(0, root_offset, disk);
 
-        reader.dump().await?;
+        reader.dump(&ctx).await?;
 
         use std::sync::Mutex;
 
@@ -1115,7 +1115,7 @@ pub(crate) mod tests {
 
         // Test get() operations on random keys, most of which will not exist
         for _ in 0..100000 {
-            let key_int = rand::thread_rng().gen::<u128>();
+            let key_int = rand::thread_rng().r#gen::<u128>();
             let search_key = u128::to_be_bytes(key_int);
             assert!(reader.get(&search_key, &ctx).await? == all_data.get(&key_int).cloned());
         }
@@ -1169,7 +1169,8 @@ pub(crate) mod tests {
         // Build a tree from it
         let mut disk = TestDisk::new();
         let mut writer = DiskBtreeBuilder::<_, 26>::new(&mut disk);
-        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let ctx =
+            RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
 
         for (key, val) in disk_btree_test_data::TEST_DATA {
             writer.append(&key, val)?;
@@ -1200,7 +1201,7 @@ pub(crate) mod tests {
             .await?;
         assert_eq!(count, disk_btree_test_data::TEST_DATA.len());
 
-        reader.dump().await?;
+        reader.dump(&ctx).await?;
 
         Ok(())
     }

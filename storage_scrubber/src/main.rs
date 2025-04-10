@@ -1,24 +1,20 @@
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 use camino::Utf8PathBuf;
+use clap::{Parser, Subcommand};
 use pageserver_api::controller_api::{MetadataHealthUpdateRequest, MetadataHealthUpdateResponse};
 use pageserver_api::shard::TenantShardId;
-use reqwest::{Method, Url};
+use reqwest::{Certificate, Method, Url};
 use storage_controller_client::control_api;
-use storage_scrubber::garbage::{find_garbage, purge_garbage, PurgeMode};
-use storage_scrubber::pageserver_physical_gc::GcMode;
+use storage_scrubber::garbage::{PurgeMode, find_garbage, purge_garbage};
+use storage_scrubber::pageserver_physical_gc::{GcMode, pageserver_physical_gc};
 use storage_scrubber::scan_pageserver_metadata::scan_pageserver_metadata;
-use storage_scrubber::scan_safekeeper_metadata::DatabaseOrList;
+use storage_scrubber::scan_safekeeper_metadata::{DatabaseOrList, scan_safekeeper_metadata};
 use storage_scrubber::tenant_snapshot::SnapshotDownloader;
-use storage_scrubber::{find_large_objects, ControllerClientConfig};
 use storage_scrubber::{
-    init_logging, pageserver_physical_gc::pageserver_physical_gc,
-    scan_safekeeper_metadata::scan_safekeeper_metadata, BucketConfig, ConsoleConfig, NodeKind,
-    TraversingDepth,
+    BucketConfig, ConsoleConfig, ControllerClientConfig, NodeKind, TraversingDepth,
+    find_large_objects, init_logging,
 };
-
-use clap::{Parser, Subcommand};
 use utils::id::TenantId;
-
 use utils::{project_build_tag, project_git_version};
 
 project_git_version!(GIT_VERSION);
@@ -45,6 +41,10 @@ struct Cli {
     /// If set to true, the scrubber will exit with error code on fatal error.
     #[arg(long, default_value_t = false)]
     exit_code: bool,
+
+    /// Trusted root CA certificates to use in https APIs.
+    #[arg(long)]
+    ssl_ca_file: Option<Utf8PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -86,6 +86,8 @@ enum Command {
         /// For safekeeper node_kind only, json list of timelines and their lsn info
         #[arg(long, default_value = None)]
         timeline_lsns: Option<String>,
+        #[arg(long, default_value_t = false)]
+        verbose: bool,
     },
     TenantSnapshot {
         #[arg(long = "tenant-id")]
@@ -148,13 +150,28 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("version: {}, build_tag {}", GIT_VERSION, BUILD_TAG);
 
+    let ssl_ca_certs = match cli.ssl_ca_file.as_ref() {
+        Some(ssl_ca_file) => {
+            tracing::info!("Using ssl root CA file: {ssl_ca_file:?}");
+            let buf = tokio::fs::read(ssl_ca_file).await?;
+            Certificate::from_pem_bundle(&buf)?
+        }
+        None => Vec::new(),
+    };
+
+    let mut http_client = reqwest::Client::builder();
+    for cert in ssl_ca_certs {
+        http_client = http_client.add_root_certificate(cert);
+    }
+    let http_client = http_client.build()?;
+
     let controller_client = cli.controller_api.map(|controller_api| {
         ControllerClientConfig {
             controller_api,
             // Default to no key: this is a convenience when working in a development environment
             controller_jwt: cli.controller_jwt.unwrap_or("".to_owned()),
         }
-        .build_client()
+        .build_client(http_client)
     });
 
     match cli.command {
@@ -166,19 +183,28 @@ async fn main() -> anyhow::Result<()> {
             dump_db_connstr,
             dump_db_table,
             timeline_lsns,
+            verbose,
         } => {
             if let NodeKind::Safekeeper = node_kind {
                 let db_or_list = match (timeline_lsns, dump_db_connstr) {
                     (Some(timeline_lsns), _) => {
-                        let timeline_lsns = serde_json::from_str(&timeline_lsns).context("parsing timeline_lsns")?;
+                        let timeline_lsns = serde_json::from_str(&timeline_lsns)
+                            .context("parsing timeline_lsns")?;
                         DatabaseOrList::List(timeline_lsns)
                     }
                     (None, Some(dump_db_connstr)) => {
-                        let dump_db_table = dump_db_table.ok_or_else(|| anyhow::anyhow!("dump_db_table not specified"))?;
+                        let dump_db_table = dump_db_table
+                            .ok_or_else(|| anyhow::anyhow!("dump_db_table not specified"))?;
                         let tenant_ids = tenant_ids.iter().map(|tshid| tshid.tenant_id).collect();
-                        DatabaseOrList::Database { tenant_ids, connstr: dump_db_connstr, table: dump_db_table }
+                        DatabaseOrList::Database {
+                            tenant_ids,
+                            connstr: dump_db_connstr,
+                            table: dump_db_table,
+                        }
                     }
-                    (None, None) => anyhow::bail!("neither `timeline_lsns` specified, nor `dump_db_connstr` and `dump_db_table`"),
+                    (None, None) => anyhow::bail!(
+                        "neither `timeline_lsns` specified, nor `dump_db_connstr` and `dump_db_table`"
+                    ),
                 };
                 let summary = scan_safekeeper_metadata(bucket_config.clone(), db_or_list).await?;
                 if json {
@@ -203,6 +229,7 @@ async fn main() -> anyhow::Result<()> {
                     tenant_ids,
                     json,
                     post_to_storcon,
+                    verbose,
                     cli.exit_code,
                 )
                 .await
@@ -313,6 +340,7 @@ pub async fn run_cron_job(
         Vec::new(),
         true,
         post_to_storcon,
+        false, // default to non-verbose mode
         exit_code,
     )
     .await?;
@@ -362,12 +390,15 @@ pub async fn scan_pageserver_metadata_cmd(
     tenant_shard_ids: Vec<TenantShardId>,
     json: bool,
     post_to_storcon: bool,
+    verbose: bool,
     exit_code: bool,
 ) -> anyhow::Result<()> {
     if controller_client.is_none() && post_to_storcon {
-        return Err(anyhow!("Posting pageserver scan health status to storage controller requires `--controller-api` and `--controller-jwt` to run"));
+        return Err(anyhow!(
+            "Posting pageserver scan health status to storage controller requires `--controller-api` and `--controller-jwt` to run"
+        ));
     }
-    match scan_pageserver_metadata(bucket_config.clone(), tenant_shard_ids).await {
+    match scan_pageserver_metadata(bucket_config.clone(), tenant_shard_ids, verbose).await {
         Err(e) => {
             tracing::error!("Failed: {e}");
             Err(e)

@@ -1,18 +1,14 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-
-use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::{
-    FilterTenantTimelineId, MessageType, SubscribeByFilterRequest,
+    FilterTenantTimelineId, MessageType, SafekeeperTimelineInfo, SubscribeByFilterRequest,
     TenantTimelineId as ProtoTenantTimelineId, TypeSubscription, TypedMessage,
 };
-
 use storage_broker::{BrokerClientChannel, DEFAULT_ENDPOINT};
 use tokio::time;
-
 use tonic::Request;
 
 const ABOUT: &str = r#"
@@ -145,6 +141,7 @@ async fn publish(client: Option<BrokerClientChannel>, n_keys: u64) {
                 peer_horizon_lsn: 5,
                 safekeeper_connstr: "zenith-1-sk-1.local:7676".to_owned(),
                 http_connstr: "zenith-1-sk-1.local:7677".to_owned(),
+                https_connstr: Some("zenith-1-sk-1.local:7678".to_owned()),
                 local_start_lsn: 0,
                 availability_zone: None,
                 standby_horizon: 0,

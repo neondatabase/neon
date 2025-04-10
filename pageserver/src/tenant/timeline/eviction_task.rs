@@ -13,31 +13,27 @@
 //! Items with parentheses are not (yet) touched by this task.
 //!
 //! See write-up on restart on-demand download spike: <https://gist.github.com/problame/2265bf7b8dc398be834abfead36c76b5>
-use std::{
-    collections::HashMap,
-    ops::ControlFlow,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::collections::HashMap;
+use std::ops::ControlFlow;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use pageserver_api::models::{EvictionPolicy, EvictionPolicyLayerAccessThreshold};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, info_span, instrument, warn, Instrument};
-
-use crate::{
-    context::{DownloadBehavior, RequestContext},
-    pgdatadir_mapping::CollectKeySpaceError,
-    task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
-    tenant::{
-        size::CalculateSyntheticSizeError, storage_layer::LayerVisibilityHint,
-        tasks::BackgroundLoopKind, timeline::EvictionError, LogicalSizeCalculationCause, Tenant,
-    },
-};
-
-use utils::{completion, sync::gate::GateGuard};
+use tracing::{Instrument, debug, info, info_span, instrument, warn};
+use utils::completion;
+use utils::sync::gate::GateGuard;
 
 use super::Timeline;
+use crate::context::{DownloadBehavior, RequestContext};
+use crate::pgdatadir_mapping::CollectKeySpaceError;
+use crate::task_mgr::{self, BACKGROUND_RUNTIME, TaskKind};
+use crate::tenant::size::CalculateSyntheticSizeError;
+use crate::tenant::storage_layer::LayerVisibilityHint;
+use crate::tenant::tasks::{BackgroundLoopKind, BackgroundLoopSemaphorePermit, sleep_random};
+use crate::tenant::timeline::EvictionError;
+use crate::tenant::{LogicalSizeCalculationCause, Tenant};
 
 #[derive(Default)]
 pub struct EvictionTaskTimelineState {
@@ -80,8 +76,6 @@ impl Timeline {
 
     #[instrument(skip_all, fields(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id))]
     async fn eviction_task(self: Arc<Self>, tenant: Arc<Tenant>) {
-        use crate::tenant::tasks::random_init_delay;
-
         // acquire the gate guard only once within a useful span
         let Ok(guard) = self.gate.enter() else {
             return;
@@ -94,12 +88,13 @@ impl Timeline {
                 EvictionPolicy::OnlyImitiate(lat) => lat.period,
                 EvictionPolicy::NoEviction => Duration::from_secs(10),
             };
-            if random_init_delay(period, &self.cancel).await.is_err() {
+            if sleep_random(period, &self.cancel).await.is_err() {
                 return;
             }
         }
 
-        let ctx = RequestContext::new(TaskKind::Eviction, DownloadBehavior::Warn);
+        let ctx = RequestContext::new(TaskKind::Eviction, DownloadBehavior::Warn)
+            .with_scope_timeline(&self);
         loop {
             let policy = self.get_eviction_policy();
             let cf = self
@@ -330,11 +325,9 @@ impl Timeline {
         &self,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> ControlFlow<(), tokio::sync::SemaphorePermit<'static>> {
-        let acquire_permit = crate::tenant::tasks::concurrent_background_tasks_rate_limit_permit(
-            BackgroundLoopKind::Eviction,
-            ctx,
-        );
+    ) -> ControlFlow<(), BackgroundLoopSemaphorePermit<'static>> {
+        let acquire_permit =
+            crate::tenant::tasks::acquire_concurrency_permit(BackgroundLoopKind::Eviction, ctx);
 
         tokio::select! {
             permit = acquire_permit => ControlFlow::Continue(permit),
@@ -374,7 +367,7 @@ impl Timeline {
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
         gate: &GateGuard,
-        permit: tokio::sync::SemaphorePermit<'static>,
+        permit: BackgroundLoopSemaphorePermit<'static>,
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
         if !self.tenant_shard_id.is_shard_zero() {

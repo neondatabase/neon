@@ -127,12 +127,12 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder, attach_mode: str):
 
     ip = get_index_part()
     assert len(ip.layer_metadata.keys())
-    assert (
-        ip.disk_consistent_lsn < last_record_lsn
-    ), "sanity check for what above loop is supposed to do"
+    assert ip.disk_consistent_lsn < last_record_lsn, (
+        "sanity check for what above loop is supposed to do"
+    )
 
     # create the image layer from the future
-    env.storage_controller.pageserver_api().patch_tenant_config_client_side(
+    env.storage_controller.pageserver_api().update_tenant_config(
         tenant_id, {"image_creation_threshold": image_creation_threshold}, None
     )
     assert ps_http.tenant_config(tenant_id).effective_config["image_creation_threshold"] == 1
@@ -172,7 +172,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder, attach_mode: str):
     # force removal of layers from the future
     tenant_conf = ps_http.tenant_config(tenant_id)
     generation_before_detach = get_generation_number()
-    env.pageserver.tenant_detach(tenant_id)
+    env.pageserver.http_client().tenant_detach(tenant_id)
     failpoint_deletion_queue = "deletion-queue-before-execute-pause"
 
     ps_http.configure_failpoints((failpoint_deletion_queue, "pause"))
@@ -206,7 +206,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder, attach_mode: str):
         future_layers = set(get_future_layers())
         assert future_layer not in future_layers
 
-    wait_until(10, 0.5, future_layer_is_gone_from_index_part)
+    wait_until(future_layer_is_gone_from_index_part)
 
     # We already make deletion stuck here, but we don't necessarily hit the failpoint
     # because deletions are batched.
@@ -233,9 +233,9 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder, attach_mode: str):
     start = time.monotonic()
     while True:
         post_stat = future_layer_path.stat()
-        assert (
-            pre_stat.st_mtime == post_stat.st_mtime
-        ), "observed PUT overtake the stucked DELETE => bug isn't fixed yet"
+        assert pre_stat.st_mtime == post_stat.st_mtime, (
+            "observed PUT overtake the stucked DELETE => bug isn't fixed yet"
+        )
         if time.monotonic() - start > max_race_opportunity_window:
             log.info(
                 "a correct implementation would never let the later PUT overtake the earlier DELETE"

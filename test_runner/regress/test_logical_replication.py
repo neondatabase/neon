@@ -55,13 +55,13 @@ def test_logical_replication(neon_simple_env: NeonEnv, vanilla_pg: VanillaPostgr
     vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub1")
 
     # Wait logical replication channel to be established
-    logical_replication_sync(vanilla_pg, endpoint)
+    logical_replication_sync(vanilla_pg, endpoint, "sub1")
 
     # insert some data
     cur.execute("insert into t values (generate_series(1,1000), 0)")
 
     # Wait logical replication to sync
-    logical_replication_sync(vanilla_pg, endpoint)
+    logical_replication_sync(vanilla_pg, endpoint, "sub1")
     assert vanilla_pg.safe_psql("select count(*) from t")[0][0] == 1000
 
     # now stop subscriber...
@@ -78,7 +78,7 @@ def test_logical_replication(neon_simple_env: NeonEnv, vanilla_pg: VanillaPostgr
     vanilla_pg.start()
 
     # Wait logical replication to sync
-    logical_replication_sync(vanilla_pg, endpoint)
+    logical_replication_sync(vanilla_pg, endpoint, "sub1")
 
     # Check that subscribers receives all data
     assert vanilla_pg.safe_psql("select count(*) from t")[0][0] == 2000
@@ -148,7 +148,7 @@ COMMIT;
     endpoint.start()
 
     vanilla_pg.start()
-    logical_replication_sync(vanilla_pg, endpoint)
+    logical_replication_sync(vanilla_pg, endpoint, "sub1")
     eq_q = "select testcolumn1, testcolumn2, testcolumn3 from replication_example order by 1, 2, 3"
     assert vanilla_pg.safe_psql(eq_q) == endpoint.safe_psql(eq_q)
     log.info("rewriteheap synced")
@@ -207,7 +207,7 @@ def test_obsolete_slot_drop(neon_simple_env: NeonEnv, vanilla_pg: VanillaPostgre
     log.info(f"ep connstr is {endpoint.connstr()}, subscriber connstr {vanilla_pg.connstr()}")
     vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub1")
 
-    wait_until(number_of_iterations=10, interval=2, func=partial(slot_removed, endpoint))
+    wait_until(partial(slot_removed, endpoint))
 
 
 def test_ondemand_wal_download_in_replication_slot_funcs(neon_env_builder: NeonEnvBuilder):
@@ -285,7 +285,7 @@ FROM generate_series(1, 16384) AS seq; -- Inserts enough rows to exceed 16MB of 
     vanilla_pg.safe_psql("create table t(a int)")
     connstr = endpoint.connstr().replace("'", "''")
     vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub")
-    logical_replication_sync(vanilla_pg, endpoint)
+    logical_replication_sync(vanilla_pg, endpoint, "sub1")
 
     vanilla_pg.stop()
 
@@ -321,13 +321,13 @@ FROM generate_series(1, 16384) AS seq; -- Inserts enough rows to exceed 16MB of 
         sk_http = sk.http_client()
         sk_http.configure_failpoints([("sk-pause-send", "off")])
 
-    logical_replication_sync(vanilla_pg, endpoint)
+    logical_replication_sync(vanilla_pg, endpoint, "sub1")
     assert [r[0] for r in vanilla_pg.safe_psql("select * from t")] == [1, 2]
 
     # Check that local reads also work
     with endpoint.connect().cursor() as cur:
         cur.execute("insert into t values (3)")
-    logical_replication_sync(vanilla_pg, endpoint)
+    logical_replication_sync(vanilla_pg, endpoint, "sub1")
     assert [r[0] for r in vanilla_pg.safe_psql("select * from t")] == [1, 2, 3]
 
     log_path = vanilla_pg.pgdatadir / "pg.log"
@@ -365,7 +365,7 @@ def test_restart_endpoint(neon_simple_env: NeonEnv, vanilla_pg: VanillaPostgres)
     log.info(f"ep connstr is {endpoint.connstr()}, subscriber connstr {vanilla_pg.connstr()}")
     connstr = endpoint.connstr().replace("'", "''")
     vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub1")
-    logical_replication_sync(vanilla_pg, endpoint)
+    logical_replication_sync(vanilla_pg, endpoint, "sub1")
     vanilla_pg.stop()
 
     wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
@@ -375,7 +375,7 @@ def test_restart_endpoint(neon_simple_env: NeonEnv, vanilla_pg: VanillaPostgres)
     # this should flush current wal page
     cur.execute("insert into replication_example values (3, 4)")
     vanilla_pg.start()
-    logical_replication_sync(vanilla_pg, endpoint)
+    logical_replication_sync(vanilla_pg, endpoint, "sub1")
     assert vanilla_pg.safe_psql(
         "select sum(somedata) from replication_example"
     ) == endpoint.safe_psql("select sum(somedata) from replication_example")
@@ -409,18 +409,18 @@ def test_large_records(neon_simple_env: NeonEnv, vanilla_pg: VanillaPostgres):
     # Test simple insert, update, delete. But with very large values
     value = random_string(10_000_000)
     cur.execute(f"INSERT INTO reptbl VALUES (1, '{value}')")
-    logical_replication_sync(vanilla_pg, endpoint)
+    logical_replication_sync(vanilla_pg, endpoint, "sub1")
     assert vanilla_pg.safe_psql("select id, largeval from reptbl") == [(1, value)]
 
     # Test delete, and reinsert another value
     cur.execute("DELETE FROM reptbl WHERE id = 1")
     cur.execute(f"INSERT INTO reptbl VALUES (2, '{value}')")
-    logical_replication_sync(vanilla_pg, endpoint)
+    logical_replication_sync(vanilla_pg, endpoint, "sub1")
     assert vanilla_pg.safe_psql("select id, largeval from reptbl") == [(2, value)]
 
     value = random_string(10_000_000)
     cur.execute(f"UPDATE reptbl SET largeval='{value}'")
-    logical_replication_sync(vanilla_pg, endpoint)
+    logical_replication_sync(vanilla_pg, endpoint, "sub1")
     assert vanilla_pg.safe_psql("select id, largeval from reptbl") == [(2, value)]
 
     endpoint.stop()
@@ -428,7 +428,7 @@ def test_large_records(neon_simple_env: NeonEnv, vanilla_pg: VanillaPostgres):
     cur = endpoint.connect().cursor()
     value = random_string(10_000_000)
     cur.execute(f"UPDATE reptbl SET largeval='{value}'")
-    logical_replication_sync(vanilla_pg, endpoint)
+    logical_replication_sync(vanilla_pg, endpoint, "sub1")
     assert vanilla_pg.safe_psql("select id, largeval from reptbl") == [(2, value)]
 
 
@@ -519,7 +519,7 @@ def test_replication_shutdown(neon_simple_env: NeonEnv):
             assert len(res) == 4
             assert [r[0] for r in res] == [10, 20, 30, 40]
 
-        wait_until(10, 0.5, check_that_changes_propagated)
+        wait_until(check_that_changes_propagated)
 
 
 def logical_replication_wait_flush_lsn_sync(publisher: PgProtocol) -> Lsn:
@@ -549,7 +549,7 @@ select sent_lsn, flush_lsn, pg_current_wal_flush_lsn() from pg_stat_replication 
         )
         assert flush_lsn >= publisher_flush_lsn
 
-    wait_until(30, 0.5, check_caughtup)
+    wait_until(check_caughtup)
     return publisher_flush_lsn
 
 
@@ -573,17 +573,18 @@ def test_subscriber_synchronous_commit(neon_simple_env: NeonEnv, vanilla_pg: Van
     vanilla_pg.safe_psql("create extension neon;")
 
     env.create_branch("subscriber")
-    # We want all data to fit into shared_buffers because later we stop
-    # safekeeper and insert more; this shouldn't cause page requests as they
-    # will be stuck.
+    # We want all data to fit into shared_buffers or LFC cache because later we
+    # stop safekeeper and insert more; this shouldn't cause page requests as
+    # they will be stuck.
+    if USE_LFC:
+        config_lines = ["neon.max_file_cache_size = 32MB", "neon.file_cache_size_limit = 32MB"]
+    else:
+        config_lines = [
+            "shared_buffers = 32MB",
+        ]
     sub = env.endpoints.create(
         "subscriber",
-        config_lines=[
-            "neon.max_file_cache_size = 32MB",
-            "neon.file_cache_size_limit = 32MB",
-        ]
-        if USE_LFC
-        else [],
+        config_lines=config_lines,
     )
     sub.start()
 
@@ -607,7 +608,7 @@ def test_subscriber_synchronous_commit(neon_simple_env: NeonEnv, vanilla_pg: Van
         for i in range(0, 1000):
             pcur.execute("INSERT into t values (%s, random()*100000)", (i,))
     # wait until sub receives all data
-    logical_replication_sync(sub, vanilla_pg)
+    logical_replication_sync(sub, vanilla_pg, "sub")
     # Update confirmed_flush_lsn of the slot. If subscriber ack'ed recevied data
     # as flushed we'll now lose it if subscriber restars. That's why
     # logical_replication_wait_flush_lsn_sync is expected to hang while

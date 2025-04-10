@@ -1,21 +1,15 @@
-use crate::{
-    is_temporary,
-    tenant::{
-        ephemeral_file::is_ephemeral_file,
-        remote_timeline_client::{
-            self,
-            index::{IndexPart, LayerFileMetadata},
-        },
-        storage_layer::LayerName,
-    },
-};
+use std::collections::{HashMap, hash_map};
+use std::str::FromStr;
+
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
-use std::{
-    collections::{hash_map, HashMap},
-    str::FromStr,
-};
 use utils::lsn::Lsn;
+
+use crate::is_temporary;
+use crate::tenant::ephemeral_file::is_ephemeral_file;
+use crate::tenant::remote_timeline_client::index::{IndexPart, LayerFileMetadata};
+use crate::tenant::remote_timeline_client::{self};
+use crate::tenant::storage_layer::LayerName;
 
 /// Identified files in the timeline directory.
 pub(super) enum Discovered {

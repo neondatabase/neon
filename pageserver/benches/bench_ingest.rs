@@ -1,22 +1,21 @@
-use std::{env, num::NonZeroUsize};
+use std::env;
+use std::num::NonZeroUsize;
 
 use bytes::Bytes;
 use camino::Utf8PathBuf;
-use criterion::{criterion_group, criterion_main, Criterion};
-use pageserver::{
-    config::PageServerConf,
-    context::{DownloadBehavior, RequestContext},
-    l0_flush::{L0FlushConfig, L0FlushGlobalState},
-    page_cache,
-    task_mgr::TaskKind,
-    tenant::storage_layer::InMemoryLayer,
-    virtual_file,
-};
-use pageserver_api::{key::Key, shard::TenantShardId, value::Value};
-use utils::{
-    bin_ser::BeSer,
-    id::{TenantId, TimelineId},
-};
+use criterion::{Criterion, criterion_group, criterion_main};
+use pageserver::config::PageServerConf;
+use pageserver::context::{DownloadBehavior, RequestContext};
+use pageserver::l0_flush::{L0FlushConfig, L0FlushGlobalState};
+use pageserver::task_mgr::TaskKind;
+use pageserver::tenant::storage_layer::InMemoryLayer;
+use pageserver::{page_cache, virtual_file};
+use pageserver_api::key::Key;
+use pageserver_api::shard::TenantShardId;
+use pageserver_api::value::Value;
+use tokio_util::sync::CancellationToken;
+use utils::bin_ser::BeSer;
+use utils::id::{TenantId, TimelineId};
 use wal_decoder::serialized_batch::SerializedValueBatch;
 
 // A very cheap hash for generating non-sequential keys.
@@ -59,13 +58,22 @@ async fn ingest(
 
     tokio::fs::create_dir_all(conf.timeline_path(&tenant_shard_id, &timeline_id)).await?;
 
-    let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
+    let ctx =
+        RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error).with_scope_debug_tools();
 
     let gate = utils::sync::gate::Gate::default();
-    let entered = gate.enter().unwrap();
+    let cancel = CancellationToken::new();
 
-    let layer =
-        InMemoryLayer::create(conf, timeline_id, tenant_shard_id, lsn, entered, &ctx).await?;
+    let layer = InMemoryLayer::create(
+        conf,
+        timeline_id,
+        tenant_shard_id,
+        lsn,
+        &gate,
+        &cancel,
+        &ctx,
+    )
+    .await?;
 
     let data = Value::Image(Bytes::from(vec![0u8; put_size]));
     let data_ser_size = data.serialized_size().unwrap() as usize;

@@ -1,7 +1,7 @@
 use pageserver_client::mgmt_api::{self, ResponseErrorMessageExt};
 use reqwest::{Method, Url};
-use serde::{de::DeserializeOwned, Serialize};
-use std::str::FromStr;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 pub struct Client {
     base_url: Url,
@@ -10,13 +10,11 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(base_url: Url, jwt_token: Option<String>) -> Self {
+    pub fn new(http_client: reqwest::Client, base_url: Url, jwt_token: Option<String>) -> Self {
         Self {
             base_url,
             jwt_token,
-            client: reqwest::ClientBuilder::new()
-                .build()
-                .expect("Failed to construct http client"),
+            client: http_client,
         }
     }
 
@@ -31,16 +29,11 @@ impl Client {
         RQ: Serialize + Sized,
         RS: DeserializeOwned + Sized,
     {
-        // The configured URL has the /upcall path prefix for pageservers to use: we will strip that out
-        // for general purpose API access.
-        let url = Url::from_str(&format!(
-            "http://{}:{}/{path}",
-            self.base_url.host_str().unwrap(),
-            self.base_url.port().unwrap()
-        ))
-        .unwrap();
-
-        let mut builder = self.client.request(method, url);
+        let request_path = self
+            .base_url
+            .join(&path)
+            .expect("Failed to build request path");
+        let mut builder = self.client.request(method, request_path);
         if let Some(body) = body {
             builder = builder.json(&body)
         }

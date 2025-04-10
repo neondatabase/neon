@@ -2,10 +2,9 @@ use std::sync::Arc;
 
 use humantime::Duration;
 use pageserver_api::shard::TenantShardId;
+use pageserver_client::mgmt_api::ForceAwaitLogicalSize;
 use tokio::task::JoinSet;
 use utils::id::TenantTimelineId;
-
-use pageserver_client::mgmt_api::ForceAwaitLogicalSize;
 
 #[derive(clap::Parser)]
 pub(crate) struct Args {
@@ -39,6 +38,7 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
     let args: &'static Args = Box::leak(Box::new(args));
 
     let mgmt_api_client = Arc::new(pageserver_client::mgmt_api::Client::new(
+        reqwest::Client::new(), // TODO: support ssl_ca_file for https APIs in pagebench.
         args.mgmt_api_endpoint.clone(),
         args.pageserver_jwt.as_deref(),
     ));

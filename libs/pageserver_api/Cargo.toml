@@ -1,7 +1,7 @@
 [package]
 name = "pageserver_api"
 version = "0.1.0"
-edition.workspace = true
+edition = "2024"
 license.workspace = true
 
 [features]
@@ -34,6 +34,7 @@ postgres_backend.workspace = true
 nix = {workspace = true, optional = true}
 reqwest.workspace = true
 rand.workspace = true
+tracing-utils.workspace = true
 
 [dev-dependencies]
 bincode.workspace = true

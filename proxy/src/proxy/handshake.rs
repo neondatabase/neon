@@ -8,12 +8,13 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info, warn};
 
 use crate::auth::endpoint_sni;
-use crate::config::{TlsConfig, PG_ALPN_PROTOCOL};
+use crate::config::TlsConfig;
 use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::metrics::Metrics;
 use crate::proxy::ERR_INSECURE_CONNECTION;
 use crate::stream::{PqStream, Stream, StreamUpgradeError};
+use crate::tls::PG_ALPN_PROTOCOL;
 
 #[derive(Error, Debug)]
 pub(crate) enum HandshakeError {
@@ -113,7 +114,7 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
 
                         let mut read_buf = read_buf.reader();
                         let mut res = Ok(());
-                        let accept = tokio_rustls::TlsAcceptor::from(tls.to_server_config())
+                        let accept = tokio_rustls::TlsAcceptor::from(tls.pg_config.clone())
                             .accept_with(raw, |session| {
                                 // push the early data to the tls session
                                 while !read_buf.get_ref().is_empty() {

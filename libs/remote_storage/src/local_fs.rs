@@ -4,31 +4,26 @@
 //! This storage used in tests, but can also be used in cases when a certain persistent
 //! volume is mounted to the local FS.
 
-use std::{
-    collections::HashSet,
-    io::ErrorKind,
-    num::NonZeroU32,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::collections::HashSet;
+use std::io::ErrorKind;
+use std::num::NonZeroU32;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, ensure, Context};
+use anyhow::{Context, bail, ensure};
 use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::stream::Stream;
-use tokio::{
-    fs,
-    io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-};
-use tokio_util::{io::ReaderStream, sync::CancellationToken};
+use tokio::fs;
+use tokio::io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio_util::io::ReaderStream;
+use tokio_util::sync::CancellationToken;
 use utils::crashsafe::path_with_suffix_extension;
 
-use crate::{
-    Download, DownloadError, DownloadOpts, Listing, ListingMode, ListingObject, RemotePath,
-    TimeTravelError, TimeoutOrCancel, REMOTE_STORAGE_PREFIX_SEPARATOR,
-};
-
 use super::{RemoteStorage, StorageMetadata};
-use crate::Etag;
+use crate::{
+    Download, DownloadError, DownloadOpts, Etag, Listing, ListingMode, ListingObject,
+    REMOTE_STORAGE_PREFIX_SEPARATOR, RemotePath, TimeTravelError, TimeoutOrCancel,
+};
 
 const LOCAL_FS_TEMP_FILE_SUFFIX: &str = "___temp";
 
@@ -91,7 +86,8 @@ impl LocalFs {
 
     #[cfg(test)]
     async fn list_all(&self) -> anyhow::Result<Vec<RemotePath>> {
-        use std::{future::Future, pin::Pin};
+        use std::future::Future;
+        use std::pin::Pin;
         fn get_all_files<'a, P>(
             directory_path: P,
         ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<Utf8PathBuf>>> + Send + Sync + 'a>>
@@ -284,7 +280,9 @@ impl LocalFs {
             })?;
 
         if bytes_read < from_size_bytes {
-            bail!("Provided stream was shorter than expected: {bytes_read} vs {from_size_bytes} bytes");
+            bail!(
+                "Provided stream was shorter than expected: {bytes_read} vs {from_size_bytes} bytes"
+            );
         }
         // Check if there is any extra data after the given size.
         let mut from = buffer_to_read.into_inner();
@@ -562,15 +560,19 @@ impl RemoteStorage for LocalFs {
         }
     }
 
-    async fn delete_objects<'a>(
+    async fn delete_objects(
         &self,
-        paths: &'a [RemotePath],
+        paths: &[RemotePath],
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         for path in paths {
             self.delete(path, cancel).await?
         }
         Ok(())
+    }
+
+    fn max_keys_per_delete(&self) -> usize {
+        super::MAX_KEYS_PER_DELETE_S3
     }
 
     async fn copy(
@@ -638,10 +640,13 @@ fn mock_etag(meta: &std::fs::Metadata) -> Etag {
 
 #[cfg(test)]
 mod fs_tests {
-    use super::*;
+    use std::collections::HashMap;
+    use std::io::Write;
+    use std::ops::Bound;
 
     use camino_tempfile::tempdir;
-    use std::{collections::HashMap, io::Write, ops::Bound};
+
+    use super::*;
 
     async fn read_and_check_metadata(
         storage: &LocalFs,
@@ -732,9 +737,14 @@ mod fs_tests {
         );
 
         let non_existing_path = RemotePath::new(Utf8Path::new("somewhere/else"))?;
-        match storage.download(&non_existing_path, &DownloadOpts::default(), &cancel).await {
+        match storage
+            .download(&non_existing_path, &DownloadOpts::default(), &cancel)
+            .await
+        {
             Err(DownloadError::NotFound) => {} // Should get NotFound for non existing keys
-            other => panic!("Should get a NotFound error when downloading non-existing storage files, but got: {other:?}"),
+            other => panic!(
+                "Should get a NotFound error when downloading non-existing storage files, but got: {other:?}"
+            ),
         }
         Ok(())
     }

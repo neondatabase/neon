@@ -8,8 +8,8 @@ use crate::auth::backend::jwt::FetchAuthRulesError;
 use crate::compute::ConnCfg;
 use crate::compute_ctl::ComputeCtlApi;
 use crate::context::RequestContext;
-use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, MetricsAuxInfo};
 use crate::control_plane::NodeInfo;
+use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, MetricsAuxInfo};
 use crate::http;
 use crate::intern::{BranchIdTag, EndpointIdTag, InternId, ProjectIdTag};
 use crate::types::EndpointId;
@@ -29,20 +29,15 @@ impl LocalBackend {
                 api: http::Endpoint::new(compute_ctl, http::new_client()),
             },
             node_info: NodeInfo {
-                config: {
-                    let mut cfg = ConnCfg::new();
-                    cfg.host(&postgres_addr.ip().to_string());
-                    cfg.port(postgres_addr.port());
-                    cfg
-                },
+                config: ConnCfg::new(postgres_addr.ip().to_string(), postgres_addr.port()),
                 // TODO(conrad): make this better reflect compute info rather than endpoint info.
                 aux: MetricsAuxInfo {
                     endpoint_id: EndpointIdTag::get_interner().get_or_intern("local"),
                     project_id: ProjectIdTag::get_interner().get_or_intern("local"),
                     branch_id: BranchIdTag::get_interner().get_or_intern("local"),
+                    compute_id: "local".into(),
                     cold_start_info: ColdStartInfo::WarmCached,
                 },
-                allow_self_signed_compute: false,
             },
         }
     }

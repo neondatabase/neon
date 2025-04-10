@@ -3,7 +3,6 @@ from __future__ import annotations
 import enum
 import time
 from collections import Counter
-from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -18,13 +17,15 @@ from fixtures.neon_fixtures import (
     PgBin,
     wait_for_last_flush_lsn,
 )
-from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_upload_queue_empty
 from fixtures.remote_storage import RemoteStorageKind
 from fixtures.utils import human_bytes, wait_until
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from typing import Any
+
+    from fixtures.pageserver.http import PageserverHttpClient
 
 
 GLOBAL_LRU_LOG_LINE = "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy"
@@ -62,9 +63,8 @@ def test_min_resident_size_override_handling(
     if config_level_override is not None:
 
         def set_min_resident_size(config):
-            tenant_config = config.get("tenant_config", {})
+            tenant_config = config.setdefault("tenant_config", {})
             tenant_config["min_resident_size_override"] = config_level_override
-            config["tenant_config"] = tenant_config
 
         env.pageserver.edit_config_toml(set_min_resident_size)
     env.pageserver.stop()
@@ -211,7 +211,7 @@ class EvictionEnv:
             pageserver.assert_log_contains(".*running mocked statvfs.*")
 
         # we most likely have already completed multiple runs
-        wait_until(10, 1, statvfs_called)
+        wait_until(statvfs_called)
 
 
 def count_layers_per_tenant(
@@ -324,9 +324,9 @@ def finish_tenant_creation(
 
     layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
     # log.info(f"{layers}")
-    assert (
-        len(layers.historic_layers) >= min_expected_layers
-    ), "evictions happen at layer granularity, but we often assert at byte-granularity"
+    assert len(layers.historic_layers) >= min_expected_layers, (
+        "evictions happen at layer granularity, but we often assert at byte-granularity"
+    )
 
     return pgbench_init_lsn
 
@@ -422,9 +422,9 @@ def test_pageserver_evicts_until_pressure_is_relieved(
 
     assert 0 <= actual_change, "nothing can load layers during this test"
     assert actual_change >= target, "must evict more than half"
-    assert (
-        response["Finished"]["assumed"]["projected_after"]["freed_bytes"] >= actual_change
-    ), "report accurately evicted bytes"
+    assert response["Finished"]["assumed"]["projected_after"]["freed_bytes"] >= actual_change, (
+        "report accurately evicted bytes"
+    )
     assert response["Finished"]["assumed"]["failed"]["count"] == 0, "zero failures expected"
 
 
@@ -449,22 +449,22 @@ def test_pageserver_respects_overridden_resident_size(
     large_tenant = max(du_by_timeline, key=du_by_timeline.__getitem__)
     small_tenant = min(du_by_timeline, key=du_by_timeline.__getitem__)
     assert du_by_timeline[large_tenant] > du_by_timeline[small_tenant]
-    assert (
-        du_by_timeline[large_tenant] - du_by_timeline[small_tenant] > 5 * env.layer_size
-    ), "ensure this test will do more than 1 eviction"
+    assert du_by_timeline[large_tenant] - du_by_timeline[small_tenant] > 5 * env.layer_size, (
+        "ensure this test will do more than 1 eviction"
+    )
 
     # Give the larger tenant a haircut while preventing the smaller tenant from getting one.
     # To prevent the smaller from getting a haircut, we set min_resident_size to its current size.
     # To ensure the larger tenant is getting a haircut, any non-zero `target` will do.
     min_resident_size = du_by_timeline[small_tenant]
     target = 1
-    assert (
-        du_by_timeline[large_tenant] > min_resident_size
-    ), "ensure the larger tenant will get a haircut"
-    env.neon_env.storage_controller.pageserver_api().patch_tenant_config_client_side(
+    assert du_by_timeline[large_tenant] > min_resident_size, (
+        "ensure the larger tenant will get a haircut"
+    )
+    env.neon_env.storage_controller.pageserver_api().update_tenant_config(
         small_tenant[0], {"min_resident_size_override": min_resident_size}
     )
-    env.neon_env.storage_controller.pageserver_api().patch_tenant_config_client_side(
+    env.neon_env.storage_controller.pageserver_api().update_tenant_config(
         large_tenant[0], {"min_resident_size_override": min_resident_size}
     )
 
@@ -491,17 +491,17 @@ def test_pageserver_respects_overridden_resident_size(
     actual_change = total_on_disk - later_total_on_disk
     assert 0 <= actual_change, "nothing can load layers during this test"
     assert actual_change >= target, "eviction must always evict more than target"
-    assert (
-        response["Finished"]["assumed"]["projected_after"]["freed_bytes"] >= actual_change
-    ), "report accurately evicted bytes"
+    assert response["Finished"]["assumed"]["projected_after"]["freed_bytes"] >= actual_change, (
+        "report accurately evicted bytes"
+    )
     assert response["Finished"]["assumed"]["failed"]["count"] == 0, "zero failures expected"
 
-    assert (
-        later_du_by_timeline[small_tenant] == du_by_timeline[small_tenant]
-    ), "small tenant sees no haircut"
-    assert (
-        later_du_by_timeline[large_tenant] < du_by_timeline[large_tenant]
-    ), "large tenant gets a haircut"
+    assert later_du_by_timeline[small_tenant] == du_by_timeline[small_tenant], (
+        "small tenant sees no haircut"
+    )
+    assert later_du_by_timeline[large_tenant] < du_by_timeline[large_tenant], (
+        "large tenant gets a haircut"
+    )
     assert du_by_timeline[large_tenant] - later_du_by_timeline[large_tenant] >= target
 
 
@@ -580,9 +580,9 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv, order: EvictionOrder):
 
     later_du_by_timeline = env.du_by_timeline(env.pageserver)
     for tenant, later_tenant_usage in later_du_by_timeline.items():
-        assert (
-            later_tenant_usage < du_by_timeline[tenant]
-        ), "all tenants should have lost some layers"
+        assert later_tenant_usage < du_by_timeline[tenant], (
+            "all tenants should have lost some layers"
+        )
 
     # with relative order what matters is the amount of layers, with a
     # fudge factor of whether the eviction bothers tenants with highest
@@ -666,9 +666,9 @@ def test_fast_growing_tenant(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, or
         ratio = after / originally
         ratios.append(ratio)
 
-    assert (
-        len(ratios) == 4
-    ), "rest of the assertions expect 3 + 1 timelines, ratios, scales, all in order"
+    assert len(ratios) == 4, (
+        "rest of the assertions expect 3 + 1 timelines, ratios, scales, all in order"
+    )
     log.info(f"{ratios}")
 
     if order == EvictionOrder.RELATIVE_ORDER_EQUAL:
@@ -772,14 +772,14 @@ def test_statvfs_pressure_usage(eviction_env: EvictionEnv):
     )
 
     wait_until(
-        10, 1, lambda: env.neon_env.pageserver.assert_log_contains(".*disk usage pressure relieved")
+        lambda: env.neon_env.pageserver.assert_log_contains(".*disk usage pressure relieved")
     )
 
     def less_than_max_usage_pct():
         post_eviction_total_size, _, _ = env.timelines_du(env.pageserver)
         assert post_eviction_total_size < 0.33 * total_size, "we requested max 33% usage"
 
-    wait_until(2, 2, less_than_max_usage_pct)
+    wait_until(less_than_max_usage_pct, timeout=5)
 
     # Disk usage candidate collection only takes into account active tenants.
     # However, the statvfs call takes into account the entire tenants directory,
@@ -825,16 +825,16 @@ def test_statvfs_pressure_min_avail_bytes(eviction_env: EvictionEnv):
     )
 
     wait_until(
-        10, 1, lambda: env.neon_env.pageserver.assert_log_contains(".*disk usage pressure relieved")
+        lambda: env.neon_env.pageserver.assert_log_contains(".*disk usage pressure relieved"),
     )
 
     def more_than_min_avail_bytes_freed():
         post_eviction_total_size, _, _ = env.timelines_du(env.pageserver)
-        assert (
-            total_size - post_eviction_total_size >= min_avail_bytes
-        ), f"we requested at least {min_avail_bytes} worth of free space"
+        assert total_size - post_eviction_total_size >= min_avail_bytes, (
+            f"we requested at least {min_avail_bytes} worth of free space"
+        )
 
-    wait_until(2, 2, more_than_min_avail_bytes_freed)
+    wait_until(more_than_min_avail_bytes_freed, timeout=5)
 
 
 def test_secondary_mode_eviction(eviction_env_ha: EvictionEnv):
@@ -879,6 +879,6 @@ def test_secondary_mode_eviction(eviction_env_ha: EvictionEnv):
 
     post_eviction_total_size, _, _ = env.timelines_du(ps_secondary)
 
-    assert (
-        total_size - post_eviction_total_size >= evict_bytes
-    ), "we requested at least evict_bytes worth of free space"
+    assert total_size - post_eviction_total_size >= evict_bytes, (
+        "we requested at least evict_bytes worth of free space"
+    )

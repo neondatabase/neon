@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import random
+from typing import TYPE_CHECKING
 
-from fixtures.common_types import TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
@@ -13,6 +13,9 @@ from fixtures.neon_fixtures import (
     wait_for_last_flush_lsn,
 )
 from fixtures.remote_storage import RemoteStorageKind
+
+if TYPE_CHECKING:
+    from fixtures.common_types import TimelineId
 
 # Test configuration
 #
@@ -123,7 +126,7 @@ def test_gc_index_upload(neon_env_builder: NeonEnvBuilder):
         ps_metrics = env.pageserver.http_client().get_metrics()
         total = 0.0
         for sample in ps_metrics.query_all(
-            name="pageserver_remote_operation_seconds_count",
+            name="pageserver_remote_timeline_client_seconds_global_count",
             filter={
                 "file_kind": str(file_kind),
                 "op_kind": str(op_kind),

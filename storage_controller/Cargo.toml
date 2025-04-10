@@ -1,7 +1,7 @@
 [package]
 name = "storage_controller"
 version = "0.1.0"
-edition.workspace = true
+edition = "2024"
 license.workspace = true
 
 [[bin]]
@@ -16,14 +16,19 @@ testing = []
 [dependencies]
 anyhow.workspace = true
 bytes.workspace = true
+camino.workspace = true
 chrono.workspace = true
 clap.workspace = true
+clashmap.workspace = true
+cron.workspace = true
 fail.workspace = true
 futures.workspace = true
+governor.workspace = true
 hex.workspace = true
 hyper0.workspace = true
 humantime.workspace = true
 itertools.workspace = true
+json-structural-diff.workspace = true
 lasso.workspace = true
 once_cell.workspace = true
 pageserver_api.workspace = true
@@ -32,26 +37,35 @@ postgres_connection.workspace = true
 rand.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
 routerify.workspace = true
+safekeeper_api.workspace = true
+safekeeper_client.workspace = true
+tikv-jemallocator.workspace = true
+regex.workspace = true
+rustls-native-certs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio-rustls.workspace = true
 tokio-util.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 measured.workspace = true
+rustls.workspace = true
 scopeguard.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
+tokio-postgres.workspace = true
+tokio-postgres-rustls.workspace = true
 
-diesel = { version = "2.1.4", features = [
+diesel = { version = "2.2.6", features = [
     "serde_json",
-    "postgres",
-    "r2d2",
     "chrono",
 ] }
-diesel_migrations = { version = "2.1.0" }
-r2d2 = { version = "0.8.10" }
+diesel-async = { version = "0.5.2", features = ["postgres", "bb8", "async-connection-wrapper"] }
+diesel_migrations = { version = "2.2.0" }
+scoped-futures = "0.1.4"
 
+http-utils = { path = "../libs/http-utils/" }
 utils = { path = "../libs/utils/" }
 metrics = { path = "../libs/metrics/" }
 control_plane = { path = "../control_plane" }

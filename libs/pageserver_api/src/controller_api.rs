@@ -9,11 +9,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use utils::id::{NodeId, TenantId};
 
-use crate::models::PageserverUtilization;
-use crate::{
-    models::{ShardParameters, TenantConfig},
-    shard::{ShardStripeSize, TenantShardId},
-};
+use crate::models::{PageserverUtilization, ShardParameters, TenantConfig};
+use crate::shard::{ShardStripeSize, TenantShardId};
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
@@ -48,7 +45,7 @@ pub struct TenantCreateResponse {
     pub shards: Vec<TenantCreateResponseShard>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NodeRegisterRequest {
     pub node_id: NodeId,
 
@@ -57,6 +54,7 @@ pub struct NodeRegisterRequest {
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,
+    pub listen_https_port: Option<u16>,
 
     pub availability_zone_id: AvailabilityZone,
 }
@@ -75,7 +73,7 @@ pub struct TenantPolicyRequest {
     pub scheduling: Option<ShardSchedulingPolicy>,
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct AvailabilityZone(pub String);
 
 impl Display for AvailabilityZone {
@@ -87,7 +85,7 @@ impl Display for AvailabilityZone {
 #[derive(Serialize, Deserialize)]
 pub struct ShardsPreferredAzsRequest {
     #[serde(flatten)]
-    pub preferred_az_ids: HashMap<TenantShardId, AvailabilityZone>,
+    pub preferred_az_ids: HashMap<TenantShardId, Option<AvailabilityZone>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -105,6 +103,7 @@ pub struct TenantLocateResponseShard {
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,
+    pub listen_https_port: Option<u16>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -144,8 +143,11 @@ pub struct NodeDescribeResponse {
     pub availability: NodeAvailabilityWrapper,
     pub scheduling: NodeSchedulingPolicy,
 
+    pub availability_zone_id: String,
+
     pub listen_http_addr: String,
     pub listen_http_port: u16,
+    pub listen_https_port: Option<u16>,
 
     pub listen_pg_addr: String,
     pub listen_pg_port: u16,
@@ -179,8 +181,65 @@ pub struct TenantDescribeResponseShard {
 /// specifies some constraints, e.g. asking it to get off particular node(s)
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TenantShardMigrateRequest {
-    pub tenant_shard_id: TenantShardId,
     pub node_id: NodeId,
+
+    /// Optionally, callers may specify the node they are migrating _from_, and the server will
+    /// reject the request if the shard is no longer attached there: this enables writing safer
+    /// clients that don't risk fighting with some other movement of the shard.
+    #[serde(default)]
+    pub origin_node_id: Option<NodeId>,
+
+    #[serde(default)]
+    pub migration_config: MigrationConfig,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct MigrationConfig {
+    /// If true, the migration will be executed even if it is to a location with a sub-optimal scheduling
+    /// score: this is usually not what you want, and if you use this then you'll also need to set the
+    /// tenant's scheduling policy to Essential or Pause to avoid the optimiser reverting your migration.
+    ///
+    /// Default: false
+    #[serde(default)]
+    pub override_scheduler: bool,
+
+    /// If true, the migration will be done gracefully by creating a secondary location first and
+    /// waiting for it to warm up before cutting over.  If false, if there is no existing secondary
+    /// location at the destination, the tenant will be migrated immediately.  If the tenant's data
+    /// can't be downloaded within [`Self::secondary_warmup_timeout`], then the migration will go
+    /// ahead but run with a cold cache that can severely reduce performance until it warms up.
+    ///
+    /// When doing a graceful migration, the migration API returns as soon as it is started.
+    ///
+    /// Default: true
+    #[serde(default = "default_prewarm")]
+    pub prewarm: bool,
+
+    /// For non-prewarm migrations which will immediately enter a cutover to the new node: how long to wait
+    /// overall for secondary warmup before cutting over
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub secondary_warmup_timeout: Option<Duration>,
+    /// For non-prewarm migrations which will immediately enter a cutover to the new node: how long to wait
+    /// within each secondary download poll call to pageserver.
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub secondary_download_request_timeout: Option<Duration>,
+}
+
+fn default_prewarm() -> bool {
+    true
+}
+
+impl Default for MigrationConfig {
+    fn default() -> Self {
+        Self {
+            override_scheduler: false,
+            prewarm: default_prewarm(),
+            secondary_warmup_timeout: None,
+            secondary_download_request_timeout: None,
+        }
+    }
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -245,6 +304,17 @@ impl From<NodeAvailability> for NodeAvailabilityWrapper {
     }
 }
 
+/// Scheduling policy enables us to selectively disable some automatic actions that the
+/// controller performs on a tenant shard. This is only set to a non-default value by
+/// human intervention, and it is reset to the default value (Active) when the tenant's
+/// placement policy is modified away from Attached.
+///
+/// The typical use of a non-Active scheduling policy is one of:
+/// - Pinnning a shard to a node (i.e. migrating it there & setting a non-Active scheduling policy)
+/// - Working around a bug (e.g. if something is flapping and we need to stop it until the bug is fixed)
+///
+/// If you're not sure which policy to use to pin a shard to its current location, you probably
+/// want Pause.
 #[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
 pub enum ShardSchedulingPolicy {
     // Normal mode: the tenant's scheduled locations may be updated at will, including
@@ -309,6 +379,42 @@ impl From<NodeSchedulingPolicy> for String {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
+pub enum SkSchedulingPolicy {
+    Active,
+    Pause,
+    Decomissioned,
+}
+
+impl FromStr for SkSchedulingPolicy {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "active" => Self::Active,
+            "pause" => Self::Pause,
+            "decomissioned" => Self::Decomissioned,
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Unknown scheduling policy '{s}', try active,pause,decomissioned"
+                ));
+            }
+        })
+    }
+}
+
+impl From<SkSchedulingPolicy> for String {
+    fn from(value: SkSchedulingPolicy) -> String {
+        use SkSchedulingPolicy::*;
+        match value {
+            Active => "active",
+            Pause => "pause",
+            Decomissioned => "decomissioned",
+        }
+        .to_string()
+    }
+}
+
 /// Controls how tenant shards are mapped to locations on pageservers, e.g. whether
 /// to create secondary locations.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -323,6 +429,16 @@ pub enum PlacementPolicy {
     /// have been idle for a long time, where we do not mind some delay in making
     /// them available in future.
     Detached,
+}
+
+impl PlacementPolicy {
+    pub fn want_secondaries(&self) -> usize {
+        match self {
+            PlacementPolicy::Attached(secondary_count) => *secondary_count,
+            PlacementPolicy::Secondary => 1,
+            PlacementPolicy::Detached => 0,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -361,10 +477,33 @@ pub struct MetadataHealthListOutdatedResponse {
     pub health_records: Vec<MetadataHealthRecord>,
 }
 
+/// Publicly exposed safekeeper description
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SafekeeperDescribeResponse {
+    pub id: NodeId,
+    pub region_id: String,
+    /// 1 is special, it means just created (not currently posted to storcon).
+    /// Zero or negative is not really expected.
+    /// Otherwise the number from `release-$(number_of_commits_on_branch)` tag.
+    pub version: i64,
+    pub host: String,
+    pub port: i32,
+    pub http_port: i32,
+    pub https_port: Option<i32>,
+    pub availability_zone_id: String,
+    pub scheduling_policy: SkSchedulingPolicy,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SafekeeperSchedulingPolicyRequest {
+    pub scheduling_policy: SkSchedulingPolicy,
+}
+
 #[cfg(test)]
 mod test {
-    use super::*;
     use serde_json;
+
+    use super::*;
 
     /// Check stability of PlacementPolicy's serialization
     #[test]
@@ -394,5 +533,44 @@ mod test {
             "expect unknown field `unknown_field` error, got: {}",
             err
         );
+    }
+
+    /// Check that a minimal migrate request with no config results in the expected default settings
+    #[test]
+    fn test_migrate_request_decode_defaults() {
+        let json = r#"{
+            "node_id": 123
+        }"#;
+
+        let request: TenantShardMigrateRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.node_id, NodeId(123));
+        assert_eq!(request.origin_node_id, None);
+        assert!(!request.migration_config.override_scheduler);
+        assert!(request.migration_config.prewarm);
+        assert_eq!(request.migration_config.secondary_warmup_timeout, None);
+        assert_eq!(
+            request.migration_config.secondary_download_request_timeout,
+            None
+        );
+    }
+
+    /// Check that a partially specified migration config results in the expected default settings
+    #[test]
+    fn test_migration_config_decode_defaults() {
+        // Specify just one field of the config
+        let json = r#"{
+        }"#;
+
+        let config: MigrationConfig = serde_json::from_str(json).unwrap();
+
+        // Check each field's expected default value
+        assert!(!config.override_scheduler);
+        assert!(config.prewarm);
+        assert_eq!(config.secondary_warmup_timeout, None);
+        assert_eq!(config.secondary_download_request_timeout, None);
+        assert_eq!(config.secondary_warmup_timeout, None);
+
+        // Consistency check that the Default impl agrees with our serde defaults
+        assert_eq!(MigrationConfig::default(), config);
     }
 }

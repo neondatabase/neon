@@ -1,9 +1,7 @@
+use std::borrow::Cow;
+use std::fs::{self, File};
+use std::io::{self, Write};
 use std::os::fd::AsRawFd;
-use std::{
-    borrow::Cow,
-    fs::{self, File},
-    io::{self, Write},
-};
 
 use camino::{Utf8Path, Utf8PathBuf};
 
@@ -83,12 +81,9 @@ pub fn path_with_suffix_extension(
 }
 
 pub fn fsync_file_and_parent(file_path: &Utf8Path) -> io::Result<()> {
-    let parent = file_path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            format!("File {file_path:?} has no parent"),
-        )
-    })?;
+    let parent = file_path
+        .parent()
+        .ok_or_else(|| io::Error::other(format!("File {file_path:?} has no parent")))?;
 
     fsync(file_path)?;
     fsync(parent)?;

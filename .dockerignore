@@ -14,13 +14,16 @@
 !compute/
 !compute_tools/
 !control_plane/
+!docker-compose/ext-src
 !libs/
 !pageserver/
 !pgxn/
 !proxy/
+!object_storage/
 !storage_scrubber/
 !safekeeper/
 !storage_broker/
 !storage_controller/
 !vendor/postgres-*/
 !workspace_hack/
+!build_tools/patches

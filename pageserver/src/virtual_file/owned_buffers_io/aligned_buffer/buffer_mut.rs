@@ -1,10 +1,9 @@
+use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
 
-use super::{
-    alignment::{Alignment, ConstAlign},
-    buffer::AlignedBuffer,
-    raw::RawAlignedBuffer,
-};
+use super::alignment::{Alignment, ConstAlign};
+use super::buffer::AlignedBuffer;
+use super::raw::RawAlignedBuffer;
 
 /// A mutable aligned buffer type.
 #[derive(Debug)]
@@ -26,8 +25,8 @@ impl<const A: usize> AlignedBufferMut<ConstAlign<A>> {
     /// * `align` must be a power of two,
     ///
     /// * `capacity`, when rounded up to the nearest multiple of `align`,
-    ///    must not overflow isize (i.e., the rounded value must be
-    ///    less than or equal to `isize::MAX`).
+    ///   must not overflow isize (i.e., the rounded value must be
+    ///   less than or equal to `isize::MAX`).
     pub fn with_capacity(capacity: usize) -> Self {
         AlignedBufferMut {
             raw: RawAlignedBuffer::with_capacity(capacity),
@@ -46,6 +45,11 @@ impl<const A: usize> AlignedBufferMut<ConstAlign<A>> {
 }
 
 impl<A: Alignment> AlignedBufferMut<A> {
+    /// Constructs a mutable aligned buffer from raw.
+    pub(super) fn from_raw(raw: RawAlignedBuffer<A>) -> Self {
+        AlignedBufferMut { raw }
+    }
+
     /// Returns the total number of bytes the buffer can hold.
     #[inline]
     pub fn capacity(&self) -> usize {
@@ -67,7 +71,8 @@ impl<A: Alignment> AlignedBufferMut<A> {
     /// Force the length of the buffer to `new_len`.
     #[inline]
     unsafe fn set_len(&mut self, new_len: usize) {
-        self.raw.set_len(new_len)
+        // SAFETY: the caller is unsafe
+        unsafe { self.raw.set_len(new_len) }
     }
 
     #[inline]
@@ -128,6 +133,39 @@ impl<A: Alignment> AlignedBufferMut<A> {
         let len = self.len();
         AlignedBuffer::from_raw(self.raw, 0..len)
     }
+
+    /// Clones and appends all elements in a slice to the buffer. Reserves additional capacity as needed.
+    #[inline]
+    pub fn extend_from_slice(&mut self, extend: &[u8]) {
+        let cnt = extend.len();
+        self.reserve(cnt);
+
+        // SAFETY: we already reserved additional `cnt` bytes, safe to perform memcpy.
+        unsafe {
+            let dst = self.spare_capacity_mut();
+            // Reserved above
+            debug_assert!(dst.len() >= cnt);
+
+            core::ptr::copy_nonoverlapping(extend.as_ptr(), dst.as_mut_ptr().cast(), cnt);
+        }
+        // SAFETY: We do have at least `cnt` bytes remaining before advance.
+        unsafe {
+            bytes::BufMut::advance_mut(self, cnt);
+        }
+    }
+
+    /// Returns the remaining spare capacity of the vector as a slice of `MaybeUninit<u8>`.
+    #[inline]
+    fn spare_capacity_mut(&mut self) -> &mut [MaybeUninit<u8>] {
+        // SAFETY: we guarantees that the `Self::capacity()` bytes from
+        // `Self::as_mut_ptr()` are allocated.
+        unsafe {
+            let ptr = self.as_mut_ptr().add(self.len());
+            let len = self.capacity() - self.len();
+
+            core::slice::from_raw_parts_mut(ptr.cast(), len)
+        }
+    }
 }
 
 impl<A: Alignment> Deref for AlignedBufferMut<A> {
@@ -181,8 +219,10 @@ unsafe impl<A: Alignment> bytes::BufMut for AlignedBufferMut<A> {
             panic_advance(cnt, remaining);
         }
 
-        // Addition will not overflow since the sum is at most the capacity.
-        self.set_len(len + cnt);
+        // SAFETY: Addition will not overflow since the sum is at most the capacity.
+        unsafe {
+            self.set_len(len + cnt);
+        }
     }
 
     #[inline]
@@ -234,7 +274,10 @@ unsafe impl<A: Alignment> tokio_epoll_uring::IoBufMut for AlignedBufferMut<A> {
 
     unsafe fn set_init(&mut self, init_len: usize) {
         if self.len() < init_len {
-            self.set_len(init_len);
+            // SAFETY: caller function is unsafe
+            unsafe {
+                self.set_len(init_len);
+            }
         }
     }
 }

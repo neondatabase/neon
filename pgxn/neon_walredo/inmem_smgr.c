@@ -32,7 +32,7 @@
 
 #include "inmem_smgr.h"
 
-/* Size of the in-memory smgr */
+/* Size of the in-memory smgr: XLR_MAX_BLOCK_ID is 32, so assume that 64 will be enough */
 #define MAX_PAGES 64
 
 /* If more than WARN_PAGES are used, print a warning in the log */
@@ -96,7 +96,7 @@ static void inmem_writeback(SMgrRelation reln, ForkNumber forknum,
 							BlockNumber blocknum, BlockNumber nblocks);
 static BlockNumber inmem_nblocks(SMgrRelation reln, ForkNumber forknum);
 static void inmem_truncate(SMgrRelation reln, ForkNumber forknum,
-						   BlockNumber nblocks);
+						   BlockNumber old_blocks, BlockNumber nblocks);
 static void inmem_immedsync(SMgrRelation reln, ForkNumber forknum);
 #if PG_MAJORVERSION_NUM >= 17
 static void inmem_registersync(SMgrRelation reln, ForkNumber forknum);
@@ -174,10 +174,7 @@ static void
 inmem_zeroextend(SMgrRelation reln, ForkNumber forknum,
 				 BlockNumber blocknum, int nblocks, bool skipFsync)
 {
-	char buffer[BLCKSZ] = {0};
-
-	for (int i = 0; i < nblocks; i++)
-		inmem_extend(reln, forknum, blocknum + i, buffer, skipFsync);
+	/* Do nothing: inmem_read will return zero page in any case */
 }
 #endif
 
@@ -285,12 +282,12 @@ inmem_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		 * WARN_PAGES, print a warning so that we get alerted and get to
 		 * investigate why we're accessing so many buffers.
 		 */
-		elog(used_pages >= WARN_PAGES ? WARNING : DEBUG1,
-			 "inmem_write() called for %u/%u/%u.%u blk %u: used_pages %u",
-			 RelFileInfoFmt(InfoFromSMgrRel(reln)),
-			 forknum,
-			 blocknum,
-			 used_pages);
+		if (used_pages >= WARN_PAGES)
+			ereport(WARNING, (errmsg("inmem_write() called for %u/%u/%u.%u blk %u: used_pages %u",
+								   RelFileInfoFmt(InfoFromSMgrRel(reln)),
+								   forknum,
+								   blocknum,
+								   used_pages), errbacktrace()));
 		if (used_pages == MAX_PAGES)
 			elog(ERROR, "Inmem storage overflow");
 
@@ -345,7 +342,7 @@ inmem_nblocks(SMgrRelation reln, ForkNumber forknum)
  *	inmem_truncate() -- Truncate relation to specified number of blocks.
  */
 static void
-inmem_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
+inmem_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber old_blocks, BlockNumber nblocks)
 {
 }
 

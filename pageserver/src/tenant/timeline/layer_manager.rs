@@ -1,27 +1,24 @@
-use anyhow::{bail, ensure, Context};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use anyhow::{Context, bail, ensure};
 use itertools::Itertools;
+use pageserver_api::keyspace::KeySpace;
 use pageserver_api::shard::TenantShardId;
-use std::{collections::HashMap, sync::Arc};
+use tokio_util::sync::CancellationToken;
 use tracing::trace;
-use utils::{
-    id::TimelineId,
-    lsn::{AtomicLsn, Lsn},
-};
+use utils::id::TimelineId;
+use utils::lsn::{AtomicLsn, Lsn};
 
-use crate::{
-    config::PageServerConf,
-    context::RequestContext,
-    metrics::TimelineMetrics,
-    tenant::{
-        layer_map::{BatchedUpdates, LayerMap},
-        storage_layer::{
-            AsLayerDesc, InMemoryLayer, Layer, PersistentLayerDesc, PersistentLayerKey,
-            ResidentLayer,
-        },
-    },
+use super::{LayerFringe, ReadableLayer, TimelineWriterState};
+use crate::config::PageServerConf;
+use crate::context::RequestContext;
+use crate::metrics::TimelineMetrics;
+use crate::tenant::layer_map::{BatchedUpdates, LayerMap, SearchResult};
+use crate::tenant::storage_layer::{
+    AsLayerDesc, InMemoryLayer, Layer, LayerVisibilityHint, PersistentLayerDesc,
+    PersistentLayerKey, ReadableLayerWeak, ResidentLayer,
 };
-
-use super::TimelineWriterState;
 
 /// Provides semantic APIs to manipulate the layer map.
 pub(crate) enum LayerManager {
@@ -42,6 +39,21 @@ impl Default for LayerManager {
 }
 
 impl LayerManager {
+    fn upgrade(&self, weak: ReadableLayerWeak) -> ReadableLayer {
+        match weak {
+            ReadableLayerWeak::PersistentLayer(desc) => {
+                ReadableLayer::PersistentLayer(self.get_from_desc(&desc))
+            }
+            ReadableLayerWeak::InMemoryLayer(desc) => {
+                let inmem = self
+                    .layer_map()
+                    .expect("no concurrent shutdown")
+                    .in_memory_layer(&desc);
+                ReadableLayer::InMemoryLayer(inmem)
+            }
+        }
+    }
+
     pub(crate) fn get_from_key(&self, key: &PersistentLayerKey) -> Layer {
         // The assumption for the `expect()` is that all code maintains the following invariant:
         // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.
@@ -91,6 +103,7 @@ impl LayerManager {
                 layer_map,
                 layer_fmgr: LayerFileManager(hashmap),
             }) => {
+                // NB: no need to decrement layer metrics; metrics are removed on timeline shutdown.
                 let open = layer_map.open_layer.take();
                 let frozen = layer_map.frozen_layers.len();
                 let taken_writer_state = writer_state.take();
@@ -117,6 +130,12 @@ impl LayerManager {
         self.layers().values().filter(|l| l.is_likely_resident())
     }
 
+    pub(crate) fn visible_layers(&self) -> impl Iterator<Item = &'_ Layer> + '_ {
+        self.layers()
+            .values()
+            .filter(|l| l.visibility() == LayerVisibilityHint::Visible)
+    }
+
     pub(crate) fn contains(&self, layer: &Layer) -> bool {
         self.contains_key(&layer.layer_desc().key())
     }
@@ -127,6 +146,36 @@ impl LayerManager {
 
     pub(crate) fn all_persistent_layers(&self) -> Vec<PersistentLayerKey> {
         self.layers().keys().cloned().collect_vec()
+    }
+
+    /// Update the [`LayerFringe`] of a read request
+    ///
+    /// Take a key space at a given LSN and query the layer map below each range
+    /// of the key space to find the next layers to visit.
+    pub(crate) fn update_search_fringe(
+        &self,
+        keyspace: &KeySpace,
+        cont_lsn: Lsn,
+        fringe: &mut LayerFringe,
+    ) -> Result<(), Shutdown> {
+        let map = self.layer_map()?;
+
+        for range in keyspace.ranges.iter() {
+            let results = map.range_search(range.clone(), cont_lsn);
+            results
+                .found
+                .into_iter()
+                .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
+                    (
+                        self.upgrade(layer),
+                        keyspace_accum.to_keyspace(),
+                        lsn_floor..cont_lsn,
+                    )
+                })
+                .for_each(|(layer, keyspace, lsn_range)| fringe.update(layer, keyspace, lsn_range));
+        }
+
+        Ok(())
     }
 
     fn layers(&self) -> &HashMap<PersistentLayerKey, Layer> {
@@ -176,13 +225,15 @@ impl OpenLayerManager {
 
     /// Open a new writable layer to append data if there is no open layer, otherwise return the
     /// current open layer, called within `get_layer_for_write`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn get_layer_for_write(
         &mut self,
         lsn: Lsn,
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
-        gate_guard: utils::sync::gate::GateGuard,
+        gate: &utils::sync::gate::Gate,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<InMemoryLayer>> {
         ensure!(lsn.is_aligned());
@@ -207,9 +258,7 @@ impl OpenLayerManager {
 
             trace!(
                 "creating in-memory layer at {}/{} for record at {}",
-                timeline_id,
-                start_lsn,
-                lsn
+                timeline_id, start_lsn, lsn
             );
 
             let new_layer = InMemoryLayer::create(
@@ -217,7 +266,8 @@ impl OpenLayerManager {
                 timeline_id,
                 tenant_shard_id,
                 start_lsn,
-                gate_guard,
+                gate,
+                cancel,
                 ctx,
             )
             .await?;
@@ -240,6 +290,7 @@ impl OpenLayerManager {
         lsn: Lsn,
         last_freeze_at: &AtomicLsn,
         write_lock: &mut tokio::sync::MutexGuard<'_, Option<TimelineWriterState>>,
+        metrics: &TimelineMetrics,
     ) -> bool {
         let Lsn(last_record_lsn) = lsn;
         let end_lsn = Lsn(last_record_lsn + 1);
@@ -247,6 +298,11 @@ impl OpenLayerManager {
         let froze = if let Some(open_layer) = &self.layer_map.open_layer {
             let open_layer_rc = Arc::clone(open_layer);
             open_layer.freeze(end_lsn).await;
+
+            // Increment the frozen layer metrics. This is decremented in `finish_flush_l0_layer()`.
+            // TODO: It would be nicer to do this via `InMemoryLayer::drop()`, but it requires a
+            // reference to the timeline metrics. Other methods use a metrics borrow as well.
+            metrics.inc_frozen_layer(open_layer);
 
             // The layer is no longer open, update the layer map to reflect this.
             // We will replace it with on-disk historics below.
@@ -304,6 +360,7 @@ impl OpenLayerManager {
             .frozen_layers
             .pop_front()
             .expect("there must be a inmem layer to flush");
+        metrics.dec_frozen_layer(&inmem);
 
         // Only one task may call this function at a time (for this
         // timeline). If two tasks tried to flush the same frozen
@@ -343,15 +400,44 @@ impl OpenLayerManager {
         compact_to: &[ResidentLayer],
         metrics: &TimelineMetrics,
     ) {
-        // We can simply reuse compact l0 logic. Use a different function name to indicate a different type of layer map modification.
-        self.finish_compact_l0(compact_from, compact_to, metrics)
+        // gc-compaction could contain layer rewrites. We need to delete the old layers and insert the new ones.
+
+        // Match the old layers with the new layers
+        let mut add_layers = HashMap::new();
+        let mut rewrite_layers = HashMap::new();
+        let mut drop_layers = HashMap::new();
+        for layer in compact_from {
+            drop_layers.insert(layer.layer_desc().key(), layer.clone());
+        }
+        for layer in compact_to {
+            if let Some(old_layer) = drop_layers.remove(&layer.layer_desc().key()) {
+                rewrite_layers.insert(layer.layer_desc().key(), (old_layer.clone(), layer.clone()));
+            } else {
+                add_layers.insert(layer.layer_desc().key(), layer.clone());
+            }
+        }
+        let add_layers = add_layers.values().cloned().collect::<Vec<_>>();
+        let drop_layers = drop_layers.values().cloned().collect::<Vec<_>>();
+        let rewrite_layers = rewrite_layers.values().cloned().collect::<Vec<_>>();
+
+        self.rewrite_layers_inner(&rewrite_layers, &drop_layers, &add_layers, metrics);
     }
 
     /// Called post-compaction when some previous generation image layers were trimmed.
-    pub(crate) fn rewrite_layers(
+    pub fn rewrite_layers(
         &mut self,
         rewrite_layers: &[(Layer, ResidentLayer)],
         drop_layers: &[Layer],
+        metrics: &TimelineMetrics,
+    ) {
+        self.rewrite_layers_inner(rewrite_layers, drop_layers, &[], metrics);
+    }
+
+    fn rewrite_layers_inner(
+        &mut self,
+        rewrite_layers: &[(Layer, ResidentLayer)],
+        drop_layers: &[Layer],
+        add_layers: &[ResidentLayer],
         metrics: &TimelineMetrics,
     ) {
         let mut updates = self.layer_map.batch_update();
@@ -387,6 +473,10 @@ impl OpenLayerManager {
         }
         for l in drop_layers {
             Self::delete_historic_layer(l, &mut updates, &mut self.layer_fmgr);
+        }
+        for l in add_layers {
+            Self::insert_historic_layer(l.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
+            metrics.record_new_file_metrics(l.layer_desc().file_size);
         }
         updates.flush();
     }
@@ -435,6 +525,25 @@ impl OpenLayerManager {
         updates.remove_historic(desc);
         mapping.remove(layer);
         layer.delete_on_drop();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_insert_in_memory_layer(&mut self, layer: Arc<InMemoryLayer>) {
+        use pageserver_api::models::InMemoryLayerInfo;
+
+        match layer.info() {
+            InMemoryLayerInfo::Open { .. } => {
+                assert!(self.layer_map.open_layer.is_none());
+                self.layer_map.open_layer = Some(layer);
+            }
+            InMemoryLayerInfo::Frozen { lsn_start, .. } => {
+                if let Some(last) = self.layer_map.frozen_layers.back() {
+                    assert!(last.get_lsn_range().end <= lsn_start);
+                }
+
+                self.layer_map.frozen_layers.push_back(layer);
+            }
+        }
     }
 }
 

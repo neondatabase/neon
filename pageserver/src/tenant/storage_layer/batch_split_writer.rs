@@ -1,17 +1,22 @@
-use std::{future::Future, ops::Range, sync::Arc};
+use std::future::Future;
+use std::ops::Range;
+use std::sync::Arc;
 
 use bytes::Bytes;
-use pageserver_api::key::{Key, KEY_SIZE};
-use utils::{id::TimelineId, lsn::Lsn, shard::TenantShardId};
-
-use crate::tenant::storage_layer::Layer;
-use crate::{config::PageServerConf, context::RequestContext, tenant::Timeline};
+use pageserver_api::key::{KEY_SIZE, Key};
 use pageserver_api::value::Value;
+use utils::id::TimelineId;
+use utils::lsn::Lsn;
+use utils::shard::TenantShardId;
 
 use super::layer::S3_UPLOAD_LIMIT;
 use super::{
     DeltaLayerWriter, ImageLayerWriter, PersistentLayerDesc, PersistentLayerKey, ResidentLayer,
 };
+use crate::config::PageServerConf;
+use crate::context::RequestContext;
+use crate::tenant::Timeline;
+use crate::tenant::storage_layer::Layer;
 
 pub(crate) enum BatchWriterResult {
     Produced(ResidentLayer),
@@ -87,6 +92,23 @@ impl BatchLayerWriter {
         ));
     }
 
+    pub(crate) async fn finish(
+        self,
+        tline: &Arc<Timeline>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<ResidentLayer>> {
+        let res = self
+            .finish_with_discard_fn(tline, ctx, |_| async { false })
+            .await?;
+        let mut output = Vec::new();
+        for r in res {
+            if let BatchWriterResult::Produced(layer) = r {
+                output.push(layer);
+            }
+        }
+        Ok(output)
+    }
+
     pub(crate) async fn finish_with_discard_fn<D, F>(
         self,
         tline: &Arc<Timeline>,
@@ -148,6 +170,10 @@ impl BatchLayerWriter {
         }
         // END: catch every error and do the recovery in the above section
         Ok(generated_layers)
+    }
+
+    pub fn pending_layer_num(&self) -> usize {
+        self.generated_layer_writers.len()
     }
 }
 
@@ -340,7 +366,7 @@ impl SplitDeltaLayerWriter {
                 )
                 .await?;
                 let (start_key, prev_delta_writer) =
-                    std::mem::replace(&mut self.inner, Some((key, next_delta_writer))).unwrap();
+                    self.inner.replace((key, next_delta_writer)).unwrap();
                 self.batches.add_unfinished_delta_writer(
                     prev_delta_writer,
                     start_key..key,
@@ -402,15 +428,10 @@ mod tests {
     use itertools::Itertools;
     use rand::{RngCore, SeedableRng};
 
-    use crate::{
-        tenant::{
-            harness::{TenantHarness, TIMELINE_ID},
-            storage_layer::AsLayerDesc,
-        },
-        DEFAULT_PG_VERSION,
-    };
-
     use super::*;
+    use crate::DEFAULT_PG_VERSION;
+    use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
+    use crate::tenant::storage_layer::AsLayerDesc;
 
     fn get_key(id: u32) -> Key {
         let mut key = Key::from_hex("000000000033333333444444445500000000").unwrap();

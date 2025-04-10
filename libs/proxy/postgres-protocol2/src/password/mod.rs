@@ -6,12 +6,12 @@
 //! side. This is good because it ensures the cleartext password won't
 //! end up in logs pg_stat displays, etc.
 
-use crate::authentication::sasl;
 use hmac::{Hmac, Mac};
-use md5::Md5;
 use rand::RngCore;
 use sha2::digest::FixedOutput;
 use sha2::{Digest, Sha256};
+
+use crate::authentication::sasl;
 
 #[cfg(test)]
 mod test;
@@ -87,21 +87,4 @@ pub(crate) async fn scram_sha_256_salt(
         base64::encode(stored_key),
         base64::encode(server_key)
     )
-}
-
-/// **Not recommended, as MD5 is not considered to be secure.**
-///
-/// Hash password using MD5 with the username as the salt.
-///
-/// The client may assume the returned string doesn't contain any
-/// special characters that would require escaping.
-pub fn md5(password: &[u8], username: &str) -> String {
-    // salt password with username
-    let mut salted_password = Vec::from(password);
-    salted_password.extend_from_slice(username.as_bytes());
-
-    let mut hash = Md5::new();
-    hash.update(&salted_password);
-    let digest = hash.finalize();
-    format!("md5{:x}", digest)
 }

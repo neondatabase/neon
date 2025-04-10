@@ -3,55 +3,56 @@
 //! Main entry point for the Page Server executable.
 
 use std::env;
-use std::env::{var, VarError};
+use std::env::{VarError, var};
 use std::io::Read;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use camino::Utf8Path;
 use clap::{Arg, ArgAction, Command};
-
-use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
-use pageserver::config::PageserverIdentity;
-use pageserver::controller_upcall_client::ControllerUpcallClient;
+use http_utils::tls_certs::ReloadingCertificateResolver;
+use metrics::launch_timestamp::{LaunchTimestamp, set_launch_timestamp_metric};
+use metrics::set_build_info_metric;
+use nix::sys::socket::{setsockopt, sockopt};
+use pageserver::config::{PageServerConf, PageserverIdentity, ignored_fields};
+use pageserver::controller_upcall_client::StorageControllerUpcallClient;
+use pageserver::deletion_queue::DeletionQueue;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
-use pageserver::task_mgr::{COMPUTE_REQUEST_RUNTIME, WALRECEIVER_RUNTIME};
-use pageserver::tenant::{secondary, TenantSharedResources};
-use pageserver::{CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener};
+use pageserver::task_mgr::{
+    BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
+};
+use pageserver::tenant::{TenantSharedResources, mgr, secondary};
+use pageserver::{
+    CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener, HttpsEndpointListener, http,
+    page_cache, page_service, task_mgr, virtual_file,
+};
+use postgres_backend::AuthType;
 use remote_storage::GenericRemoteStorage;
-use tokio::signal::unix::SignalKind;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-
-use metrics::set_build_info_metric;
-use pageserver::{
-    config::PageServerConf,
-    deletion_queue::DeletionQueue,
-    http, page_cache, page_service, task_mgr,
-    task_mgr::{BACKGROUND_RUNTIME, MGMT_REQUEST_RUNTIME},
-    tenant::mgr,
-    virtual_file,
-};
-use postgres_backend::AuthType;
+use tracing_utils::OtelGuard;
+use utils::auth::{JwtAuth, SwappableJwtAuth};
 use utils::crashsafe::syncfs;
-use utils::failpoint_support;
 use utils::logging::TracingErrorLayerEnablement;
-use utils::{
-    auth::{JwtAuth, SwappableJwtAuth},
-    logging, project_build_tag, project_git_version,
-    sentry_init::init_sentry,
-    tcp_listener,
-};
+use utils::sentry_init::init_sentry;
+use utils::{failpoint_support, logging, project_build_tag, project_git_version, tcp_listener};
 
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
 
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+/// Configure jemalloc to profile heap allocations by sampling stack traces every 2 MB (1 << 21).
+/// This adds roughly 3% overhead for allocations on average, which is acceptable considering
+/// performance-sensitive code will avoid allocations as far as possible anyway.
+#[allow(non_upper_case_globals)]
+#[unsafe(export_name = "malloc_conf")]
+pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:21\0";
 
 const PID_FILE_NAME: &str = "pageserver.pid";
 
@@ -78,6 +79,9 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Initialize up failpoints support
+    let scenario = failpoint_support::init();
+
     let workdir = arg_matches
         .get_one::<String>("workdir")
         .map(Utf8Path::new)
@@ -93,7 +97,7 @@ fn main() -> anyhow::Result<()> {
     env::set_current_dir(&workdir)
         .with_context(|| format!("Failed to set application's current dir to '{workdir}'"))?;
 
-    let conf = initialize_config(&identity_file_path, &cfg_file_path, &workdir)?;
+    let (conf, ignored) = initialize_config(&identity_file_path, &cfg_file_path, &workdir)?;
 
     // Initialize logging.
     //
@@ -107,11 +111,27 @@ fn main() -> anyhow::Result<()> {
     } else {
         TracingErrorLayerEnablement::Disabled
     };
+
     logging::init(
         conf.log_format,
         tracing_error_layer_enablement,
         logging::Output::Stdout,
     )?;
+
+    let otel_enablement = match &conf.tracing {
+        Some(cfg) => tracing_utils::OtelEnablement::Enabled {
+            service_name: "pageserver".to_string(),
+            export_config: (&cfg.export_config).into(),
+            runtime: *COMPUTE_REQUEST_RUNTIME,
+        },
+        None => tracing_utils::OtelEnablement::Disabled,
+    };
+
+    let otel_guard = tracing_utils::init_performance_tracing(otel_enablement);
+
+    if otel_guard.is_some() {
+        info!(?conf.tracing, "starting with OTEL tracing enabled");
+    }
 
     // mind the order required here: 1. logging, 2. panic_hook, 3. sentry.
     // disarming this hook on pageserver, because we never tear down tracing.
@@ -123,10 +143,23 @@ fn main() -> anyhow::Result<()> {
         &[("node_id", &conf.id.to_string())],
     );
 
-    // after setting up logging, log the effective IO engine choice and read path implementations
+    // Warn about ignored config items; see pageserver_api::config::ConfigToml
+    // doc comment for rationale why we prefer this over serde(deny_unknown_fields).
+    {
+        let ignored_fields::Paths { paths } = &ignored;
+        for path in paths {
+            warn!(?path, "ignoring unknown configuration item");
+        }
+    }
+
+    // Log configuration items for feature-flag-like config
+    // (maybe we should automate this with a visitor?).
     info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
     info!(?conf.virtual_file_io_mode, "starting with virtual_file IO mode");
     info!(?conf.wal_receiver_protocol, "starting with WAL receiver protocol");
+    info!(?conf.validate_wal_contiguity, "starting with WAL contiguity validation");
+    info!(?conf.page_service_pipelining, "starting with page service pipelining config");
+    info!(?conf.get_vectored_concurrent_io, "starting with get_vectored IO concurrency config");
 
     // The tenants directory contains all the pageserver local disk state.
     // Create if not exists and make sure all the contents are durable before proceeding.
@@ -168,9 +201,6 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Initialize up failpoints support
-    let scenario = failpoint_support::init();
-
     // Basic initialization of things that don't change after startup
     tracing::info!("Initializing virtual_file...");
     virtual_file::init(
@@ -186,7 +216,7 @@ fn main() -> anyhow::Result<()> {
     tracing::info!("Initializing page_cache...");
     page_cache::init(conf.page_cache_size);
 
-    start_pageserver(launch_ts, conf).context("Failed to start pageserver")?;
+    start_pageserver(launch_ts, conf, ignored, otel_guard).context("Failed to start pageserver")?;
 
     scenario.teardown();
     Ok(())
@@ -196,7 +226,7 @@ fn initialize_config(
     identity_file_path: &Utf8Path,
     cfg_file_path: &Utf8Path,
     workdir: &Utf8Path,
-) -> anyhow::Result<&'static PageServerConf> {
+) -> anyhow::Result<(&'static PageServerConf, ignored_fields::Paths)> {
     // The deployment orchestrator writes out an indentity file containing the node id
     // for all pageservers. This file is the source of truth for the node id. In order
     // to allow for rolling back pageserver releases, the node id is also included in
@@ -207,7 +237,9 @@ fn initialize_config(
         Ok(mut f) => {
             let md = f.metadata().context("stat config file")?;
             if !md.is_file() {
-                anyhow::bail!("Pageserver found identity file but it is a dir entry: {identity_file_path}. Aborting start up ...");
+                anyhow::bail!(
+                    "Pageserver found identity file but it is a dir entry: {identity_file_path}. Aborting start up ..."
+                );
             }
 
             let mut s = String::new();
@@ -215,21 +247,44 @@ fn initialize_config(
             toml_edit::de::from_str::<PageserverIdentity>(&s)?
         }
         Err(e) => {
-            anyhow::bail!("Pageserver could not read identity file: {identity_file_path}: {e}. Aborting start up ...");
+            anyhow::bail!(
+                "Pageserver could not read identity file: {identity_file_path}: {e}. Aborting start up ..."
+            );
         }
     };
 
     let config_file_contents =
         std::fs::read_to_string(cfg_file_path).context("read config file from filesystem")?;
-    let config_toml = serde_path_to_error::deserialize(
-        toml_edit::de::Deserializer::from_str(&config_file_contents)
-            .context("build toml deserializer")?,
-    )
-    .context("deserialize config toml")?;
+
+    // Deserialize the config file contents into a ConfigToml.
+    let config_toml: pageserver_api::config::ConfigToml = {
+        let deserializer = toml_edit::de::Deserializer::from_str(&config_file_contents)
+            .context("build toml deserializer")?;
+        let mut path_to_error_track = serde_path_to_error::Track::new();
+        let deserializer =
+            serde_path_to_error::Deserializer::new(deserializer, &mut path_to_error_track);
+        serde::Deserialize::deserialize(deserializer).context("deserialize config toml")?
+    };
+
+    // Find unknown fields by re-serializing the parsed ConfigToml and comparing it to the on-disk file.
+    // Any fields that are only in the on-disk version are unknown.
+    // (The assumption here is that the ConfigToml doesn't to skip_serializing_if.)
+    // (Make sure to read the ConfigToml doc comment on why we only want to warn about, but not fail startup, on unknown fields).
+    let ignored = {
+        let ondisk_toml = config_file_contents
+            .parse::<toml_edit::DocumentMut>()
+            .context("parse original config as toml document")?;
+        let parsed_toml = toml_edit::ser::to_document(&config_toml)
+            .context("re-serialize config to toml document")?;
+        pageserver::config::ignored_fields::find(ondisk_toml, parsed_toml)
+    };
+
+    // Construct the runtime god object (it's called PageServerConf but actually is just global shared state).
     let conf = PageServerConf::parse_and_validate(identity.id, config_toml, workdir)
         .context("runtime-validation of config toml")?;
+    let conf = Box::leak(Box::new(conf));
 
-    Ok(Box::leak(Box::new(conf)))
+    Ok((conf, ignored))
 }
 
 struct WaitForPhaseResult<F: std::future::Future + Unpin> {
@@ -280,6 +335,8 @@ fn startup_checkpoint(started_at: Instant, phase: &str, human_phase: &str) {
 fn start_pageserver(
     launch_ts: &'static LaunchTimestamp,
     conf: &'static PageServerConf,
+    ignored: ignored_fields::Paths,
+    otel_guard: Option<OtelGuard>,
 ) -> anyhow::Result<()> {
     // Monotonic time for later calculating startup duration
     let started_startup_at = Instant::now();
@@ -302,7 +359,7 @@ fn start_pageserver(
         pageserver::metrics::tokio_epoll_uring::Collector::new(),
     ))
     .unwrap();
-    pageserver::preinitialize_metrics();
+    pageserver::preinitialize_metrics(conf, ignored);
 
     // If any failpoints were set from FAILPOINTS environment variable,
     // print them to the log for debugging purposes
@@ -336,10 +393,24 @@ fn start_pageserver(
     info!("Starting pageserver http handler on {http_addr}");
     let http_listener = tcp_listener::bind(http_addr)?;
 
-    let pg_addr = &conf.listen_pg_addr;
+    let https_listener = match conf.listen_https_addr.as_ref() {
+        Some(https_addr) => {
+            info!("Starting pageserver https handler on {https_addr}");
+            Some(tcp_listener::bind(https_addr)?)
+        }
+        None => None,
+    };
 
+    let pg_addr = &conf.listen_pg_addr;
     info!("Starting pageserver pg protocol handler on {pg_addr}");
     let pageserver_listener = tcp_listener::bind(pg_addr)?;
+
+    // Enable SO_KEEPALIVE on the socket, to detect dead connections faster.
+    // These are configured via net.ipv4.tcp_keepalive_* sysctls.
+    //
+    // TODO: also set this on the walreceiver socket, but tokio-postgres doesn't
+    // support enabling keepalives while using the default OS sysctls.
+    setsockopt(&pageserver_listener, sockopt::KeepAlive, &true)?;
 
     // Launch broker client
     // The storage_broker::connect call needs to happen inside a tokio runtime thread.
@@ -381,6 +452,23 @@ fn start_pageserver(
     info!("Using auth for http API: {:#?}", conf.http_auth_type);
     info!("Using auth for pg connections: {:#?}", conf.pg_auth_type);
 
+    let tls_server_config = if conf.listen_https_addr.is_some() || conf.enable_tls_page_service_api
+    {
+        let resolver = BACKGROUND_RUNTIME.block_on(ReloadingCertificateResolver::new(
+            &conf.ssl_key_file,
+            &conf.ssl_cert_file,
+            conf.ssl_cert_reload_period,
+        ))?;
+
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_cert_resolver(resolver);
+
+        Some(Arc::new(server_config))
+    } else {
+        None
+    };
+
     match var("NEON_AUTH_TOKEN") {
         Ok(v) => {
             info!("Loaded JWT token for authentication with Safekeeper");
@@ -391,11 +479,9 @@ fn start_pageserver(
         Err(VarError::NotPresent) => {
             info!("No JWT token for authentication with Safekeeper detected");
         }
-        Err(e) => {
-            return Err(e).with_context(|| {
-                "Failed to either load to detect non-present NEON_AUTH_TOKEN environment variable"
-            })
-        }
+        Err(e) => return Err(e).with_context(
+            || "Failed to either load to detect non-present NEON_AUTH_TOKEN environment variable",
+        ),
     };
 
     // Top-level cancellation token for the process
@@ -407,7 +493,7 @@ fn start_pageserver(
     // Set up deletion queue
     let (deletion_queue, deletion_workers) = DeletionQueue::new(
         remote_storage.clone(),
-        ControllerUpcallClient::new(conf, &shutdown_pageserver),
+        StorageControllerUpcallClient::new(conf, &shutdown_pageserver)?,
         conf,
     );
     deletion_workers.spawn_with(BACKGROUND_RUNTIME.handle());
@@ -563,9 +649,8 @@ fn start_pageserver(
 
     // Start up the service to handle HTTP mgmt API request. We created the
     // listener earlier already.
-    let http_endpoint_listener = {
+    let (http_endpoint_listener, https_endpoint_listener) = {
         let _rt_guard = MGMT_REQUEST_RUNTIME.enter(); // for hyper
-        let cancel = CancellationToken::new();
 
         let router_state = Arc::new(
             http::routes::State::new(
@@ -580,22 +665,48 @@ fn start_pageserver(
             )
             .context("Failed to initialize router state")?,
         );
+
         let router = http::make_router(router_state, launch_ts, http_auth.clone())?
             .build()
             .map_err(|err| anyhow!(err))?;
-        let service = utils::http::RouterService::new(router).unwrap();
-        let server = hyper0::Server::from_tcp(http_listener)?
-            .serve(service)
-            .with_graceful_shutdown({
-                let cancel = cancel.clone();
-                async move { cancel.clone().cancelled().await }
-            });
 
-        let task = MGMT_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
-            "http endpoint listener",
-            server,
-        ));
-        HttpEndpointListener(CancellableTask { task, cancel })
+        let service =
+            Arc::new(http_utils::RequestServiceBuilder::new(router).map_err(|err| anyhow!(err))?);
+
+        let http_task = {
+            let server =
+                http_utils::server::Server::new(Arc::clone(&service), http_listener, None)?;
+            let cancel = CancellationToken::new();
+
+            let task = MGMT_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
+                "http endpoint listener",
+                server.serve(cancel.clone()),
+            ));
+            HttpEndpointListener(CancellableTask { task, cancel })
+        };
+
+        let https_task = match https_listener {
+            Some(https_listener) => {
+                let tls_server_config = tls_server_config
+                    .clone()
+                    .expect("tls_server_config is set earlier if https is enabled");
+
+                let tls_acceptor = tokio_rustls::TlsAcceptor::from(tls_server_config);
+
+                let server =
+                    http_utils::server::Server::new(service, https_listener, Some(tls_acceptor))?;
+                let cancel = CancellationToken::new();
+
+                let task = MGMT_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
+                    "https endpoint listener",
+                    server.serve(cancel.clone()),
+                ));
+                Some(HttpsEndpointListener(CancellableTask { task, cancel }))
+            }
+            None => None,
+        };
+
+        (http_task, https_task)
     };
 
     let consumption_metrics_tasks = {
@@ -622,53 +733,56 @@ fn start_pageserver(
 
     // Spawn a task to listen for libpq connections. It will spawn further tasks
     // for each connection. We created the listener earlier already.
-    let page_service = page_service::spawn(conf, tenant_manager.clone(), pg_auth, {
-        let _entered = COMPUTE_REQUEST_RUNTIME.enter(); // TcpListener::from_std requires it
-        pageserver_listener
-            .set_nonblocking(true)
-            .context("set listener to nonblocking")?;
-        tokio::net::TcpListener::from_std(pageserver_listener).context("create tokio listener")?
-    });
-
-    let mut shutdown_pageserver = Some(shutdown_pageserver.drop_guard());
+    let perf_trace_dispatch = otel_guard.as_ref().map(|g| g.dispatch.clone());
+    let page_service = page_service::spawn(
+        conf,
+        tenant_manager.clone(),
+        pg_auth,
+        perf_trace_dispatch,
+        {
+            let _entered = COMPUTE_REQUEST_RUNTIME.enter(); // TcpListener::from_std requires it
+            pageserver_listener
+                .set_nonblocking(true)
+                .context("set listener to nonblocking")?;
+            tokio::net::TcpListener::from_std(pageserver_listener)
+                .context("create tokio listener")?
+        },
+        if conf.enable_tls_page_service_api {
+            tls_server_config
+        } else {
+            None
+        },
+    );
 
     // All started up! Now just sit and wait for shutdown signal.
+    BACKGROUND_RUNTIME.block_on(async move {
+        let signal_token = CancellationToken::new();
+        let signal_cancel = signal_token.child_token();
 
-    {
-        BACKGROUND_RUNTIME.block_on(async move {
-            let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt()).unwrap();
-            let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate()).unwrap();
-            let mut sigquit = tokio::signal::unix::signal(SignalKind::quit()).unwrap();
-            let signal = tokio::select! {
-                _ = sigquit.recv() => {
-                    info!("Got signal SIGQUIT. Terminating in immediate shutdown mode",);
-                    std::process::exit(111);
-                }
-                _ = sigint.recv() => { "SIGINT" },
-                _ = sigterm.recv() => { "SIGTERM" },
-            };
+        tokio::spawn(utils::signals::signal_handler(signal_token));
 
-            info!("Got signal {signal}. Terminating gracefully in fast shutdown mode",);
+        // Wait for cancellation signal and shut down the pageserver.
+        //
+        // This cancels the `shutdown_pageserver` cancellation tree. Right now that tree doesn't
+        // reach very far, and `task_mgr` is used instead. The plan is to change that over time.
+        signal_cancel.cancelled().await;
 
-            // This cancels the `shutdown_pageserver` cancellation tree.
-            // Right now that tree doesn't reach very far, and `task_mgr` is used instead.
-            // The plan is to change that over time.
-            shutdown_pageserver.take();
-            pageserver::shutdown_pageserver(
-                http_endpoint_listener,
-                page_service,
-                consumption_metrics_tasks,
-                disk_usage_eviction_task,
-                &tenant_manager,
-                background_purges,
-                deletion_queue.clone(),
-                secondary_controller_tasks,
-                0,
-            )
-            .await;
-            unreachable!()
-        })
-    }
+        shutdown_pageserver.cancel();
+        pageserver::shutdown_pageserver(
+            http_endpoint_listener,
+            https_endpoint_listener,
+            page_service,
+            consumption_metrics_tasks,
+            disk_usage_eviction_task,
+            &tenant_manager,
+            background_purges,
+            deletion_queue.clone(),
+            secondary_controller_tasks,
+            0,
+        )
+        .await;
+        unreachable!();
+    })
 }
 
 async fn create_remote_storage_client(
@@ -687,7 +801,9 @@ async fn create_remote_storage_client(
     // wrapper that simulates failures.
     if conf.test_remote_failures > 0 {
         if !cfg!(feature = "testing") {
-            anyhow::bail!("test_remote_failures option is not available because pageserver was compiled without the 'testing' feature");
+            anyhow::bail!(
+                "test_remote_failures option is not available because pageserver was compiled without the 'testing' feature"
+            );
         }
         info!(
             "Simulating remote failures for first {} attempts of each op",

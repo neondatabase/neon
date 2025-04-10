@@ -1,19 +1,21 @@
-use std::{ops::Bound, sync::Arc};
+use std::ops::Bound;
+use std::sync::Arc;
 
 use anyhow::Context;
 use bytes::Bytes;
 use postgres_ffi::ControlFileData;
 use remote_storage::{
-    Download, DownloadError, DownloadOpts, GenericRemoteStorage, Listing, ListingObject, RemotePath,
+    Download, DownloadError, DownloadKind, DownloadOpts, GenericRemoteStorage, Listing,
+    ListingObject, RemotePath,
 };
 use serde::de::DeserializeOwned;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument};
 use utils::lsn::Lsn;
 
-use crate::{assert_u64_eq_usize::U64IsUsize, config::PageServerConf};
-
 use super::{importbucket_format, index_part_format};
+use crate::assert_u64_eq_usize::U64IsUsize;
+use crate::config::PageServerConf;
 
 pub async fn new(
     conf: &'static PageServerConf,
@@ -239,6 +241,7 @@ impl RemoteStorageWrapper {
                     .download(
                         path,
                         &DownloadOpts {
+                            kind: DownloadKind::Large,
                             etag: None,
                             byte_start: Bound::Included(start_inclusive),
                             byte_end: Bound::Excluded(end_exclusive)
@@ -306,7 +309,7 @@ impl ControlFile {
             202107181 => 14,
             202209061 => 15,
             202307071 => 16,
-            /* XXX pg17 */
+            202406281 => 17,
             catversion => {
                 anyhow::bail!("unrecognized catalog version {catversion}")
             }

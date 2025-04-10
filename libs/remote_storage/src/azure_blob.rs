@@ -2,31 +2,26 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::env;
 use std::fmt::Display;
-use std::io;
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+use std::{env, io};
 
-use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use azure_core::request_options::{IfMatchCondition, MaxResults, Metadata, Range};
-use azure_core::{Continuable, RetryOptions};
-use azure_identity::DefaultAzureCredential;
+use azure_core::{Continuable, HttpClient, RetryOptions, TransportOptions};
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::blob::CopyStatus;
-use azure_storage_blobs::prelude::ClientBuilder;
-use azure_storage_blobs::{blob::operations::GetBlobBuilder, prelude::ContainerClient};
+use azure_storage_blobs::blob::operations::GetBlobBuilder;
+use azure_storage_blobs::prelude::{ClientBuilder, ContainerClient};
 use bytes::Bytes;
+use futures::FutureExt;
 use futures::future::Either;
 use futures::stream::Stream;
-use futures::FutureExt;
-use futures_util::StreamExt;
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use http_types::{StatusCode, Url};
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
@@ -34,11 +29,13 @@ use tracing::debug;
 use utils::backoff;
 use utils::backoff::exponential_backoff_duration_seconds;
 
-use crate::metrics::{start_measuring_requests, AttemptOutcome, RequestKind};
+use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
+use crate::config::AzureConfig;
+use crate::error::Cancelled;
+use crate::metrics::{AttemptOutcome, RequestKind, start_measuring_requests};
 use crate::{
-    config::AzureConfig, error::Cancelled, ConcurrencyLimiter, Download, DownloadError,
-    DownloadOpts, Listing, ListingMode, ListingObject, RemotePath, RemoteStorage, StorageMetadata,
-    TimeTravelError, TimeoutOrCancel,
+    ConcurrencyLimiter, Download, DownloadError, DownloadKind, DownloadOpts, Listing, ListingMode,
+    ListingObject, RemotePath, RemoteStorage, StorageMetadata, TimeTravelError, TimeoutOrCancel,
 };
 
 pub struct AzureBlobStorage {
@@ -49,10 +46,17 @@ pub struct AzureBlobStorage {
     concurrency_limiter: ConcurrencyLimiter,
     // Per-request timeout. Accessible for tests.
     pub timeout: Duration,
+
+    // Alternative timeout used for metadata objects which are expected to be small
+    pub small_timeout: Duration,
 }
 
 impl AzureBlobStorage {
-    pub fn new(azure_config: &AzureConfig, timeout: Duration) -> Result<Self> {
+    pub fn new(
+        azure_config: &AzureConfig,
+        timeout: Duration,
+        small_timeout: Duration,
+    ) -> Result<Self> {
         debug!(
             "Creating azure remote storage for azure container {}",
             azure_config.container_name
@@ -68,12 +72,18 @@ impl AzureBlobStorage {
         let credentials = if let Ok(access_key) = env::var("AZURE_STORAGE_ACCESS_KEY") {
             StorageCredentials::access_key(account.clone(), access_key)
         } else {
-            let token_credential = DefaultAzureCredential::default();
-            StorageCredentials::token_credential(Arc::new(token_credential))
+            let token_credential = azure_identity::create_default_credential()
+                .context("trying to obtain Azure default credentials")?;
+            StorageCredentials::token_credential(token_credential)
         };
 
-        // we have an outer retry
-        let builder = ClientBuilder::new(account, credentials).retry(RetryOptions::none());
+        let builder = ClientBuilder::new(account, credentials)
+            // we have an outer retry
+            .retry(RetryOptions::none())
+            // Customize transport to configure conneciton pooling
+            .transport(TransportOptions::new(Self::reqwest_client(
+                azure_config.conn_pool_size,
+            )));
 
         let client = builder.container_client(azure_config.container_name.to_owned());
 
@@ -94,7 +104,16 @@ impl AzureBlobStorage {
             max_keys_per_list_response,
             concurrency_limiter: ConcurrencyLimiter::new(azure_config.concurrency_limit.get()),
             timeout,
+            small_timeout,
         })
+    }
+
+    fn reqwest_client(conn_pool_size: usize) -> Arc<dyn HttpClient> {
+        let client = reqwest::ClientBuilder::new()
+            .pool_max_idle_per_host(conn_pool_size)
+            .build()
+            .expect("failed to build `reqwest` client");
+        Arc::new(client)
     }
 
     pub fn relative_path_to_name(&self, path: &RemotePath) -> String {
@@ -133,6 +152,7 @@ impl AzureBlobStorage {
     async fn download_for_builder(
         &self,
         builder: GetBlobBuilder,
+        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         let kind = RequestKind::Get;
@@ -156,7 +176,7 @@ impl AzureBlobStorage {
                 .map_err(to_download_error);
 
             // apply per request timeout
-            let response = tokio_stream::StreamExt::timeout(response, self.timeout);
+            let response = tokio_stream::StreamExt::timeout(response, timeout);
 
             // flatten
             let response = response.map(|res| match res {
@@ -351,7 +371,8 @@ impl RemoteStorage for AzureBlobStorage {
 
                 let next_item = next_item?;
 
-                if timeout_try_cnt >= 2 {
+                // Log a warning if we saw two timeouts in a row before a successful request
+                if timeout_try_cnt > 2 {
                     tracing::warn!("Azure Blob Storage list timed out and succeeded after {} tries", timeout_try_cnt);
                 }
                 timeout_try_cnt = 1;
@@ -415,7 +436,7 @@ impl RemoteStorage for AzureBlobStorage {
         let blob_client = self.client.blob_client(self.relative_path_to_name(key));
         let properties_future = blob_client.get_properties().into_future();
 
-        let properties_future = tokio::time::timeout(self.timeout, properties_future);
+        let properties_future = tokio::time::timeout(self.small_timeout, properties_future);
 
         let res = tokio::select! {
             res = properties_future => res,
@@ -521,7 +542,12 @@ impl RemoteStorage for AzureBlobStorage {
             });
         }
 
-        self.download_for_builder(builder, cancel).await
+        let timeout = match opts.kind {
+            DownloadKind::Small => self.small_timeout,
+            DownloadKind::Large => self.timeout,
+        };
+
+        self.download_for_builder(builder, timeout, cancel).await
     }
 
     async fn delete(&self, path: &RemotePath, cancel: &CancellationToken) -> anyhow::Result<()> {
@@ -529,9 +555,9 @@ impl RemoteStorage for AzureBlobStorage {
             .await
     }
 
-    async fn delete_objects<'a>(
+    async fn delete_objects(
         &self,
-        paths: &'a [RemotePath],
+        paths: &[RemotePath],
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let kind = RequestKind::Delete;
@@ -607,6 +633,10 @@ impl RemoteStorage for AzureBlobStorage {
             .req_seconds
             .observe_elapsed(kind, &res, started_at);
         res
+    }
+
+    fn max_keys_per_delete(&self) -> usize {
+        super::MAX_KEYS_PER_DELETE_AZURE
     }
 
     async fn copy(
@@ -771,8 +801,7 @@ where
             // that support needs to be hacked in.
             //
             // including {self:?} into the message would be useful, but unsure how to unproject.
-            _ => std::task::Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            _ => std::task::Poll::Ready(Err(std::io::Error::other(
                 "cloned or initial values cannot be read",
             ))),
         }
@@ -825,7 +854,7 @@ where
         };
         Err(azure_core::error::Error::new(
             azure_core::error::ErrorKind::Io,
-            std::io::Error::new(std::io::ErrorKind::Other, msg),
+            std::io::Error::other(msg),
         ))
     }
 
