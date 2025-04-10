@@ -26,18 +26,10 @@ index 0cdc769..b66bf67 100644
 +  SET search_path = ''
 +;
 diff --git a/sql/init.sql b/sql/init.sql
-index 7da6553..17353f5 100644
+index 7da6553..2b0d48c 100644
 --- a/sql/init.sql
 +++ b/sql/init.sql
-@@ -4,15 +4,26 @@
- 
- -- ADD unit tests in tests/sql/init.sql
- 
--CREATE OR REPLACE FUNCTION anon.load_csv(
-+CREATE OR REPLACE FUNCTION load_csv(
-   dest_table REGCLASS,
-   csv_file TEXT
- )
+@@ -11,8 +11,19 @@ CREATE OR REPLACE FUNCTION anon.load_csv(
  RETURNS BOOLEAN AS
  $$
  DECLARE
