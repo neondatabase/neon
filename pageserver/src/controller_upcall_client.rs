@@ -53,11 +53,8 @@ impl StorageControllerUpcallClient {
     pub fn new(
         conf: &'static PageServerConf,
         cancel: &CancellationToken,
-    ) -> Result<Option<Self>, reqwest::Error> {
-        let mut url = match conf.control_plane_api.as_ref() {
-            Some(u) => u.clone(),
-            None => return Ok(None),
-        };
+    ) -> Self {
+        let mut url = conf.control_plane_api.clone();
 
         if let Ok(mut segs) = url.path_segments_mut() {
             // This ensures that `url` ends with a slash if it doesn't already.
@@ -80,12 +77,12 @@ impl StorageControllerUpcallClient {
             client = client.add_root_certificate(ssl_ca_cert.clone());
         }
 
-        Ok(Some(Self {
-            http_client: client.build()?,
+        Self {
+            http_client: client.build().expect("Failed to construct HTTP client"),
             base_url: url,
             node_id: conf.id,
             cancel: cancel.clone(),
-        }))
+        }
     }
 
     #[tracing::instrument(skip_all)]
