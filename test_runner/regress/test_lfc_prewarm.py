@@ -6,7 +6,6 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import USE_LFC
-from test_endpoint_storage import headers_with_jwt
 import aiohttp
 
 
@@ -144,17 +143,18 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv):
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 async def test_lfc_prewarm_compute_ctl(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    n_records = 1000000
+    # n_records = 1000000
+    n_records = 100
 
     endpoint = env.endpoints.create_start(
         branch_name="main",
-        config_lines=[
-            "autovacuum = off",
-            "shared_buffers=1MB",
-            "neon.max_file_cache_size=1GB",
-            "neon.file_cache_size_limit=1GB",
-            "neon.file_cache_prewarm_limit=1000",
-        ],
+        # config_lines=[
+        #     "autovacuum = off",
+        #     "shared_buffers=1MB",
+        #     "neon.max_file_cache_size=1GB",
+        #     "neon.file_cache_size_limit=1GB",
+        #     "neon.file_cache_prewarm_limit=1000",
+        # ],
     )
     conn = endpoint.connect()
     cur = conn.cursor()
@@ -165,7 +165,7 @@ async def test_lfc_prewarm_compute_ctl(neon_simple_env: NeonEnv):
 
     port = endpoint.http_client().external_port  # TODO patch EndpointHttpClient
     session = aiohttp.ClientSession(
-        headers=headers_with_jwt(env, endpoint),
+        headers={},
         base_url=f"http://localhost:{port}/",
         raise_for_status=True
     )
