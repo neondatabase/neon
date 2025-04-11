@@ -376,12 +376,22 @@ pub(crate) mod tests {
                 let offs = res?;
                 offsets.push(offs);
             }
-            // Write out one page worth of zeros so that we can
-            // read again with read_blk
-            let (_, res) = wtr.write_blob(vec![0; PAGE_SZ].slice_len(), ctx).await;
-            let offs = res?;
-            println!("Writing final blob at offs={offs}");
-            wtr.into_inner(|_| None).await?; // TODO: this here is the problem with the tests: we're dropping the tail end
+            wtr.into_inner(|mut buf| {
+                use crate::virtual_file::owned_buffers_io::write::Buffer;
+
+                let len = buf.pending();
+                let cap = buf.cap();
+
+                // pad zeros to the next io alignment requirement.
+                // TODO: this is actually padding to next PAGE_SZ multiple, but only if the buffer capacity is larger than that.
+                // We can't let the fact that we do direct IO, or the buffer capacity, dictate the on-disk format we write here.
+                // Need to find a better API that allows writing the format we intend to.
+                let count = len.next_multiple_of(PAGE_SZ).min(cap) - len;
+                buf.extend_with(0, count);
+
+                Some(buf)
+            })
+            .await?; // TODO: this here is the problem with the tests: we're dropping the tail end
         }
         Ok((temp_dir, pathbuf, offsets))
     }
