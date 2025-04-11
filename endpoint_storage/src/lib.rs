@@ -134,7 +134,7 @@ fn unauthorized(route: impl Display, claims: impl Display) -> Response {
 }
 
 pub fn bad_request(err: impl Display, desc: &'static str) -> Response {
-    debug!(%err, desc);
+    tracing::info!(%err, desc); // TODO revert to debug
     (StatusCode::BAD_REQUEST, err.to_string()).into_response()
 }
 
