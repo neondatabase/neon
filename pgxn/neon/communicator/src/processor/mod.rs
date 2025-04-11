@@ -18,6 +18,7 @@ use thiserror::Error;
 use tonic;
 use tonic::metadata::AsciiMetadataValue;
 use tonic::transport::Channel;
+use tracing;
 
 use crate::neon_request::{DbSizeRequest, GetPageRequest, RelExistsRequest, RelSizeRequest};
 
@@ -65,6 +66,7 @@ impl CommunicatorProcessor {
         auth_token: &Option<String>,
         shard_map: HashMap<Shardno, String>,
     ) -> Self {
+        tracing::info!("Initialized");
         Self {
             _tenant_id: tenant_id.to_string(),
             _timeline_id: timeline_id.to_string(),

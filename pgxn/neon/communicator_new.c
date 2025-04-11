@@ -116,6 +116,9 @@ communicator_new_bgworker_main(Datum main_arg)
 {
 	char	  **connstrs;
 	shardno_t	num_shards;
+	struct LoggingState *logging;
+	char		errbuf[1000];
+	int			elevel;
 
 	/* Establish signal handlers. */
 	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
@@ -125,6 +128,8 @@ communicator_new_bgworker_main(Datum main_arg)
 	BackgroundWorkerUnblockSignals();
 
 	get_shard_map(&connstrs, &num_shards);
+
+	logging = configure_logging();
 
 	communicator_worker_process_launch(
 		cis,
@@ -138,12 +143,37 @@ communicator_new_bgworker_main(Datum main_arg)
 	elog(LOG, "communicator threads started");
 	for (;;)
 	{
+		int32		rc;
+
+		CHECK_FOR_INTERRUPTS();
+
+		for (;;) {
+			rc = pump_logging(logging, (uint8 *) errbuf, sizeof(errbuf), &elevel);
+			if (rc == 0)
+			{
+				/* nothing to do */
+				break;
+			}
+			else if (rc == 1)
+			{
+				/* Because we don't want to exit on error */
+				if (elevel == ERROR)
+					elevel = LOG;
+				if (elevel == INFO)
+					elevel = LOG;
+				elog(elevel, "[COMMUNICATOR] %s", errbuf);
+			}
+			else if (rc == -1)
+			{
+				elog(ERROR, "logging channel was closed unexpectedly");
+			}
+		}
+
 		(void) WaitLatch(MyLatch,
 						 WL_LATCH_SET | WL_EXIT_ON_PM_DEATH,
 						 0,
 						 PG_WAIT_EXTENSION);
 		ResetLatch(MyLatch);
-		CHECK_FOR_INTERRUPTS();
 	}
 }
 
@@ -164,20 +194,11 @@ notify_proc_unsafe(int procno)
 	SetLatch(&proc->procLatch);
 }
 
-/* FIXME: investigate using pgrx for this, or at least copying its approach */
 void
-elog_log_unsafe(const char *s)
+callback_set_my_latch_unsafe(void)
 {
-	/*
-	 * because this can get called from different threads, protect with spinlock
-	 *
-	 * FIXME: that's not good enough if the main process code calls elog too
-	 */
-	SpinLockAcquire(&in_elog);
-	elog(LOG, "%s", s);
-	SpinLockRelease(&in_elog);
+	SetLatch(MyLatch);
 }
-
 
 /**** Backend functions. These run in each backend ****/
 
@@ -260,6 +281,8 @@ perform_request(NeonIORequest *request)
 		request_idx = bcomm_start_io_request(my_bs, request);
 		// fixme: check 'request_idx' ?
 
+		elog(DEBUG5, "sent request with idx %d: tag %d", request_idx, request->tag);
+
 		(void) WaitLatch(MyLatch,
 						 WL_EXIT_ON_PM_DEATH | WL_LATCH_SET,
 						 0,
@@ -285,6 +308,7 @@ bool
 communicator_new_rel_exists(NRelFileInfo rinfo, ForkNumber forkNum, neon_request_lsns *request_lsns)
 {
 	NeonIORequest request = {
+		.tag = NeonIORequest_RelExists,
 		.rel_exists = {
 			.spc_oid = NInfoGetSpcOid(rinfo),
 			.db_oid = NInfoGetDbOid(rinfo),
@@ -314,6 +338,7 @@ communicator_new_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber
 	 */
 
 	NeonIORequest request = {
+		.tag = NeonIORequest_GetPage,
 		.get_page = {
 			.spc_oid = NInfoGetSpcOid(rinfo),
 			.db_oid = NInfoGetDbOid(rinfo),
@@ -369,6 +394,7 @@ BlockNumber
 communicator_new_rel_nblocks(NRelFileInfo rinfo, ForkNumber forkNum, neon_request_lsns *request_lsns)
 {
 	NeonIORequest request = {
+		.tag = NeonIORequest_RelSize,
 		.rel_size = {
 			.spc_oid = NInfoGetSpcOid(rinfo),
 			.db_oid = NInfoGetDbOid(rinfo),
@@ -393,6 +419,7 @@ int64
 communicator_new_dbsize(Oid dbNode, neon_request_lsns *request_lsns)
 {
 	NeonIORequest request = {
+		.tag = NeonIORequest_DbSize,
 		.db_size = {
 			.db_oid = dbNode,
 			.request_lsn = request_lsns->request_lsn,

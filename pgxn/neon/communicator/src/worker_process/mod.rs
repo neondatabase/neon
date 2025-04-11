@@ -6,6 +6,7 @@
 //! - write results back to backends.
 
 mod callbacks;
+mod logging;
 
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char};
@@ -20,7 +21,9 @@ use crate::processor::CommunicatorProcessor;
 use tokio::io::AsyncReadExt;
 use tokio_pipe::PipeRead;
 
-use callbacks::{elog_log, notify_proc};
+use callbacks::notify_proc;
+
+use tracing::{error, info};
 
 ///
 /// Main entry point for the communicator process.
@@ -39,8 +42,6 @@ pub extern "C" fn communicator_worker_process_launch(
     shard_map: *mut *mut c_char,
     nshards: u32,
 ) {
-    elog_log("In communicator_worker_process_launch");
-
     let cis = unsafe { &*cis };
     let tenant_id = {
         let c_str = unsafe { CStr::from_ptr(tenant_id) };
@@ -65,10 +66,10 @@ pub extern "C" fn communicator_worker_process_launch(
         .enable_all()
         .thread_name("communicator thread")
         .on_thread_start(|| {
-            elog_log("thread started");
+            info!("thread started");
         })
         .on_thread_stop(|| {
-            elog_log("thread stopping");
+            info!("thread stopping");
         })
         .build()
         .unwrap();
@@ -83,7 +84,7 @@ pub extern "C" fn communicator_worker_process_launch(
 
     runtime.spawn(async {
         let err = main_loop_handle.await.unwrap_err();
-        elog_log(&format!("error: {err:?}"));
+        error!("error: {err:?}");
     });
 
     // keep the runtime running after we exit this function
@@ -101,8 +102,6 @@ async fn communicator_process_main_loop(
     let mut submission_pipe_read =
         PipeRead::from_raw_fd_checked(cis.submission_pipe_read_fd).expect("invalid pipe fd");
 
-    elog_log("In communicator_process_main_loop");
-
     let processor = CommunicatorProcessor::new(tenant_id, timeline_id, &auth_token, shard_map);
 
     let mut idxbuf: [u8; 4] = [0; 4];
@@ -114,7 +113,7 @@ async fn communicator_process_main_loop(
         }
         let request_idx = u32::from_ne_bytes(idxbuf);
 
-        elog_log(&format!("received request {request_idx}"));
+        info!("received request {request_idx}");
 
         // Read the IO request from the slot indicated in the wakeup
         let slot = cis.get_request_slot(request_idx);
@@ -139,10 +138,11 @@ async fn communicator_process_main_loop(
 
         let request = slot.request.clone();
 
-        elog_log(&format!("processing request {request_idx}: {request:?}"));
+        info!("processing request {request_idx}: {request:?}");
         match request {
             NeonIORequest::Empty => {
-                panic!("unexpected Empty IO request");
+                error!("unexpected Empty IO request");
+                slot.result = NeonIOResult::Error(-1);
             }
             NeonIORequest::RelExists(req) => match processor.process_rel_exists_request(&req).await
             {
@@ -150,7 +150,7 @@ async fn communicator_process_main_loop(
                     slot.result = NeonIOResult::RelExists(exists);
                 }
                 Err(err) => {
-                    elog_log(&format!("tonic error: {err:?}"));
+                    info!("tonic error: {err:?}");
                     slot.result = NeonIOResult::Error(-1);
                 }
             },
@@ -159,7 +159,7 @@ async fn communicator_process_main_loop(
                     slot.result = NeonIOResult::RelSize(nblocks);
                 }
                 Err(err) => {
-                    elog_log(&format!("tonic error: {err:?}"));
+                    info!("tonic error: {err:?}");
                     slot.result = NeonIOResult::Error(-1);
                 }
             },
@@ -176,7 +176,7 @@ async fn communicator_process_main_loop(
                     slot.result = NeonIOResult::GetPage;
                 }
                 Err(err) => {
-                    elog_log(&format!("tonic error: {err:?}"));
+                    info!("tonic error: {err:?}");
                     slot.result = NeonIOResult::Error(-1);
                 }
             },
@@ -185,7 +185,7 @@ async fn communicator_process_main_loop(
                     slot.result = NeonIOResult::DbSize(db_size);
                 }
                 Err(err) => {
-                    elog_log(&format!("tonic error: {err:?}"));
+                    info!("tonic error: {err:?}");
                     slot.result = NeonIOResult::Error(-1);
                 }
             },

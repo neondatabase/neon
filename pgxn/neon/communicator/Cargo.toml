@@ -16,6 +16,7 @@ tokio = { version = "1.43.1", features = ["macros", "net", "io-util", "rt", "rt-
 tokio-pipe = { version = "0.2.12" }
 thiserror.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [build-dependencies]
 cbindgen.workspace = true
