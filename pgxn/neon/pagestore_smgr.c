@@ -118,6 +118,7 @@ typedef enum
 
 static SMgrRelation unlogged_build_rel = NULL;
 static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
+static bool unlogged_build_delete_init_fork;
 
 static bool neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id);
 static bool (*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
@@ -4164,6 +4165,8 @@ neon_start_unlogged_build(SMgrRelation reln)
 			(errmsg(NEON_TAG "starting unlogged build of relation %u/%u/%u",
 					RelFileInfoFmt(InfoFromSMgrRel(reln)))));
 
+	unlogged_build_delete_init_fork = false;
+
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
@@ -4177,6 +4180,16 @@ neon_start_unlogged_build(SMgrRelation reln)
 		case RELPERSISTENCE_UNLOGGED:
 			unlogged_build_rel = reln;
 			unlogged_build_phase = UNLOGGED_BUILD_NOT_PERMANENT;
+#ifdef DEBUG_COMPARE_LOCAL
+			if (!IsParallelWorker())
+			{
+				if (!mdexists(reln, INIT_FORKNUM))
+				{
+					unlogged_build_delete_init_fork = true;
+					mdcreate(reln, INIT_FORKNUM, false);
+				}
+			}
+#endif
 			return;
 
 		default:
@@ -4199,12 +4212,18 @@ neon_start_unlogged_build(SMgrRelation reln)
 	 * FIXME: should we pass isRedo true to create the tablespace dir if it
 	 * doesn't exist? Is it needed?
 	 */
-#ifndef DEBUG_COMPARE_LOCAL
  	if (!IsParallelWorker())
+	{
+#ifndef DEBUG_COMPARE_LOCAL
 		mdcreate(reln, MAIN_FORKNUM, false);
 #else
-	mdcreate(reln, INIT_FORKNUM, false);
+		if (!mdexists(reln, INIT_FORKNUM))
+		{
+			unlogged_build_delete_init_fork = true;
+			mdcreate(reln, INIT_FORKNUM, false);
+		}
 #endif
+	}
 }
 
 /*
@@ -4282,12 +4301,13 @@ neon_end_unlogged_build(SMgrRelation reln)
 #ifndef DEBUG_COMPARE_LOCAL
 			/* use isRedo == true, so that we drop it immediately */
 			mdunlink(rinfob, forknum, true);
-#else
-			mdunlink(rinfob, INIT_FORKNUM, true);
 #endif
 		}
 	}
-
+#ifdef DEBUG_COMPARE_LOCAL
+	if (unlogged_build_delete_init_fork)
+		mdunlink(rinfob, INIT_FORKNUM, true);
+#endif
 	unlogged_build_rel = NULL;
 	unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 }
