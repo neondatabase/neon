@@ -4186,6 +4186,7 @@ impl Timeline {
                 self.timeline_id,
                 self.tenant_shard_id,
                 &self.gate,
+                &self.cancel,
                 ctx,
             )
             .await?;
@@ -4711,6 +4712,7 @@ impl Timeline {
                     key_range,
                     self_clone.l0_flush_global_state.inner(),
                     &self_clone.gate,
+                    self_clone.cancel.clone(),
                 )
                 .await?
             else {
@@ -5250,6 +5252,7 @@ impl Timeline {
                 &img_range,
                 lsn,
                 &self.gate,
+                self.cancel.clone(),
                 ctx,
             )
             .await?;
@@ -6599,6 +6602,7 @@ impl Timeline {
             &(min_key..end_key),
             lsn,
             &self.gate,
+            self.cancel.clone(),
             ctx,
         )
         .await?;
@@ -6661,6 +6665,7 @@ impl Timeline {
             deltas.key_range.start,
             deltas.lsn_range,
             &self.gate,
+            self.cancel.clone(),
             ctx,
         )
         .await?;
@@ -6750,6 +6755,8 @@ impl Timeline {
             self.tenant_shard_id,
             in_memory.lsn_range.start,
             &self.gate,
+            // TODO: if we ever use this function in production code, we need to pass the real cancellation token
+            &CancellationToken::new(),
             ctx,
         )
         .await

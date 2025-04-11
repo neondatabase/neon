@@ -46,6 +46,7 @@ use pageserver_api::value::Value;
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::bin_ser::BeSer;
 use utils::bin_ser::SerializeError;
@@ -761,6 +762,7 @@ impl ImageLayerWriterInner {
     ///
     /// Start building a new image layer.
     ///
+    #[allow(clippy::too_many_arguments)]
     async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
@@ -768,6 +770,7 @@ impl ImageLayerWriterInner {
         key_range: &Range<Key>,
         lsn: Lsn,
         gate: &utils::sync::gate::Gate,
+        cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename.
@@ -800,6 +803,7 @@ impl ImageLayerWriterInner {
             file,
             PAGE_SZ as u64,
             gate,
+            cancel,
             ctx,
             info_span!(parent: None, "image_layer_writer_flush_task", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), timeline_id=%timeline_id, path = %path),
         )?;
@@ -1025,6 +1029,7 @@ impl ImageLayerWriter {
     ///
     /// Start building a new image layer.
     ///
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
@@ -1032,6 +1037,7 @@ impl ImageLayerWriter {
         key_range: &Range<Key>,
         lsn: Lsn,
         gate: &utils::sync::gate::Gate,
+        cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<ImageLayerWriter> {
         Ok(Self {
@@ -1043,6 +1049,7 @@ impl ImageLayerWriter {
                     key_range,
                     lsn,
                     gate,
+                    cancel,
                     ctx,
                 )
                 .await?,
@@ -1107,11 +1114,7 @@ impl Drop for ImageLayerWriter {
                 ..
             } = inner;
 
-            let vfile = match blob_writer
-                .into_inner(|_| None)
-                .await
-                .maybe_fatal_err("failed to access inner virtual file")
-            {
+            let vfile = match blob_writer.into_inner(|_| None).await {
                 Ok(vfile) => vfile,
                 Err(e) => {
                     error!(err=%e, "failed to remove image layer writer file");
@@ -1279,6 +1282,7 @@ mod test {
                 &range,
                 lsn,
                 &timeline.gate,
+                timeline.cancel.clone(),
                 &ctx,
             )
             .await
@@ -1345,6 +1349,7 @@ mod test {
                 &range,
                 lsn,
                 &timeline.gate,
+                timeline.cancel.clone(),
                 &ctx,
             )
             .await
@@ -1424,6 +1429,7 @@ mod test {
             &key_range,
             lsn,
             &tline.gate,
+            tline.cancel.clone(),
             ctx,
         )
         .await?;

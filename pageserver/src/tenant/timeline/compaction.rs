@@ -1218,6 +1218,7 @@ impl Timeline {
                 &layer.layer_desc().key_range,
                 layer.layer_desc().image_layer_lsn(),
                 &self.gate,
+                self.cancel.clone(),
                 ctx,
             )
             .await
@@ -1819,6 +1820,7 @@ impl Timeline {
                                 lsn_range.clone()
                             },
                             &self.gate,
+                            self.cancel.clone(),
                             ctx,
                         )
                         .await
@@ -3014,6 +3016,7 @@ impl Timeline {
                     lowest_retain_lsn,
                     self.get_compaction_target_size(),
                     &self.gate,
+                    self.cancel.clone(),
                     ctx,
                 )
                 .await
@@ -3030,6 +3033,7 @@ impl Timeline {
             self.tenant_shard_id,
             lowest_retain_lsn..end_lsn,
             self.get_compaction_target_size(),
+            self.cancel.clone(),
         )
         .await
         .context("failed to create delta layer writer")
@@ -3129,6 +3133,7 @@ impl Timeline {
                                 desc.key_range.start,
                                 desc.lsn_range.clone(),
                                 &self.gate,
+                                self.cancel.clone(),
                                 ctx,
                             )
                             .await
@@ -3147,6 +3152,7 @@ impl Timeline {
                                 job_desc.compaction_key_range.end,
                                 desc.lsn_range.clone(),
                                 &self.gate,
+                                self.cancel.clone(),
                                 ctx,
                             )
                             .await
@@ -3716,6 +3722,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
             key_range.start,
             lsn_range.clone(),
             &self.timeline.gate,
+            self.timeline.cancel.clone(),
             ctx,
         )
         .await?;
@@ -3792,6 +3799,7 @@ impl TimelineAdaptor {
             key_range,
             lsn,
             &self.timeline.gate,
+            self.timeline.cancel.clone(),
             ctx,
         )
         .await?;

@@ -19,6 +19,7 @@ use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
@@ -552,13 +553,15 @@ impl InMemoryLayer {
         tenant_shard_id: TenantShardId,
         start_lsn: Lsn,
         gate: &utils::sync::gate::Gate,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<InMemoryLayer> {
         trace!(
             "initializing new empty InMemoryLayer for writing on timeline {timeline_id} at {start_lsn}"
         );
 
-        let file = EphemeralFile::create(conf, tenant_shard_id, timeline_id, gate, ctx).await?;
+        let file =
+            EphemeralFile::create(conf, tenant_shard_id, timeline_id, gate, cancel, ctx).await?;
         let key = InMemoryLayerFileId(file.page_cache_file_id());
 
         Ok(InMemoryLayer {
@@ -717,6 +720,7 @@ impl InMemoryLayer {
         key_range: Option<Range<Key>>,
         l0_flush_global_state: &l0_flush::Inner,
         gate: &utils::sync::gate::Gate,
+        cancel: CancellationToken,
     ) -> Result<Option<(PersistentLayerDesc, Utf8PathBuf)>> {
         // Grab the lock in read-mode. We hold it over the I/O, but because this
         // layer is not writeable anymore, no one should be trying to acquire the
@@ -758,6 +762,7 @@ impl InMemoryLayer {
             Key::MIN,
             self.start_lsn..end_lsn,
             gate,
+            cancel,
             ctx,
         )
         .await?;

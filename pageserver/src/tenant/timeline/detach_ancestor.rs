@@ -675,6 +675,7 @@ async fn copy_lsn_prefix(
         layer.layer_desc().key_range.start,
         layer.layer_desc().lsn_range.start..end_lsn,
         &target_timeline.gate,
+        target_timeline.cancel.clone(),
         ctx,
     )
     .await

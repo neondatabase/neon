@@ -207,6 +207,7 @@ async fn download_object(
         }
         #[cfg(target_os = "linux")]
         crate::virtual_file::io_engine::IoEngine::TokioEpollUring => {
+            use crate::virtual_file::owned_buffers_io::write::FlushTaskError;
             use std::sync::Arc;
 
             use crate::virtual_file::{IoBufferMut, owned_buffers_io};
@@ -231,6 +232,7 @@ async fn download_object(
                     0,
                     || IoBufferMut::with_capacity(super::BUFFER_SIZE),
                     gate.enter().map_err(|_| DownloadError::Cancelled)?,
+                    cancel.child_token(),
                     ctx,
                     tracing::info_span!(parent: None, "download_object_buffered_writer", %dst_path),
                 );
@@ -243,12 +245,14 @@ async fn download_object(
                     {
                         let chunk = match res {
                             Ok(chunk) => chunk,
-                            Err(e) => return Err(DownloadError::Other(anyhow::Error::new(e).context("download next chunk"))),
+                            Err(e) => return Err(DownloadError::from(e)),
                         };
-                        buffered.write_buffered_borrowed(&chunk, ctx)
+                        buffered
+                            .write_buffered_borrowed(&chunk, ctx)
                             .await
-                            .context("write_buffered_borrowed")
-                            .map_err(DownloadError::Other)?;
+                            .map_err(|e| match e {
+                                FlushTaskError::Cancelled => DownloadError::Cancelled,
+                            })?;
                     }
                     let mut pad_amount = None;
                     let (bytes_amount, destination_file) = buffered
@@ -269,8 +273,9 @@ async fn download_object(
                             Some(buf)
                         })
                         .await
-                        .context("buffered writer shutdown")
-                        .map_err(DownloadError::Other)?;
+                        .map_err(|e| match e {
+                            FlushTaskError::Cancelled => DownloadError::Cancelled,
+                        })?;
 
                     let pad_amount = pad_amount.expect("shutdown always invokes the closure").into_u64();
                     let set_len_arg = bytes_amount - pad_amount;

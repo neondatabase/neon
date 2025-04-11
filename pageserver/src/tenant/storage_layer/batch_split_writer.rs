@@ -5,6 +5,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use pageserver_api::key::{KEY_SIZE, Key};
 use pageserver_api::value::Value;
+use tokio_util::sync::CancellationToken;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
 use utils::shard::TenantShardId;
@@ -188,6 +189,7 @@ pub struct SplitImageLayerWriter {
     tenant_shard_id: TenantShardId,
     batches: BatchLayerWriter,
     start_key: Key,
+    cancel: CancellationToken,
 }
 
 impl SplitImageLayerWriter {
@@ -200,6 +202,7 @@ impl SplitImageLayerWriter {
         lsn: Lsn,
         target_layer_size: u64,
         gate: &utils::sync::gate::Gate,
+        cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         Ok(Self {
@@ -211,6 +214,7 @@ impl SplitImageLayerWriter {
                 &(start_key..Key::MAX),
                 lsn,
                 gate,
+                cancel.clone(),
                 ctx,
             )
             .await?,
@@ -220,6 +224,7 @@ impl SplitImageLayerWriter {
             batches: BatchLayerWriter::new(conf).await?,
             lsn,
             start_key,
+            cancel,
         })
     }
 
@@ -244,6 +249,7 @@ impl SplitImageLayerWriter {
                 &(key..Key::MAX),
                 self.lsn,
                 gate,
+                self.cancel.clone(),
                 ctx,
             )
             .await?;
@@ -305,6 +311,7 @@ pub struct SplitDeltaLayerWriter {
     lsn_range: Range<Lsn>,
     last_key_written: Key,
     batches: BatchLayerWriter,
+    cancel: CancellationToken,
 }
 
 impl SplitDeltaLayerWriter {
@@ -314,6 +321,7 @@ impl SplitDeltaLayerWriter {
         tenant_shard_id: TenantShardId,
         lsn_range: Range<Lsn>,
         target_layer_size: u64,
+        cancel: CancellationToken,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             target_layer_size,
@@ -324,6 +332,7 @@ impl SplitDeltaLayerWriter {
             lsn_range,
             last_key_written: Key::MIN,
             batches: BatchLayerWriter::new(conf).await?,
+            cancel,
         })
     }
 
@@ -351,6 +360,7 @@ impl SplitDeltaLayerWriter {
                     key,
                     self.lsn_range.clone(),
                     gate,
+                    self.cancel.clone(),
                     ctx,
                 )
                 .await?,
@@ -370,6 +380,7 @@ impl SplitDeltaLayerWriter {
                     key,
                     self.lsn_range.clone(),
                     gate,
+                    self.cancel.clone(),
                     ctx,
                 )
                 .await?;
@@ -478,6 +489,7 @@ mod tests {
             Lsn(0x18),
             4 * 1024 * 1024,
             &tline.gate,
+            tline.cancel.clone(),
             &ctx,
         )
         .await
@@ -489,6 +501,7 @@ mod tests {
             tenant.tenant_shard_id,
             Lsn(0x18)..Lsn(0x20),
             4 * 1024 * 1024,
+            tline.cancel.clone(),
         )
         .await
         .unwrap();
@@ -562,6 +575,7 @@ mod tests {
             Lsn(0x18),
             4 * 1024 * 1024,
             &tline.gate,
+            tline.cancel.clone(),
             &ctx,
         )
         .await
@@ -572,6 +586,7 @@ mod tests {
             tenant.tenant_shard_id,
             Lsn(0x18)..Lsn(0x20),
             4 * 1024 * 1024,
+            tline.cancel.clone(),
         )
         .await
         .unwrap();
@@ -666,6 +681,7 @@ mod tests {
             Lsn(0x18),
             4 * 1024,
             &tline.gate,
+            tline.cancel.clone(),
             &ctx,
         )
         .await
@@ -677,6 +693,7 @@ mod tests {
             tenant.tenant_shard_id,
             Lsn(0x18)..Lsn(0x20),
             4 * 1024,
+            tline.cancel.clone(),
         )
         .await
         .unwrap();
@@ -765,6 +782,7 @@ mod tests {
             tenant.tenant_shard_id,
             Lsn(0x10)..Lsn(N as u64 * 16 + 0x10),
             4 * 1024 * 1024,
+            tline.cancel.clone(),
         )
         .await
         .unwrap();

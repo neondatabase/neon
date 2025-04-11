@@ -739,6 +739,7 @@ impl ChunkProcessingJob {
             &self.range,
             self.pgdata_lsn,
             &self.timeline.gate,
+            self.timeline.cancel.clone(),
             ctx,
         )
         .await?;

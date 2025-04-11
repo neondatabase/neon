@@ -47,6 +47,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use tokio::sync::OnceCell;
 use tokio_epoll_uring::IoBuf;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::bin_ser::BeSer;
 use utils::bin_ser::SerializeError;
@@ -412,6 +413,7 @@ impl DeltaLayerWriterInner {
     ///
     /// Start building a new delta layer.
     ///
+    #[allow(clippy::too_many_arguments)]
     async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
@@ -419,6 +421,7 @@ impl DeltaLayerWriterInner {
         key_start: Key,
         lsn_range: Range<Lsn>,
         gate: &utils::sync::gate::Gate,
+        cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename. We don't know
@@ -437,6 +440,7 @@ impl DeltaLayerWriterInner {
             file,
             PAGE_SZ as u64,
             gate,
+            cancel,
             ctx,
             info_span!(parent: None, "delta_layer_writer_flush_task", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), timeline_id=%timeline_id, path = %path),
         )?;
@@ -664,6 +668,7 @@ impl DeltaLayerWriter {
     ///
     /// Start building a new delta layer.
     ///
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
@@ -671,6 +676,7 @@ impl DeltaLayerWriter {
         key_start: Key,
         lsn_range: Range<Lsn>,
         gate: &utils::sync::gate::Gate,
+        cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         Ok(Self {
@@ -682,6 +688,7 @@ impl DeltaLayerWriter {
                     key_start,
                     lsn_range,
                     gate,
+                    cancel,
                     ctx,
                 )
                 .await?,
@@ -768,11 +775,7 @@ impl Drop for DeltaLayerWriter {
                 ..
             } = inner;
 
-            let vfile = match blob_writer
-                .into_inner(|_| None)
-                .await
-                .maybe_fatal_err("failed to access inner virtual file")
-            {
+            let vfile = match blob_writer.into_inner(|_| None).await {
                 Ok(vfile) => vfile,
                 Err(e) => {
                     error!(err=%e, "failed to remove delta layer writer file");
@@ -1946,6 +1949,7 @@ pub(crate) mod test {
             entries_meta.key_range.start,
             entries_meta.lsn_range.clone(),
             &timeline.gate,
+            timeline.cancel.clone(),
             &ctx,
         )
         .await?;
@@ -2141,6 +2145,7 @@ pub(crate) mod test {
                 Key::MIN,
                 Lsn(0x11)..truncate_at,
                 &branch.gate,
+                branch.cancel.clone(),
                 ctx,
             )
             .await
@@ -2276,6 +2281,7 @@ pub(crate) mod test {
             *key_start,
             (*lsn_min)..lsn_end,
             &tline.gate,
+            tline.cancel.clone(),
             ctx,
         )
         .await?;

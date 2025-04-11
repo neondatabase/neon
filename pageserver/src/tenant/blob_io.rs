@@ -15,7 +15,6 @@
 //! len >= 128: 1CCCXXXX XXXXXXXX XXXXXXXX XXXXXXXX
 //!
 use std::cmp::min;
-use std::io::{Error, ErrorKind};
 use std::sync::Arc;
 
 use async_compression::Level;
@@ -23,6 +22,7 @@ use bytes::{BufMut, BytesMut};
 use pageserver_api::models::ImageCompressionAlgorithm;
 use tokio::io::AsyncWriteExt;
 use tokio_epoll_uring::IoBuf;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::context::RequestContext;
@@ -31,12 +31,20 @@ use crate::tenant::block_io::BlockCursor;
 use crate::virtual_file::IoBufferMut;
 use crate::virtual_file::VirtualFile;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
-use crate::virtual_file::owned_buffers_io::write::BufferedWriter;
+use crate::virtual_file::owned_buffers_io::write::{BufferedWriter, FlushTaskError};
 
 #[derive(Copy, Clone, Debug)]
 pub struct CompressionInfo {
     pub written_compressed: bool,
     pub compressed_size: Option<usize>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum WriteBlobError {
+    #[error(transparent)]
+    Flush(FlushTaskError),
+    #[error("blob too large ({len} bytes)")]
+    BlobTooLarge { len: usize },
 }
 
 impl BlockCursor<'_> {
@@ -174,6 +182,7 @@ impl BlobWriter {
         file: Arc<VirtualFile>,
         start_offset: u64,
         gate: &utils::sync::gate::Gate,
+        cancel: CancellationToken,
         ctx: &RequestContext,
         flush_task_span: tracing::Span,
     ) -> anyhow::Result<Self> {
@@ -184,6 +193,7 @@ impl BlobWriter {
                 start_offset,
                 || IoBufferMut::with_capacity(Self::CAPACITY),
                 gate.enter()?,
+                cancel,
                 ctx,
                 flush_task_span,
             ),
@@ -202,7 +212,7 @@ impl BlobWriter {
         &mut self,
         src_buf: FullSlice<Buf>,
         ctx: &RequestContext,
-    ) -> (FullSlice<Buf>, Result<(), Error>) {
+    ) -> (FullSlice<Buf>, Result<(), FlushTaskError>) {
         let res = self
             .writer
             // TODO: why are we taking a FullSlice if we're going to pass a borrow downstack?
@@ -222,7 +232,7 @@ impl BlobWriter {
         &mut self,
         srcbuf: FullSlice<Buf>,
         ctx: &RequestContext,
-    ) -> (FullSlice<Buf>, Result<u64, Error>) {
+    ) -> (FullSlice<Buf>, Result<u64, WriteBlobError>) {
         let (buf, res) = self
             .write_blob_maybe_compressed(srcbuf, ctx, ImageCompressionAlgorithm::Disabled)
             .await;
@@ -236,7 +246,10 @@ impl BlobWriter {
         srcbuf: FullSlice<Buf>,
         ctx: &RequestContext,
         algorithm: ImageCompressionAlgorithm,
-    ) -> (FullSlice<Buf>, Result<(u64, CompressionInfo), Error>) {
+    ) -> (
+        FullSlice<Buf>,
+        Result<(u64, CompressionInfo), WriteBlobError>,
+    ) {
         let offset = self.offset;
         let mut compression_info = CompressionInfo {
             written_compressed: false,
@@ -252,17 +265,16 @@ impl BlobWriter {
             if len < 128 {
                 // Short blob. Write a 1-byte length header
                 io_buf.put_u8(len as u8);
-                (self.write_all(io_buf.slice_len(), ctx).await, srcbuf)
+                let (slice, res) = self.write_all(io_buf.slice_len(), ctx).await;
+                let res = res.map_err(WriteBlobError::Flush);
+                ((slice, res), srcbuf)
             } else {
                 // Write a 4-byte length header
                 if len > MAX_SUPPORTED_BLOB_LEN {
                     return (
                         (
                             io_buf.slice_len(),
-                            Err(Error::new(
-                                ErrorKind::Other,
-                                format!("blob too large ({len} bytes)"),
-                            )),
+                            Err(WriteBlobError::BlobTooLarge { len }),
                         ),
                         srcbuf,
                     );
@@ -296,7 +308,9 @@ impl BlobWriter {
                 assert_eq!(len_buf[0] & 0xf0, 0);
                 len_buf[0] |= high_bit_mask;
                 io_buf.extend_from_slice(&len_buf[..]);
-                (self.write_all(io_buf.slice_len(), ctx).await, srcbuf)
+                let (slice, res) = self.write_all(io_buf.slice_len(), ctx).await;
+                let res = res.map_err(WriteBlobError::Flush);
+                ((slice, res), srcbuf)
             }
         }
         .await;
@@ -311,6 +325,7 @@ impl BlobWriter {
         } else {
             self.write_all(srcbuf, ctx).await
         };
+        let res = res.map_err(WriteBlobError::Flush);
         (srcbuf, res.map(|_| (offset, compression_info)))
     }
 
@@ -324,7 +339,7 @@ impl BlobWriter {
     pub async fn into_inner(
         self,
         handle_tail: impl FnMut(IoBufferMut) -> Option<IoBufferMut>,
-    ) -> Result<VirtualFile, Error> {
+    ) -> Result<VirtualFile, FlushTaskError> {
         let (_, file) = self.writer.shutdown(handle_tail).await?;
         Ok(file)
     }
@@ -342,7 +357,7 @@ pub(crate) mod tests {
     use crate::task_mgr::TaskKind;
     use crate::tenant::block_io::BlockReaderRef;
 
-    async fn round_trip_test(blobs: &[Vec<u8>]) -> Result<(), Error> {
+    async fn round_trip_test(blobs: &[Vec<u8>]) -> anyhow::Result<()> {
         round_trip_test_compressed(blobs, false).await
     }
 
@@ -350,16 +365,18 @@ pub(crate) mod tests {
         blobs: &[Vec<u8>],
         compression: bool,
         ctx: &RequestContext,
-    ) -> Result<(Utf8TempDir, Utf8PathBuf, Vec<u64>), Error> {
+    ) -> anyhow::Result<(Utf8TempDir, Utf8PathBuf, Vec<u64>)> {
         let temp_dir = camino_tempfile::tempdir()?;
         let pathbuf = temp_dir.path().join("file");
         let gate = utils::sync::gate::Gate::default();
+        let cancel = CancellationToken::new();
 
         // Write part (in block to drop the file)
         let mut offsets = Vec::new();
         {
             let file = Arc::new(VirtualFile::create_v2(pathbuf.as_path(), ctx).await?);
-            let mut wtr = BlobWriter::new(file, 0, &gate, ctx, info_span!("test")).unwrap();
+            let mut wtr =
+                BlobWriter::new(file, 0, &gate, cancel.clone(), ctx, info_span!("test")).unwrap();
             for blob in blobs.iter() {
                 let (_, res) = if compression {
                     let res = wtr
@@ -396,7 +413,10 @@ pub(crate) mod tests {
         Ok((temp_dir, pathbuf, offsets))
     }
 
-    async fn round_trip_test_compressed(blobs: &[Vec<u8>], compression: bool) -> Result<(), Error> {
+    async fn round_trip_test_compressed(
+        blobs: &[Vec<u8>],
+        compression: bool,
+    ) -> anyhow::Result<()> {
         let ctx =
             RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
         let (_temp_dir, pathbuf, offsets) =
@@ -422,14 +442,14 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_one() -> Result<(), Error> {
+    async fn test_one() -> anyhow::Result<()> {
         let blobs = &[vec![12, 21, 22]];
         round_trip_test(blobs).await?;
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_hello_simple() -> Result<(), Error> {
+    async fn test_hello_simple() -> anyhow::Result<()> {
         let blobs = &[
             vec![0, 1, 2, 3],
             b"Hello, World!".to_vec(),
@@ -442,7 +462,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_really_big_array() -> Result<(), Error> {
+    async fn test_really_big_array() -> anyhow::Result<()> {
         let blobs = &[
             b"test".to_vec(),
             random_array(10 * PAGE_SZ),
@@ -457,7 +477,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_arrays_inc() -> Result<(), Error> {
+    async fn test_arrays_inc() -> anyhow::Result<()> {
         let blobs = (0..PAGE_SZ / 8)
             .map(|v| random_array(v * 16))
             .collect::<Vec<_>>();
@@ -466,7 +486,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_arrays_random_size() -> Result<(), Error> {
+    async fn test_arrays_random_size() -> anyhow::Result<()> {
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
         let blobs = (0..1024)
             .map(|_| {
@@ -483,7 +503,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_arrays_page_boundary() -> Result<(), Error> {
+    async fn test_arrays_page_boundary() -> anyhow::Result<()> {
         let blobs = &[
             random_array(PAGE_SZ - 4),
             random_array(PAGE_SZ - 4),
