@@ -147,10 +147,16 @@ impl Service {
             "Got {} non-successful responses from initial creation request of total {total_result_count} responses",
             remaining.len()
         );
-        if remaining.len() >= 2 {
+        let quorum_size = match timeline_persistence.sk_set.len() {
+            1 => 1,
+            2 => 2,
+            _ => (timeline_persistence.sk_set.len() * 3) / 2,
+        };
+        if remaining.len() >= quorum_size {
             // Failure
             return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                "not enough successful reconciliations to reach quorum, please retry: {} errored",
+                "not enough successful reconciliations to reach quorum size {}, please retry: {} errored",
+                quorum_size,
                 remaining.len()
             )));
         }
@@ -463,8 +469,6 @@ impl Service {
     pub(crate) async fn safekeepers_for_new_timeline(
         &self,
     ) -> Result<Vec<SafekeeperInfo>, ApiError> {
-        // Number of safekeepers in different AZs we are looking for
-        let wanted_count = 3;
         let mut all_safekeepers = {
             let locked = self.inner.read().unwrap();
             locked
@@ -503,6 +507,17 @@ impl Service {
                 sk.1.id.0,
             )
         });
+        // Number of safekeepers in different AZs we are looking for
+        let wanted_count = match all_safekeepers.len() {
+            0 => {
+                return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                    "couldn't find any active safekeeper for new timeline",
+                )));
+            }
+            1 => 1,
+            2 => 2,
+            _ => 3,
+        };
         let mut sks = Vec::new();
         let mut azs = HashSet::new();
         for (_sk_util, sk_info, az_id) in all_safekeepers.iter() {
