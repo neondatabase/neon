@@ -261,17 +261,15 @@ impl ImageLayer {
         tenant_shard_id: TenantShardId,
         fname: &ImageLayerName,
     ) -> Utf8PathBuf {
-        // Strongly monotonically increasing suffix number.
-        //
-        // Use this over random string to avoid corruption bugs.
-        // It's unlikely the number will verflow since it is reset after pageserver restarts.
+        // Never reuse a filename in the lifetime of a pageserver process so that we need
+        // not worry about laggard Drop impl's async unlink hitting an already reused filename.
         static NEXT_TEMP_DISAMBIGUATOR: AtomicU64 = AtomicU64::new(1);
         let filename_disambiguator =
             NEXT_TEMP_DISAMBIGUATOR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         conf.timeline_path(&tenant_shard_id, &timeline_id)
             .join(format!(
-                "{fname}.{:X}.{TEMP_FILE_SUFFIX}",
+                "{fname}.{:x}.{TEMP_FILE_SUFFIX}",
                 filename_disambiguator
             ))
     }
@@ -752,10 +750,10 @@ struct ImageLayerWriterInner {
     blob_writer: BlobWriter,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
 
-    _gate_guard: utils::sync::gate::GateGuard,
-
     #[cfg(feature = "testing")]
     last_written_key: Key,
+
+    _gate_guard: utils::sync::gate::GateGuard,
 }
 
 impl ImageLayerWriterInner {
@@ -827,7 +825,6 @@ impl ImageLayerWriterInner {
             num_keys: 0,
             #[cfg(feature = "testing")]
             last_written_key: Key::MIN,
-
             _gate_guard: gate.enter()?,
         };
 
