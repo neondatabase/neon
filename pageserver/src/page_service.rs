@@ -58,8 +58,8 @@ use crate::context::{
     DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
 };
 use crate::metrics::{
-    self, COMPUTE_COMMANDS_COUNTERS, ComputeCommandKind, LIVE_CONNECTIONS, SmgrOpTimer,
-    TimelineMetrics,
+    self, COMPUTE_COMMANDS_COUNTERS, ComputeCommandKind, GetPageBatchBreakReason, LIVE_CONNECTIONS,
+    SmgrOpTimer, TimelineMetrics,
 };
 use crate::pgdatadir_mapping::Version;
 use crate::span::{
@@ -672,6 +672,7 @@ enum BatchedFeMessage {
         span: Span,
         shard: timeline::handle::WeakHandle<TenantManagerTypes>,
         pages: smallvec::SmallVec<[BatchedGetPageRequest; 1]>,
+        batch_break_reason: GetPageBatchBreakReason,
     },
     DbSize {
         span: Span,
@@ -722,6 +723,119 @@ impl BatchedFeMessage {
                 }
             }
             BatchedFeMessage::RespondError { .. } => {}
+        }
+    }
+
+    fn should_break_batch(
+        &self,
+        other: &BatchedFeMessage,
+        max_batch_size: NonZeroUsize,
+        batching_strategy: PageServiceProtocolPipelinedBatchingStrategy,
+    ) -> Option<GetPageBatchBreakReason> {
+        match (self, other) {
+            (
+                BatchedFeMessage::GetPage {
+                    shard: accum_shard,
+                    pages: accum_pages,
+                    ..
+                },
+                BatchedFeMessage::GetPage {
+                    shard: this_shard,
+                    pages: this_pages,
+                    ..
+                },
+            ) => {
+                assert_eq!(this_pages.len(), 1);
+                if accum_pages.len() >= max_batch_size.get() {
+                    trace!(%max_batch_size, "stopping batching because of batch size");
+                    assert_eq!(accum_pages.len(), max_batch_size.get());
+
+                    return Some(GetPageBatchBreakReason::BatchFull);
+                }
+                if !accum_shard.is_same_handle_as(this_shard) {
+                    trace!("stopping batching because timeline object mismatch");
+                    // TODO: we _could_ batch & execute each shard seperately (and in parallel).
+                    // But the current logic for keeping responses in order does not support that.
+
+                    return Some(GetPageBatchBreakReason::NonUniformTimeline);
+                }
+
+                match batching_strategy {
+                    PageServiceProtocolPipelinedBatchingStrategy::UniformLsn => {
+                        if let Some(last_in_batch) = accum_pages.last() {
+                            if last_in_batch.effective_request_lsn
+                                != this_pages[0].effective_request_lsn
+                            {
+                                trace!(
+                                    accum_lsn = %last_in_batch.effective_request_lsn,
+                                    this_lsn = %this_pages[0].effective_request_lsn,
+                                    "stopping batching because LSN changed"
+                                );
+
+                                return Some(GetPageBatchBreakReason::NonUniformLsn);
+                            }
+                        }
+                    }
+                    PageServiceProtocolPipelinedBatchingStrategy::ScatteredLsn => {
+                        // The read path doesn't curently support serving the same page at different LSNs.
+                        // While technically possible, it's uncertain if the complexity is worth it.
+                        // Break the batch if such a case is encountered.
+                        let same_page_different_lsn = accum_pages.iter().any(|batched| {
+                            batched.req.rel == this_pages[0].req.rel
+                                && batched.req.blkno == this_pages[0].req.blkno
+                                && batched.effective_request_lsn
+                                    != this_pages[0].effective_request_lsn
+                        });
+
+                        if same_page_different_lsn {
+                            trace!(
+                                rel=%this_pages[0].req.rel,
+                                blkno=%this_pages[0].req.blkno,
+                                lsn=%this_pages[0].effective_request_lsn,
+                                "stopping batching because same page was requested at different LSNs"
+                            );
+
+                            return Some(GetPageBatchBreakReason::SamePageAtDifferentLsn);
+                        }
+                    }
+                }
+
+                None
+            }
+            #[cfg(feature = "testing")]
+            (
+                BatchedFeMessage::Test {
+                    shard: accum_shard,
+                    requests: accum_requests,
+                    ..
+                },
+                BatchedFeMessage::Test {
+                    shard: this_shard,
+                    requests: this_requests,
+                    ..
+                },
+            ) => {
+                assert!(this_requests.len() == 1);
+                if accum_requests.len() >= max_batch_size.get() {
+                    trace!(%max_batch_size, "stopping batching because of batch size");
+                    assert_eq!(accum_requests.len(), max_batch_size.get());
+                    return Some(GetPageBatchBreakReason::BatchFull);
+                }
+                if !accum_shard.is_same_handle_as(this_shard) {
+                    trace!("stopping batching because timeline object mismatch");
+                    // TODO: we _could_ batch & execute each shard seperately (and in parallel).
+                    // But the current logic for keeping responses in order does not support that.
+                    return Some(GetPageBatchBreakReason::NonUniformTimeline);
+                }
+                let this_batch_key = this_requests[0].req.batch_key;
+                let accum_batch_key = accum_requests[0].req.batch_key;
+                if this_requests[0].req.batch_key != accum_requests[0].req.batch_key {
+                    trace!(%accum_batch_key, %this_batch_key, "stopping batching because batch key changed");
+                    return Some(GetPageBatchBreakReason::NonUniformKey);
+                }
+                None
+            }
+            (_, _) => Some(GetPageBatchBreakReason::NonBatchableRequest),
         }
     }
 }
@@ -1047,6 +1161,10 @@ impl PageServerHandler {
                         effective_request_lsn,
                         ctx,
                     }],
+                    // The executor grabs the batch when it becomes idle.
+                    // Hence, [`GetPageBatchBreakReason::ExecutorSteal`] is the
+                    // default reason for breaking the batch.
+                    batch_break_reason: GetPageBatchBreakReason::ExecutorSteal,
                 }
             }
             #[cfg(feature = "testing")]
@@ -1084,117 +1202,58 @@ impl PageServerHandler {
             Err(e) => return Err(Err(e)),
         };
 
-        match (&mut *batch, this_msg) {
-            // something batched already, let's see if we can add this message to the batch
-            (
-                Ok(BatchedFeMessage::GetPage {
-                    span: _,
-                    shard: accum_shard,
-                    pages: accum_pages,
-                }),
-                BatchedFeMessage::GetPage {
-                    span: _,
-                    shard: this_shard,
-                    pages: this_pages,
-                },
-            ) if (|| {
-                assert_eq!(this_pages.len(), 1);
-                if accum_pages.len() >= max_batch_size.get() {
-                    trace!(%max_batch_size, "stopping batching because of batch size");
-                    assert_eq!(accum_pages.len(), max_batch_size.get());
-                    return false;
-                }
-                if !accum_shard.is_same_handle_as(&this_shard) {
-                    trace!("stopping batching because timeline object mismatch");
-                    // TODO: we _could_ batch & execute each shard seperately (and in parallel).
-                    // But the current logic for keeping responses in order does not support that.
-                    return false;
-                }
-
-                match batching_strategy {
-                    PageServiceProtocolPipelinedBatchingStrategy::UniformLsn => {
-                        if let Some(last_in_batch) = accum_pages.last() {
-                            if last_in_batch.effective_request_lsn
-                                != this_pages[0].effective_request_lsn
-                            {
-                                return false;
-                            }
-                        }
-                    }
-                    PageServiceProtocolPipelinedBatchingStrategy::ScatteredLsn => {
-                        // The read path doesn't curently support serving the same page at different LSNs.
-                        // While technically possible, it's uncertain if the complexity is worth it.
-                        // Break the batch if such a case is encountered.
-                        //
-                        // TODO(vlad): Include a metric for batch breaks with a reason label.
-                        let same_page_different_lsn = accum_pages.iter().any(|batched| {
-                            batched.req.rel == this_pages[0].req.rel
-                                && batched.req.blkno == this_pages[0].req.blkno
-                                && batched.effective_request_lsn
-                                    != this_pages[0].effective_request_lsn
-                        });
-
-                        if same_page_different_lsn {
-                            trace!(
-                                rel=%this_pages[0].req.rel,
-                                blkno=%this_pages[0].req.blkno,
-                                lsn=%this_pages[0].effective_request_lsn,
-                                "stopping batching because same page was requested at different LSNs"
-                            );
-                            return false;
-                        }
-                    }
-                }
-
-                true
-            })() =>
-            {
-                // ok to batch
-                accum_pages.extend(this_pages);
-                Ok(())
+        let eligible_batch = match batch {
+            Ok(b) => b,
+            Err(_) => {
+                return Err(Ok(this_msg));
             }
-            #[cfg(feature = "testing")]
-            (
-                Ok(BatchedFeMessage::Test {
-                    shard: accum_shard,
-                    requests: accum_requests,
-                    ..
-                }),
-                BatchedFeMessage::Test {
-                    shard: this_shard,
-                    requests: this_requests,
-                    ..
-                },
-            ) if (|| {
-                assert!(this_requests.len() == 1);
-                if accum_requests.len() >= max_batch_size.get() {
-                    trace!(%max_batch_size, "stopping batching because of batch size");
-                    assert_eq!(accum_requests.len(), max_batch_size.get());
-                    return false;
+        };
+
+        let batch_break =
+            eligible_batch.should_break_batch(&this_msg, max_batch_size, batching_strategy);
+
+        match batch_break {
+            Some(reason) => {
+                if let BatchedFeMessage::GetPage {
+                    batch_break_reason, ..
+                } = eligible_batch
+                {
+                    *batch_break_reason = reason;
                 }
-                if !accum_shard.is_same_handle_as(&this_shard) {
-                    trace!("stopping batching because timeline object mismatch");
-                    // TODO: we _could_ batch & execute each shard seperately (and in parallel).
-                    // But the current logic for keeping responses in order does not support that.
-                    return false;
-                }
-                let this_batch_key = this_requests[0].req.batch_key;
-                let accum_batch_key = accum_requests[0].req.batch_key;
-                if this_requests[0].req.batch_key != accum_requests[0].req.batch_key {
-                    trace!(%accum_batch_key, %this_batch_key, "stopping batching because batch key changed");
-                    return false;
-                }
-                true
-            })() =>
-            {
-                // ok to batch
-                accum_requests.extend(this_requests);
-                Ok(())
-            }
-            // something batched already but this message is unbatchable
-            (_, this_msg) => {
-                // by default, don't continue batching
+
                 Err(Ok(this_msg))
+            }
+            None => {
+                // ok to batch
+                match (eligible_batch, this_msg) {
+                    (
+                        BatchedFeMessage::GetPage {
+                            pages: accum_pages, ..
+                        },
+                        BatchedFeMessage::GetPage {
+                            pages: this_pages, ..
+                        },
+                    ) => {
+                        accum_pages.extend(this_pages);
+                        Ok(())
+                    }
+                    #[cfg(feature = "testing")]
+                    (
+                        BatchedFeMessage::Test {
+                            requests: accum_requests,
+                            ..
+                        },
+                        BatchedFeMessage::Test {
+                            requests: this_requests,
+                            ..
+                        },
+                    ) => {
+                        accum_requests.extend(this_requests);
+                        Ok(())
+                    }
+                    // Shape guaranteed by [`BatchedFeMessage::should_break_batch`]
+                    _ => unreachable!(),
+                }
             }
         }
     }
@@ -1413,7 +1472,12 @@ impl PageServerHandler {
                     span,
                 )
             }
-            BatchedFeMessage::GetPage { span, shard, pages } => {
+            BatchedFeMessage::GetPage {
+                span,
+                shard,
+                pages,
+                batch_break_reason,
+            } => {
                 fail::fail_point!("ps::handle-pagerequest-message::getpage");
                 let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
@@ -1425,6 +1489,7 @@ impl PageServerHandler {
                                 &shard,
                                 pages,
                                 io_concurrency,
+                                batch_break_reason,
                                 &ctx,
                             )
                             .instrument(span.clone())
@@ -2113,13 +2178,14 @@ impl PageServerHandler {
         timeline: &Timeline,
         requests: smallvec::SmallVec<[BatchedGetPageRequest; 1]>,
         io_concurrency: IoConcurrency,
+        batch_break_reason: GetPageBatchBreakReason,
         ctx: &RequestContext,
     ) -> Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>> {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
         timeline
             .query_metrics
-            .observe_getpage_batch_start(requests.len());
+            .observe_getpage_batch_start(requests.len(), batch_break_reason);
 
         // If a page trace is running, submit an event for this request.
         if let Some(page_trace) = timeline.page_trace.load().as_ref() {
