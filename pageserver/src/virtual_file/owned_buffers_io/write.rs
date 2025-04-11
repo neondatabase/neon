@@ -1,7 +1,6 @@
 mod flush;
 use std::sync::Arc;
 
-use super::io_buf_aligned::{IoBufAligned, IoBufAlignedMut};
 use bytes::BufMut;
 pub(crate) use flush::FlushControl;
 use flush::FlushHandle;
@@ -9,6 +8,8 @@ pub(crate) use flush::FlushTaskError;
 use tokio_epoll_uring::IoBuf;
 use tokio_util::sync::CancellationToken;
 
+use super::io_buf_aligned::IoBufAligned;
+use super::io_buf_aligned::IoBufAlignedMut;
 use super::io_buf_ext::{FullSlice, IoBufExt};
 use crate::context::RequestContext;
 use crate::virtual_file::{IoBuffer, IoBufferMut};
