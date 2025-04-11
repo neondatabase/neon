@@ -511,4 +511,5 @@ PER_METRIC_VERIFIERS = {
     "written_data_bytes_delta": WrittenDataDeltaVerifier,
     "timeline_logical_size": CannotVerifyAnything,
     "synthetic_storage_size": SyntheticSizeVerifier,
+    "timeline_changed_bytes_from_parent": CannotVerifyAnything,
 }
