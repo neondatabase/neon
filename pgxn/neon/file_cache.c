@@ -175,6 +175,7 @@ typedef struct FileCacheState
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
 	uint32		magic;
 	uint32		n_chunks;
+	uint32		n_pages;
 	uint16		chunk_size_log;
 	BufferTag	chunks[FLEXIBLE_ARRAY_MEMBER];
 	/* followed by bitmap */
@@ -620,6 +621,7 @@ lfc_get_state(size_t max_entries)
 		dlist_iter iter;
 		size_t i = 0;
 		uint8* bitmap;
+		size_t n_pages = 0;
 		size_t n_entries = Min(max_entries, lfc_ctl->used - lfc_ctl->pinned);
 		size_t state_size = FILE_CACHE_STATE_SIZE_FOR_CHUNKS(n_entries);
 		fcs = (FileCacheState*)palloc0(state_size);
@@ -636,12 +638,16 @@ lfc_get_state(size_t max_entries)
 			for (int j = 0; j < lfc_blocks_per_chunk; j++)
 			{
 				if (GET_STATE(entry, j) != UNAVAILABLE)
+				{
 					BITMAP_SET(bitmap, i*lfc_blocks_per_chunk + j);
+					n_pages += 1;
+				}
 			}
 			if (++i == n_entries)
 				break;
 		}
 		Assert(i == n_entries);
+		fcs->n_pages = n_pages;
 		elog(LOG, "LFC: save state of %ld chunks", (long)n_entries);
 	}
 
