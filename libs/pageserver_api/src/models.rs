@@ -576,6 +576,8 @@ pub struct TenantConfigPatch {
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_compaction_enabled: FieldPatch<bool>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub gc_compaction_verification: FieldPatch<bool>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_compaction_initial_threshold_kb: FieldPatch<u64>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_compaction_ratio_percent: FieldPatch<u64>,
@@ -697,6 +699,9 @@ pub struct TenantConfig {
     pub gc_compaction_enabled: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub gc_compaction_verification: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub gc_compaction_initial_threshold_kb: Option<u64>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -744,6 +749,7 @@ impl TenantConfig {
             mut wal_receiver_protocol_override,
             mut rel_size_v2_enabled,
             mut gc_compaction_enabled,
+            mut gc_compaction_verification,
             mut gc_compaction_initial_threshold_kb,
             mut gc_compaction_ratio_percent,
             mut sampling_ratio,
@@ -836,6 +842,9 @@ impl TenantConfig {
             .gc_compaction_enabled
             .apply(&mut gc_compaction_enabled);
         patch
+            .gc_compaction_verification
+            .apply(&mut gc_compaction_verification);
+        patch
             .gc_compaction_initial_threshold_kb
             .apply(&mut gc_compaction_initial_threshold_kb);
         patch
@@ -876,6 +885,7 @@ impl TenantConfig {
             wal_receiver_protocol_override,
             rel_size_v2_enabled,
             gc_compaction_enabled,
+            gc_compaction_verification,
             gc_compaction_initial_threshold_kb,
             gc_compaction_ratio_percent,
             sampling_ratio,
@@ -974,6 +984,9 @@ impl TenantConfig {
             gc_compaction_enabled: self
                 .gc_compaction_enabled
                 .unwrap_or(global_conf.gc_compaction_enabled),
+            gc_compaction_verification: self
+                .gc_compaction_verification
+                .unwrap_or(global_conf.gc_compaction_verification),
             gc_compaction_initial_threshold_kb: self
                 .gc_compaction_initial_threshold_kb
                 .unwrap_or(global_conf.gc_compaction_initial_threshold_kb),
