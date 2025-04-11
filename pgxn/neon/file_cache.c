@@ -555,7 +555,7 @@ lfc_init(void)
 							   NULL);
 
 	DefineCustomIntVariable("neon.file_cache_prewarm_limit",
-							"Maximal number of prewarmed pages",
+							"Maximal number of prewarmed chunks",
 							NULL,
 							&lfc_prewarm_limit,
 							INT_MAX,	/* no limit by default */
