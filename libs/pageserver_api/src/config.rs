@@ -180,6 +180,8 @@ pub struct ConfigToml {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generate_unarchival_heatmap: Option<bool>,
     pub tracing: Option<Tracing>,
+
+    pub dev_mode: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -631,6 +633,7 @@ impl Default for ConfigToml {
             load_previous_heatmap: None,
             generate_unarchival_heatmap: None,
             tracing: None,
+            dev_mode: false,
         }
     }
 }

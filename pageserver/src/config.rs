@@ -219,6 +219,8 @@ pub struct PageServerConf {
     pub generate_unarchival_heatmap: bool,
 
     pub tracing: Option<pageserver_api::config::Tracing>,
+
+    pub dev_mode: bool,
 }
 
 /// Token for authentication to safekeepers
@@ -441,6 +443,7 @@ impl PageServerConf {
             page_service_pipelining,
             get_vectored_concurrent_io,
             tracing,
+            dev_mode,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling
