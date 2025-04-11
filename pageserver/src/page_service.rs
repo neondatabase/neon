@@ -18,7 +18,7 @@ use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pageserver_api::config::{
     PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
-    PageServiceProtocolPipelinedExecutionStrategy,
+    PageServiceProtocolPipelinedBatchingStrategy, PageServiceProtocolPipelinedExecutionStrategy,
 };
 use pageserver_api::key::rel_block_to_key;
 use pageserver_api::models::{
@@ -641,6 +641,7 @@ impl std::fmt::Display for BatchedPageStreamError {
 struct BatchedGetPageRequest {
     req: PagestreamGetPageRequest,
     timer: SmgrOpTimer,
+    effective_request_lsn: Lsn,
     ctx: RequestContext,
 }
 
@@ -670,7 +671,6 @@ enum BatchedFeMessage {
     GetPage {
         span: Span,
         shard: timeline::handle::WeakHandle<TenantManagerTypes>,
-        effective_request_lsn: Lsn,
         pages: smallvec::SmallVec<[BatchedGetPageRequest; 1]>,
     },
     DbSize {
@@ -1025,34 +1025,28 @@ impl PageServerHandler {
                 .await?;
 
                 // We're holding the Handle
-                // TODO: if we actually need to wait for lsn here, it delays the entire batch which doesn't need to wait
-                let res = Self::wait_or_get_last_lsn(
+                let effective_request_lsn = match Self::effective_request_lsn(
                     &shard,
+                    shard.get_last_record_lsn(),
                     req.hdr.request_lsn,
                     req.hdr.not_modified_since,
                     &shard.get_applied_gc_cutoff_lsn(),
-                    &ctx,
-                )
-                .maybe_perf_instrument(&ctx, |current_perf_span| {
-                    info_span!(
-                        target: PERF_TRACE_TARGET,
-                        parent: current_perf_span,
-                        "WAIT_LSN",
-                    )
-                })
-                .await;
-
-                let effective_request_lsn = match res {
+                ) {
                     Ok(lsn) => lsn,
                     Err(e) => {
                         return respond_error!(span, e);
                     }
                 };
+
                 BatchedFeMessage::GetPage {
                     span,
                     shard: shard.downgrade(),
-                    effective_request_lsn,
-                    pages: smallvec::smallvec![BatchedGetPageRequest { req, timer, ctx }],
+                    pages: smallvec::smallvec![BatchedGetPageRequest {
+                        req,
+                        timer,
+                        effective_request_lsn,
+                        ctx,
+                    }],
                 }
             }
             #[cfg(feature = "testing")]
@@ -1078,6 +1072,7 @@ impl PageServerHandler {
     #[instrument(skip_all, level = tracing::Level::TRACE)]
     #[allow(clippy::boxed_local)]
     fn pagestream_do_batch(
+        batching_strategy: PageServiceProtocolPipelinedBatchingStrategy,
         max_batch_size: NonZeroUsize,
         batch: &mut Result<BatchedFeMessage, QueryError>,
         this_msg: Result<BatchedFeMessage, QueryError>,
@@ -1096,33 +1091,61 @@ impl PageServerHandler {
                     span: _,
                     shard: accum_shard,
                     pages: accum_pages,
-                    effective_request_lsn: accum_lsn,
                 }),
                 BatchedFeMessage::GetPage {
                     span: _,
                     shard: this_shard,
                     pages: this_pages,
-                    effective_request_lsn: this_lsn,
                 },
             ) if (|| {
                 assert_eq!(this_pages.len(), 1);
                 if accum_pages.len() >= max_batch_size.get() {
-                    trace!(%accum_lsn, %this_lsn, %max_batch_size, "stopping batching because of batch size");
+                    trace!(%max_batch_size, "stopping batching because of batch size");
                     assert_eq!(accum_pages.len(), max_batch_size.get());
                     return false;
                 }
                 if !accum_shard.is_same_handle_as(&this_shard) {
-                    trace!(%accum_lsn, %this_lsn, "stopping batching because timeline object mismatch");
+                    trace!("stopping batching because timeline object mismatch");
                     // TODO: we _could_ batch & execute each shard seperately (and in parallel).
                     // But the current logic for keeping responses in order does not support that.
                     return false;
                 }
-                // the vectored get currently only supports a single LSN, so, bounce as soon
-                // as the effective request_lsn changes
-                if *accum_lsn != this_lsn {
-                    trace!(%accum_lsn, %this_lsn, "stopping batching because LSN changed");
-                    return false;
+
+                match batching_strategy {
+                    PageServiceProtocolPipelinedBatchingStrategy::UniformLsn => {
+                        if let Some(last_in_batch) = accum_pages.last() {
+                            if last_in_batch.effective_request_lsn
+                                != this_pages[0].effective_request_lsn
+                            {
+                                return false;
+                            }
+                        }
+                    }
+                    PageServiceProtocolPipelinedBatchingStrategy::ScatteredLsn => {
+                        // The read path doesn't curently support serving the same page at different LSNs.
+                        // While technically possible, it's uncertain if the complexity is worth it.
+                        // Break the batch if such a case is encountered.
+                        //
+                        // TODO(vlad): Include a metric for batch breaks with a reason label.
+                        let same_page_different_lsn = accum_pages.iter().any(|batched| {
+                            batched.req.rel == this_pages[0].req.rel
+                                && batched.req.blkno == this_pages[0].req.blkno
+                                && batched.effective_request_lsn
+                                    != this_pages[0].effective_request_lsn
+                        });
+
+                        if same_page_different_lsn {
+                            trace!(
+                                rel=%this_pages[0].req.rel,
+                                blkno=%this_pages[0].req.blkno,
+                                lsn=%this_pages[0].effective_request_lsn,
+                                "stopping batching because same page was requested at different LSNs"
+                            );
+                            return false;
+                        }
+                    }
                 }
+
                 true
             })() =>
             {
@@ -1390,12 +1413,7 @@ impl PageServerHandler {
                     span,
                 )
             }
-            BatchedFeMessage::GetPage {
-                span,
-                shard,
-                effective_request_lsn,
-                pages,
-            } => {
+            BatchedFeMessage::GetPage { span, shard, pages } => {
                 fail::fail_point!("ps::handle-pagerequest-message::getpage");
                 let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
@@ -1405,7 +1423,6 @@ impl PageServerHandler {
                         let res = self
                             .handle_get_page_at_lsn_request_batched(
                                 &shard,
-                                effective_request_lsn,
                                 pages,
                                 io_concurrency,
                                 &ctx,
@@ -1724,6 +1741,7 @@ impl PageServerHandler {
         let PageServicePipeliningConfigPipelined {
             max_batch_size,
             execution,
+            batching: batching_strategy,
         } = pipelining_config;
 
         // Macro to _define_ a pipeline stage.
@@ -1775,7 +1793,7 @@ impl PageServerHandler {
                     exit |= read_res.is_err();
                     let could_send = batch_tx
                         .send(read_res, |batch, res| {
-                            Self::pagestream_do_batch(max_batch_size, batch, res)
+                            Self::pagestream_do_batch(batching_strategy, max_batch_size, batch, res)
                         })
                         .await;
                     exit |= could_send.is_err();
@@ -1871,7 +1889,39 @@ impl PageServerHandler {
         ctx: &RequestContext,
     ) -> Result<Lsn, PageStreamError> {
         let last_record_lsn = timeline.get_last_record_lsn();
+        let effective_request_lsn = Self::effective_request_lsn(
+            timeline,
+            last_record_lsn,
+            request_lsn,
+            not_modified_since,
+            latest_gc_cutoff_lsn,
+        )?;
 
+        if effective_request_lsn > last_record_lsn {
+            timeline
+                .wait_lsn(
+                    not_modified_since,
+                    crate::tenant::timeline::WaitLsnWaiter::PageService,
+                    timeline::WaitLsnTimeout::Default,
+                    ctx,
+                )
+                .await?;
+
+            // Since we waited for 'effective_request_lsn' to arrive, that is now the last
+            // record LSN. (Or close enough for our purposes; the last-record LSN can
+            // advance immediately after we return anyway)
+        }
+
+        Ok(effective_request_lsn)
+    }
+
+    fn effective_request_lsn(
+        timeline: &Timeline,
+        last_record_lsn: Lsn,
+        request_lsn: Lsn,
+        not_modified_since: Lsn,
+        latest_gc_cutoff_lsn: &RcuReadGuard<Lsn>,
+    ) -> Result<Lsn, PageStreamError> {
         // Sanity check the request
         if request_lsn < not_modified_since {
             return Err(PageStreamError::BadRequest(
@@ -1906,19 +1956,7 @@ impl PageServerHandler {
             }
         }
 
-        // Wait for WAL up to 'not_modified_since' to arrive, if necessary
         if not_modified_since > last_record_lsn {
-            timeline
-                .wait_lsn(
-                    not_modified_since,
-                    crate::tenant::timeline::WaitLsnWaiter::PageService,
-                    timeline::WaitLsnTimeout::Default,
-                    ctx,
-                )
-                .await?;
-            // Since we waited for 'not_modified_since' to arrive, that is now the last
-            // record LSN. (Or close enough for our purposes; the last-record LSN can
-            // advance immediately after we return anyway)
             Ok(not_modified_since)
         } else {
             // It might be better to use max(not_modified_since, latest_gc_cutoff_lsn)
@@ -2073,7 +2111,6 @@ impl PageServerHandler {
     async fn handle_get_page_at_lsn_request_batched(
         &mut self,
         timeline: &Timeline,
-        effective_lsn: Lsn,
         requests: smallvec::SmallVec<[BatchedGetPageRequest; 1]>,
         io_concurrency: IoConcurrency,
         ctx: &RequestContext,
@@ -2092,20 +2129,81 @@ impl PageServerHandler {
                 // Ignore error (trace buffer may be full or tracer may have disconnected).
                 _ = page_trace.try_send(PageTraceEvent {
                     key,
-                    effective_lsn,
+                    effective_lsn: batch.effective_request_lsn,
                     time,
                 });
             }
         }
 
+        // If any request in the batch needs to wait for LSN, then do so now.
+        let mut perf_instrument = false;
+        let max_effective_lsn = requests
+            .iter()
+            .map(|req| {
+                if req.ctx.has_perf_span() {
+                    perf_instrument = true;
+                }
+
+                req.effective_request_lsn
+            })
+            .max()
+            .expect("batch is never empty");
+
+        let ctx = match perf_instrument {
+            true => RequestContextBuilder::from(ctx)
+                .root_perf_span(|| {
+                    info_span!(
+                        target: PERF_TRACE_TARGET,
+                        "GET_VECTORED",
+                        tenant_id = %timeline.tenant_shard_id.tenant_id,
+                        timeline_id = %timeline.timeline_id,
+                        shard = %timeline.tenant_shard_id.shard_slug(),
+                        %max_effective_lsn
+                    )
+                })
+                .attached_child(),
+            false => ctx.attached_child(),
+        };
+
+        let last_record_lsn = timeline.get_last_record_lsn();
+        if max_effective_lsn > last_record_lsn {
+            if let Err(e) = timeline
+                .wait_lsn(
+                    max_effective_lsn,
+                    crate::tenant::timeline::WaitLsnWaiter::PageService,
+                    timeline::WaitLsnTimeout::Default,
+                    &ctx,
+                )
+                .maybe_perf_instrument(&ctx, |current_perf_span| {
+                    info_span!(
+                        target: PERF_TRACE_TARGET,
+                        parent: current_perf_span,
+                        "WAIT_LSN",
+                    )
+                })
+                .await
+            {
+                return Vec::from_iter(requests.into_iter().map(|req| {
+                    Err(BatchedPageStreamError {
+                        err: PageStreamError::from(e.clone()),
+                        req: req.req.hdr,
+                    })
+                }));
+            }
+        }
+
         let results = timeline
             .get_rel_page_at_lsn_batched(
-                requests
-                    .iter()
-                    .map(|p| (&p.req.rel, &p.req.blkno, p.ctx.attached_child())),
-                effective_lsn,
+                requests.iter().map(|p| {
+                    (
+                        &p.req.rel,
+                        &p.req.blkno,
+                        p.effective_request_lsn,
+                        p.ctx.attached_child(),
+                    )
+                }),
                 io_concurrency,
-                ctx,
+                &ctx,
             )
             .await;
         assert_eq!(results.len(), requests.len());

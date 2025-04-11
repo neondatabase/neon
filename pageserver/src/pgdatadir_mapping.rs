@@ -6,7 +6,7 @@
 //! walingest.rs handles a few things like implicit relation creation and extension.
 //! Clarify that)
 //!
-use std::collections::{BTreeMap, HashMap, HashSet, hash_map};
+use std::collections::{HashMap, HashSet, hash_map};
 use std::ops::{ControlFlow, Range};
 
 use crate::walingest::{WalIngestError, WalIngestErrorKind};
@@ -14,7 +14,6 @@ use crate::{PERF_TRACE_TARGET, ensure_walingest};
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
-use itertools::Itertools;
 use pageserver_api::key::{
     AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, CompactKey, DBDIR_KEY, Key, RelDirExists,
     TWOPHASEDIR_KEY, dbdir_key_range, rel_block_to_key, rel_dir_to_key, rel_key_range,
@@ -22,7 +21,7 @@ use pageserver_api::key::{
     repl_origin_key, repl_origin_key_range, slru_block_to_key, slru_dir_to_key,
     slru_segment_key_range, slru_segment_size_to_key, twophase_file_key, twophase_key_range,
 };
-use pageserver_api::keyspace::SparseKeySpace;
+use pageserver_api::keyspace::{KeySpaceRandomAccum, SparseKeySpace};
 use pageserver_api::models::RelSizeMigration;
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
@@ -41,7 +40,7 @@ use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 
 use super::tenant::{PageReconstructError, Timeline};
 use crate::aux_file;
-use crate::context::{PerfInstrumentFutureExt, RequestContext, RequestContextBuilder};
+use crate::context::{PerfInstrumentFutureExt, RequestContext};
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::metrics::{
     RELSIZE_CACHE_ENTRIES, RELSIZE_CACHE_HITS, RELSIZE_CACHE_MISSES, RELSIZE_CACHE_MISSES_OLD,
@@ -51,7 +50,7 @@ use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id,
 };
 use crate::tenant::storage_layer::IoConcurrency;
-use crate::tenant::timeline::GetVectoredError;
+use crate::tenant::timeline::{GetVectoredError, VersionedKeySpaceQuery};
 
 /// Max delta records appended to the AUX_FILES_KEY (for aux v1). The write path will write a full image once this threshold is reached.
 pub const MAX_AUX_FILE_DELTAS: usize = 1024;
@@ -207,10 +206,9 @@ impl Timeline {
                 let pages: smallvec::SmallVec<[_; 1]> = smallvec::smallvec![(tag, blknum)];
                 let res = self
                     .get_rel_page_at_lsn_batched(
-                        pages
-                            .iter()
-                            .map(|(tag, blknum)| (tag, blknum, ctx.attached_child())),
-                        effective_lsn,
+                        pages.iter().map(|(tag, blknum)| {
+                            (tag, blknum, effective_lsn, ctx.attached_child())
+                        }),
                         io_concurrency.clone(),
                         ctx,
                     )
@@ -248,8 +246,7 @@ impl Timeline {
     /// The ordering of the returned vec corresponds to the ordering of `pages`.
     pub(crate) async fn get_rel_page_at_lsn_batched(
         &self,
-        pages: impl ExactSizeIterator<Item = (&RelTag, &BlockNumber, RequestContext)>,
-        effective_lsn: Lsn,
+        pages: impl ExactSizeIterator<Item = (&RelTag, &BlockNumber, Lsn, RequestContext)>,
         io_concurrency: IoConcurrency,
         ctx: &RequestContext,
     ) -> Vec<Result<Bytes, PageReconstructError>> {
@@ -262,11 +259,13 @@ impl Timeline {
         let mut result = Vec::with_capacity(pages.len());
         let result_slots = result.spare_capacity_mut();
 
-        let mut keys_slots: BTreeMap<Key, smallvec::SmallVec<[(usize, RequestContext); 1]>> =
-            BTreeMap::default();
+        let mut keys_slots: HashMap<Key, smallvec::SmallVec<[(usize, RequestContext); 1]>> =
+            HashMap::with_capacity(pages.len());
 
-        let mut perf_instrument = false;
-        for (response_slot_idx, (tag, blknum, ctx)) in pages.enumerate() {
+        let mut req_keyspaces: HashMap<Lsn, KeySpaceRandomAccum> =
+            HashMap::with_capacity(pages.len());
+
+        for (response_slot_idx, (tag, blknum, lsn, ctx)) in pages.enumerate() {
             if tag.relnode == 0 {
                 result_slots[response_slot_idx].write(Err(PageReconstructError::Other(
                     RelationError::InvalidRelnode.into(),
@@ -277,14 +276,14 @@ impl Timeline {
             }
 
             let nblocks = match self
-                .get_rel_size(*tag, Version::Lsn(effective_lsn), &ctx)
+                .get_rel_size(*tag, Version::Lsn(lsn), &ctx)
                 .maybe_perf_instrument(&ctx, |crnt_perf_span| {
                     info_span!(
                         target: PERF_TRACE_TARGET,
                         parent: crnt_perf_span,
                         "GET_REL_SIZE",
                         reltag=%tag,
-                        lsn=%effective_lsn,
+                        lsn=%lsn,
                     )
                 })
                 .await
@@ -300,7 +299,7 @@ impl Timeline {
             if *blknum >= nblocks {
                 debug!(
                     "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
-                    tag, blknum, effective_lsn, nblocks
+                    tag, blknum, lsn, nblocks
                 );
                 result_slots[response_slot_idx].write(Ok(ZERO_PAGE.clone()));
                 slots_filled += 1;
@@ -309,46 +308,29 @@ impl Timeline {
 
             let key = rel_block_to_key(*tag, *blknum);
 
-            if ctx.has_perf_span() {
-                perf_instrument = true;
-            }
-
             let key_slots = keys_slots.entry(key).or_default();
             key_slots.push((response_slot_idx, ctx));
+
+            let acc = req_keyspaces.entry(lsn).or_default();
+            acc.add_key(key);
         }
 
-        let keyspace = {
-            // add_key requires monotonicity
-            let mut acc = KeySpaceAccum::new();
-            for key in keys_slots
-                .keys()
-                // in fact it requires strong monotonicity
-                .dedup()
-            {
-                acc.add_key(*key);
-            }
-            acc.to_keyspace()
-        };
+        let query: Vec<(Lsn, KeySpace)> = req_keyspaces
+            .into_iter()
+            .map(|(lsn, acc)| (lsn, acc.to_keyspace()))
+            .collect();
 
-        let ctx = match perf_instrument {
-            true => RequestContextBuilder::from(ctx)
-                .root_perf_span(|| {
-                    info_span!(
-                        target: PERF_TRACE_TARGET,
-                        "GET_VECTORED",
-                        tenant_id = %self.tenant_shard_id.tenant_id,
-                        timeline_id = %self.timeline_id,
-                        lsn = %effective_lsn,
-                        shard = %self.tenant_shard_id.shard_slug(),
-                    )
-                })
-                .attached_child(),
-            false => ctx.attached_child(),
-        };
-
+        let query = VersionedKeySpaceQuery::scattered(query);
         let res = self
-            .get_vectored(keyspace, effective_lsn, io_concurrency, &ctx)
-            .maybe_perf_instrument(&ctx, |current_perf_span| current_perf_span.clone())
+            .get_vectored(query, io_concurrency, ctx)
+            .maybe_perf_instrument(ctx, |current_perf_span| {
+                info_span!(
+                    target: PERF_TRACE_TARGET,
+                    parent: current_perf_span,
+                    "GET_BATCH",
+                    batch_size = %page_count,
+                )
+            })
             .await;
 
         match res {
@@ -378,12 +360,12 @@ impl Timeline {
                         // There is no standardized way to express that the batched span followed from N request spans.
                         // So, abuse the system and mark the request contexts as follows_from the batch span, so we get
                         // some linkage in our trace viewer. It allows us to answer: which GET_VECTORED did this GET_PAGE wait for.
-                        req_ctx.perf_follows_from(&ctx);
+                        req_ctx.perf_follows_from(ctx);
                         slots_filled += 1;
                     }
 
                     result_slots[first_slot].write(res);
-                    first_req_ctx.perf_follows_from(&ctx);
+                    first_req_ctx.perf_follows_from(ctx);
                     slots_filled += 1;
                 }
             }
@@ -422,7 +404,7 @@ impl Timeline {
                         }
                     };
 
-                    req_ctx.perf_follows_from(&ctx);
+                    req_ctx.perf_follows_from(ctx);
                     result_slots[*slot].write(err);
                 }
 
@@ -661,8 +643,9 @@ impl Timeline {
 
         let mut segment = BytesMut::with_capacity(n_blocks as usize * BLCKSZ as usize);
         for batch in batches.parts {
+            let query = VersionedKeySpaceQuery::uniform(batch, lsn);
             let blocks = self
-                .get_vectored(batch, lsn, io_concurrency.clone(), ctx)
+                .get_vectored(query, io_concurrency.clone(), ctx)
                 .await?;
 
             for (_key, block) in blocks {
@@ -899,8 +882,9 @@ impl Timeline {
             );
 
             for batch in batches.parts.into_iter().rev() {
+                let query = VersionedKeySpaceQuery::uniform(batch, probe_lsn);
                 let blocks = self
-                    .get_vectored(batch, probe_lsn, io_concurrency.clone(), ctx)
+                    .get_vectored(query, io_concurrency.clone(), ctx)
                     .await?;
 
                 for (_key, clog_page) in blocks.into_iter().rev() {
