@@ -216,7 +216,7 @@ pub async fn handle_cancel_messages(
                     reply.send_err(anyhow!("could not send cmd to redis: {err}"));
                 }
             }
-        };
+        }
 
         replies.clear();
     }
