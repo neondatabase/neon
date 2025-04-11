@@ -3,7 +3,7 @@ use std::thread;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use compute_api::responses::ComputeStatus;
+use compute_api::responses::{ActivityKind, ComputeStatus};
 use compute_api::spec::ComputeFeature;
 use postgres::{Client, NoTls};
 use tracing::{debug, error, info, warn};
@@ -91,7 +91,7 @@ fn watch_compute_activity(compute: &ComputeNode) {
                             if detected_activity {
                                 // Update the last active time and continue, we don't need to
                                 // check backends state change.
-                                compute.update_last_active(Some(Utc::now()));
+                                compute.update_last_active(Some(Utc::now()), ActivityKind::Query);
                                 continue;
                             }
                         }
@@ -109,7 +109,7 @@ fn watch_compute_activity(compute: &ComputeNode) {
                 // This helps us to discover new sessions, that did nothing yet.
                 match get_backends_state_change(cli) {
                     Ok(last_active) => {
-                        compute.update_last_active(last_active);
+                        compute.update_last_active(last_active, ActivityKind::Query);
                     }
                     Err(e) => {
                         error!("could not get backends state change: {}", e);
@@ -125,7 +125,10 @@ fn watch_compute_activity(compute: &ComputeNode) {
                     Ok(r) => match r.try_get::<&str, i64>("count") {
                         Ok(num_ws) => {
                             if num_ws > 0 {
-                                compute.update_last_active(Some(Utc::now()));
+                                compute.update_last_active(
+                                    Some(Utc::now()),
+                                    ActivityKind::LogicalReplication,
+                                );
                                 continue;
                             }
                         }
@@ -150,7 +153,10 @@ fn watch_compute_activity(compute: &ComputeNode) {
                     Ok(row) => match row.try_get::<&str, i64>("count") {
                         Ok(num_subscribers) => {
                             if num_subscribers > 0 {
-                                compute.update_last_active(Some(Utc::now()));
+                                compute.update_last_active(
+                                    Some(Utc::now()),
+                                    ActivityKind::LogicalReplication,
+                                );
                                 continue;
                             }
                         }
@@ -175,7 +181,8 @@ fn watch_compute_activity(compute: &ComputeNode) {
                     Ok(r) => match r.try_get::<&str, i64>("count") {
                         Ok(num_workers) => {
                             if num_workers > 0 {
-                                compute.update_last_active(Some(Utc::now()));
+                                compute
+                                    .update_last_active(Some(Utc::now()), ActivityKind::Autovacuum);
                                 continue;
                             }
                         }
