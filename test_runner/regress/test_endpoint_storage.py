@@ -30,7 +30,7 @@ def headers_with_jwt(env: NeonEnv, ep: Endpoint):
 
 
 @pytest.mark.asyncio
-async def test_object_storage_insert_retrieve_delete(neon_simple_env: NeonEnv):
+async def test_endpoint_storage_insert_retrieve_delete(neon_simple_env: NeonEnv):
     """
     Inserts, retrieves, and deletes test file using a JWT token
     """
@@ -41,7 +41,7 @@ async def test_object_storage_insert_retrieve_delete(neon_simple_env: NeonEnv):
     endpoint_id = ep.endpoint_id
 
     headers = headers_with_jwt(env, ep)
-    base_url = env.object_storage.base_url()
+    base_url = env.endpoint_storage.base_url()
     key = f"http://{base_url}/{tenant_id}/{timeline_id}/{endpoint_id}/key"
     log.info(f"cache key url {key}")
 
