@@ -22,6 +22,7 @@ use bytes::{BufMut, BytesMut};
 use pageserver_api::models::ImageCompressionAlgorithm;
 use tokio::io::AsyncWriteExt;
 use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::context::RequestContext;
@@ -169,7 +170,13 @@ pub struct BlobWriter<const BUFFERED: bool> {
 }
 
 impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
-    pub fn new(inner: VirtualFile, start_offset: u64) -> Self {
+    pub fn new(
+        inner: VirtualFile,
+        start_offset: u64,
+        _gate: &utils::sync::gate::Gate,
+        _cancel: CancellationToken,
+        _ctx: &RequestContext,
+    ) -> Self {
         Self {
             inner,
             offset: start_offset,
@@ -432,12 +439,14 @@ pub(crate) mod tests {
     ) -> Result<(Utf8TempDir, Utf8PathBuf, Vec<u64>), Error> {
         let temp_dir = camino_tempfile::tempdir()?;
         let pathbuf = temp_dir.path().join("file");
+        let gate = utils::sync::gate::Gate::default();
+        let cancel = CancellationToken::new();
 
         // Write part (in block to drop the file)
         let mut offsets = Vec::new();
         {
             let file = VirtualFile::create(pathbuf.as_path(), ctx).await?;
-            let mut wtr = BlobWriter::<BUFFERED>::new(file, 0);
+            let mut wtr = BlobWriter::<BUFFERED>::new(file, 0, &gate, cancel.clone(), ctx);
             for blob in blobs.iter() {
                 let (_, res) = if compression {
                     let res = wtr
