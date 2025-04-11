@@ -206,7 +206,7 @@ def wait_and_record_startup_metrics(
         assert len(matching) == len(expected_labels)
         return matching
 
-    samples = wait_until(metrics_are_filled)
+    samples = wait_until(metrics_are_filled, timeout=60)
 
     for sample in samples:
         phase = sample.labels["phase"]
