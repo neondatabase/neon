@@ -2981,12 +2981,13 @@ class NeonPageserver(PgProtocol, LogUtils):
         to call into the pageserver HTTP client.
         """
         client = self.http_client()
-        generation = self.env.storage_controller.attach_hook_issue(
-            tenant_id,
-            self.id,
-            generation_override=generation if override_storage_controller_generation else None,
-            config=config,
-        )
+        if generation is None or override_storage_controller_generation:
+            generation = self.env.storage_controller.attach_hook_issue(
+                tenant_id,
+                self.id,
+                generation_override=generation if override_storage_controller_generation else None,
+                config=config,
+            )
         return client.tenant_attach(
             tenant_id,
             generation,
