@@ -1,9 +1,8 @@
-use std::sync::Arc;
-
 use crate::compute::ComputeNode;
 use axum::extract::State as AxumState;
 use axum::http::StatusCode;
-use axum::response::{ErrorResponse, IntoResponse, Response, Result};
+use axum::response::{ErrorResponse, Result};
+use reqwest::Client;
 type State = AxumState<std::sync::Arc<ComputeNode>>;
 
 fn to_axum_err(err: impl std::fmt::Display) -> ErrorResponse {
@@ -12,23 +11,23 @@ fn to_axum_err(err: impl std::fmt::Display) -> ErrorResponse {
 }
 
 fn get_addr_token(state: &ComputeNode) -> (String, String) {
-    let addr: String;
-    let token: String;
-    {
-        let state = state.state.lock().unwrap();
-        let pspec = state.pspec.as_ref().expect("pspec must be provided");
-        addr = pspec.object_storage_addr.clone();
-        token = pspec.object_storage_token.clone();
-    }
-    (addr, token)
+    let state = state.state.lock().unwrap();
+    let pspec = state.pspec.as_ref().expect("pspec must be provided");
+    (
+        pspec.endpoint_storage_addr.clone(),
+        pspec.endpoint_storage_token.clone(),
+    )
 }
+
+const KEY: &str = "lfc_state";
 
 pub(in crate::http) async fn prewarm_lfc(AxumState(state): State) -> Result<()> {
     crate::metrics::LFC_PREWARM_REQUESTS.inc();
-    let (addr, token) = get_addr_token(&state);
+    let (_addr, _token) = get_addr_token(&state);
     Ok(())
 }
 
+// TODO JsonResponse
 pub(in crate::http) async fn prewarm_lfc_offload(AxumState(state): State) -> Result<()> {
     crate::metrics::LFC_PREWARM_OFFLOAD_REQUESTS.inc();
 
@@ -42,6 +41,20 @@ pub(in crate::http) async fn prewarm_lfc_offload(AxumState(state): State) -> Res
         .try_get::<usize, String>(0)
         .map_err(to_axum_err)?;
 
-    // connect to service, upload file
-    Ok(())
+    let client = Client::new();
+    let res = client
+        .put(format!("{addr}/{KEY}"))
+        .bearer_auth(token)
+        .body(lfc_state)
+        .send()
+        .await;
+    match res {
+        Ok(response) if response.status() == StatusCode::OK => return Ok(()),
+        Ok(_) => {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
+        }
+        Err(_) => {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
+        }
+    }
 }

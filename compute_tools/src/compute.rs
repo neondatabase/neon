@@ -199,9 +199,9 @@ pub struct ParsedSpec {
     pub safekeeper_connstrings: Vec<String>,
     pub storage_auth_token: Option<String>,
 
-    // Address and token for accessing src/object_storage service
-    pub object_storage_addr: String,
-    pub object_storage_token: String,
+    // Address and token for accessing src/endpoint_storage service
+    pub endpoint_storage_addr: String,
+    pub endpoint_storage_token: String,
 }
 
 impl TryFrom<ComputeSpec> for ParsedSpec {
@@ -256,21 +256,21 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
         };
 
         // TODO do we need backward compatibility on new fields?
-        let object_storage_addr: String = if let Some(ref addr) = spec.object_storage_addr {
+        let endpoint_storage_addr: String = if let Some(ref addr) = spec.endpoint_storage_addr {
             addr.clone()
         } else {
             spec.cluster
                 .settings
-                .find("neon.object_storage_addr")
-                .ok_or("object_storage_addr should be provided")?
+                .find("neon.endpoint_storage_addr")
+                .ok_or("endpoint_storage_addr should be provided")?
         };
-        let object_storage_token: String = if let Some(ref token) = spec.object_storage_token {
+        let endpoint_storage_token: String = if let Some(ref token) = spec.endpoint_storage_token {
             token.clone()
         } else {
             spec.cluster
                 .settings
-                .find("neon.object_storage_token")
-                .ok_or("object_storage_token should be provided")?
+                .find("neon.endpoint_storage_token")
+                .ok_or("endpoint_storage_token should be provided")?
         };
 
         Ok(ParsedSpec {
@@ -280,8 +280,8 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             storage_auth_token,
             tenant_id,
             timeline_id,
-            object_storage_addr,
-            object_storage_token
+            endpoint_storage_addr,
+            endpoint_storage_token
         })
     }
 }
