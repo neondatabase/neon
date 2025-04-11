@@ -67,7 +67,7 @@ use utils::try_rcu::ArcSwapExt;
 use utils::zstd::{create_zst_tarball, extract_zst_tarball};
 use utils::{backoff, completion, failpoint_support, fs_ext, pausable_failpoint};
 
-use self::config::{AttachedLocationConfig, AttachmentMode, LocationConf, TenantConf};
+use self::config::{AttachedLocationConfig, AttachmentMode, LocationConf};
 use self::metadata::TimelineMetadata;
 use self::mgr::{GetActiveTenantError, GetTenantError};
 use self::remote_timeline_client::upload::{upload_index_part, upload_tenant_manifest};
@@ -88,7 +88,7 @@ use crate::metrics::{
     TENANT_SYNTHETIC_SIZE_METRIC, remove_tenant_metrics,
 };
 use crate::task_mgr::TaskKind;
-use crate::tenant::config::{LocationMode, TenantConfOpt};
+use crate::tenant::config::LocationMode;
 use crate::tenant::gc_result::GcResult;
 pub use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::remote_timeline_client::{
@@ -162,7 +162,7 @@ pub struct TenantSharedResources {
 /// in this struct.
 #[derive(Clone)]
 pub(super) struct AttachedTenantConf {
-    tenant_conf: TenantConfOpt,
+    tenant_conf: pageserver_api::models::TenantConfig,
     location: AttachedLocationConfig,
     /// The deadline before which we are blocked from GC so that
     /// leases have a chance to be renewed.
@@ -170,7 +170,10 @@ pub(super) struct AttachedTenantConf {
 }
 
 impl AttachedTenantConf {
-    fn new(tenant_conf: TenantConfOpt, location: AttachedLocationConfig) -> Self {
+    fn new(
+        tenant_conf: pageserver_api::models::TenantConfig,
+        location: AttachedLocationConfig,
+    ) -> Self {
         // Sets a deadline before which we cannot proceed to GC due to lsn lease.
         //
         // We do this as the leases mapping are not persisted to disk. By delaying GC by lease
@@ -251,7 +254,7 @@ pub struct Tenant {
     state: watch::Sender<TenantState>,
 
     // Overridden tenant-specific config parameters.
-    // We keep TenantConfOpt sturct here to preserve the information
+    // We keep pageserver_api::models::TenantConfig sturct here to preserve the information
     // about parameters that are not set.
     // This is necessary to allow global config updates.
     tenant_conf: Arc<ArcSwap<AttachedTenantConf>>,
@@ -3077,6 +3080,7 @@ impl Tenant {
             let mut has_pending_l0 = false;
             for timeline in compact_l0 {
                 let ctx = &ctx.with_scope_timeline(&timeline);
+                // NB: don't set CompactFlags::YieldForL0, since this is an L0-only compaction pass.
                 let outcome = timeline
                     .compact(cancel, CompactFlags::OnlyL0Compaction.into(), ctx)
                     .instrument(info_span!("compact_timeline", timeline_id = %timeline.timeline_id))
@@ -3094,14 +3098,9 @@ impl Tenant {
             }
         }
 
-        // Pass 2: image compaction and timeline offloading. If any timelines have accumulated
-        // more L0 layers, they may also be compacted here.
-        //
-        // NB: image compaction may yield if there is pending L0 compaction.
-        //
-        // TODO: it will only yield if there is pending L0 compaction on the same timeline. If a
-        // different timeline needs compaction, it won't. It should check `l0_compaction_trigger`.
-        // We leave this for a later PR.
+        // Pass 2: image compaction and timeline offloading. If any timelines have accumulated more
+        // L0 layers, they may also be compacted here. Image compaction will yield if there is
+        // pending L0 compaction on any tenant timeline.
         //
         // TODO: consider ordering timelines by some priority, e.g. time since last full compaction,
         // amount of L1 delta debt or garbage, offload-eligible timelines first, etc.
@@ -3112,8 +3111,14 @@ impl Tenant {
             }
             let ctx = &ctx.with_scope_timeline(&timeline);
 
+            // Yield for L0 if the separate L0 pass is enabled (otherwise there's no point).
+            let mut flags = EnumSet::default();
+            if self.get_compaction_l0_first() {
+                flags |= CompactFlags::YieldForL0;
+            }
+
             let mut outcome = timeline
-                .compact(cancel, EnumSet::default(), ctx)
+                .compact(cancel, flags, ctx)
                 .instrument(info_span!("compact_timeline", timeline_id = %timeline.timeline_id))
                 .await
                 .inspect_err(|err| self.maybe_trip_compaction_breaker(err))?;
@@ -3243,17 +3248,23 @@ impl Tenant {
     async fn housekeeping(&self) {
         // Call through to all timelines to freeze ephemeral layers as needed. This usually happens
         // during ingest, but we don't want idle timelines to hold open layers for too long.
-        let timelines = self
-            .timelines
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|tli| tli.is_active())
-            .cloned()
-            .collect_vec();
+        //
+        // We don't do this if the tenant can't upload layers (i.e. it's in stale attachment mode).
+        // We don't run compaction in this case either, and don't want to keep flushing tiny L0
+        // layers that won't be compacted down.
+        if self.tenant_conf.load().location.may_upload_layers_hint() {
+            let timelines = self
+                .timelines
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|tli| tli.is_active())
+                .cloned()
+                .collect_vec();
 
-        for timeline in timelines {
-            timeline.maybe_freeze_ephemeral_layer().await;
+            for timeline in timelines {
+                timeline.maybe_freeze_ephemeral_layer().await;
+            }
         }
 
         // Shut down walredo if idle.
@@ -3678,7 +3689,7 @@ impl Tenant {
                         }
                     }
                 }
-                TenantState::Active { .. } => {
+                TenantState::Active => {
                     return Ok(());
                 }
                 TenantState::Broken { reason, .. } => {
@@ -3702,16 +3713,13 @@ impl Tenant {
     /// create a Tenant in the same state.  Do not use this in hot paths: it's for relatively
     /// rare external API calls, like a reconciliation at startup.
     pub(crate) fn get_location_conf(&self) -> models::LocationConfig {
-        let conf = self.tenant_conf.load();
+        let attached_tenant_conf = self.tenant_conf.load();
 
-        let location_config_mode = match conf.location.attach_mode {
+        let location_config_mode = match attached_tenant_conf.location.attach_mode {
             AttachmentMode::Single => models::LocationConfigMode::AttachedSingle,
             AttachmentMode::Multi => models::LocationConfigMode::AttachedMulti,
             AttachmentMode::Stale => models::LocationConfigMode::AttachedStale,
         };
-
-        // We have a pageserver TenantConf, we need the API-facing TenantConfig.
-        let tenant_config: models::TenantConfig = conf.tenant_conf.clone().into();
 
         models::LocationConfig {
             mode: location_config_mode,
@@ -3720,7 +3728,7 @@ impl Tenant {
             shard_number: self.shard_identity.number.0,
             shard_count: self.shard_identity.count.literal(),
             shard_stripe_size: self.shard_identity.stripe_size.0,
-            tenant_conf: tenant_config,
+            tenant_conf: attached_tenant_conf.tenant_conf.clone(),
         }
     }
 
@@ -3926,11 +3934,11 @@ enum ActivateTimelineArgs {
 }
 
 impl Tenant {
-    pub fn tenant_specific_overrides(&self) -> TenantConfOpt {
+    pub fn tenant_specific_overrides(&self) -> pageserver_api::models::TenantConfig {
         self.tenant_conf.load().tenant_conf.clone()
     }
 
-    pub fn effective_config(&self) -> TenantConf {
+    pub fn effective_config(&self) -> pageserver_api::config::TenantConfigToml {
         self.tenant_specific_overrides()
             .merge(self.conf.default_tenant_conf.clone())
     }
@@ -4072,10 +4080,14 @@ impl Tenant {
         }
     }
 
-    pub fn update_tenant_config<F: Fn(TenantConfOpt) -> anyhow::Result<TenantConfOpt>>(
+    pub fn update_tenant_config<
+        F: Fn(
+            pageserver_api::models::TenantConfig,
+        ) -> anyhow::Result<pageserver_api::models::TenantConfig>,
+    >(
         &self,
         update: F,
-    ) -> anyhow::Result<TenantConfOpt> {
+    ) -> anyhow::Result<pageserver_api::models::TenantConfig> {
         // Use read-copy-update in order to avoid overwriting the location config
         // state if this races with [`Tenant::set_new_location_config`]. Note that
         // this race is not possible if both request types come from the storage
@@ -4122,7 +4134,7 @@ impl Tenant {
 
     fn get_pagestream_throttle_config(
         psconf: &'static PageServerConf,
-        overrides: &TenantConfOpt,
+        overrides: &pageserver_api::models::TenantConfig,
     ) -> throttle::Config {
         overrides
             .timeline_get_throttle
@@ -4130,7 +4142,7 @@ impl Tenant {
             .unwrap_or(psconf.default_tenant_conf.timeline_get_throttle.clone())
     }
 
-    pub(crate) fn tenant_conf_updated(&self, new_conf: &TenantConfOpt) {
+    pub(crate) fn tenant_conf_updated(&self, new_conf: &pageserver_api::models::TenantConfig) {
         let conf = Self::get_pagestream_throttle_config(self.conf, new_conf);
         self.pagestream_throttle.reconfigure(conf)
     }
@@ -4193,9 +4205,9 @@ impl Tenant {
             self.cancel.child_token(),
         );
 
-        let timeline_ctx = RequestContextBuilder::extend(ctx)
+        let timeline_ctx = RequestContextBuilder::from(ctx)
             .scope(context::Scope::new_timeline(&timeline))
-            .build();
+            .detached_child();
 
         Ok((timeline, timeline_ctx))
     }
@@ -5091,14 +5103,17 @@ impl Tenant {
             fs::remove_dir_all(&pgdata_path).with_context(|| {
                 format!("Failed to remove already existing initdb directory: {pgdata_path}")
             })?;
+            tracing::info!("removed previous attempt's temporary initdb directory '{pgdata_path}'");
         }
 
         // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
         let pgdata_path_deferred = pgdata_path.clone();
         scopeguard::defer! {
-            if let Err(e) = fs::remove_dir_all(&pgdata_path_deferred) {
+            if let Err(e) = fs::remove_dir_all(&pgdata_path_deferred).or_else(fs_ext::ignore_not_found) {
                 // this is unlikely, but we will remove the directory on pageserver restart or another bootstrap call
                 error!("Failed to remove temporary initdb directory '{pgdata_path_deferred}': {e}");
+            } else {
+                tracing::info!("removed temporary initdb directory '{pgdata_path_deferred}'");
             }
         }
         if let Some(existing_initdb_timeline_id) = load_existing_initdb {
@@ -5492,7 +5507,7 @@ impl Tenant {
         Ok(())
     }
 
-    pub(crate) fn get_tenant_conf(&self) -> TenantConfOpt {
+    pub(crate) fn get_tenant_conf(&self) -> pageserver_api::models::TenantConfig {
         self.tenant_conf.load().tenant_conf.clone()
     }
 
@@ -5682,59 +5697,9 @@ pub(crate) mod harness {
         buf.freeze()
     }
 
-    impl From<TenantConf> for TenantConfOpt {
-        fn from(tenant_conf: TenantConf) -> Self {
-            Self {
-                checkpoint_distance: Some(tenant_conf.checkpoint_distance),
-                checkpoint_timeout: Some(tenant_conf.checkpoint_timeout),
-                compaction_target_size: Some(tenant_conf.compaction_target_size),
-                compaction_period: Some(tenant_conf.compaction_period),
-                compaction_threshold: Some(tenant_conf.compaction_threshold),
-                compaction_upper_limit: Some(tenant_conf.compaction_upper_limit),
-                compaction_algorithm: Some(tenant_conf.compaction_algorithm),
-                compaction_l0_first: Some(tenant_conf.compaction_l0_first),
-                compaction_l0_semaphore: Some(tenant_conf.compaction_l0_semaphore),
-                l0_flush_delay_threshold: tenant_conf.l0_flush_delay_threshold,
-                l0_flush_stall_threshold: tenant_conf.l0_flush_stall_threshold,
-                l0_flush_wait_upload: Some(tenant_conf.l0_flush_wait_upload),
-                gc_horizon: Some(tenant_conf.gc_horizon),
-                gc_period: Some(tenant_conf.gc_period),
-                image_creation_threshold: Some(tenant_conf.image_creation_threshold),
-                pitr_interval: Some(tenant_conf.pitr_interval),
-                walreceiver_connect_timeout: Some(tenant_conf.walreceiver_connect_timeout),
-                lagging_wal_timeout: Some(tenant_conf.lagging_wal_timeout),
-                max_lsn_wal_lag: Some(tenant_conf.max_lsn_wal_lag),
-                eviction_policy: Some(tenant_conf.eviction_policy),
-                min_resident_size_override: tenant_conf.min_resident_size_override,
-                evictions_low_residence_duration_metric_threshold: Some(
-                    tenant_conf.evictions_low_residence_duration_metric_threshold,
-                ),
-                heatmap_period: Some(tenant_conf.heatmap_period),
-                lazy_slru_download: Some(tenant_conf.lazy_slru_download),
-                timeline_get_throttle: Some(tenant_conf.timeline_get_throttle),
-                image_layer_creation_check_threshold: Some(
-                    tenant_conf.image_layer_creation_check_threshold,
-                ),
-                image_creation_preempt_threshold: Some(
-                    tenant_conf.image_creation_preempt_threshold,
-                ),
-                lsn_lease_length: Some(tenant_conf.lsn_lease_length),
-                lsn_lease_length_for_ts: Some(tenant_conf.lsn_lease_length_for_ts),
-                timeline_offloading: Some(tenant_conf.timeline_offloading),
-                wal_receiver_protocol_override: tenant_conf.wal_receiver_protocol_override,
-                rel_size_v2_enabled: Some(tenant_conf.rel_size_v2_enabled),
-                gc_compaction_enabled: Some(tenant_conf.gc_compaction_enabled),
-                gc_compaction_initial_threshold_kb: Some(
-                    tenant_conf.gc_compaction_initial_threshold_kb,
-                ),
-                gc_compaction_ratio_percent: Some(tenant_conf.gc_compaction_ratio_percent),
-            }
-        }
-    }
-
     pub struct TenantHarness {
         pub conf: &'static PageServerConf,
-        pub tenant_conf: TenantConf,
+        pub tenant_conf: pageserver_api::models::TenantConfig,
         pub tenant_shard_id: TenantShardId,
         pub generation: Generation,
         pub shard: ShardIndex,
@@ -5761,7 +5726,7 @@ pub(crate) mod harness {
     impl TenantHarness {
         pub async fn create_custom(
             test_name: &'static str,
-            tenant_conf: TenantConf,
+            tenant_conf: pageserver_api::models::TenantConfig,
             tenant_id: TenantId,
             shard_identity: ShardIdentity,
             generation: Generation,
@@ -5814,10 +5779,10 @@ pub(crate) mod harness {
         pub async fn create(test_name: &'static str) -> anyhow::Result<Self> {
             // Disable automatic GC and compaction to make the unit tests more deterministic.
             // The tests perform them manually if needed.
-            let tenant_conf = TenantConf {
-                gc_period: Duration::ZERO,
-                compaction_period: Duration::ZERO,
-                ..TenantConf::default()
+            let tenant_conf = pageserver_api::models::TenantConfig {
+                gc_period: Some(Duration::ZERO),
+                compaction_period: Some(Duration::ZERO),
+                ..Default::default()
             };
             let tenant_id = TenantId::generate();
             let shard = ShardIdentity::unsharded();
@@ -5857,7 +5822,7 @@ pub(crate) mod harness {
                 TenantState::Attaching,
                 self.conf,
                 AttachedTenantConf::try_from(LocationConf::attached_single(
-                    TenantConfOpt::from(self.tenant_conf.clone()),
+                    self.tenant_conf.clone(),
                     self.generation,
                     &ShardParameters::default(),
                 ))
@@ -6559,11 +6524,7 @@ mod tests {
 
         tline.freeze_and_flush().await?;
         tline
-            .compact(
-                &CancellationToken::new(),
-                CompactFlags::NoYield.into(),
-                &ctx,
-            )
+            .compact(&CancellationToken::new(), EnumSet::default(), &ctx)
             .await?;
 
         let mut writer = tline.writer().await;
@@ -6580,11 +6541,7 @@ mod tests {
 
         tline.freeze_and_flush().await?;
         tline
-            .compact(
-                &CancellationToken::new(),
-                CompactFlags::NoYield.into(),
-                &ctx,
-            )
+            .compact(&CancellationToken::new(), EnumSet::default(), &ctx)
             .await?;
 
         let mut writer = tline.writer().await;
@@ -6601,11 +6558,7 @@ mod tests {
 
         tline.freeze_and_flush().await?;
         tline
-            .compact(
-                &CancellationToken::new(),
-                CompactFlags::NoYield.into(),
-                &ctx,
-            )
+            .compact(&CancellationToken::new(), EnumSet::default(), &ctx)
             .await?;
 
         let mut writer = tline.writer().await;
@@ -6622,11 +6575,7 @@ mod tests {
 
         tline.freeze_and_flush().await?;
         tline
-            .compact(
-                &CancellationToken::new(),
-                CompactFlags::NoYield.into(),
-                &ctx,
-            )
+            .compact(&CancellationToken::new(), EnumSet::default(), &ctx)
             .await?;
 
         assert_eq!(
@@ -6709,9 +6658,7 @@ mod tests {
             timeline.freeze_and_flush().await?;
             if compact {
                 // this requires timeline to be &Arc<Timeline>
-                timeline
-                    .compact(&cancel, CompactFlags::NoYield.into(), ctx)
-                    .await?;
+                timeline.compact(&cancel, EnumSet::default(), ctx).await?;
             }
 
             // this doesn't really need to use the timeline_id target, but it is closer to what it
@@ -6941,14 +6888,14 @@ mod tests {
     // ```
     #[tokio::test]
     async fn test_get_vectored_key_gap() -> anyhow::Result<()> {
-        let tenant_conf = TenantConf {
+        let tenant_conf = pageserver_api::models::TenantConfig {
             // Make compaction deterministic
-            gc_period: Duration::ZERO,
-            compaction_period: Duration::ZERO,
+            gc_period: Some(Duration::ZERO),
+            compaction_period: Some(Duration::ZERO),
             // Encourage creation of L1 layers
-            checkpoint_distance: 16 * 1024,
-            compaction_target_size: 8 * 1024,
-            ..TenantConf::default()
+            checkpoint_distance: Some(16 * 1024),
+            compaction_target_size: Some(8 * 1024),
+            ..Default::default()
         };
 
         let harness = TenantHarness::create_custom(
@@ -7038,7 +6985,6 @@ mod tests {
         child_timeline.freeze_and_flush().await?;
         let mut flags = EnumSet::new();
         flags.insert(CompactFlags::ForceRepartition);
-        flags.insert(CompactFlags::NoYield);
         child_timeline
             .compact(&CancellationToken::new(), flags, &ctx)
             .await?;
@@ -7254,9 +7200,9 @@ mod tests {
         compaction_algorithm: CompactionAlgorithm,
     ) -> anyhow::Result<()> {
         let mut harness = TenantHarness::create(name).await?;
-        harness.tenant_conf.compaction_algorithm = CompactionAlgorithmSettings {
+        harness.tenant_conf.compaction_algorithm = Some(CompactionAlgorithmSettings {
             kind: compaction_algorithm,
-        };
+        });
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
@@ -7417,9 +7363,7 @@ mod tests {
 
             // Perform a cycle of flush, compact, and GC
             tline.freeze_and_flush().await?;
-            tline
-                .compact(&cancel, CompactFlags::NoYield.into(), &ctx)
-                .await?;
+            tline.compact(&cancel, EnumSet::default(), &ctx).await?;
             tenant
                 .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
                 .await?;
@@ -7623,9 +7567,9 @@ mod tests {
         compaction_algorithm: CompactionAlgorithm,
     ) -> anyhow::Result<()> {
         let mut harness = TenantHarness::create(name).await?;
-        harness.tenant_conf.compaction_algorithm = CompactionAlgorithmSettings {
+        harness.tenant_conf.compaction_algorithm = Some(CompactionAlgorithmSettings {
             kind: compaction_algorithm,
-        };
+        });
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
@@ -7748,7 +7692,6 @@ mod tests {
                             let mut flags = EnumSet::new();
                             flags.insert(CompactFlags::ForceImageLayerCreation);
                             flags.insert(CompactFlags::ForceRepartition);
-                            flags.insert(CompactFlags::NoYield);
                             flags
                         } else {
                             EnumSet::empty()
@@ -7799,9 +7742,7 @@ mod tests {
         let before_num_l0_delta_files =
             tline.layers.read().await.layer_map()?.level0_deltas().len();
 
-        tline
-            .compact(&cancel, CompactFlags::NoYield.into(), &ctx)
-            .await?;
+        tline.compact(&cancel, EnumSet::default(), &ctx).await?;
 
         let after_num_l0_delta_files = tline.layers.read().await.layer_map()?.level0_deltas().len();
 
@@ -7966,7 +7907,6 @@ mod tests {
                             let mut flags = EnumSet::new();
                             flags.insert(CompactFlags::ForceImageLayerCreation);
                             flags.insert(CompactFlags::ForceRepartition);
-                            flags.insert(CompactFlags::NoYield);
                             flags
                         },
                         &ctx,
@@ -8429,7 +8369,6 @@ mod tests {
                     let mut flags = EnumSet::new();
                     flags.insert(CompactFlags::ForceImageLayerCreation);
                     flags.insert(CompactFlags::ForceRepartition);
-                    flags.insert(CompactFlags::NoYield);
                     flags
                 },
                 &ctx,
@@ -8497,7 +8436,6 @@ mod tests {
                     let mut flags = EnumSet::new();
                     flags.insert(CompactFlags::ForceImageLayerCreation);
                     flags.insert(CompactFlags::ForceRepartition);
-                    flags.insert(CompactFlags::NoYield);
                     flags
                 },
                 &ctx,
@@ -11592,6 +11530,257 @@ mod tests {
             ],
         );
 
+        Ok(())
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn test_synthetic_size_calculation_with_invisible_branches() -> anyhow::Result<()> {
+        use pageserver_api::models::TimelineVisibilityState;
+
+        use crate::tenant::size::gather_inputs;
+
+        let tenant_conf = pageserver_api::models::TenantConfig {
+            // Ensure that we don't compute gc_cutoffs (which needs reading the layer files)
+            pitr_interval: Some(Duration::ZERO),
+            ..Default::default()
+        };
+        let harness = TenantHarness::create_custom(
+            "test_synthetic_size_calculation_with_invisible_branches",
+            tenant_conf,
+            TenantId::generate(),
+            ShardIdentity::unsharded(),
+            Generation::new(0xdeadbeef),
+        )
+        .await?;
+        let (tenant, ctx) = harness.load().await;
+        let main_tline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                vec![],
+                vec![],
+                vec![],
+                Lsn(0x100),
+            )
+            .await?;
+
+        let snapshot1 = TimelineId::from_array(hex!("11223344556677881122334455667790"));
+        tenant
+            .branch_timeline_test_with_layers(
+                &main_tline,
+                snapshot1,
+                Some(Lsn(0x20)),
+                &ctx,
+                vec![],
+                vec![],
+                Lsn(0x50),
+            )
+            .await?;
+        let snapshot2 = TimelineId::from_array(hex!("11223344556677881122334455667791"));
+        tenant
+            .branch_timeline_test_with_layers(
+                &main_tline,
+                snapshot2,
+                Some(Lsn(0x30)),
+                &ctx,
+                vec![],
+                vec![],
+                Lsn(0x50),
+            )
+            .await?;
+        let snapshot3 = TimelineId::from_array(hex!("11223344556677881122334455667792"));
+        tenant
+            .branch_timeline_test_with_layers(
+                &main_tline,
+                snapshot3,
+                Some(Lsn(0x40)),
+                &ctx,
+                vec![],
+                vec![],
+                Lsn(0x50),
+            )
+            .await?;
+        let limit = Arc::new(Semaphore::new(1));
+        let max_retention_period = None;
+        let mut logical_size_cache = HashMap::new();
+        let cause = LogicalSizeCalculationCause::EvictionTaskImitation;
+        let cancel = CancellationToken::new();
+
+        let inputs = gather_inputs(
+            &tenant,
+            &limit,
+            max_retention_period,
+            &mut logical_size_cache,
+            cause,
+            &cancel,
+            &ctx,
+        )
+        .instrument(info_span!(
+            "gather_inputs",
+            tenant_id = "unknown",
+            shard_id = "unknown",
+        ))
+        .await?;
+        use crate::tenant::size::{LsnKind, ModelInputs, SegmentMeta};
+        use LsnKind::*;
+        use tenant_size_model::Segment;
+        let ModelInputs { mut segments, .. } = inputs;
+        segments.retain(|s| s.timeline_id == TIMELINE_ID);
+        for segment in segments.iter_mut() {
+            segment.segment.parent = None; // We don't care about the parent for the test
+            segment.segment.size = None; // We don't care about the size for the test
+        }
+        assert_eq!(
+            segments,
+            [
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x10,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchStart,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x20,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchPoint,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x30,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchPoint,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x40,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchPoint,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x100,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: GcCutOff,
+                }, // we need to retain everything above the last branch point
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x100,
+                        size: None,
+                        needed: true,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchEnd,
+                },
+            ]
+        );
+
+        main_tline
+            .remote_client
+            .schedule_index_upload_for_timeline_invisible_state(
+                TimelineVisibilityState::Invisible,
+            )?;
+        main_tline.remote_client.wait_completion().await?;
+        let inputs = gather_inputs(
+            &tenant,
+            &limit,
+            max_retention_period,
+            &mut logical_size_cache,
+            cause,
+            &cancel,
+            &ctx,
+        )
+        .instrument(info_span!(
+            "gather_inputs",
+            tenant_id = "unknown",
+            shard_id = "unknown",
+        ))
+        .await?;
+        let ModelInputs { mut segments, .. } = inputs;
+        segments.retain(|s| s.timeline_id == TIMELINE_ID);
+        for segment in segments.iter_mut() {
+            segment.segment.parent = None; // We don't care about the parent for the test
+            segment.segment.size = None; // We don't care about the size for the test
+        }
+        assert_eq!(
+            segments,
+            [
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x10,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchStart,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x20,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchPoint,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x30,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchPoint,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x40,
+                        size: None,
+                        needed: false,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchPoint,
+                },
+                SegmentMeta {
+                    segment: Segment {
+                        parent: None,
+                        lsn: 0x40, // Branch end LSN == last branch point LSN
+                        size: None,
+                        needed: true,
+                    },
+                    timeline_id: TIMELINE_ID,
+                    kind: BranchEnd,
+                },
+            ]
+        );
         Ok(())
     }
 }

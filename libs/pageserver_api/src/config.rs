@@ -51,9 +51,54 @@ pub struct NodeMetadata {
 /// If there cannot be a static default value because we need to make runtime
 /// checks to determine the default, make it an `Option` (which defaults to None).
 /// The runtime check should be done in the consuming crate, i.e., `pageserver`.
+///
+/// Unknown fields are silently ignored during deserialization.
+/// The alternative, which we used in the past, was to set `deny_unknown_fields`,
+/// which fails deserialization, and hence pageserver startup, if there is an unknown field.
+/// The reason we don't do that anymore is that it complicates
+/// usage of config fields for feature flagging, which we commonly do for
+/// region-by-region rollouts.
+/// The complications mainly arise because the `pageserver.toml` contents on a
+/// prod server have a separate lifecycle from the pageserver binary.
+/// For instance, `pageserver.toml` contents today are defined in the internal
+/// infra repo, and thus introducing a new config field to pageserver and
+/// rolling it out to prod servers are separate commits in separate repos
+/// that can't be made or rolled back atomically.
+/// Rollbacks in particular pose a risk with deny_unknown_fields because
+/// the old pageserver binary may reject a new config field, resulting in
+/// an outage unless the person doing the pageserver rollback remembers
+/// to also revert the commit that added the config field in to the
+/// `pageserver.toml` templates in the internal infra repo.
+/// (A pre-deploy config check would eliminate this risk during rollbacks,
+///  cf [here](https://github.com/neondatabase/cloud/issues/24349).)
+/// In addition to this compatibility problem during emergency rollbacks,
+/// deny_unknown_fields adds further complications when decomissioning a feature
+/// flag: with deny_unknown_fields, we can't remove a flag from the [`ConfigToml`]
+/// until all prod servers' `pageserver.toml` files have been updated to a version
+/// that doesn't specify the flag. Otherwise new software would fail to start up.
+/// This adds the requirement for an intermediate step where the new config field
+/// is accepted but ignored, prolonging the decomissioning process by an entire
+/// release cycle.
+/// By contrast  with unknown fields silently ignored, decomissioning a feature
+/// flag is a one-step process: we can skip the intermediate step and straight
+/// remove the field from the [`ConfigToml`]. We leave the field in the
+/// `pageserver.toml` files on prod servers until we reach certainty that we
+/// will not roll back to old software whose behavior was dependent on config.
+/// Then we can remove the field from the templates in the internal infra repo.
+/// This process is [documented internally](
+/// https://docs.neon.build/storage/pageserver_configuration.html).
+///
+/// Note that above relaxed compatbility for the config format does NOT APPLY
+/// TO THE STORAGE FORMAT. As general guidance, when introducing storage format
+/// changes, ensure that the potential rollback target version will be compatible
+/// with the new format. This must hold regardless of what flags are set in in the `pageserver.toml`:
+/// any format version that exists in an environment must be compatible with the software that runs there.
+/// Use a pageserver.toml flag only to gate whether software _writes_ the new format.
+/// For more compatibility considerations, refer to [internal docs](
+/// https://docs.neon.build/storage/compat.html?highlight=compat#format-versions--compatibility)
 #[serde_as]
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct ConfigToml {
     // types mapped 1:1 into the runtime PageServerConfig type
     pub listen_pg_addr: String,
@@ -61,6 +106,9 @@ pub struct ConfigToml {
     pub listen_https_addr: Option<String>,
     pub ssl_key_file: Utf8PathBuf,
     pub ssl_cert_file: Utf8PathBuf,
+    #[serde(with = "humantime_serde")]
+    pub ssl_cert_reload_period: Duration,
+    pub ssl_ca_file: Option<Utf8PathBuf>,
     pub availability_zone: Option<String>,
     #[serde(with = "humantime_serde")]
     pub wait_lsn_timeout: Duration,
@@ -131,10 +179,10 @@ pub struct ConfigToml {
     pub load_previous_heatmap: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generate_unarchival_heatmap: Option<bool>,
+    pub tracing: Option<Tracing>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DiskUsageEvictionTaskConfig {
     pub max_usage_pct: utils::serde_percent::Percent,
     pub min_avail_bytes: u64,
@@ -149,13 +197,11 @@ pub struct DiskUsageEvictionTaskConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case")]
-#[serde(deny_unknown_fields)]
 pub enum PageServicePipeliningConfig {
     Serial,
     Pipelined(PageServicePipeliningConfigPipelined),
 }
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PageServicePipeliningConfigPipelined {
     /// Causes runtime errors if larger than max get_vectored batch size.
     pub max_batch_size: NonZeroUsize,
@@ -171,7 +217,6 @@ pub enum PageServiceProtocolPipelinedExecutionStrategy {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case")]
-#[serde(deny_unknown_fields)]
 pub enum GetVectoredConcurrentIo {
     /// The read path is fully sequential: layers are visited
     /// one after the other and IOs are issued and waited upon
@@ -186,6 +231,54 @@ pub enum GetVectoredConcurrentIo {
     /// If the PS PageCache miss rate is low, this improves
     /// throughput dramatically.
     SidecarTask,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Ratio {
+    pub numerator: usize,
+    pub denominator: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OtelExporterConfig {
+    pub endpoint: String,
+    pub protocol: OtelExporterProtocol,
+    #[serde(with = "humantime_serde")]
+    pub timeout: Duration,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OtelExporterProtocol {
+    Grpc,
+    HttpBinary,
+    HttpJson,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Tracing {
+    pub sampling_ratio: Ratio,
+    pub export_config: OtelExporterConfig,
+}
+
+impl From<&OtelExporterConfig> for tracing_utils::ExportConfig {
+    fn from(val: &OtelExporterConfig) -> Self {
+        tracing_utils::ExportConfig {
+            endpoint: Some(val.endpoint.clone()),
+            protocol: val.protocol.into(),
+            timeout: val.timeout,
+        }
+    }
+}
+
+impl From<OtelExporterProtocol> for tracing_utils::Protocol {
+    fn from(val: OtelExporterProtocol) -> Self {
+        match val {
+            OtelExporterProtocol::Grpc => tracing_utils::Protocol::Grpc,
+            OtelExporterProtocol::HttpJson => tracing_utils::Protocol::HttpJson,
+            OtelExporterProtocol::HttpBinary => tracing_utils::Protocol::HttpBinary,
+        }
+    }
 }
 
 pub mod statvfs {
@@ -240,13 +333,9 @@ impl Default for EvictionOrder {
 #[serde(transparent)]
 pub struct MaxVectoredReadBytes(pub NonZeroUsize);
 
-/// A tenant's calcuated configuration, which is the result of merging a
-/// tenant's TenantConfOpt with the global TenantConf from PageServerConf.
-///
-/// For storing and transmitting individual tenant's configuration, see
-/// TenantConfOpt.
+/// Tenant-level configuration values, used for various purposes.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[serde(default)]
 pub struct TenantConfigToml {
     // Flush out an inmemory layer, if it's holding WAL older than this
     // This puts a backstop on how much WAL needs to be re-digested if the
@@ -286,12 +375,6 @@ pub struct TenantConfigToml {
     /// Level0 delta layer threshold at which to stall layer flushes. Must be >compaction_threshold
     /// to avoid deadlock. 0 to disable. Disabled by default.
     pub l0_flush_stall_threshold: Option<usize>,
-    /// If true, Level0 delta layer flushes will wait for S3 upload before flushing the next
-    /// layer. This is a temporary backpressure mechanism which should be removed once
-    /// l0_flush_{delay,stall}_threshold is fully enabled.
-    ///
-    /// TODO: this is no longer enabled, remove it when the config option is no longer set.
-    pub l0_flush_wait_upload: bool,
     // Determines how much history is retained, to allow
     // branching and read replicas at an older point in time.
     // The unit is #of bytes of WAL.
@@ -374,6 +457,9 @@ pub struct TenantConfigToml {
     /// The ratio that triggers the auto gc-compaction. If (the total size of layers between L2 LSN and gc-horizon) / (size below the L2 LSN)
     /// is above this ratio, gc-compaction will be triggered.
     pub gc_compaction_ratio_percent: u64,
+    /// Tenant level performance sampling ratio override. Controls the ratio of get page requests
+    /// that will get perf sampling for the tenant.
+    pub sampling_ratio: Option<Ratio>,
 }
 
 pub mod defaults {
@@ -443,6 +529,8 @@ impl Default for ConfigToml {
             listen_https_addr: (None),
             ssl_key_file: Utf8PathBuf::from(DEFAULT_SSL_KEY_FILE),
             ssl_cert_file: Utf8PathBuf::from(DEFAULT_SSL_CERT_FILE),
+            ssl_cert_reload_period: Duration::from_secs(60),
+            ssl_ca_file: None,
             availability_zone: (None),
             wait_lsn_timeout: (humantime::parse_duration(DEFAULT_WAIT_LSN_TIMEOUT)
                 .expect("cannot parse default wait lsn timeout")),
@@ -542,6 +630,7 @@ impl Default for ConfigToml {
             validate_wal_contiguity: None,
             load_previous_heatmap: None,
             generate_unarchival_heatmap: None,
+            tracing: None,
         }
     }
 }
@@ -577,8 +666,6 @@ pub mod tenant_conf_defaults {
 
     pub const DEFAULT_COMPACTION_ALGORITHM: crate::models::CompactionAlgorithm =
         crate::models::CompactionAlgorithm::Legacy;
-
-    pub const DEFAULT_L0_FLUSH_WAIT_UPLOAD: bool = false;
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
 
@@ -626,7 +713,6 @@ impl Default for TenantConfigToml {
             compaction_l0_semaphore: DEFAULT_COMPACTION_L0_SEMAPHORE,
             l0_flush_delay_threshold: None,
             l0_flush_stall_threshold: None,
-            l0_flush_wait_upload: DEFAULT_L0_FLUSH_WAIT_UPLOAD,
             gc_horizon: DEFAULT_GC_HORIZON,
             gc_period: humantime::parse_duration(DEFAULT_GC_PERIOD)
                 .expect("cannot parse default gc period"),
@@ -660,6 +746,7 @@ impl Default for TenantConfigToml {
             gc_compaction_enabled: DEFAULT_GC_COMPACTION_ENABLED,
             gc_compaction_initial_threshold_kb: DEFAULT_GC_COMPACTION_INITIAL_THRESHOLD_KB,
             gc_compaction_ratio_percent: DEFAULT_GC_COMPACTION_RATIO_PERCENT,
+            sampling_ratio: None,
         }
     }
 }

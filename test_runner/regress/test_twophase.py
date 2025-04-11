@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from fixtures.common_types import TimelineId
 from fixtures.log_helper import log
@@ -12,6 +12,9 @@ from fixtures.neon_fixtures import (
     import_timeline_from_vanilla_postgres,
     wait_for_wal_insert_lsn,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 #

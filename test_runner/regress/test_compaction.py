@@ -166,6 +166,7 @@ def test_pageserver_compaction_preempt(
 
 
 @skip_in_debug_build("only run with release build")
+@pytest.mark.timeout(900)  # This test is slow with sanitizers enabled, especially on ARM
 @pytest.mark.parametrize(
     "with_branches",
     ["with_branches", "no_branches"],
@@ -177,7 +178,7 @@ def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder, with_b
         "compaction_period": "5s",
         # No PiTR interval and small GC horizon
         "pitr_interval": "0s",
-        "gc_horizon": f"{1024 ** 2}",
+        "gc_horizon": f"{1024**2}",
         "lsn_lease_length": "0s",
     }
 
@@ -867,7 +868,7 @@ def test_image_layer_compression(neon_env_builder: NeonEnvBuilder, enabled: bool
     )
     assert bytes_in is not None
     assert bytes_out is not None
-    log.info(f"Compression ratio: {bytes_out/bytes_in} ({bytes_out} in, {bytes_out} out)")
+    log.info(f"Compression ratio: {bytes_out / bytes_in} ({bytes_out} in, {bytes_out} out)")
 
     if enabled:
         # We are writing high compressible repetitive plain text, expect excellent compression

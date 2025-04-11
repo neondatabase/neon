@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING
 
-from fixtures.neon_fixtures import NeonEnvBuilder
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 #
@@ -34,10 +36,10 @@ def test_truncate(neon_env_builder: NeonEnvBuilder, zenbenchmark):
     cur.execute(f"insert into t1 values (generate_series(1,{n_records}))")
     cur.execute("vacuum t1")
     for _ in range(n_iter):
-        cur.execute(f"delete from t1 where x>{n_records//2}")
+        cur.execute(f"delete from t1 where x>{n_records // 2}")
         cur.execute("vacuum t1")
         time.sleep(1)  # let pageserver a chance to create image layers
-        cur.execute(f"insert into t1 values (generate_series({n_records//2+1}, {n_records}))")
+        cur.execute(f"insert into t1 values (generate_series({n_records // 2 + 1}, {n_records}))")
         cur.execute("vacuum t1")
         time.sleep(1)  # let pageserver a chance to create image layers
 

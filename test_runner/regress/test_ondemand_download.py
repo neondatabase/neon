@@ -38,12 +38,13 @@ def get_num_downloaded_layers(client: PageserverHttpClient):
     This assumes that the pageserver only has a single tenant.
     """
     value = client.get_metric_value(
-        "pageserver_remote_operation_seconds_count",
+        "pageserver_remote_timeline_client_seconds_global_count",
         {
             "file_kind": "layer",
             "op_kind": "download",
             "status": "success",
         },
+        "sum",
     )
     if value is None:
         return 0
@@ -61,12 +62,12 @@ def test_ondemand_download_large_rel(neon_env_builder: NeonEnvBuilder):
         initial_tenant_conf={
             # disable background GC
             "gc_period": "0s",
-            "gc_horizon": f"{10 * 1024 ** 3}",  # 10 GB
+            "gc_horizon": f"{10 * 1024**3}",  # 10 GB
             # small checkpoint distance to create more delta layer files
-            "checkpoint_distance": f"{10 * 1024 ** 2}",  # 10 MB
+            "checkpoint_distance": f"{10 * 1024**2}",  # 10 MB
             # allow compaction with the checkpoint
             "compaction_threshold": "3",
-            "compaction_target_size": f"{10 * 1024 ** 2}",  # 10 MB
+            "compaction_target_size": f"{10 * 1024**2}",  # 10 MB
             # but don't run compaction in background or on restart
             "compaction_period": "0s",
         }
@@ -160,10 +161,10 @@ def test_ondemand_download_timetravel(neon_env_builder: NeonEnvBuilder):
             "gc_period": "0s",
             "compaction_period": "0s",
             # small checkpoint distance to create more delta layer files
-            "checkpoint_distance": f"{1 * 1024 ** 2}",  # 1 MB
+            "checkpoint_distance": f"{1 * 1024**2}",  # 1 MB
             "compaction_threshold": "1",
             "image_creation_threshold": "1",
-            "compaction_target_size": f"{1 * 1024 ** 2}",  # 1 MB
+            "compaction_target_size": f"{1 * 1024**2}",  # 1 MB
         }
     )
     pageserver_http = env.pageserver.http_client()
@@ -334,10 +335,10 @@ def test_download_remote_layers_api(
             "gc_period": "0s",
             "compaction_period": "0s",
             # small checkpoint distance to create more delta layer files
-            "checkpoint_distance": f"{1 * 1024 ** 2}",  # 1 MB
+            "checkpoint_distance": f"{1 * 1024**2}",  # 1 MB
             "compaction_threshold": "999999",
             "image_creation_threshold": "999999",
-            "compaction_target_size": f"{1 * 1024 ** 2}",  # 1 MB
+            "compaction_target_size": f"{1 * 1024**2}",  # 1 MB
         }
     )
 
@@ -419,15 +420,15 @@ def test_download_remote_layers_api(
     ###### Phase 1: exercise download error code path
 
     this_time = get_api_current_physical_size()
-    assert (
-        filled_current_physical == this_time
-    ), "current_physical_size is sum of loaded layer sizes, independent of whether local or remote"
+    assert filled_current_physical == this_time, (
+        "current_physical_size is sum of loaded layer sizes, independent of whether local or remote"
+    )
 
     post_unlink_size = get_resident_physical_size()
     log.info(f"post_unlink_size: {post_unlink_size}")
-    assert (
-        post_unlink_size < filled_size
-    ), "we just deleted layers and didn't cause anything to re-download them yet"
+    assert post_unlink_size < filled_size, (
+        "we just deleted layers and didn't cause anything to re-download them yet"
+    )
 
     # issue downloads that we know will fail
     info = client.timeline_download_remote_layers(
@@ -449,9 +450,9 @@ def test_download_remote_layers_api(
         == info["successful_download_count"] + info["failed_download_count"]
     )
     assert get_api_current_physical_size() == filled_current_physical
-    assert (
-        get_resident_physical_size() == post_unlink_size
-    ), "didn't download anything new due to failpoint"
+    assert get_resident_physical_size() == post_unlink_size, (
+        "didn't download anything new due to failpoint"
+    )
 
     ##### Retry, this time without failpoints
     client.configure_failpoints(("remote-storage-download-pre-rename", "off"))
@@ -515,9 +516,9 @@ def test_compaction_downloads_on_demand_without_image_creation(neon_env_builder:
         m = pageserver_http.get_metrics()
         # these are global counters
         total_bytes = m.query_one("pageserver_remote_ondemand_downloaded_bytes_total").value
-        assert (
-            total_bytes < 2**53 and total_bytes.is_integer()
-        ), "bytes should still be safe integer-in-f64"
+        assert total_bytes < 2**53 and total_bytes.is_integer(), (
+            "bytes should still be safe integer-in-f64"
+        )
         count = m.query_one("pageserver_remote_ondemand_downloaded_layers_total").value
         assert count < 2**53 and count.is_integer(), "count should still be safe integer-in-f64"
         return (int(total_bytes), int(count))

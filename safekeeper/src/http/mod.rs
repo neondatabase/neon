@@ -1,6 +1,7 @@
 pub mod routes;
 use std::sync::Arc;
 
+use http_utils::tls_certs::ReloadingCertificateResolver;
 pub use routes::make_router;
 pub use safekeeper_api::models;
 use tokio_util::sync::CancellationToken;
@@ -29,12 +30,16 @@ pub async fn task_main_https(
     https_listener: std::net::TcpListener,
     global_timelines: Arc<GlobalTimelines>,
 ) -> anyhow::Result<()> {
-    let certs = http_utils::tls_certs::load_cert_chain(&conf.ssl_cert_file)?;
-    let key = http_utils::tls_certs::load_private_key(&conf.ssl_key_file)?;
+    let cert_resolver = ReloadingCertificateResolver::new(
+        &conf.ssl_key_file,
+        &conf.ssl_cert_file,
+        conf.ssl_cert_reload_period,
+    )
+    .await?;
 
     let server_config = rustls::ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(certs, key)?;
+        .with_cert_resolver(cert_resolver);
 
     let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
 

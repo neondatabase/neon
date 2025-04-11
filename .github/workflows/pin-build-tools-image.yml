@@ -40,6 +40,11 @@ jobs:
       skip: ${{ steps.check-manifests.outputs.skip }}
 
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
       - name: Check if we really need to pin the image
         id: check-manifests
         env:

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
-from fixtures.compare_fixtures import PgCompare
 
 from performance.test_perf_pgbench import PgBenchLoadType, get_durations_matrix, run_test_pgbench
+
+if TYPE_CHECKING:
+    from fixtures.compare_fixtures import PgCompare
 
 
 # The following test runs on an existing database that has pgvector extension installed

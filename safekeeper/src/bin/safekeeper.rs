@@ -21,7 +21,7 @@ use safekeeper::defaults::{
     DEFAULT_CONTROL_FILE_SAVE_INTERVAL, DEFAULT_EVICTION_MIN_RESIDENT, DEFAULT_HEARTBEAT_TIMEOUT,
     DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_MAX_OFFLOADER_LAG_BYTES, DEFAULT_PARTIAL_BACKUP_CONCURRENCY,
     DEFAULT_PARTIAL_BACKUP_TIMEOUT, DEFAULT_PG_LISTEN_ADDR, DEFAULT_SSL_CERT_FILE,
-    DEFAULT_SSL_KEY_FILE,
+    DEFAULT_SSL_CERT_RELOAD_PERIOD, DEFAULT_SSL_KEY_FILE,
 };
 use safekeeper::{
     BROKER_RUNTIME, GlobalTimelines, HTTP_RUNTIME, SafeKeeperConf, WAL_SERVICE_RUNTIME, broker,
@@ -214,9 +214,18 @@ struct Args {
     /// Path to a file with a X509 certificate for https API.
     #[arg(long, default_value = DEFAULT_SSL_CERT_FILE)]
     ssl_cert_file: Utf8PathBuf,
-    /// Trusted root CA certificate to use in https APIs.
+    /// Period to reload certificate and private key from files.
+    #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_SSL_CERT_RELOAD_PERIOD)]
+    pub ssl_cert_reload_period: Duration,
+    /// Trusted root CA certificates to use in https APIs.
     #[arg(long)]
-    ssl_ca_file: Option<Utf8PathBuf>,
+    pub ssl_ca_file: Option<Utf8PathBuf>,
+    /// Flag to use https for requests to peer's safekeeper API.
+    #[arg(long)]
+    pub use_https_safekeeper_api: bool,
+    /// Path to the JWT auth token used to authenticate with other safekeepers.
+    #[arg(long)]
+    auth_token_path: Option<Utf8PathBuf>,
 }
 
 // Like PathBufValueParser, but allows empty string.
@@ -335,14 +344,24 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Load JWT auth token to connect to other safekeepers for pull_timeline.
+    // First check if the env var is present, then check the arg with the path.
+    // We want to deprecate and remove the env var method in the future.
     let sk_auth_token = match var("SAFEKEEPER_AUTH_TOKEN") {
         Ok(v) => {
             info!("loaded JWT token for authentication with safekeepers");
             Some(SecretString::from(v))
         }
         Err(VarError::NotPresent) => {
-            info!("no JWT token for authentication with safekeepers detected");
-            None
+            if let Some(auth_token_path) = args.auth_token_path.as_ref() {
+                info!(
+                    "loading JWT token for authentication with safekeepers from {auth_token_path}"
+                );
+                let auth_token = tokio::fs::read_to_string(auth_token_path).await?;
+                Some(SecretString::from(auth_token.trim().to_owned()))
+            } else {
+                info!("no JWT token for authentication with safekeepers detected");
+                None
+            }
         }
         Err(_) => {
             warn!("JWT token for authentication with safekeepers is not unicode");
@@ -350,13 +369,13 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let ssl_ca_cert = match args.ssl_ca_file.as_ref() {
+    let ssl_ca_certs = match args.ssl_ca_file.as_ref() {
         Some(ssl_ca_file) => {
             tracing::info!("Using ssl root CA file: {ssl_ca_file:?}");
             let buf = tokio::fs::read(ssl_ca_file).await?;
-            Some(Certificate::from_pem(&buf)?)
+            Certificate::from_pem_bundle(&buf)?
         }
-        None => None,
+        None => Vec::new(),
     };
 
     let conf = Arc::new(SafeKeeperConf {
@@ -394,7 +413,9 @@ async fn main() -> anyhow::Result<()> {
         max_delta_for_fanout: args.max_delta_for_fanout,
         ssl_key_file: args.ssl_key_file,
         ssl_cert_file: args.ssl_cert_file,
-        ssl_ca_cert,
+        ssl_cert_reload_period: args.ssl_cert_reload_period,
+        ssl_ca_certs,
+        use_https_safekeeper_api: args.use_https_safekeeper_api,
     });
 
     // initialize sentry if SENTRY_DSN is provided

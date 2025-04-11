@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 def test_oid_overflow(neon_env_builder: NeonEnvBuilder):
@@ -32,7 +36,7 @@ def test_oid_overflow(neon_env_builder: NeonEnvBuilder):
     log.info(f"t1.relfilenode={oid}")
 
     cur.execute("set statement_timeout=0")
-    cur.execute(f"select test_consume_oids({oid-1})")
+    cur.execute(f"select test_consume_oids({oid - 1})")
     cur.execute("VACUUM FULL t2")
 
     cur.execute("SELECT relfilenode FROM pg_class where relname='t2'")

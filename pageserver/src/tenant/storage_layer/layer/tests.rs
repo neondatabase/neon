@@ -119,6 +119,10 @@ async fn smoke_test() {
     let e = layer.evict_and_wait(FOREVER).await.unwrap_err();
     assert!(matches!(e, EvictionError::NotFound));
 
+    let dl_ctx = RequestContextBuilder::from(ctx)
+        .download_behavior(DownloadBehavior::Download)
+        .attached_child();
+
     // on accesses when the layer is evicted, it will automatically be downloaded.
     let img_after = {
         let mut data = ValuesReconstructState::new(io_concurrency.clone());
@@ -127,7 +131,7 @@ async fn smoke_test() {
                 controlfile_keyspace.clone(),
                 Lsn(0x10)..Lsn(0x11),
                 &mut data,
-                ctx,
+                &dl_ctx,
             )
             .instrument(download_span.clone())
             .await
@@ -177,7 +181,7 @@ async fn smoke_test() {
 
     // plain downloading is rarely needed
     layer
-        .download_and_keep_resident(ctx)
+        .download_and_keep_resident(&dl_ctx)
         .instrument(download_span)
         .await
         .unwrap();
@@ -645,9 +649,10 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
     let ctx = ctx.with_scope_timeline(&timeline);
 
     // This test does downloads
-    let ctx = RequestContextBuilder::extend(&ctx)
+    let ctx = RequestContextBuilder::from(&ctx)
         .download_behavior(DownloadBehavior::Download)
-        .build();
+        .attached_child();
+
     let layer = {
         let mut layers = {
             let layers = timeline.layers.read().await;
@@ -730,9 +735,9 @@ async fn evict_and_wait_does_not_wait_for_download() {
     let ctx = ctx.with_scope_timeline(&timeline);
 
     // This test does downloads
-    let ctx = RequestContextBuilder::extend(&ctx)
+    let ctx = RequestContextBuilder::from(&ctx)
         .download_behavior(DownloadBehavior::Download)
-        .build();
+        .attached_child();
 
     let layer = {
         let mut layers = {

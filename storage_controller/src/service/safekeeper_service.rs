@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,6 +9,7 @@ use crate::persistence::{
     DatabaseError, SafekeeperTimelineOpKind, TimelinePendingOpPersistence, TimelinePersistence,
 };
 use crate::safekeeper::Safekeeper;
+use anyhow::Context;
 use http_utils::error::ApiError;
 use pageserver_api::controller_api::{SafekeeperDescribeResponse, SkSchedulingPolicy};
 use pageserver_api::models::{self, SafekeeperInfo, SafekeepersInfo, TimelineInfo};
@@ -76,8 +78,8 @@ impl Service {
         for sk in timeline_persistence.sk_set.iter() {
             let sk_id = NodeId(*sk as u64);
             let safekeepers = safekeepers.clone();
+            let http_client = self.http_client.clone();
             let jwt = jwt.clone();
-            let ssl_ca_cert = self.config.ssl_ca_cert.clone();
             let req = req.clone();
             joinset.spawn(async move {
                 // Unwrap is fine as we already would have returned error above
@@ -88,8 +90,8 @@ impl Service {
                             let req = req.clone();
                             async move { client.create_timeline(&req).await }
                         },
+                        &http_client,
                         &jwt,
-                        &ssl_ca_cert,
                         3,
                         3,
                         SK_CREATE_TIMELINE_RECONCILE_TIMEOUT,
@@ -265,7 +267,8 @@ impl Service {
                                 .get(&sk.id)
                                 .ok_or_else(|| {
                                     ApiError::InternalServerError(anyhow::anyhow!(
-                                        "Couldn't find safekeeper with id {remaining_id} to pull from"
+                                        "Couldn't find safekeeper with id {} to pull from",
+                                        sk.id
                                     ))
                                 })?
                                 .base_url(),
@@ -279,7 +282,7 @@ impl Service {
                     safekeeper: Box::new(sk.clone()),
                     host_list,
                     tenant_id,
-                    timeline_id,
+                    timeline_id: Some(timeline_id),
                     generation: timeline_persist.generation as u32,
                     kind: crate::persistence::SafekeeperTimelineOpKind::Pull,
                 };
@@ -310,25 +313,32 @@ impl Service {
             );
             return Ok(());
         };
+        self.persistence
+            .timeline_set_deleted_at(tenant_id, timeline_id)
+            .await?;
         let all_sks = tl
             .new_sk_set
             .iter()
-            .flat_map(|sks| {
-                sks.iter()
-                    .map(|sk| (*sk, SafekeeperTimelineOpKind::Exclude))
-            })
-            .chain(
-                tl.sk_set
-                    .iter()
-                    .map(|v| (*v, SafekeeperTimelineOpKind::Delete)),
-            )
-            .collect::<HashMap<_, _>>();
+            .flatten()
+            .chain(tl.sk_set.iter())
+            .collect::<HashSet<_>>();
 
         // Schedule reconciliations
+        for &sk_id in all_sks.iter() {
+            let pending_op = TimelinePendingOpPersistence {
+                tenant_id: tenant_id.to_string(),
+                timeline_id: timeline_id.to_string(),
+                generation: tl.generation,
+                op_kind: SafekeeperTimelineOpKind::Delete,
+                sk_id: *sk_id,
+            };
+            tracing::info!("writing pending op for sk id {sk_id}");
+            self.persistence.insert_pending_op(pending_op).await?;
+        }
         {
             let mut locked = self.inner.write().unwrap();
-            for (sk_id, kind) in all_sks {
-                let sk_id = NodeId(sk_id as u64);
+            for sk_id in all_sks {
+                let sk_id = NodeId(*sk_id as u64);
                 let Some(sk) = locked.safekeepers.get(&sk_id) else {
                     return Err(ApiError::InternalServerError(anyhow::anyhow!(
                         "Couldn't find safekeeper with id {sk_id}"
@@ -340,12 +350,110 @@ impl Service {
                     // we don't use this for this kind, put a dummy value
                     host_list: Vec::new(),
                     tenant_id,
-                    timeline_id,
+                    timeline_id: Some(timeline_id),
                     generation: tl.generation as u32,
-                    kind,
+                    kind: SafekeeperTimelineOpKind::Delete,
                 };
                 locked.safekeeper_reconcilers.schedule_request(self, req);
             }
+        }
+        Ok(())
+    }
+
+    /// Perform tenant deletion on safekeepers.
+    pub(super) async fn tenant_delete_safekeepers(
+        self: &Arc<Self>,
+        tenant_id: TenantId,
+    ) -> Result<(), ApiError> {
+        let timeline_list = self
+            .persistence
+            .list_timelines_for_tenant(tenant_id)
+            .await?;
+
+        if timeline_list.is_empty() {
+            // Early exit: the tenant is either empty or not migrated to the storcon yet
+            tracing::info!("Skipping tenant delete as the timeline doesn't exist in db");
+            return Ok(());
+        }
+
+        let timeline_list = timeline_list
+            .into_iter()
+            .map(|timeline| {
+                let timeline_id = TimelineId::from_str(&timeline.timeline_id)
+                    .context("timeline id loaded from db")
+                    .map_err(ApiError::InternalServerError)?;
+                Ok((timeline_id, timeline))
+            })
+            .collect::<Result<Vec<_>, ApiError>>()?;
+
+        // Remove pending ops from db, and set `deleted_at`.
+        // We cancel them in a later iteration once we hold the state lock.
+        for (timeline_id, _timeline) in timeline_list.iter() {
+            self.persistence
+                .remove_pending_ops_for_timeline(tenant_id, Some(*timeline_id))
+                .await?;
+            self.persistence
+                .timeline_set_deleted_at(tenant_id, *timeline_id)
+                .await?;
+        }
+
+        // The list of safekeepers that have any of the timelines
+        let mut sk_list = HashSet::new();
+
+        // List all pending ops for all timelines, cancel them
+        for (_timeline_id, timeline) in timeline_list.iter() {
+            let sk_iter = timeline
+                .sk_set
+                .iter()
+                .chain(timeline.new_sk_set.iter().flatten())
+                .map(|id| NodeId(*id as u64));
+            sk_list.extend(sk_iter);
+        }
+
+        for &sk_id in sk_list.iter() {
+            let pending_op = TimelinePendingOpPersistence {
+                tenant_id: tenant_id.to_string(),
+                timeline_id: String::new(),
+                generation: i32::MAX,
+                op_kind: SafekeeperTimelineOpKind::Delete,
+                sk_id: sk_id.0 as i64,
+            };
+            tracing::info!("writing pending op for sk id {sk_id}");
+            self.persistence.insert_pending_op(pending_op).await?;
+        }
+
+        let mut locked = self.inner.write().unwrap();
+
+        for (timeline_id, _timeline) in timeline_list.iter() {
+            for sk_id in sk_list.iter() {
+                locked
+                    .safekeeper_reconcilers
+                    .cancel_reconciles_for_timeline(*sk_id, tenant_id, Some(*timeline_id));
+            }
+        }
+
+        // unwrap is safe: we return above for an empty timeline list
+        let max_generation = timeline_list
+            .iter()
+            .map(|(_tl_id, tl)| tl.generation as u32)
+            .max()
+            .unwrap();
+
+        for sk_id in sk_list {
+            let Some(safekeeper) = locked.safekeepers.get(&sk_id) else {
+                tracing::warn!("Couldn't find safekeeper with id {sk_id}");
+                continue;
+            };
+            // Add pending op for tenant deletion
+            let req = ScheduleRequest {
+                generation: max_generation,
+                host_list: Vec::new(),
+                kind: SafekeeperTimelineOpKind::Delete,
+                safekeeper: Box::new(safekeeper.clone()),
+                tenant_id,
+                timeline_id: None,
+            };
+            locked.safekeeper_reconcilers.schedule_request(self, req);
         }
         Ok(())
     }

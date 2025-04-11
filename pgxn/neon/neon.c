@@ -1,10 +1,7 @@
 /*-------------------------------------------------------------------------
  *
  * neon.c
- *	  Utility functions to expose neon specific information to user
- *
- * IDENTIFICATION
- *	 contrib/neon/neon.c
+ *	  Main entry point into the neon exension
  *
  *-------------------------------------------------------------------------
  */
@@ -33,6 +30,7 @@
 
 #include "extension_server.h"
 #include "neon.h"
+#include "neon_lwlsncache.h"
 #include "control_plane_connector.h"
 #include "logical_replication_monitor.h"
 #include "unstable_extensions.h"
@@ -437,6 +435,8 @@ _PG_init(void)
 
 	pg_init_libpagestore();
 	pg_init_walproposer();
+	init_lwlsncache();
+
 	pagestore_smgr_init();
 	Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 

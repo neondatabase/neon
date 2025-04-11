@@ -23,6 +23,7 @@ use utils::lsn::Lsn;
 use utils::postgres_client::PostgresClientProtocol;
 use utils::{completion, serde_system_time};
 
+use crate::config::Ratio;
 use crate::key::{CompactKey, Key};
 use crate::reltag::RelTag;
 use crate::shard::{ShardCount, ShardStripeSize, TenantShardId};
@@ -523,8 +524,6 @@ pub struct TenantConfigPatch {
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub l0_flush_stall_threshold: FieldPatch<usize>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
-    pub l0_flush_wait_upload: FieldPatch<bool>,
-    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_horizon: FieldPatch<u64>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_period: FieldPatch<String>,
@@ -570,68 +569,131 @@ pub struct TenantConfigPatch {
     pub gc_compaction_initial_threshold_kb: FieldPatch<u64>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_compaction_ratio_percent: FieldPatch<u64>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub sampling_ratio: FieldPatch<Option<Ratio>>,
 }
 
-/// An alternative representation of `pageserver::tenant::TenantConf` with
-/// simpler types.
-#[derive(Serialize, Deserialize, Debug, Default, Clone, Eq, PartialEq)]
+/// Like [`crate::config::TenantConfigToml`], but preserves the information
+/// about which parameters are set and which are not.
+///
+/// Used in many places, including durably stored ones.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)] // this maps omitted fields in deserialization to None
 pub struct TenantConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoint_distance: Option<u64>,
-    #[serde(default)]
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
     pub checkpoint_timeout: Option<Duration>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction_target_size: Option<u64>,
-    #[serde(default)]
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
     pub compaction_period: Option<Duration>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction_threshold: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction_upper_limit: Option<usize>,
-    // defer parsing compaction_algorithm, like eviction_policy
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction_algorithm: Option<CompactionAlgorithmSettings>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction_l0_first: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction_l0_semaphore: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub l0_flush_delay_threshold: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub l0_flush_stall_threshold: Option<usize>,
-    pub l0_flush_wait_upload: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub gc_horizon: Option<u64>,
-    #[serde(default)]
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
     pub gc_period: Option<Duration>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub image_creation_threshold: Option<usize>,
-    #[serde(default)]
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
     pub pitr_interval: Option<Duration>,
-    #[serde(default)]
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
     pub walreceiver_connect_timeout: Option<Duration>,
-    #[serde(default)]
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
     pub lagging_wal_timeout: Option<Duration>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_lsn_wal_lag: Option<NonZeroU64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub eviction_policy: Option<EvictionPolicy>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub min_resident_size_override: Option<u64>,
-    #[serde(default)]
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
     pub evictions_low_residence_duration_metric_threshold: Option<Duration>,
-    #[serde(default)]
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
     pub heatmap_period: Option<Duration>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub lazy_slru_download: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub timeline_get_throttle: Option<ThrottleConfig>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub image_layer_creation_check_threshold: Option<u8>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub image_creation_preempt_threshold: Option<usize>,
-    #[serde(default)]
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
     pub lsn_lease_length: Option<Duration>,
-    #[serde(default)]
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
     pub lsn_lease_length_for_ts: Option<Duration>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub timeline_offloading: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub wal_receiver_protocol_override: Option<PostgresClientProtocol>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub rel_size_v2_enabled: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub gc_compaction_enabled: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub gc_compaction_initial_threshold_kb: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub gc_compaction_ratio_percent: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sampling_ratio: Option<Option<Ratio>>,
 }
 
 impl TenantConfig {
@@ -651,7 +713,6 @@ impl TenantConfig {
             mut compaction_l0_semaphore,
             mut l0_flush_delay_threshold,
             mut l0_flush_stall_threshold,
-            mut l0_flush_wait_upload,
             mut gc_horizon,
             mut gc_period,
             mut image_creation_threshold,
@@ -675,6 +736,7 @@ impl TenantConfig {
             mut gc_compaction_enabled,
             mut gc_compaction_initial_threshold_kb,
             mut gc_compaction_ratio_percent,
+            mut sampling_ratio,
         } = self;
 
         patch.checkpoint_distance.apply(&mut checkpoint_distance);
@@ -704,7 +766,6 @@ impl TenantConfig {
         patch
             .l0_flush_stall_threshold
             .apply(&mut l0_flush_stall_threshold);
-        patch.l0_flush_wait_upload.apply(&mut l0_flush_wait_upload);
         patch.gc_horizon.apply(&mut gc_horizon);
         patch
             .gc_period
@@ -770,6 +831,7 @@ impl TenantConfig {
         patch
             .gc_compaction_ratio_percent
             .apply(&mut gc_compaction_ratio_percent);
+        patch.sampling_ratio.apply(&mut sampling_ratio);
 
         Ok(Self {
             checkpoint_distance,
@@ -783,7 +845,6 @@ impl TenantConfig {
             compaction_l0_semaphore,
             l0_flush_delay_threshold,
             l0_flush_stall_threshold,
-            l0_flush_wait_upload,
             gc_horizon,
             gc_period,
             image_creation_threshold,
@@ -807,7 +868,110 @@ impl TenantConfig {
             gc_compaction_enabled,
             gc_compaction_initial_threshold_kb,
             gc_compaction_ratio_percent,
+            sampling_ratio,
         })
+    }
+
+    pub fn merge(
+        &self,
+        global_conf: crate::config::TenantConfigToml,
+    ) -> crate::config::TenantConfigToml {
+        crate::config::TenantConfigToml {
+            checkpoint_distance: self
+                .checkpoint_distance
+                .unwrap_or(global_conf.checkpoint_distance),
+            checkpoint_timeout: self
+                .checkpoint_timeout
+                .unwrap_or(global_conf.checkpoint_timeout),
+            compaction_target_size: self
+                .compaction_target_size
+                .unwrap_or(global_conf.compaction_target_size),
+            compaction_period: self
+                .compaction_period
+                .unwrap_or(global_conf.compaction_period),
+            compaction_threshold: self
+                .compaction_threshold
+                .unwrap_or(global_conf.compaction_threshold),
+            compaction_upper_limit: self
+                .compaction_upper_limit
+                .unwrap_or(global_conf.compaction_upper_limit),
+            compaction_algorithm: self
+                .compaction_algorithm
+                .as_ref()
+                .unwrap_or(&global_conf.compaction_algorithm)
+                .clone(),
+            compaction_l0_first: self
+                .compaction_l0_first
+                .unwrap_or(global_conf.compaction_l0_first),
+            compaction_l0_semaphore: self
+                .compaction_l0_semaphore
+                .unwrap_or(global_conf.compaction_l0_semaphore),
+            l0_flush_delay_threshold: self
+                .l0_flush_delay_threshold
+                .or(global_conf.l0_flush_delay_threshold),
+            l0_flush_stall_threshold: self
+                .l0_flush_stall_threshold
+                .or(global_conf.l0_flush_stall_threshold),
+            gc_horizon: self.gc_horizon.unwrap_or(global_conf.gc_horizon),
+            gc_period: self.gc_period.unwrap_or(global_conf.gc_period),
+            image_creation_threshold: self
+                .image_creation_threshold
+                .unwrap_or(global_conf.image_creation_threshold),
+            pitr_interval: self.pitr_interval.unwrap_or(global_conf.pitr_interval),
+            walreceiver_connect_timeout: self
+                .walreceiver_connect_timeout
+                .unwrap_or(global_conf.walreceiver_connect_timeout),
+            lagging_wal_timeout: self
+                .lagging_wal_timeout
+                .unwrap_or(global_conf.lagging_wal_timeout),
+            max_lsn_wal_lag: self.max_lsn_wal_lag.unwrap_or(global_conf.max_lsn_wal_lag),
+            eviction_policy: self.eviction_policy.unwrap_or(global_conf.eviction_policy),
+            min_resident_size_override: self
+                .min_resident_size_override
+                .or(global_conf.min_resident_size_override),
+            evictions_low_residence_duration_metric_threshold: self
+                .evictions_low_residence_duration_metric_threshold
+                .unwrap_or(global_conf.evictions_low_residence_duration_metric_threshold),
+            heatmap_period: self.heatmap_period.unwrap_or(global_conf.heatmap_period),
+            lazy_slru_download: self
+                .lazy_slru_download
+                .unwrap_or(global_conf.lazy_slru_download),
+            timeline_get_throttle: self
+                .timeline_get_throttle
+                .clone()
+                .unwrap_or(global_conf.timeline_get_throttle),
+            image_layer_creation_check_threshold: self
+                .image_layer_creation_check_threshold
+                .unwrap_or(global_conf.image_layer_creation_check_threshold),
+            image_creation_preempt_threshold: self
+                .image_creation_preempt_threshold
+                .unwrap_or(global_conf.image_creation_preempt_threshold),
+            lsn_lease_length: self
+                .lsn_lease_length
+                .unwrap_or(global_conf.lsn_lease_length),
+            lsn_lease_length_for_ts: self
+                .lsn_lease_length_for_ts
+                .unwrap_or(global_conf.lsn_lease_length_for_ts),
+            timeline_offloading: self
+                .timeline_offloading
+                .unwrap_or(global_conf.timeline_offloading),
+            wal_receiver_protocol_override: self
+                .wal_receiver_protocol_override
+                .or(global_conf.wal_receiver_protocol_override),
+            rel_size_v2_enabled: self
+                .rel_size_v2_enabled
+                .unwrap_or(global_conf.rel_size_v2_enabled),
+            gc_compaction_enabled: self
+                .gc_compaction_enabled
+                .unwrap_or(global_conf.gc_compaction_enabled),
+            gc_compaction_initial_threshold_kb: self
+                .gc_compaction_initial_threshold_kb
+                .unwrap_or(global_conf.gc_compaction_initial_threshold_kb),
+            gc_compaction_ratio_percent: self
+                .gc_compaction_ratio_percent
+                .unwrap_or(global_conf.gc_compaction_ratio_percent),
+            sampling_ratio: self.sampling_ratio.unwrap_or(global_conf.sampling_ratio),
+        }
     }
 }
 
@@ -940,7 +1104,7 @@ pub struct CompactionAlgorithmSettings {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
-#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(tag = "mode", rename_all = "kebab-case")]
 pub enum L0FlushConfig {
     #[serde(rename_all = "snake_case")]
     Direct { max_concurrency: NonZeroUsize },
@@ -1200,6 +1364,12 @@ pub enum TimelineArchivalState {
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub enum TimelineVisibilityState {
+    Visible,
+    Invisible,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct TimelineArchivalConfigRequest {
     pub state: TimelineArchivalState,
 }
@@ -1257,11 +1427,6 @@ pub struct TimelineInfo {
     pub ancestor_lsn: Option<Lsn>,
     pub last_record_lsn: Lsn,
     pub prev_record_lsn: Option<Lsn>,
-
-    /// Legacy field, retained for one version to enable old storage controller to
-    /// decode (it was a mandatory field).
-    #[serde(default, rename = "latest_gc_cutoff_lsn")]
-    pub _unused: Lsn,
 
     /// The LSN up to which GC has advanced: older data may still exist but it is not available for clients.
     /// This LSN is not suitable for deciding where to create branches etc: use [`TimelineInfo::min_readable_lsn`] instead,
@@ -1331,6 +1496,9 @@ pub struct TimelineInfo {
 
     /// The status of the rel_size migration.
     pub rel_size_migration: Option<RelSizeMigration>,
+
+    /// Whether the timeline is invisible in synthetic size calculations.
+    pub is_invisible: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

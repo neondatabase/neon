@@ -393,7 +393,7 @@ pub struct DebugDumpResponse {
 pub async fn handle_request(
     request: PullTimelineRequest,
     sk_auth_token: Option<SecretString>,
-    ssl_ca_cert: Option<Certificate>,
+    ssl_ca_certs: Vec<Certificate>,
     global_timelines: Arc<GlobalTimelines>,
 ) -> Result<PullTimelineResponse> {
     let existing_tli = global_timelines.get(TenantTimelineId::new(
@@ -405,7 +405,7 @@ pub async fn handle_request(
     }
 
     let mut http_client = reqwest::Client::builder();
-    if let Some(ssl_ca_cert) = ssl_ca_cert {
+    for ssl_ca_cert in ssl_ca_certs {
         http_client = http_client.add_root_certificate(ssl_ca_cert);
     }
     let http_client = http_client.build()?;

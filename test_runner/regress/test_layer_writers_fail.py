@@ -13,9 +13,9 @@ def test_image_layer_writer_fail_before_finish(neon_simple_env: NeonEnv):
     tenant_id, timeline_id = env.create_tenant(
         conf={
             # small checkpoint distance to create more delta layer files
-            "checkpoint_distance": f"{1024 ** 2}",
+            "checkpoint_distance": f"{1024**2}",
             # set the target size to be large to allow the image layer to cover the whole key space
-            "compaction_target_size": f"{1024 ** 3}",
+            "compaction_target_size": f"{1024**3}",
             # tweak the default settings to allow quickly create image layers and L1 layers
             "compaction_period": "1 s",
             "compaction_threshold": "2",
@@ -44,9 +44,9 @@ def test_image_layer_writer_fail_before_finish(neon_simple_env: NeonEnv):
         )
     )
 
-    assert (
-        len(new_temp_layer_files) == 0
-    ), "pageserver should clean its temporary new image layer files on failure"
+    assert len(new_temp_layer_files) == 0, (
+        "pageserver should clean its temporary new image layer files on failure"
+    )
 
 
 @pytest.mark.skip("See https://github.com/neondatabase/neon/issues/2703")
@@ -57,9 +57,9 @@ def test_delta_layer_writer_fail_before_finish(neon_simple_env: NeonEnv):
     tenant_id, timeline_id = env.create_tenant(
         conf={
             # small checkpoint distance to create more delta layer files
-            "checkpoint_distance": f"{1024 ** 2}",
+            "checkpoint_distance": f"{1024**2}",
             # set the target size to be large to allow the image layer to cover the whole key space
-            "compaction_target_size": f"{1024 ** 3}",
+            "compaction_target_size": f"{1024**3}",
             # tweak the default settings to allow quickly create image layers and L1 layers
             "compaction_period": "1 s",
             "compaction_threshold": "2",
@@ -90,6 +90,6 @@ def test_delta_layer_writer_fail_before_finish(neon_simple_env: NeonEnv):
         )
     )
 
-    assert (
-        len(new_temp_layer_files) == 0
-    ), "pageserver should clean its temporary new delta layer files on failure"
+    assert len(new_temp_layer_files) == 0, (
+        "pageserver should clean its temporary new delta layer files on failure"
+    )

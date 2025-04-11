@@ -26,7 +26,7 @@ use once_cell::sync::Lazy;
 use pageserver_api::config::tenant_conf_defaults::DEFAULT_CHECKPOINT_DISTANCE;
 use pageserver_api::key::{KEY_SIZE, Key};
 use pageserver_api::keyspace::{KeySpace, ShardedRange};
-use pageserver_api::models::CompactInfoResponse;
+use pageserver_api::models::{CompactInfoResponse, CompactKeyRange};
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::shard::{ShardCount, ShardIdentity, TenantShardId};
 use pageserver_api::value::Value;
@@ -61,7 +61,7 @@ use crate::tenant::timeline::{
     DeltaLayerWriter, ImageLayerCreationOutcome, ImageLayerWriter, IoConcurrency, Layer,
     ResidentLayer, drop_rlock,
 };
-use crate::tenant::{DeltaLayer, MaybeOffloaded, gc_block};
+use crate::tenant::{DeltaLayer, MaybeOffloaded};
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 
 /// Maximum number of deltas before generating an image layer in bottom-most compaction.
@@ -123,7 +123,6 @@ impl GcCompactionQueueItem {
 #[derive(Default)]
 struct GcCompactionGuardItems {
     notify: Option<tokio::sync::oneshot::Sender<()>>,
-    gc_guard: Option<gc_block::Guard>,
     permit: Option<OwnedSemaphorePermit>,
 }
 
@@ -279,7 +278,7 @@ impl GcCompactionQueue {
             gc_compaction_ratio_percent: u64,
         ) -> bool {
             const AUTO_TRIGGER_LIMIT: u64 = 150 * 1024 * 1024 * 1024; // 150GB
-            if l1_size >= AUTO_TRIGGER_LIMIT || l2_size >= AUTO_TRIGGER_LIMIT {
+            if l1_size + l2_size >= AUTO_TRIGGER_LIMIT {
                 // Do not auto-trigger when physical size >= 150GB
                 return false;
             }
@@ -319,7 +318,12 @@ impl GcCompactionQueue {
                         flags
                     },
                     sub_compaction: true,
-                    compact_key_range: None,
+                    // Only auto-trigger gc-compaction over the data keyspace due to concerns in
+                    // https://github.com/neondatabase/neon/issues/11318.
+                    compact_key_range: Some(CompactKeyRange {
+                        start: Key::MIN,
+                        end: Key::metadata_key_range().start,
+                    }),
                     compact_lsn_range: None,
                     sub_compaction_max_job_size_mb: None,
                 },
@@ -343,11 +347,15 @@ impl GcCompactionQueue {
         info!("compaction job id={} finished", id);
         let mut guard = self.inner.lock().unwrap();
         if let Some(items) = guard.guards.remove(&id) {
-            drop(items.gc_guard);
             if let Some(tx) = items.notify {
                 let _ = tx.send(());
             }
         }
+    }
+
+    fn clear_running_job(&self) {
+        let mut guard = self.inner.lock().unwrap();
+        guard.running = None;
     }
 
     async fn handle_sub_compaction(
@@ -355,32 +363,29 @@ impl GcCompactionQueue {
         id: GcCompactionJobId,
         options: CompactOptions,
         timeline: &Arc<Timeline>,
-        gc_block: &GcBlock,
         auto: bool,
     ) -> Result<(), CompactionError> {
         info!(
             "running scheduled enhanced gc bottom-most compaction with sub-compaction, splitting compaction jobs"
         );
-        let jobs = timeline
+        let res = timeline
             .gc_compaction_split_jobs(
                 GcCompactJob::from_compact_options(options.clone()),
                 options.sub_compaction_max_job_size_mb,
             )
-            .await?;
+            .await;
+        let jobs = match res {
+            Ok(jobs) => jobs,
+            Err(err) => {
+                warn!("cannot split gc-compaction jobs: {}, unblocked gc", err);
+                self.notify_and_unblock(id);
+                return Err(err);
+            }
+        };
         if jobs.is_empty() {
             info!("no jobs to run, skipping scheduled compaction task");
             self.notify_and_unblock(id);
         } else {
-            let gc_guard = match gc_block.start().await {
-                Ok(guard) => guard,
-                Err(e) => {
-                    return Err(CompactionError::Other(anyhow!(
-                        "cannot run gc-compaction because gc is blocked: {}",
-                        e
-                    )));
-                }
-            };
-
             let jobs_len = jobs.len();
             let mut pending_tasks = Vec::new();
             // gc-compaction might pick more layers or fewer layers to compact. The L2 LSN does not need to be accurate.
@@ -394,8 +399,8 @@ impl GcCompactionQueue {
                 if job.dry_run {
                     flags |= CompactFlags::DryRun;
                 }
-                if options.flags.contains(CompactFlags::NoYield) {
-                    flags |= CompactFlags::NoYield;
+                if options.flags.contains(CompactFlags::YieldForL0) {
+                    flags |= CompactFlags::YieldForL0;
                 }
                 let options = CompactOptions {
                     flags,
@@ -415,7 +420,6 @@ impl GcCompactionQueue {
 
             {
                 let mut guard = self.inner.lock().unwrap();
-                guard.guards.entry(id).or_default().gc_guard = Some(gc_guard);
                 let mut tasks = Vec::new();
                 for task in pending_tasks {
                     let id = guard.next_id();
@@ -446,7 +450,18 @@ impl GcCompactionQueue {
         if let Err(err) = &res {
             log_compaction_error(err, None, cancel.is_cancelled());
         }
-        res
+        match res {
+            Ok(res) => Ok(res),
+            Err(CompactionError::ShuttingDown) => Err(CompactionError::ShuttingDown),
+            Err(_) => {
+                // There are some cases where traditional gc might collect some layer
+                // files causing gc-compaction cannot read the full history of the key.
+                // This needs to be resolved in the long-term by improving the compaction
+                // process. For now, let's simply avoid such errors triggering the
+                // circuit breaker.
+                Ok(CompactionOutcome::Skipped)
+            }
+        }
     }
 
     async fn iteration_inner(
@@ -494,27 +509,32 @@ impl GcCompactionQueue {
                     info!(
                         "running scheduled enhanced gc bottom-most compaction with sub-compaction, splitting compaction jobs"
                     );
-                    self.handle_sub_compaction(id, options, timeline, gc_block, auto)
+                    self.handle_sub_compaction(id, options, timeline, auto)
                         .await?;
                 } else {
                     // Auto compaction always enables sub-compaction so we don't need to handle update_l2_lsn
                     // in this branch.
-                    let gc_guard = match gc_block.start().await {
+                    let _gc_guard = match gc_block.start().await {
                         Ok(guard) => guard,
                         Err(e) => {
+                            self.notify_and_unblock(id);
+                            self.clear_running_job();
                             return Err(CompactionError::Other(anyhow!(
                                 "cannot run gc-compaction because gc is blocked: {}",
                                 e
                             )));
                         }
                     };
-                    {
-                        let mut guard = self.inner.lock().unwrap();
-                        guard.guards.entry(id).or_default().gc_guard = Some(gc_guard);
-                    }
-                    let compaction_result =
-                        timeline.compact_with_options(cancel, options, ctx).await?;
-                    self.notify_and_unblock(id);
+                    let res = timeline.compact_with_options(cancel, options, ctx).await;
+                    let compaction_result = match res {
+                        Ok(res) => res,
+                        Err(err) => {
+                            warn!(%err, "failed to run gc-compaction");
+                            self.notify_and_unblock(id);
+                            self.clear_running_job();
+                            return Err(err);
+                        }
+                    };
                     if compaction_result == CompactionOutcome::YieldForL0 {
                         yield_for_l0 = true;
                     }
@@ -522,7 +542,25 @@ impl GcCompactionQueue {
             }
             GcCompactionQueueItem::SubCompactionJob(options) => {
                 // TODO: error handling, clear the queue if any task fails?
-                let compaction_result = timeline.compact_with_options(cancel, options, ctx).await?;
+                let _gc_guard = match gc_block.start().await {
+                    Ok(guard) => guard,
+                    Err(e) => {
+                        self.clear_running_job();
+                        return Err(CompactionError::Other(anyhow!(
+                            "cannot run gc-compaction because gc is blocked: {}",
+                            e
+                        )));
+                    }
+                };
+                let res = timeline.compact_with_options(cancel, options, ctx).await;
+                let compaction_result = match res {
+                    Ok(res) => res,
+                    Err(err) => {
+                        warn!(%err, "failed to run gc-compaction subcompaction job");
+                        self.clear_running_job();
+                        return Err(err);
+                    }
+                };
                 if compaction_result == CompactionOutcome::YieldForL0 {
                     // We will permenantly give up a task if we yield for L0 compaction: the preempted subcompaction job won't be running
                     // again. This ensures that we don't keep doing duplicated work within gc-compaction. Not directly returning here because
@@ -553,10 +591,7 @@ impl GcCompactionQueue {
                 }
             }
         }
-        {
-            let mut guard = self.inner.lock().unwrap();
-            guard.running = None;
-        }
+        self.clear_running_job();
         Ok(if yield_for_l0 {
             tracing::info!("give up gc-compaction: yield for L0 compaction");
             CompactionOutcome::YieldForL0
@@ -984,7 +1019,7 @@ impl Timeline {
 
         // Yield if we have pending L0 compaction. The scheduler will do another pass.
         if (l0_outcome == CompactionOutcome::Pending || l0_outcome == CompactionOutcome::YieldForL0)
-            && !options.flags.contains(CompactFlags::NoYield)
+            && options.flags.contains(CompactFlags::YieldForL0)
         {
             info!("image/ancestor compaction yielding for L0 compaction");
             return Ok(CompactionOutcome::YieldForL0);
@@ -1002,9 +1037,9 @@ impl Timeline {
         {
             Ok(((dense_partitioning, sparse_partitioning), lsn)) => {
                 // Disables access_stats updates, so that the files we read remain candidates for eviction after we're done with them
-                let image_ctx = RequestContextBuilder::extend(ctx)
+                let image_ctx = RequestContextBuilder::from(ctx)
                     .access_stats_behavior(AccessStatsBehavior::Skip)
-                    .build();
+                    .attached_child();
 
                 let mut partitioning = dense_partitioning;
                 partitioning
@@ -1029,7 +1064,7 @@ impl Timeline {
                             .load()
                             .as_ref()
                             .clone(),
-                        !options.flags.contains(CompactFlags::NoYield),
+                        options.flags.contains(CompactFlags::YieldForL0),
                     )
                     .await
                     .inspect_err(|err| {
@@ -1210,6 +1245,10 @@ impl Timeline {
         let mut replace_image_layers = Vec::new();
 
         for layer in layers_to_rewrite {
+            if self.cancel.is_cancelled() {
+                return Err(CompactionError::ShuttingDown);
+            }
+
             tracing::info!(layer=%layer, "Rewriting layer after shard split...");
             let mut image_layer_writer = ImageLayerWriter::new(
                 self.conf,
@@ -2640,7 +2679,7 @@ impl Timeline {
     ) -> Result<CompactionOutcome, CompactionError> {
         let sub_compaction = options.sub_compaction;
         let job = GcCompactJob::from_compact_options(options.clone());
-        let no_yield = options.flags.contains(CompactFlags::NoYield);
+        let yield_for_l0 = options.flags.contains(CompactFlags::YieldForL0);
         if sub_compaction {
             info!(
                 "running enhanced gc bottom-most compaction with sub-compaction, splitting compaction jobs"
@@ -2655,7 +2694,7 @@ impl Timeline {
                     idx + 1,
                     jobs_len
                 );
-                self.compact_with_gc_inner(cancel, job, ctx, no_yield)
+                self.compact_with_gc_inner(cancel, job, ctx, yield_for_l0)
                     .await?;
             }
             if jobs_len == 0 {
@@ -2663,7 +2702,8 @@ impl Timeline {
             }
             return Ok(CompactionOutcome::Done);
         }
-        self.compact_with_gc_inner(cancel, job, ctx, no_yield).await
+        self.compact_with_gc_inner(cancel, job, ctx, yield_for_l0)
+            .await
     }
 
     async fn compact_with_gc_inner(
@@ -2671,7 +2711,7 @@ impl Timeline {
         cancel: &CancellationToken,
         job: GcCompactJob,
         ctx: &RequestContext,
-        no_yield: bool,
+        yield_for_l0: bool,
     ) -> Result<CompactionOutcome, CompactionError> {
         // Block other compaction/GC tasks from running for now. GC-compaction could run along
         // with legacy compaction tasks in the future. Always ensure the lock order is compaction -> gc.
@@ -2941,18 +2981,15 @@ impl Timeline {
             if cancel.is_cancelled() {
                 return Err(CompactionError::ShuttingDown);
             }
-            if !no_yield {
-                let should_yield = self
+            let should_yield = yield_for_l0
+                && self
                     .l0_compaction_trigger
                     .notified()
                     .now_or_never()
                     .is_some();
-                if should_yield {
-                    tracing::info!(
-                        "preempt gc-compaction when downloading layers: too many L0 layers"
-                    );
-                    return Ok(CompactionOutcome::YieldForL0);
-                }
+            if should_yield {
+                tracing::info!("preempt gc-compaction when downloading layers: too many L0 layers");
+                return Ok(CompactionOutcome::YieldForL0);
             }
             let resident_layer = layer
                 .download_and_keep_resident(ctx)
@@ -3089,21 +3126,17 @@ impl Timeline {
                 return Err(CompactionError::ShuttingDown);
             }
 
-            if !no_yield {
-                keys_processed += 1;
-                if keys_processed % 1000 == 0 {
-                    let should_yield = self
-                        .l0_compaction_trigger
-                        .notified()
-                        .now_or_never()
-                        .is_some();
-                    if should_yield {
-                        tracing::info!(
-                            "preempt gc-compaction in the main loop: too many L0 layers"
-                        );
-                        return Ok(CompactionOutcome::YieldForL0);
-                    }
-                }
+            keys_processed += 1;
+            let should_yield = yield_for_l0
+                && keys_processed % 1000 == 0
+                && self
+                    .l0_compaction_trigger
+                    .notified()
+                    .now_or_never()
+                    .is_some();
+            if should_yield {
+                tracing::info!("preempt gc-compaction in the main loop: too many L0 layers");
+                return Ok(CompactionOutcome::YieldForL0);
             }
             if self.shard_identity.is_key_disposable(&key) {
                 // If this shard does not need to store this key, simply skip it.

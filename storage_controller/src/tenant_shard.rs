@@ -622,7 +622,7 @@ impl TenantShard {
             .collect::<Vec<_>>();
 
         attached_locs.sort_by_key(|i| i.1);
-        if let Some((node_id, _gen)) = attached_locs.into_iter().last() {
+        if let Some((node_id, _gen)) = attached_locs.into_iter().next_back() {
             self.intent.set_attached(scheduler, Some(*node_id));
         }
 
@@ -1588,6 +1588,7 @@ impl TenantShard {
         units: ReconcileUnits,
         gate_guard: GateGuard,
         cancel: &CancellationToken,
+        http_client: reqwest::Client,
     ) -> Option<ReconcilerWaiter> {
         // Reconcile in flight for a stale sequence?  Our sequence's task will wait for it before
         // doing our sequence's work.
@@ -1633,6 +1634,7 @@ impl TenantShard {
             cancel: reconciler_cancel.clone(),
             persistence: persistence.clone(),
             compute_notify_failure: false,
+            http_client,
         };
 
         let reconcile_seq = self.sequence;

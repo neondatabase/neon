@@ -2,10 +2,14 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Context;
+use bytes::Bytes;
 use http_utils::error::ApiError;
+use pageserver_api::key::Key;
+use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::DetachBehavior;
 use pageserver_api::models::detach_ancestor::AncestorDetached;
 use pageserver_api::shard::ShardIdentity;
+use pageserver_compaction::helpers::overlaps_with;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -22,7 +26,10 @@ use crate::task_mgr::TaskKind;
 use crate::tenant::Tenant;
 use crate::tenant::remote_timeline_client::index::GcBlockingReason::DetachAncestor;
 use crate::tenant::storage_layer::layer::local_layer_path;
-use crate::tenant::storage_layer::{AsLayerDesc as _, DeltaLayerWriter, Layer, ResidentLayer};
+use crate::tenant::storage_layer::{
+    AsLayerDesc as _, DeltaLayerWriter, ImageLayerWriter, IoConcurrency, Layer, ResidentLayer,
+    ValuesReconstructState,
+};
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 
 #[derive(Debug, thiserror::Error)]
@@ -170,6 +177,92 @@ impl Attempt {
     }
 }
 
+async fn generate_tombstone_image_layer(
+    detached: &Arc<Timeline>,
+    ancestor: &Arc<Timeline>,
+    ancestor_lsn: Lsn,
+    ctx: &RequestContext,
+) -> Result<Option<ResidentLayer>, Error> {
+    tracing::info!(
+        "removing non-inherited keys by writing an image layer with tombstones at the detach LSN"
+    );
+    let io_concurrency = IoConcurrency::spawn_from_conf(
+        detached.conf,
+        detached.gate.enter().map_err(|_| Error::ShuttingDown)?,
+    );
+    let mut reconstruct_state = ValuesReconstructState::new(io_concurrency);
+    // Directly use `get_vectored_impl` to skip the max_vectored_read_key limit check. Note that the keyspace should
+    // not contain too many keys, otherwise this takes a lot of memory. Currently we limit it to 10k keys in the compute.
+    let key_range = Key::sparse_non_inherited_keyspace();
+    // avoid generating a "future layer" which will then be removed
+    let image_lsn = ancestor_lsn;
+
+    {
+        let layers = detached.layers.read().await;
+        for layer in layers.all_persistent_layers() {
+            if !layer.is_delta
+                && layer.lsn_range.start == image_lsn
+                && overlaps_with(&key_range, &layer.key_range)
+            {
+                tracing::warn!(
+                    layer=%layer, "image layer at the detach LSN already exists, skipping removing aux files"
+                );
+                return Ok(None);
+            }
+        }
+    }
+
+    let data = ancestor
+        .get_vectored_impl(
+            KeySpace::single(key_range.clone()),
+            image_lsn,
+            &mut reconstruct_state,
+            ctx,
+        )
+        .await
+        .context("failed to retrieve aux keys")
+        .map_err(|e| Error::launder(e, Error::Prepare))?;
+    if !data.is_empty() {
+        // TODO: is it possible that we can have an image at `image_lsn`? Unlikely because image layers are only generated
+        // upon compaction but theoretically possible.
+        let mut image_layer_writer = ImageLayerWriter::new(
+            detached.conf,
+            detached.timeline_id,
+            detached.tenant_shard_id,
+            &key_range,
+            image_lsn,
+            ctx,
+        )
+        .await
+        .context("failed to create image layer writer")
+        .map_err(Error::Prepare)?;
+        for key in data.keys() {
+            image_layer_writer
+                .put_image(*key, Bytes::new(), ctx)
+                .await
+                .context("failed to write key")
+                .map_err(|e| Error::launder(e, Error::Prepare))?;
+        }
+        let (desc, path) = image_layer_writer
+            .finish(ctx)
+            .await
+            .context("failed to finish image layer writer for removing the metadata keys")
+            .map_err(|e| Error::launder(e, Error::Prepare))?;
+        let generated = Layer::finish_creating(detached.conf, detached, desc, &path)
+            .map_err(|e| Error::launder(e, Error::Prepare))?;
+        detached
+            .remote_client
+            .upload_layer_file(&generated, &detached.cancel)
+            .await
+            .map_err(|e| Error::launder(e, Error::Prepare))?;
+        tracing::info!(layer=%generated, "wrote image layer");
+        Ok(Some(generated))
+    } else {
+        tracing::info!("no aux keys found in ancestor");
+        Ok(None)
+    }
+}
+
 /// See [`Timeline::prepare_to_detach_from_ancestor`]
 pub(super) async fn prepare(
     detached: &Arc<Timeline>,
@@ -235,7 +328,7 @@ pub(super) async fn prepare(
         return Err(NoAncestor);
     }
 
-    check_no_archived_children_of_ancestor(tenant, detached, &ancestor, ancestor_lsn)?;
+    check_no_archived_children_of_ancestor(tenant, detached, &ancestor, ancestor_lsn, behavior)?;
 
     if let DetachBehavior::MultiLevelAndNoReparent = behavior {
         // If the ancestor has an ancestor, we might be able to fast-path detach it if the current ancestor does not have any data written/used by the detaching timeline.
@@ -249,7 +342,13 @@ pub(super) async fn prepare(
             ancestor_lsn = ancestor.ancestor_lsn; // Get the LSN first before resetting the `ancestor` variable
             ancestor = ancestor_of_ancestor;
             // TODO: do we still need to check if we don't want to reparent?
-            check_no_archived_children_of_ancestor(tenant, detached, &ancestor, ancestor_lsn)?;
+            check_no_archived_children_of_ancestor(
+                tenant,
+                detached,
+                &ancestor,
+                ancestor_lsn,
+                behavior,
+            )?;
         }
     } else if ancestor.ancestor_timeline.is_some() {
         // non-technical requirement; we could flatten N ancestors just as easily but we chose
@@ -346,10 +445,16 @@ pub(super) async fn prepare(
 
     // TODO: copying and lsn prefix copying could be done at the same time with a single fsync after
     let mut new_layers: Vec<Layer> =
-        Vec::with_capacity(straddling_branchpoint.len() + rest_of_historic.len());
+        Vec::with_capacity(straddling_branchpoint.len() + rest_of_historic.len() + 1);
+
+    if let Some(tombstone_layer) =
+        generate_tombstone_image_layer(detached, &ancestor, ancestor_lsn, ctx).await?
+    {
+        new_layers.push(tombstone_layer.into());
+    }
 
     {
-        tracing::debug!(to_rewrite = %straddling_branchpoint.len(), "copying prefix of delta layers");
+        tracing::info!(to_rewrite = %straddling_branchpoint.len(), "copying prefix of delta layers");
 
         let mut tasks = tokio::task::JoinSet::new();
 
@@ -1158,31 +1263,44 @@ fn check_no_archived_children_of_ancestor(
     detached: &Arc<Timeline>,
     ancestor: &Arc<Timeline>,
     ancestor_lsn: Lsn,
+    detach_behavior: DetachBehavior,
 ) -> Result<(), Error> {
-    let timelines = tenant.timelines.lock().unwrap();
-    let timelines_offloaded = tenant.timelines_offloaded.lock().unwrap();
-    for timeline in reparentable_timelines(timelines.values(), detached, ancestor, ancestor_lsn) {
-        if timeline.is_archived() == Some(true) {
-            return Err(Error::Archived(timeline.timeline_id));
-        }
-    }
-    for timeline_offloaded in timelines_offloaded.values() {
-        if timeline_offloaded.ancestor_timeline_id != Some(ancestor.timeline_id) {
-            continue;
-        }
-        // This forbids the detach ancestor feature if flattened timelines are present,
-        // even if the ancestor_lsn is from after the branchpoint of the detached timeline.
-        // But as per current design, we don't record the ancestor_lsn of flattened timelines.
-        // This is a bit unfortunate, but as of writing this we don't support flattening
-        // anyway. Maybe we can evolve the data model in the future.
-        if let Some(retain_lsn) = timeline_offloaded.ancestor_retain_lsn {
-            let is_earlier = retain_lsn <= ancestor_lsn;
-            if !is_earlier {
-                continue;
+    match detach_behavior {
+        DetachBehavior::NoAncestorAndReparent => {
+            let timelines = tenant.timelines.lock().unwrap();
+            let timelines_offloaded = tenant.timelines_offloaded.lock().unwrap();
+
+            for timeline in
+                reparentable_timelines(timelines.values(), detached, ancestor, ancestor_lsn)
+            {
+                if timeline.is_archived() == Some(true) {
+                    return Err(Error::Archived(timeline.timeline_id));
+                }
+            }
+
+            for timeline_offloaded in timelines_offloaded.values() {
+                if timeline_offloaded.ancestor_timeline_id != Some(ancestor.timeline_id) {
+                    continue;
+                }
+                // This forbids the detach ancestor feature if flattened timelines are present,
+                // even if the ancestor_lsn is from after the branchpoint of the detached timeline.
+                // But as per current design, we don't record the ancestor_lsn of flattened timelines.
+                // This is a bit unfortunate, but as of writing this we don't support flattening
+                // anyway. Maybe we can evolve the data model in the future.
+                if let Some(retain_lsn) = timeline_offloaded.ancestor_retain_lsn {
+                    let is_earlier = retain_lsn <= ancestor_lsn;
+                    if !is_earlier {
+                        continue;
+                    }
+                }
+                return Err(Error::Archived(timeline_offloaded.timeline_id));
             }
         }
-        return Err(Error::Archived(timeline_offloaded.timeline_id));
+        DetachBehavior::MultiLevelAndNoReparent => {
+            // We don't need to check anything if the user requested to not reparent.
+        }
     }
+
     Ok(())
 }
 

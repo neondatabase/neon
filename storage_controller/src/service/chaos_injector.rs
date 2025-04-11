@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use pageserver_api::controller_api::ShardSchedulingPolicy;
 use rand::seq::SliceRandom;
-use rand::thread_rng;
+use rand::{Rng, thread_rng};
 use tokio_util::sync::CancellationToken;
 use utils::id::NodeId;
 use utils::shard::TenantShardId;
@@ -64,17 +64,22 @@ impl ChaosInjector {
         let mut interval = tokio::time::interval(self.interval);
         #[derive(Debug)]
         enum ChaosEvent {
-            ShuffleTenant,
-            ForceKill,
+            MigrationsToSecondary,
+            ForceKillController,
+            GracefulMigrationsAnywhere,
         }
         loop {
             let cron_interval = self.get_cron_interval_sleep_future();
             let chaos_type = tokio::select! {
                 _ = interval.tick() => {
-                    ChaosEvent::ShuffleTenant
+                    if thread_rng().gen_bool(0.5) {
+                        ChaosEvent::MigrationsToSecondary
+                    } else {
+                        ChaosEvent::GracefulMigrationsAnywhere
+                    }
                 }
                 Some(_) = maybe_sleep(cron_interval) => {
-                    ChaosEvent::ForceKill
+                    ChaosEvent::ForceKillController
                 }
                 _ = cancel.cancelled() => {
                     tracing::info!("Shutting down");
@@ -83,14 +88,27 @@ impl ChaosInjector {
             };
             tracing::info!("Chaos iteration: {chaos_type:?}...");
             match chaos_type {
-                ChaosEvent::ShuffleTenant => {
-                    self.inject_chaos().await;
+                ChaosEvent::MigrationsToSecondary => {
+                    self.inject_migrations_to_secondary();
                 }
-                ChaosEvent::ForceKill => {
+                ChaosEvent::GracefulMigrationsAnywhere => {
+                    self.inject_graceful_migrations_anywhere();
+                }
+                ChaosEvent::ForceKillController => {
                     self.force_kill().await;
                 }
             }
         }
+    }
+
+    fn is_shard_eligible_for_chaos(&self, shard: &TenantShard) -> bool {
+        // - Skip non-active scheduling policies, so that a shard with a policy like Pause can
+        //   be pinned without being disrupted by us.
+        // - Skip shards doing a graceful migration already, so that we allow these to run to
+        //   completion rather than only exercising the first part and then cancelling with
+        //   some other chaos.
+        !matches!(shard.get_scheduling_policy(), ShardSchedulingPolicy::Active)
+            && shard.get_preferred_node().is_none()
     }
 
     /// If a shard has a secondary and attached location, then re-assign the secondary to be
@@ -108,13 +126,7 @@ impl ChaosInjector {
             .get_mut(&tenant_shard_id)
             .expect("Held lock between choosing ID and this get");
 
-        if !matches!(shard.get_scheduling_policy(), ShardSchedulingPolicy::Active) {
-            // Skip non-active scheduling policies, so that a shard with a policy like Pause can
-            // be pinned without being disrupted by us.
-            tracing::info!(
-                "Skipping shard {tenant_shard_id}: scheduling policy is {:?}",
-                shard.get_scheduling_policy()
-            );
+        if !self.is_shard_eligible_for_chaos(shard) {
             return;
         }
 
@@ -152,7 +164,77 @@ impl ChaosInjector {
         std::process::exit(1);
     }
 
-    async fn inject_chaos(&mut self) {
+    // Unlike [`Self::inject_migrations_to_secondary`], this function will not only cut over to secondary, it
+    // will migrate a tenant to a random node in its home AZ using a graceful migration of the same type
+    // that my be initiated by an API caller using prewarm=true.
+    //
+    // This is a much more expensive operation in terms of I/O and time, as we will fully warm up
+    // some new location in order to migrate the tenant there.  For that reason we do far fewer of these.
+    fn inject_graceful_migrations_anywhere(&mut self) {
+        let batch_size = 1;
+        let mut inner = self.service.inner.write().unwrap();
+        let (nodes, tenants, _scheduler) = inner.parts_mut();
+
+        let mut candidates = tenants
+            .values_mut()
+            .filter(|shard| self.is_shard_eligible_for_chaos(shard))
+            .collect::<Vec<_>>();
+
+        tracing::info!(
+            "Injecting chaos: found {} candidates for graceful migrations anywhere",
+            candidates.len()
+        );
+
+        let mut victims: Vec<&mut TenantShard> = Vec::new();
+
+        // Pick our victims: use a hand-rolled loop rather than choose_multiple() because we want
+        // to take the mutable refs from our candidates rather than ref'ing them.
+        while !candidates.is_empty() && victims.len() < batch_size {
+            let i = thread_rng().gen_range(0..candidates.len());
+            victims.push(candidates.swap_remove(i));
+        }
+
+        for victim in victims.into_iter() {
+            // Find a node in the same AZ as the shard, or if the shard has no AZ preference, which
+            // is not where they are currently attached.
+            let candidate_nodes = nodes
+                .values()
+                .filter(|node| {
+                    if let Some(preferred_az) = victim.preferred_az() {
+                        node.get_availability_zone_id() == preferred_az
+                    } else if let Some(attached) = *victim.intent.get_attached() {
+                        node.get_id() != attached
+                    } else {
+                        true
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            let Some(victim_node) = candidate_nodes.choose(&mut thread_rng()) else {
+                // This can happen if e.g. we are in a small region with only one pageserver per AZ.
+                tracing::info!(
+                    "no candidate nodes found for migrating shard {tenant_shard_id} within its home AZ",
+                    tenant_shard_id = victim.tenant_shard_id
+                );
+                continue;
+            };
+
+            // This doesn't change intent immediately: next iteration of Service::optimize_all should do that.  We avoid
+            // doing it here because applying optimizations requires dropping lock to do some async work to check the optimisation
+            // is valid given remote state, and it would be a shame to duplicate that dance here.
+            tracing::info!(
+                "Injecting chaos: migrate {} to {}",
+                victim.tenant_shard_id,
+                victim_node
+            );
+            victim.set_preferred_node(Some(victim_node.get_id()));
+        }
+    }
+
+    /// Migrations of attached locations to their secondary location.  This exercises reconciliation in general,
+    /// live migration in particular, and the pageserver code for cleanly shutting down and starting up tenants
+    /// during such migrations.
+    fn inject_migrations_to_secondary(&mut self) {
         // Pick some shards to interfere with
         let batch_size = 128;
         let mut inner = self.service.inner.write().unwrap();

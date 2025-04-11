@@ -4,6 +4,8 @@
 //! file, or on the command line.
 //! See also `settings.md` for better description on every parameter.
 
+pub mod ignored_fields;
+
 use std::env;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -17,7 +19,7 @@ use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
 use postgres_backend::AuthType;
 use remote_storage::{RemotePath, RemoteStorageConfig};
-use reqwest::Url;
+use reqwest::{Certificate, Url};
 use storage_broker::Uri;
 use utils::id::{NodeId, TimelineId};
 use utils::logging::{LogFormat, SecretString};
@@ -43,7 +45,7 @@ use crate::{TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME, virtual_file};
 ///
 /// For fields that require additional validation or filling in of defaults at runtime,
 /// check for examples in the [`PageServerConf::parse_and_validate`] method.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct PageServerConf {
     // Identifier of that particular pageserver so e g safekeepers
     // can safely distinguish different pageservers
@@ -56,8 +58,17 @@ pub struct PageServerConf {
     /// Example: 127.0.0.1:9899
     pub listen_https_addr: Option<String>,
 
+    /// Path to a file with certificate's private key for https API.
+    /// Default: server.key
     pub ssl_key_file: Utf8PathBuf,
+    /// Path to a file with a X509 certificate for https API.
+    /// Default: server.crt
     pub ssl_cert_file: Utf8PathBuf,
+    /// Period to reload certificate and private key from files.
+    /// Default: 60s.
+    pub ssl_cert_reload_period: Duration,
+    /// Trusted root CA certificates to use in https APIs.
+    pub ssl_ca_certs: Vec<Certificate>,
 
     /// Current availability zone. Used for traffic metrics.
     pub availability_zone: Option<String>,
@@ -94,7 +105,7 @@ pub struct PageServerConf {
 
     pub remote_storage_config: Option<RemoteStorageConfig>,
 
-    pub default_tenant_conf: crate::tenant::config::TenantConf,
+    pub default_tenant_conf: pageserver_api::config::TenantConfigToml,
 
     /// Storage broker endpoints to connect to.
     pub broker_endpoint: Uri,
@@ -206,6 +217,8 @@ pub struct PageServerConf {
 
     /// When set, include visible layers in the next uploaded heatmaps of an unarchived timeline.
     pub generate_unarchival_heatmap: bool,
+
+    pub tracing: Option<pageserver_api::config::Tracing>,
 }
 
 /// Token for authentication to safekeepers
@@ -325,6 +338,8 @@ impl PageServerConf {
             listen_https_addr,
             ssl_key_file,
             ssl_cert_file,
+            ssl_cert_reload_period,
+            ssl_ca_file,
             availability_zone,
             wait_lsn_timeout,
             wal_redo_timeout,
@@ -375,6 +390,7 @@ impl PageServerConf {
             validate_wal_contiguity,
             load_previous_heatmap,
             generate_unarchival_heatmap,
+            tracing,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -386,6 +402,7 @@ impl PageServerConf {
             listen_https_addr,
             ssl_key_file,
             ssl_cert_file,
+            ssl_cert_reload_period,
             availability_zone,
             wait_lsn_timeout,
             wal_redo_timeout,
@@ -423,6 +440,7 @@ impl PageServerConf {
             wal_receiver_protocol,
             page_service_pipelining,
             get_vectored_concurrent_io,
+            tracing,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling
@@ -469,6 +487,13 @@ impl PageServerConf {
             validate_wal_contiguity: validate_wal_contiguity.unwrap_or(false),
             load_previous_heatmap: load_previous_heatmap.unwrap_or(true),
             generate_unarchival_heatmap: generate_unarchival_heatmap.unwrap_or(true),
+            ssl_ca_certs: match ssl_ca_file {
+                Some(ssl_ca_file) => {
+                    let buf = std::fs::read(ssl_ca_file)?;
+                    Certificate::from_pem_bundle(&buf)?
+                }
+                None => Vec::new(),
+            },
         };
 
         // ------------------------------------------------------------
@@ -483,6 +508,17 @@ impl PageServerConf {
                 auth_validation_public_key_path.exists(),
                 format!(
                     "Can't find auth_validation_public_key at '{auth_validation_public_key_path}'",
+                )
+            );
+        }
+
+        if let Some(tracing_config) = conf.tracing.as_ref() {
+            let ratio = &tracing_config.sampling_ratio;
+            ensure!(
+                ratio.denominator != 0 && ratio.denominator >= ratio.numerator,
+                format!(
+                    "Invalid sampling ratio: {}/{}",
+                    ratio.numerator, ratio.denominator
                 )
             );
         }
@@ -526,7 +562,6 @@ impl PageServerConf {
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct PageserverIdentity {
     pub id: NodeId,
 }
@@ -597,83 +632,5 @@ mod tests {
         let workdir = Utf8PathBuf::from("/nonexistent");
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
             .expect("parse_and_validate");
-    }
-
-    /// If there's a typo in the pageserver config, we'd rather catch that typo
-    /// and fail pageserver startup than silently ignoring the typo, leaving whoever
-    /// made it in the believe that their config change is effective.
-    ///
-    /// The default in serde is to allow unknown fields, so, we rely
-    /// on developer+review discipline to add `deny_unknown_fields` when adding
-    /// new structs to the config, and these tests here as a regression test.
-    ///
-    /// The alternative to all of this would be to allow unknown fields in the config.
-    /// To catch them, we could have a config check tool or mgmt API endpoint that
-    /// compares the effective config with the TOML on disk and makes sure that
-    /// the on-disk TOML is a strict subset of the effective config.
-    mod unknown_fields_handling {
-        macro_rules! test {
-            ($short_name:ident, $input:expr) => {
-                #[test]
-                fn $short_name() {
-                    let input = $input;
-                    let err = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(&input)
-                        .expect_err("some_invalid_field is an invalid field");
-                    dbg!(&err);
-                    assert!(err.to_string().contains("some_invalid_field"));
-                }
-            };
-        }
-        use indoc::indoc;
-
-        test!(
-            toplevel,
-            indoc! {r#"
-                some_invalid_field = 23
-            "#}
-        );
-
-        test!(
-            toplevel_nested,
-            indoc! {r#"
-                [some_invalid_field]
-                foo = 23
-            "#}
-        );
-
-        test!(
-            disk_usage_based_eviction,
-            indoc! {r#"
-                [disk_usage_based_eviction]
-                some_invalid_field = 23
-            "#}
-        );
-
-        test!(
-            tenant_config,
-            indoc! {r#"
-                [tenant_config]
-                some_invalid_field = 23
-            "#}
-        );
-
-        test!(
-            l0_flush,
-            indoc! {r#"
-                [l0_flush]
-                mode = "direct"
-                some_invalid_field = 23
-            "#}
-        );
-
-        // TODO: fix this => https://github.com/neondatabase/neon/issues/8915
-        // test!(
-        //     remote_storage_config,
-        //     indoc! {r#"
-        //         [remote_storage_config]
-        //         local_path = "/nonexistent"
-        //         some_invalid_field = 23
-        //     "#}
-        // );
     }
 }

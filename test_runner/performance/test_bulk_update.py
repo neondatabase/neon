@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_last_flush_lsn
+from fixtures.utils import shared_buffers_for_max_cu
 
 
 #
@@ -20,7 +21,10 @@ def test_bulk_update(neon_env_builder: NeonEnvBuilder, zenbenchmark, fillfactor)
 
     timeline_id = env.create_branch("test_bulk_update")
     tenant_id = env.initial_tenant
-    endpoint = env.endpoints.create_start("test_bulk_update")
+    # use shared_buffers size like in production for 8 CU compute
+    endpoint = env.endpoints.create_start(
+        "test_bulk_update", config_lines=[f"shared_buffers={shared_buffers_for_max_cu(8.0)}"]
+    )
     cur = endpoint.connect().cursor()
     cur.execute("set statement_timeout=0")
 

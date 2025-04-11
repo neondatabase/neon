@@ -124,14 +124,14 @@ def test_timeline_init_break_before_checkpoint(neon_env_builder: NeonEnvBuilder)
 
     # Creating the timeline didn't finish. The other timelines on tenant should still be present and work normally.
     new_tenant_timelines = env.neon_cli.timeline_list(tenant_id)
-    assert (
-        new_tenant_timelines == old_tenant_timelines
-    ), f"Pageserver after restart should ignore non-initialized timelines for tenant {tenant_id}"
+    assert new_tenant_timelines == old_tenant_timelines, (
+        f"Pageserver after restart should ignore non-initialized timelines for tenant {tenant_id}"
+    )
 
     timeline_dirs = [d for d in timelines_dir.iterdir()]
-    assert (
-        timeline_dirs == initial_timeline_dirs
-    ), "pageserver should clean its temp timeline files on timeline creation failure"
+    assert timeline_dirs == initial_timeline_dirs, (
+        "pageserver should clean its temp timeline files on timeline creation failure"
+    )
 
 
 # The "exit" case is for a reproducer of issue 6007: an unclean shutdown where we can't do local fs cleanups
@@ -176,14 +176,14 @@ def test_timeline_init_break_before_checkpoint_recreate(
 
     # Creating the timeline didn't finish. The other timelines on tenant should still be present and work normally.
     new_tenant_timelines = env.neon_cli.timeline_list(tenant_id)
-    assert (
-        new_tenant_timelines == old_tenant_timelines
-    ), f"Pageserver after restart should ignore non-initialized timelines for tenant {tenant_id}"
+    assert new_tenant_timelines == old_tenant_timelines, (
+        f"Pageserver after restart should ignore non-initialized timelines for tenant {tenant_id}"
+    )
 
     timeline_dirs = [d for d in timelines_dir.iterdir()]
-    assert (
-        timeline_dirs == initial_timeline_dirs
-    ), "pageserver should clean its temp timeline files on timeline creation failure"
+    assert timeline_dirs == initial_timeline_dirs, (
+        "pageserver should clean its temp timeline files on timeline creation failure"
+    )
 
     # creating the branch should have worked now
     new_timeline_id = TimelineId(
@@ -211,11 +211,11 @@ def test_timeline_create_break_after_dir_creation(neon_env_builder: NeonEnvBuild
     # Creating the timeline didn't finish. The other timelines on tenant should still be present and work normally.
     # "New" timeline is not present in the list, allowing pageserver to retry the same request
     new_tenant_timelines = env.neon_cli.timeline_list(tenant_id)
-    assert (
-        new_tenant_timelines == old_tenant_timelines
-    ), f"Pageserver after restart should ignore non-initialized timelines for tenant {tenant_id}"
+    assert new_tenant_timelines == old_tenant_timelines, (
+        f"Pageserver after restart should ignore non-initialized timelines for tenant {tenant_id}"
+    )
 
     timeline_dirs = [d for d in timelines_dir.iterdir()]
-    assert (
-        timeline_dirs == initial_timeline_dirs
-    ), "pageserver should clean its temp timeline files on timeline creation failure"
+    assert timeline_dirs == initial_timeline_dirs, (
+        "pageserver should clean its temp timeline files on timeline creation failure"
+    )

@@ -40,7 +40,7 @@ use super::{GlobalShutDown, TenantSharedResources};
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::controller_upcall_client::{
-    ControlPlaneGenerationsApi, ControllerUpcallClient, RetryForeverError,
+    RetryForeverError, StorageControllerUpcallApi, StorageControllerUpcallClient,
 };
 use crate::deletion_queue::DeletionQueueClient;
 use crate::http::routes::ACTIVE_TENANT_TIMEOUT;
@@ -58,7 +58,7 @@ use crate::{InitializationOrder, TEMP_FILE_SUFFIX};
 
 /// For a tenant that appears in TenantsMap, it may either be
 /// - `Attached`: has a full Tenant object, is elegible to service
-///    reads and ingest WAL.
+///   reads and ingest WAL.
 /// - `Secondary`: is only keeping a local cache warm.
 ///
 /// Secondary is a totally distinct state rather than being a mode of a `Tenant`, because
@@ -344,7 +344,7 @@ async fn init_load_generations(
             "Emergency mode!  Tenants will be attached unsafely using their last known generation"
         );
         emergency_generations(tenant_confs)
-    } else if let Some(client) = ControllerUpcallClient::new(conf, cancel) {
+    } else if let Some(client) = StorageControllerUpcallClient::new(conf, cancel)? {
         info!("Calling {} API to re-attach tenants", client.base_url());
         // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
         match client.re_attach(conf).await {

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use std::{io, str};
 
+use crate::PERF_TRACE_TARGET;
 use anyhow::{Context, bail};
 use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
@@ -53,7 +54,9 @@ use utils::sync::spsc_fold;
 use crate::auth::check_permission;
 use crate::basebackup::BasebackupError;
 use crate::config::PageServerConf;
-use crate::context::{DownloadBehavior, RequestContext};
+use crate::context::{
+    DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
+};
 use crate::metrics::{
     self, COMPUTE_COMMANDS_COUNTERS, ComputeCommandKind, LIVE_CONNECTIONS, SmgrOpTimer,
     TimelineMetrics,
@@ -100,6 +103,7 @@ pub fn spawn(
     conf: &'static PageServerConf,
     tenant_manager: Arc<TenantManager>,
     pg_auth: Option<Arc<SwappableJwtAuth>>,
+    perf_trace_dispatch: Option<Dispatch>,
     tcp_listener: tokio::net::TcpListener,
 ) -> Listener {
     let cancel = CancellationToken::new();
@@ -117,6 +121,7 @@ pub fn spawn(
             conf,
             tenant_manager,
             pg_auth,
+            perf_trace_dispatch,
             tcp_listener,
             conf.pg_auth_type,
             conf.page_service_pipelining.clone(),
@@ -173,6 +178,7 @@ pub async fn libpq_listener_main(
     conf: &'static PageServerConf,
     tenant_manager: Arc<TenantManager>,
     auth: Option<Arc<SwappableJwtAuth>>,
+    perf_trace_dispatch: Option<Dispatch>,
     listener: tokio::net::TcpListener,
     auth_type: AuthType,
     pipelining_config: PageServicePipeliningConfig,
@@ -205,8 +211,12 @@ pub async fn libpq_listener_main(
                 // Connection established. Spawn a new task to handle it.
                 debug!("accepted connection from {}", peer_addr);
                 let local_auth = auth.clone();
-                let connection_ctx = listener_ctx
-                    .detached_child(TaskKind::PageRequestHandler, DownloadBehavior::Download);
+                let connection_ctx = RequestContextBuilder::from(&listener_ctx)
+                    .task_kind(TaskKind::PageRequestHandler)
+                    .download_behavior(DownloadBehavior::Download)
+                    .perf_span_dispatch(perf_trace_dispatch.clone())
+                    .detached_child();
+
                 connection_handler_tasks.spawn(page_service_conn_main(
                     conf,
                     tenant_manager.clone(),
@@ -237,7 +247,16 @@ pub async fn libpq_listener_main(
 
 type ConnectionHandlerResult = anyhow::Result<()>;
 
-#[instrument(skip_all, fields(peer_addr, application_name))]
+/// Perf root spans start at the per-request level, after shard routing.
+/// This struct carries connection-level information to the root perf span definition.
+#[derive(Clone)]
+struct ConnectionPerfSpanFields {
+    peer_addr: String,
+    application_name: Option<String>,
+    compute_mode: Option<String>,
+}
+
+#[instrument(skip_all, fields(peer_addr, application_name, compute_mode))]
 #[allow(clippy::too_many_arguments)]
 async fn page_service_conn_main(
     conf: &'static PageServerConf,
@@ -261,6 +280,12 @@ async fn page_service_conn_main(
     let socket_fd = socket.as_raw_fd();
 
     let peer_addr = socket.peer_addr().context("get peer address")?;
+
+    let perf_span_fields = ConnectionPerfSpanFields {
+        peer_addr: peer_addr.to_string(),
+        application_name: None, // filled in later
+        compute_mode: None,     // filled in later
+    };
     tracing::Span::current().record("peer_addr", field::display(peer_addr));
 
     // setup read timeout of 10 minutes. the timeout is rather arbitrary for requirements:
@@ -304,6 +329,7 @@ async fn page_service_conn_main(
         tenant_manager,
         auth,
         pipelining_config,
+        perf_span_fields,
         connection_ctx,
         cancel.clone(),
         gate_guard,
@@ -347,6 +373,8 @@ struct PageServerHandler {
     /// For each query received over the connection,
     /// `process_query` creates a child context from this one.
     connection_ctx: RequestContext,
+
+    perf_span_fields: ConnectionPerfSpanFields,
 
     cancel: CancellationToken,
 
@@ -607,6 +635,7 @@ impl std::fmt::Display for BatchedPageStreamError {
 struct BatchedGetPageRequest {
     req: PagestreamGetPageRequest,
     timer: SmgrOpTimer,
+    ctx: RequestContext,
 }
 
 #[cfg(feature = "testing")]
@@ -692,11 +721,13 @@ impl BatchedFeMessage {
 }
 
 impl PageServerHandler {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         conf: &'static PageServerConf,
         tenant_manager: Arc<TenantManager>,
         auth: Option<Arc<SwappableJwtAuth>>,
         pipelining_config: PageServicePipeliningConfig,
+        perf_span_fields: ConnectionPerfSpanFields,
         connection_ctx: RequestContext,
         cancel: CancellationToken,
         gate_guard: GateGuard,
@@ -706,6 +737,7 @@ impl PageServerHandler {
             auth,
             claims: None,
             connection_ctx,
+            perf_span_fields,
             timeline_handles: Some(TimelineHandles::new(tenant_manager)),
             cancel,
             pipelining_config,
@@ -743,6 +775,7 @@ impl PageServerHandler {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         timeline_handles: &mut TimelineHandles,
+        conn_perf_span_fields: &ConnectionPerfSpanFields,
         cancel: &CancellationToken,
         ctx: &RequestContext,
         protocol_version: PagestreamProtocolVersion,
@@ -902,10 +935,12 @@ impl PageServerHandler {
                 }
 
                 let key = rel_block_to_key(req.rel, req.blkno);
-                let shard = match timeline_handles
+
+                let res = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Page(key))
-                    .await
-                {
+                    .await;
+
+                let shard = match res {
                     Ok(tl) => tl,
                     Err(e) => {
                         let span = mkspan!(before shard routing);
@@ -932,6 +967,41 @@ impl PageServerHandler {
                         }
                     }
                 };
+
+                let ctx = if shard.is_get_page_request_sampled() {
+                    RequestContextBuilder::from(ctx)
+                        .root_perf_span(|| {
+                            info_span!(
+                            target: PERF_TRACE_TARGET,
+                            "GET_PAGE",
+                            peer_addr = conn_perf_span_fields.peer_addr,
+                            application_name = conn_perf_span_fields.application_name,
+                            compute_mode = conn_perf_span_fields.compute_mode,
+                            tenant_id = %tenant_id,
+                            shard_id = %shard.get_shard_identity().shard_slug(),
+                            timeline_id = %timeline_id,
+                            lsn = %req.hdr.request_lsn,
+                            request_id = %req.hdr.reqid,
+                            key = %key,
+                            )
+                        })
+                        .attached_child()
+                } else {
+                    ctx.attached_child()
+                };
+
+                // This ctx travels as part of the BatchedFeMessage through
+                // batching into the request handler.
+                // The request handler needs to do some per-request work
+                // (relsize check) before dispatching the batch as a single
+                // get_vectored call to the Timeline.
+                // This ctx will be used for the reslize check, whereas the
+                // get_vectored call will be a different ctx with separate
+                // perf span.
+                let ctx = ctx.with_scope_page_service_pagestream(&shard);
+
+                // Similar game for this `span`: we funnel it through so that
+                // request handler log messages contain the request-specific fields.
                 let span = mkspan!(shard.tenant_shard_id.shard_slug());
 
                 let timer = record_op_start_and_throttle(
@@ -939,19 +1009,34 @@ impl PageServerHandler {
                     metrics::SmgrQueryType::GetPageAtLsn,
                     received_at,
                 )
+                .maybe_perf_instrument(&ctx, |current_perf_span| {
+                    info_span!(
+                        target: PERF_TRACE_TARGET,
+                        parent: current_perf_span,
+                        "THROTTLE",
+                    )
+                })
                 .await?;
 
                 // We're holding the Handle
-                let effective_request_lsn = match Self::wait_or_get_last_lsn(
+                // TODO: if we actually need to wait for lsn here, it delays the entire batch which doesn't need to wait
+                let res = Self::wait_or_get_last_lsn(
                     &shard,
                     req.hdr.request_lsn,
                     req.hdr.not_modified_since,
                     &shard.get_applied_gc_cutoff_lsn(),
-                    ctx,
+                    &ctx,
                 )
-                // TODO: if we actually need to wait for lsn here, it delays the entire batch which doesn't need to wait
-                .await
-                {
+                .maybe_perf_instrument(&ctx, |current_perf_span| {
+                    info_span!(
+                        target: PERF_TRACE_TARGET,
+                        parent: current_perf_span,
+                        "WAIT_LSN",
+                    )
+                })
+                .await;
+
+                let effective_request_lsn = match res {
                     Ok(lsn) => lsn,
                     Err(e) => {
                         return respond_error!(span, e);
@@ -961,7 +1046,7 @@ impl PageServerHandler {
                     span,
                     shard: shard.downgrade(),
                     effective_request_lsn,
-                    pages: smallvec::smallvec![BatchedGetPageRequest { req, timer }],
+                    pages: smallvec::smallvec![BatchedGetPageRequest { req, timer, ctx }],
                 }
             }
             #[cfg(feature = "testing")]
@@ -1514,12 +1599,14 @@ impl PageServerHandler {
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
     {
         let cancel = self.cancel.clone();
+
         let err = loop {
             let msg = Self::pagestream_read_message(
                 &mut pgb_reader,
                 tenant_id,
                 timeline_id,
                 &mut timeline_handles,
+                &self.perf_span_fields,
                 &cancel,
                 ctx,
                 protocol_version,
@@ -1653,6 +1740,8 @@ impl PageServerHandler {
         // Batcher
         //
 
+        let perf_span_fields = self.perf_span_fields.clone();
+
         let cancel_batcher = self.cancel.child_token();
         let (mut batch_tx, mut batch_rx) = spsc_fold::channel();
         let batcher = pipeline_stage!("batcher", cancel_batcher.clone(), move |cancel_batcher| {
@@ -1666,6 +1755,7 @@ impl PageServerHandler {
                         tenant_id,
                         timeline_id,
                         &mut timeline_handles,
+                        &perf_span_fields,
                         &cancel_batcher,
                         &ctx,
                         protocol_version,
@@ -2004,7 +2094,9 @@ impl PageServerHandler {
 
         let results = timeline
             .get_rel_page_at_lsn_batched(
-                requests.iter().map(|p| (&p.req.rel, &p.req.blkno)),
+                requests
+                    .iter()
+                    .map(|p| (&p.req.rel, &p.req.blkno, p.ctx.attached_child())),
                 effective_lsn,
                 io_concurrency,
                 ctx,
@@ -2512,6 +2604,58 @@ impl PageServiceCmd {
     }
 }
 
+/// Parse the startup options from the postgres wire protocol startup packet.
+///
+/// It takes a sequence of `-c option=X` or `-coption=X`. It parses the options string
+/// by best effort and returns all the options parsed (key-value pairs) and a bool indicating
+/// whether all options are successfully parsed. There could be duplicates in the options
+/// if the caller passed such parameters.
+fn parse_options(options: &str) -> (Vec<(String, String)>, bool) {
+    let mut parsing_config = false;
+    let mut has_error = false;
+    let mut config = Vec::new();
+    for item in options.split_whitespace() {
+        if item == "-c" {
+            if !parsing_config {
+                parsing_config = true;
+            } else {
+                // "-c" followed with another "-c"
+                tracing::warn!("failed to parse the startup options: {options}");
+                has_error = true;
+                break;
+            }
+        } else if item.starts_with("-c") || parsing_config {
+            let Some((mut key, value)) = item.split_once('=') else {
+                // "-c" followed with an invalid option
+                tracing::warn!("failed to parse the startup options: {options}");
+                has_error = true;
+                break;
+            };
+            if !parsing_config {
+                // Parse "-coptions=X"
+                let Some(stripped_key) = key.strip_prefix("-c") else {
+                    tracing::warn!("failed to parse the startup options: {options}");
+                    has_error = true;
+                    break;
+                };
+                key = stripped_key;
+            }
+            config.push((key.to_string(), value.to_string()));
+            parsing_config = false;
+        } else {
+            tracing::warn!("failed to parse the startup options: {options}");
+            has_error = true;
+            break;
+        }
+    }
+    if parsing_config {
+        // "-c" without the option
+        tracing::warn!("failed to parse the startup options: {options}");
+        has_error = true;
+    }
+    (config, has_error)
+}
+
 impl<IO> postgres_backend::Handler<IO> for PageServerHandler
 where
     IO: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
@@ -2554,7 +2698,17 @@ where
 
         if let FeStartupPacket::StartupMessage { params, .. } = sm {
             if let Some(app_name) = params.get("application_name") {
+                self.perf_span_fields.application_name = Some(app_name.to_string());
                 Span::current().record("application_name", field::display(app_name));
+            }
+            if let Some(options) = params.get("options") {
+                let (config, _) = parse_options(options);
+                for (key, value) in config {
+                    if key == "neon.compute_mode" {
+                        self.perf_span_fields.compute_mode = Some(value.clone());
+                        Span::current().record("compute_mode", field::display(value));
+                    }
+                }
             }
         };
 
@@ -2669,6 +2823,7 @@ where
             PageServiceCmd::Set => {
                 // important because psycopg2 executes "SET datestyle TO 'ISO'"
                 // on connect
+                // TODO: allow setting options, i.e., application_name/compute_mode via SET commands
                 pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
             }
             PageServiceCmd::LeaseLsn(LeaseLsnCmd {
@@ -2942,5 +3097,47 @@ mod tests {
         assert!(cmd.is_err());
         let cmd = PageServiceCmd::parse(&format!("lease {tenant_id} {timeline_id} gzip 0/16ABCDE"));
         assert!(cmd.is_err());
+    }
+
+    #[test]
+    fn test_parse_options() {
+        let (config, has_error) = parse_options(" -c neon.compute_mode=primary ");
+        assert!(!has_error);
+        assert_eq!(
+            config,
+            vec![("neon.compute_mode".to_string(), "primary".to_string())]
+        );
+
+        let (config, has_error) = parse_options(" -c neon.compute_mode=primary -c foo=bar ");
+        assert!(!has_error);
+        assert_eq!(
+            config,
+            vec![
+                ("neon.compute_mode".to_string(), "primary".to_string()),
+                ("foo".to_string(), "bar".to_string()),
+            ]
+        );
+
+        let (config, has_error) = parse_options(" -c neon.compute_mode=primary -cfoo=bar");
+        assert!(!has_error);
+        assert_eq!(
+            config,
+            vec![
+                ("neon.compute_mode".to_string(), "primary".to_string()),
+                ("foo".to_string(), "bar".to_string()),
+            ]
+        );
+
+        let (_, has_error) = parse_options("-c");
+        assert!(has_error);
+
+        let (_, has_error) = parse_options("-c foo=bar -c -c");
+        assert!(has_error);
+
+        let (_, has_error) = parse_options("    ");
+        assert!(!has_error);
+
+        let (_, has_error) = parse_options(" -c neon.compute_mode");
+        assert!(has_error);
     }
 }

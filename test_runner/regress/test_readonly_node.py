@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
@@ -13,9 +14,11 @@ from fixtures.neon_fixtures import (
     last_flush_lsn_upload,
     tenant_get_shards,
 )
-from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_last_record_lsn
 from fixtures.utils import query_scalar, wait_until
+
+if TYPE_CHECKING:
+    from fixtures.pageserver.http import PageserverHttpClient
 
 
 #
@@ -207,9 +210,9 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
 
             # Note: cannot assert on `layers_removed` here because it could be layers
             # not guarded by the lease. Instead, use layer map dump.
-            assert layers_guarded_before_gc.issubset(
-                layers_guarded_after_gc
-            ), "Layers guarded by lease before GC should not be removed"
+            assert layers_guarded_before_gc.issubset(layers_guarded_after_gc), (
+                "Layers guarded by lease before GC should not be removed"
+            )
 
             log.info(f"{gc_result=}")
 
