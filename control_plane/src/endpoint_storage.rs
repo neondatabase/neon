@@ -1,34 +1,33 @@
 use crate::background_process::{self, start_process, stop_process};
 use crate::local_env::LocalEnv;
-use anyhow::anyhow;
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
 use std::io::Write;
 use std::time::Duration;
 
 /// Directory within .neon which will be used by default for LocalFs remote storage.
-pub const OBJECT_STORAGE_REMOTE_STORAGE_DIR: &str = "local_fs_remote_storage/object_storage";
-pub const OBJECT_STORAGE_DEFAULT_PORT: u16 = 9993;
+pub const ENDPOINT_STORAGE_REMOTE_STORAGE_DIR: &str = "local_fs_remote_storage/endpoint_storage";
+pub const ENDPOINT_STORAGE_DEFAULT_PORT: u16 = 9993;
 
-pub struct ObjectStorage {
+pub struct EndpointStorage {
     pub bin: Utf8PathBuf,
     pub data_dir: Utf8PathBuf,
     pub pemfile: Utf8PathBuf,
     pub port: u16,
 }
 
-impl ObjectStorage {
-    pub fn from_env(env: &LocalEnv) -> ObjectStorage {
-        ObjectStorage {
-            bin: Utf8PathBuf::from_path_buf(env.object_storage_bin()).unwrap(),
-            data_dir: Utf8PathBuf::from_path_buf(env.object_storage_data_dir()).unwrap(),
+impl EndpointStorage {
+    pub fn from_env(env: &LocalEnv) -> EndpointStorage {
+        EndpointStorage {
+            bin: Utf8PathBuf::from_path_buf(env.endpoint_storage_bin()).unwrap(),
+            data_dir: Utf8PathBuf::from_path_buf(env.endpoint_storage_data_dir()).unwrap(),
             pemfile: Utf8PathBuf::from_path_buf(env.public_key_path.clone()).unwrap(),
-            port: env.object_storage.port,
+            port: env.endpoint_storage.port,
         }
     }
 
     fn config_path(&self) -> Utf8PathBuf {
-        self.data_dir.join("object_storage.json")
+        self.data_dir.join("endpoint_storage.json")
     }
 
     fn listen_addr(&self) -> Utf8PathBuf {
@@ -49,7 +48,7 @@ impl ObjectStorage {
         let cfg = Cfg {
             listen: self.listen_addr(),
             pemfile: parent.join(self.pemfile.clone()),
-            local_path: parent.join(OBJECT_STORAGE_REMOTE_STORAGE_DIR),
+            local_path: parent.join(ENDPOINT_STORAGE_REMOTE_STORAGE_DIR),
             r#type: "LocalFs".to_string(),
         };
         std::fs::create_dir_all(self.config_path().parent().unwrap())?;
@@ -59,7 +58,7 @@ impl ObjectStorage {
     }
 
     pub async fn start(&self, retry_timeout: &Duration) -> Result<()> {
-        println!("Starting object_storage at {}", self.listen_addr());
+        println!("Starting endpoint_storage at {}", self.listen_addr());
         std::io::stdout().flush().context("flush stdout")?;
 
         let process_status_check = || async {
@@ -71,7 +70,7 @@ impl ObjectStorage {
         };
 
         let res = start_process(
-            "object_storage",
+            "endpoint_storage",
             &self.data_dir.clone().into_std_path_buf(),
             &self.bin.clone().into_std_path_buf(),
             vec![self.config_path().to_string()],
@@ -89,14 +88,14 @@ impl ObjectStorage {
     }
 
     pub fn stop(&self, immediate: bool) -> anyhow::Result<()> {
-        stop_process(immediate, "object_storage", &self.pid_file())
+        stop_process(immediate, "endpoint_storage", &self.pid_file())
     }
 
     fn log_file(&self) -> Utf8PathBuf {
-        self.data_dir.join("object_storage.log")
+        self.data_dir.join("endpoint_storage.log")
     }
 
     fn pid_file(&self) -> Utf8PathBuf {
-        self.data_dir.join("object_storage.pid")
+        self.data_dir.join("endpoint_storage.pid")
     }
 }
