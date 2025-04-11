@@ -213,13 +213,14 @@ def test_throughput(
                 for sample in samples:
                     log.info(f"{name=} labels={sample.labels} {sample.value}")
 
-            batch_break_reason_count = pageserver_metrics.query_all(
+            raw_batch_break_reason_count = pageserver_metrics.query_all(
                 "pageserver_page_service_batch_break_reason_total",
                 filter={"timeline_id": str(env.initial_timeline)},
             )
 
             batch_break_reason_count = {
-                sample.labels["reason"]: int(sample.value) for sample in batch_break_reason_count
+                sample.labels["reason"]: int(sample.value)
+                for sample in raw_batch_break_reason_count
             }
 
             return Metrics(
@@ -299,6 +300,7 @@ def test_throughput(
 
     for metric, value in dataclasses.asdict(metrics).items():
         if metric == "pageserver_batch_breaks_reason_count":
+            assert isinstance(value, dict)
             for reason, count in value.items():
                 zenbenchmark.record(
                     f"counters.{metric}_{reason}", count, unit="", report=MetricReport.TEST_PARAM
