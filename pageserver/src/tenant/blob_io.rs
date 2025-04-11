@@ -381,7 +381,7 @@ pub(crate) mod tests {
             let (_, res) = wtr.write_blob(vec![0; PAGE_SZ].slice_len(), ctx).await;
             let offs = res?;
             println!("Writing final blob at offs={offs}");
-            wtr.into_inner(|_| None).await?;
+            wtr.into_inner(|_| None).await?; // TODO: this here is the problem with the tests: we're dropping the tail end
         }
         Ok((temp_dir, pathbuf, offsets))
     }
