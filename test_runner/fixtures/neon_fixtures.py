@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 from collections import defaultdict
+from collections.abc import Mapping
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -79,7 +80,12 @@ from fixtures.remote_storage import (
     default_remote_storage,
     remote_storage_to_toml_dict,
 )
-from fixtures.safekeeper.http import SafekeeperHttpClient
+from fixtures.safekeeper.http import (
+    MembershipConfiguration,
+    SafekeeperHttpClient,
+    SafekeeperId,
+    TimelineCreateRequest,
+)
 from fixtures.safekeeper.utils import wait_walreceivers_absent
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
@@ -1980,10 +1986,13 @@ class NeonStorageController(MetricsGetter, LogUtils):
         tenant_shard_id: TenantId | TenantShardId,
         pageserver_id: int,
         generation_override: int | None = None,
+        config: None | dict[str, Any] = None,
     ) -> int:
         body = {"tenant_shard_id": str(tenant_shard_id), "node_id": pageserver_id}
         if generation_override is not None:
             body["generation_override"] = generation_override
+        if config is not None:
+            body["config"] = config
 
         response = self.request(
             "POST",
@@ -2878,13 +2887,14 @@ class NeonPageserver(PgProtocol, LogUtils):
         self,
         immediate: bool = False,
         timeout_in_seconds: int | None = None,
+        extra_env_vars: dict[str, str] | None = None,
     ):
         """
         High level wrapper for restart: restarts the process, and waits for
         tenant state to stabilize.
         """
         self.stop(immediate=immediate)
-        self.start(timeout_in_seconds=timeout_in_seconds)
+        self.start(timeout_in_seconds=timeout_in_seconds, extra_env_vars=extra_env_vars)
         self.quiesce_tenants()
 
     def quiesce_tenants(self):
@@ -2973,11 +2983,12 @@ class NeonPageserver(PgProtocol, LogUtils):
         to call into the pageserver HTTP client.
         """
         client = self.http_client()
-        if generation is None:
-            generation = self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
-        elif override_storage_controller_generation:
+        if generation is None or override_storage_controller_generation:
             generation = self.env.storage_controller.attach_hook_issue(
-                tenant_id, self.id, generation
+                tenant_id,
+                self.id,
+                generation_override=generation if override_storage_controller_generation else None,
+                config=config,
             )
         return client.tenant_attach(
             tenant_id,
@@ -4291,28 +4302,29 @@ class Endpoint(PgProtocol, LogUtils):
 
     def respec_deep(self, **kwargs: Any) -> None:
         """
-        Update the endpoint.json file taking into account nested keys.
-        It does one level deep update. Should enough for most cases.
-        Distinct method from respec() to do not break existing functionality.
+        Update the spec.json file taking into account nested keys.
+        Distinct method from respec() to not break existing functionality.
         NOTE: This method also updates the spec.json file, not endpoint.json.
         We need it because neon_local also writes to spec.json, so intended
         use-case is i) start endpoint with some config, ii) respec_deep(),
         iii) call reconfigure() to apply the changes.
         """
+
+        def update(curr, patch):
+            for k, v in patch.items():
+                if isinstance(v, Mapping):
+                    curr[k] = update(curr.get(k, {}), v)
+                else:
+                    curr[k] = v
+            return curr
+
         config_path = os.path.join(self.endpoint_path(), "spec.json")
         with open(config_path) as f:
             data_dict: dict[str, Any] = json.load(f)
 
         log.debug("Current compute spec: %s", json.dumps(data_dict, indent=4))
 
-        for key, value in kwargs.items():
-            if isinstance(value, dict):
-                if key not in data_dict:
-                    data_dict[key] = value
-                else:
-                    data_dict[key] = {**data_dict[key], **value}
-            else:
-                data_dict[key] = value
+        update(data_dict, kwargs)
 
         with open(config_path, "w") as file:
             log.debug("Updating compute spec to: %s", json.dumps(data_dict, indent=4))
@@ -4838,6 +4850,50 @@ class Safekeeper(LogUtils):
             self.assert_log_contains(msg)
 
         wait_until(paused)
+
+    @staticmethod
+    def sks_to_safekeeper_ids(sks: list[Safekeeper]) -> list[SafekeeperId]:
+        return [SafekeeperId(sk.id, "localhost", sk.port.pg_tenant_only) for sk in sks]
+
+    @staticmethod
+    def mconf_sks(env: NeonEnv, mconf: MembershipConfiguration) -> list[Safekeeper]:
+        """
+        List of Safekeepers which are members in `mconf`.
+        """
+        members_ids = [m.id for m in mconf.members]
+        new_members_ids = [m.id for m in mconf.new_members] if mconf.new_members is not None else []
+        return [sk for sk in env.safekeepers if sk.id in members_ids or sk.id in new_members_ids]
+
+    @staticmethod
+    def create_timeline(
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        ps: NeonPageserver,
+        mconf: MembershipConfiguration,
+        members_sks: list[Safekeeper],
+    ):
+        """
+        Manually create timeline on safekeepers with given (presumably inital)
+        mconf: figure out LSN from pageserver, bake request and execute it on
+        given safekeepers.
+
+        Normally done by storcon, but some tests want to do it manually so far.
+        """
+        ps_http_cli = ps.http_client()
+        # figure out initial LSN.
+        ps_timeline_detail = ps_http_cli.timeline_detail(tenant_id, timeline_id)
+        init_lsn = ps_timeline_detail["last_record_lsn"]
+        log.info(f"initial LSN: {init_lsn}")
+        # sk timeline creation request expects minor version
+        pg_version = ps_timeline_detail["pg_version"] * 10000
+        # create inital mconf
+        create_r = TimelineCreateRequest(
+            tenant_id, timeline_id, mconf, pg_version, Lsn(init_lsn), commit_lsn=None
+        )
+        log.info(f"sending timeline create: {create_r.to_json()}")
+
+        for sk in members_sks:
+            sk.http_client().timeline_create(create_r)
 
 
 class NeonBroker(LogUtils):

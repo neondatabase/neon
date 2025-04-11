@@ -9,8 +9,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet, hash_map};
 use std::ops::{ControlFlow, Range};
 
-use crate::PERF_TRACE_TARGET;
-use anyhow::{Context, ensure};
+use crate::walingest::{WalIngestError, WalIngestErrorKind};
+use crate::{PERF_TRACE_TARGET, ensure_walingest};
+use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
 use itertools::Itertools;
@@ -136,12 +137,8 @@ impl From<PageReconstructError> for CalculateLogicalSizeError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RelationError {
-    #[error("Relation Already Exists")]
-    AlreadyExists,
     #[error("invalid relnode")]
     InvalidRelnode,
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
 }
 
 ///
@@ -1478,8 +1475,8 @@ impl DatadirModification<'_> {
     }
 
     /// Set the current lsn
-    pub(crate) fn set_lsn(&mut self, lsn: Lsn) -> anyhow::Result<()> {
-        ensure!(
+    pub(crate) fn set_lsn(&mut self, lsn: Lsn) -> Result<(), WalIngestError> {
+        ensure_walingest!(
             lsn >= self.lsn,
             "setting an older lsn {} than {} is not allowed",
             lsn,
@@ -1578,7 +1575,7 @@ impl DatadirModification<'_> {
         &mut self,
         rel: RelTag,
         ctx: &RequestContext,
-    ) -> Result<u32, PageReconstructError> {
+    ) -> Result<u32, WalIngestError> {
         // Get current size and put rel creation if rel doesn't exist
         //
         // NOTE: we check the cache first even though get_rel_exists and get_rel_size would
@@ -1593,14 +1590,13 @@ impl DatadirModification<'_> {
             .await?
         {
             // create it with 0 size initially, the logic below will extend it
-            self.put_rel_creation(rel, 0, ctx)
-                .await
-                .context("Relation Error")?;
+            self.put_rel_creation(rel, 0, ctx).await?;
             Ok(0)
         } else {
-            self.tline
+            Ok(self
+                .tline
                 .get_rel_size(rel, Version::Modified(self), ctx)
-                .await
+                .await?)
         }
     }
 
@@ -1637,11 +1633,14 @@ impl DatadirModification<'_> {
         // TODO(vlad): remove this argument and replace the shard check with is_key_local
         shard: &ShardIdentity,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         let mut gaps_at_lsns = Vec::default();
 
         for meta in batch.metadata.iter() {
-            let (rel, blkno) = Key::from_compact(meta.key()).to_rel_block()?;
+            let key = Key::from_compact(meta.key());
+            let (rel, blkno) = key
+                .to_rel_block()
+                .map_err(|_| WalIngestErrorKind::InvalidKey(key, meta.lsn()))?;
             let new_nblocks = blkno + 1;
 
             let old_nblocks = self.create_relation_if_required(rel, ctx).await?;
@@ -1683,8 +1682,8 @@ impl DatadirModification<'_> {
         rel: RelTag,
         blknum: BlockNumber,
         rec: NeonWalRecord,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
+    ) -> Result<(), WalIngestError> {
+        ensure_walingest!(rel.relnode != 0, RelationError::InvalidRelnode);
         self.put(rel_block_to_key(rel, blknum), Value::WalRecord(rec));
         Ok(())
     }
@@ -1696,7 +1695,7 @@ impl DatadirModification<'_> {
         segno: u32,
         blknum: BlockNumber,
         rec: NeonWalRecord,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         if !self.tline.tenant_shard_id.is_shard_zero() {
             return Ok(());
         }
@@ -1714,14 +1713,11 @@ impl DatadirModification<'_> {
         rel: RelTag,
         blknum: BlockNumber,
         img: Bytes,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
+    ) -> Result<(), WalIngestError> {
+        ensure_walingest!(rel.relnode != 0, RelationError::InvalidRelnode);
         let key = rel_block_to_key(rel, blknum);
         if !key.is_valid_key_on_write_path() {
-            anyhow::bail!(
-                "the request contains data not supported by pageserver at {}",
-                key
-            );
+            Err(WalIngestErrorKind::InvalidKey(key, self.lsn))?;
         }
         self.put(rel_block_to_key(rel, blknum), Value::Image(img));
         Ok(())
@@ -1733,15 +1729,12 @@ impl DatadirModification<'_> {
         segno: u32,
         blknum: BlockNumber,
         img: Bytes,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         assert!(self.tline.tenant_shard_id.is_shard_zero());
 
         let key = slru_block_to_key(kind, segno, blknum);
         if !key.is_valid_key_on_write_path() {
-            anyhow::bail!(
-                "the request contains data not supported by pageserver at {}",
-                key
-            );
+            Err(WalIngestErrorKind::InvalidKey(key, self.lsn))?;
         }
         self.put(key, Value::Image(img));
         Ok(())
@@ -1751,15 +1744,11 @@ impl DatadirModification<'_> {
         &mut self,
         rel: RelTag,
         blknum: BlockNumber,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
+    ) -> Result<(), WalIngestError> {
+        ensure_walingest!(rel.relnode != 0, RelationError::InvalidRelnode);
         let key = rel_block_to_key(rel, blknum);
         if !key.is_valid_key_on_write_path() {
-            anyhow::bail!(
-                "the request contains data not supported by pageserver: {} @ {}",
-                key,
-                self.lsn
-            );
+            Err(WalIngestErrorKind::InvalidKey(key, self.lsn))?;
         }
 
         let batch = self
@@ -1776,15 +1765,11 @@ impl DatadirModification<'_> {
         kind: SlruKind,
         segno: u32,
         blknum: BlockNumber,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         assert!(self.tline.tenant_shard_id.is_shard_zero());
         let key = slru_block_to_key(kind, segno, blknum);
         if !key.is_valid_key_on_write_path() {
-            anyhow::bail!(
-                "the request contains data not supported by pageserver: {} @ {}",
-                key,
-                self.lsn
-            );
+            Err(WalIngestErrorKind::InvalidKey(key, self.lsn))?;
         }
 
         let batch = self
@@ -1832,8 +1817,10 @@ impl DatadirModification<'_> {
         dbnode: Oid,
         img: Bytes,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        let v2_enabled = self.maybe_enable_rel_size_v2()?;
+    ) -> Result<(), WalIngestError> {
+        let v2_enabled = self
+            .maybe_enable_rel_size_v2()
+            .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
 
         // Add it to the directory (if it doesn't exist already)
         let buf = self.get(DBDIR_KEY, ctx).await?;
@@ -1874,13 +1861,13 @@ impl DatadirModification<'_> {
         xid: u64,
         img: Bytes,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         // Add it to the directory entry
         let dirbuf = self.get(TWOPHASEDIR_KEY, ctx).await?;
         let newdirbuf = if self.tline.pg_version >= 17 {
             let mut dir = TwoPhaseDirectoryV17::des(&dirbuf)?;
             if !dir.xids.insert(xid) {
-                anyhow::bail!("twophase file for xid {} already exists", xid);
+                Err(WalIngestErrorKind::FileAlreadyExists(xid))?;
             }
             self.pending_directory_entries.push((
                 DirectoryKind::TwoPhase,
@@ -1891,7 +1878,7 @@ impl DatadirModification<'_> {
             let xid = xid as u32;
             let mut dir = TwoPhaseDirectory::des(&dirbuf)?;
             if !dir.xids.insert(xid) {
-                anyhow::bail!("twophase file for xid {} already exists", xid);
+                Err(WalIngestErrorKind::FileAlreadyExists(xid.into()))?;
             }
             self.pending_directory_entries.push((
                 DirectoryKind::TwoPhase,
@@ -1909,22 +1896,22 @@ impl DatadirModification<'_> {
         &mut self,
         origin_id: RepOriginId,
         origin_lsn: Lsn,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         let key = repl_origin_key(origin_id);
         self.put(key, Value::Image(origin_lsn.ser().unwrap().into()));
         Ok(())
     }
 
-    pub async fn drop_replorigin(&mut self, origin_id: RepOriginId) -> anyhow::Result<()> {
+    pub async fn drop_replorigin(&mut self, origin_id: RepOriginId) -> Result<(), WalIngestError> {
         self.set_replorigin(origin_id, Lsn::INVALID).await
     }
 
-    pub fn put_control_file(&mut self, img: Bytes) -> anyhow::Result<()> {
+    pub fn put_control_file(&mut self, img: Bytes) -> Result<(), WalIngestError> {
         self.put(CONTROLFILE_KEY, Value::Image(img));
         Ok(())
     }
 
-    pub fn put_checkpoint(&mut self, img: Bytes) -> anyhow::Result<()> {
+    pub fn put_checkpoint(&mut self, img: Bytes) -> Result<(), WalIngestError> {
         self.put(CHECKPOINT_KEY, Value::Image(img));
         Ok(())
     }
@@ -1934,7 +1921,7 @@ impl DatadirModification<'_> {
         spcnode: Oid,
         dbnode: Oid,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         let total_blocks = self
             .tline
             .get_db_size(spcnode, dbnode, Version::Modified(self), ctx)
@@ -1973,20 +1960,21 @@ impl DatadirModification<'_> {
         rel: RelTag,
         nblocks: BlockNumber,
         ctx: &RequestContext,
-    ) -> Result<(), RelationError> {
+    ) -> Result<(), WalIngestError> {
         if rel.relnode == 0 {
-            return Err(RelationError::InvalidRelnode);
+            Err(WalIngestErrorKind::LogicalError(anyhow::anyhow!(
+                "invalid relnode"
+            )))?;
         }
         // It's possible that this is the first rel for this db in this
         // tablespace.  Create the reldir entry for it if so.
-        let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY, ctx).await.context("read db")?)
-            .context("deserialize db")?;
+        let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY, ctx).await?)?;
 
         let dbdir_exists =
             if let hash_map::Entry::Vacant(e) = dbdir.dbdirs.entry((rel.spcnode, rel.dbnode)) {
                 // Didn't exist. Update dbdir
                 e.insert(false);
-                let buf = DbDirectory::ser(&dbdir).context("serialize db")?;
+                let buf = DbDirectory::ser(&dbdir)?;
                 self.pending_directory_entries.push((
                     DirectoryKind::Db,
                     MetricsUpdate::Set(dbdir.dbdirs.len() as u64),
@@ -2003,27 +1991,25 @@ impl DatadirModification<'_> {
             RelDirectory::default()
         } else {
             // reldir already exists, fetch it
-            RelDirectory::des(&self.get(rel_dir_key, ctx).await.context("read db")?)
-                .context("deserialize db")?
+            RelDirectory::des(&self.get(rel_dir_key, ctx).await?)?
         };
 
-        let v2_enabled = self.maybe_enable_rel_size_v2()?;
+        let v2_enabled = self
+            .maybe_enable_rel_size_v2()
+            .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
 
         if v2_enabled {
             if rel_dir.rels.contains(&(rel.relnode, rel.forknum)) {
-                return Err(RelationError::AlreadyExists);
+                Err(WalIngestErrorKind::RelationAlreadyExists(rel))?;
             }
             let sparse_rel_dir_key =
                 rel_tag_sparse_key(rel.spcnode, rel.dbnode, rel.relnode, rel.forknum);
             // check if the rel_dir_key exists in v2
-            let val = self
-                .sparse_get(sparse_rel_dir_key, ctx)
-                .await
-                .map_err(|e| RelationError::Other(e.into()))?;
+            let val = self.sparse_get(sparse_rel_dir_key, ctx).await?;
             let val = RelDirExists::decode_option(val)
-                .map_err(|_| RelationError::Other(anyhow::anyhow!("invalid reldir key")))?;
+                .map_err(|_| WalIngestErrorKind::InvalidRelDirKey(sparse_rel_dir_key))?;
             if val == RelDirExists::Exists {
-                return Err(RelationError::AlreadyExists);
+                Err(WalIngestErrorKind::RelationAlreadyExists(rel))?;
             }
             self.put(
                 sparse_rel_dir_key,
@@ -2039,9 +2025,7 @@ impl DatadirModification<'_> {
                 // will be key not found errors if we don't create an empty one for rel_size_v2.
                 self.put(
                     rel_dir_key,
-                    Value::Image(Bytes::from(
-                        RelDirectory::ser(&RelDirectory::default()).context("serialize")?,
-                    )),
+                    Value::Image(Bytes::from(RelDirectory::ser(&RelDirectory::default())?)),
                 );
             }
             self.pending_directory_entries
@@ -2049,7 +2033,7 @@ impl DatadirModification<'_> {
         } else {
             // Add the new relation to the rel directory entry, and write it back
             if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
-                return Err(RelationError::AlreadyExists);
+                Err(WalIngestErrorKind::RelationAlreadyExists(rel))?;
             }
             if !dbdir_exists {
                 self.pending_directory_entries
@@ -2059,9 +2043,7 @@ impl DatadirModification<'_> {
                 .push((DirectoryKind::Rel, MetricsUpdate::Add(1)));
             self.put(
                 rel_dir_key,
-                Value::Image(Bytes::from(
-                    RelDirectory::ser(&rel_dir).context("serialize")?,
-                )),
+                Value::Image(Bytes::from(RelDirectory::ser(&rel_dir)?)),
             );
         }
 
@@ -2086,8 +2068,8 @@ impl DatadirModification<'_> {
         rel: RelTag,
         nblocks: BlockNumber,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
+    ) -> Result<(), WalIngestError> {
+        ensure_walingest!(rel.relnode != 0, RelationError::InvalidRelnode);
         if self
             .tline
             .get_rel_exists(rel, Version::Modified(self), ctx)
@@ -2117,8 +2099,8 @@ impl DatadirModification<'_> {
         rel: RelTag,
         nblocks: BlockNumber,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
+    ) -> Result<(), WalIngestError> {
+        ensure_walingest!(rel.relnode != 0, RelationError::InvalidRelnode);
 
         // Put size
         let size_key = rel_size_to_key(rel);
@@ -2142,8 +2124,10 @@ impl DatadirModification<'_> {
         &mut self,
         drop_relations: HashMap<(u32, u32), Vec<RelTag>>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        let v2_enabled = self.maybe_enable_rel_size_v2()?;
+    ) -> Result<(), WalIngestError> {
+        let v2_enabled = self
+            .maybe_enable_rel_size_v2()
+            .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
         for ((spc_node, db_node), rel_tags) in drop_relations {
             let dir_key = rel_dir_to_key(spc_node, db_node);
             let buf = self.get(dir_key, ctx).await?;
@@ -2163,7 +2147,7 @@ impl DatadirModification<'_> {
                     let key =
                         rel_tag_sparse_key(spc_node, db_node, rel_tag.relnode, rel_tag.forknum);
                     let val = RelDirExists::decode_option(self.sparse_get(key, ctx).await?)
-                        .map_err(|_| RelationError::Other(anyhow::anyhow!("invalid reldir key")))?;
+                        .map_err(|_| WalIngestErrorKind::InvalidKey(key, self.lsn))?;
                     if val == RelDirExists::Exists {
                         self.pending_directory_entries
                             .push((DirectoryKind::RelV2, MetricsUpdate::Sub(1)));
@@ -2206,7 +2190,7 @@ impl DatadirModification<'_> {
         segno: u32,
         nblocks: BlockNumber,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         assert!(self.tline.tenant_shard_id.is_shard_zero());
 
         // Add it to the directory entry
@@ -2215,7 +2199,7 @@ impl DatadirModification<'_> {
         let mut dir = SlruSegmentDirectory::des(&buf)?;
 
         if !dir.segments.insert(segno) {
-            anyhow::bail!("slru segment {kind:?}/{segno} already exists");
+            Err(WalIngestErrorKind::SlruAlreadyExists(kind, segno))?;
         }
         self.pending_directory_entries.push((
             DirectoryKind::SlruSegment(kind),
@@ -2242,7 +2226,7 @@ impl DatadirModification<'_> {
         kind: SlruKind,
         segno: u32,
         nblocks: BlockNumber,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         assert!(self.tline.tenant_shard_id.is_shard_zero());
 
         // Put size
@@ -2258,7 +2242,7 @@ impl DatadirModification<'_> {
         kind: SlruKind,
         segno: u32,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         // Remove it from the directory entry
         let dir_key = slru_dir_to_key(kind);
         let buf = self.get(dir_key, ctx).await?;
@@ -2283,7 +2267,7 @@ impl DatadirModification<'_> {
     }
 
     /// Drop a relmapper file (pg_filenode.map)
-    pub fn drop_relmap_file(&mut self, _spcnode: Oid, _dbnode: Oid) -> anyhow::Result<()> {
+    pub fn drop_relmap_file(&mut self, _spcnode: Oid, _dbnode: Oid) -> Result<(), WalIngestError> {
         // TODO
         Ok(())
     }
@@ -2293,7 +2277,7 @@ impl DatadirModification<'_> {
         &mut self,
         xid: u64,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         // Remove it from the directory entry
         let buf = self.get(TWOPHASEDIR_KEY, ctx).await?;
         let newdirbuf = if self.tline.pg_version >= 17 {
@@ -2308,7 +2292,8 @@ impl DatadirModification<'_> {
             ));
             Bytes::from(TwoPhaseDirectoryV17::ser(&dir)?)
         } else {
-            let xid: u32 = u32::try_from(xid)?;
+            let xid: u32 = u32::try_from(xid)
+                .map_err(|e| WalIngestErrorKind::LogicalError(anyhow::Error::from(e)))?;
             let mut dir = TwoPhaseDirectory::des(&buf)?;
 
             if !dir.xids.remove(&xid) {
@@ -2333,7 +2318,7 @@ impl DatadirModification<'_> {
         path: &str,
         content: &[u8],
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WalIngestError> {
         let key = aux_file::encode_aux_file_key(path);
         // retrieve the key from the engine
         let old_val = match self.get(key, ctx).await {
@@ -2342,7 +2327,7 @@ impl DatadirModification<'_> {
             Err(e) => return Err(e.into()),
         };
         let files: Vec<(&str, &[u8])> = if let Some(ref old_val) = old_val {
-            aux_file::decode_file_value(old_val)?
+            aux_file::decode_file_value(old_val).map_err(WalIngestErrorKind::EncodeAuxFileError)?
         } else {
             Vec::new()
         };
@@ -2387,7 +2372,8 @@ impl DatadirModification<'_> {
             }
             (None, true) => warn!("removing non-existing aux file: {}", path),
         }
-        let new_val = aux_file::encode_file_value(&new_files)?;
+        let new_val = aux_file::encode_file_value(&new_files)
+            .map_err(WalIngestErrorKind::EncodeAuxFileError)?;
         self.put(key, Value::Image(new_val.into()));
 
         Ok(())
