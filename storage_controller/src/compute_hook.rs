@@ -629,15 +629,13 @@ impl ComputeHook {
         };
 
         let result = if !self.config.use_local_compute_notifications {
-            let compute_hook_url = if let Some(control_plane_url) = &self.config.control_plane_url {
-                Some(if control_plane_url.ends_with('/') {
-                    format!("{control_plane_url}notify-attach")
-                } else {
-                    format!("{control_plane_url}/notify-attach")
-                })
-            } else {
-                self.config.compute_hook_url.clone()
-            };
+            let compute_hook_url =
+                self.config
+                    .control_plane_url
+                    .as_ref()
+                    .map(|control_plane_url| {
+                        format!("{}/notify-attach", control_plane_url.trim_end_matches('/'))
+                    });
 
             // We validate this at startup
             let notify_url = compute_hook_url.as_ref().unwrap();
