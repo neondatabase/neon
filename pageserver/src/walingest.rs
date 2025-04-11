@@ -27,7 +27,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use bytes::{Buf, Bytes};
-use pageserver_api::key::{Key, ToRelBlockError, rel_block_to_key};
+use pageserver_api::key::{Key, rel_block_to_key};
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
@@ -126,10 +126,8 @@ pub enum WalIngestErrorKind {
     SlruAlreadyExists(SlruKind, u32),
     #[error("relation already exists")]
     RelationAlreadyExists,
-    #[error("invalid reldir key")]
+    #[error("invalid reldir key {0}")]
     InvalidRelDirKey(Key),
-    #[error(transparent)]
-    ToRelBlockErr(#[from] ToRelBlockError),
 
     #[error(transparent)]
     LogicalError(anyhow::Error),

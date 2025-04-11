@@ -1637,7 +1637,10 @@ impl DatadirModification<'_> {
         let mut gaps_at_lsns = Vec::default();
 
         for meta in batch.metadata.iter() {
-            let (rel, blkno) = Key::from_compact(meta.key()).to_rel_block()?;
+            let key = Key::from_compact(meta.key());
+            let (rel, blkno) = key
+                .to_rel_block()
+                .map_err(|_| WalIngestErrorKind::InvalidKey(key, meta.lsn()))?;
             let new_nblocks = blkno + 1;
 
             let old_nblocks = self.create_relation_if_required(rel, ctx).await?;
@@ -2290,7 +2293,7 @@ impl DatadirModification<'_> {
             Bytes::from(TwoPhaseDirectoryV17::ser(&dir)?)
         } else {
             let xid: u32 = u32::try_from(xid)
-                .map_err(|e| WalIngestErrorKind::AssertionError(anyhow::Error::from(e)))?;
+                .map_err(|e| WalIngestErrorKind::LogicalError(anyhow::Error::from(e)))?;
             let mut dir = TwoPhaseDirectory::des(&buf)?;
 
             if !dir.xids.remove(&xid) {
