@@ -1959,7 +1959,9 @@ impl DatadirModification<'_> {
         ctx: &RequestContext,
     ) -> Result<(), WalIngestError> {
         if rel.relnode == 0 {
-            Err(WalIngestErrorKind::InvalidRelnode)?;
+            Err(WalIngestErrorKind::LogicalError(anyhow::anyhow!(
+                "invalid relnode"
+            )))?;
         }
         // It's possible that this is the first rel for this db in this
         // tablespace.  Create the reldir entry for it if so.
@@ -2002,7 +2004,7 @@ impl DatadirModification<'_> {
             // check if the rel_dir_key exists in v2
             let val = self.sparse_get(sparse_rel_dir_key, ctx).await?;
             let val = RelDirExists::decode_option(val)
-                .map_err(|_| WalIngestErrorKind::InvalidRelDirKey)?;
+                .map_err(|_| WalIngestErrorKind::InvalidRelDirKey(sparse_rel_dir_key))?;
             if val == RelDirExists::Exists {
                 Err(WalIngestErrorKind::RelationAlreadyExists)?;
             }

@@ -126,15 +126,13 @@ pub enum WalIngestErrorKind {
     SlruAlreadyExists(SlruKind, u32),
     #[error("relation already exists")]
     RelationAlreadyExists,
-    #[error("invalid relnode")]
-    InvalidRelnode,
     #[error("invalid reldir key")]
-    InvalidRelDirKey,
+    InvalidRelDirKey(Key),
     #[error(transparent)]
     ToRelBlockErr(#[from] ToRelBlockError),
 
     #[error(transparent)]
-    AssertionError(anyhow::Error),
+    LogicalError(anyhow::Error),
     #[error(transparent)]
     EncodeAuxFileError(anyhow::Error),
     #[error(transparent)]
@@ -193,16 +191,7 @@ macro_rules! ensure_walingest {
         _ = || -> Result<(), anyhow::Error> {
             anyhow::ensure!($($t)*);
             Ok(())
-        }().map_err(WalIngestErrorKind::AssertionError)?;
-    };
-}
-
-#[macro_export]
-macro_rules! bail_walingest {
-    ($($t:tt)*) => {
-        _ = || -> Result<(), anyhow::Error> {
-            anyhow::bail!($($t)*);
-        }().map_err(WalIngestErrorKind::AssertionError)?;
+        }().map_err(WalIngestErrorKind::LogicalError)?;
     };
 }
 
@@ -400,9 +389,9 @@ impl WalIngest {
         if xid > next_xid {
             // Wraparound occurred, must be from a prev epoch.
             if epoch == 0 {
-                bail_walingest!(
+                Err(WalIngestErrorKind::LogicalError(anyhow::anyhow!(
                     "apparent XID wraparound with prepared transaction XID {xid}, nextXid is {next_full_xid}"
-                );
+                )))?;
             }
             epoch -= 1;
         }
