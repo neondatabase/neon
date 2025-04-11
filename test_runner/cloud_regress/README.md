@@ -3,7 +3,7 @@
 * Create a Neon project on staging.
 * Grant the superuser privileges to the DB user.
 * (Optional) create a branch for testing
-* Configure the default endpoint for the project using the admin interface with the following settings:
+* Add the following settings to the `pg_settings` section of the default endpoint configuration for the project using the admin interface:
   * `Timeone`: `America/Los_Angeles`
   * `DateStyle`: `Postgres,MDY`
   * `compute_query_id`: `off`
