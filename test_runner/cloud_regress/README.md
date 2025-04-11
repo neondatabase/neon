@@ -33,5 +33,5 @@ $ scripts/pysync
 ```
 * Run 
 ```bash
-$ poetry run pytest -m remote_cluster -k cloud_regress
+$ scripts/pytest -m remote_cluster -k cloud_regress
 ```
