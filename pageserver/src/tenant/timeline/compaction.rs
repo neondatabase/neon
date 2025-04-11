@@ -808,11 +808,9 @@ impl KeyHistoryRetention {
             // This should never happen b/c if we don't have any history of a key, we won't even do `generate_key_retention`.
             return Ok(());
         };
-        let mut base_img = if let Some((_, lsn, img)) = base_img_from_ancestor {
-            Some((*lsn, img))
-        } else {
-            None
-        };
+        let mut base_img = base_img_from_ancestor
+            .as_ref()
+            .map(|(_, lsn, img)| (*lsn, img));
         let mut history = Vec::new();
 
         async fn collect_and_verify(
