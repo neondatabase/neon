@@ -48,6 +48,7 @@ use rand::distributions::Alphanumeric;
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::bin_ser::BeSer;
 use utils::id::{TenantId, TimelineId};
@@ -748,12 +749,15 @@ impl ImageLayerWriterInner {
     ///
     /// Start building a new image layer.
     ///
+    #[allow(clippy::too_many_arguments)]
     async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
         key_range: &Range<Key>,
         lsn: Lsn,
+        gate: &utils::sync::gate::Gate,
+        cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename.
@@ -780,7 +784,7 @@ impl ImageLayerWriterInner {
         };
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
-        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64);
+        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64, gate, cancel, ctx);
 
         // Initialize the b-tree index builder
         let block_buf = BlockBuf::new();
@@ -988,18 +992,30 @@ impl ImageLayerWriter {
     ///
     /// Start building a new image layer.
     ///
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
         key_range: &Range<Key>,
         lsn: Lsn,
+        gate: &utils::sync::gate::Gate,
+        cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<ImageLayerWriter> {
         Ok(Self {
             inner: Some(
-                ImageLayerWriterInner::new(conf, timeline_id, tenant_shard_id, key_range, lsn, ctx)
-                    .await?,
+                ImageLayerWriterInner::new(
+                    conf,
+                    timeline_id,
+                    tenant_shard_id,
+                    key_range,
+                    lsn,
+                    gate,
+                    cancel,
+                    ctx,
+                )
+                .await?,
             ),
         })
     }
@@ -1203,6 +1219,8 @@ mod test {
                 harness.tenant_shard_id,
                 &range,
                 lsn,
+                &timeline.gate,
+                timeline.cancel.clone(),
                 &ctx,
             )
             .await
@@ -1268,6 +1286,8 @@ mod test {
                 harness.tenant_shard_id,
                 &range,
                 lsn,
+                &timeline.gate,
+                timeline.cancel.clone(),
                 &ctx,
             )
             .await
@@ -1346,6 +1366,8 @@ mod test {
             tenant.tenant_shard_id,
             &key_range,
             lsn,
+            &tline.gate,
+            tline.cancel.clone(),
             ctx,
         )
         .await?;
