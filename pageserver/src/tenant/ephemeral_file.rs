@@ -28,6 +28,11 @@ pub struct EphemeralFile {
     _timeline_id: TimelineId,
     page_cache_file_id: page_cache::FileId,
     bytes_written: u64,
+    // Always Some except during Drop
+    inner: Option<Inner>,
+}
+
+struct Inner {
     buffered_writer: owned_buffers_io::write::BufferedWriter<IoBufferMut, VirtualFile>,
     /// Gate guard is held on as long as we need to do operations in the path (delete on drop)
     _gate_guard: utils::sync::gate::GateGuard,
@@ -44,9 +49,9 @@ impl EphemeralFile {
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<EphemeralFile> {
-        static NEXT_FILENAME: AtomicU64 = AtomicU64::new(1);
+        static NEXT_TEMP_DISAMBIGUATOR: AtomicU64 = AtomicU64::new(1);
         let filename_disambiguator =
-            NEXT_FILENAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            NEXT_TEMP_DISAMBIGUATOR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let filename = conf
             .timeline_path(&tenant_shard_id, &timeline_id)
@@ -73,34 +78,68 @@ impl EphemeralFile {
             _timeline_id: timeline_id,
             page_cache_file_id,
             bytes_written: 0,
-            buffered_writer: owned_buffers_io::write::BufferedWriter::new(
-                file,
-                || IoBufferMut::with_capacity(TAIL_SZ),
-                gate.enter()?,
-                cancel.child_token(),
-                ctx,
-                info_span!(parent: None, "ephemeral_file_buffered_writer", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), timeline_id=%timeline_id, path = %filename),
-            ),
-            _gate_guard: gate.enter()?,
+            inner: Some(Inner {
+                buffered_writer: owned_buffers_io::write::BufferedWriter::new(
+                    file,
+                    || IoBufferMut::with_capacity(TAIL_SZ),
+                    gate.enter()?,
+                    cancel.child_token(),
+                    ctx,
+                    info_span!(parent: None, "ephemeral_file_buffered_writer", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), timeline_id=%timeline_id, path = %filename),
+                ),
+                _gate_guard: gate.enter()?,
+            }),
         })
+    }
+
+    fn buffered_writer(
+        &self,
+    ) -> &owned_buffers_io::write::BufferedWriter<IoBufferMut, VirtualFile> {
+        &self
+            .inner
+            .as_ref()
+            .expect("we never take out except during drop")
+            .buffered_writer
+    }
+    fn buffered_writer_mut(
+        &mut self,
+    ) -> &mut owned_buffers_io::write::BufferedWriter<IoBufferMut, VirtualFile> {
+        &mut self
+            .inner
+            .as_mut()
+            .expect("we never take out except during drop")
+            .buffered_writer
     }
 }
 
 impl Drop for EphemeralFile {
     fn drop(&mut self) {
-        // unlink the file
-        // we are clear to do this, because we have entered a gate
-        let path = self.buffered_writer.as_inner().path();
-        let res = std::fs::remove_file(path);
-        if let Err(e) = res {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                // just never log the not found errors, we cannot do anything for them; on detach
-                // the tenant directory is already gone.
-                //
-                // not found files might also be related to https://github.com/neondatabase/neon/issues/2442
-                error!("could not remove ephemeral file '{path}': {e}");
+        let inner = self.inner.take().expect("we never take out except here");
+
+        tokio::spawn(async move {
+            let Inner {
+                buffered_writer,
+                _gate_guard,
+            } = inner;
+
+            // XXX kinda ugly that we have this Arc here, would like to call VirtualFile::remove()
+            let virtual_file: Arc<VirtualFile> = buffered_writer.into_inner_no_flush().await;
+            let path = virtual_file.path();
+            let res = std::fs::remove_file(path);
+            if let Err(e) = res {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    // TODO: can we retry?
+
+                    // just never log the not found errors, we cannot do anything for them; on detach
+                    // the tenant directory is already gone.
+                    //
+                    // not found files might also be related to https://github.com/neondatabase/neon/issues/2442
+                    error!("could not remove ephemeral file '{path}': {e}");
+                }
             }
-        }
+
+            drop(_gate_guard);
+        });
     }
 }
 
@@ -168,7 +207,7 @@ impl EphemeralFile {
 
         // Write the payload
         let (nwritten, control) = self
-            .buffered_writer
+            .buffered_writer_mut()
             .write_buffered_borrowed_controlled(srcbuf, ctx)
             .await
             .map_err(|e| match e {
@@ -193,9 +232,9 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
         dst: tokio_epoll_uring::Slice<B>,
         ctx: &RequestContext,
     ) -> std::io::Result<(tokio_epoll_uring::Slice<B>, usize)> {
-        let submitted_offset = self.buffered_writer.bytes_submitted();
+        let submitted_offset = self.buffered_writer().bytes_submitted();
 
-        let mutable = match self.buffered_writer.inspect_mutable() {
+        let mutable = match self.buffered_writer().inspect_mutable() {
             Some(mutable) => &mutable[0..mutable.pending()],
             None => {
                 // Timeline::cancel and hence buffered writer flush was cancelled.
@@ -204,7 +243,7 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
             }
         };
 
-        let maybe_flushed = self.buffered_writer.inspect_maybe_flushed();
+        let maybe_flushed = self.buffered_writer().inspect_maybe_flushed();
 
         let dst_cap = dst.bytes_total().into_u64();
         let end = {
@@ -262,7 +301,7 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
         let mutable_range = Range(std::cmp::max(start, submitted_offset), end);
 
         let dst = if written_range.len() > 0 {
-            let file: &VirtualFile = self.buffered_writer.as_inner();
+            let file: &VirtualFile = self.buffered_writer().as_inner();
             let bounds = dst.bounds();
             let slice = file
                 .read_exact_at(dst.slice(0..written_range.len().into_usize()), start, ctx)
@@ -419,7 +458,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mutable = file.buffered_writer.mutable();
+        let mutable = file.buffered_writer().mutable();
         let cap = mutable.capacity();
         let align = mutable.align();
 
@@ -456,13 +495,13 @@ mod tests {
             assert_eq!(&buf, &content[range]);
         }
 
-        let file_contents = std::fs::read(file.buffered_writer.as_inner().path()).unwrap();
+        let file_contents = std::fs::read(file.buffered_writer().as_inner().path()).unwrap();
         assert!(file_contents == content[0..cap * 2]);
 
-        let maybe_flushed_buffer_contents = file.buffered_writer.inspect_maybe_flushed().unwrap();
+        let maybe_flushed_buffer_contents = file.buffered_writer().inspect_maybe_flushed().unwrap();
         assert_eq!(&maybe_flushed_buffer_contents[..], &content[cap..cap * 2]);
 
-        let mutable_buffer_contents = file.buffered_writer.mutable();
+        let mutable_buffer_contents = file.buffered_writer().mutable();
         assert_eq!(mutable_buffer_contents, &content[cap * 2..write_nbytes]);
     }
 
@@ -477,7 +516,7 @@ mod tests {
             .unwrap();
 
         // mutable buffer and maybe_flushed buffer each has `cap` bytes.
-        let cap = file.buffered_writer.mutable().capacity();
+        let cap = file.buffered_writer().mutable().capacity();
 
         let content: Vec<u8> = rand::thread_rng()
             .sample_iter(rand::distributions::Standard)
@@ -489,18 +528,18 @@ mod tests {
         // assert the state is as this test expects it to be
         let load_io_buf_res = file.load_to_io_buf(&ctx).await.unwrap();
         assert_eq!(&load_io_buf_res[..], &content[0..cap * 2 + cap / 2]);
-        let md = file.buffered_writer.as_inner().path().metadata().unwrap();
+        let md = file.buffered_writer().as_inner().path().metadata().unwrap();
         assert_eq!(
             md.len(),
             2 * cap.into_u64(),
             "buffered writer requires one write to be flushed if we write 2.5x buffer capacity"
         );
         assert_eq!(
-            &file.buffered_writer.inspect_maybe_flushed().unwrap()[0..cap],
+            &file.buffered_writer().inspect_maybe_flushed().unwrap()[0..cap],
             &content[cap..cap * 2]
         );
         assert_eq!(
-            &file.buffered_writer.mutable()[0..cap / 2],
+            &file.buffered_writer().mutable()[0..cap / 2],
             &content[cap * 2..cap * 2 + cap / 2]
         );
     }
@@ -522,7 +561,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mutable = file.buffered_writer.mutable();
+        let mutable = file.buffered_writer().mutable();
         let cap = mutable.capacity();
         let align = mutable.align();
         let content: Vec<u8> = rand::thread_rng()
