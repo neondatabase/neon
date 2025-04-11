@@ -63,9 +63,6 @@ def test_ingest_insert_bulk(
             f"max_replication_flush_lag = {'10GB' if backpressure else '0'}",
             # use shared_buffers size like in production for 8 CU compute
             f"shared_buffers={shared_buffers_for_max_cu(8.0)}",
-            # f"neon.pageserver_response_disconnect_timeout='300s'",
-            # f"neon.extension_server_connect_timeout='300s'",
-            # f"max_wal_size='5GB'",
             # NB: neon_local defaults to 15MB, which is too slow -- production uses 500MB.
             f"max_replication_write_lag = {'500MB' if backpressure else '0'}",
         ],
