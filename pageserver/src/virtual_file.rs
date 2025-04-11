@@ -223,14 +223,6 @@ impl VirtualFile {
         self.inner.write_all_at(buf, offset, ctx).await
     }
 
-    pub async fn write_all<Buf: IoBuf + Send>(
-        &mut self,
-        buf: FullSlice<Buf>,
-        ctx: &RequestContext,
-    ) -> (FullSlice<Buf>, Result<usize, Error>) {
-        self.inner.write_all(buf, ctx).await
-    }
-
     async fn read_to_end(&mut self, buf: &mut Vec<u8>, ctx: &RequestContext) -> Result<(), Error> {
         self.inner.read_to_end(buf, ctx).await
     }
@@ -847,58 +839,6 @@ impl VirtualFileInner {
         (restore(buf), Ok(()))
     }
 
-    /// Writes `buf` to the file at the current offset.
-    ///
-    /// Panics if there is an uninitialized range in `buf`, as that is most likely a bug in the caller.
-    pub async fn write_all<Buf: IoBuf + Send>(
-        &mut self,
-        buf: FullSlice<Buf>,
-        ctx: &RequestContext,
-    ) -> (FullSlice<Buf>, Result<usize, Error>) {
-        let buf = buf.into_raw_slice();
-        let bounds = buf.bounds();
-        let restore =
-            |buf: Slice<_>| FullSlice::must_new(Slice::from_buf_bounds(buf.into_inner(), bounds));
-        let nbytes = buf.len();
-        let mut buf = buf;
-        while !buf.is_empty() {
-            let (tmp, res) = self.write(FullSlice::must_new(buf), ctx).await;
-            buf = tmp.into_raw_slice();
-            match res {
-                Ok(0) => {
-                    return (
-                        restore(buf),
-                        Err(Error::new(
-                            std::io::ErrorKind::WriteZero,
-                            "failed to write whole buffer",
-                        )),
-                    );
-                }
-                Ok(n) => {
-                    buf = buf.slice(n..);
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return (restore(buf), Err(e)),
-            }
-        }
-        (restore(buf), Ok(nbytes))
-    }
-
-    async fn write<B: IoBuf + Send>(
-        &mut self,
-        buf: FullSlice<B>,
-        ctx: &RequestContext,
-    ) -> (FullSlice<B>, Result<usize, std::io::Error>) {
-        let pos = self.pos;
-        let (buf, res) = self.write_at(buf, pos, ctx).await;
-        let n = match res {
-            Ok(n) => n,
-            Err(e) => return (buf, Err(e)),
-        };
-        self.pos += n as u64;
-        (buf, Ok(n))
-    }
-
     pub(crate) async fn read_at<Buf>(
         &self,
         buf: tokio_epoll_uring::Slice<Buf>,
@@ -927,19 +867,7 @@ impl VirtualFileInner {
         })
     }
 
-    /// The function aborts the process if the error is fatal.
     async fn write_at<B: IoBuf + Send>(
-        &self,
-        buf: FullSlice<B>,
-        offset: u64,
-        ctx: &RequestContext,
-    ) -> (FullSlice<B>, Result<usize, Error>) {
-        let (slice, result) = self.write_at_inner(buf, offset, ctx).await;
-        let result = result.maybe_fatal_err("write_at");
-        (slice, result)
-    }
-
-    async fn write_at_inner<B: IoBuf + Send>(
         &self,
         buf: FullSlice<B>,
         offset: u64,
@@ -952,6 +880,7 @@ impl VirtualFileInner {
         observe_duration!(StorageIoOperation::Write, {
             let ((_file_guard, buf), result) =
                 io_engine::get().write_at(file_guard, offset, buf).await;
+            let result = result.maybe_fatal_err("write_at");
             if let Ok(size) = result {
                 ctx.io_size_metrics().write.add(size.into_u64());
             }
@@ -1370,7 +1299,6 @@ static SYNC_MODE: AtomicU8 = AtomicU8::new(SyncMode::Sync as u8);
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
     use std::os::unix::fs::FileExt;
     use std::sync::Arc;
 
@@ -1427,19 +1355,6 @@ mod tests {
             match self {
                 MaybeVirtualFile::VirtualFile(file) => file.seek(pos).await,
                 MaybeVirtualFile::File(file) => file.seek(pos),
-            }
-        }
-        async fn write_all<Buf: IoBuf + Send>(
-            &mut self,
-            buf: FullSlice<Buf>,
-            ctx: &RequestContext,
-        ) -> Result<(), Error> {
-            match self {
-                MaybeVirtualFile::VirtualFile(file) => {
-                    let (_buf, res) = file.write_all(buf, ctx).await;
-                    res.map(|_| ())
-                }
-                MaybeVirtualFile::File(file) => file.write_all(&buf[..]),
             }
         }
 
@@ -1555,7 +1470,7 @@ mod tests {
         .await?;
 
         file_a
-            .write_all(b"foobar".to_vec().slice_len(), &ctx)
+            .write_all_at(IoBuffer::from(b"foobar").slice_len(), 0, &ctx)
             .await?;
 
         // cannot read from a file opened in write-only mode
@@ -1566,7 +1481,7 @@ mod tests {
 
         // cannot write to a file opened in read-only mode
         let _ = file_a
-            .write_all(b"bar".to_vec().slice_len(), &ctx)
+            .write_all_at(IoBuffer::from(b"bar").slice_len(), 0, &ctx)
             .await
             .unwrap_err();
 
