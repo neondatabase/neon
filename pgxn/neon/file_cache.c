@@ -707,7 +707,7 @@ lfc_prewarm(FileCacheState* fcs, uint32 worker_id, uint32 n_workers)
 	}
 
 	fcs_chunk_size_log = fcs->chunk_size_log;
-	if (fcs_chunk_size_log > MAX_BLOCKS_PER_CHUNK)
+	if (fcs_chunk_size_log > MAX_BLOCKS_PER_CHUNK_LOG)
 	{
 		elog(ERROR, "LFC: Invalid chunk size log: %u", fcs->chunk_size_log);
 	}
