@@ -69,7 +69,7 @@ pub extern "C" fn bcomm_poll_request_completion(
     let (state, result) = bs.poll_request_completion(request_idx);
 
     if state == NeonIOHandleState::Completed {
-        unsafe { *result_p = result}
+        unsafe { *result_p = result }
         0
     } else {
         -1

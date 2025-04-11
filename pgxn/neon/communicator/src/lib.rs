@@ -9,7 +9,6 @@ mod backend_comms;
 mod backend_interface;
 mod init;
 mod neon_request;
-mod processor;
 mod worker_process;
 
 use backend_comms::NeonIOHandle;

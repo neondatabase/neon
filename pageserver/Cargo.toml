@@ -76,6 +76,7 @@ url.workspace = true
 walkdir.workspace = true
 metrics.workspace = true
 pageserver_api.workspace = true
+pageserver_data_api.workspace = true
 pageserver_client.workspace = true # for ResponseErrorMessageExt TOOD refactor that
 pageserver_compaction.workspace = true
 postgres_connection.workspace = true
@@ -129,6 +130,3 @@ harness = false
 [[bin]]
 name = "test_helper_slow_client_reads"
 required-features = [ "testing" ]
-
-[build-dependencies]
-tonic-build.workspace = true

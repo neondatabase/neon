@@ -16,7 +16,7 @@ use std::sync::atomic::fence;
 use crate::CommunicatorInitStruct;
 use crate::backend_comms::NeonIOHandleState;
 use crate::neon_request::{NeonIORequest, NeonIOResult};
-use crate::processor::CommunicatorProcessor;
+use pageserver_client_grpc::CommunicatorProcessor;
 
 use tokio::io::AsyncReadExt;
 use tokio_pipe::PipeRead;
@@ -144,51 +144,58 @@ async fn communicator_process_main_loop(
                 error!("unexpected Empty IO request");
                 slot.result = NeonIOResult::Error(-1);
             }
-            NeonIORequest::RelExists(req) => match processor.process_rel_exists_request(&req).await
-            {
-                Ok(exists) => {
-                    slot.result = NeonIOResult::RelExists(exists);
+            NeonIORequest::RelExists(ref req) => {
+                match processor.process_rel_exists_request(&req.into()).await {
+                    Ok(exists) => {
+                        slot.result = NeonIOResult::RelExists(exists);
+                    }
+                    Err(err) => {
+                        info!("tonic error: {err:?}");
+                        slot.result = NeonIOResult::Error(-1);
+                    }
                 }
-                Err(err) => {
-                    info!("tonic error: {err:?}");
-                    slot.result = NeonIOResult::Error(-1);
+            }
+            NeonIORequest::RelSize(ref req) => {
+                match processor.process_rel_size_request(&req.into()).await {
+                    Ok(nblocks) => {
+                        slot.result = NeonIOResult::RelSize(nblocks);
+                    }
+                    Err(err) => {
+                        info!("tonic error: {err:?}");
+                        slot.result = NeonIOResult::Error(-1);
+                    }
                 }
-            },
-            NeonIORequest::RelSize(req) => match processor.process_rel_size_request(&req).await {
-                Ok(nblocks) => {
-                    slot.result = NeonIOResult::RelSize(nblocks);
+            }
+            NeonIORequest::GetPage(ref req) => {
+                match processor.process_get_page_request(&req.into()).await {
+                    Ok(page_image) => {
+                        // Write the received page image directly to the shared memory location
+                        // that the backend requested.
+                        let src: &[u8] = page_image.as_slice();
+                        let dst = cis.shmem_ptr.with_addr(req.dest_ptr);
+                        let len = std::cmp::min(src.len(), req.dest_size as usize);
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(src.as_ptr(), dst, len);
+                        };
+                        slot.result = NeonIOResult::GetPage;
+                    }
+                    Err(err) => {
+                        info!("tonic error: {err:?}");
+                        slot.result = NeonIOResult::Error(-1);
+                    }
                 }
-                Err(err) => {
-                    info!("tonic error: {err:?}");
-                    slot.result = NeonIOResult::Error(-1);
+            }
+            NeonIORequest::DbSize(ref req) => {
+                match processor.process_dbsize_request(&req.into()).await {
+                    Ok(db_size) => {
+                        slot.result = NeonIOResult::DbSize(db_size);
+                    }
+                    Err(err) => {
+                        info!("tonic error: {err:?}");
+                        slot.result = NeonIOResult::Error(-1);
+                    }
                 }
-            },
-            NeonIORequest::GetPage(req) => match processor.process_get_page_request(&req).await {
-                Ok(page_image) => {
-                    // Write the received page image directly to the shared memory location
-                    // that the backend requested.
-                    let src: &[u8] = page_image.as_slice();
-                    let dst = cis.shmem_ptr.with_addr(req.dest_ptr);
-                    let len = std::cmp::min(src.len(), req.dest_size as usize);
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(src.as_ptr(), dst, len);
-                    };
-                    slot.result = NeonIOResult::GetPage;
-                }
-                Err(err) => {
-                    info!("tonic error: {err:?}");
-                    slot.result = NeonIOResult::Error(-1);
-                }
-            },
-            NeonIORequest::DbSize(req) => match processor.process_dbsize_request(&req).await {
-                Ok(db_size) => {
-                    slot.result = NeonIOResult::DbSize(db_size);
-                }
-                Err(err) => {
-                    info!("tonic error: {err:?}");
-                    slot.result = NeonIOResult::Error(-1);
-                }
-            },
+            }
         };
 
         let owner_procno = slot.owner_procno;
