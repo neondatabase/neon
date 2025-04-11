@@ -927,7 +927,7 @@ impl Key {
 
     /// Guaranteed to return `Ok()` if [`Self::is_rel_block_key`] returns `true` for `key`.
     #[inline(always)]
-    pub fn to_rel_block(self) -> anyhow::Result<(RelTag, BlockNumber)> {
+    pub fn to_rel_block(self) -> Result<(RelTag, BlockNumber), ToRelBlockError> {
         Ok(match self.field1 {
             0x00 => (
                 RelTag {
@@ -938,7 +938,7 @@ impl Key {
                 },
                 self.field6,
             ),
-            _ => anyhow::bail!("unexpected value kind 0x{:02x}", self.field1),
+            _ => return Err(ToRelBlockError(self.field1)),
         })
     }
 }
@@ -950,6 +950,17 @@ impl std::str::FromStr for Key {
         Self::from_hex(s)
     }
 }
+
+#[derive(Debug)]
+pub struct ToRelBlockError(u8);
+
+impl fmt::Display for ToRelBlockError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unexpected value kind 0x{:02x}", self.0)
+    }
+}
+
+impl std::error::Error for ToRelBlockError {}
 
 #[cfg(test)]
 mod tests {

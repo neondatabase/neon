@@ -3253,7 +3253,7 @@ async fn ingest_aux_files(
         modification
             .put_file(&fname, content.as_bytes(), &ctx)
             .await
-            .map_err(ApiError::InternalServerError)?;
+            .map_err(|e| ApiError::InternalServerError(e.into()))?;
     }
     modification
         .commit(&ctx)
