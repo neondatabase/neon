@@ -1119,7 +1119,17 @@ impl Timeline {
             // being potentially much longer.
             let rewrite_max = partition_count;
 
-            self.compact_shard_ancestors(rewrite_max, ctx).await?;
+            let outcome = self
+                .compact_shard_ancestors(
+                    rewrite_max,
+                    options.flags.contains(CompactFlags::YieldForL0),
+                    ctx,
+                )
+                .await?;
+            match outcome {
+                CompactionOutcome::Pending | CompactionOutcome::YieldForL0 => return Ok(outcome),
+                CompactionOutcome::Done | CompactionOutcome::Skipped => {}
+            }
         }
 
         Ok(CompactionOutcome::Done)
@@ -1136,11 +1146,12 @@ impl Timeline {
     async fn compact_shard_ancestors(
         self: &Arc<Self>,
         rewrite_max: usize,
+        yield_for_l0: bool,
         ctx: &RequestContext,
-    ) -> Result<(), CompactionError> {
+    ) -> Result<CompactionOutcome, CompactionError> {
+        let mut outcome = CompactionOutcome::Done;
         let mut drop_layers = Vec::new();
         let mut layers_to_rewrite: Vec<Layer> = Vec::new();
-        let mut rewrite_max_exceeded: bool = false;
 
         // We will use the Lsn cutoff of the last GC as a threshold for rewriting layers: if a
         // layer is behind this Lsn, it indicates that the layer is being retained beyond the
@@ -1233,8 +1244,8 @@ impl Timeline {
                 debug!(%layer, "Will rewrite layer on a future compaction, already rewrote {}",
                     layers_to_rewrite.len()
                 );
-                rewrite_max_exceeded = true;
-                continue;
+                outcome = CompactionOutcome::Pending;
+                break;
             }
 
             // Fall through: all our conditions for doing a rewrite passed.
@@ -1246,7 +1257,7 @@ impl Timeline {
 
         // Drop out early if there's nothing to do.
         if layers_to_rewrite.is_empty() && drop_layers.is_empty() {
-            return Ok(());
+            return Ok(CompactionOutcome::Done);
         }
 
         info!(
@@ -1314,6 +1325,20 @@ impl Timeline {
                 // the layer has no data for us with the ShardedRange check above, but
                 drop_layers.push(layer);
             }
+
+            // Yield for L0 compaction if necessary, but make sure we update the layer map below
+            // with the work we've already done.
+            if yield_for_l0
+                && self
+                    .l0_compaction_trigger
+                    .notified()
+                    .now_or_never()
+                    .is_some()
+            {
+                info!("shard ancestor compaction yielding for L0 compaction");
+                outcome = CompactionOutcome::YieldForL0;
+                break;
+            }
         }
 
         for layer in &drop_layers {
@@ -1337,27 +1362,36 @@ impl Timeline {
         // necessary for correctness, but it simplifies testing, and avoids proceeding with another
         // Timeline's compaction while this timeline's uploads may be generating lots of disk I/O
         // load.
-        info!("shard ancestor compaction waiting for uploads");
-        match self.remote_client.wait_completion().await {
-            Ok(()) => (),
-            Err(WaitCompletionError::NotInitialized(ni)) => return Err(CompactionError::from(ni)),
-            Err(WaitCompletionError::UploadQueueShutDownOrStopped) => {
-                return Err(CompactionError::ShuttingDown);
+        if outcome != CompactionOutcome::YieldForL0 {
+            info!("shard ancestor compaction waiting for uploads");
+            tokio::select! {
+                result = self.remote_client.wait_completion() => match result {
+                    Ok(()) => {},
+                    Err(WaitCompletionError::NotInitialized(ni)) => return Err(CompactionError::from(ni)),
+                    Err(WaitCompletionError::UploadQueueShutDownOrStopped) => {
+                        return Err(CompactionError::ShuttingDown);
+                    }
+                },
+                // Don't wait if there's L0 compaction to do. We don't need to update the outcome
+                // here, because we've already done the actual work.
+                _ = self.l0_compaction_trigger.notified(), if yield_for_l0 => {},
             }
         }
 
         info!(
             "shard ancestor compaction done in {:.3}s{}",
             started.elapsed().as_secs_f64(),
-            match rewrite_max_exceeded {
-                true => format!(", more work pending due to rewrite_max={rewrite_max}"),
-                false => String::new(),
+            match outcome {
+                CompactionOutcome::Pending =>
+                    format!(", with pending work (rewrite_max={rewrite_max})"),
+                CompactionOutcome::YieldForL0 => String::from(", yielding for L0 compaction"),
+                CompactionOutcome::Skipped | CompactionOutcome::Done => String::new(),
             }
         );
 
         fail::fail_point!("compact-shard-ancestors-persistent");
 
-        Ok(())
+        Ok(outcome)
     }
 
     /// Update the LayerVisibilityHint of layers covered by image layers, based on whether there is
