@@ -1,4 +1,3 @@
-use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
@@ -170,14 +169,14 @@ impl CancelReplyOp {
 pub async fn handle_cancel_messages(
     client: &mut RedisKVClient,
     mut rx: mpsc::Receiver<CancelKeyOp>,
-) -> anyhow::Result<Infallible> {
+) -> anyhow::Result<()> {
     let mut batch = Vec::new();
     let mut replies = vec![];
 
     loop {
         if rx.recv_many(&mut batch, BATCH_SIZE).await == 0 {
             warn!("shutting down cancellation queue");
-            break std::future::pending().await;
+            break Ok(())
         }
 
         let batch_size = batch.len();
