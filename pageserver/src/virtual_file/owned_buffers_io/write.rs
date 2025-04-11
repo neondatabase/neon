@@ -1,5 +1,4 @@
 mod flush;
-use std::sync::Arc;
 
 pub(crate) use flush::FlushControl;
 use flush::FlushHandle;
@@ -10,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use super::io_buf_aligned::IoBufAligned;
 use super::io_buf_ext::{FullSlice, IoBufExt};
 use crate::context::RequestContext;
-use crate::virtual_file::{IoBuffer, IoBufferMut};
+use crate::virtual_file::{IoBuffer, IoBufferMut, VirtualFile};
 
 pub(crate) trait CheapCloneForRead {
     /// Returns a cheap clone of the buffer.
@@ -36,12 +35,15 @@ pub trait OwnedAsyncWriter {
     ) -> impl std::future::Future<Output = (FullSlice<Buf>, std::io::Result<()>)> + Send;
 }
 
+pub trait BufferedWriterSink: OwnedAsyncWriter {
+    fn cleanup(self);
+}
+
 /// A wrapper aorund an [`OwnedAsyncWriter`] that uses a [`Buffer`] to batch
 /// small writes into larger writes of size [`Buffer::cap`].
 // TODO(yuchen): For large write, implementing buffer bypass for aligned parts of the write could be beneficial to throughput,
 // since we would avoid copying majority of the data into the internal buffer.
 pub struct BufferedWriter<B: Buffer, W> {
-    writer: Arc<W>,
     /// Clone of the buffer that was last submitted to the flush loop.
     /// `None` if no flush request has been submitted, Some forever after.
     pub(super) maybe_flushed: Option<FullSlice<B::IoBuf>>,
@@ -66,13 +68,13 @@ impl<B, Buf, W> BufferedWriter<B, W>
 where
     B: Buffer<IoBuf = Buf> + Send + 'static,
     Buf: IoBufAligned + Send + Sync + CheapCloneForRead,
-    W: OwnedAsyncWriter + Send + Sync + 'static + std::fmt::Debug,
+    W: BufferedWriterSink + Send + Sync + 'static + std::fmt::Debug,
 {
     /// Creates a new buffered writer.
     ///
     /// The `buf_new` function provides a way to initialize the owned buffers used by this writer.
     pub fn new(
-        writer: Arc<W>,
+        writer: W,
         buf_new: impl Fn() -> B,
         gate_guard: utils::sync::gate::GateGuard,
         cancel: CancellationToken,
@@ -80,7 +82,6 @@ where
         flush_task_span: tracing::Span,
     ) -> Self {
         Self {
-            writer: writer.clone(),
             mutable: Some(buf_new()),
             maybe_flushed: None,
             flush_handle: FlushHandle::spawn_new(
@@ -93,10 +94,6 @@ where
             ),
             bytes_submitted: 0,
         }
-    }
-
-    pub fn as_inner(&self) -> &W {
-        &self.writer
     }
 
     /// Returns the number of bytes submitted to the background flush task.
@@ -119,17 +116,16 @@ where
     pub async fn flush_and_into_inner(
         mut self,
         ctx: &RequestContext,
-    ) -> Result<(u64, Arc<W>), FlushTaskError> {
+    ) -> Result<(u64, W), FlushTaskError> {
         self.flush(ctx).await?;
 
         let Self {
             mutable: buf,
             maybe_flushed: _,
-            writer,
             mut flush_handle,
             bytes_submitted: bytes_amount,
         } = self;
-        flush_handle.shutdown().await?;
+        let writer = flush_handle.shutdown().await?;
         assert!(buf.is_some());
         Ok((bytes_amount, writer))
     }
@@ -280,6 +276,40 @@ impl Buffer for IoBufferMut {
     }
 }
 
+#[derive(Debug)]
+pub struct DeleteVirtualFileOnCleanup(pub VirtualFile);
+
+impl OwnedAsyncWriter for DeleteVirtualFileOnCleanup {
+    fn write_all_at<Buf: IoBufAligned + Send>(
+        &self,
+        buf: FullSlice<Buf>,
+        offset: u64,
+        ctx: &RequestContext,
+    ) -> impl std::future::Future<Output = (FullSlice<Buf>, std::io::Result<()>)> + Send {
+        self.0.write_all_at(buf, offset, ctx)
+    }
+}
+
+impl BufferedWriterSink for DeleteVirtualFileOnCleanup {
+    fn cleanup(self) {
+        self.0.remove();
+    }
+}
+
+impl std::ops::Deref for DeleteVirtualFileOnCleanup {
+    type Target = VirtualFile;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DeleteVirtualFileOnCleanup {
+    pub fn disarm_into_inner(self) -> VirtualFile {
+        return self.0;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -321,6 +351,12 @@ mod tests {
         }
     }
 
+    impl BufferedWriterSink for RecorderWriter {
+        fn cleanup(self) {
+            // No-op.
+        }
+    }
+
     fn test_ctx() -> RequestContext {
         RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error)
     }
@@ -329,7 +365,7 @@ mod tests {
     async fn test_write_all_borrowed_always_goes_through_buffer() -> anyhow::Result<()> {
         let ctx = test_ctx();
         let ctx = &ctx;
-        let recorder = Arc::new(RecorderWriter::default());
+        let recorder = RecorderWriter::default();
         let gate = utils::sync::gate::Gate::default();
         let cancel = CancellationToken::new();
         let mut writer = BufferedWriter::<_, RecorderWriter>::new(

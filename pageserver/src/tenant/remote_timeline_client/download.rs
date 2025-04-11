@@ -40,6 +40,7 @@ use crate::span::{
 use crate::tenant::Generation;
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::LayerName;
+use crate::virtual_file::owned_buffers_io::write::DeleteVirtualFileOnCleanup;
 use crate::virtual_file::{MaybeFatalIo, VirtualFile, on_fatal_io_error};
 
 ///
@@ -206,11 +207,10 @@ async fn download_object(
         #[cfg(target_os = "linux")]
         crate::virtual_file::io_engine::IoEngine::TokioEpollUring => {
             use crate::virtual_file::owned_buffers_io::write::FlushTaskError;
-            use std::sync::Arc;
 
             use crate::virtual_file::{IoBufferMut, owned_buffers_io};
             async {
-                let destination_file = Arc::new(
+                let destination_file = DeleteVirtualFileOnCleanup(
                     VirtualFile::create(dst_path, ctx)
                         .await
                         .with_context(|| {
@@ -268,6 +268,8 @@ async fn download_object(
                     .maybe_fatal_err("download_object sync_all")
                     .with_context(|| format!("failed to fsync source file at {dst_path}"))
                     .map_err(DownloadError::Other)?;
+
+                let _: VirtualFile = destination_file.disarm_into_inner();
 
                 Ok(bytes_amount)
             }

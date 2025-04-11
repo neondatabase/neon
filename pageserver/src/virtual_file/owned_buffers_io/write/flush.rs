@@ -1,11 +1,10 @@
 use std::ops::ControlFlow;
-use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info, info_span, warn};
 use utils::sync::duplex;
 
-use super::{Buffer, CheapCloneForRead, OwnedAsyncWriter};
+use super::{Buffer, BufferedWriterSink, CheapCloneForRead};
 use crate::context::RequestContext;
 use crate::virtual_file::MaybeFatalIo;
 use crate::virtual_file::owned_buffers_io::io_buf_aligned::IoBufAligned;
@@ -21,7 +20,7 @@ pub struct FlushHandleInner<Buf, W> {
     /// and receives recyled buffer.
     channel: duplex::mpsc::Duplex<FlushRequest<Buf>, FullSlice<Buf>>,
     /// Join handle for the background flush task.
-    join_handle: tokio::task::JoinHandle<Result<Arc<W>, FlushTaskError>>,
+    join_handle: tokio::task::JoinHandle<Result<W, FlushTaskError>>,
 }
 
 struct FlushRequest<Buf> {
@@ -109,7 +108,7 @@ impl FlushControl {
 impl<Buf, W> FlushHandle<Buf, W>
 where
     Buf: IoBufAligned + Send + Sync + CheapCloneForRead,
-    W: OwnedAsyncWriter + Send + Sync + 'static + std::fmt::Debug,
+    W: BufferedWriterSink + Send + Sync + 'static + std::fmt::Debug,
 {
     /// Spawns a new background flush task and obtains a handle.
     ///
@@ -120,7 +119,7 @@ where
     /// The queue depth is 1, and the passed-in `buf` seeds the queue depth.
     /// I.e., the passed-in buf is immediately available to the handle as a recycled buffer.
     pub fn spawn_new<B>(
-        file: Arc<W>,
+        file: W,
         buf: B,
         gate_guard: utils::sync::gate::GateGuard,
         cancel: CancellationToken,
@@ -183,7 +182,7 @@ where
     }
 
     /// Cleans up the channel, join the flush task.
-    pub async fn shutdown(&mut self) -> Result<Arc<W>, FlushTaskError> {
+    pub async fn shutdown(&mut self) -> Result<W, FlushTaskError> {
         let handle = self
             .inner
             .take()
@@ -207,7 +206,7 @@ pub struct FlushBackgroundTask<Buf, W> {
     /// and send back recycled buffer.
     channel: duplex::mpsc::Duplex<FullSlice<Buf>, FlushRequest<Buf>>,
     /// A writter for persisting data to disk.
-    writer: Arc<W>,
+    writer: W,
     ctx: RequestContext,
     cancel: CancellationToken,
     /// Prevent timeline from shuting down until the flush background task finishes flushing all remaining buffers to disk.
@@ -223,12 +222,12 @@ pub enum FlushTaskError {
 impl<Buf, W> FlushBackgroundTask<Buf, W>
 where
     Buf: IoBufAligned + Send + Sync,
-    W: OwnedAsyncWriter + Sync + 'static,
+    W: BufferedWriterSink + Sync + 'static,
 {
     /// Creates a new background flush task.
     fn new(
         channel: duplex::mpsc::Duplex<FullSlice<Buf>, FlushRequest<Buf>>,
-        file: Arc<W>,
+        file: W,
         gate_guard: utils::sync::gate::GateGuard,
         cancel: CancellationToken,
         ctx: RequestContext,
@@ -243,7 +242,10 @@ where
     }
 
     /// Runs the background flush task.
-    async fn run(mut self) -> Result<Arc<W>, FlushTaskError> {
+    async fn run(mut self) -> Result<W, FlushTaskError> {
+        let writer = scopeguard::guard(self.writer, |writer| {
+            writer.cleanup();
+        });
         //  Exit condition: channel is closed and there is no remaining buffer to be flushed
         while let Some(request) = self.channel.recv().await {
             #[cfg(test)]
@@ -280,7 +282,7 @@ where
                     // If we retry indefinitely, we'll deplete those resources.
                     // Future: teach tokio-epoll-uring io_uring operation cancellation, but still,
                     // wait for cancelled ops to complete and discard their error.
-                    let (slice, res) = self.writer.write_all_at(slice, request.offset, &self.ctx).await;
+                    let (slice, res) = writer.write_all_at(slice, request.offset, &self.ctx).await;
                     slice_storage = Some(slice);
                     let res = res.maybe_fatal_err("owned_buffers_io flush");
                     let Err(err) = res else {
@@ -314,7 +316,7 @@ where
             }
         }
 
-        Ok(self.writer)
+        Ok(scopeguard::ScopeGuard::into_inner(writer))
     }
 }
 
