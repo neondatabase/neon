@@ -56,7 +56,20 @@ pub struct ComputeStatusResponse {
     pub status: ComputeStatus,
     #[serde(serialize_with = "rfc3339_serialize")]
     pub last_active: Option<DateTime<Utc>>,
+    pub last_active_query: Option<DateTime<Utc>>,
+    pub last_activity_kind: Option<ActivityKind>,
     pub error: Option<String>,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityKind {
+    // Client's query is executed
+    Query,
+    // Logical replication  is active (subscription or publication)
+    LogicalReplication,
+    // Autovacuum is active
+    Autovacuum,
 }
 
 #[derive(Serialize, Clone, Copy, Debug, Deserialize, PartialEq, Eq)]

@@ -30,6 +30,8 @@ impl From<&ComputeState> for ComputeStatusResponse {
                 .map(|pspec| pspec.timeline_id.to_string()),
             status: state.status,
             last_active: state.last_active,
+            last_active_query: state.last_active_query,
+            last_activity_kind: state.last_activity_kind,
             error: state.error.clone(),
         }
     }
