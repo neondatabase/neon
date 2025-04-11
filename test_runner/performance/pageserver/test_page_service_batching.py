@@ -1,7 +1,6 @@
 import concurrent.futures
 import dataclasses
 import json
-import re
 import threading
 import time
 from dataclasses import dataclass
@@ -170,6 +169,7 @@ def test_throughput(
         time: float
         pageserver_batch_size_histo_sum: float
         pageserver_batch_size_histo_count: float
+        pageserver_batch_breaks_reason_count: dict[str, int]
         compute_getpage_count: float
         pageserver_cpu_seconds_total: float
 
@@ -183,6 +183,10 @@ def test_throughput(
                 compute_getpage_count=self.compute_getpage_count - other.compute_getpage_count,
                 pageserver_cpu_seconds_total=self.pageserver_cpu_seconds_total
                 - other.pageserver_cpu_seconds_total,
+                pageserver_batch_breaks_reason_count={
+                    reason: count - other.pageserver_batch_breaks_reason_count.get(reason, 0)
+                    for reason, count in self.pageserver_batch_breaks_reason_count.items()
+                },
             )
 
         def normalize(self, by) -> "Metrics":
@@ -192,6 +196,10 @@ def test_throughput(
                 pageserver_batch_size_histo_count=self.pageserver_batch_size_histo_count / by,
                 compute_getpage_count=self.compute_getpage_count / by,
                 pageserver_cpu_seconds_total=self.pageserver_cpu_seconds_total / by,
+                pageserver_batch_breaks_reason_count={
+                    reason: count / by
+                    for reason, count in self.pageserver_batch_breaks_reason_count.items()
+                },
             )
 
     def get_metrics() -> Metrics:
@@ -201,6 +209,19 @@ def test_throughput(
             )
             compute_getpage_count = cur.fetchall()[0][0]
             pageserver_metrics = ps_http.get_metrics()
+            for name, samples in pageserver_metrics.metrics.items():
+                for sample in samples:
+                    log.info(f"{name=} labels={sample.labels} {sample.value}")
+
+            batch_break_reason_count = pageserver_metrics.query_all(
+                "pageserver_page_service_batch_break_reason_total",
+                filter={"timeline_id": str(env.initial_timeline)},
+            )
+
+            batch_break_reason_count = {
+                sample.labels["reason"]: int(sample.value) for sample in batch_break_reason_count
+            }
+
             return Metrics(
                 time=time.time(),
                 pageserver_batch_size_histo_sum=pageserver_metrics.query_one(
@@ -209,6 +230,7 @@ def test_throughput(
                 pageserver_batch_size_histo_count=pageserver_metrics.query_one(
                     "pageserver_page_service_batch_size_count"
                 ).value,
+                pageserver_batch_breaks_reason_count=batch_break_reason_count,
                 compute_getpage_count=compute_getpage_count,
                 pageserver_cpu_seconds_total=pageserver_metrics.query_one(
                     "libmetrics_process_cpu_seconds_highres"
@@ -263,25 +285,6 @@ def test_throughput(
 
     log.info("Results: %s", metrics)
 
-    since_last_start: list[str] = []
-    for line in env.pageserver.logfile.read_text().splitlines():
-        if "git:" in line:
-            since_last_start = []
-        since_last_start.append(line)
-
-    stopping_batching_because_re = re.compile(
-        r"stopping batching because (LSN changed|of batch size|timeline object mismatch|batch key changed|same page was requested at different LSNs|.*)"
-    )
-    reasons_for_stopping_batching = {}
-    for line in since_last_start:
-        match = stopping_batching_because_re.search(line)
-        if match:
-            if match.group(1) not in reasons_for_stopping_batching:
-                reasons_for_stopping_batching[match.group(1)] = 0
-            reasons_for_stopping_batching[match.group(1)] += 1
-
-    log.info("Reasons for stopping batching: %s", reasons_for_stopping_batching)
-
     #
     # Sanity-checks on the collected data
     #
@@ -295,7 +298,15 @@ def test_throughput(
     #
 
     for metric, value in dataclasses.asdict(metrics).items():
-        zenbenchmark.record(f"counters.{metric}", value, unit="", report=MetricReport.TEST_PARAM)
+        if metric == "pageserver_batch_breaks_reason_count":
+            for reason, count in value.items():
+                zenbenchmark.record(
+                    f"counters.{metric}_{reason}", count, unit="", report=MetricReport.TEST_PARAM
+                )
+        else:
+            zenbenchmark.record(
+                f"counters.{metric}", value, unit="", report=MetricReport.TEST_PARAM
+            )
 
     zenbenchmark.record(
         "perfmetric.batching_factor",
