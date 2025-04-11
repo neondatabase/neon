@@ -11576,6 +11576,99 @@ mod tests {
 
     #[cfg(feature = "testing")]
     #[tokio::test]
+    async fn test_bottom_most_compation_redo_failure() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_bottom_most_compation_redo_failure").await?;
+        let (tenant, ctx) = harness.load().await;
+
+        fn get_key(id: u32) -> Key {
+            // using aux key here b/c they are guaranteed to be inside `collect_keyspace`.
+            let mut key = Key::from_hex("620000000033333333444444445500000000").unwrap();
+            key.field6 = id;
+            key
+        }
+
+        let img_layer = (0..10)
+            .map(|id| (get_key(id), Bytes::from(format!("value {id}@0x10"))))
+            .collect_vec();
+
+        let delta1 = vec![
+            (
+                get_key(1),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x20")),
+            ),
+            (
+                get_key(1),
+                Lsn(0x24),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x24")),
+            ),
+            (
+                get_key(1),
+                Lsn(0x28),
+                // This record will fail to redo
+                Value::WalRecord(NeonWalRecord::wal_append_conditional("@0x28", "???")),
+            ),
+        ];
+
+        let tline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                vec![], // in-memory layers
+                vec![DeltaLayerTestDesc::new_with_inferred_key_range(
+                    Lsn(0x20)..Lsn(0x30),
+                    delta1,
+                )], // delta layers
+                vec![(Lsn(0x10), img_layer)], // image layers
+                Lsn(0x50),
+            )
+            .await?;
+        {
+            tline
+                .applied_gc_cutoff_lsn
+                .lock_for_write()
+                .store_and_unlock(Lsn(0x30))
+                .wait()
+                .await;
+            // Update GC info
+            let mut guard = tline.gc_info.write().unwrap();
+            *guard = GcInfo {
+                retain_lsns: vec![],
+                cutoffs: GcCutoffs {
+                    time: Lsn(0x30),
+                    space: Lsn(0x30),
+                },
+                leases: Default::default(),
+                within_ancestor_pitr: false,
+            };
+        }
+
+        let cancel = CancellationToken::new();
+
+        // Compaction will fail, but should not fire any critical error.
+        // Gc-compaction currently cannot figure out what keys are not in the keyspace during the compaction
+        // process. It will always try to redo the logs it reads and if it doesn't work, fail the entire
+        // compaction job. Tracked in <https://github.com/neondatabase/neon/issues/10395>.
+        let res = tline
+            .compact_with_gc(
+                &cancel,
+                CompactOptions {
+                    compact_key_range: None,
+                    compact_lsn_range: None,
+                    ..Default::default()
+                },
+                &ctx,
+            )
+            .await;
+        assert!(res.is_err());
+
+        Ok(())
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
     async fn test_synthetic_size_calculation_with_invisible_branches() -> anyhow::Result<()> {
         use pageserver_api::models::TimelineVisibilityState;
 

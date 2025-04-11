@@ -455,6 +455,7 @@ fn start_pageserver(
     let tls_server_config = if conf.listen_https_addr.is_some() || conf.enable_tls_page_service_api
     {
         let resolver = BACKGROUND_RUNTIME.block_on(ReloadingCertificateResolver::new(
+            "main",
             &conf.ssl_key_file,
             &conf.ssl_cert_file,
             conf.ssl_cert_reload_period,
