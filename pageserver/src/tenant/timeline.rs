@@ -1940,7 +1940,7 @@ impl Timeline {
             )
             .await;
         if let Err(err) = &res {
-            log_compaction_error(err, None, cancel.is_cancelled());
+            log_compaction_error(err, None, cancel.is_cancelled(), false);
         }
         res
     }
@@ -6364,7 +6364,30 @@ impl Timeline {
         &self,
         key: Key,
         request_lsn: Lsn,
+        data: ValueReconstructState,
+    ) -> Result<Bytes, PageReconstructError> {
+        self.reconstruct_value_inner(key, request_lsn, data, false)
+            .await
+    }
+
+    /// Reconstruct a value, using the given base image and WAL records in 'data'. It does not fire critical errors because
+    /// sometimes it is expected to fail due to unreplayable history described in <https://github.com/neondatabase/neon/issues/10395>.
+    async fn reconstruct_value_wo_critical_error(
+        &self,
+        key: Key,
+        request_lsn: Lsn,
+        data: ValueReconstructState,
+    ) -> Result<Bytes, PageReconstructError> {
+        self.reconstruct_value_inner(key, request_lsn, data, true)
+            .await
+    }
+
+    async fn reconstruct_value_inner(
+        &self,
+        key: Key,
+        request_lsn: Lsn,
         mut data: ValueReconstructState,
+        no_critical_error: bool,
     ) -> Result<Bytes, PageReconstructError> {
         // Perform WAL redo if needed
         data.records.reverse();
@@ -6421,7 +6444,9 @@ impl Timeline {
                     Ok(img) => img,
                     Err(walredo::Error::Cancelled) => return Err(PageReconstructError::Cancelled),
                     Err(walredo::Error::Other(err)) => {
-                        critical!("walredo failure during page reconstruction: {err:?}");
+                        if !no_critical_error {
+                            critical!("walredo failure during page reconstruction: {err:?}");
+                        }
                         return Err(PageReconstructError::WalRedo(
                             err.context("reconstruct a page image"),
                         ));

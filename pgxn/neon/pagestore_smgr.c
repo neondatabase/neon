@@ -65,6 +65,7 @@
 #include "utils/timeout.h"
 
 #include "bitmap.h"
+#include "file_cache.h"
 #include "neon.h"
 #include "neon_lwlsncache.h"
 #include "neon_perf_counters.h"
@@ -3564,7 +3565,7 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		for (int i = 0; i < nblocks; i++)
 		{
 			BlockNumber blkno = blocknum + i;
-			if (!BITMAP_ISSET(read, i))
+			if (!BITMAP_ISSET(read_pages, i))
 				continue;
 
 #if PG_MAJORVERSION_NUM >= 17
@@ -3687,6 +3688,9 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 #ifndef DEBUG_COMPARE_LOCAL
 			/* This is a bit tricky. Check if the relation exists locally */
 			if (mdexists(reln, forknum))
+#else
+			if (mdexists(reln, INIT_FORKNUM))
+#endif
 			{
 				/* It exists locally. Guess it's unlogged then. */
 #if PG_MAJORVERSION_NUM >= 17
@@ -3703,7 +3707,6 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 				 */
 				return;
 			}
-#endif
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
@@ -3760,6 +3763,9 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 #ifndef DEBUG_COMPARE_LOCAL
 			/* This is a bit tricky. Check if the relation exists locally */
 			if (mdexists(reln, forknum))
+#else
+			if (mdexists(reln, INIT_FORKNUM))
+#endif
 			{
 				/* It exists locally. Guess it's unlogged then. */
 				mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
@@ -3773,7 +3779,6 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 				 */
 				return;
 			}
-#endif
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
@@ -4187,6 +4192,8 @@ neon_start_unlogged_build(SMgrRelation reln)
 #ifndef DEBUG_COMPARE_LOCAL
  	if (!IsParallelWorker())
 		mdcreate(reln, MAIN_FORKNUM, false);
+#else
+	mdcreate(reln, INIT_FORKNUM, false);
 #endif
 }
 
@@ -4265,6 +4272,8 @@ neon_end_unlogged_build(SMgrRelation reln)
 #ifndef DEBUG_COMPARE_LOCAL
 			/* use isRedo == true, so that we drop it immediately */
 			mdunlink(rinfob, forknum, true);
+#else
+			mdunlink(rinfob, INIT_FORKNUM, true);
 #endif
 		}
 	}

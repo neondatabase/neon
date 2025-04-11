@@ -31,7 +31,6 @@ use pageserver::{
 };
 use postgres_backend::AuthType;
 use remote_storage::GenericRemoteStorage;
-use tokio::signal::unix::SignalKind;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -744,32 +743,7 @@ fn start_pageserver(
         let signal_token = CancellationToken::new();
         let signal_cancel = signal_token.child_token();
 
-        // Spawn signal handlers. Runs in a loop since we want to be responsive to multiple signals
-        // even after triggering shutdown (e.g. a SIGQUIT after a slow SIGTERM shutdown). See:
-        // https://github.com/neondatabase/neon/issues/9740.
-        tokio::spawn(async move {
-            let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt()).unwrap();
-            let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate()).unwrap();
-            let mut sigquit = tokio::signal::unix::signal(SignalKind::quit()).unwrap();
-
-            loop {
-                let signal = tokio::select! {
-                    _ = sigquit.recv() => {
-                        info!("Got signal SIGQUIT. Terminating in immediate shutdown mode.");
-                        std::process::exit(111);
-                    }
-                    _ = sigint.recv() => "SIGINT",
-                    _ = sigterm.recv() => "SIGTERM",
-                };
-
-                if !signal_token.is_cancelled() {
-                    info!("Got signal {signal}. Terminating gracefully in fast shutdown mode.");
-                    signal_token.cancel();
-                } else {
-                    info!("Got signal {signal}. Already shutting down.");
-                }
-            }
-        });
+        tokio::spawn(utils::signals::signal_handler(signal_token));
 
         // Wait for cancellation signal and shut down the pageserver.
         //

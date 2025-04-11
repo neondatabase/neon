@@ -148,9 +148,9 @@ def test_create_snapshot(
     env = neon_env_builder.init_start(
         initial_tenant_conf={
             # Miniature layers to enable generating non-trivial layer map without writing lots of data.
-            "checkpoint_distance": f"{128 * 1024}",
-            "compaction_threshold": "1",
-            "compaction_target_size": f"{128 * 1024}",
+            "checkpoint_distance": f"{256 * 1024}",
+            "compaction_threshold": "5",
+            "compaction_target_size": f"{256 * 1024}",
         }
     )
     endpoint = env.endpoints.create_start("main")
@@ -491,6 +491,13 @@ HISTORIC_DATA_SETS = [
         TenantId("e1411ca6562d6ff62419f693a5695d67"),
         PgVersion.V17,
         "https://neon-github-public-dev.s3.eu-central-1.amazonaws.com/compatibility-data-snapshots/2025-02-07-pgv17-nogenerations.tar.zst",
+    ),
+    # Tenant manifest v1.
+    HistoricDataSet(
+        "2025-04-08-tenant-manifest-v1",
+        TenantId("c547c28588abf1d7b7139ff1f1158345"),
+        PgVersion.V17,
+        "https://neon-github-public-dev.s3.eu-central-1.amazonaws.com/compatibility-data-snapshots/2025-04-08-pgv17-tenant-manifest-v1.tar.zst",
     ),
 ]
 
