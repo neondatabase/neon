@@ -642,6 +642,7 @@ impl RemoteTimelineClient {
             cancel,
         )
         .measure_remote_op(
+            Option::<TaskKind>::None,
             RemoteOpFileKind::Index,
             RemoteOpKind::Download,
             Arc::clone(&self.metrics),
@@ -739,6 +740,7 @@ impl RemoteTimelineClient {
                 ctx,
             )
             .measure_remote_op(
+                Some(ctx.task_kind()),
                 RemoteOpFileKind::Layer,
                 RemoteOpKind::Download,
                 Arc::clone(&self.metrics),
@@ -2175,6 +2177,7 @@ impl RemoteTimelineClient {
                         &self.cancel,
                     )
                     .measure_remote_op(
+                        Some(TaskKind::RemoteUploadTask),
                         RemoteOpFileKind::Layer,
                         RemoteOpKind::Upload,
                         Arc::clone(&self.metrics),
@@ -2191,6 +2194,7 @@ impl RemoteTimelineClient {
                         &self.cancel,
                     )
                     .measure_remote_op(
+                        Some(TaskKind::RemoteUploadTask),
                         RemoteOpFileKind::Index,
                         RemoteOpKind::Upload,
                         Arc::clone(&self.metrics),

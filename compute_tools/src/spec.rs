@@ -3,9 +3,8 @@ use std::path::Path;
 
 use anyhow::{Result, anyhow, bail};
 use compute_api::responses::{
-    ComputeCtlConfig, ControlPlaneComputeStatus, ControlPlaneSpecResponse,
+    ComputeConfig, ControlPlaneComputeStatus, ControlPlaneConfigResponse,
 };
-use compute_api::spec::ComputeSpec;
 use reqwest::StatusCode;
 use tokio_postgres::Client;
 use tracing::{error, info, instrument};
@@ -21,7 +20,7 @@ use crate::params::PG_HBA_ALL_MD5;
 fn do_control_plane_request(
     uri: &str,
     jwt: &str,
-) -> Result<ControlPlaneSpecResponse, (bool, String, String)> {
+) -> Result<ControlPlaneConfigResponse, (bool, String, String)> {
     let resp = reqwest::blocking::Client::new()
         .get(uri)
         .header("Authorization", format!("Bearer {}", jwt))
@@ -29,14 +28,14 @@ fn do_control_plane_request(
         .map_err(|e| {
             (
                 true,
-                format!("could not perform spec request to control plane: {:?}", e),
+                format!("could not perform request to control plane: {:?}", e),
                 UNKNOWN_HTTP_STATUS.to_string(),
             )
         })?;
 
     let status = resp.status();
     match status {
-        StatusCode::OK => match resp.json::<ControlPlaneSpecResponse>() {
+        StatusCode::OK => match resp.json::<ControlPlaneConfigResponse>() {
             Ok(spec_resp) => Ok(spec_resp),
             Err(e) => Err((
                 true,
@@ -69,40 +68,35 @@ fn do_control_plane_request(
     }
 }
 
-/// Request spec from the control-plane by compute_id. If `NEON_CONTROL_PLANE_TOKEN`
-/// env variable is set, it will be used for authorization.
-pub fn get_spec_from_control_plane(
-    base_uri: &str,
-    compute_id: &str,
-) -> Result<(Option<ComputeSpec>, ComputeCtlConfig)> {
+/// Request config from the control-plane by compute_id. If
+/// `NEON_CONTROL_PLANE_TOKEN` env variable is set, it will be used for
+/// authorization.
+pub fn get_config_from_control_plane(base_uri: &str, compute_id: &str) -> Result<ComputeConfig> {
     let cp_uri = format!("{base_uri}/compute/api/v2/computes/{compute_id}/spec");
-    let jwt: String = match std::env::var("NEON_CONTROL_PLANE_TOKEN") {
-        Ok(v) => v,
-        Err(_) => "".to_string(),
-    };
+    let jwt: String = std::env::var("NEON_CONTROL_PLANE_TOKEN").unwrap_or_default();
     let mut attempt = 1;
 
-    info!("getting spec from control plane: {}", cp_uri);
+    info!("getting config from control plane: {}", cp_uri);
 
     // Do 3 attempts to get spec from the control plane using the following logic:
     // - network error -> then retry
     // - compute id is unknown or any other error -> bail out
     // - no spec for compute yet (Empty state) -> return Ok(None)
-    // - got spec -> return Ok(Some(spec))
+    // - got config -> return Ok(Some(config))
     while attempt < 4 {
         let result = match do_control_plane_request(&cp_uri, &jwt) {
-            Ok(spec_resp) => {
+            Ok(config_resp) => {
                 CPLANE_REQUESTS_TOTAL
                     .with_label_values(&[
-                        CPlaneRequestRPC::GetSpec.as_str(),
+                        CPlaneRequestRPC::GetConfig.as_str(),
                         &StatusCode::OK.to_string(),
                     ])
                     .inc();
-                match spec_resp.status {
-                    ControlPlaneComputeStatus::Empty => Ok((None, spec_resp.compute_ctl_config)),
+                match config_resp.status {
+                    ControlPlaneComputeStatus::Empty => Ok(config_resp.into()),
                     ControlPlaneComputeStatus::Attached => {
-                        if let Some(spec) = spec_resp.spec {
-                            Ok((Some(spec), spec_resp.compute_ctl_config))
+                        if config_resp.spec.is_some() {
+                            Ok(config_resp.into())
                         } else {
                             bail!("compute is attached, but spec is empty")
                         }
@@ -111,7 +105,7 @@ pub fn get_spec_from_control_plane(
             }
             Err((retry, msg, status)) => {
                 CPLANE_REQUESTS_TOTAL
-                    .with_label_values(&[CPlaneRequestRPC::GetSpec.as_str(), &status])
+                    .with_label_values(&[CPlaneRequestRPC::GetConfig.as_str(), &status])
                     .inc();
                 if retry {
                     Err(anyhow!(msg))
@@ -122,7 +116,7 @@ pub fn get_spec_from_control_plane(
         };
 
         if let Err(e) = &result {
-            error!("attempt {} to get spec failed with: {}", attempt, e);
+            error!("attempt {} to get config failed with: {}", attempt, e);
         } else {
             return result;
         }
@@ -133,13 +127,13 @@ pub fn get_spec_from_control_plane(
 
     // All attempts failed, return error.
     Err(anyhow::anyhow!(
-        "Exhausted all attempts to retrieve the spec from the control plane"
+        "Exhausted all attempts to retrieve the config from the control plane"
     ))
 }
 
 /// Check `pg_hba.conf` and update if needed to allow external connections.
 pub fn update_pg_hba(pgdata_path: &Path) -> Result<()> {
-    // XXX: consider making it a part of spec.json
+    // XXX: consider making it a part of config.json
     let pghba_path = pgdata_path.join("pg_hba.conf");
 
     if config::line_in_file(&pghba_path, PG_HBA_ALL_MD5)? {
@@ -153,7 +147,7 @@ pub fn update_pg_hba(pgdata_path: &Path) -> Result<()> {
 
 /// Create a standby.signal file
 pub fn add_standby_signal(pgdata_path: &Path) -> Result<()> {
-    // XXX: consider making it a part of spec.json
+    // XXX: consider making it a part of config.json
     let signalfile = pgdata_path.join("standby.signal");
 
     if !signalfile.exists() {

@@ -73,6 +73,7 @@ pub(super) enum WalReceiverError {
     /// Generic error
     Other(anyhow::Error),
     ClosedGate,
+    Cancelled,
 }
 
 impl From<tokio_postgres::Error> for WalReceiverError {
@@ -200,6 +201,9 @@ pub(super) async fn handle_walreceiver_connection(
                                 // with a similar error.
                             },
                             WalReceiverError::SuccessfulCompletion(_) => {}
+                            WalReceiverError::Cancelled => {
+                                debug!("Connection cancelled")
+                            }
                             WalReceiverError::ClosedGate => {
                                 // doesn't happen at runtime
                             }
@@ -273,7 +277,12 @@ pub(super) async fn handle_walreceiver_connection(
 
     let mut waldecoder = WalStreamDecoder::new(startpoint, timeline.pg_version);
 
-    let mut walingest = WalIngest::new(timeline.as_ref(), startpoint, &ctx).await?;
+    let mut walingest = WalIngest::new(timeline.as_ref(), startpoint, &ctx)
+        .await
+        .map_err(|e| match e.kind {
+            crate::walingest::WalIngestErrorKind::Cancelled => WalReceiverError::Cancelled,
+            _ => WalReceiverError::Other(e.into()),
+        })?;
 
     let shard = vec![*timeline.get_shard_identity()];
 
@@ -445,7 +454,7 @@ pub(super) async fn handle_walreceiver_connection(
                         .inspect_err(|err| {
                             // TODO: we can't differentiate cancellation errors with
                             // anyhow::Error, so just ignore it if we're cancelled.
-                            if !cancellation.is_cancelled() {
+                            if !cancellation.is_cancelled() && !timeline.is_stopping() {
                                 critical!("{err:?}")
                             }
                         })?;
@@ -577,7 +586,7 @@ pub(super) async fn handle_walreceiver_connection(
                             .inspect_err(|err| {
                                 // TODO: we can't differentiate cancellation errors with
                                 // anyhow::Error, so just ignore it if we're cancelled.
-                                if !cancellation.is_cancelled() {
+                                if !cancellation.is_cancelled() && !timeline.is_stopping() {
                                     critical!("{err:?}")
                                 }
                             })?;

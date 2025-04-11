@@ -5,6 +5,14 @@ use crate::privilege::Privilege;
 use crate::responses::ComputeCtlConfig;
 use crate::spec::{ComputeSpec, ExtVersion, PgIdent};
 
+/// When making requests to the `compute_ctl` external HTTP server, the client
+/// must specify a set of claims in `Authorization` header JWTs such that
+/// `compute_ctl` can authorize the request.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ComputeClaims {
+    pub compute_id: String,
+}
+
 /// Request of the /configure API
 ///
 /// We now pass only `spec` in the configuration request, but later we can
@@ -29,10 +37,4 @@ pub struct SetRoleGrantsRequest {
     pub schema: PgIdent,
     pub privileges: Vec<Privilege>,
     pub role: PgIdent,
-}
-
-/// Request of the /configure_telemetry API
-#[derive(Debug, Deserialize, Serialize)]
-pub struct ConfigureTelemetryRequest {
-    pub logs_export_host: Option<String>,
 }

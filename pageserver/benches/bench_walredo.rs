@@ -65,7 +65,7 @@ use bytes::{Buf, Bytes};
 use criterion::{BenchmarkId, Criterion};
 use once_cell::sync::Lazy;
 use pageserver::config::PageServerConf;
-use pageserver::walredo::PostgresRedoManager;
+use pageserver::walredo::{PostgresRedoManager, RedoAttemptType};
 use pageserver_api::key::Key;
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::shard::TenantShardId;
@@ -223,7 +223,14 @@ impl Request {
 
         // TODO: avoid these clones
         manager
-            .request_redo(*key, *lsn, base_img.clone(), records.clone(), *pg_version)
+            .request_redo(
+                *key,
+                *lsn,
+                base_img.clone(),
+                records.clone(),
+                *pg_version,
+                RedoAttemptType::ReadPage,
+            )
             .await
             .context("request_redo")
     }

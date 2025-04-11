@@ -9,4 +9,4 @@
 #define BITMAP_SET(bm, bit) (bm)[(bit) >> 3] |= (1 << ((bit) & 7))
 #define BITMAP_CLR(bm, bit) (bm)[(bit) >> 3] &= ~(1 << ((bit) & 7))
 
-#endif //NEON_BITMAP_H
+#endif							/* NEON_BITMAP_H */

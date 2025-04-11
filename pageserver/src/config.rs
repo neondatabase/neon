@@ -4,6 +4,8 @@
 //! file, or on the command line.
 //! See also `settings.md` for better description on every parameter.
 
+pub mod ignored_fields;
+
 use std::env;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -217,6 +219,11 @@ pub struct PageServerConf {
     pub generate_unarchival_heatmap: bool,
 
     pub tracing: Option<pageserver_api::config::Tracing>,
+
+    /// Enable TLS in page service API.
+    /// Does not force TLS: the client negotiates TLS usage during the handshake.
+    /// Uses key and certificate from ssl_key_file/ssl_cert_file.
+    pub enable_tls_page_service_api: bool,
 }
 
 /// Token for authentication to safekeepers
@@ -389,6 +396,7 @@ impl PageServerConf {
             load_previous_heatmap,
             generate_unarchival_heatmap,
             tracing,
+            enable_tls_page_service_api,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -439,6 +447,7 @@ impl PageServerConf {
             page_service_pipelining,
             get_vectored_concurrent_io,
             tracing,
+            enable_tls_page_service_api,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling
@@ -560,7 +569,6 @@ impl PageServerConf {
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct PageserverIdentity {
     pub id: NodeId,
 }
@@ -631,83 +639,5 @@ mod tests {
         let workdir = Utf8PathBuf::from("/nonexistent");
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
             .expect("parse_and_validate");
-    }
-
-    /// If there's a typo in the pageserver config, we'd rather catch that typo
-    /// and fail pageserver startup than silently ignoring the typo, leaving whoever
-    /// made it in the believe that their config change is effective.
-    ///
-    /// The default in serde is to allow unknown fields, so, we rely
-    /// on developer+review discipline to add `deny_unknown_fields` when adding
-    /// new structs to the config, and these tests here as a regression test.
-    ///
-    /// The alternative to all of this would be to allow unknown fields in the config.
-    /// To catch them, we could have a config check tool or mgmt API endpoint that
-    /// compares the effective config with the TOML on disk and makes sure that
-    /// the on-disk TOML is a strict subset of the effective config.
-    mod unknown_fields_handling {
-        macro_rules! test {
-            ($short_name:ident, $input:expr) => {
-                #[test]
-                fn $short_name() {
-                    let input = $input;
-                    let err = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(&input)
-                        .expect_err("some_invalid_field is an invalid field");
-                    dbg!(&err);
-                    assert!(err.to_string().contains("some_invalid_field"));
-                }
-            };
-        }
-        use indoc::indoc;
-
-        test!(
-            toplevel,
-            indoc! {r#"
-                some_invalid_field = 23
-            "#}
-        );
-
-        test!(
-            toplevel_nested,
-            indoc! {r#"
-                [some_invalid_field]
-                foo = 23
-            "#}
-        );
-
-        test!(
-            disk_usage_based_eviction,
-            indoc! {r#"
-                [disk_usage_based_eviction]
-                some_invalid_field = 23
-            "#}
-        );
-
-        test!(
-            tenant_config,
-            indoc! {r#"
-                [tenant_config]
-                some_invalid_field = 23
-            "#}
-        );
-
-        test!(
-            l0_flush,
-            indoc! {r#"
-                [l0_flush]
-                mode = "direct"
-                some_invalid_field = 23
-            "#}
-        );
-
-        // TODO: fix this => https://github.com/neondatabase/neon/issues/8915
-        // test!(
-        //     remote_storage_config,
-        //     indoc! {r#"
-        //         [remote_storage_config]
-        //         local_path = "/nonexistent"
-        //         some_invalid_field = 23
-        //     "#}
-        // );
     }
 }

@@ -111,7 +111,7 @@ pub(crate) async fn offload_timeline(
     // at the next restart attach it again.
     // For that to happen, we'd need to make the manifest reflect our *intended* state,
     // not our actual state of offloaded timelines.
-    tenant.store_tenant_manifest().await?;
+    tenant.maybe_upload_tenant_manifest().await?;
 
     tracing::info!("Timeline offload complete (remaining arc refcount: {remaining_refcount})");
 

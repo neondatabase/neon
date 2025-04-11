@@ -19,13 +19,13 @@ pub(crate) static INSTALLED_EXTENSIONS: Lazy<UIntGaugeVec> = Lazy::new(|| {
 // but for all our APIs we defined a 'slug'/method/operationId in the OpenAPI spec.
 // And it's fair to call it a 'RPC' (Remote Procedure Call).
 pub enum CPlaneRequestRPC {
-    GetSpec,
+    GetConfig,
 }
 
 impl CPlaneRequestRPC {
     pub fn as_str(&self) -> &str {
         match self {
-            CPlaneRequestRPC::GetSpec => "GetSpec",
+            CPlaneRequestRPC::GetConfig => "GetConfig",
         }
     }
 }

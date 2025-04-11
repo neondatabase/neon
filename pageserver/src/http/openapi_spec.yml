@@ -212,6 +212,12 @@ paths:
               schema:
                 type: string
                 format: date-time
+        "412":
+          description: No timestamp is found for given LSN, e.g. if there had been no commits till LSN
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreconditionFailedError"
 
   /v1/tenant/{tenant_id}/timeline/{timeline_id}/get_lsn_by_timestamp:
     parameters:

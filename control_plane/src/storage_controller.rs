@@ -13,7 +13,9 @@ use pageserver_api::controller_api::{
     NodeConfigureRequest, NodeDescribeResponse, NodeRegisterRequest, TenantCreateRequest,
     TenantCreateResponse, TenantLocateResponse,
 };
-use pageserver_api::models::{TenantConfigRequest, TimelineCreateRequest, TimelineInfo};
+use pageserver_api::models::{
+    TenantConfig, TenantConfigRequest, TimelineCreateRequest, TimelineInfo,
+};
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
@@ -82,7 +84,8 @@ impl NeonStorageControllerStopArgs {
 pub struct AttachHookRequest {
     pub tenant_shard_id: TenantShardId,
     pub node_id: Option<NodeId>,
-    pub generation_override: Option<i32>,
+    pub generation_override: Option<i32>, // only new tenants
+    pub config: Option<TenantConfig>,     // only new tenants
 }
 
 #[derive(Serialize, Deserialize)]
@@ -805,6 +808,7 @@ impl StorageController {
             tenant_shard_id,
             node_id: Some(pageserver_id),
             generation_override: None,
+            config: None,
         };
 
         let response = self

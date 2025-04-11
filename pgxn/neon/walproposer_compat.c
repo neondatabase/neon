@@ -7,6 +7,7 @@
 
 #include <stdio.h>
 
+#include "libpq/pqformat.h"
 #include "miscadmin.h"
 #include "utils/datetime.h"
 #include "walproposer.h"

@@ -6,19 +6,14 @@ use axum_extra::{
     TypedHeader,
     headers::{Authorization, authorization::Bearer},
 };
+use compute_api::requests::ComputeClaims;
 use futures::future::BoxFuture;
 use http::{Request, Response, StatusCode};
 use jsonwebtoken::{Algorithm, DecodingKey, TokenData, Validation, jwk::JwkSet};
-use serde::Deserialize;
 use tower_http::auth::AsyncAuthorizeRequest;
 use tracing::warn;
 
 use crate::http::{JsonResponse, extract::RequestId};
-
-#[derive(Clone, Debug, Deserialize)]
-pub(in crate::http) struct Claims {
-    compute_id: String,
-}
 
 #[derive(Clone, Debug)]
 pub(in crate::http) struct Authorize {
@@ -112,7 +107,11 @@ impl AsyncAuthorizeRequest<Body> for Authorize {
 
 impl Authorize {
     /// Verify the token using the JSON Web Key set and return the token data.
-    fn verify(jwks: &JwkSet, token: &str, validation: &Validation) -> Result<TokenData<Claims>> {
+    fn verify(
+        jwks: &JwkSet,
+        token: &str,
+        validation: &Validation,
+    ) -> Result<TokenData<ComputeClaims>> {
         for jwk in jwks.keys.iter() {
             let decoding_key = match DecodingKey::from_jwk(jwk) {
                 Ok(key) => key,
@@ -127,7 +126,7 @@ impl Authorize {
                 }
             };
 
-            match jsonwebtoken::decode::<Claims>(token, &decoding_key, validation) {
+            match jsonwebtoken::decode::<ComputeClaims>(token, &decoding_key, validation) {
                 Ok(data) => return Ok(data),
                 Err(e) => {
                     warn!(

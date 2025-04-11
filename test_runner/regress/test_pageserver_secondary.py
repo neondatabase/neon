@@ -61,7 +61,7 @@ def evict_random_layers(
     )
     client = pageserver.http_client()
     for layer in initial_local_layers:
-        if "ephemeral" in layer.name or "temp_download" in layer.name:
+        if "ephemeral" in layer.name or "temp_download" in layer.name or ".___temp" in layer.name:
             continue
 
         layer_name = parse_layer_file_name(layer.name)
@@ -242,7 +242,13 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
             pageserver.tenant_location_configure(tenant_id, location_conf)
             last_state[pageserver.id] = (mode, generation)
 
-            if mode.startswith("Attached"):
+            # It's only valid to connect to the last generation. Newer generations may yank layer
+            # files used in older generations.
+            last_generation = max(
+                [s[1] for s in last_state.values() if s[1] is not None], default=None
+            )
+
+            if mode.startswith("Attached") and generation == last_generation:
                 # This is a basic test: we are validating that he endpoint works properly _between_
                 # configuration changes.  A stronger test would be to validate that clients see
                 # no errors while we are making the changes.

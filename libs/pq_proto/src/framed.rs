@@ -35,7 +35,7 @@ impl ConnectionError {
     pub fn into_io_error(self) -> io::Error {
         match self {
             ConnectionError::Io(io) => io,
-            ConnectionError::Protocol(pe) => io::Error::new(io::ErrorKind::Other, pe.to_string()),
+            ConnectionError::Protocol(pe) => io::Error::other(pe.to_string()),
         }
     }
 }
