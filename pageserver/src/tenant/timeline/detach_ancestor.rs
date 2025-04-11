@@ -231,6 +231,8 @@ async fn generate_tombstone_image_layer(
             detached.tenant_shard_id,
             &key_range,
             image_lsn,
+            &detached.gate,
+            detached.cancel.clone(),
             ctx,
         )
         .await

@@ -385,7 +385,7 @@ impl SplitDeltaLayerWriter {
                 )
                 .await?;
                 let (start_key, prev_delta_writer) =
-                    std::mem::replace(&mut self.inner, Some((key, next_delta_writer))).unwrap();
+                    self.inner.replace((key, next_delta_writer)).unwrap();
                 self.batches.add_unfinished_delta_writer(
                     prev_delta_writer,
                     start_key..key,
