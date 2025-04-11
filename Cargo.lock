@@ -4302,6 +4302,7 @@ dependencies = [
  "arc-swap",
  "async-compression",
  "async-stream",
+ "base64 0.22.1",
  "bincode",
  "bit_field",
  "byteorder",

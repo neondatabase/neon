@@ -6743,7 +6743,7 @@ impl Timeline {
     }
 
     /// Reconstruct a value, using the given base image and WAL records in 'data'.
-    async fn reconstruct_value(
+    pub(crate) async fn reconstruct_value(
         &self,
         key: Key,
         request_lsn: Lsn,
