@@ -520,6 +520,7 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
             .as_ref()
             .unwrap_or_else(|| BACKGROUND_RUNTIME.handle())
             .block_on(ReloadingCertificateResolver::new(
+                "main",
                 &conf.ssl_key_file,
                 &conf.ssl_cert_file,
                 conf.ssl_cert_reload_period,
