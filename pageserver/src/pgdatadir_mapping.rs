@@ -2000,7 +2000,7 @@ impl DatadirModification<'_> {
 
         if v2_enabled {
             if rel_dir.rels.contains(&(rel.relnode, rel.forknum)) {
-                Err(WalIngestErrorKind::RelationAlreadyExists)?;
+                Err(WalIngestErrorKind::RelationAlreadyExists(rel))?;
             }
             let sparse_rel_dir_key =
                 rel_tag_sparse_key(rel.spcnode, rel.dbnode, rel.relnode, rel.forknum);
@@ -2009,7 +2009,7 @@ impl DatadirModification<'_> {
             let val = RelDirExists::decode_option(val)
                 .map_err(|_| WalIngestErrorKind::InvalidRelDirKey(sparse_rel_dir_key))?;
             if val == RelDirExists::Exists {
-                Err(WalIngestErrorKind::RelationAlreadyExists)?;
+                Err(WalIngestErrorKind::RelationAlreadyExists(rel))?;
             }
             self.put(
                 sparse_rel_dir_key,
@@ -2033,7 +2033,7 @@ impl DatadirModification<'_> {
         } else {
             // Add the new relation to the rel directory entry, and write it back
             if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
-                Err(WalIngestErrorKind::RelationAlreadyExists)?;
+                Err(WalIngestErrorKind::RelationAlreadyExists(rel))?;
             }
             if !dbdir_exists {
                 self.pending_directory_entries

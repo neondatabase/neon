@@ -158,7 +158,7 @@ async fn import_rel(
         .await
     {
         match e.kind {
-            WalIngestErrorKind::RelationAlreadyExists => {
+            WalIngestErrorKind::RelationAlreadyExists(rel) => {
                 debug!("Relation {rel} already exists. We must be extending it.")
             }
             _ => return Err(e.into()),

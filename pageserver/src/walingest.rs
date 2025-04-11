@@ -125,7 +125,7 @@ pub enum WalIngestErrorKind {
     #[error("slru segment {0:?}/{1} already exists")]
     SlruAlreadyExists(SlruKind, u32),
     #[error("relation already exists")]
-    RelationAlreadyExists,
+    RelationAlreadyExists(RelTag),
     #[error("invalid reldir key {0}")]
     InvalidRelDirKey(Key),
 
