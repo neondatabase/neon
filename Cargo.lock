@@ -1349,14 +1349,16 @@ dependencies = [
  "cbindgen",
  "http 1.1.0",
  "nix 0.27.1",
+ "pageserver_client_grpc",
+ "pageserver_data_api",
  "prost 0.13.3",
  "thiserror 1.0.69",
  "tokio",
  "tokio-pipe",
  "tonic",
- "tonic-build",
  "tracing",
  "tracing-subscriber",
+ "utils",
 ]
 
 [[package]]
@@ -4392,6 +4394,7 @@ dependencies = [
  "pageserver_api",
  "pageserver_client",
  "pageserver_compaction",
+ "pageserver_data_api",
  "peekable",
  "pin-project-lite",
  "postgres-protocol",
@@ -4435,7 +4438,6 @@ dependencies = [
  "tokio-util",
  "toml_edit",
  "tonic",
- "tonic-build",
  "tracing",
  "tracing-utils",
  "url",
@@ -4500,6 +4502,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pageserver_client_grpc"
+version = "0.1.0"
+dependencies = [
+ "http 1.1.0",
+ "pageserver_data_api",
+ "thiserror 1.0.69",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
 name = "pageserver_compaction"
 version = "0.1.0"
 dependencies = [
@@ -4520,6 +4533,17 @@ dependencies = [
  "tracing-subscriber",
  "utils",
  "workspace_hack",
+]
+
+[[package]]
+name = "pageserver_data_api"
+version = "0.1.0"
+dependencies = [
+ "prost 0.13.3",
+ "thiserror 1.0.69",
+ "tonic",
+ "tonic-build",
+ "utils",
 ]
 
 [[package]]

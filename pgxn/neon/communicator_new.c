@@ -315,7 +315,7 @@ communicator_new_rel_exists(NRelFileInfo rinfo, ForkNumber forkNum, neon_request
 			.rel_number = NInfoGetRelNumber(rinfo),
 			.fork_number = forkNum,
 			.request_lsn = request_lsns->request_lsn,
-			.not_modified_since = request_lsns->not_modified_since,
+			.not_modified_since_lsn = request_lsns->not_modified_since,
 		}
 	};
 	const NeonIOResult *result;

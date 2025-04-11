@@ -1,15 +1,8 @@
-//! Ground rules
-//! ------------
+//! Pageserver Data API client
 //!
-//! This module is indendend of any of the C code, and doesn't rely on
-//! any PostgreSQL facilities. You are free to use any Rust crates,
-//! Tokio, threads, you name it. If you wanted to build another client
-//! application, separate from Postgres, you should be able to take
-//! this module and embed it in standalone Rust program.
+//! - Manage connections to pageserver
+//! - Send requests to correct shards
 //!
-//! The interface to this module is public CommunicatorProcess::process_*()
-//! functions. They are async, and may be called from multiple threads.
-
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -18,17 +11,13 @@ use thiserror::Error;
 use tonic;
 use tonic::metadata::AsciiMetadataValue;
 use tonic::transport::Channel;
-use tracing;
 
-use crate::neon_request::{DbSizeRequest, GetPageRequest, RelExistsRequest, RelSizeRequest};
+use pageserver_data_api::model::{DbSizeRequest, GetPageRequest, RelExistsRequest, RelSizeRequest};
+use pageserver_data_api::proto;
 
 type Shardno = u16;
 
-mod page_service {
-    tonic::include_proto!("page_service");
-}
-
-use page_service::page_service_client::PageServiceClient;
+use pageserver_data_api::client::PageServiceClient;
 
 type MyPageServiceClient = PageServiceClient<
     tonic::service::interceptor::InterceptedService<tonic::transport::Channel, AuthInterceptor>,
@@ -66,7 +55,6 @@ impl CommunicatorProcessor {
         auth_token: &Option<String>,
         shard_map: HashMap<Shardno, String>,
     ) -> Self {
-        tracing::info!("Initialized");
         Self {
             _tenant_id: tenant_id.to_string(),
             _timeline_id: timeline_id.to_string(),
@@ -77,7 +65,7 @@ impl CommunicatorProcessor {
         }
     }
 
-    /// Process a request to get a database size.
+    /// Process a request to get the size of a database.
     pub async fn process_dbsize_request(
         &self,
         request: &DbSizeRequest,
@@ -87,15 +75,8 @@ impl CommunicatorProcessor {
 
         let mut client = self.get_client(shard_no).await?;
 
-        let request = tonic::Request::new(page_service::DbSizeRequest {
-            common: Some(page_service::RequestCommon {
-                request_lsn: request.request_lsn,
-                not_modified_since_lsn: request.not_modified_since,
-            }),
-            db_oid: request.db_oid,
-        });
-
-        let response = client.db_size(request).await?;
+        let request = proto::DbSizeRequest::from(request);
+        let response = client.db_size(tonic::Request::new(request)).await?;
 
         Ok(response.get_ref().num_bytes)
     }
@@ -109,20 +90,8 @@ impl CommunicatorProcessor {
 
         let mut client = self.get_client(shard_no).await?;
 
-        let request = tonic::Request::new(page_service::RelExistsRequest {
-            common: Some(page_service::RequestCommon {
-                request_lsn: request.request_lsn,
-                not_modified_since_lsn: request.not_modified_since,
-            }),
-            rel: Some(page_service::RelTag {
-                spc_oid: request.spc_oid,
-                db_oid: request.db_oid,
-                rel_number: request.rel_number,
-                fork_number: request.fork_number as u32,
-            }),
-        });
-
-        let response = client.rel_exists(request).await?;
+        let request = proto::RelExistsRequest::from(request);
+        let response = client.rel_exists(tonic::Request::new(request)).await?;
 
         Ok(response.get_ref().exists)
     }
@@ -136,20 +105,8 @@ impl CommunicatorProcessor {
 
         let mut client = self.get_client(shard_no).await?;
 
-        let request = tonic::Request::new(page_service::RelSizeRequest {
-            common: Some(page_service::RequestCommon {
-                request_lsn: request.request_lsn,
-                not_modified_since_lsn: request.not_modified_since,
-            }),
-            rel: Some(page_service::RelTag {
-                spc_oid: request.spc_oid,
-                db_oid: request.db_oid,
-                rel_number: request.rel_number,
-                fork_number: request.fork_number as u32,
-            }),
-        });
-
-        let response = client.rel_size(request).await?;
+        let request = proto::RelSizeRequest::from(request);
+        let response = client.rel_size(tonic::Request::new(request)).await?;
 
         Ok(response.get_ref().num_blocks)
     }
@@ -163,21 +120,8 @@ impl CommunicatorProcessor {
 
         let mut client = self.get_client(shard_no).await?;
 
-        let request = tonic::Request::new(page_service::GetPageRequest {
-            common: Some(page_service::RequestCommon {
-                request_lsn: request.request_lsn,
-                not_modified_since_lsn: request.not_modified_since,
-            }),
-            rel: Some(page_service::RelTag {
-                spc_oid: request.spc_oid,
-                db_oid: request.db_oid,
-                rel_number: request.rel_number,
-                fork_number: request.fork_number as u32,
-            }),
-            block_number: request.block_number,
-        });
-
-        let response = client.get_page(request).await?;
+        let request = proto::GetPageRequest::from(request);
+        let response = client.get_page(tonic::Request::new(request)).await?;
 
         Ok(response.into_inner().page_image)
     }

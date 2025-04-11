@@ -8,6 +8,7 @@ members = [
     "pageserver/compaction",
     "pageserver/ctl",
     "pageserver/client",
+    "pageserver/client_grpc",
     "pageserver/pagebench",
     "proxy",
     "safekeeper",
@@ -251,6 +252,8 @@ metrics = { version = "0.1", path = "./libs/metrics/" }
 pageserver = { path = "./pageserver" }
 pageserver_api = { version = "0.1", path = "./libs/pageserver_api/" }
 pageserver_client = { path = "./pageserver/client" }
+pageserver_client_grpc = { path = "./pageserver/client_grpc" }
+pageserver_data_api = { path = "./pageserver/data_api" }
 pageserver_compaction = { version = "0.1", path = "./pageserver/compaction/" }
 postgres_backend = { version = "0.1", path = "./libs/postgres_backend/" }
 postgres_connection = { version = "0.1", path = "./libs/postgres_connection/" }

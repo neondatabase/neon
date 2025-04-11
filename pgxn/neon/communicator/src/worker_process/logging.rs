@@ -1,70 +1,71 @@
-//!
-//! Glue code to get Rust log stream, created with the `tracing` crate, to the PostgreSQL log
+//! Glue code to hook up Rust logging, with the `tracing` crate, to the PostgreSQL log
 //!
 //! In the Rust threads, the log messages are written to a mpsc Channel, and the Postgres
 //! process latch is raised. That wakes up the loop in the  main thread. It reads the
 //! message from the channel and ereport()s it. This ensures that only one thread, the main
 //! thread, calls the PostgreSQL logging routines at any time.
-//!
 
 use std::sync::mpsc::sync_channel;
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::mpsc::{TryRecvError, TrySendError};
 
 use tracing::info;
-use tracing::Level;
-use tracing::Event;
-use tracing::Metadata;
-use tracing::Subscriber;
+use tracing::{Event, Level, Metadata, Subscriber};
 use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::fmt::FmtContext;
 use tracing_subscriber::fmt::FormatEvent;
 use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::fmt::FormattedFields;
-use tracing_subscriber::fmt::FmtContext;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::registry::LookupSpan;
 
-
 use crate::worker_process::callbacks::callback_set_my_latch;
 
 pub struct LoggingState {
-    receiver: Receiver<FormattedEventWithMeta>
+    receiver: Receiver<FormattedEventWithMeta>,
 }
 
+/// Called once, at worker process startup. The returned LoggingState is passed back
+/// in the subsequent calls to `pump_logging`. It is opaque to the C code.
 #[unsafe(no_mangle)]
 pub extern "C" fn configure_logging() -> *mut LoggingState {
     let (sender, receiver) = sync_channel(1000);
 
-    let maker = Maker {
-        channel: sender
-    };
+    let maker = Maker { channel: sender };
 
     use tracing_subscriber::prelude::*;
     let r = tracing_subscriber::registry();
 
     let r = r.with(
         tracing_subscriber::fmt::layer()
-            .event_format(MyFormatter::new())
+            .event_format(SimpleFormatter::new())
             .with_writer(maker)
-            .with_filter(LevelFilter::from_level(Level::TRACE)
-            )
+            .with_filter(LevelFilter::from_level(Level::TRACE)),
     );
     r.init();
 
     info!("communicator process logging started");
 
-    let state = LoggingState {
-        receiver,
-    };
+    let state = LoggingState { receiver };
 
     Box::leak(Box::new(state))
 }
 
-/// This is called from the main thread of the communicator process. That makes it safe to
-/// call ereport()
+/// Read one message from the logging queue. This is essentially a wrapper to Receiver,
+/// with a C-friendly signature.
+///
+/// The message is copied into *errbuf, which is a caller-supplied buffer of size `errbuf_len`.
+/// If the message doesn't fit in the buffer, it is truncated. It is always NULL-terminated.
+///
+/// The error level is returned *elevel_p. It's one of the PostgreSQL error levels, see elog.h
 #[unsafe(no_mangle)]
-pub extern "C" fn pump_logging(state: *mut LoggingState, errbuf: *mut u8, errbuf_len: u32, elevel_p: *mut i32) -> i32 {
+pub extern "C" fn pump_logging(
+    state: *mut LoggingState,
+    errbuf: *mut u8,
+    errbuf_len: u32,
+    elevel_p: *mut i32,
+) -> i32 {
     let receiver = unsafe { &(*state).receiver };
 
     let msg = match receiver.try_recv() {
@@ -78,16 +79,16 @@ pub extern "C" fn pump_logging(state: *mut LoggingState, errbuf: *mut u8, errbuf
     let len = std::cmp::min(src.len(), errbuf_len as usize - 1);
     unsafe {
         std::ptr::copy_nonoverlapping(src.as_ptr(), dst, len);
-        /* NULL terminator */
-        *(errbuf.add(len)) = b'\0';
+        *(errbuf.add(len)) = b'\0'; // NULL terminator
 
-        // TODO: these levels are copied from PostgreSQL's elog.h
+        // XXX: these levels are copied from PostgreSQL's elog.h. Introduce another enum
+        // to hide these?
         *elevel_p = match msg.level {
-            Level::TRACE => 10,		// DEBUG5
-            Level::DEBUG => 14,		// DEBUG1
-            Level::INFO => 17,		// INFO
-            Level::WARN => 19,		// WARNING
-            Level::ERROR => 21,		// ERROR
+            Level::TRACE => 10, // DEBUG5
+            Level::DEBUG => 14, // DEBUG1
+            Level::INFO => 17,  // INFO
+            Level::WARN => 19,  // WARNING
+            Level::ERROR => 21, // ERROR
         }
     }
     1
@@ -117,7 +118,7 @@ struct EventBuilder<'a> {
 }
 
 impl<'a> std::io::Write for EventBuilder<'a> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize>  {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.event.message.write(buf)
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -163,8 +164,8 @@ impl Maker {
             Ok(()) => {
                 // notify the main thread
                 callback_set_my_latch();
-            },
-            Err(TrySendError::Disconnected(_)) => {},
+            }
+            Err(TrySendError::Disconnected(_)) => {}
             Err(TrySendError::Full(_)) => {
                 // TODO: record that some messages were lost
             }
@@ -172,11 +173,16 @@ impl Maker {
     }
 }
 
-struct MyFormatter {
+/// Simple formatter implementation for tracing_subscriber, which prints the log
+/// spans and message part like the default formatter, but no timestamp or error
+/// level. The error level is captured separately by `FormattedEventWithMeta',
+/// and when the error is printed by the main thread, with PostgreSQL ereport(),
+/// it gets a timestamp at that point. (The timestamp printed will therefore lag
+/// behind the timestamp on the event here, if the main thread doesn't process
+/// the log message promptly)
+struct SimpleFormatter;
 
-}
-
-impl<S, N> FormatEvent<S, N> for MyFormatter
+impl<S, N> FormatEvent<S, N> for SimpleFormatter
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
     N: for<'a> FormatFields<'a> + 'static,
@@ -217,8 +223,8 @@ where
     }
 }
 
-impl MyFormatter {
+impl SimpleFormatter {
     fn new() -> Self {
-        MyFormatter {}
+        SimpleFormatter {}
     }
 }

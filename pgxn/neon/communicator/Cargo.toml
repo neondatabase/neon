@@ -18,6 +18,9 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+pageserver_client_grpc.workspace = true
+pageserver_data_api.workspace = true
+utils.workspace = true
+
 [build-dependencies]
 cbindgen.workspace = true
-tonic-build.workspace = true

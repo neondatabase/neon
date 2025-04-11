@@ -9,11 +9,10 @@ interface.
 
 ## Design criteria
 
-- saturate a 10 Gbit / s network interface without becoming a bottleneck
+- Low latency
+- Saturate a 10 Gbit / s network interface without becoming a bottleneck
 
 ## Source code view
-
-protos/
 
 pgxn/neon/communicator_new.c
 	Contains the glue that interact with PostgreSQL code and the Rust
@@ -28,16 +27,12 @@ pgxn/neon/communicator/src/init.rs
 pgxn/neon/communicator/src/worker_process/
     Worker process main loop and glue code
 
-pgxn/neon/communicator/src/processor/
-	Contains the main part of the communicator which actually processes the
-	I/O requests. It consists of async functions, which are called from the
-	tokio runtime in the worker process. However, it's designed to be independent
-	so that could be used in a standalone application, without PostgreSQL or
-	any of the other parts.
-
 At compilation time, pgxn/neon/communicator/ produces a static
 library, libcommunicator.a. It is linked to the neon.so extension
 library.
+
+The real networking code, which is independent of PostgreSQL, is in
+the pageserver/client_grpc crate.
 
 ## Process view
 

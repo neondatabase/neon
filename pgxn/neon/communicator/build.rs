@@ -9,13 +9,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("Unable to generate bindings")
         .write_to_file("communicator_bindings.h");
 
-    tonic_build::configure()
-        .build_server(false)
-        .build_client(true)
-        .compile_protos(
-            &["../../../protos/page_service.proto"],
-            &["../../../protos/"],
-        )?;
-
     Ok(())
 }

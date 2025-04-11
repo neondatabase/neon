@@ -29,7 +29,7 @@ use utils::auth::SwappableJwtAuth;
 use utils::sync::gate::{Gate, GateGuard};
 
 use crate::compute_service_grpc::PageServiceAuthenticator;
-use crate::compute_service_grpc::page_service_server::PageServiceServer;
+use crate::compute_service_grpc::proto::page_service_server::PageServiceServer;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
 use crate::page_service::libpq_page_service_conn_main;
