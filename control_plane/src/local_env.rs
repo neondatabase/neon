@@ -148,10 +148,10 @@ pub struct NeonLocalInitConf {
     pub generate_local_ssl_certs: bool,
 }
 
-#[derive(Serialize, Default, Deserialize, PartialEq, Eq, Clone, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 #[serde(default)]
 pub struct EndpointStorageConf {
-    pub port: u16,
+    pub listen_addr: SocketAddr,
 }
 
 /// Broker config for cluster internal communication.
@@ -242,6 +242,13 @@ impl Default for NeonBroker {
     }
 }
 
+impl Default for EndpointStorageConf {
+    fn default() -> Self {
+        Self {
+            listen_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0),
+        }
+    }
+}
 impl NeonBroker {
     pub fn client_url(&self) -> Url {
         Url::parse(&format!("http://{}", self.listen_addr)).expect("failed to construct url")
@@ -761,6 +768,29 @@ impl LocalEnv {
         let private_key_path = self.get_private_key_path();
         let key_data = fs::read(private_key_path)?;
         encode_from_key_file(claims, &key_data)
+    }
+
+    pub fn generate_endpoint_storage_auth_token(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        endpoint_id: &String,
+    ) -> anyhow::Result<String> {
+        // TODO replace
+        #[derive(Serialize)]
+        struct Claims {
+            tenant_id: TenantId,
+            timeline_id: TimelineId,
+            endpoint_id: String,
+        }
+        let claims = Claims {
+            tenant_id,
+            timeline_id,
+            endpoint_id: endpoint_id.to_string(),
+        };
+        let private_key_path = self.get_private_key_path();
+        let key_data = fs::read(private_key_path)?;
+        encode_from_key_file(&claims, &key_data)
     }
 
     pub fn get_private_key_path(&self) -> PathBuf {

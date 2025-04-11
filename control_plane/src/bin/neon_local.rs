@@ -18,7 +18,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use compute_api::spec::ComputeMode;
 use control_plane::endpoint::ComputeControlPlane;
-use control_plane::endpoint_storage::{ENDPOINT_STORAGE_DEFAULT_PORT, EndpointStorage};
+use control_plane::endpoint_storage::{ENDPOINT_STORAGE_DEFAULT_ADDR, EndpointStorage};
 use control_plane::local_env::{
     EndpointStorageConf, InitForceMode, LocalEnv, NeonBroker, NeonLocalInitConf,
     NeonLocalInitPageserverConf, SafekeeperConf,
@@ -1008,7 +1008,7 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
                 })
                 .collect(),
             endpoint_storage: EndpointStorageConf {
-                port: ENDPOINT_STORAGE_DEFAULT_PORT,
+                listen_addr: ENDPOINT_STORAGE_DEFAULT_ADDR,
             },
             pg_distrib_dir: None,
             neon_distrib_dir: None,
@@ -1474,10 +1474,20 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 None
             };
 
+            let endpoint_storage_auth_token = env.generate_endpoint_storage_auth_token(
+                endpoint.tenant_id,
+                endpoint.timeline_id,
+                endpoint_id,
+            )?;
+            let addr = env.endpoint_storage.listen_addr;
+            let endpoint_storage_addr = format!("http://{}:{}", addr.ip(), addr.port());
+
             println!("Starting existing endpoint {endpoint_id}...");
             endpoint
                 .start(
                     &auth_token,
+                    endpoint_storage_auth_token,
+                    endpoint_storage_addr,
                     safekeepers_generation,
                     safekeepers,
                     pageservers,
