@@ -59,19 +59,14 @@ impl ObjectStorage {
     }
 
     pub async fn start(&self, retry_timeout: &Duration) -> Result<()> {
-        println!("Starting s3 proxy at {}", self.listen_addr());
+        println!("Starting object_storage at {}", self.listen_addr());
         std::io::stdout().flush().context("flush stdout")?;
 
         let process_status_check = || async {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            let res = reqwest::Client::new()
-                .get(format!("http://{}/metrics", self.listen_addr()))
-                .send()
-                .await;
-            match res {
-                Ok(response) if response.status().is_success() => Ok(true),
-                Ok(_) => Err(anyhow!("Failed to query /metrics")),
-                Err(e) => Err(anyhow!("Failed to check node status: {e}")),
+            let res = reqwest::Client::new().get(format!("http://{}/metrics", self.listen_addr()));
+            match res.send().await {
+                Ok(res) => Ok(res.status().is_success()),
+                Err(_) => Ok(false),
             }
         };
 
