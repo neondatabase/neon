@@ -18,7 +18,7 @@ use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pageserver_api::config::{
     PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
-    PageServiceProtocolPipelinedExecutionStrategy, Tracing,
+    PageServiceProtocolPipelinedExecutionStrategy,
 };
 use pageserver_api::key::rel_block_to_key;
 use pageserver_api::models::{
@@ -37,7 +37,6 @@ use postgres_ffi::BLCKSZ;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use pq_proto::framed::ConnectionError;
 use pq_proto::{BeMessage, FeMessage, FeStartupPacket, RowDescriptor};
-use rand::Rng;
 use strum_macros::IntoStaticStr;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter};
 use tokio::task::JoinHandle;
@@ -106,6 +105,7 @@ pub fn spawn(
     pg_auth: Option<Arc<SwappableJwtAuth>>,
     perf_trace_dispatch: Option<Dispatch>,
     tcp_listener: tokio::net::TcpListener,
+    tls_config: Option<Arc<rustls::ServerConfig>>,
 ) -> Listener {
     let cancel = CancellationToken::new();
     let libpq_ctx = RequestContext::todo_child(
@@ -125,6 +125,7 @@ pub fn spawn(
             perf_trace_dispatch,
             tcp_listener,
             conf.pg_auth_type,
+            tls_config,
             conf.page_service_pipelining.clone(),
             libpq_ctx,
             cancel.clone(),
@@ -182,6 +183,7 @@ pub async fn libpq_listener_main(
     perf_trace_dispatch: Option<Dispatch>,
     listener: tokio::net::TcpListener,
     auth_type: AuthType,
+    tls_config: Option<Arc<rustls::ServerConfig>>,
     pipelining_config: PageServicePipeliningConfig,
     listener_ctx: RequestContext,
     listener_cancel: CancellationToken,
@@ -224,6 +226,7 @@ pub async fn libpq_listener_main(
                     local_auth,
                     socket,
                     auth_type,
+                    tls_config.clone(),
                     pipelining_config.clone(),
                     connection_ctx,
                     connections_cancel.child_token(),
@@ -248,6 +251,15 @@ pub async fn libpq_listener_main(
 
 type ConnectionHandlerResult = anyhow::Result<()>;
 
+/// Perf root spans start at the per-request level, after shard routing.
+/// This struct carries connection-level information to the root perf span definition.
+#[derive(Clone)]
+struct ConnectionPerfSpanFields {
+    peer_addr: String,
+    application_name: Option<String>,
+    compute_mode: Option<String>,
+}
+
 #[instrument(skip_all, fields(peer_addr, application_name, compute_mode))]
 #[allow(clippy::too_many_arguments)]
 async fn page_service_conn_main(
@@ -256,6 +268,7 @@ async fn page_service_conn_main(
     auth: Option<Arc<SwappableJwtAuth>>,
     socket: tokio::net::TcpStream,
     auth_type: AuthType,
+    tls_config: Option<Arc<rustls::ServerConfig>>,
     pipelining_config: PageServicePipeliningConfig,
     connection_ctx: RequestContext,
     cancel: CancellationToken,
@@ -272,6 +285,12 @@ async fn page_service_conn_main(
     let socket_fd = socket.as_raw_fd();
 
     let peer_addr = socket.peer_addr().context("get peer address")?;
+
+    let perf_span_fields = ConnectionPerfSpanFields {
+        peer_addr: peer_addr.to_string(),
+        application_name: None, // filled in later
+        compute_mode: None,     // filled in later
+    };
     tracing::Span::current().record("peer_addr", field::display(peer_addr));
 
     // setup read timeout of 10 minutes. the timeout is rather arbitrary for requirements:
@@ -315,11 +334,13 @@ async fn page_service_conn_main(
         tenant_manager,
         auth,
         pipelining_config,
+        perf_span_fields,
         connection_ctx,
         cancel.clone(),
         gate_guard,
     );
-    let pgbackend = PostgresBackend::new_from_io(socket_fd, socket, peer_addr, auth_type, None)?;
+    let pgbackend =
+        PostgresBackend::new_from_io(socket_fd, socket, peer_addr, auth_type, tls_config)?;
 
     match pgbackend.run(&mut conn_handler, &cancel).await {
         Ok(()) => {
@@ -358,6 +379,8 @@ struct PageServerHandler {
     /// For each query received over the connection,
     /// `process_query` creates a child context from this one.
     connection_ctx: RequestContext,
+
+    perf_span_fields: ConnectionPerfSpanFields,
 
     cancel: CancellationToken,
 
@@ -704,11 +727,13 @@ impl BatchedFeMessage {
 }
 
 impl PageServerHandler {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         conf: &'static PageServerConf,
         tenant_manager: Arc<TenantManager>,
         auth: Option<Arc<SwappableJwtAuth>>,
         pipelining_config: PageServicePipeliningConfig,
+        perf_span_fields: ConnectionPerfSpanFields,
         connection_ctx: RequestContext,
         cancel: CancellationToken,
         gate_guard: GateGuard,
@@ -718,6 +743,7 @@ impl PageServerHandler {
             auth,
             claims: None,
             connection_ctx,
+            perf_span_fields,
             timeline_handles: Some(TimelineHandles::new(tenant_manager)),
             cancel,
             pipelining_config,
@@ -755,7 +781,7 @@ impl PageServerHandler {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         timeline_handles: &mut TimelineHandles,
-        tracing_config: Option<&Tracing>,
+        conn_perf_span_fields: &ConnectionPerfSpanFields,
         cancel: &CancellationToken,
         ctx: &RequestContext,
         protocol_version: PagestreamProtocolVersion,
@@ -916,47 +942,8 @@ impl PageServerHandler {
 
                 let key = rel_block_to_key(req.rel, req.blkno);
 
-                let sampled = match tracing_config {
-                    Some(conf) => {
-                        let ratio = &conf.sampling_ratio;
-
-                        if ratio.numerator == 0 {
-                            false
-                        } else {
-                            rand::thread_rng().gen_range(0..ratio.denominator) < ratio.numerator
-                        }
-                    }
-                    None => false,
-                };
-
-                let ctx = if sampled {
-                    RequestContextBuilder::from(ctx)
-                        .root_perf_span(|| {
-                            info_span!(
-                            target: PERF_TRACE_TARGET,
-                            "GET_PAGE",
-                            tenant_id = %tenant_id,
-                            shard_id = field::Empty,
-                            timeline_id = %timeline_id,
-                            lsn = %req.hdr.request_lsn,
-                            request_id = %req.hdr.reqid,
-                            key = %key,
-                            )
-                        })
-                        .attached_child()
-                } else {
-                    ctx.attached_child()
-                };
-
                 let res = timeline_handles
                     .get(tenant_id, timeline_id, ShardSelector::Page(key))
-                    .maybe_perf_instrument(&ctx, |current_perf_span| {
-                        info_span!(
-                            target: PERF_TRACE_TARGET,
-                            parent: current_perf_span,
-                            "SHARD_SELECTION",
-                        )
-                    })
                     .await;
 
                 let shard = match res {
@@ -987,6 +974,28 @@ impl PageServerHandler {
                     }
                 };
 
+                let ctx = if shard.is_get_page_request_sampled() {
+                    RequestContextBuilder::from(ctx)
+                        .root_perf_span(|| {
+                            info_span!(
+                            target: PERF_TRACE_TARGET,
+                            "GET_PAGE",
+                            peer_addr = conn_perf_span_fields.peer_addr,
+                            application_name = conn_perf_span_fields.application_name,
+                            compute_mode = conn_perf_span_fields.compute_mode,
+                            tenant_id = %tenant_id,
+                            shard_id = %shard.get_shard_identity().shard_slug(),
+                            timeline_id = %timeline_id,
+                            lsn = %req.hdr.request_lsn,
+                            request_id = %req.hdr.reqid,
+                            key = %key,
+                            )
+                        })
+                        .attached_child()
+                } else {
+                    ctx.attached_child()
+                };
+
                 // This ctx travels as part of the BatchedFeMessage through
                 // batching into the request handler.
                 // The request handler needs to do some per-request work
@@ -1000,12 +1009,6 @@ impl PageServerHandler {
                 // Similar game for this `span`: we funnel it through so that
                 // request handler log messages contain the request-specific fields.
                 let span = mkspan!(shard.tenant_shard_id.shard_slug());
-
-                // Enrich the perf span with shard_id now that shard routing is done.
-                ctx.perf_span_record(
-                    "shard_id",
-                    tracing::field::display(shard.get_shard_identity().shard_slug()),
-                );
 
                 let timer = record_op_start_and_throttle(
                     &shard,
@@ -1602,7 +1605,6 @@ impl PageServerHandler {
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
     {
         let cancel = self.cancel.clone();
-        let tracing_config = self.conf.tracing.clone();
 
         let err = loop {
             let msg = Self::pagestream_read_message(
@@ -1610,7 +1612,7 @@ impl PageServerHandler {
                 tenant_id,
                 timeline_id,
                 &mut timeline_handles,
-                tracing_config.as_ref(),
+                &self.perf_span_fields,
                 &cancel,
                 ctx,
                 protocol_version,
@@ -1744,7 +1746,7 @@ impl PageServerHandler {
         // Batcher
         //
 
-        let tracing_config = self.conf.tracing.clone();
+        let perf_span_fields = self.perf_span_fields.clone();
 
         let cancel_batcher = self.cancel.child_token();
         let (mut batch_tx, mut batch_rx) = spsc_fold::channel();
@@ -1759,7 +1761,7 @@ impl PageServerHandler {
                         tenant_id,
                         timeline_id,
                         &mut timeline_handles,
-                        tracing_config.as_ref(),
+                        &perf_span_fields,
                         &cancel_batcher,
                         &ctx,
                         protocol_version,
@@ -2702,12 +2704,14 @@ where
 
         if let FeStartupPacket::StartupMessage { params, .. } = sm {
             if let Some(app_name) = params.get("application_name") {
+                self.perf_span_fields.application_name = Some(app_name.to_string());
                 Span::current().record("application_name", field::display(app_name));
             }
             if let Some(options) = params.get("options") {
                 let (config, _) = parse_options(options);
                 for (key, value) in config {
                     if key == "neon.compute_mode" {
+                        self.perf_span_fields.compute_mode = Some(value.clone());
                         Span::current().record("compute_mode", field::display(value));
                     }
                 }

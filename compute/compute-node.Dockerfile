@@ -1024,39 +1024,6 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) && \
 
 #########################################################################################
 #
-# Layer "pg_embedding-build"
-# compile pg_embedding extension
-#
-#########################################################################################
-FROM build-deps AS pg_embedding-src
-ARG PG_VERSION
-
-# This is our extension, support stopped in favor of pgvector
-# TODO: deprecate it
-WORKDIR /ext-src
-RUN case "${PG_VERSION:?}" in \
-      "v14" | "v15") \
-        export PG_EMBEDDING_VERSION=0.3.5 \
-        export PG_EMBEDDING_CHECKSUM=0e95b27b8b6196e2cf0a0c9ec143fe2219b82e54c5bb4ee064e76398cbe69ae9 \
-        ;; \
-      *) \
-        echo "pg_embedding not supported on this PostgreSQL version. Use pgvector instead." && exit 0;; \
-    esac && \
-    wget https://github.com/neondatabase/pg_embedding/archive/refs/tags/${PG_EMBEDDING_VERSION}.tar.gz -O pg_embedding.tar.gz && \
-    echo "${PG_EMBEDDING_CHECKSUM} pg_embedding.tar.gz" | sha256sum --check && \
-    mkdir pg_embedding-src && cd pg_embedding-src && tar xzf ../pg_embedding.tar.gz --strip-components=1 -C .
-
-FROM pg-build AS pg_embedding-build
-COPY --from=pg_embedding-src /ext-src/ /ext-src/
-WORKDIR /ext-src/
-RUN  if [ -d pg_embedding-src ]; then \
-        cd pg_embedding-src && \
-        make -j $(getconf _NPROCESSORS_ONLN) && \
-        make -j $(getconf _NPROCESSORS_ONLN) install; \
-    fi
-
-#########################################################################################
-#
 # Layer "pg build with nonroot user and cargo installed"
 # This layer is base and common for layers with `pgrx`
 #
@@ -1647,7 +1614,6 @@ COPY --from=rdkit-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_uuidv7-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_roaringbitmap-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_semver-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pg_embedding-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=wal2json-build /usr/local/pgsql /usr/local/pgsql
 COPY --from=pg_ivm-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_partman-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -1824,7 +1790,6 @@ COPY --from=pg_cron-src /ext-src/ /ext-src/
 COPY --from=pg_uuidv7-src /ext-src/ /ext-src/
 COPY --from=pg_roaringbitmap-src /ext-src/ /ext-src/
 COPY --from=pg_semver-src /ext-src/ /ext-src/
-#COPY --from=pg_embedding-src /ext-src/ /ext-src/
 #COPY --from=wal2json-src /ext-src/ /ext-src/
 COPY --from=pg_ivm-src /ext-src/ /ext-src/
 COPY --from=pg_partman-src /ext-src/ /ext-src/

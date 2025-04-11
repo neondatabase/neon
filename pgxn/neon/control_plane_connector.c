@@ -13,9 +13,6 @@
  *        accumulate changes. On subtransaction commit, the top of the stack
  *        is merged with the table below it.
  *
- * IDENTIFICATION
- *	 contrib/neon/control_plane_connector.c
- *
  *-------------------------------------------------------------------------
  */
 

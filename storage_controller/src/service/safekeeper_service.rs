@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use super::safekeeper_reconciler::ScheduleRequest;
 use crate::heartbeater::SafekeeperState;
+use crate::metrics;
 use crate::persistence::{
     DatabaseError, SafekeeperTimelineOpKind, TimelinePendingOpPersistence, TimelinePersistence,
 };
@@ -590,6 +591,20 @@ impl Service {
                 }
             }
             locked.safekeepers = Arc::new(safekeepers);
+            metrics::METRICS_REGISTRY
+                .metrics_group
+                .storage_controller_safekeeper_nodes
+                .set(locked.safekeepers.len() as i64);
+            metrics::METRICS_REGISTRY
+                .metrics_group
+                .storage_controller_https_safekeeper_nodes
+                .set(
+                    locked
+                        .safekeepers
+                        .values()
+                        .filter(|s| s.has_https_port())
+                        .count() as i64,
+                );
         }
         Ok(())
     }

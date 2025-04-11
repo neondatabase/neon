@@ -118,16 +118,18 @@ struct Cli {
     #[arg(long)]
     pub set_disk_quota_for_fs: Option<String>,
 
-    #[arg(short = 's', long = "spec", group = "spec")]
-    pub spec_json: Option<String>,
-
     #[arg(short = 'S', long, group = "spec-path")]
     pub spec_path: Option<OsString>,
 
     #[arg(short = 'i', long, group = "compute-id")]
     pub compute_id: String,
 
-    #[arg(short = 'p', long, conflicts_with_all = ["spec", "spec-path"], value_name = "CONTROL_PLANE_API_BASE_URL")]
+    #[arg(
+        short = 'p',
+        long,
+        conflicts_with = "spec-path",
+        value_name = "CONTROL_PLANE_API_BASE_URL"
+    )]
     pub control_plane_uri: Option<String>,
 }
 
@@ -172,7 +174,6 @@ fn main() -> Result<()> {
             cgroup: cli.cgroup,
             #[cfg(target_os = "linux")]
             vm_monitor_addr: cli.vm_monitor_addr,
-            live_config_allowed: cli_spec.live_config_allowed,
         },
         cli_spec.spec,
         cli_spec.compute_ctl_config,
@@ -201,23 +202,12 @@ async fn init() -> Result<()> {
 }
 
 fn try_spec_from_cli(cli: &Cli) -> Result<CliSpecParams> {
-    // First, try to get cluster spec from the cli argument
-    if let Some(ref spec_json) = cli.spec_json {
-        info!("got spec from cli argument {}", spec_json);
-        return Ok(CliSpecParams {
-            spec: Some(serde_json::from_str(spec_json)?),
-            compute_ctl_config: ComputeCtlConfig::default(),
-            live_config_allowed: false,
-        });
-    }
-
-    // Second, try to read it from the file if path is provided
+    // First, read spec from the path if provided
     if let Some(ref spec_path) = cli.spec_path {
         let file = File::open(Path::new(spec_path))?;
         return Ok(CliSpecParams {
             spec: Some(serde_json::from_reader(file)?),
             compute_ctl_config: ComputeCtlConfig::default(),
-            live_config_allowed: true,
         });
     }
 
@@ -225,11 +215,12 @@ fn try_spec_from_cli(cli: &Cli) -> Result<CliSpecParams> {
         panic!("must specify --control-plane-uri");
     };
 
+    // If the spec wasn't provided in the CLI arguments, then retrieve it from
+    // the control plane
     match get_spec_from_control_plane(cli.control_plane_uri.as_ref().unwrap(), &cli.compute_id) {
         Ok(resp) => Ok(CliSpecParams {
             spec: resp.0,
             compute_ctl_config: resp.1,
-            live_config_allowed: true,
         }),
         Err(e) => {
             error!(
@@ -247,7 +238,6 @@ struct CliSpecParams {
     spec: Option<ComputeSpec>,
     #[allow(dead_code)]
     compute_ctl_config: ComputeCtlConfig,
-    live_config_allowed: bool,
 }
 
 fn deinit_and_exit(exit_code: Option<i32>) -> ! {

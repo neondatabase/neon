@@ -2,6 +2,9 @@ import json
 import os
 import subprocess
 
+RED = "\033[91m"
+RESET = "\033[0m"
+
 image_map = os.getenv("IMAGE_MAP")
 if not image_map:
     raise ValueError("IMAGE_MAP environment variable is not set")
@@ -29,9 +32,14 @@ while len(pending) > 0:
     result = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
     if result.returncode != 0:
-        failures.append((" ".join(cmd), result.stdout))
+        failures.append((" ".join(cmd), result.stdout, target))
         pending.append((source, target))
+        print(
+            f"{RED}[RETRY]{RESET} Push failed for {target}. Retrying... (failure count: {len(failures)})"
+        )
+        print(result.stdout)
 
 if len(failures) > 0 and (github_output := os.getenv("GITHUB_OUTPUT")):
+    failed_targets = [target for _, _, target in failures]
     with open(github_output, "a") as f:
-        f.write("slack_notify=true\n")
+        f.write(f"push_failures={json.dumps(failed_targets)}\n")

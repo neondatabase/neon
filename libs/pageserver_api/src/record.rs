@@ -58,6 +58,8 @@ pub enum NeonWalRecord {
         /// to true. This record does not need the history WALs to reconstruct. See [`NeonWalRecord::will_init`] and
         /// its references in `timeline.rs`.
         will_init: bool,
+        /// Only append the record if the current image is the same as the one specified in this field.
+        only_if: Option<String>,
     },
 }
 
@@ -81,6 +83,17 @@ impl NeonWalRecord {
             append: s.as_ref().to_string(),
             clear: false,
             will_init: false,
+            only_if: None,
+        }
+    }
+
+    #[cfg(feature = "testing")]
+    pub fn wal_append_conditional(s: impl AsRef<str>, only_if: impl AsRef<str>) -> Self {
+        Self::Test {
+            append: s.as_ref().to_string(),
+            clear: false,
+            will_init: false,
+            only_if: Some(only_if.as_ref().to_string()),
         }
     }
 
@@ -90,6 +103,7 @@ impl NeonWalRecord {
             append: s.as_ref().to_string(),
             clear: true,
             will_init: false,
+            only_if: None,
         }
     }
 
@@ -99,6 +113,7 @@ impl NeonWalRecord {
             append: s.as_ref().to_string(),
             clear: true,
             will_init: true,
+            only_if: None,
         }
     }
 }

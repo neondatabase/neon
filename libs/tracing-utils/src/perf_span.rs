@@ -28,7 +28,7 @@ use core::{
     task::{Context, Poll},
 };
 use pin_project_lite::pin_project;
-use tracing::{Dispatch, field, span::Span};
+use tracing::{Dispatch, span::Span};
 
 #[derive(Debug, Clone)]
 pub struct PerfSpan {
@@ -47,15 +47,6 @@ impl PerfSpan {
             inner: ManuallyDrop::new(span),
             dispatch,
         }
-    }
-
-    pub fn record<Q: field::AsField + ?Sized, V: field::Value>(
-        &self,
-        field: &Q,
-        value: V,
-    ) -> &Self {
-        self.inner.record(field, value);
-        self
     }
 
     pub fn enter(&self) -> PerfSpanEntered {

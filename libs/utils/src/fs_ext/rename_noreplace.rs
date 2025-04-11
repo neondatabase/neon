@@ -8,7 +8,7 @@ pub fn rename_noreplace<P1: ?Sized + NixPath, P2: ?Sized + NixPath>(
     dst: &P2,
 ) -> nix::Result<()> {
     {
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
         {
             nix::fcntl::renameat2(
                 None,
@@ -29,7 +29,7 @@ pub fn rename_noreplace<P1: ?Sized + NixPath, P2: ?Sized + NixPath>(
             })??;
             nix::errno::Errno::result(res).map(drop)
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
         {
             std::compile_error!("OS does not support no-replace renames");
         }

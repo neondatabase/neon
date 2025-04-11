@@ -545,6 +545,11 @@ impl PageServerNode {
                 .map(|x| x.parse::<u64>())
                 .transpose()
                 .context("Failed to parse 'gc_compaction_ratio_percent' as integer")?,
+            sampling_ratio: settings
+                .remove("sampling_ratio")
+                .map(serde_json::from_str)
+                .transpose()
+                .context("Falied to parse 'sampling_ratio'")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")

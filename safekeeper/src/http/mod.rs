@@ -31,6 +31,7 @@ pub async fn task_main_https(
     global_timelines: Arc<GlobalTimelines>,
 ) -> anyhow::Result<()> {
     let cert_resolver = ReloadingCertificateResolver::new(
+        "main",
         &conf.ssl_key_file,
         &conf.ssl_cert_file,
         conf.ssl_cert_reload_period,

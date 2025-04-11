@@ -173,7 +173,7 @@ impl std::fmt::Debug for JwtAuth {
 }
 
 // this function is used only for testing purposes in CLI e g generate tokens during init
-pub fn encode_from_key_file(claims: &Claims, key_data: &[u8]) -> Result<String> {
+pub fn encode_from_key_file<S: Serialize>(claims: &S, key_data: &[u8]) -> Result<String> {
     let key = EncodingKey::from_ed_pem(key_data)?;
     Ok(encode(&Header::new(STORAGE_TOKEN_ALGORITHM), claims, &key)?)
 }

@@ -145,11 +145,14 @@ def run_database_maintenance(env: PgCompare):
                 END $$;
                 """
             )
-
-            log.info("start REINDEX TABLE CONCURRENTLY transaction.transaction")
-            with env.zenbenchmark.record_duration("reindex concurrently"):
-                cur.execute("REINDEX TABLE CONCURRENTLY transaction.transaction;")
-            log.info("finished REINDEX TABLE CONCURRENTLY transaction.transaction")
+            # in production a customer would likely use reindex concurrently
+            # but for our test we don't care about the downtime
+            # and it would just about double the time we report in the test
+            # because we need one more table scan for each index
+            log.info("start REINDEX TABLE transaction.transaction")
+            with env.zenbenchmark.record_duration("reindex"):
+                cur.execute("REINDEX TABLE transaction.transaction;")
+            log.info("finished REINDEX TABLE transaction.transaction")
 
 
 @pytest.mark.parametrize("custom_scripts", get_custom_scripts())

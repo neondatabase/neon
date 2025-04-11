@@ -15,9 +15,10 @@ use clap::ValueEnum;
 use postgres_backend::AuthType;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use utils::auth::{Claims, encode_from_key_file};
+use utils::auth::encode_from_key_file;
 use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 
+use crate::object_storage::{OBJECT_STORAGE_REMOTE_STORAGE_DIR, ObjectStorage};
 use crate::pageserver::{PAGESERVER_REMOTE_STORAGE_DIR, PageServerNode};
 use crate::safekeeper::SafekeeperNode;
 
@@ -55,6 +56,7 @@ pub struct LocalEnv {
 
     // used to issue tokens during e.g pg start
     pub private_key_path: PathBuf,
+    pub public_key_path: PathBuf,
 
     pub broker: NeonBroker,
 
@@ -67,6 +69,8 @@ pub struct LocalEnv {
     pub pageservers: Vec<PageServerConf>,
 
     pub safekeepers: Vec<SafekeeperConf>,
+
+    pub object_storage: ObjectStorageConf,
 
     // Control plane upcall API for pageserver: if None, we will not run storage_controller  If set, this will
     // be propagated into each pageserver's configuration.
@@ -95,6 +99,7 @@ pub struct OnDiskConfig {
     pub neon_distrib_dir: PathBuf,
     pub default_tenant_id: Option<TenantId>,
     pub private_key_path: PathBuf,
+    pub public_key_path: PathBuf,
     pub broker: NeonBroker,
     pub storage_controller: NeonStorageControllerConf,
     #[serde(
@@ -103,6 +108,7 @@ pub struct OnDiskConfig {
     )]
     pub pageservers: Vec<PageServerConf>,
     pub safekeepers: Vec<SafekeeperConf>,
+    pub object_storage: ObjectStorageConf,
     pub control_plane_api: Option<Url>,
     pub control_plane_hooks_api: Option<Url>,
     pub control_plane_compute_hook_api: Option<Url>,
@@ -136,9 +142,16 @@ pub struct NeonLocalInitConf {
     pub storage_controller: Option<NeonStorageControllerConf>,
     pub pageservers: Vec<NeonLocalInitPageserverConf>,
     pub safekeepers: Vec<SafekeeperConf>,
+    pub object_storage: ObjectStorageConf,
     pub control_plane_api: Option<Url>,
     pub control_plane_hooks_api: Option<Url>,
     pub generate_local_ssl_certs: bool,
+}
+
+#[derive(Serialize, Default, Deserialize, PartialEq, Eq, Clone, Debug)]
+#[serde(default)]
+pub struct ObjectStorageConf {
+    pub port: u16,
 }
 
 /// Broker config for cluster internal communication.
@@ -398,6 +411,10 @@ impl LocalEnv {
         self.pg_dir(pg_version, "lib")
     }
 
+    pub fn object_storage_bin(&self) -> PathBuf {
+        self.neon_distrib_dir.join("object_storage")
+    }
+
     pub fn pageserver_bin(&self) -> PathBuf {
         self.neon_distrib_dir.join("pageserver")
     }
@@ -429,6 +446,10 @@ impl LocalEnv {
 
     pub fn safekeeper_data_dir(&self, data_dir_name: &str) -> PathBuf {
         self.base_data_dir.join("safekeepers").join(data_dir_name)
+    }
+
+    pub fn object_storage_data_dir(&self) -> PathBuf {
+        self.base_data_dir.join("object_storage")
     }
 
     pub fn get_pageserver_conf(&self, id: NodeId) -> anyhow::Result<&PageServerConf> {
@@ -582,6 +603,7 @@ impl LocalEnv {
                 neon_distrib_dir,
                 default_tenant_id,
                 private_key_path,
+                public_key_path,
                 broker,
                 storage_controller,
                 pageservers,
@@ -591,6 +613,7 @@ impl LocalEnv {
                 control_plane_compute_hook_api: _,
                 branch_name_mappings,
                 generate_local_ssl_certs,
+                object_storage,
             } = on_disk_config;
             LocalEnv {
                 base_data_dir: repopath.to_owned(),
@@ -598,6 +621,7 @@ impl LocalEnv {
                 neon_distrib_dir,
                 default_tenant_id,
                 private_key_path,
+                public_key_path,
                 broker,
                 storage_controller,
                 pageservers,
@@ -606,6 +630,7 @@ impl LocalEnv {
                 control_plane_hooks_api,
                 branch_name_mappings,
                 generate_local_ssl_certs,
+                object_storage,
             }
         };
 
@@ -705,6 +730,7 @@ impl LocalEnv {
                 neon_distrib_dir: self.neon_distrib_dir.clone(),
                 default_tenant_id: self.default_tenant_id,
                 private_key_path: self.private_key_path.clone(),
+                public_key_path: self.public_key_path.clone(),
                 broker: self.broker.clone(),
                 storage_controller: self.storage_controller.clone(),
                 pageservers: vec![], // it's skip_serializing anyway
@@ -714,6 +740,7 @@ impl LocalEnv {
                 control_plane_compute_hook_api: None,
                 branch_name_mappings: self.branch_name_mappings.clone(),
                 generate_local_ssl_certs: self.generate_local_ssl_certs,
+                object_storage: self.object_storage.clone(),
             },
         )
     }
@@ -730,7 +757,7 @@ impl LocalEnv {
     }
 
     // this function is used only for testing purposes in CLI e g generate tokens during init
-    pub fn generate_auth_token(&self, claims: &Claims) -> anyhow::Result<String> {
+    pub fn generate_auth_token<S: Serialize>(&self, claims: &S) -> anyhow::Result<String> {
         let private_key_path = self.get_private_key_path();
         let key_data = fs::read(private_key_path)?;
         encode_from_key_file(claims, &key_data)
@@ -797,6 +824,7 @@ impl LocalEnv {
             control_plane_api,
             generate_local_ssl_certs,
             control_plane_hooks_api,
+            object_storage,
         } = conf;
 
         // Find postgres binaries.
@@ -828,6 +856,7 @@ impl LocalEnv {
         )
         .context("generate auth keys")?;
         let private_key_path = PathBuf::from("auth_private_key.pem");
+        let public_key_path = PathBuf::from("auth_public_key.pem");
 
         // create the runtime type because the remaining initialization code below needs
         // a LocalEnv instance op operation
@@ -838,6 +867,7 @@ impl LocalEnv {
             neon_distrib_dir,
             default_tenant_id: Some(default_tenant_id),
             private_key_path,
+            public_key_path,
             broker,
             storage_controller: storage_controller.unwrap_or_default(),
             pageservers: pageservers.iter().map(Into::into).collect(),
@@ -846,6 +876,7 @@ impl LocalEnv {
             control_plane_hooks_api,
             branch_name_mappings: Default::default(),
             generate_local_ssl_certs,
+            object_storage,
         };
 
         if generate_local_ssl_certs {
@@ -873,8 +904,13 @@ impl LocalEnv {
                 .context("pageserver init failed")?;
         }
 
+        ObjectStorage::from_env(&env)
+            .init()
+            .context("object storage init failed")?;
+
         // setup remote remote location for default LocalFs remote storage
         std::fs::create_dir_all(env.base_data_dir.join(PAGESERVER_REMOTE_STORAGE_DIR))?;
+        std::fs::create_dir_all(env.base_data_dir.join(OBJECT_STORAGE_REMOTE_STORAGE_DIR))?;
 
         env.persist_config()
     }

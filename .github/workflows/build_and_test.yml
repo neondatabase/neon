@@ -980,7 +980,7 @@ jobs:
           TEST_EXTENSIONS_TAG: >-
             ${{
               contains(fromJSON('["storage-rc-pr", "proxy-rc-pr"]'), needs.meta.outputs.run-kind)
-              && 'latest'
+              && needs.meta.outputs.previous-compute-release
               || needs.meta.outputs.build-tag
             }}
           TEST_VERSION_ONLY: ${{ matrix.pg_version }}

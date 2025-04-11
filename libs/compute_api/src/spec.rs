@@ -104,6 +104,12 @@ pub struct ComputeSpec {
     pub timeline_id: Option<TimelineId>,
     pub pageserver_connstring: Option<String>,
 
+    // More neon ids that we expose to the compute_ctl
+    // and to postgres as neon extension GUCs.
+    pub project_id: Option<String>,
+    pub branch_id: Option<String>,
+    pub endpoint_id: Option<String>,
+
     /// Safekeeper membership config generation. It is put in
     /// neon.safekeepers GUC and serves two purposes:
     /// 1) Non zero value forces walproposer to use membership configurations.
@@ -159,15 +165,13 @@ pub struct ComputeSpec {
     #[serde(default)] // Default false
     pub drop_subscriptions_before_start: bool,
 
-    /// Log level for audit logging:
-    ///
-    /// Disabled - no audit logging. This is the default.
-    /// log - log masked statements to the postgres log using pgaudit extension
-    /// hipaa - log unmasked statements to the file using pgaudit and pgauditlogtofile extension
-    ///
-    /// Extensions should be present in shared_preload_libraries
+    /// Log level for compute audit logging
     #[serde(default)]
     pub audit_log_level: ComputeAudit,
+
+    /// Hostname and the port of the otel collector. Leave empty to disable Postgres logs forwarding.
+    /// Example: config-shy-breeze-123-collector-monitoring.neon-telemetry.svc.cluster.local:10514
+    pub logs_export_host: Option<String>,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
@@ -178,9 +182,6 @@ pub enum ComputeFeature {
     /// Enable the experimental activity monitor logic, which uses `pg_stat_database` to
     /// track short-lived connections as user activity.
     ActivityMonitorExperimental,
-
-    /// Allow to configure rsyslog for Postgres logs export
-    PostgresLogsExport,
 
     /// This is a special feature flag that is used to represent unknown feature flags.
     /// Basically all unknown to enum flags are represented as this one. See unit test
@@ -288,14 +289,25 @@ impl ComputeMode {
 }
 
 /// Log level for audit logging
-/// Disabled, log, hipaa
-/// Default is Disabled
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 pub enum ComputeAudit {
     #[default]
     Disabled,
+    // Deprecated, use Base instead
     Log,
+    // (pgaudit.log = 'ddl', pgaudit.log_parameter='off')
+    // logged to the standard postgresql log stream
+    Base,
+    // Deprecated, use Full or Extended instead
     Hipaa,
+    // (pgaudit.log = 'all, -misc', pgaudit.log_parameter='off')
+    // logged to separate files collected by rsyslog
+    // into dedicated log storage with strict access
+    Extended,
+    // (pgaudit.log='all', pgaudit.log_parameter='on'),
+    // logged to separate files collected by rsyslog
+    // into dedicated log storage with strict access.
+    Full,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]

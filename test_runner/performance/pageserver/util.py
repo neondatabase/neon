@@ -40,6 +40,8 @@ def ensure_pageserver_ready_for_benchmarking(env: NeonEnv, n_tenants: int):
             for layer in info.historic_layers:
                 assert not layer.remote
 
+    env.storage_controller.reconcile_until_idle(timeout_secs=60)
+
     log.info("ready")
 
 

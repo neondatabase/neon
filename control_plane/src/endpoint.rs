@@ -658,6 +658,9 @@ impl Endpoint {
             delta_operations: None,
             tenant_id: Some(self.tenant_id),
             timeline_id: Some(self.timeline_id),
+            project_id: None,
+            branch_id: None,
+            endpoint_id: Some(self.endpoint_id.clone()),
             mode: self.mode,
             pageserver_connstring: Some(pageserver_connstring),
             safekeepers_generation: safekeepers_generation.map(|g| g.into_inner()),
@@ -670,6 +673,7 @@ impl Endpoint {
             reconfigure_concurrency: self.reconfigure_concurrency,
             drop_subscriptions_before_start: self.drop_subscriptions_before_start,
             audit_log_level: ComputeAudit::Disabled,
+            logs_export_host: None::<String>,
         };
 
         // this strange code is needed to support respec() in tests

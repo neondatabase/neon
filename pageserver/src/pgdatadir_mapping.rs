@@ -691,7 +691,7 @@ impl Timeline {
         Ok(buf.get_u32_le())
     }
 
-    /// Get size of an SLRU segment
+    /// Does the slru segment exist?
     pub(crate) async fn get_slru_segment_exists(
         &self,
         kind: SlruKind,
@@ -844,9 +844,9 @@ impl Timeline {
         .await
     }
 
-    /// Obtain the possible timestamp range for the given lsn.
+    /// Obtain the timestamp for the given lsn.
     ///
-    /// If the lsn has no timestamps, returns None. returns `(min, max, median)` if it has timestamps.
+    /// If the lsn has no timestamps (e.g. no commits), returns None.
     pub(crate) async fn get_timestamp_for_lsn(
         &self,
         probe_lsn: Lsn,
