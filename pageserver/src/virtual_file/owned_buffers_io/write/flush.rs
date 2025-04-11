@@ -1,5 +1,5 @@
 use std::ops::ControlFlow;
-use std::sync::Arc;
+use std::{marker::PhantomData, sync::Arc};
 
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info, info_span, warn};
@@ -21,7 +21,10 @@ pub struct FlushHandleInner<Buf, W> {
     /// and receives recyled buffer.
     channel: duplex::mpsc::Duplex<FlushRequest<Buf>, FullSlice<Buf>>,
     /// Join handle for the background flush task.
-    join_handle: tokio::task::JoinHandle<Result<Arc<W>, FlushTaskError>>,
+    join_handle: tokio::task::JoinHandle<Result<RequestContext, FlushTaskError>>,
+
+    // TODO: get rit of the type parameter?
+    _phantom: PhantomData<W>,
 }
 
 struct FlushRequest<Buf> {
@@ -144,6 +147,7 @@ where
             inner: Some(FlushHandleInner {
                 channel: front,
                 join_handle,
+                _phantom: PhantomData,
             }),
         }
     }
@@ -179,12 +183,13 @@ where
         Err(self
             .shutdown()
             .await
-            .expect_err("flush task only disconnects duplex if it exits with an error"))
+            .err()
+            .expect("flush task only disconnects duplex if it exits with an error"))
     }
 
     /// Cleans up the channel, join the flush task.
-    pub async fn shutdown(&mut self) -> Result<Arc<W>, FlushTaskError> {
-        let handle = self
+    pub async fn shutdown(&mut self) -> Result<RequestContext, FlushTaskError> {
+        let handle: FlushHandleInner<Buf, W> = self
             .inner
             .take()
             .expect("must not use after we returned an error");
@@ -243,7 +248,7 @@ where
     }
 
     /// Runs the background flush task.
-    async fn run(mut self) -> Result<Arc<W>, FlushTaskError> {
+    async fn run(mut self) -> Result<RequestContext, FlushTaskError> {
         //  Exit condition: channel is closed and there is no remaining buffer to be flushed
         while let Some(request) = self.channel.recv().await {
             #[cfg(test)]
@@ -313,8 +318,7 @@ where
                 continue;
             }
         }
-
-        Ok(self.writer)
+        Ok(self.ctx)
     }
 }
 
@@ -349,7 +353,7 @@ impl FlushNotStarted {
 impl FlushInProgress {
     /// Waits until background flush is done.
     pub async fn wait_until_flush_is_done(self) -> FlushDone {
-        self.done_flush_rx.await.unwrap();
+        let _ = self.done_flush_rx.await;
         FlushDone
     }
 }

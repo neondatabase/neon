@@ -677,7 +677,6 @@ impl StreamingVectoredReadPlanner {
 
 #[cfg(test)]
 mod tests {
-    use anyhow::Error;
 
     use super::super::blob_io::tests::{random_array, write_maybe_compressed};
     use super::*;
@@ -960,13 +959,16 @@ mod tests {
         }
     }
 
-    async fn round_trip_test_compressed(blobs: &[Vec<u8>], compression: bool) -> Result<(), Error> {
+    async fn round_trip_test_compressed(
+        blobs: &[Vec<u8>],
+        compression: bool,
+    ) -> anyhow::Result<()> {
         let ctx =
             RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error).with_scope_unit_test();
         let (_temp_dir, pathbuf, offsets) =
-            write_maybe_compressed::<true>(blobs, compression, &ctx).await?;
+            write_maybe_compressed(blobs, compression, &ctx).await?;
 
-        let file = VirtualFile::open(&pathbuf, &ctx).await?;
+        let file = VirtualFile::open_v2(&pathbuf, &ctx).await?;
         let file_len = std::fs::metadata(&pathbuf)?.len();
 
         // Multiply by two (compressed data might need more space), and add a few bytes for the header
@@ -1003,7 +1005,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_really_big_array() -> Result<(), Error> {
+    async fn test_really_big_array() -> anyhow::Result<()> {
         let blobs = &[
             b"test".to_vec(),
             random_array(10 * PAGE_SZ),
@@ -1018,7 +1020,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_arrays_inc() -> Result<(), Error> {
+    async fn test_arrays_inc() -> anyhow::Result<()> {
         let blobs = (0..PAGE_SZ / 8)
             .map(|v| random_array(v * 16))
             .collect::<Vec<_>>();
