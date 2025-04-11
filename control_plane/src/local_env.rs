@@ -975,25 +975,26 @@ fn generate_auth_keys(private_key_path: &Path, public_key_path: &Path) -> anyhow
     Ok(())
 }
 
-fn generate_ssl_ca_cert(cert_path: &Path, key_path: &Path) -> anyhow::Result<()> {
-    // openssl req -x509 -newkey rsa:2048 -nodes -subj "/CN=Neon Local CA" -days 36500 \
-    // -out rootCA.crt -keyout rootCA.key
-    let keygen_output = Command::new("openssl")
-        .args([
-            "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "36500",
-        ])
-        .args(["-subj", "/CN=Neon Local CA"])
-        .args(["-out", cert_path.to_str().unwrap()])
-        .args(["-keyout", key_path.to_str().unwrap()])
-        .output()
-        .context("failed to generate CA certificate")?;
-    if !keygen_output.status.success() {
-        bail!(
-            "openssl failed: '{}'",
-            String::from_utf8_lossy(&keygen_output.stderr)
-        );
-    }
-    Ok(())
+fn generate_ssl_ca_cert(
+    cert_path: &Path,
+    key_path: &Path,
+) -> anyhow::Result<(rcgen::Certificate, rcgen::KeyPair)> {
+    let ca_key = rcgen::KeyPair::generate()?;
+    let ca_cert = {
+        let mut params = rcgen::CertificateParams::default();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "Neon Local CA");
+
+        params.self_signed(&ca_key)?
+    };
+
+    fs::write(cert_path, ca_cert.pem())?;
+    fs::write(key_path, ca_key.serialize_pem())?;
+
+    Ok((ca_cert, ca_key))
 }
 
 fn generate_ssl_cert(
@@ -1002,52 +1003,34 @@ fn generate_ssl_cert(
     ca_cert_path: &Path,
     ca_key_path: &Path,
 ) -> anyhow::Result<()> {
-    // Generate Certificate Signing Request (CSR).
-    let mut csr_path = cert_path.to_path_buf();
-    csr_path.set_extension(".csr");
+    use rcgen::{CertificateParams, KeyPair, SanType};
 
-    // openssl req -new -nodes -newkey rsa:2048 -keyout server.key -out server.csr \
-    // -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
-    let keygen_output = Command::new("openssl")
-        .args(["req", "-new", "-nodes"])
-        .args(["-newkey", "rsa:2048"])
-        .args(["-subj", "/CN=localhost"])
-        .args(["-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"])
-        .args(["-keyout", key_path.to_str().unwrap()])
-        .args(["-out", csr_path.to_str().unwrap()])
-        .output()
-        .context("failed to generate CSR")?;
-    if !keygen_output.status.success() {
-        bail!(
-            "openssl failed: '{}'",
-            String::from_utf8_lossy(&keygen_output.stderr)
-        );
-    }
+    let ca_key_pem = fs::read_to_string(ca_key_path)?;
+    let ca_key = KeyPair::from_pem(&ca_key_pem)?;
 
-    // Sign CSR with CA key.
-    //
-    // openssl x509 -req -in server.csr -CA rootCA.crt -CAkey rootCA.key -CAcreateserial \
-    // -out server.crt -days 36500 -copy_extensions copyall
-    let keygen_output = Command::new("openssl")
-        .args(["x509", "-req"])
-        .args(["-in", csr_path.to_str().unwrap()])
-        .args(["-CA", ca_cert_path.to_str().unwrap()])
-        .args(["-CAkey", ca_key_path.to_str().unwrap()])
-        .arg("-CAcreateserial")
-        .args(["-out", cert_path.to_str().unwrap()])
-        .args(["-days", "36500"])
-        .args(["-copy_extensions", "copyall"])
-        .output()
-        .context("failed to sign CSR")?;
-    if !keygen_output.status.success() {
-        bail!(
-            "openssl failed: '{}'",
-            String::from_utf8_lossy(&keygen_output.stderr)
-        );
-    }
+    let ca_cert_pem = fs::read_to_string(ca_cert_path)?;
+    let ca_cert_params = CertificateParams::from_ca_cert_pem(&ca_cert_pem)?;
+    let ca_cert = ca_cert_params.self_signed(&ca_key)?;
 
-    // Remove CSR file as it's not needed anymore.
-    fs::remove_file(csr_path)?;
+    let key = KeyPair::generate()?;
+    let cert = {
+        let mut params = CertificateParams::default();
+        params.subject_alt_names = vec![
+            SanType::DnsName("localhost".try_into().unwrap()),
+            SanType::IpAddress("127.0.0.1".parse().unwrap()),
+        ];
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "Neon Local Cert");
+
+        params
+            .signed_by(&key, &ca_cert, &ca_key)
+            .context("failed to sign certificate")?
+    };
+
+    fs::write(cert_path, cert.pem())?;
+    fs::write(key_path, key.serialize_pem())?;
 
     Ok(())
 }

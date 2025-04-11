@@ -270,7 +270,7 @@ workspace_hack = { version = "0.1", path = "./workspace_hack/" }
 
 ## Build dependencies
 criterion = "0.5.1"
-rcgen = "0.13"
+rcgen = { version = "0.13", features = ["x509-parser"] }
 rstest = "0.18"
 camino-tempfile = "1.0.2"
 tonic-build = "0.12"
