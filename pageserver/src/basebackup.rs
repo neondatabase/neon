@@ -151,10 +151,14 @@ where
                 .map_err(|_| BasebackupError::Shutdown)?,
         ),
     };
-    basebackup
+    let res = basebackup
         .send_tarball()
         .instrument(info_span!("send_tarball", backup_lsn=%backup_lsn))
-        .await
+        .await;
+
+    info!("basebackup done!");
+
+    res
 }
 
 /// This is short-living object only for the time of tarball creation,

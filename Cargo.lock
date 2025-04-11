@@ -4318,6 +4318,8 @@ dependencies = [
  "humantime-serde",
  "pageserver_api",
  "pageserver_client",
+ "pageserver_client_grpc",
+ "pageserver_data_api",
  "rand 0.8.5",
  "reqwest",
  "serde",
@@ -4505,6 +4507,7 @@ dependencies = [
 name = "pageserver_client_grpc"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "http 1.1.0",
  "pageserver_data_api",
  "thiserror 1.0.69",
@@ -7581,6 +7584,7 @@ dependencies = [
  "axum 0.7.9",
  "base64 0.22.1",
  "bytes",
+ "flate2",
  "h2 0.4.4",
  "http 1.1.0",
  "http-body 1.0.0",

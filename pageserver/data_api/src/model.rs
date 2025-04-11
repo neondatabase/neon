@@ -67,6 +67,12 @@ pub struct DbSizeResponse {
     pub num_bytes: u64,
 }
 
+#[derive(Clone, Debug)]
+pub struct GetBaseBackupRequest {
+    pub common: RequestCommon,
+    pub replica: bool,
+}
+
 //--- Conversions to/from the generated proto types
 
 use thiserror::Error;
@@ -206,6 +212,26 @@ impl TryFrom<&proto::DbSizeRequest> for DbSizeRequest {
         Ok(DbSizeRequest {
             common: (&value.common.ok_or(ProtocolError::Missing("common"))?).into(),
             db_oid: value.db_oid,
+        })
+    }
+}
+
+impl From<&GetBaseBackupRequest> for proto::GetBaseBackupRequest {
+    fn from(value: &GetBaseBackupRequest) -> proto::GetBaseBackupRequest {
+        proto::GetBaseBackupRequest {
+            common: Some((&value.common).into()),
+            replica: value.replica,
+        }
+    }
+}
+
+impl TryFrom<&proto::GetBaseBackupRequest> for GetBaseBackupRequest {
+    type Error = ProtocolError;
+
+    fn try_from(value: &proto::GetBaseBackupRequest) -> Result<GetBaseBackupRequest, ProtocolError> {
+        Ok(GetBaseBackupRequest {
+            common: (&value.common.ok_or(ProtocolError::Missing("common"))?).into(),
+            replica: value.replica,
         })
     }
 }

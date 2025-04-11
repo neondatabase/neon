@@ -6,25 +6,26 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+use bytes::Bytes;
 use http;
 use thiserror::Error;
 use tonic;
 use tonic::metadata::AsciiMetadataValue;
 use tonic::transport::Channel;
 
-use pageserver_data_api::model::{DbSizeRequest, GetPageRequest, RelExistsRequest, RelSizeRequest};
+use pageserver_data_api::model::*;
 use pageserver_data_api::proto;
 
 type Shardno = u16;
 
 use pageserver_data_api::client::PageServiceClient;
 
-type MyPageServiceClient = PageServiceClient<
+type MyPageServiceClient = pageserver_data_api::client::PageServiceClient<
     tonic::service::interceptor::InterceptedService<tonic::transport::Channel, AuthInterceptor>,
 >;
 
 #[derive(Error, Debug)]
-pub enum CommunicatorError {
+pub enum PageserverClientError {
     #[error("could not connect to service: {0}")]
     ConnectError(#[from] tonic::transport::Error),
     #[error("could not perform request: {0}`")]
@@ -34,7 +35,7 @@ pub enum CommunicatorError {
     InvalidUri(#[from] http::uri::InvalidUri),
 }
 
-pub struct CommunicatorProcessor {
+pub struct PageserverClient {
     _tenant_id: String,
     _timeline_id: String,
 
@@ -47,7 +48,7 @@ pub struct CommunicatorProcessor {
     auth_interceptor: AuthInterceptor,
 }
 
-impl CommunicatorProcessor {
+impl PageserverClient {
     /// TODO: this doesn't currently react to changes in the shard map.
     pub fn new(
         tenant_id: &str,
@@ -65,26 +66,10 @@ impl CommunicatorProcessor {
         }
     }
 
-    /// Process a request to get the size of a database.
-    pub async fn process_dbsize_request(
-        &self,
-        request: &DbSizeRequest,
-    ) -> Result<u64, CommunicatorError> {
-        // Current sharding model assumes that all metadata is present only at shard 0.
-        let shard_no = 0;
-
-        let mut client = self.get_client(shard_no).await?;
-
-        let request = proto::DbSizeRequest::from(request);
-        let response = client.db_size(tonic::Request::new(request)).await?;
-
-        Ok(response.get_ref().num_bytes)
-    }
-
     pub async fn process_rel_exists_request(
         &self,
         request: &RelExistsRequest,
-    ) -> Result<bool, CommunicatorError> {
+    ) -> Result<bool, PageserverClientError> {
         // Current sharding model assumes that all metadata is present only at shard 0.
         let shard_no = 0;
 
@@ -99,7 +84,7 @@ impl CommunicatorProcessor {
     pub async fn process_rel_size_request(
         &self,
         request: &RelSizeRequest,
-    ) -> Result<u32, CommunicatorError> {
+    ) -> Result<u32, PageserverClientError> {
         // Current sharding model assumes that all metadata is present only at shard 0.
         let shard_no = 0;
 
@@ -114,7 +99,7 @@ impl CommunicatorProcessor {
     pub async fn process_get_page_request(
         &self,
         request: &GetPageRequest,
-    ) -> Result<Vec<u8>, CommunicatorError> {
+    ) -> Result<Bytes, PageserverClientError> {
         // FIXME: calculate the shard number correctly
         let shard_no = 0;
 
@@ -126,11 +111,51 @@ impl CommunicatorProcessor {
         Ok(response.into_inner().page_image)
     }
 
+    /// Process a request to get the size of a database.
+    pub async fn process_dbsize_request(
+        &self,
+        request: &DbSizeRequest,
+    ) -> Result<u64, PageserverClientError> {
+        // Current sharding model assumes that all metadata is present only at shard 0.
+        let shard_no = 0;
+
+        let mut client = self.get_client(shard_no).await?;
+
+        let request = proto::DbSizeRequest::from(request);
+        let response = client.db_size(tonic::Request::new(request)).await?;
+
+        Ok(response.get_ref().num_bytes)
+    }
+
+    /// Process a request to get the size of a database.
+    pub async fn get_base_backup(
+        &self,
+        request: &GetBaseBackupRequest,
+        gzip: bool,
+    ) -> std::result::Result<
+            tonic::Response<tonic::codec::Streaming<proto::GetBaseBackupResponseChunk>>,
+            PageserverClientError,
+        >
+    {
+        // Current sharding model assumes that all metadata is present only at shard 0.
+        let shard_no = 0;
+
+        let mut client = self.get_client(shard_no).await?;
+        if gzip {
+            client = client.accept_compressed(tonic::codec::CompressionEncoding::Gzip);
+        }
+
+        let request = proto::GetBaseBackupRequest::from(request);
+        let response = client.get_base_backup(tonic::Request::new(request)).await?;
+
+        Ok(response)
+    }
+
     /// Get a client for given shard
     ///
     /// This implements very basic caching. If we already have a client for the given shard,
     /// reuse it. If not, create a new client and put it to the cache.
-    async fn get_client(&self, shard_no: u16) -> Result<MyPageServiceClient, CommunicatorError> {
+    async fn get_client(&self, shard_no: u16) -> Result<MyPageServiceClient, PageserverClientError> {
         let reused_channel: Option<Channel> = {
             let channels = self.channels.read().unwrap();
 

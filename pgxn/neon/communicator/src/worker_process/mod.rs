@@ -16,7 +16,7 @@ use std::sync::atomic::fence;
 use crate::CommunicatorInitStruct;
 use crate::backend_comms::NeonIOHandleState;
 use crate::neon_request::{NeonIORequest, NeonIOResult};
-use pageserver_client_grpc::CommunicatorProcessor;
+use pageserver_client_grpc::PageserverClient;
 
 use tokio::io::AsyncReadExt;
 use tokio_pipe::PipeRead;
@@ -102,7 +102,7 @@ async fn communicator_process_main_loop(
     let mut submission_pipe_read =
         PipeRead::from_raw_fd_checked(cis.submission_pipe_read_fd).expect("invalid pipe fd");
 
-    let processor = CommunicatorProcessor::new(tenant_id, timeline_id, &auth_token, shard_map);
+    let pageserver_client = PageserverClient::new(tenant_id, timeline_id, &auth_token, shard_map);
 
     let mut idxbuf: [u8; 4] = [0; 4];
     loop {
@@ -145,7 +145,7 @@ async fn communicator_process_main_loop(
                 slot.result = NeonIOResult::Error(-1);
             }
             NeonIORequest::RelExists(ref req) => {
-                match processor.process_rel_exists_request(&req.into()).await {
+                match pageserver_client.process_rel_exists_request(&req.into()).await {
                     Ok(exists) => {
                         slot.result = NeonIOResult::RelExists(exists);
                     }
@@ -156,7 +156,7 @@ async fn communicator_process_main_loop(
                 }
             }
             NeonIORequest::RelSize(ref req) => {
-                match processor.process_rel_size_request(&req.into()).await {
+                match pageserver_client.process_rel_size_request(&req.into()).await {
                     Ok(nblocks) => {
                         slot.result = NeonIOResult::RelSize(nblocks);
                     }
@@ -167,11 +167,11 @@ async fn communicator_process_main_loop(
                 }
             }
             NeonIORequest::GetPage(ref req) => {
-                match processor.process_get_page_request(&req.into()).await {
+                match pageserver_client.process_get_page_request(&req.into()).await {
                     Ok(page_image) => {
                         // Write the received page image directly to the shared memory location
                         // that the backend requested.
-                        let src: &[u8] = page_image.as_slice();
+                        let src: &[u8] = page_image.as_ref();
                         let dst = cis.shmem_ptr.with_addr(req.dest_ptr);
                         let len = std::cmp::min(src.len(), req.dest_size as usize);
                         unsafe {
@@ -186,7 +186,7 @@ async fn communicator_process_main_loop(
                 }
             }
             NeonIORequest::DbSize(ref req) => {
-                match processor.process_dbsize_request(&req.into()).await {
+                match pageserver_client.process_dbsize_request(&req.into()).await {
                     Ok(db_size) => {
                         slot.result = NeonIOResult::DbSize(db_size);
                     }

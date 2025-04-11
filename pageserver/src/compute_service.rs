@@ -28,8 +28,7 @@ use tracing::*;
 use utils::auth::SwappableJwtAuth;
 use utils::sync::gate::{Gate, GateGuard};
 
-use crate::compute_service_grpc::PageServiceAuthenticator;
-use crate::compute_service_grpc::proto::page_service_server::PageServiceServer;
+use crate::compute_service_grpc::launch_compute_service_grpc_server;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
 use crate::page_service::libpq_page_service_conn_main;
@@ -146,39 +145,21 @@ pub async fn compute_connection_listener_main(
     let connections_gate = Gate::default();
     let mut connection_handler_tasks = tokio::task::JoinSet::default();
 
-    // Set up the gRPC service
-    let service_ctx = RequestContextBuilder::from(&listener_ctx)
-        .task_kind(TaskKind::PageRequestHandler)
-        .download_behavior(DownloadBehavior::Download)
-        .attached_child();
-    let grpc_page_service = crate::compute_service_grpc::PageServiceService {
-        conf,
-        cancel: connections_cancel.clone(),
-        tenant_mgr: tenant_manager.clone(),
-        ctx: Arc::new(service_ctx),
-    };
-    let authenticator = PageServiceAuthenticator {
-        auth: auth.clone(),
-        auth_type,
-        tls_config: tls_config.clone(),
-    };
-    let svc = PageServiceServer::with_interceptor(grpc_page_service, authenticator);
-
     // The connection handling task passes the gRPC protocol
     // connections to this channel. The tonic gRPC server reads the
     // channel and takes over the connections from there.
     let (grpc_connections_tx, grpc_connections_rx) = tokio::sync::mpsc::channel(1000);
 
-    let cc = connections_cancel.clone();
-    tokio::spawn(async move {
-        tonic::transport::Server::builder()
-            .add_service(svc)
-            .serve_with_incoming_shutdown(
-                tokio_stream::wrappers::ReceiverStream::new(grpc_connections_rx),
-                cc.cancelled(),
-            )
-            .await
-    });
+    // Set up the gRPC service
+    launch_compute_service_grpc_server(
+        grpc_connections_rx,
+        conf,
+        tenant_manager.clone(),
+        auth.clone(),
+        auth_type,
+        connections_cancel.clone(),
+        &listener_ctx,
+    );
 
     // Main listener loop
     loop {
@@ -255,7 +236,7 @@ pub async fn page_service_conn_main(
     connection_ctx: RequestContext,
     cancel: CancellationToken,
     gate_guard: GateGuard,
-    grpc_connections_tx: tokio::sync::mpsc::Sender<Result<tokio::net::TcpStream, anyhow::Error>>,
+    grpc_connections_tx: tokio::sync::mpsc::Sender<tokio::io::Result<tokio::net::TcpStream>>,
 ) -> ConnectionHandlerResult {
     let mut buf: [u8; 4] = [0; 4];
 

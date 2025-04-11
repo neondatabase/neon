@@ -384,9 +384,6 @@ communicator_new_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumbe
 	}
 }
 
-
-
-
 /*
  *	neon_nblocks() -- Get the number of blocks stored in a relation.
  */
