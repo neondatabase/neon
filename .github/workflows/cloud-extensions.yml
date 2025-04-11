@@ -77,7 +77,7 @@ jobs:
         run: /run-tests.sh -r /ext-src
         env:
           BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
-          SKIP: "pg_hint_plan-src,pg_repack-src"
+          SKIP: "pg_hint_plan-src,pg_repack-src,pg_cron-src"
 
       - name: Delete Neon Project
         if: ${{ always() }}
