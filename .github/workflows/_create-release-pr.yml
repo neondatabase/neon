@@ -53,11 +53,13 @@ jobs:
             || inputs.component-name == 'Compute' && 'release-compute'
           }}
       run: |
-        today=$(date -u +'%Y-%m-%d')
-        now=$(date -u +'%H-%M-%Z')
-        echo "title=${COMPONENT_NAME} release ${today}"       | tee -a ${GITHUB_OUTPUT}
-        echo "rc-branch=rc/${RELEASE_BRANCH}/${today}_${now}" | tee -a ${GITHUB_OUTPUT}
-        echo "release-branch=${RELEASE_BRANCH}"               | tee -a ${GITHUB_OUTPUT}
+        now_date=$(date -u +'%Y-%m-%d')
+        now_time=$(date -u +'%H-%M-%Z')
+        {
+          echo "title=${COMPONENT_NAME} release ${now_date}"
+          echo "rc-branch=rc/${RELEASE_BRANCH}/${now_date}_${now_time}"
+          echo "release-branch=${RELEASE_BRANCH}"
+        } | tee -a ${GITHUB_OUTPUT}
 
     - name: Configure git
       run: |
