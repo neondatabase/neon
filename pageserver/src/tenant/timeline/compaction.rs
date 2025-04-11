@@ -1140,6 +1140,7 @@ impl Timeline {
     ) -> Result<(), CompactionError> {
         let mut drop_layers = Vec::new();
         let mut layers_to_rewrite: Vec<Layer> = Vec::new();
+        let mut rewrite_max_exceeded: bool = false;
 
         // We will use the Lsn cutoff of the last GC as a threshold for rewriting layers: if a
         // layer is behind this Lsn, it indicates that the layer is being retained beyond the
@@ -1148,12 +1149,7 @@ impl Timeline {
         // Holding this read guard also blocks [`Self::gc_timeline`] from entering while we
         // are rewriting layers.
         let latest_gc_cutoff = self.get_applied_gc_cutoff_lsn();
-
-        tracing::info!(
-            "starting shard ancestor compaction, latest_gc_cutoff: {}, pitr cutoff {}",
-            *latest_gc_cutoff,
-            self.gc_info.read().unwrap().cutoffs.time
-        );
+        let pitr_cutoff = self.gc_info.read().unwrap().cutoffs.time;
 
         let layers = self.layers.read().await;
         for layer_desc in layers.layer_map()?.iter_historic_layers() {
@@ -1171,8 +1167,8 @@ impl Timeline {
                 // This ancestral layer only covers keys that belong to other shards.
                 // We include the full metadata in the log: if we had some critical bug that caused
                 // us to incorrectly drop layers, this would simplify manually debugging + reinstating those layers.
-                info!(%layer, old_metadata=?layer.metadata(),
-                    "dropping layer after shard split, contains no keys for this shard.",
+                debug!(%layer, old_metadata=?layer.metadata(),
+                    "dropping layer after shard split, contains no keys for this shard",
                 );
 
                 if cfg!(debug_assertions) {
@@ -1234,9 +1230,10 @@ impl Timeline {
             }
 
             if layers_to_rewrite.len() >= rewrite_max {
-                tracing::info!(%layer, "Will rewrite layer on a future compaction, already rewrote {}",
+                debug!(%layer, "Will rewrite layer on a future compaction, already rewrote {}",
                     layers_to_rewrite.len()
                 );
+                rewrite_max_exceeded = true;
                 continue;
             }
 
@@ -1244,8 +1241,23 @@ impl Timeline {
             layers_to_rewrite.push(layer);
         }
 
-        // Drop read lock on layer map before we start doing time-consuming I/O
+        // Drop read lock on layer map before we start doing time-consuming I/O.
         drop(layers);
+
+        // Drop out early if there's nothing to do.
+        if layers_to_rewrite.is_empty() && drop_layers.is_empty() {
+            return Ok(());
+        }
+
+        info!(
+            "starting shard ancestor compaction, rewriting {} layers and dropping {} layers \
+                (latest_gc_cutoff={} pitr_cutoff={})",
+            layers_to_rewrite.len(),
+            drop_layers.len(),
+            *latest_gc_cutoff,
+            pitr_cutoff,
+        );
+        let started = Instant::now();
 
         let mut replace_image_layers = Vec::new();
 
@@ -1254,7 +1266,7 @@ impl Timeline {
                 return Err(CompactionError::ShuttingDown);
             }
 
-            tracing::info!(layer=%layer, "Rewriting layer after shard split...");
+            info!(layer=%layer, "rewriting layer after shard split");
             let mut image_layer_writer = ImageLayerWriter::new(
                 self.conf,
                 self.timeline_id,
@@ -1292,7 +1304,7 @@ impl Timeline {
                     .map_err(CompactionError::Other)?;
                 let new_layer = Layer::finish_creating(self.conf, self, desc, &path)
                     .map_err(CompactionError::Other)?;
-                tracing::info!(layer=%new_layer, "Rewrote layer, {} -> {} bytes",
+                info!(layer=%new_layer, "rewrote layer, {} -> {} bytes",
                     layer.metadata().file_size,
                     new_layer.metadata().file_size);
 
@@ -1302,6 +1314,12 @@ impl Timeline {
                 // the layer has no data for us with the ShardedRange check above, but
                 drop_layers.push(layer);
             }
+        }
+
+        for layer in &drop_layers {
+            info!(%layer, old_metadata=?layer.metadata(),
+                "dropping layer after shard split (no keys for this shard)",
+            );
         }
 
         // At this point, we have replaced local layer files with their rewritten form, but not yet uploaded
@@ -1319,6 +1337,7 @@ impl Timeline {
         // necessary for correctness, but it simplifies testing, and avoids proceeding with another
         // Timeline's compaction while this timeline's uploads may be generating lots of disk I/O
         // load.
+        info!("shard ancestor compaction waiting for uploads");
         match self.remote_client.wait_completion().await {
             Ok(()) => (),
             Err(WaitCompletionError::NotInitialized(ni)) => return Err(CompactionError::from(ni)),
@@ -1326,6 +1345,15 @@ impl Timeline {
                 return Err(CompactionError::ShuttingDown);
             }
         }
+
+        info!(
+            "shard ancestor compaction done in {:.3}s{}",
+            started.elapsed().as_secs_f64(),
+            match rewrite_max_exceeded {
+                true => format!(", more work pending due to rewrite_max={rewrite_max}"),
+                false => String::new(),
+            }
+        );
 
         fail::fail_point!("compact-shard-ancestors-persistent");
 
