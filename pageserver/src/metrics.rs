@@ -1289,7 +1289,6 @@ pub(crate) enum StorageIoOperation {
     Seek,
     Fsync,
     Metadata,
-    SetLen,
 }
 
 impl StorageIoOperation {
@@ -1304,7 +1303,6 @@ impl StorageIoOperation {
             StorageIoOperation::Seek => "seek",
             StorageIoOperation::Fsync => "fsync",
             StorageIoOperation::Metadata => "metadata",
-            StorageIoOperation::SetLen => "set_len",
         }
     }
 }

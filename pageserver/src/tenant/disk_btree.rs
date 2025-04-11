@@ -25,7 +25,7 @@ use std::{io, result};
 
 use async_stream::try_stream;
 use byteorder::{BE, ReadBytesExt};
-use bytes::BufMut;
+use bytes::{BufMut, Bytes, BytesMut};
 use either::Either;
 use futures::{Stream, StreamExt};
 use hex;
@@ -34,7 +34,6 @@ use tracing::error;
 
 use crate::context::RequestContext;
 use crate::tenant::block_io::{BlockReader, BlockWriter};
-use crate::virtual_file::{IoBuffer, IoBufferMut, owned_buffers_io::write::Buffer};
 
 // The maximum size of a value stored in the B-tree. 5 bytes is enough currently.
 pub const VALUE_SZ: usize = 5;
@@ -788,12 +787,12 @@ impl<const L: usize> BuildNode<L> {
     ///
     /// Serialize the node to on-disk format.
     ///
-    fn pack(&self) -> IoBuffer {
+    fn pack(&self) -> Bytes {
         assert!(self.keys.len() == self.num_children as usize * self.suffix_len);
         assert!(self.values.len() == self.num_children as usize * VALUE_SZ);
         assert!(self.num_children > 0);
 
-        let mut buf = IoBufferMut::with_capacity(PAGE_SZ);
+        let mut buf = BytesMut::new();
 
         buf.put_u16(self.num_children);
         buf.put_u8(self.level);
@@ -806,7 +805,7 @@ impl<const L: usize> BuildNode<L> {
         assert!(buf.len() == self.size);
 
         assert!(buf.len() <= PAGE_SZ);
-        buf.extend_with(0, PAGE_SZ - buf.len());
+        buf.resize(PAGE_SZ, 0);
         buf.freeze()
     }
 
@@ -840,7 +839,7 @@ pub(crate) mod tests {
 
     #[derive(Clone, Default)]
     pub(crate) struct TestDisk {
-        blocks: Vec<IoBuffer>,
+        blocks: Vec<Bytes>,
     }
     impl TestDisk {
         fn new() -> Self {
@@ -858,7 +857,7 @@ pub(crate) mod tests {
         }
     }
     impl BlockWriter for &mut TestDisk {
-        fn write_blk(&mut self, buf: IoBuffer) -> io::Result<u32> {
+        fn write_blk(&mut self, buf: Bytes) -> io::Result<u32> {
             let blknum = self.blocks.len();
             self.blocks.push(buf);
             Ok(blknum as u32)

@@ -1,7 +1,6 @@
 mod flush;
 use std::sync::Arc;
 
-use bytes::BufMut;
 pub(crate) use flush::FlushControl;
 use flush::FlushHandle;
 pub(crate) use flush::FlushTaskError;
@@ -9,7 +8,6 @@ use tokio_epoll_uring::IoBuf;
 use tokio_util::sync::CancellationToken;
 
 use super::io_buf_aligned::IoBufAligned;
-use super::io_buf_aligned::IoBufAlignedMut;
 use super::io_buf_ext::{FullSlice, IoBufExt};
 use crate::context::RequestContext;
 use crate::virtual_file::{IoBuffer, IoBufferMut};
@@ -66,7 +64,7 @@ pub struct BufferedWriter<B: Buffer, W> {
 
 impl<B, Buf, W> BufferedWriter<B, W>
 where
-    B: IoBufAlignedMut + Buffer<IoBuf = Buf> + Send + 'static,
+    B: Buffer<IoBuf = Buf> + Send + 'static,
     Buf: IoBufAligned + Send + Sync + CheapCloneForRead,
     W: OwnedAsyncWriter + Send + Sync + 'static + std::fmt::Debug,
 {
@@ -75,7 +73,6 @@ where
     /// The `buf_new` function provides a way to initialize the owned buffers used by this writer.
     pub fn new(
         writer: Arc<W>,
-        start_offset: u64,
         buf_new: impl Fn() -> B,
         gate_guard: utils::sync::gate::GateGuard,
         cancel: CancellationToken,
@@ -94,7 +91,7 @@ where
                 ctx.attached_child(),
                 flush_task_span,
             ),
-            bytes_submitted: start_offset,
+            bytes_submitted: 0,
         }
     }
 
@@ -119,29 +116,21 @@ where
     }
 
     #[cfg_attr(target_os = "macos", allow(dead_code))]
-    pub async fn shutdown(
-        self,
-        mut handle_tail: impl FnMut(B) -> Option<B>,
-    ) -> Result<(u64, W), FlushTaskError> {
+    pub async fn flush_and_into_inner(
+        mut self,
+        ctx: &RequestContext,
+    ) -> Result<(u64, Arc<W>), FlushTaskError> {
+        self.flush(ctx).await?;
+
         let Self {
-            mutable: tail,
+            mutable: buf,
             maybe_flushed: _,
             writer,
             mut flush_handle,
-            bytes_submitted: submit_offset,
+            bytes_submitted: bytes_amount,
         } = self;
-
-        let ctx = flush_handle.shutdown().await?;
-        let buf = tail.expect("must not use after an error");
-        let writer = Arc::into_inner(writer).expect("writer is the only strong reference");
-        let mut bytes_amount = submit_offset;
-        if let Some(buf) = handle_tail(buf) {
-            bytes_amount += buf.pending() as u64;
-            // TODO: infinite retries + maybe_fatal_err like we do in the flush loop; can we just send this
-            // as work into the flush loop, as part of flush_handle.shutdown()
-            let (_, res) = writer.write_all_at(buf.flush(), submit_offset, &ctx).await;
-            let _: () = res.unwrap(); // DO NOT MERGE, THIS CAN FAIL E.G. on ENOSPC
-        }
+        flush_handle.shutdown().await?;
+        assert!(buf.is_some());
         Ok((bytes_amount, writer))
     }
 
@@ -246,10 +235,6 @@ pub trait Buffer {
     /// panics if `other.len() > self.cap() - self.pending()`.
     fn extend_from_slice(&mut self, other: &[u8]);
 
-    /// Add `count` bytes `val` into `self`.
-    /// Panics if `count > self.cap() - self.pending()`.
-    fn extend_with(&mut self, val: u8, count: usize);
-
     /// Number of bytes in the buffer.
     fn pending(&self) -> usize;
 
@@ -275,14 +260,6 @@ impl Buffer for IoBufferMut {
         }
 
         IoBufferMut::extend_from_slice(self, other);
-    }
-
-    fn extend_with(&mut self, val: u8, count: usize) {
-        if self.len() + count > self.cap() {
-            panic!("Buffer capacity exceeded");
-        }
-
-        IoBufferMut::put_bytes(self, val, count);
     }
 
     fn pending(&self) -> usize {
@@ -357,7 +334,6 @@ mod tests {
         let cancel = CancellationToken::new();
         let mut writer = BufferedWriter::<_, RecorderWriter>::new(
             recorder,
-            0,
             || IoBufferMut::with_capacity(2),
             gate.enter()?,
             cancel,
@@ -374,7 +350,7 @@ mod tests {
         writer.write_buffered_borrowed(b"j", ctx).await?;
         writer.write_buffered_borrowed(b"klmno", ctx).await?;
 
-        let (_, recorder) = writer.shutdown(Some).await?;
+        let (_, recorder) = writer.flush_and_into_inner(ctx).await?;
         assert_eq!(
             recorder.get_writes(),
             {

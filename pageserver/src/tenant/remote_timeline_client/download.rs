@@ -32,14 +32,12 @@ use super::{
     remote_tenant_manifest_prefix, remote_tenant_path,
 };
 use crate::TEMP_FILE_SUFFIX;
-use crate::assert_u64_eq_usize::UsizeIsU64;
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id, debug_assert_current_span_has_tenant_id,
 };
 use crate::tenant::Generation;
-use crate::tenant::disk_btree::PAGE_SZ;
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::LayerName;
 use crate::virtual_file::{MaybeFatalIo, VirtualFile, on_fatal_io_error};
@@ -229,7 +227,6 @@ async fn download_object(
 
                 let mut buffered = owned_buffers_io::write::BufferedWriter::<IoBufferMut, _>::new(
                     destination_file,
-                    0,
                     || IoBufferMut::with_capacity(super::BUFFER_SIZE),
                     gate.enter().map_err(|_| DownloadError::Cancelled)?,
                     cancel.child_token(),
@@ -254,41 +251,13 @@ async fn download_object(
                                 FlushTaskError::Cancelled => DownloadError::Cancelled,
                             })?;
                     }
-                    let mut pad_amount = None;
-                    let (bytes_amount, destination_file) = buffered
-                        .shutdown(|mut buf| {
-                            use crate::virtual_file::owned_buffers_io::write::Buffer;
-
-                            let len = buf.pending();
-                            let cap = buf.cap();
-
-                            // pad zeros to the next io alignment requirement.
-                            // TODO: this is actually padding to next PAGE_SZ multiple, but only if the buffer capacity is larger than that.
-                            // We can't let the fact that we do direct IO, or the buffer capacity, dictate the on-disk format we write here.
-                            // Need to find a better API that allows writing the format we intend to.
-                            let count = len.next_multiple_of(PAGE_SZ).min(cap) - len;
-                            pad_amount = Some(count);
-                            buf.extend_with(0, count);
-
-                            Some(buf)
-                        })
+                    let inner = buffered
+                        .flush_and_into_inner(ctx)
                         .await
                         .map_err(|e| match e {
                             FlushTaskError::Cancelled => DownloadError::Cancelled,
                         })?;
-
-                    let pad_amount = pad_amount.expect("shutdown always invokes the closure").into_u64();
-                    let set_len_arg = bytes_amount - pad_amount;
-                    destination_file
-                        .set_len(set_len_arg)
-                        .await
-                        .maybe_fatal_err("download_object set_len")
-                        .with_context(|| {
-                            format!("set len for file at {dst_path}: 0x{set_len_arg:x} = 0x{bytes_amount:x} - 0x{pad_amount:x}")
-                        })
-                        .map_err(DownloadError::Other)?;
-
-                    Ok((set_len_arg, destination_file))
+                    Ok(inner)
                 }
                 .await?;
 

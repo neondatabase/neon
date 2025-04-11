@@ -75,7 +75,6 @@ impl EphemeralFile {
             bytes_written: 0,
             buffered_writer: owned_buffers_io::write::BufferedWriter::new(
                 file,
-                0,
                 || IoBufferMut::with_capacity(TAIL_SZ),
                 gate.enter()?,
                 cancel.child_token(),
