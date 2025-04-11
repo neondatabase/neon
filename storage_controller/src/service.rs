@@ -61,7 +61,7 @@ use utils::completion::Barrier;
 use utils::generation::Generation;
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
-use utils::sync::gate::Gate;
+use utils::sync::gate::{Gate, GateGuard};
 use utils::{failpoint_support, pausable_failpoint};
 
 use crate::background_node_operations::{
@@ -594,6 +594,8 @@ struct TenantShardSplitAbort {
     new_stripe_size: Option<ShardStripeSize>,
     /// Until this abort op is complete, no other operations may be done on the tenant
     _tenant_lock: TracingExclusiveGuard<TenantOperations>,
+    /// The reconciler gate for the duration of the split operation, and any included abort.
+    _gate: GateGuard,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -1460,7 +1462,7 @@ impl Service {
             // Retry until shutdown: we must keep this request object alive until it is properly
             // processed, as it holds a lock guard that prevents other operations trying to do things
             // to the tenant while it is in a weird part-split state.
-            while !self.cancel.is_cancelled() {
+            while !self.reconcilers_cancel.is_cancelled() {
                 match self.abort_tenant_shard_split(&op).await {
                     Ok(_) => break,
                     Err(e) => {
@@ -1473,9 +1475,12 @@ impl Service {
                         // when we retry, so that the abort op will succeed.  If the abort op is failing
                         // for some other reason, we will keep retrying forever, or until a human notices
                         // and does something about it (either fixing a pageserver or restarting the controller).
-                        tokio::time::timeout(Duration::from_secs(5), self.cancel.cancelled())
-                            .await
-                            .ok();
+                        tokio::time::timeout(
+                            Duration::from_secs(5),
+                            self.reconcilers_cancel.cancelled(),
+                        )
+                        .await
+                        .ok();
                     }
                 }
             }
@@ -1847,6 +1852,7 @@ impl Service {
         };
 
         if insert {
+            let config = attach_req.config.clone().unwrap_or_default();
             let tsp = TenantShardPersistence {
                 tenant_id: attach_req.tenant_shard_id.tenant_id.to_string(),
                 shard_number: attach_req.tenant_shard_id.shard_number.0 as i32,
@@ -1855,7 +1861,7 @@ impl Service {
                 generation: attach_req.generation_override.or(Some(0)),
                 generation_pageserver: None,
                 placement_policy: serde_json::to_string(&PlacementPolicy::Attached(0)).unwrap(),
-                config: serde_json::to_string(&TenantConfig::default()).unwrap(),
+                config: serde_json::to_string(&config).unwrap(),
                 splitting: SplitState::default(),
                 scheduling_policy: serde_json::to_string(&ShardSchedulingPolicy::default())
                     .unwrap(),
@@ -1878,16 +1884,16 @@ impl Service {
                 Ok(()) => {
                     tracing::info!("Inserted shard {} in database", attach_req.tenant_shard_id);
 
-                    let mut locked = self.inner.write().unwrap();
-                    locked.tenants.insert(
+                    let mut shard = TenantShard::new(
                         attach_req.tenant_shard_id,
-                        TenantShard::new(
-                            attach_req.tenant_shard_id,
-                            ShardIdentity::unsharded(),
-                            PlacementPolicy::Attached(0),
-                            None,
-                        ),
+                        ShardIdentity::unsharded(),
+                        PlacementPolicy::Attached(0),
+                        None,
                     );
+                    shard.config = config;
+
+                    let mut locked = self.inner.write().unwrap();
+                    locked.tenants.insert(attach_req.tenant_shard_id, shard);
                     tracing::info!("Inserted shard {} in memory", attach_req.tenant_shard_id);
                 }
             }
@@ -1972,11 +1978,12 @@ impl Service {
             .set_attached(scheduler, attach_req.node_id);
 
         tracing::info!(
-            "attach_hook: tenant {} set generation {:?}, pageserver {}",
+            "attach_hook: tenant {} set generation {:?}, pageserver {}, config {:?}",
             attach_req.tenant_shard_id,
             tenant_shard.generation,
             // TODO: this is an odd number of 0xf's
-            attach_req.node_id.unwrap_or(utils::id::NodeId(0xfffffff))
+            attach_req.node_id.unwrap_or(utils::id::NodeId(0xfffffff)),
+            attach_req.config,
         );
 
         // Trick the reconciler into not doing anything for this tenant: this helps
@@ -4910,7 +4917,7 @@ impl Service {
                     1,
                     10,
                     Duration::from_secs(5),
-                    &self.cancel,
+                    &self.reconcilers_cancel,
                 )
                 .await
             {
@@ -5161,6 +5168,11 @@ impl Service {
         )
         .await;
 
+        let _gate = self
+            .reconcilers_gate
+            .enter()
+            .map_err(|_| ApiError::ShuttingDown)?;
+
         let new_shard_count = ShardCount::new(split_req.new_shard_count);
         let new_stripe_size = split_req.new_stripe_size;
 
@@ -5188,6 +5200,7 @@ impl Service {
                         new_shard_count,
                         new_stripe_size,
                         _tenant_lock,
+                        _gate,
                     })
                     // Ignore error sending: that just means we're shutting down: aborts are ephemeral so it's fine to drop it.
                     .ok();
@@ -5527,7 +5540,10 @@ impl Service {
                 "failpoint".to_string()
             )));
 
-            failpoint_support::sleep_millis_async!("shard-split-post-remote-sleep", &self.cancel);
+            failpoint_support::sleep_millis_async!(
+                "shard-split-post-remote-sleep",
+                &self.reconcilers_cancel
+            );
 
             tracing::info!(
                 "Split {} into {}",
@@ -5585,7 +5601,7 @@ impl Service {
                         stripe_size,
                         preferred_az: preferred_az_id.as_ref().map(Cow::Borrowed),
                     },
-                    &self.cancel,
+                    &self.reconcilers_cancel,
                 )
                 .await
             {
@@ -8670,9 +8686,24 @@ impl Service {
         failpoint_support::sleep_millis_async!("sleep-on-step-down-handling");
 
         self.inner.write().unwrap().step_down();
-        // TODO: would it make sense to have a time-out for this?
-        self.stop_reconciliations(StopReconciliationsReason::SteppingDown)
-            .await;
+
+        // Wait for reconciliations to stop, or terminate this process if they
+        // fail to stop in time (this indicates a bug in shutdown)
+        tokio::select! {
+            _ = self.stop_reconciliations(StopReconciliationsReason::SteppingDown) => {
+                tracing::info!("Reconciliations stopped, proceeding with step down");
+            }
+            _ = async {
+                failpoint_support::sleep_millis_async!("step-down-delay-timeout");
+                tokio::time::sleep(Duration::from_secs(10)).await
+            } => {
+                tracing::warn!("Step down timed out while waiting for reconciliation gate, terminating process");
+
+                // The caller may proceed to act as leader when it sees this request fail: reduce the chance
+                // of a split-brain situation by terminating this controller instead of leaving it up in a partially-shut-down state.
+                std::process::exit(1);
+            }
+        }
 
         let mut global_observed = GlobalObservedState::default();
         let locked = self.inner.read().unwrap();

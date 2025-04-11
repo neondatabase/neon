@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 from collections import defaultdict
+from collections.abc import Mapping
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -1985,10 +1986,13 @@ class NeonStorageController(MetricsGetter, LogUtils):
         tenant_shard_id: TenantId | TenantShardId,
         pageserver_id: int,
         generation_override: int | None = None,
+        config: None | dict[str, Any] = None,
     ) -> int:
         body = {"tenant_shard_id": str(tenant_shard_id), "node_id": pageserver_id}
         if generation_override is not None:
             body["generation_override"] = generation_override
+        if config is not None:
+            body["config"] = config
 
         response = self.request(
             "POST",
@@ -2883,13 +2887,14 @@ class NeonPageserver(PgProtocol, LogUtils):
         self,
         immediate: bool = False,
         timeout_in_seconds: int | None = None,
+        extra_env_vars: dict[str, str] | None = None,
     ):
         """
         High level wrapper for restart: restarts the process, and waits for
         tenant state to stabilize.
         """
         self.stop(immediate=immediate)
-        self.start(timeout_in_seconds=timeout_in_seconds)
+        self.start(timeout_in_seconds=timeout_in_seconds, extra_env_vars=extra_env_vars)
         self.quiesce_tenants()
 
     def quiesce_tenants(self):
@@ -2978,11 +2983,12 @@ class NeonPageserver(PgProtocol, LogUtils):
         to call into the pageserver HTTP client.
         """
         client = self.http_client()
-        if generation is None:
-            generation = self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
-        elif override_storage_controller_generation:
+        if generation is None or override_storage_controller_generation:
             generation = self.env.storage_controller.attach_hook_issue(
-                tenant_id, self.id, generation
+                tenant_id,
+                self.id,
+                generation_override=generation if override_storage_controller_generation else None,
+                config=config,
             )
         return client.tenant_attach(
             tenant_id,
@@ -4297,31 +4303,32 @@ class Endpoint(PgProtocol, LogUtils):
     def respec_deep(self, **kwargs: Any) -> None:
         """
         Update the endpoint.json file taking into account nested keys.
-        It does one level deep update. Should enough for most cases.
         Distinct method from respec() to do not break existing functionality.
-        NOTE: This method also updates the spec.json file, not endpoint.json.
-        We need it because neon_local also writes to spec.json, so intended
+        NOTE: This method also updates the config.json file, not endpoint.json.
+        We need it because neon_local also writes to config.json, so intended
         use-case is i) start endpoint with some config, ii) respec_deep(),
         iii) call reconfigure() to apply the changes.
         """
-        config_path = os.path.join(self.endpoint_path(), "spec.json")
-        with open(config_path) as f:
-            data_dict: dict[str, Any] = json.load(f)
 
-        log.debug("Current compute spec: %s", json.dumps(data_dict, indent=4))
-
-        for key, value in kwargs.items():
-            if isinstance(value, dict):
-                if key not in data_dict:
-                    data_dict[key] = value
+        def update(curr, patch):
+            for k, v in patch.items():
+                if isinstance(v, Mapping):
+                    curr[k] = update(curr.get(k, {}), v)
                 else:
-                    data_dict[key] = {**data_dict[key], **value}
-            else:
-                data_dict[key] = value
+                    curr[k] = v
+            return curr
+
+        config_path = os.path.join(self.endpoint_path(), "config.json")
+        with open(config_path) as f:
+            config: dict[str, Any] = json.load(f)
+
+        log.debug("Current compute config: %s", json.dumps(config, indent=4))
+
+        update(config, kwargs)
 
         with open(config_path, "w") as file:
-            log.debug("Updating compute spec to: %s", json.dumps(data_dict, indent=4))
-            json.dump(data_dict, file, indent=4)
+            log.debug("Updating compute config to: %s", json.dumps(config, indent=4))
+            json.dump(config, file, indent=4)
 
     def wait_for_migrations(self, wait_for: int = NUM_COMPUTE_MIGRATIONS) -> None:
         """
@@ -4338,7 +4345,7 @@ class Endpoint(PgProtocol, LogUtils):
             wait_until(check_migrations_done)
 
     # Mock the extension part of spec passed from control plane for local testing
-    # endpooint.rs adds content of this file as a part of the spec.json
+    # endpooint.rs adds content of this file as a part of the config.json
     def create_remote_extension_spec(self, spec: dict[str, Any]):
         """Create a remote extension spec file for the endpoint."""
         remote_extensions_spec_path = os.path.join(

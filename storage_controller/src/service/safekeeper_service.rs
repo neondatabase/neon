@@ -12,13 +12,16 @@ use crate::persistence::{
 use crate::safekeeper::Safekeeper;
 use anyhow::Context;
 use http_utils::error::ApiError;
-use pageserver_api::controller_api::{SafekeeperDescribeResponse, SkSchedulingPolicy};
+use pageserver_api::controller_api::{
+    SafekeeperDescribeResponse, SkSchedulingPolicy, TimelineImportRequest,
+};
 use pageserver_api::models::{self, SafekeeperInfo, SafekeepersInfo, TimelineInfo};
 use safekeeper_api::membership::{MemberSet, SafekeeperId};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::logging::SecretString;
+use utils::lsn::Lsn;
 
 use super::Service;
 
@@ -298,6 +301,31 @@ impl Service {
             timeline_id,
         })
     }
+
+    /// Directly insert the timeline into the database without reconciling it with safekeepers.
+    ///
+    /// Useful if the timeline already exists on the specified safekeepers,
+    /// but we want to make it storage controller managed.
+    pub(crate) async fn timeline_import(&self, req: TimelineImportRequest) -> Result<(), ApiError> {
+        let persistence = TimelinePersistence {
+            tenant_id: req.tenant_id.to_string(),
+            timeline_id: req.timeline_id.to_string(),
+            start_lsn: Lsn::INVALID.into(),
+            generation: 1,
+            sk_set: req.sk_set.iter().map(|sk_id| sk_id.0 as i64).collect(),
+            new_sk_set: None,
+            cplane_notified_generation: 1,
+            deleted_at: None,
+        };
+        let inserted = self.persistence.insert_timeline(persistence).await?;
+        if inserted {
+            tracing::info!("imported timeline into db");
+        } else {
+            tracing::info!("didn't import timeline into db, as it is already present in db");
+        }
+        Ok(())
+    }
+
     /// Perform timeline deletion on safekeepers. Will return success: we persist the deletion into the reconciler.
     pub(super) async fn tenant_timeline_delete_safekeepers(
         self: &Arc<Self>,

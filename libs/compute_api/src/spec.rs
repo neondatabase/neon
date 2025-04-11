@@ -1,8 +1,8 @@
-//! `ComputeSpec` represents the contents of the spec.json file.
-//!
-//! The spec.json file is used to pass information to 'compute_ctl'. It contains
-//! all the information needed to start up the right version of PostgreSQL,
-//! and connect it to the storage nodes.
+//! The ComputeSpec contains all the information needed to start up
+//! the right version of PostgreSQL, and connect it to the storage nodes.
+//! It can be passed as part of the `config.json`, or the control plane can
+//! provide it by calling the compute_ctl's `/compute_ctl` endpoint, or
+//! compute_ctl can fetch it by calling the control plane's API.
 use std::collections::HashMap;
 
 use indexmap::IndexMap;
@@ -165,13 +165,7 @@ pub struct ComputeSpec {
     #[serde(default)] // Default false
     pub drop_subscriptions_before_start: bool,
 
-    /// Log level for audit logging:
-    ///
-    /// Disabled - no audit logging. This is the default.
-    /// log - log masked statements to the postgres log using pgaudit extension
-    /// hipaa - log unmasked statements to the file using pgaudit and pgauditlogtofile extension
-    ///
-    /// Extensions should be present in shared_preload_libraries
+    /// Log level for compute audit logging
     #[serde(default)]
     pub audit_log_level: ComputeAudit,
 
@@ -295,14 +289,25 @@ impl ComputeMode {
 }
 
 /// Log level for audit logging
-/// Disabled, log, hipaa
-/// Default is Disabled
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 pub enum ComputeAudit {
     #[default]
     Disabled,
+    // Deprecated, use Base instead
     Log,
+    // (pgaudit.log = 'ddl', pgaudit.log_parameter='off')
+    // logged to the standard postgresql log stream
+    Base,
+    // Deprecated, use Full or Extended instead
     Hipaa,
+    // (pgaudit.log = 'all, -misc', pgaudit.log_parameter='off')
+    // logged to separate files collected by rsyslog
+    // into dedicated log storage with strict access
+    Extended,
+    // (pgaudit.log='all', pgaudit.log_parameter='on'),
+    // logged to separate files collected by rsyslog
+    // into dedicated log storage with strict access.
+    Full,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]

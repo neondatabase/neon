@@ -22,6 +22,7 @@ use pageserver_api::controller_api::{
     MetadataHealthListUnhealthyResponse, MetadataHealthUpdateRequest, MetadataHealthUpdateResponse,
     NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, SafekeeperSchedulingPolicyRequest,
     ShardsPreferredAzsRequest, TenantCreateRequest, TenantPolicyRequest, TenantShardMigrateRequest,
+    TimelineImportRequest,
 };
 use pageserver_api::models::{
     DetachBehavior, LsnLeaseRequest, TenantConfigPatchRequest, TenantConfigRequest,
@@ -1235,8 +1236,18 @@ async fn handle_step_down(req: Request<Body>) -> Result<Response<Body>, ApiError
         ForwardOutcome::NotForwarded(req) => req,
     };
 
-    let state = get_state(&req);
-    json_response(StatusCode::OK, state.service.step_down().await)
+    // Spawn a background task: once we start stepping down, we must finish: if the client drops
+    // their request we should avoid stopping in some part-stepped-down state.
+    let handle = tokio::spawn(async move {
+        let state = get_state(&req);
+        state.service.step_down().await
+    });
+
+    let result = handle
+        .await
+        .map_err(|e| ApiError::InternalServerError(e.into()))?;
+
+    json_response(StatusCode::OK, result)
 }
 
 async fn handle_tenant_drop(req: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -1273,6 +1284,37 @@ async fn handle_tenant_import(req: Request<Body>) -> Result<Response<Body>, ApiE
     json_response(
         StatusCode::OK,
         state.service.tenant_import(tenant_id).await?,
+    )
+}
+
+async fn handle_timeline_import(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+    check_permissions(&req, Scope::PageServerApi)?;
+    maybe_rate_limit(&req, tenant_id).await;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let import_req = json_request::<TimelineImportRequest>(&mut req).await?;
+
+    let state = get_state(&req);
+
+    if import_req.tenant_id != tenant_id || import_req.timeline_id != timeline_id {
+        return Err(ApiError::BadRequest(anyhow::anyhow!(
+            "tenant id or timeline id mismatch: url={tenant_id}/{timeline_id}, body={}/{}",
+            import_req.tenant_id,
+            import_req.timeline_id
+        )));
+    }
+
+    json_response(
+        StatusCode::OK,
+        state.service.timeline_import(import_req).await?,
     )
 }
 
@@ -1949,6 +1991,16 @@ pub fn make_router(
                 RequestName("debug_v1_tenant_locate"),
             )
         })
+        .post(
+            "/debug/v1/tenant/:tenant_id/timeline/:timeline_id/import",
+            |r| {
+                named_request_span(
+                    r,
+                    handle_timeline_import,
+                    RequestName("debug_v1_timeline_import"),
+                )
+            },
+        )
         .get("/debug/v1/scheduler", |r| {
             named_request_span(r, handle_scheduler_dump, RequestName("debug_v1_scheduler"))
         })
