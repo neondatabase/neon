@@ -747,10 +747,9 @@ impl KeyHistoryRetention {
     async fn pipe_to(
         self,
         key: Key,
-        delta_writer: &mut SplitDeltaLayerWriter,
-        mut image_writer: Option<&mut SplitImageLayerWriter>,
+        delta_writer: &mut SplitDeltaLayerWriter<'_>,
+        mut image_writer: Option<&mut SplitImageLayerWriter<'_>>,
         stat: &mut CompactionStatistics,
-        gate: &utils::sync::gate::Gate,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let mut first_batch = true;
@@ -762,30 +761,30 @@ impl KeyHistoryRetention {
                     };
                     stat.produce_image_key(img);
                     if let Some(image_writer) = image_writer.as_mut() {
-                        image_writer.put_image(key, img.clone(), gate, ctx).await?;
+                        image_writer.put_image(key, img.clone(), ctx).await?;
                     } else {
                         delta_writer
-                            .put_value(key, cutoff_lsn, Value::Image(img.clone()), gate, ctx)
+                            .put_value(key, cutoff_lsn, Value::Image(img.clone()), ctx)
                             .await?;
                     }
                 } else {
                     for (lsn, val) in logs {
                         stat.produce_key(&val);
-                        delta_writer.put_value(key, lsn, val, gate, ctx).await?;
+                        delta_writer.put_value(key, lsn, val, ctx).await?;
                     }
                 }
                 first_batch = false;
             } else {
                 for (lsn, val) in logs {
                     stat.produce_key(&val);
-                    delta_writer.put_value(key, lsn, val, gate, ctx).await?;
+                    delta_writer.put_value(key, lsn, val, ctx).await?;
                 }
             }
         }
         let KeyLogAtLsn(above_horizon_logs) = self.above_horizon;
         for (lsn, val) in above_horizon_logs {
             stat.produce_key(&val);
-            delta_writer.put_value(key, lsn, val, gate, ctx).await?;
+            delta_writer.put_value(key, lsn, val, ctx).await?;
         }
         Ok(())
     }
@@ -3106,6 +3105,7 @@ impl Timeline {
             self.tenant_shard_id,
             lowest_retain_lsn..end_lsn,
             self.get_compaction_target_size(),
+            &self.gate,
             self.cancel.clone(),
         )
         .await
@@ -3275,7 +3275,6 @@ impl Timeline {
                         &mut delta_layer_writer,
                         image_layer_writer.as_mut(),
                         &mut stat,
-                        &self.gate,
                         ctx,
                     )
                     .await
@@ -3316,7 +3315,6 @@ impl Timeline {
                 &mut delta_layer_writer,
                 image_layer_writer.as_mut(),
                 &mut stat,
-                &self.gate,
                 ctx,
             )
             .await
