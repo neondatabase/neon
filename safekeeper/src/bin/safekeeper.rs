@@ -514,17 +514,35 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
         .current_thread_runtime
         .then(|| Handle::try_current().expect("no runtime in main"));
 
+    // Load all timelines from disk to memory.
+    global_timelines.init().await?;
+
+    // Run everything in current thread rt, if asked.
+    if conf.current_thread_runtime {
+        info!("running in current thread runtime");
+    }
+
     let tls_server_config = if conf.listen_https_addr.is_some() || conf.enable_tls_wall_service_api
     {
+        let ssl_key_file = conf.ssl_key_file.clone();
+        let ssl_cert_file = conf.ssl_cert_file.clone();
+        let ssl_cert_reload_period = conf.ssl_cert_reload_period;
+
+        // Create resolver in BACKGROUND_RUNTIME, so the background certificate reloading
+        // task is run in this runtime.
         let cert_resolver = current_thread_rt
             .as_ref()
             .unwrap_or_else(|| BACKGROUND_RUNTIME.handle())
-            .block_on(ReloadingCertificateResolver::new(
-                "main",
-                &conf.ssl_key_file,
-                &conf.ssl_cert_file,
-                conf.ssl_cert_reload_period,
-            ))?;
+            .spawn(async move {
+                ReloadingCertificateResolver::new(
+                    "main",
+                    &ssl_key_file,
+                    &ssl_cert_file,
+                    ssl_cert_reload_period,
+                )
+                .await
+            })
+            .await??;
 
         let config = rustls::ServerConfig::builder()
             .with_no_client_auth()
@@ -534,14 +552,6 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
     } else {
         None
     };
-
-    // Load all timelines from disk to memory.
-    global_timelines.init().await?;
-
-    // Run everything in current thread rt, if asked.
-    if conf.current_thread_runtime {
-        info!("running in current thread runtime");
-    }
 
     let wal_service_handle = current_thread_rt
         .as_ref()

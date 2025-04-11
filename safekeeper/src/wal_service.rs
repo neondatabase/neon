@@ -47,7 +47,7 @@ pub async fn task_main(
         let tls_config = tls_config.clone();
         tokio::spawn(
             async move {
-                if let Err(err) = handle_socket(socket, conf, conn_id, allowed_auth_scope,tls_config, global_timelines).await {
+                if let Err(err) = handle_socket(socket, conf, conn_id, allowed_auth_scope, tls_config, global_timelines).await {
                     error!("connection handler exited: {}", err);
                 }
             }
