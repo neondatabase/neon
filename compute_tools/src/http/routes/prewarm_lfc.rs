@@ -3,6 +3,8 @@ use axum::extract::State as AxumState;
 use axum::http::StatusCode;
 use axum::response::{ErrorResponse, Result};
 use reqwest::Client;
+use tracing::info;
+use utils::id::{TenantId, TimelineId};
 type State = AxumState<std::sync::Arc<ComputeNode>>;
 
 fn to_axum_err(err: impl std::fmt::Display) -> ErrorResponse {
@@ -13,10 +15,10 @@ fn to_axum_err(err: impl std::fmt::Display) -> ErrorResponse {
 fn get_addr_token(state: &ComputeNode) -> (String, String) {
     let state = state.state.lock().unwrap();
     let pspec = state.pspec.as_ref().expect("pspec must be provided");
-    (
-        pspec.endpoint_storage_addr.clone(),
-        pspec.endpoint_storage_token.clone(),
-    )
+    let addr = pspec.endpoint_storage_addr.clone();
+    let token = pspec.endpoint_storage_token.clone();
+    tracing::info!(%addr, %token, "LFC prewarm");
+    (addr, token)
 }
 
 const KEY: &str = "lfc_state";
@@ -31,6 +33,8 @@ pub(in crate::http) async fn prewarm_lfc(AxumState(state): State) -> Result<()> 
 pub(in crate::http) async fn prewarm_lfc_offload(AxumState(state): State) -> Result<()> {
     crate::metrics::LFC_PREWARM_OFFLOAD_REQUESTS.inc();
 
+    info!("Requesting LFC state from Postgres");
+
     let (addr, token) = get_addr_token(&state);
     let lfc_state = ComputeNode::get_maintenance_client(&state.tokio_conn_conf)
         .await
@@ -38,23 +42,35 @@ pub(in crate::http) async fn prewarm_lfc_offload(AxumState(state): State) -> Res
         .query_one("select get_local_cache_state()", &[])
         .await
         .map_err(to_axum_err)?
-        .try_get::<usize, String>(0)
-        .map_err(to_axum_err)?;
+        .try_get::<usize, &[u8]>(0)
+        .map_err(to_axum_err)?
+        .to_vec();
 
-    let client = Client::new();
-    let res = client
-        .put(format!("{addr}/{KEY}"))
+    info!("Downloaded lfc state of size {}", lfc_state.len());
+
+    let tenant_id: TenantId;
+    let timeline_id: TimelineId;
+    let endpoint_id: String;
+    {
+        let state = state.state.lock().unwrap();
+        let pspec = state.pspec.as_ref().expect("pspec must be provided");
+        tenant_id = pspec.tenant_id;
+        timeline_id = pspec.timeline_id;
+        timeline_id = pspec.spec.endpoint_id;
+    }
+
+    let uri = format!("{addr}/{tenant_id}/{timeline_id}/{endpoint_id}/{KEY}");
+    info!(%uri, "Sending LFC state to endpoint storage");
+
+    let res = Client::new()
+        .put(uri)
         .bearer_auth(token)
         .body(lfc_state)
         .send()
         .await;
     match res {
-        Ok(response) if response.status() == StatusCode::OK => return Ok(()),
-        Ok(_) => {
-            return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
-        }
-        Err(_) => {
-            return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
-        }
+        Ok(res) if res.status() == StatusCode::OK => Ok(()),
+        Ok(res) => Err(to_axum_err(res.status())),
+        Err(err) => Err(to_axum_err(err)),
     }
 }
