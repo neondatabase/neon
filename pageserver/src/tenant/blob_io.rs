@@ -205,6 +205,8 @@ impl BlobWriter {
     ) -> (FullSlice<Buf>, Result<(), Error>) {
         let res = self
             .writer
+            // TODO: why are we taking a FullSlice if we're going to pass a borrow downstack?
+            // Can remove all the complexity around owned buffers upstack
             .write_buffered_borrowed(&src_buf, ctx)
             .await
             .map(|len| {
