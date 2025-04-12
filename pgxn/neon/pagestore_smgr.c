@@ -290,7 +290,7 @@ neon_wallog_pagev(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 				 * value in that case, which is the last replayed LSN.
 				 */
 				ereport(RecoveryInProgress() ? LOG : PANIC,
-						(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is evicted with zero LSN",
+						(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is evicted withxfxf zero LSN",
 								blkno,
 								RelFileInfoFmt(InfoFromSMgrRel(reln)),
 								forknum)));
@@ -2099,11 +2099,11 @@ neon_end_unlogged_build(SMgrRelation reln)
 			mdunlink(rinfob, forknum, true);
 #endif
 		}
-	}
 #ifdef DEBUG_COMPARE_LOCAL
-	if (unlogged_build_delete_init_fork)
-		mdunlink(rinfob, INIT_FORKNUM, true);
+		if (unlogged_build_delete_init_fork)
+			mdunlink(rinfob, INIT_FORKNUM, true);
 #endif
+	}
 	unlogged_build_rel = NULL;
 	unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 }
