@@ -95,7 +95,6 @@
 #define MB					((uint64)1024*1024)
 
 #define SIZE_MB_TO_CHUNKS(size) ((uint32)((size) * MB / BLCKSZ >> lfc_chunk_size_log))
-#define CHUNK_BITMAP_SIZE ((MAX_BLOCKS_PER_CHUNK + 31) / 32)
 
 #define BLOCK_TO_CHUNK_NUN(blkno) ((blkno) >> lfc_chunk_size_log)
 #define BLOCK_TO_CHUNK_OFF(blkno) ((blkno) & (lfc_blocks_per_chunk-1))
@@ -127,7 +126,7 @@ typedef struct FileCacheEntry
 	uint32		state[FLEXIBLE_ARRAY_MEMBER]; /* two bits per block */
 } FileCacheEntry;
 
-#define FILE_CACHE_ENRTY_SIZE MAXALIGN(offsetof(FileCacheEntry, state) + (lfc_blocks_per_chunk+31)/32)
+#define FILE_CACHE_ENRTY_SIZE MAXALIGN(offsetof(FileCacheEntry, state) + (lfc_blocks_per_chunk*2+31)/32*4)
 #define GET_STATE(entry, i) (((entry)->state[(i) / 16] >> ((i) % 16 * 2)) & 3)
 #define SET_STATE(entry, i, new_state) (entry)->state[(i) / 16] = ((entry)->state[(i) / 16] & ~(3 << ((i) % 16 * 2))) | ((new_state) << ((i) % 16 * 2))
 
@@ -400,11 +399,11 @@ is_normal_backend(void)
 }
 
 static bool
-lfc_check_limit_hook(int *newval, void **extra, GucSource source)
+lfc_check_chunk_size(int *newval, void **extra, GucSource source)
 {
-	if (*newval > lfc_max_size)
+	if (*newval & (*newval - 1))
 	{
-		elog(ERROR, "LFC: neon.file_cache_size_limit can not be larger than neon.max_file_cache_size");
+		elog(ERROR, "LFC chunk size should be pwer of two");
 		return false;
 	}
 	return true;
@@ -413,7 +412,19 @@ lfc_check_limit_hook(int *newval, void **extra, GucSource source)
 static void
 lfc_change_chunk_size(int newval, void* extra)
 {
-	lfc_blocks_per_chunk = 1 << newval;
+	lfc_chunk_size_log = pg_ceil_log2_32(newval);
+}
+
+
+static bool
+lfc_check_limit_hook(int *newval, void **extra, GucSource source)
+{
+	if (*newval > lfc_max_size)
+	{
+		elog(ERROR, "LFC: neon.file_cache_size_limit can not be larger than neon.max_file_cache_size");
+		return false;
+	}
+	return true;
 }
 
 static void
@@ -580,16 +591,16 @@ lfc_init(void)
 							NULL,
 							NULL);
 
-	DefineCustomIntVariable("neon.chunk_size_log",
-							"Logarithm of LFC chunk size in blocks",
+	DefineCustomIntVariable("neon.chunk_size",
+							"LFC chunk size in blocks (should be power of two)",
 							NULL,
-							&lfc_chunk_size_log,
-							MAX_BLOCKS_PER_CHUNK_LOG,
-							0,
-							MAX_BLOCKS_PER_CHUNK_LOG,
+							&lfc_blocks_per_chunk,
+							MAX_BLOCKS_PER_CHUNK,
+							1,
+							MAX_BLOCKS_PER_CHUNK,
 							PGC_POSTMASTER,
 							0,
-							NULL,
+							lfc_check_chunk_size,
 							lfc_change_chunk_size,
 							NULL);
 
