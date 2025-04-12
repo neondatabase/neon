@@ -791,6 +791,10 @@ lfc_prewarm(FileCacheState* fcs, uint32 worker_id, uint32 n_workers)
 			}
 			if (n_sent >= n_received + prewarm_batch || snd_idx == max_prefetch_pages)
 			{
+				if (n_received == n_sent && snd_idx == max_prefetch_pages)
+				{
+					break;
+				}
 				if ((rcv_idx >> fcs_chunk_size_log) % n_workers != worker_id)
 				{
 					/* Skip chunks processed by other workers */
@@ -817,10 +821,7 @@ lfc_prewarm(FileCacheState* fcs, uint32 worker_id, uint32 n_workers)
 					ws->skipped_pages += 1;
 				}
 				rcv_idx += 1;
-				if (++n_received == n_sent && snd_idx == max_prefetch_pages)
-				{
-					break;
-				}
+				n_received += 1;
 			}
 		}
 		Assert(n_sent == n_received);
