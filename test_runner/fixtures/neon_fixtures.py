@@ -1187,8 +1187,7 @@ class NeonEnv:
             "generate_local_ssl_certs": self.generate_local_ssl_certs,
         }
 
-        if self.control_plane_api is not None:
-            cfg["control_plane_api"] = self.control_plane_api
+        cfg["control_plane_api"] = self.control_plane_api
 
         if self.control_plane_hooks_api is not None:
             cfg["control_plane_hooks_api"] = self.control_plane_hooks_api
