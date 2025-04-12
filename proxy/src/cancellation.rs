@@ -176,7 +176,7 @@ pub async fn handle_cancel_messages(
     loop {
         if rx.recv_many(&mut batch, BATCH_SIZE).await == 0 {
             warn!("shutting down cancellation queue");
-            break Ok(())
+            break Ok(());
         }
 
         let batch_size = batch.len();
