@@ -1959,8 +1959,6 @@ neon_start_unlogged_build(SMgrRelation reln)
 			(errmsg(NEON_TAG "starting unlogged build of relation %u/%u/%u",
 					RelFileInfoFmt(InfoFromSMgrRel(reln)))));
 
-	unlogged_build_delete_init_fork = false;
-
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
