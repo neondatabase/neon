@@ -290,11 +290,10 @@ neon_wallog_pagev(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 				 * value in that case, which is the last replayed LSN.
 				 */
 				ereport(RecoveryInProgress() ? LOG : PANIC,
-						(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is evicted withxfxf zero LSN",
+						(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is evicted with zero LSN",
 								blkno,
 								RelFileInfoFmt(InfoFromSMgrRel(reln)),
 								forknum)));
-				Assert(false);
 
 				lsn = GetXLogReplayRecPtr(NULL); /* in standby mode, soldier on */
 			}
