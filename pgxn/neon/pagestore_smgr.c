@@ -1451,7 +1451,7 @@ compare_with_localv(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, vo
 	{
 		for (BlockNumber i = 0; i < nblocks; i++)
 		{
-			if (!BITMAP_ISSET(read_pages, i))
+			if (BITMAP_ISSET(read_pages, i))
 			{
 				compare_with_local(reln, forkNum, blkno + i, buffers[i], request_lsns[i].request_lsn);
 			}
