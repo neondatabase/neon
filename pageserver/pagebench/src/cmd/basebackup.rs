@@ -299,16 +299,15 @@ async fn client_grpc(
     all_work_done_barrier: Arc<Barrier>,
     live_stats: Arc<LiveStats>,
 ) {
-    start_work_barrier.wait().await;
-
     let shard_map = HashMap::from([(0, args.page_service_connstring.clone())]);
-
     let client = pageserver_client_grpc::PageserverClient::new(
         &timeline.tenant_id.to_string(),
         &timeline.timeline_id.to_string(),
         &None,
         shard_map,
     );
+
+    start_work_barrier.wait().await;
 
     while let Some(Work { lsn, gzip }) = work.recv().await {
         let start = Instant::now();

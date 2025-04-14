@@ -96,7 +96,7 @@ impl PageserverClient {
         Ok(response.get_ref().num_blocks)
     }
 
-    pub async fn process_get_page_request(
+    pub async fn get_page(
         &self,
         request: &GetPageRequest,
     ) -> Result<Bytes, PageserverClientError> {

@@ -167,7 +167,7 @@ async fn communicator_process_main_loop(
                 }
             }
             NeonIORequest::GetPage(ref req) => {
-                match pageserver_client.process_get_page_request(&req.into()).await {
+                match pageserver_client.get_page(&req.into()).await {
                     Ok(page_image) => {
                         // Write the received page image directly to the shared memory location
                         // that the backend requested.

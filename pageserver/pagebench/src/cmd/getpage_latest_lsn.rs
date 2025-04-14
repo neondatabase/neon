@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use camino::Utf8PathBuf;
+use futures::stream::FuturesOrdered;
+use futures::StreamExt;
 use pageserver_api::key::Key;
 use pageserver_api::keyspace::KeySpaceAccum;
 use pageserver_api::models::{PagestreamGetPageRequest, PagestreamRequest};
@@ -25,6 +27,8 @@ use crate::util::{request_stats, tokio_thread_local_stats};
 /// GetPage@LatestLSN, uniformly distributed across the compute-accessible keyspace.
 #[derive(clap::Parser)]
 pub(crate) struct Args {
+    #[clap(long, default_value = "false")]
+    grpc: bool,
     #[clap(long, default_value = "http://localhost:9898")]
     mgmt_api_endpoint: String,
     #[clap(long, default_value = "postgres://postgres@localhost:64000")]
@@ -289,7 +293,11 @@ async fn main_impl(
 
         let cancel = cancel.clone();
         Box::pin(async move {
-            client_libpq(args, worker_id, start_work_barrier, cancel, rps_period, live_stats, ranges, weights).await
+            if args.grpc {
+                client_grpc(args, worker_id, start_work_barrier, cancel, rps_period, live_stats, ranges, weights).await
+            } else {
+                client_libpq(args, worker_id, start_work_barrier, cancel, rps_period, live_stats, ranges, weights).await
+            }
         })
     };
 
@@ -410,6 +418,104 @@ async fn client_libpq(
 
         let start = inflight.pop_front().unwrap();
         client.getpage_recv().await.unwrap();
+        let end = Instant::now();
+        live_stats.request_done();
+        ticks_processed += 1;
+        STATS.with(|stats| {
+            stats
+                .borrow()
+                .lock()
+                .unwrap()
+                .observe(end.duration_since(start))
+                .unwrap();
+        });
+
+        if let Some(period) = &rps_period {
+            let next_at = client_start
+                + Duration::from_micros(
+                    (ticks_processed) as u64 * u64::try_from(period.as_micros()).unwrap(),
+                );
+            tokio::time::sleep_until(next_at.into()).await;
+        }
+    }
+}
+
+async fn client_grpc(
+    args: &Args,
+    worker_id: WorkerId,
+    start_work_barrier: Arc<tokio::sync::Barrier>,
+    cancel: CancellationToken,
+    rps_period: Option<Duration>,
+    live_stats: Arc<LiveStats>,
+    ranges: Vec<KeyRange>,
+    weights: rand::distributions::weighted::WeightedIndex<i128>,
+)
+{
+    let shard_map = HashMap::from([(0, args.page_service_connstring.clone())]);
+    let client = pageserver_client_grpc::PageserverClient::new(
+        &worker_id.timeline.tenant_id.to_string(),
+        &worker_id.timeline.timeline_id.to_string(),
+        &None,
+        shard_map,
+    );
+    let client = Arc::new(client);
+
+    start_work_barrier.wait().await;
+    let client_start = Instant::now();
+    let mut ticks_processed = 0;
+    let mut inflight = FuturesOrdered::new();
+    while !cancel.is_cancelled() {
+        // Detect if a request took longer than the RPS rate
+        if let Some(period) = &rps_period {
+            let periods_passed_until_now =
+                usize::try_from(client_start.elapsed().as_micros() / period.as_micros())
+                .unwrap();
+
+            if periods_passed_until_now > ticks_processed {
+                live_stats.missed((periods_passed_until_now - ticks_processed) as u64);
+            }
+            ticks_processed = periods_passed_until_now;
+        }
+
+        while inflight.len() < args.queue_depth.get() {
+            let start = Instant::now();
+            let req = {
+                let mut rng = rand::thread_rng();
+                let r = &ranges[weights.sample(&mut rng)];
+                let key: i128 = rng.gen_range(r.start..r.end);
+                let key = Key::from_i128(key);
+                assert!(key.is_rel_block_key());
+                let (rel_tag, block_no) = key
+                    .to_rel_block()
+                    .expect("we filter non-rel-block keys out above");
+                pageserver_data_api::model::GetPageRequest {
+                    common: pageserver_data_api::model::RequestCommon {
+                        request_lsn: if rng.gen_bool(args.req_latest_probability) {
+                            Lsn::MAX
+                        } else {
+                            r.timeline_lsn
+                        },
+                        not_modified_since_lsn: r.timeline_lsn,
+                    },
+                    rel: pageserver_data_api::model::RelTag {
+                        spc_oid: rel_tag.spcnode,
+                        db_oid: rel_tag.dbnode,
+                        rel_number: rel_tag.relnode,
+                        fork_number: rel_tag.forknum,
+                    },
+                    block_number: block_no,
+                }
+            };
+            let client_clone = client.clone();
+            let getpage_fut = async move {
+                let result = client_clone.get_page(&req).await;
+                (start, result)
+            };
+            inflight.push_back(getpage_fut);
+        }
+
+        let (start, result) = inflight.next().await.unwrap();
+        result.expect("getpage request should succeed");
         let end = Instant::now();
         live_stats.request_done();
         ticks_processed += 1;
