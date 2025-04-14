@@ -30,6 +30,7 @@ tokio.workspace = true
 tracing.workspace = true
 url.workspace = true
 uuid.workspace = true
+x509-cert.workspace = true
 
 # to use tokio channels as streams, this is faster to compile than async_stream
 # why is it only here? no other crate should use it, streams are rarely needed.

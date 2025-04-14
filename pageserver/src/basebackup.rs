@@ -34,7 +34,7 @@ use utils::lsn::Lsn;
 use crate::context::RequestContext;
 use crate::pgdatadir_mapping::Version;
 use crate::tenant::storage_layer::IoConcurrency;
-use crate::tenant::timeline::GetVectoredError;
+use crate::tenant::timeline::{GetVectoredError, VersionedKeySpaceQuery};
 use crate::tenant::{PageReconstructError, Timeline};
 
 #[derive(Debug, thiserror::Error)]
@@ -353,9 +353,10 @@ where
             let mut slru_builder = SlruSegmentsBuilder::new(&mut self.ar);
 
             for part in slru_partitions.parts {
+                let query = VersionedKeySpaceQuery::uniform(part, self.lsn);
                 let blocks = self
                     .timeline
-                    .get_vectored(part, self.lsn, self.io_concurrency.clone(), self.ctx)
+                    .get_vectored(query, self.io_concurrency.clone(), self.ctx)
                     .await?;
 
                 for (key, block) in blocks {

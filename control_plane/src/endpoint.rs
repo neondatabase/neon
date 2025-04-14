@@ -29,7 +29,7 @@
 //!     compute.log               - log output of `compute_ctl` and `postgres`
 //!     endpoint.json             - serialized `EndpointConf` struct
 //!     postgresql.conf           - postgresql settings
-//!     spec.json                 - passed to `compute_ctl`
+//!     config.json                 - passed to `compute_ctl`
 //!     pgdata/
 //!         postgresql.conf       - copy of postgresql.conf created by `compute_ctl`
 //!         zenith.signal
@@ -46,7 +46,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use compute_api::requests::ConfigurationRequest;
-use compute_api::responses::{ComputeCtlConfig, ComputeStatus, ComputeStatusResponse};
+use compute_api::responses::{
+    ComputeConfig, ComputeCtlConfig, ComputeStatus, ComputeStatusResponse,
+};
 use compute_api::spec::{
     Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, PgIdent,
     RemoteExtSpec, Role,
@@ -619,92 +621,117 @@ impl Endpoint {
             remote_extensions = None;
         };
 
-        // Create spec file
-        let mut spec = ComputeSpec {
-            skip_pg_catalog_updates: self.skip_pg_catalog_updates,
-            format_version: 1.0,
-            operation_uuid: None,
-            features: self.features.clone(),
-            swap_size_bytes: None,
-            disk_quota_bytes: None,
-            disable_lfc_resizing: None,
-            cluster: Cluster {
-                cluster_id: None, // project ID: not used
-                name: None,       // project name: not used
-                state: None,
-                roles: if create_test_user {
-                    vec![Role {
+        // Create config file
+        let config = {
+            let mut spec = ComputeSpec {
+                skip_pg_catalog_updates: self.skip_pg_catalog_updates,
+                format_version: 1.0,
+                operation_uuid: None,
+                features: self.features.clone(),
+                swap_size_bytes: None,
+                disk_quota_bytes: None,
+                disable_lfc_resizing: None,
+                cluster: Cluster {
+                    cluster_id: None, // project ID: not used
+                    name: None,       // project name: not used
+                    state: None,
+                    roles: if create_test_user {
+                        vec![Role {
+                            name: PgIdent::from_str("test").unwrap(),
+                            encrypted_password: None,
+                            options: None,
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    databases: if create_test_user {
+                        vec![Database {
+                            name: PgIdent::from_str("neondb").unwrap(),
+                            owner: PgIdent::from_str("test").unwrap(),
+                            options: None,
+                            restrict_conn: false,
+                            invalid: false,
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    settings: None,
+                    postgresql_conf: Some(postgresql_conf.clone()),
+                },
+                delta_operations: None,
+                tenant_id: Some(self.tenant_id),
+                timeline_id: Some(self.timeline_id),
+                project_id: None,
+                branch_id: None,
+                endpoint_id: Some(self.endpoint_id.clone()),
+                mode: self.mode,
+                pageserver_connstring: Some(pageserver_connstring),
+                safekeepers_generation: safekeepers_generation.map(|g| g.into_inner()),
+                safekeeper_connstrings,
+                storage_auth_token: auth_token.clone(),
+                remote_extensions,
+                pgbouncer_settings: None,
+                shard_stripe_size: Some(shard_stripe_size),
+                local_proxy_config: None,
+                reconfigure_concurrency: self.reconfigure_concurrency,
+                drop_subscriptions_before_start: self.drop_subscriptions_before_start,
+                audit_log_level: ComputeAudit::Disabled,
+                logs_export_host: None::<String>,
+            };
+
+            // this strange code is needed to support respec() in tests
+            if self.cluster.is_some() {
+                debug!("Cluster is already set in the endpoint spec, using it");
+                spec.cluster = self.cluster.clone().unwrap();
+
+                debug!("spec.cluster {:?}", spec.cluster);
+
+                // fill missing fields again
+                if create_test_user {
+                    spec.cluster.roles.push(Role {
                         name: PgIdent::from_str("test").unwrap(),
                         encrypted_password: None,
                         options: None,
-                    }]
-                } else {
-                    Vec::new()
-                },
-                databases: if create_test_user {
-                    vec![Database {
+                    });
+                    spec.cluster.databases.push(Database {
                         name: PgIdent::from_str("neondb").unwrap(),
                         owner: PgIdent::from_str("test").unwrap(),
                         options: None,
                         restrict_conn: false,
                         invalid: false,
-                    }]
-                } else {
-                    Vec::new()
-                },
-                settings: None,
-                postgresql_conf: Some(postgresql_conf.clone()),
-            },
-            delta_operations: None,
-            tenant_id: Some(self.tenant_id),
-            timeline_id: Some(self.timeline_id),
-            mode: self.mode,
-            pageserver_connstring: Some(pageserver_connstring),
-            safekeepers_generation: safekeepers_generation.map(|g| g.into_inner()),
-            safekeeper_connstrings,
-            storage_auth_token: auth_token.clone(),
-            remote_extensions,
-            pgbouncer_settings: None,
-            shard_stripe_size: Some(shard_stripe_size),
-            local_proxy_config: None,
-            reconfigure_concurrency: self.reconfigure_concurrency,
-            drop_subscriptions_before_start: self.drop_subscriptions_before_start,
-            audit_log_level: ComputeAudit::Disabled,
+                    });
+                }
+                spec.cluster.postgresql_conf = Some(postgresql_conf);
+            }
+
+            ComputeConfig {
+                spec: Some(spec),
+                compute_ctl_config: ComputeCtlConfig::default(),
+            }
         };
 
-        // this strange code is needed to support respec() in tests
-        if self.cluster.is_some() {
-            debug!("Cluster is already set in the endpoint spec, using it");
-            spec.cluster = self.cluster.clone().unwrap();
-
-            debug!("spec.cluster {:?}", spec.cluster);
-
-            // fill missing fields again
-            if create_test_user {
-                spec.cluster.roles.push(Role {
-                    name: PgIdent::from_str("test").unwrap(),
-                    encrypted_password: None,
-                    options: None,
-                });
-                spec.cluster.databases.push(Database {
-                    name: PgIdent::from_str("neondb").unwrap(),
-                    owner: PgIdent::from_str("test").unwrap(),
-                    options: None,
-                    restrict_conn: false,
-                    invalid: false,
-                });
-            }
-            spec.cluster.postgresql_conf = Some(postgresql_conf);
-        }
-
+        // TODO(tristan957): Remove the write to spec.json after compatibility
+        // tests work themselves out
         let spec_path = self.endpoint_path().join("spec.json");
-        std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
+        std::fs::write(spec_path, serde_json::to_string_pretty(&config.spec)?)?;
+        let config_path = self.endpoint_path().join("config.json");
+        std::fs::write(config_path, serde_json::to_string_pretty(&config)?)?;
 
         // Open log file. We'll redirect the stdout and stderr of `compute_ctl` to it.
         let logfile = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(self.endpoint_path().join("compute.log"))?;
+
+        // TODO(tristan957): Remove when compatibility tests are no longer an
+        // issue
+        let old_compute_ctl = {
+            let mut cmd = Command::new(self.env.neon_distrib_dir.join("compute_ctl"));
+            let help_output = cmd.arg("--help").output()?;
+            let help_output = String::from_utf8_lossy(&help_output.stdout);
+
+            !help_output.contains("--config")
+        };
 
         // Launch compute_ctl
         let conn_str = self.connstr("cloud_admin", "postgres");
@@ -724,9 +751,18 @@ impl Endpoint {
         ])
         .args(["--pgdata", self.pgdata().to_str().unwrap()])
         .args(["--connstr", &conn_str])
+        // TODO(tristan957): Change this to --config when compatibility tests
+        // are no longer an issue
         .args([
             "--spec-path",
-            self.endpoint_path().join("spec.json").to_str().unwrap(),
+            self.endpoint_path()
+                .join(if old_compute_ctl {
+                    "spec.json"
+                } else {
+                    "config.json"
+                })
+                .to_str()
+                .unwrap(),
         ])
         .args([
             "--pgbin",
@@ -869,10 +905,12 @@ impl Endpoint {
         stripe_size: Option<ShardStripeSize>,
         safekeepers: Option<Vec<NodeId>>,
     ) -> Result<()> {
-        let mut spec: ComputeSpec = {
-            let spec_path = self.endpoint_path().join("spec.json");
-            let file = std::fs::File::open(spec_path)?;
-            serde_json::from_reader(file)?
+        let (mut spec, compute_ctl_config) = {
+            let config_path = self.endpoint_path().join("config.json");
+            let file = std::fs::File::open(config_path)?;
+            let config: ComputeConfig = serde_json::from_reader(file)?;
+
+            (config.spec.unwrap(), config.compute_ctl_config)
         };
 
         let postgresql_conf = self.read_postgresql_conf()?;
@@ -922,7 +960,7 @@ impl Endpoint {
             .body(
                 serde_json::to_string(&ConfigurationRequest {
                     spec,
-                    compute_ctl_config: ComputeCtlConfig::default(),
+                    compute_ctl_config,
                 })
                 .unwrap(),
             )

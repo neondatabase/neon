@@ -3,7 +3,9 @@ use std::{fs, io, path::Path};
 
 use anyhow::Context;
 
+#[cfg(feature = "rename_noreplace")]
 mod rename_noreplace;
+#[cfg(feature = "rename_noreplace")]
 pub use rename_noreplace::rename_noreplace;
 
 pub trait PathExt {

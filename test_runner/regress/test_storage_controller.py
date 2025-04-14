@@ -95,6 +95,7 @@ def test_storage_controller_smoke(
     env.pageservers[1].start()
     for sk in env.safekeepers:
         sk.start()
+    env.object_storage.start()
 
     # The pageservers we started should have registered with the sharding service on startup
     nodes = env.storage_controller.node_list()
@@ -346,6 +347,7 @@ def prepare_onboarding_env(
     env = neon_env_builder.init_configs()
     env.broker.start()
     env.storage_controller.start()
+    env.object_storage.start()
 
     # This is the pageserver where we'll initially create the tenant.  Run it in emergency
     # mode so that it doesn't talk to storage controller, and do not register it.
@@ -675,7 +677,7 @@ def test_storage_controller_compute_hook(
     env.storage_controller.tenant_shard_split(env.initial_tenant, shard_count=2)
     expect = {
         "tenant_id": str(env.initial_tenant),
-        "stripe_size": 32768,
+        "stripe_size": 2048,
         "shards": [
             {"node_id": int(env.pageservers[1].id), "shard_number": 0},
             {"node_id": int(env.pageservers[1].id), "shard_number": 1},
@@ -2890,10 +2892,12 @@ def test_storage_controller_leadership_transfer(
         )
 
 
+@pytest.mark.parametrize("step_down_times_out", [False, True])
 def test_storage_controller_leadership_transfer_during_split(
     neon_env_builder: NeonEnvBuilder,
     storage_controller_proxy: StorageControllerProxy,
     port_distributor: PortDistributor,
+    step_down_times_out: bool,
 ):
     """
     Exercise a race between shard splitting and graceful leadership transfer.  This is
@@ -2934,6 +2938,18 @@ def test_storage_controller_leadership_transfer_during_split(
         )
     env.storage_controller.reconcile_until_idle()
 
+    # We are testing scenarios where the step down API does not complete: either because it is stuck
+    # doing a shard split, or because it totally times out on some other failpoint.
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*step_down.*request was dropped before completing.*",
+            ".*step_down.*operation timed out.*",
+            ".*Send step down request failed, will retry.*",
+            ".*Send step down request still failed after.*retries.*",
+            ".*Leader .+ did not respond to step-down request.*",
+        ]
+    )
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         # Start a shard split
         env.storage_controller.allowed_errors.extend(
@@ -2941,6 +2957,14 @@ def test_storage_controller_leadership_transfer_during_split(
         )
         pause_failpoint = "shard-split-pre-complete"
         env.storage_controller.configure_failpoints((pause_failpoint, "pause"))
+
+        if not step_down_times_out:
+            # Prevent the timeout self-terminate code from executing: we will block step down on the
+            # shard split itself
+            env.storage_controller.configure_failpoints(
+                ("step-down-delay-timeout", "return(3600000)")
+            )
+
         split_fut = executor.submit(
             env.storage_controller.tenant_shard_split, list(tenants)[0], shard_count * 2
         )
@@ -2959,12 +2983,20 @@ def test_storage_controller_leadership_transfer_during_split(
             timeout_in_seconds=30, instance_id=2, base_port=storage_controller_2_port
         )
 
+        if step_down_times_out:
+            # Step down will time out, original controller will terminate itself
+            env.storage_controller.allowed_errors.extend([".*terminating process.*"])
+        else:
+            # Step down does not time out: original controller hits its shard split completion
+            # code path and realises that it must not purge the parent shards from the database.
+            env.storage_controller.allowed_errors.extend([".*Enqueuing background abort.*"])
+
         def passed_split_abort():
             try:
                 log.info("Checking log for pattern...")
-                assert env.storage_controller.log_contains(
-                    ".*Using observed state received from leader.*"
-                )
+                # This log is indicative of entering startup_reconcile, which happens
+                # after the point we would abort shard splits
+                assert env.storage_controller.log_contains(".*Populating tenant shards.*")
             except Exception:
                 log.exception("Failed to find pattern in log")
                 raise
@@ -2973,34 +3005,42 @@ def test_storage_controller_leadership_transfer_during_split(
         wait_until(passed_split_abort, interval=0.1, status_interval=1.0)
         assert env.storage_controller.log_contains(".*Aborting shard split.*")
 
-        # Proxy is still talking to original controller here: disable its pause failpoint so
-        # that its shard split can run to completion.
-        log.info("Disabling failpoint")
-        # Bypass the proxy: the python test HTTPServer is single threaded and still blocked
-        # on handling the shard split request.
-        env.storage_controller.request(
-            "PUT",
-            f"http://127.0.0.1:{storage_controller_1_port}/debug/v1/failpoints",
-            json=[{"name": "shard-split-pre-complete", "actions": "off"}],
-            headers=env.storage_controller.headers(TokenScope.ADMIN),
-        )
+        if step_down_times_out:
+            # We will let the old controller hit a timeout path where it terminates itself, rather than
+            # completing step_down and trying to complete a shard split
+            def old_controller_terminated():
+                assert env.storage_controller.log_contains(".*terminating process.*")
 
-        def previous_stepped_down():
-            assert (
-                env.storage_controller.get_leadership_status()
-                == StorageControllerLeadershipStatus.STEPPED_DOWN
+            wait_until(old_controller_terminated)
+        else:
+            # Proxy is still talking to original controller here: disable its pause failpoint so
+            # that its shard split can run to completion.
+            log.info("Disabling failpoint")
+            # Bypass the proxy: the python test HTTPServer is single threaded and still blocked
+            # on handling the shard split request.
+            env.storage_controller.request(
+                "PUT",
+                f"http://127.0.0.1:{storage_controller_1_port}/debug/v1/failpoints",
+                json=[{"name": "shard-split-pre-complete", "actions": "off"}],
+                headers=env.storage_controller.headers(TokenScope.ADMIN),
             )
 
-        log.info("Awaiting step down")
-        wait_until(previous_stepped_down)
+            def previous_stepped_down():
+                assert (
+                    env.storage_controller.get_leadership_status()
+                    == StorageControllerLeadershipStatus.STEPPED_DOWN
+                )
 
-        # Let the shard split complete: this may happen _after_ the replacement has come up
-        # and tried to clean up the databases
-        log.info("Unblocking & awaiting shard split")
-        with pytest.raises(Exception, match="Unexpected child shard count"):
-            # This split fails when it tries to persist results, because it encounters
-            # changes already made by the new controller's abort-on-startup
-            split_fut.result()
+            log.info("Awaiting step down")
+            wait_until(previous_stepped_down)
+
+            # Let the shard split complete: this may happen _after_ the replacement has come up
+            # and tried to clean up the databases
+            log.info("Unblocking & awaiting shard split")
+            with pytest.raises(Exception, match="Unexpected child shard count"):
+                # This split fails when it tries to persist results, because it encounters
+                # changes already made by the new controller's abort-on-startup
+                split_fut.result()
 
         log.info("Routing to new leader")
         storage_controller_proxy.route_to(f"http://127.0.0.1:{storage_controller_2_port}")
@@ -3018,13 +3058,14 @@ def test_storage_controller_leadership_transfer_during_split(
     env.storage_controller.wait_until_ready()
     env.storage_controller.consistency_check()
 
-    # Check that the stepped down instance forwards requests
-    # to the new leader while it's still running.
-    storage_controller_proxy.route_to(f"http://127.0.0.1:{storage_controller_1_port}")
-    env.storage_controller.tenant_shard_dump()
-    env.storage_controller.node_configure(env.pageservers[0].id, {"scheduling": "Pause"})
-    status = env.storage_controller.node_status(env.pageservers[0].id)
-    assert status["scheduling"] == "Pause"
+    if not step_down_times_out:
+        # Check that the stepped down instance forwards requests
+        # to the new leader while it's still running.
+        storage_controller_proxy.route_to(f"http://127.0.0.1:{storage_controller_1_port}")
+        env.storage_controller.tenant_shard_dump()
+        env.storage_controller.node_configure(env.pageservers[0].id, {"scheduling": "Pause"})
+        status = env.storage_controller.node_status(env.pageservers[0].id)
+        assert status["scheduling"] == "Pause"
 
 
 def test_storage_controller_ps_restarted_during_drain(neon_env_builder: NeonEnvBuilder):
@@ -4109,6 +4150,7 @@ def test_storcon_create_delete_sk_down(neon_env_builder: NeonEnvBuilder, restart
     env.storage_controller.allowed_errors.extend(
         [
             ".*Call to safekeeper.* management API still failed after.*",
+            ".*Call to safekeeper.* management API failed, will retry.*",
             ".*reconcile_one.*tenant_id={tenant_id}.*Call to safekeeper.* management API still failed after.*",
         ]
     )

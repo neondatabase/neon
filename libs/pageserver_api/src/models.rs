@@ -26,7 +26,7 @@ use utils::{completion, serde_system_time};
 use crate::config::Ratio;
 use crate::key::{CompactKey, Key};
 use crate::reltag::RelTag;
-use crate::shard::{ShardCount, ShardStripeSize, TenantShardId};
+use crate::shard::{DEFAULT_STRIPE_SIZE, ShardCount, ShardStripeSize, TenantShardId};
 
 /// The state of a tenant in this pageserver.
 ///
@@ -80,10 +80,22 @@ pub enum TenantState {
     ///
     /// Transitions out of this state are possible through `set_broken()`.
     Stopping {
+        /// The barrier can be used to wait for shutdown to complete. The first caller to set
+        /// Some(Barrier) is responsible for driving shutdown to completion. Subsequent callers
+        /// will wait for the first caller's existing barrier.
+        ///
+        /// None is set when an attach is cancelled, to signal to shutdown that the attach has in
+        /// fact cancelled:
+        ///
+        /// 1. `shutdown` sees `TenantState::Attaching`, and cancels the tenant.
+        /// 2. `attach` sets `TenantState::Stopping(None)` and exits.
+        /// 3. `set_stopping` waits for `TenantState::Stopping(None)` and sets
+        ///    `TenantState::Stopping(Some)` to claim the barrier as the shutdown owner.
+        //
         // Because of https://github.com/serde-rs/serde/issues/2105 this has to be a named field,
         // otherwise it will not be skipped during deserialization
         #[serde(skip)]
-        progress: completion::Barrier,
+        progress: Option<completion::Barrier>,
     },
     /// The tenant is recognized by the pageserver, but can no longer be used for
     /// any operations.
@@ -426,8 +438,6 @@ pub struct ShardParameters {
 }
 
 impl ShardParameters {
-    pub const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
-
     pub fn is_unsharded(&self) -> bool {
         self.count.is_unsharded()
     }
@@ -437,7 +447,7 @@ impl Default for ShardParameters {
     fn default() -> Self {
         Self {
             count: ShardCount::new(0),
-            stripe_size: Self::DEFAULT_STRIPE_SIZE,
+            stripe_size: DEFAULT_STRIPE_SIZE,
         }
     }
 }
@@ -566,6 +576,8 @@ pub struct TenantConfigPatch {
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_compaction_enabled: FieldPatch<bool>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub gc_compaction_verification: FieldPatch<bool>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_compaction_initial_threshold_kb: FieldPatch<u64>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_compaction_ratio_percent: FieldPatch<u64>,
@@ -687,6 +699,9 @@ pub struct TenantConfig {
     pub gc_compaction_enabled: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub gc_compaction_verification: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub gc_compaction_initial_threshold_kb: Option<u64>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -734,6 +749,7 @@ impl TenantConfig {
             mut wal_receiver_protocol_override,
             mut rel_size_v2_enabled,
             mut gc_compaction_enabled,
+            mut gc_compaction_verification,
             mut gc_compaction_initial_threshold_kb,
             mut gc_compaction_ratio_percent,
             mut sampling_ratio,
@@ -826,6 +842,9 @@ impl TenantConfig {
             .gc_compaction_enabled
             .apply(&mut gc_compaction_enabled);
         patch
+            .gc_compaction_verification
+            .apply(&mut gc_compaction_verification);
+        patch
             .gc_compaction_initial_threshold_kb
             .apply(&mut gc_compaction_initial_threshold_kb);
         patch
@@ -866,6 +885,7 @@ impl TenantConfig {
             wal_receiver_protocol_override,
             rel_size_v2_enabled,
             gc_compaction_enabled,
+            gc_compaction_verification,
             gc_compaction_initial_threshold_kb,
             gc_compaction_ratio_percent,
             sampling_ratio,
@@ -964,6 +984,9 @@ impl TenantConfig {
             gc_compaction_enabled: self
                 .gc_compaction_enabled
                 .unwrap_or(global_conf.gc_compaction_enabled),
+            gc_compaction_verification: self
+                .gc_compaction_verification
+                .unwrap_or(global_conf.gc_compaction_verification),
             gc_compaction_initial_threshold_kb: self
                 .gc_compaction_initial_threshold_kb
                 .unwrap_or(global_conf.gc_compaction_initial_threshold_kb),
@@ -1668,6 +1691,7 @@ pub struct SecondaryProgress {
 pub struct TenantScanRemoteStorageShard {
     pub tenant_shard_id: TenantShardId,
     pub generation: Option<u32>,
+    pub stripe_size: Option<ShardStripeSize>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -2721,8 +2745,13 @@ mod tests {
             (line!(), TenantState::Active, "Active"),
             (
                 line!(),
+                TenantState::Stopping { progress: None },
+                "Stopping",
+            ),
+            (
+                line!(),
                 TenantState::Stopping {
-                    progress: utils::completion::Barrier::default(),
+                    progress: Some(completion::Barrier::default()),
                 },
                 "Stopping",
             ),

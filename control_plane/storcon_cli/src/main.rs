@@ -941,7 +941,7 @@ async fn main() -> anyhow::Result<()> {
             let mut node_to_fill_descs = Vec::new();
 
             for desc in node_descs {
-                let to_drain = nodes.iter().any(|id| *id == desc.id);
+                let to_drain = nodes.contains(&desc.id);
                 if to_drain {
                     node_to_drain_descs.push(desc);
                 } else {
