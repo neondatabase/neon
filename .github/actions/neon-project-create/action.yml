@@ -99,6 +99,7 @@ runs:
 
         # Mask password
         echo "::add-mask::$(echo $project | jq --raw-output '.roles[] | select(.name != "web_access") | .password')"
+        set -x
 
         dsn=$(echo $project | jq --raw-output '.connection_uris[0].connection_uri')
         echo "::add-mask::${dsn}"
@@ -141,10 +142,13 @@ runs:
         fi
         # XXX
         # This is a workaround for project's settings which don't work well in public API now
-        # /regions/aws-us-east-2/api/v1/admin/projects/super-sound-08287150
-        if { [[ -n "${PROJECT_SETTINGS}" ]] && [[ "${PROJECT_SETTINGS}" != "{}" ]] } || { [[ -n "${DEFAULT_ENDPOINT_SETTINGS}" ]] && [[ "${DEFAULT_ENDPOINT_SETTINGS}" != "{}" ]] }; then
+        echo ${PROJECT_SETTINGS}
+        echo ${DEFAULT_ENDPOINT_SETTINGS}
+        if ( [[ -n "${PROJECT_SETTINGS}" ]] && [[ "${PROJECT_SETTINGS}" != "{}" ]] ) || ( [[ -n "${DEFAULT_ENDPOINT_SETTINGS}" ]] && [[ "${DEFAULT_ENDPOINT_SETTINGS}" != "{}" ]] ); then
           PROJECT_DATA=$(curl -X GET \
               "https://${API_HOST}/regions/${REGION_ID}/api/v1/admin/projects/${project_id}" \
+              -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer ${ADMIN_API_KEY}" \
+              -d "{\"scheduling\": \"Essential\"}"
           )
           echo ${PROJECT_DATA} | jq .
         fi
