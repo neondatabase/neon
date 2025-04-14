@@ -391,24 +391,19 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     }
 }
 
-impl BlobWriter<true> {
-    /// Access the underlying `VirtualFile`.
+impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
+    /// Finish this blob writer and return the underlying `VirtualFile`.
     ///
-    /// This function flushes the internal buffer before giving access
-    /// to the underlying `VirtualFile`.
+    /// If there is an internal buffer (depends on `BUFFERED`), it will
+    /// be flushed before this method returns.
     pub async fn into_inner(
         mut self,
         ctx: &RequestContext,
     ) -> Result<DeleteVirtualFileOnCleanup, Error> {
-        self.flush_buffer(ctx).await?;
+        if BUFFERED {
+            self.flush_buffer(ctx).await?;
+        }
         Ok(self.inner)
-    }
-}
-
-impl BlobWriter<false> {
-    /// Access the underlying `VirtualFile`.
-    pub fn into_inner(self) -> DeleteVirtualFileOnCleanup {
-        self.inner
     }
 }
 
@@ -442,7 +437,7 @@ pub(crate) mod tests {
         let mut offsets = Vec::new();
         {
             let file =
-                DeleteVirtualFileOnCleanup(VirtualFile::create(pathbuf.as_path(), ctx).await?);
+                DeleteVirtualFileOnCleanup::new(VirtualFile::create(pathbuf.as_path(), ctx).await?);
             let mut wtr = BlobWriter::<BUFFERED>::new(file, 0, &gate, cancel.clone(), ctx);
             for blob in blobs.iter() {
                 let (_, res) = if compression {
@@ -465,7 +460,9 @@ pub(crate) mod tests {
             let (_, res) = wtr.write_blob(vec![0; PAGE_SZ].slice_len(), ctx).await;
             let offs = res?;
             println!("Writing final blob at offs={offs}");
-            wtr.flush_buffer(ctx).await?;
+
+            let file = wtr.into_inner(ctx).await?;
+            file.disarm_into_inner();
         }
         Ok((temp_dir, pathbuf, offsets))
     }

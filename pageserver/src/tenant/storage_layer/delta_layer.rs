@@ -421,7 +421,7 @@ impl DeltaLayerWriterInner {
         let path =
             DeltaLayer::temp_path_for(conf, &tenant_shard_id, &timeline_id, key_start, &lsn_range);
 
-        let mut file = DeleteVirtualFileOnCleanup(VirtualFile::create(&path, ctx).await?);
+        let mut file = DeleteVirtualFileOnCleanup::new(VirtualFile::create(&path, ctx).await?);
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
         let blob_writer = BlobWriter::new(file, PAGE_SZ as u64, gate, cancel, ctx);
@@ -581,6 +581,8 @@ impl DeltaLayerWriterInner {
             .maybe_fatal_err("delta_layer sync_all")?;
 
         trace!("created delta layer {}", self.path);
+
+        file.disarm_into_inner();
 
         Ok((desc, self.path))
     }

@@ -775,7 +775,7 @@ impl ImageLayerWriterInner {
             },
         );
         trace!("creating image layer {}", path);
-        let mut file = DeleteVirtualFileOnCleanup(
+        let mut file = DeleteVirtualFileOnCleanup::new(
             VirtualFile::open_with_options(
                 &path,
                 virtual_file::OpenOptions::new()
@@ -874,7 +874,7 @@ impl ImageLayerWriterInner {
         crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES_CHOSEN.inc_by(self.uncompressed_bytes_chosen);
         crate::metrics::COMPRESSION_IMAGE_OUTPUT_BYTES.inc_by(compressed_size);
 
-        let mut file = self.blob_writer.into_inner();
+        let mut file = self.blob_writer.into_inner(ctx).await?;
 
         // Write out the index
         file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
@@ -941,6 +941,8 @@ impl ImageLayerWriterInner {
             .maybe_fatal_err("image_layer sync_all")?;
 
         trace!("created image layer {}", self.path);
+
+        file.disarm_into_inner();
 
         Ok((desc, self.path))
     }
