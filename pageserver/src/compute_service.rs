@@ -242,6 +242,10 @@ pub async fn page_service_conn_main(
 ) -> ConnectionHandlerResult {
     let mut buf: [u8; 4] = [0; 4];
 
+    socket
+        .set_nodelay(true)
+        .context("could not set TCP_NODELAY")?;
+
     // Peek
     socket.peek(&mut buf).await?;
 
@@ -261,9 +265,6 @@ pub async fn page_service_conn_main(
 
     // Dispatch
     if grpc {
-        socket
-            .set_nodelay(true)
-            .context("could not set TCP_NODELAY")?;
         grpc_connections_tx.send(Ok(socket)).await?;
         info!("connection sent to channel");
         Ok(())

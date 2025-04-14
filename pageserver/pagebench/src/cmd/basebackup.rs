@@ -313,6 +313,9 @@ async fn client_grpc(
     while let Some(Work { lsn, gzip }) = work.recv().await {
         let start = Instant::now();
 
+        //tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        info!("starting get_base_backup");
         let mut basebackup_stream = client.get_base_backup(
             &GetBaseBackupRequest {
                 common: RequestCommon {
@@ -326,6 +329,7 @@ async fn client_grpc(
             .unwrap()
             .into_inner();
 
+        info!("starting receive");
         use futures::StreamExt;
         let mut size = 0;
         let mut nchunks = 0;

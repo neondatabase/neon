@@ -322,13 +322,66 @@ impl PageService for PageServiceService {
 
         let span = tracing::info_span!("get_base_backup", tenant_id = %ttid.tenant_id, timeline_id = %ttid.timeline_id, req_lsn = %req.common.request_lsn);
 
-        // Launch a task that writes the basebackup tarball to the simplex pipe
-        let (simplex_read, mut simplex_write) = tokio::io::simplex(64*1024);
-        let basebackup_task = tokio::spawn(
-            async move {
-                // hold onto the guard for as long as the basebackup runs
-                let _latest_gc_cutoff_lsn = latest_gc_cutoff_lsn;
+        tracing::info!("starting basebackup");
 
+        #[allow(dead_code)]
+        enum TestMode {
+            /// Create real basebackup, in streaming fashion
+            Streaming,
+            /// Create real basebackup, but fully materialize it in the 'simplex' pipe buffer first
+            Materialize,
+            /// Create a dummy all-zeros basebackup, in streaming fashion
+            DummyStreaming,
+            /// Create a dummy all-zeros basebackup, but fully materialize it first
+            DummyMaterialize,
+        }
+        let mode = TestMode::Streaming;
+
+        let buf_size = match mode {
+            TestMode::Streaming | TestMode::DummyStreaming => 64 * 1024,
+            TestMode::Materialize | TestMode::DummyMaterialize => 64 * 1024 * 1024,
+        };
+
+        let (simplex_read, mut simplex_write) = tokio::io::simplex(buf_size);
+
+        let basebackup_task = match mode {
+            TestMode::DummyStreaming => {
+                tokio::spawn(
+                    async move {
+                        // hold onto the guard for as long as the basebackup runs
+                        let _latest_gc_cutoff_lsn = latest_gc_cutoff_lsn;
+
+                        let zerosbuf: [u8; 1024] = [0; 1024];
+                        let nbytes = 16900000;
+                        let mut bytes_written = 0;
+                        while bytes_written < nbytes {
+                            let s = std::cmp::min(1024, nbytes - bytes_written);
+                            let _ = simplex_write.write_all(&zerosbuf[0..s]).await;
+                            bytes_written += s;
+                        }
+                        simplex_write.shutdown().await.context("shutdown of basebackup pipe")?;
+
+                        Ok(())
+                    }.
+                        instrument(span)
+                )
+            },
+            TestMode::DummyMaterialize => {
+                let zerosbuf: [u8; 1024] = [0; 1024];
+                let nbytes = 16900000;
+                let mut bytes_written = 0;
+                while bytes_written < nbytes {
+                    let s = std::cmp::min(1024, nbytes - bytes_written);
+                    let _ = simplex_write.write_all(&zerosbuf[0..s]).await;
+                    bytes_written += s;
+                }
+                simplex_write.shutdown().await.expect("shutdown of basebackup pipe");
+                tracing::info!("basebackup (dummy) materialized");
+                let result = Ok(());
+
+                tokio::spawn(std::future::ready(result))
+            },
+            TestMode::Materialize => {
                 let result = basebackup::send_basebackup_tarball(
                     &mut simplex_write,
                     &timeline,
@@ -339,11 +392,35 @@ impl PageService for PageServiceService {
                     &ctx,
                 )
                     .await;
-                simplex_write.shutdown().await.context("shutdown of basebackup pipe")?;
-                result
-            }.
-                instrument(span)
-        );
+                simplex_write.shutdown().await.expect("shutdown of basebackup pipe");
+                tracing::info!("basebackup materialized");
+
+                // Launch a task that writes the basebackup tarball to the simplex pipe
+                tokio::spawn(std::future::ready(result))
+            },
+            TestMode::Streaming => {
+                tokio::spawn(
+                    async move {
+                        // hold onto the guard for as long as the basebackup runs
+                        let _latest_gc_cutoff_lsn = latest_gc_cutoff_lsn;
+
+                        let result = basebackup::send_basebackup_tarball(
+                            &mut simplex_write,
+                            &timeline,
+                            Some(lsn),
+                            None,
+                            false,
+                            req.replica,
+                            &ctx,
+                        )
+                            .await;
+                        simplex_write.shutdown().await.context("shutdown of basebackup pipe")?;
+                        result
+                    }.
+                        instrument(span)
+                )
+            },
+        };
 
         let response = new_basebackup_response_stream(simplex_read, basebackup_task);
 

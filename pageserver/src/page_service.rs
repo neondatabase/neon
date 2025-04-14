@@ -91,6 +91,7 @@ struct ConnectionPerfSpanFields {
     compute_mode: Option<String>,
 }
 
+/// note: the caller has already set TCP_NODELAY on the socket
 #[instrument(skip_all, fields(peer_addr, application_name, compute_mode))]
 #[allow(clippy::too_many_arguments)]
 pub async fn libpq_page_service_conn_main(
@@ -108,10 +109,6 @@ pub async fn libpq_page_service_conn_main(
     let _guard = LIVE_CONNECTIONS
         .with_label_values(&["page_service"])
         .guard();
-
-    socket
-        .set_nodelay(true)
-        .context("could not set TCP_NODELAY")?;
 
     let socket_fd = socket.as_raw_fd();
 
