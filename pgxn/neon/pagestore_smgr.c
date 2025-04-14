@@ -1961,7 +1961,7 @@ neon_start_unlogged_build(SMgrRelation reln)
 		neon_log(ERROR, "unlogged relation build is already in progress");
 	Assert(unlogged_build_rel == NULL);
 
-	ereport(LOG,
+	ereport(SmgrTrace,
 			(errmsg(NEON_TAG "starting unlogged build of relation %u/%u/%u",
 					RelFileInfoFmt(InfoFromSMgrRel(reln)))));
 
@@ -2064,7 +2064,7 @@ neon_end_unlogged_build(SMgrRelation reln)
 
 	Assert(unlogged_build_rel == reln);
 
-	ereport(LOG,
+	ereport(SmgrTrace,
 			(errmsg(NEON_TAG "ending unlogged build of relation %u/%u/%u",
 					RelFileInfoFmt(InfoFromNInfoB(rinfob)))));
 
