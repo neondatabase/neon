@@ -151,10 +151,15 @@ runs:
               -d "{\"scheduling\": \"Essential\"}"
           )
           NEW_PROJECT_SETTINGS=$(echo ${PROJECT_DATA} | jq -rc ".project.settings + ${PROJECT_SETTINGS}")
-          curl -X POST \
+          curl -X POST --fail \
                 "https://${API_HOST}/regions/${REGION_ID}/api/v1/admin/projects/${project_id}/settings" \
                 -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer ${ADMIN_API_KEY}" \
                 --data "${NEW_PROJECT_SETTINGS}"
+          NEW_DEFAULT_ENDPOINT_SETTINGS=$(echo ${PROJECT_DATA} | jq -rc ".project.default_endpoint_settings + ${DEFAULT_ENDPOINT_SETTINGS}")
+          curl -X POST --fail \
+                "https://${API_HOST}/regions/${REGION_ID}/api/v1/admin/projects/${project_id}/default_endpoint_settings" \
+                -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer ${ADMIN_API_KEY}" \
+                --data "${NEW_DEFAULT_ENDPOINT_SETTINGS}"
         fi
         
 
