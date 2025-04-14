@@ -42,7 +42,7 @@ impl Drop for TempVirtualFile {
         if let Err(e) =
             std::fs::remove_file(path).maybe_fatal_err("failed to remove the virtual file")
         {
-            error!(err=%e, path=%path, "failed to remove delta layer writer file");
+            error!(err=%e, path=%path, "failed to remove");
         }
     }
 }
