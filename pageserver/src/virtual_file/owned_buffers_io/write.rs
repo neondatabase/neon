@@ -5,11 +5,12 @@ use flush::FlushHandle;
 pub(crate) use flush::FlushTaskError;
 use tokio_epoll_uring::IoBuf;
 use tokio_util::sync::CancellationToken;
+use tracing::error;
 
 use super::io_buf_aligned::IoBufAligned;
 use super::io_buf_ext::{FullSlice, IoBufExt};
 use crate::context::RequestContext;
-use crate::virtual_file::{IoBuffer, IoBufferMut, VirtualFile};
+use crate::virtual_file::{IoBuffer, IoBufferMut, MaybeFatalIo, VirtualFile};
 
 pub(crate) trait CheapCloneForRead {
     /// Returns a cheap clone of the buffer.
@@ -292,7 +293,12 @@ impl OwnedAsyncWriter for DeleteVirtualFileOnCleanup {
 
 impl BufferedWriterSink for DeleteVirtualFileOnCleanup {
     fn cleanup(self) {
-        self.0.remove();
+        let path = self.0.path();
+        if let Err(e) =
+            std::fs::remove_file(path).maybe_fatal_err("failed to remove the virtual file")
+        {
+            error!(err=%e, path=%path, "failed to remove delta layer writer file");
+        }
     }
 }
 
