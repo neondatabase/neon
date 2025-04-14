@@ -947,6 +947,8 @@ class NeonEnvBuilder:
                     continue
                 if SMALL_DB_FILE_NAME_REGEX.fullmatch(test_file.name):
                     continue
+                if FINAL_METRICS_FILE_NAME == test_file.name:
+                    continue
                 log.debug(f"Removing large database {test_file} file")
                 test_file.unlink()
             elif test_entry.is_dir():
@@ -1461,6 +1463,12 @@ class NeonEnv:
                 except Exception as e:
                     metric_errors.append(e)
                     log.error(f"metric validation failed on {pageserver.id}: {e}")
+
+            try:
+                pageserver.snapshot_final_metrics()
+            except Exception as e:
+                log.error(f"metric snapshot failed on {pageserver.id}: {e}")
+
             try:
                 pageserver.stop(immediate=immediate)
             except RuntimeError:
@@ -2975,6 +2983,20 @@ class NeonPageserver(PgProtocol, LogUtils):
         ]:
             value = self.http_client().get_metric_value(metric)
             assert value == 0, f"Nonzero {metric} == {value}"
+
+    def snapshot_final_metrics(self):
+        """
+        Take a snapshot of this pageserver's metrics and stash in its work directory.
+        """
+        if not self.running:
+            log.info(f"Skipping metrics snapshot on pageserver {self.id}, it is not running")
+            return
+
+        metrics = self.http_client().get_metrics_str()
+        metrics_snapshot_path = self.workdir / FINAL_METRICS_FILE_NAME
+
+        with open(metrics_snapshot_path, "w") as f:
+            f.write(metrics)
 
     def tenant_attach(
         self,
@@ -5137,6 +5159,8 @@ def pytest_addoption(parser: Parser):
 SMALL_DB_FILE_NAME_REGEX: re.Pattern[str] = re.compile(
     r"config-v1|heatmap-v1|tenant-manifest|metadata|.+\.(?:toml|pid|json|sql|conf)"
 )
+
+FINAL_METRICS_FILE_NAME: str = "final_metrics.txt"
 
 
 SKIP_DIRS = frozenset(
