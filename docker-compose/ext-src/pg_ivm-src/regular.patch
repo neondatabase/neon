@@ -1,0 +1,309 @@
+diff --git a/expected/pg_ivm.out b/expected/pg_ivm.out
+index e8798ee..4081680 100644
+--- a/expected/pg_ivm.out
++++ b/expected/pg_ivm.out
+@@ -1363,61 +1363,6 @@ SELECT * FROM mv ORDER BY i;
+    |   2 |   4 |                 2 |                 2 |             2
+ (1 row)
+ 
+-ROLLBACK;
+--- IMMV containing user defined type
+-BEGIN;
+-CREATE TYPE mytype;
+-CREATE FUNCTION mytype_in(cstring)
+- RETURNS mytype AS 'int4in'
+- LANGUAGE INTERNAL STRICT IMMUTABLE;
+-NOTICE:  return type mytype is only a shell
+-CREATE FUNCTION mytype_out(mytype)
+- RETURNS cstring AS 'int4out'
+- LANGUAGE INTERNAL STRICT IMMUTABLE;
+-NOTICE:  argument type mytype is only a shell
+-CREATE TYPE mytype (
+- LIKE = int4,
+- INPUT = mytype_in,
+- OUTPUT = mytype_out
+-);
+-CREATE FUNCTION mytype_eq(mytype, mytype)
+- RETURNS bool AS 'int4eq'
+- LANGUAGE INTERNAL STRICT IMMUTABLE;
+-CREATE FUNCTION mytype_lt(mytype, mytype)
+- RETURNS bool AS 'int4lt'
+- LANGUAGE INTERNAL STRICT IMMUTABLE;
+-CREATE FUNCTION mytype_cmp(mytype, mytype)
+- RETURNS integer AS 'btint4cmp'
+- LANGUAGE INTERNAL STRICT IMMUTABLE;
+-CREATE OPERATOR = (
+- leftarg = mytype, rightarg = mytype,
+- procedure = mytype_eq);
+-CREATE OPERATOR < (
+- leftarg = mytype, rightarg = mytype,
+- procedure = mytype_lt);
+-CREATE OPERATOR CLASS mytype_ops
+- DEFAULT FOR TYPE mytype USING btree AS
+- OPERATOR        1       <,
+- OPERATOR        3       = ,
+- FUNCTION		1		mytype_cmp(mytype,mytype);
+-CREATE TABLE t_mytype (x mytype);
+-SELECT create_immv('mv_mytype',
+- 'SELECT * FROM t_mytype');
+-NOTICE:  could not create an index on immv "mv_mytype" automatically
+-DETAIL:  This target list does not have all the primary key columns, or this view does not contain GROUP BY or DISTINCT clause.
+-HINT:  Create an index on the immv for efficient incremental maintenance.
+- create_immv 
+--------------
+-           0
+-(1 row)
+-
+-INSERT INTO t_mytype VALUES ('1'::mytype);
+-SELECT * FROM mv_mytype;
+- x 
+----
+- 1
+-(1 row)
+-
+ ROLLBACK;
+ -- outer join is not supported
+ SELECT create_immv('mv(a,b)',
+@@ -1510,112 +1455,6 @@ SELECT create_immv('mv_ivm_only_values1', 'values(1)');
+ ERROR:  VALUES is not supported on incrementally maintainable materialized view
+ SELECT create_immv('mv_ivm_only_values2',  'SELECT * FROM (values(1)) AS tmp');
+ ERROR:  VALUES is not supported on incrementally maintainable materialized view
+--- views containing base tables with Row Level Security
+-DROP USER IF EXISTS ivm_admin;
+-NOTICE:  role "ivm_admin" does not exist, skipping
+-DROP USER IF EXISTS ivm_user;
+-NOTICE:  role "ivm_user" does not exist, skipping
+-CREATE USER ivm_admin;
+-CREATE USER ivm_user;
+---- create a table with RLS
+-SET SESSION AUTHORIZATION ivm_admin;
+-CREATE TABLE rls_tbl(id int, data text, owner name);
+-INSERT INTO rls_tbl VALUES
+-  (1,'foo','ivm_user'),
+-  (2,'bar','postgres');
+-CREATE TABLE num_tbl(id int, num text);
+-INSERT INTO num_tbl VALUES
+-  (1,'one'),
+-  (2,'two'),
+-  (3,'three'),
+-  (4,'four'),
+-  (5,'five'),
+-  (6,'six');
+---- Users can access only their own rows
+-CREATE POLICY rls_tbl_policy ON rls_tbl FOR SELECT TO PUBLIC USING(owner = current_user);
+-ALTER TABLE rls_tbl ENABLE ROW LEVEL SECURITY;
+-GRANT ALL on rls_tbl TO PUBLIC;
+-GRANT ALL on num_tbl TO PUBLIC;
+---- create a view owned by ivm_user
+-SET SESSION AUTHORIZATION ivm_user;
+-SELECT create_immv('ivm_rls', 'SELECT * FROM rls_tbl');
+-NOTICE:  could not create an index on immv "ivm_rls" automatically
+-DETAIL:  This target list does not have all the primary key columns, or this view does not contain GROUP BY or DISTINCT clause.
+-HINT:  Create an index on the immv for efficient incremental maintenance.
+- create_immv 
+--------------
+-           1
+-(1 row)
+-
+-SELECT id, data, owner FROM ivm_rls ORDER BY 1,2,3;
+- id | data |  owner   
+-----+------+----------
+-  1 | foo  | ivm_user
+-(1 row)
+-
+-RESET SESSION AUTHORIZATION;
+---- inserts rows owned by different users
+-INSERT INTO rls_tbl VALUES
+-  (3,'baz','ivm_user'),
+-  (4,'qux','postgres');
+-SELECT id, data, owner FROM ivm_rls ORDER BY 1,2,3;
+- id | data |  owner   
+-----+------+----------
+-  1 | foo  | ivm_user
+-  3 | baz  | ivm_user
+-(2 rows)
+-
+---- combination of diffent kinds of commands
+-WITH
+- i AS (INSERT INTO rls_tbl VALUES(5,'quux','postgres'), (6,'corge','ivm_user')),
+- u AS (UPDATE rls_tbl SET owner = 'postgres' WHERE id = 1),
+- u2 AS (UPDATE rls_tbl SET owner = 'ivm_user' WHERE id = 2)
+-SELECT;
+---
+-(1 row)
+-
+-SELECT id, data, owner FROM ivm_rls ORDER BY 1,2,3;
+- id | data  |  owner   
+-----+-------+----------
+-  2 | bar   | ivm_user
+-  3 | baz   | ivm_user
+-  6 | corge | ivm_user
+-(3 rows)
+-
+----
+-SET SESSION AUTHORIZATION ivm_user;
+-SELECT create_immv('ivm_rls2', 'SELECT * FROM rls_tbl JOIN num_tbl USING(id)');
+-NOTICE:  could not create an index on immv "ivm_rls2" automatically
+-DETAIL:  This target list does not have all the primary key columns, or this view does not contain GROUP BY or DISTINCT clause.
+-HINT:  Create an index on the immv for efficient incremental maintenance.
+- create_immv 
+--------------
+-           3
+-(1 row)
+-
+-RESET SESSION AUTHORIZATION;
+-WITH
+- x AS (UPDATE rls_tbl SET data = data || '_2' where id in (3,4)),
+- y AS (UPDATE num_tbl SET num = num || '_2' where id in (3,4))
+-SELECT;
+---
+-(1 row)
+-
+-SELECT * FROM ivm_rls2 ORDER BY 1,2,3;
+- id | data  |  owner   |   num   
+-----+-------+----------+---------
+-  2 | bar   | ivm_user | two
+-  3 | baz_2 | ivm_user | three_2
+-  6 | corge | ivm_user | six
+-(3 rows)
+-
+-DROP TABLE rls_tbl CASCADE;
+-NOTICE:  drop cascades to 2 other objects
+-DETAIL:  drop cascades to table ivm_rls
+-drop cascades to table ivm_rls2
+-DROP TABLE num_tbl CASCADE;
+-DROP USER ivm_user;
+-DROP USER ivm_admin;
+ -- automatic index creation
+ BEGIN;
+ CREATE TABLE base_a (i int primary key, j int);
+diff --git a/sql/pg_ivm.sql b/sql/pg_ivm.sql
+index d3c1a01..203213d 100644
+--- a/sql/pg_ivm.sql
++++ b/sql/pg_ivm.sql
+@@ -454,53 +454,6 @@ DELETE FROM base_t WHERE v = 5;
+ SELECT * FROM mv ORDER BY i;
+ ROLLBACK;
+ 
+--- IMMV containing user defined type
+-BEGIN;
+-
+-CREATE TYPE mytype;
+-CREATE FUNCTION mytype_in(cstring)
+- RETURNS mytype AS 'int4in'
+- LANGUAGE INTERNAL STRICT IMMUTABLE;
+-CREATE FUNCTION mytype_out(mytype)
+- RETURNS cstring AS 'int4out'
+- LANGUAGE INTERNAL STRICT IMMUTABLE;
+-CREATE TYPE mytype (
+- LIKE = int4,
+- INPUT = mytype_in,
+- OUTPUT = mytype_out
+-);
+-
+-CREATE FUNCTION mytype_eq(mytype, mytype)
+- RETURNS bool AS 'int4eq'
+- LANGUAGE INTERNAL STRICT IMMUTABLE;
+-CREATE FUNCTION mytype_lt(mytype, mytype)
+- RETURNS bool AS 'int4lt'
+- LANGUAGE INTERNAL STRICT IMMUTABLE;
+-CREATE FUNCTION mytype_cmp(mytype, mytype)
+- RETURNS integer AS 'btint4cmp'
+- LANGUAGE INTERNAL STRICT IMMUTABLE;
+-
+-CREATE OPERATOR = (
+- leftarg = mytype, rightarg = mytype,
+- procedure = mytype_eq);
+-CREATE OPERATOR < (
+- leftarg = mytype, rightarg = mytype,
+- procedure = mytype_lt);
+-
+-CREATE OPERATOR CLASS mytype_ops
+- DEFAULT FOR TYPE mytype USING btree AS
+- OPERATOR        1       <,
+- OPERATOR        3       = ,
+- FUNCTION		1		mytype_cmp(mytype,mytype);
+-
+-CREATE TABLE t_mytype (x mytype);
+-SELECT create_immv('mv_mytype',
+- 'SELECT * FROM t_mytype');
+-INSERT INTO t_mytype VALUES ('1'::mytype);
+-SELECT * FROM mv_mytype;
+-
+-ROLLBACK;
+-
+ -- outer join is not supported
+ SELECT create_immv('mv(a,b)',
+     'SELECT a.i, b.i FROM mv_base_a a LEFT JOIN mv_base_b b ON a.i=b.i');
+@@ -579,71 +532,6 @@ SELECT create_immv('mv_ivm31', 'SELECT sum(i)/sum(j) FROM mv_base_a');
+ SELECT create_immv('mv_ivm_only_values1', 'values(1)');
+ SELECT create_immv('mv_ivm_only_values2',  'SELECT * FROM (values(1)) AS tmp');
+ 
+-
+--- views containing base tables with Row Level Security
+-DROP USER IF EXISTS ivm_admin;
+-DROP USER IF EXISTS ivm_user;
+-CREATE USER ivm_admin;
+-CREATE USER ivm_user;
+-
+---- create a table with RLS
+-SET SESSION AUTHORIZATION ivm_admin;
+-CREATE TABLE rls_tbl(id int, data text, owner name);
+-INSERT INTO rls_tbl VALUES
+-  (1,'foo','ivm_user'),
+-  (2,'bar','postgres');
+-CREATE TABLE num_tbl(id int, num text);
+-INSERT INTO num_tbl VALUES
+-  (1,'one'),
+-  (2,'two'),
+-  (3,'three'),
+-  (4,'four'),
+-  (5,'five'),
+-  (6,'six');
+-
+---- Users can access only their own rows
+-CREATE POLICY rls_tbl_policy ON rls_tbl FOR SELECT TO PUBLIC USING(owner = current_user);
+-ALTER TABLE rls_tbl ENABLE ROW LEVEL SECURITY;
+-GRANT ALL on rls_tbl TO PUBLIC;
+-GRANT ALL on num_tbl TO PUBLIC;
+-
+---- create a view owned by ivm_user
+-SET SESSION AUTHORIZATION ivm_user;
+-SELECT create_immv('ivm_rls', 'SELECT * FROM rls_tbl');
+-SELECT id, data, owner FROM ivm_rls ORDER BY 1,2,3;
+-RESET SESSION AUTHORIZATION;
+-
+---- inserts rows owned by different users
+-INSERT INTO rls_tbl VALUES
+-  (3,'baz','ivm_user'),
+-  (4,'qux','postgres');
+-SELECT id, data, owner FROM ivm_rls ORDER BY 1,2,3;
+-
+---- combination of diffent kinds of commands
+-WITH
+- i AS (INSERT INTO rls_tbl VALUES(5,'quux','postgres'), (6,'corge','ivm_user')),
+- u AS (UPDATE rls_tbl SET owner = 'postgres' WHERE id = 1),
+- u2 AS (UPDATE rls_tbl SET owner = 'ivm_user' WHERE id = 2)
+-SELECT;
+-SELECT id, data, owner FROM ivm_rls ORDER BY 1,2,3;
+-
+----
+-SET SESSION AUTHORIZATION ivm_user;
+-SELECT create_immv('ivm_rls2', 'SELECT * FROM rls_tbl JOIN num_tbl USING(id)');
+-RESET SESSION AUTHORIZATION;
+-
+-WITH
+- x AS (UPDATE rls_tbl SET data = data || '_2' where id in (3,4)),
+- y AS (UPDATE num_tbl SET num = num || '_2' where id in (3,4))
+-SELECT;
+-SELECT * FROM ivm_rls2 ORDER BY 1,2,3;
+-
+-DROP TABLE rls_tbl CASCADE;
+-DROP TABLE num_tbl CASCADE;
+-
+-DROP USER ivm_user;
+-DROP USER ivm_admin;
+-
+ -- automatic index creation
+ BEGIN;
+ CREATE TABLE base_a (i int primary key, j int);
