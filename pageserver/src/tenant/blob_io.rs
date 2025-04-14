@@ -30,9 +30,7 @@ use crate::tenant::block_io::BlockCursor;
 use crate::virtual_file::IoBufferMut;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
 use crate::virtual_file::owned_buffers_io::write::{BufferedWriter, FlushTaskError};
-use crate::virtual_file::owned_buffers_io::write::{
-    BufferedWriterShutdownMode, BufferedWriterSink,
-};
+use crate::virtual_file::owned_buffers_io::write::{BufferedWriterShutdownMode, OwnedAsyncWriter};
 
 #[derive(Copy, Clone, Debug)]
 pub struct CompressionInfo {
@@ -176,7 +174,7 @@ pub struct BlobWriter<W> {
 
 impl<W> BlobWriter<W>
 where
-    W: BufferedWriterSink + std::fmt::Debug + Send + Sync + 'static,
+    W: OwnedAsyncWriter + std::fmt::Debug + Send + Sync + 'static,
 {
     pub fn new(
         file: W,

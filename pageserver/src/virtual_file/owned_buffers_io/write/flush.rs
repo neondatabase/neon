@@ -4,7 +4,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span, warn};
 use utils::sync::duplex;
 
-use super::{Buffer, BufferedWriterSink, CheapCloneForRead};
+use super::{Buffer, CheapCloneForRead, OwnedAsyncWriter};
 use crate::context::RequestContext;
 use crate::virtual_file::MaybeFatalIo;
 use crate::virtual_file::owned_buffers_io::io_buf_aligned::IoBufAligned;
@@ -126,7 +126,7 @@ impl FlushControl {
 impl<Buf, W> FlushHandle<Buf, W>
 where
     Buf: IoBufAligned + Send + Sync + CheapCloneForRead,
-    W: BufferedWriterSink + Send + Sync + 'static + std::fmt::Debug,
+    W: OwnedAsyncWriter + Send + Sync + 'static + std::fmt::Debug,
 {
     /// Spawns a new background flush task and obtains a handle.
     ///
@@ -250,7 +250,7 @@ pub enum FlushTaskError {
 impl<Buf, W> FlushBackgroundTask<Buf, W>
 where
     Buf: IoBufAligned + Send + Sync,
-    W: BufferedWriterSink + Sync + 'static,
+    W: OwnedAsyncWriter + Sync + 'static,
 {
     /// Creates a new background flush task.
     fn new(
@@ -271,9 +271,6 @@ where
 
     /// Runs the background flush task.
     async fn run(mut self) -> Result<W, FlushTaskError> {
-        let writer = scopeguard::guard(self.writer, |writer| {
-            writer.cleanup();
-        });
         //  Exit condition: channel is closed and there is no remaining buffer to be flushed
         while let Some(request) = self.channel.recv().await {
             let op_kind = request.op_str();
@@ -308,7 +305,7 @@ where
                         warn!(op=%request.op_str(), "retrying");
                     }
                     // borrows so we can async move the requests into async block while not moving these borrows here
-                    let writer = &writer;
+                    let writer = &self.writer;
                     let request_storage = &mut request_storage;
                     let ctx = &self.ctx;
                     let io_fut = match request {
@@ -398,7 +395,7 @@ where
             }
         }
 
-        Ok(scopeguard::ScopeGuard::into_inner(writer))
+        Ok(self.writer)
     }
 }
 

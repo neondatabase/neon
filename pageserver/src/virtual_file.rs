@@ -1183,6 +1183,9 @@ impl OwnedAsyncWriter for VirtualFile {
     ) -> (FullSlice<Buf>, std::io::Result<()>) {
         VirtualFile::write_all_at(self, buf, offset, ctx).await
     }
+    async fn set_len(&self, len: u64, ctx: &RequestContext) -> std::io::Result<()> {
+        VirtualFile::set_len(self, len, ctx).await
+    }
 }
 
 impl OpenFiles {

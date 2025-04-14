@@ -38,15 +38,11 @@ pub trait OwnedAsyncWriter {
         offset: u64,
         ctx: &RequestContext,
     ) -> impl std::future::Future<Output = (FullSlice<Buf>, std::io::Result<()>)> + Send;
-}
-
-pub trait BufferedWriterSink: OwnedAsyncWriter {
     fn set_len(
         &self,
         len: u64,
         ctx: &RequestContext,
     ) -> impl Future<Output = std::io::Result<()>> + Send;
-    fn cleanup(self);
 }
 
 /// A wrapper aorund an [`OwnedAsyncWriter`] that uses a [`Buffer`] to batch
@@ -121,7 +117,7 @@ impl<B, Buf, W> BufferedWriter<B, W>
 where
     B: IoBufAlignedMut + Buffer<IoBuf = Buf> + Send + 'static,
     Buf: IoBufAligned + Send + Sync + CheapCloneForRead,
-    W: BufferedWriterSink + Send + Sync + 'static + std::fmt::Debug,
+    W: OwnedAsyncWriter + Send + Sync + 'static + std::fmt::Debug,
 {
     /// Creates a new buffered writer.
     ///
@@ -441,13 +437,6 @@ mod tests {
                 .push((Vec::from(&buf[..]), offset));
             (buf, Ok(()))
         }
-    }
-
-    impl BufferedWriterSink for RecorderWriter {
-        fn cleanup(self) {
-            // No-op.
-        }
-
         async fn set_len(&self, _len: u64, _ctx: &RequestContext) -> std::io::Result<()> {
             unreachable!("tests don't need this")
         }

@@ -3,7 +3,7 @@
 
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::AtomicU64;
 
 use camino::Utf8PathBuf;
 use num_traits::Num;
@@ -21,9 +21,9 @@ use crate::tenant::storage_layer::inmemory_layer::vectored_dio_read::File;
 use crate::virtual_file::owned_buffers_io::io_buf_aligned::IoBufAlignedMut;
 use crate::virtual_file::owned_buffers_io::slice::SliceMutExt;
 use crate::virtual_file::owned_buffers_io::write::{Buffer, FlushTaskError};
-use crate::virtual_file::{self, IoBufferMut, MaybeFatalIo, VirtualFile, owned_buffers_io};
+use crate::virtual_file::{self, IoBufferMut, TempVirtualFile, VirtualFile, owned_buffers_io};
 
-use self::owned_buffers_io::write::{BufferedWriterSink, OwnedAsyncWriter};
+use self::owned_buffers_io::write::OwnedAsyncWriter;
 
 pub struct EphemeralFile {
     _tenant_shard_id: TenantShardId,
@@ -35,7 +35,7 @@ pub struct EphemeralFile {
 }
 
 struct Inner {
-    file: VirtualFileCoOwnedByEphemeralFileAndBufferedWriter,
+    file: TempVirtualFileCoOwnedByEphemeralFileAndBufferedWriter,
     buffered_writer: BufferedWriter,
     /// Gate guard is held on as long as we need to do operations in the path (delete on drop)
     _gate_guard: utils::sync::gate::GateGuard,
@@ -43,18 +43,18 @@ struct Inner {
 
 type BufferedWriter = owned_buffers_io::write::BufferedWriter<
     IoBufferMut,
-    VirtualFileCoOwnedByEphemeralFileAndBufferedWriter,
+    TempVirtualFileCoOwnedByEphemeralFileAndBufferedWriter,
 >;
 
-#[derive(Debug)]
-struct VirtualFileCoOwnedByEphemeralFileAndBufferedWriter {
-    inner: Arc<VirtualFileCoOwnedByEphemeralFileAndBufferedWriterInner>,
-}
-
-#[derive(Debug)]
-struct VirtualFileCoOwnedByEphemeralFileAndBufferedWriterInner {
-    file: VirtualFile,
-    asked_for_cleanup: AtomicBool,
+/// A TempVirtualFile that is co-owned by the [`EphemeralFile`]` and [`BufferedWriter`].
+///
+/// (Actually [`BufferedWriter`] internally is just a client to a background flush task.
+/// The co-ownership is between [`EphemeralFile`] and that flush task.)
+///
+/// Co-ownership allows us to serve reads for data that has already been flushed by the [`BufferedWriter`].
+#[derive(Debug, Clone)]
+struct TempVirtualFileCoOwnedByEphemeralFileAndBufferedWriter {
+    inner: Arc<TempVirtualFile>,
 }
 
 const TAIL_SZ: usize = 64 * 1024;
@@ -78,7 +78,7 @@ impl EphemeralFile {
                 "ephemeral-{filename_disambiguator}"
             )));
 
-        let file = VirtualFileCoOwnedByEphemeralFileAndBufferedWriter::new(
+        let file = TempVirtualFileCoOwnedByEphemeralFileAndBufferedWriter::new(
             VirtualFile::open_with_options_v2(
                 &filename,
                 virtual_file::OpenOptions::new()
@@ -130,7 +130,15 @@ impl EphemeralFile {
     }
 }
 
-impl OwnedAsyncWriter for VirtualFileCoOwnedByEphemeralFileAndBufferedWriter {
+impl TempVirtualFileCoOwnedByEphemeralFileAndBufferedWriter {
+    fn new(file: VirtualFile) -> Self {
+        Self {
+            inner: Arc::new(TempVirtualFile::new(file)),
+        }
+    }
+}
+
+impl OwnedAsyncWriter for TempVirtualFileCoOwnedByEphemeralFileAndBufferedWriter {
     fn write_all_at<Buf: owned_buffers_io::io_buf_aligned::IoBufAligned + Send>(
         &self,
         buf: owned_buffers_io::io_buf_ext::FullSlice<Buf>,
@@ -142,64 +150,23 @@ impl OwnedAsyncWriter for VirtualFileCoOwnedByEphemeralFileAndBufferedWriter {
             std::io::Result<()>,
         ),
     > + Send {
-        self.inner.file.write_all_at(buf, offset, ctx)
+        self.inner.write_all_at(buf, offset, ctx)
+    }
+
+    fn set_len(
+        &self,
+        len: u64,
+        ctx: &RequestContext,
+    ) -> impl Future<Output = std::io::Result<()>> + Send {
+        self.inner.set_len(len, ctx)
     }
 }
 
-impl BufferedWriterSink for VirtualFileCoOwnedByEphemeralFileAndBufferedWriter {
-    async fn set_len(&self, len: u64, ctx: &RequestContext) -> std::io::Result<()> {
-        self.inner.file.set_len(len, ctx).await
-    }
-    fn cleanup(self) {
-        self.inner
-            .asked_for_cleanup
-            .store(true, std::sync::atomic::Ordering::SeqCst); // TODO: SeqCst necessary?
-    }
-}
-
-impl std::ops::Deref for VirtualFileCoOwnedByEphemeralFileAndBufferedWriter {
+impl std::ops::Deref for TempVirtualFileCoOwnedByEphemeralFileAndBufferedWriter {
     type Target = VirtualFile;
 
     fn deref(&self) -> &Self::Target {
-        &self.inner.file
-    }
-}
-
-impl VirtualFileCoOwnedByEphemeralFileAndBufferedWriter {
-    fn new(file: VirtualFile) -> Self {
-        Self {
-            inner: Arc::new(VirtualFileCoOwnedByEphemeralFileAndBufferedWriterInner {
-                file,
-                asked_for_cleanup: AtomicBool::new(false),
-            }),
-        }
-    }
-}
-
-impl Clone for VirtualFileCoOwnedByEphemeralFileAndBufferedWriter {
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-        }
-    }
-}
-
-impl Drop for VirtualFileCoOwnedByEphemeralFileAndBufferedWriterInner {
-    fn drop(&mut self) {
-        if !self
-            .asked_for_cleanup
-            .load(std::sync::atomic::Ordering::SeqCst)
-        // TODO SeqCst necessary?
-        {
-            return;
-        }
-
-        let path = self.file.path();
-        let Err(e) = std::fs::remove_file(path).maybe_fatal_err("ephemeral file cleanup") else {
-            return;
-        };
-
-        error!("could not remove ephemeral file '{path}': {e}");
+        &self.inner
     }
 }
 
