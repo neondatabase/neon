@@ -14,6 +14,32 @@ pub struct GenericAPIError {
     pub error: String,
 }
 
+/// All configuration parameters necessary for a compute. When
+/// [`ComputeConfig::spec`] is provided, it means that the compute is attached
+/// to a tenant. [`ComputeConfig::compute_ctl_config`] will always be provided
+/// and contains parameters necessary for operating `compute_ctl` independently
+/// of whether a tenant is attached to the compute or not.
+///
+/// This also happens to be the body of `compute_ctl`'s /configure request.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ComputeConfig {
+    /// The compute spec
+    pub spec: Option<ComputeSpec>,
+
+    /// The compute_ctl configuration
+    #[allow(dead_code)]
+    pub compute_ctl_config: ComputeCtlConfig,
+}
+
+impl From<ControlPlaneConfigResponse> for ComputeConfig {
+    fn from(value: ControlPlaneConfigResponse) -> Self {
+        Self {
+            spec: value.spec,
+            compute_ctl_config: value.compute_ctl_config,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ExtensionInstallResponse {
     pub extension: PgIdent,
@@ -161,7 +187,7 @@ pub struct TlsConfig {
 
 /// Response of the `/computes/{compute_id}/spec` control-plane API.
 #[derive(Deserialize, Debug)]
-pub struct ControlPlaneSpecResponse {
+pub struct ControlPlaneConfigResponse {
     pub spec: Option<ComputeSpec>,
     pub status: ControlPlaneComputeStatus,
     pub compute_ctl_config: ComputeCtlConfig,
