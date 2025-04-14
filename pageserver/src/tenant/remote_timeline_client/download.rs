@@ -148,9 +148,9 @@ async fn download_object(
     storage: &GenericRemoteStorage,
     src_path: &RemotePath,
     dst_path: &Utf8PathBuf,
-    #[cfg_attr(target_os = "macos", allow(unused_variables))] gate: &utils::sync::gate::Gate,
+    gate: &utils::sync::gate::Gate,
     cancel: &CancellationToken,
-    #[cfg_attr(target_os = "macos", allow(unused_variables))] ctx: &RequestContext,
+    ctx: &RequestContext,
 ) -> Result<u64, DownloadError> {
     use crate::virtual_file::owned_buffers_io::write::FlushTaskError;
 
