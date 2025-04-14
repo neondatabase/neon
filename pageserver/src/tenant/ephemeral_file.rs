@@ -101,6 +101,7 @@ impl EphemeralFile {
                 file: file.clone(),
                 buffered_writer: BufferedWriter::new(
                     file,
+                    0,
                     || IoBufferMut::with_capacity(TAIL_SZ),
                     gate.enter()?,
                     cancel.child_token(),

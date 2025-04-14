@@ -209,6 +209,22 @@ impl IoEngine {
             }
         }
     }
+
+    pub(super) async fn set_len(
+        &self,
+        file_guard: FileGuard,
+        len: u64,
+    ) -> (FileGuard, std::io::Result<()>) {
+        match self {
+            IoEngine::NotSet => panic!("not initialized"),
+            // TODO: ftruncate op for tokio-epoll-uring
+            IoEngine::StdFs | IoEngine::TokioEpollUring => {
+                let res = file_guard.with_std_file(|std_file| std_file.set_len(len));
+                (file_guard, res)
+            }
+        }
+    }
+
     pub(super) async fn write_at<B: IoBuf + Send>(
         &self,
         file_guard: FileGuard,

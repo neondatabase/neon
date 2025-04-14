@@ -29,11 +29,11 @@
 //!
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
-use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use anyhow::{Context, Result, bail, ensure};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -45,14 +45,13 @@ use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
 use pageserver_api::value::Value;
-use rand::Rng;
-use rand::distributions::Alphanumeric;
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 use tokio_epoll_uring::IoBuf;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::bin_ser::BeSer;
+use utils::bin_ser::SerializeError;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
@@ -75,7 +74,8 @@ use crate::tenant::vectored_blob_io::{
     VectoredReadPlanner,
 };
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
-use crate::virtual_file::{self, IoBufferMut, MaybeFatalIo, VirtualFile};
+use crate::virtual_file::owned_buffers_io::write::{Buffer, DeleteVirtualFileOnCleanup};
+use crate::virtual_file::{self, IoBuffer, IoBufferMut, MaybeFatalIo, VirtualFile};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 
 ///
@@ -113,6 +113,15 @@ impl From<&DeltaLayer> for Summary {
 }
 
 impl Summary {
+    /// Serializes the summary header into an aligned buffer of lenth `PAGE_SZ`.
+    pub fn ser_into_page(&self) -> Result<IoBuffer, SerializeError> {
+        let mut buf = IoBufferMut::with_capacity(PAGE_SZ);
+        Self::ser_into(self, &mut buf)?;
+        // Pad zeroes to the buffer so the length is a multiple of the alignment.
+        buf.extend_with(0, buf.capacity() - buf.len());
+        Ok(buf.freeze())
+    }
+
     pub(super) fn expected(
         tenant_id: TenantId,
         timeline_id: TimelineId,
@@ -288,19 +297,19 @@ impl DeltaLayer {
         key_start: Key,
         lsn_range: &Range<Lsn>,
     ) -> Utf8PathBuf {
-        let rand_string: String = rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(8)
-            .map(char::from)
-            .collect();
+        // Never reuse a filename in the lifetime of a pageserver process so that we need
+        // not worry about laggard Drop impl's async unlink hitting an already reused filename.
+        static NEXT_TEMP_DISAMBIGUATOR: AtomicU64 = AtomicU64::new(1);
+        let filename_disambiguator =
+            NEXT_TEMP_DISAMBIGUATOR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         conf.timeline_path(tenant_shard_id, timeline_id)
             .join(format!(
-                "{}-XXX__{:016X}-{:016X}.{}.{}",
+                "{}-XXX__{:016X}-{:016X}.{:x}.{}",
                 key_start,
                 u64::from(lsn_range.start),
                 u64::from(lsn_range.end),
-                rand_string,
+                filename_disambiguator,
                 TEMP_FILE_SUFFIX,
             ))
     }
@@ -391,10 +400,12 @@ struct DeltaLayerWriterInner {
 
     tree: DiskBtreeBuilder<BlockBuf, DELTA_KEY_SIZE>,
 
-    blob_writer: BlobWriter<true>,
+    blob_writer: BlobWriter<DeleteVirtualFileOnCleanup>,
 
     // Number of key-lsns in the layer.
     num_keys: usize,
+
+    _gate_guard: utils::sync::gate::GateGuard,
 }
 
 impl DeltaLayerWriterInner {
@@ -421,10 +432,17 @@ impl DeltaLayerWriterInner {
         let path =
             DeltaLayer::temp_path_for(conf, &tenant_shard_id, &timeline_id, key_start, &lsn_range);
 
-        let mut file = VirtualFile::create(&path, ctx).await?;
-        // make room for the header block
-        file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
-        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64, gate, cancel, ctx);
+        let file = DeleteVirtualFileOnCleanup(VirtualFile::create_v2(&path, ctx).await?);
+
+        // Start at PAGE_SZ, make room for the header block
+        let blob_writer = BlobWriter::new(
+            file,
+            PAGE_SZ as u64,
+            gate,
+            cancel,
+            ctx,
+            info_span!(parent: None, "delta_layer_writer_flush_task", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), timeline_id=%timeline_id, path = %path),
+        )?;
 
         // Initialize the b-tree index builder
         let block_buf = BlockBuf::new();
@@ -439,6 +457,7 @@ impl DeltaLayerWriterInner {
             tree: tree_builder,
             blob_writer,
             num_keys: 0,
+            _gate_guard: gate.enter()?,
         })
     }
 
@@ -516,33 +535,35 @@ impl DeltaLayerWriterInner {
         key_end: Key,
         ctx: &RequestContext,
     ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
-        let temp_path = self.path.clone();
-        let result = self.finish0(key_end, ctx).await;
-        if let Err(ref e) = result {
-            tracing::info!(%temp_path, "cleaning up temporary file after error during writing: {e}");
-            if let Err(e) = std::fs::remove_file(&temp_path) {
-                tracing::warn!(error=%e, %temp_path, "error cleaning up temporary layer file after error during writing");
-            }
-        }
-        result
-    }
-
-    async fn finish0(
-        self,
-        key_end: Key,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
         let index_start_blk = self.blob_writer.size().div_ceil(PAGE_SZ as u64) as u32;
 
-        let mut file = self.blob_writer.into_inner(ctx).await?;
+        let file = self
+            .blob_writer
+            .into_inner(ctx, |mut buf| {
+                let len = buf.pending();
+                let cap = buf.cap();
+
+                // pad zeros to the next io alignment requirement.
+                // TODO: this is actually padding to next PAGE_SZ multiple, but only if the buffer capacity is larger than that.
+                // We can't let the fact that we do direct IO, or the buffer capacity, dictate the on-disk format we write here.
+                // Need to find a better API that allows writing the format we intend to.
+                let count = len.next_multiple_of(PAGE_SZ).min(cap) - len;
+                buf.extend_with(0, count);
+
+                Some(buf)
+            })
+            .await?;
 
         // Write out the index
         let (index_root_blk, block_buf) = self.tree.finish()?;
-        file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
-            .await?;
+        let mut offset = index_start_blk as u64 * PAGE_SZ as u64;
+
+        // TODO(yuchen): https://github.com/neondatabase/neon/issues/10092
+        // Should we just replace BlockBuf::blocks with one big buffer
         for buf in block_buf.blocks {
-            let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
+            let (_buf, res) = file.write_all_at(buf.slice_len(), offset, ctx).await;
             res?;
+            offset += PAGE_SZ as u64;
         }
         assert!(self.lsn_range.start < self.lsn_range.end);
         // Fill in the summary on blk 0
@@ -557,11 +578,9 @@ impl DeltaLayerWriterInner {
             index_root_blk,
         };
 
-        let mut buf = Vec::with_capacity(PAGE_SZ);
-        // TODO: could use smallvec here but it's a pain with Slice<T>
-        Summary::ser_into(&summary, &mut buf)?;
-        file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
+        // Writes summary at the first block (offset 0).
+        let buf = summary.ser_into_page()?;
+        let (_buf, res) = file.write_all_at(buf.slice_len(), 0, ctx).await;
         res?;
 
         let metadata = file
@@ -597,6 +616,8 @@ impl DeltaLayerWriterInner {
             .maybe_fatal_err("delta_layer sync_all")?;
 
         trace!("created delta layer {}", self.path);
+
+        let _file = file.disarm_into_inner();
 
         Ok((desc, self.path))
     }
@@ -726,17 +747,6 @@ impl DeltaLayerWriter {
     }
 }
 
-impl Drop for DeltaLayerWriter {
-    fn drop(&mut self) {
-        if let Some(inner) = self.inner.take() {
-            // We want to remove the virtual file here, so it's fine to not
-            // having completely flushed unwritten data.
-            let vfile = inner.blob_writer.into_inner_no_flush();
-            vfile.remove();
-        }
-    }
-}
-
 #[derive(thiserror::Error, Debug)]
 pub enum RewriteSummaryError {
     #[error("magic mismatch")]
@@ -760,7 +770,7 @@ impl DeltaLayer {
     where
         F: Fn(Summary) -> Summary,
     {
-        let mut file = VirtualFile::open_with_options(
+        let file = VirtualFile::open_with_options_v2(
             path,
             virtual_file::OpenOptions::new().read(true).write(true),
             ctx,
@@ -777,11 +787,8 @@ impl DeltaLayer {
 
         let new_summary = rewrite(actual_summary);
 
-        let mut buf = Vec::with_capacity(PAGE_SZ);
-        // TODO: could use smallvec here, but it's a pain with Slice<T>
-        Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
-        file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
+        let buf = new_summary.ser_into_page().context("serialize")?;
+        let (_buf, res) = file.write_all_at(buf.slice_len(), 0, ctx).await;
         res?;
         Ok(())
     }
@@ -1609,8 +1616,8 @@ pub(crate) mod test {
     use bytes::Bytes;
     use itertools::MinMaxResult;
     use pageserver_api::value::Value;
-    use rand::RngCore;
     use rand::prelude::{SeedableRng, SliceRandom, StdRng};
+    use rand::{Rng, RngCore};
 
     use super::*;
     use crate::DEFAULT_PG_VERSION;

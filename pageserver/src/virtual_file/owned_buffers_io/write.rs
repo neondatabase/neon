@@ -1,14 +1,20 @@
 mod flush;
 
+use bytes::BufMut;
 pub(crate) use flush::FlushControl;
 use flush::FlushHandle;
 pub(crate) use flush::FlushTaskError;
 use tokio_epoll_uring::IoBuf;
 use tokio_util::sync::CancellationToken;
+use tracing::error;
+use tracing::trace;
 
 use super::io_buf_aligned::IoBufAligned;
+use super::io_buf_aligned::IoBufAlignedMut;
 use super::io_buf_ext::{FullSlice, IoBufExt};
 use crate::context::RequestContext;
+use crate::virtual_file::MaybeFatalIo;
+use crate::virtual_file::get_io_buffer_alignment;
 use crate::virtual_file::{IoBuffer, IoBufferMut, VirtualFile};
 
 pub(crate) trait CheapCloneForRead {
@@ -66,7 +72,7 @@ pub struct BufferedWriter<B: Buffer, W> {
 
 impl<B, Buf, W> BufferedWriter<B, W>
 where
-    B: Buffer<IoBuf = Buf> + Send + 'static,
+    B: IoBufAlignedMut + Buffer<IoBuf = Buf> + Send + 'static,
     Buf: IoBufAligned + Send + Sync + CheapCloneForRead,
     W: BufferedWriterSink + Send + Sync + 'static + std::fmt::Debug,
 {
@@ -75,6 +81,7 @@ where
     /// The `buf_new` function provides a way to initialize the owned buffers used by this writer.
     pub fn new(
         writer: W,
+        start_offset: u64,
         buf_new: impl Fn() -> B,
         gate_guard: utils::sync::gate::GateGuard,
         cancel: CancellationToken,
@@ -92,7 +99,7 @@ where
                 ctx.attached_child(),
                 flush_task_span,
             ),
-            bytes_submitted: 0,
+            bytes_submitted: start_offset,
         }
     }
 
@@ -113,20 +120,43 @@ where
     }
 
     #[cfg_attr(target_os = "macos", allow(dead_code))]
-    pub async fn flush_and_into_inner(
+    pub async fn shutdown(
         mut self,
         ctx: &RequestContext,
+        mut handle_tail: impl FnMut(B) -> Option<B>,
     ) -> Result<(u64, W), FlushTaskError> {
-        self.flush(ctx).await?;
+        // TODO: replace the callback with an action so that the buffer never leaves our purview
+        let mutable = self.mutable.take().expect("must not use after an error");
+        let unpadded_pending = mutable.pending();
+        let padded = handle_tail(mutable);
+        let padded_pending = padded.as_ref().map(|b| b.pending());
+        trace!(
+            unpadded_pending,
+            padded_pending, "handle_tail returned a result"
+        );
+        if let Some(padded) = padded {
+            assert_eq!(
+                padded.pending() % get_io_buffer_alignment(),
+                0,
+                "the buffere returned by `handle_tail` must be aligned and have a pending size that will be accepted by the kernel"
+            );
+            self.mutable = Some(padded);
+            self.flush(ctx).await?;
+            assert!(self.mutable.is_some(), "flush maintains invariant as usual");
+            let mutable = self
+                .mutable
+                .as_ref()
+                .expect("flush maintains invariant as usual");
+            assert_eq!(mutable.pending(), 0, "nothing left to flush");
+        }
 
         let Self {
-            mutable: buf,
+            mutable: _,
             maybe_flushed: _,
             mut flush_handle,
             bytes_submitted: bytes_amount,
         } = self;
         let writer = flush_handle.shutdown().await?;
-        assert!(buf.is_some());
         Ok((bytes_amount, writer))
     }
 
@@ -231,6 +261,10 @@ pub trait Buffer {
     /// panics if `other.len() > self.cap() - self.pending()`.
     fn extend_from_slice(&mut self, other: &[u8]);
 
+    /// Add `count` bytes `val` into `self`.
+    /// Panics if `count > self.cap() - self.pending()`.
+    fn extend_with(&mut self, val: u8, count: usize);
+
     /// Number of bytes in the buffer.
     fn pending(&self) -> usize;
 
@@ -256,6 +290,14 @@ impl Buffer for IoBufferMut {
         }
 
         IoBufferMut::extend_from_slice(self, other);
+    }
+
+    fn extend_with(&mut self, val: u8, count: usize) {
+        if self.len() + count > self.cap() {
+            panic!("Buffer capacity exceeded");
+        }
+
+        IoBufferMut::put_bytes(self, val, count);
     }
 
     fn pending(&self) -> usize {
@@ -292,7 +334,12 @@ impl OwnedAsyncWriter for DeleteVirtualFileOnCleanup {
 
 impl BufferedWriterSink for DeleteVirtualFileOnCleanup {
     fn cleanup(self) {
-        self.0.remove();
+        let path = self.0.path();
+        if let Err(e) =
+            std::fs::remove_file(path).maybe_fatal_err("failed to remove the virtual file")
+        {
+            error!(err=%e, path=%path, "failed to remove delta layer writer file");
+        }
     }
 }
 
@@ -306,7 +353,7 @@ impl std::ops::Deref for DeleteVirtualFileOnCleanup {
 
 impl DeleteVirtualFileOnCleanup {
     pub fn disarm_into_inner(self) -> VirtualFile {
-        return self.0;
+        self.0
     }
 }
 
@@ -370,6 +417,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let mut writer = BufferedWriter::<_, RecorderWriter>::new(
             recorder,
+            0,
             || IoBufferMut::with_capacity(2),
             gate.enter()?,
             cancel,
@@ -386,7 +434,7 @@ mod tests {
         writer.write_buffered_borrowed(b"j", ctx).await?;
         writer.write_buffered_borrowed(b"klmno", ctx).await?;
 
-        let (_, recorder) = writer.flush_and_into_inner(ctx).await?;
+        let (_, recorder) = writer.shutdown(ctx, Some).await?;
         assert_eq!(
             recorder.get_writes(),
             {
