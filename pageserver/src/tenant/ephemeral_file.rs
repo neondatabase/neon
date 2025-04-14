@@ -244,6 +244,18 @@ impl EphemeralFile {
         srcbuf: &[u8],
         ctx: &RequestContext,
     ) -> Result<u64, EphemeralFileWriteError> {
+        let (pos, control) = self.write_raw_controlled(srcbuf, ctx).await?;
+        if let Some(control) = control {
+            control.release().await;
+        }
+        Ok(pos)
+    }
+
+    async fn write_raw_controlled(
+        &mut self,
+        srcbuf: &[u8],
+        ctx: &RequestContext,
+    ) -> Result<(u64, Option<owned_buffers_io::write::FlushControl>), EphemeralFileWriteError> {
         let pos = self.bytes_written;
 
         let new_bytes_written = pos.checked_add(srcbuf.len().into_u64()).ok_or_else(|| {
@@ -254,9 +266,9 @@ impl EphemeralFile {
         })?;
 
         // Write the payload
-        let nwritten = self
+        let (nwritten, control) = self
             .buffered_writer_mut()
-            .write_buffered_borrowed(srcbuf, ctx)
+            .write_buffered_borrowed_controlled(srcbuf, ctx)
             .await
             .map_err(|e| match e {
                 FlushTaskError::Cancelled => EphemeralFileWriteError::Cancelled,
@@ -269,7 +281,7 @@ impl EphemeralFile {
 
         self.bytes_written = new_bytes_written;
 
-        Ok(pos)
+        Ok((pos, control))
     }
 }
 
@@ -599,5 +611,83 @@ mod tests {
         );
     }
 
-    // TODO: bring back this test
+    #[tokio::test]
+    async fn test_read_split_across_file_and_buffer() {
+        // This test exercises the logic on the read path that splits the logical read
+        // into a read from the flushed part (= the file) and a copy from the buffered writer's buffer.
+        //
+        // This test build on the assertions in test_flushes_do_happen
+
+        let (conf, tenant_id, timeline_id, ctx) =
+            harness("test_read_split_across_file_and_buffer").unwrap();
+
+        let gate = utils::sync::gate::Gate::default();
+        let cancel = CancellationToken::new();
+
+        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &gate, &cancel, &ctx)
+            .await
+            .unwrap();
+
+        let mutable = file.buffered_writer().mutable();
+        let cap = mutable.capacity();
+        let align = mutable.align();
+        let content: Vec<u8> = rand::thread_rng()
+            .sample_iter(rand::distributions::Standard)
+            .take(cap * 2 + cap / 2)
+            .collect();
+
+        let (_, control) = file.write_raw_controlled(&content, &ctx).await.unwrap();
+
+        let test_read = |start: usize, len: usize| {
+            let file = &file;
+            let ctx = &ctx;
+            let content = &content;
+            async move {
+                let (buf, nread) = file
+                    .read_exact_at_eof_ok(
+                        start.into_u64(),
+                        IoBufferMut::with_capacity(len).slice_full(),
+                        ctx,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(nread, len);
+                assert_eq!(&buf.into_inner(), &content[start..(start + len)]);
+            }
+        };
+
+        let test_read_all_offset_combinations = || {
+            async move {
+                test_read(align, align).await;
+                // border onto edge of file
+                test_read(cap - align, align).await;
+                // read across file and buffer
+                test_read(cap - align, 2 * align).await;
+                // stay from start of maybe flushed buffer
+                test_read(cap, align).await;
+                // completely within maybe flushed buffer
+                test_read(cap + align, align).await;
+                // border onto edge of maybe flushed buffer.
+                test_read(cap * 2 - align, align).await;
+                // read across maybe flushed and mutable buffer
+                test_read(cap * 2 - align, 2 * align).await;
+                // read across three segments
+                test_read(cap - align, cap + 2 * align).await;
+                // completely within mutable buffer
+                test_read(cap * 2 + align, align).await;
+            }
+        };
+
+        // completely within the file range
+        assert!(align < cap, "test assumption");
+        assert!(cap % align == 0);
+
+        // test reads at different flush stages.
+        let not_started = control.unwrap().into_not_started();
+        test_read_all_offset_combinations().await;
+        let in_progress = not_started.ready_to_flush();
+        test_read_all_offset_combinations().await;
+        in_progress.wait_until_flush_is_done().await;
+        test_read_all_offset_combinations().await;
+    }
 }

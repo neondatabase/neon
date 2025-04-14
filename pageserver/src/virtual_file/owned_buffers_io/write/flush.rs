@@ -26,6 +26,10 @@ pub struct FlushHandleInner<Buf, W> {
 struct FlushRequest<Buf> {
     slice: FullSlice<Buf>,
     offset: u64,
+    #[cfg(test)]
+    ready_to_flush_rx: Option<tokio::sync::oneshot::Receiver<()>>,
+    #[cfg(test)]
+    done_flush_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 pub struct ShutdownRequest {
@@ -42,6 +46,79 @@ impl<Buf> Request<Buf> {
         match self {
             Request::Flush(_) => "flush",
             Request::Shutdown(_) => "shutdown",
+        }
+    }
+}
+
+/// Constructs a request and a control object for a new flush operation.
+#[cfg(not(test))]
+fn new_flush_op<Buf>(slice: FullSlice<Buf>, offset: u64) -> (FlushRequest<Buf>, FlushControl) {
+    let request = FlushRequest { slice, offset };
+    let control = FlushControl::untracked();
+
+    (request, control)
+}
+
+/// Constructs a request and a control object for a new flush operation.
+#[cfg(test)]
+fn new_flush_op<Buf>(slice: FullSlice<Buf>, offset: u64) -> (FlushRequest<Buf>, FlushControl) {
+    let (ready_to_flush_tx, ready_to_flush_rx) = tokio::sync::oneshot::channel();
+    let (done_flush_tx, done_flush_rx) = tokio::sync::oneshot::channel();
+    let control = FlushControl::not_started(ready_to_flush_tx, done_flush_rx);
+
+    let request = FlushRequest {
+        slice,
+        offset,
+        ready_to_flush_rx: Some(ready_to_flush_rx),
+        done_flush_tx: Some(done_flush_tx),
+    };
+    (request, control)
+}
+
+/// A handle to a `FlushRequest` that allows unit tests precise control over flush behavior.
+#[cfg(test)]
+pub(crate) struct FlushControl {
+    not_started: FlushNotStarted,
+}
+
+#[cfg(not(test))]
+pub(crate) struct FlushControl;
+
+impl FlushControl {
+    #[cfg(test)]
+    fn not_started(
+        ready_to_flush_tx: tokio::sync::oneshot::Sender<()>,
+        done_flush_rx: tokio::sync::oneshot::Receiver<()>,
+    ) -> Self {
+        FlushControl {
+            not_started: FlushNotStarted {
+                ready_to_flush_tx,
+                done_flush_rx,
+            },
+        }
+    }
+
+    #[cfg(not(test))]
+    fn untracked() -> Self {
+        FlushControl
+    }
+
+    /// In tests, turn flush control into a not started state.
+    #[cfg(test)]
+    pub(crate) fn into_not_started(self) -> FlushNotStarted {
+        self.not_started
+    }
+
+    /// Release control to the submitted buffer.
+    ///
+    /// In `cfg(test)` environment, the buffer is guranteed to be flushed to disk after [`FlushControl::release`] is finishes execution.
+    pub async fn release(self) {
+        #[cfg(test)]
+        {
+            self.not_started
+                .ready_to_flush()
+                .wait_until_flush_is_done()
+                .await;
         }
     }
 }
@@ -96,8 +173,8 @@ where
         &mut self,
         slice: FullSlice<Buf>,
         offset: u64,
-    ) -> Result<FullSlice<Buf>, FlushTaskError> {
-        let request = FlushRequest { slice, offset };
+    ) -> Result<(FullSlice<Buf>, FlushControl), FlushTaskError> {
+        let (request, flush_control) = new_flush_op(slice, offset);
 
         // Submits the buffer to the background task.
         self.send(Request::Flush(request)).await?;
@@ -109,7 +186,7 @@ where
             return self.handle_error().await;
         };
 
-        Ok(recycled)
+        Ok((recycled, flush_control))
     }
 
     /// Sends poison pill to flush task and waits for it to exit.
@@ -235,11 +312,24 @@ where
                     let request_storage = &mut request_storage;
                     let ctx = &self.ctx;
                     let io_fut = match request {
-                        Request::Flush(FlushRequest { slice, offset }) => futures::future::Either::Left(async move {
+                        Request::Flush(FlushRequest { slice, offset, #[cfg(test)] ready_to_flush_rx, #[cfg(test)] done_flush_tx }) => futures::future::Either::Left(async move {
+                            #[cfg(test)]
+                            if let Some(ready_to_flush_rx) = ready_to_flush_rx {
+                                {
+                                    // In test, wait for control to signal that we are ready to flush.
+                                    if ready_to_flush_rx.await.is_err() {
+                                        tracing::debug!("control dropped");
+                                    }
+                                }
+                            }
                             let (slice, res) = writer.write_all_at(slice, offset, ctx).await;
                             *request_storage = Some(Request::Flush(FlushRequest {
                                 slice,
                                 offset,
+                                #[cfg(test)]
+                                ready_to_flush_rx: None, // the contract is that we notify before first attempt
+                                #[cfg(test)]
+                                done_flush_tx
                             }));
                             res
                         }),
@@ -279,7 +369,21 @@ where
             let request = request_storage.expect("loop must have run at least once");
 
             let slice = match request {
-                Request::Flush(FlushRequest { slice, .. }) => slice,
+                Request::Flush(FlushRequest {
+                    slice,
+                    #[cfg(test)]
+                    mut done_flush_tx,
+                    ..
+                }) => {
+                    #[cfg(test)]
+                    {
+                        // In test, tell control we are done flushing buffer.
+                        if done_flush_tx.take().expect("always Some").send(()).is_err() {
+                            tracing::debug!("control dropped");
+                        }
+                    }
+                    slice
+                }
                 Request::Shutdown(_) => {
                     // next iteration will observe recv() returning None
                     continue;
@@ -295,5 +399,41 @@ where
         }
 
         Ok(scopeguard::ScopeGuard::into_inner(writer))
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct FlushNotStarted {
+    ready_to_flush_tx: tokio::sync::oneshot::Sender<()>,
+    done_flush_rx: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+pub(crate) struct FlushInProgress {
+    done_flush_rx: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+pub(crate) struct FlushDone;
+
+#[cfg(test)]
+impl FlushNotStarted {
+    /// Signals the background task the buffer is ready to flush to disk.
+    pub fn ready_to_flush(self) -> FlushInProgress {
+        self.ready_to_flush_tx
+            .send(())
+            .map(|_| FlushInProgress {
+                done_flush_rx: self.done_flush_rx,
+            })
+            .unwrap()
+    }
+}
+
+#[cfg(test)]
+impl FlushInProgress {
+    /// Waits until background flush is done.
+    pub async fn wait_until_flush_is_done(self) -> FlushDone {
+        self.done_flush_rx.await.unwrap();
+        FlushDone
     }
 }

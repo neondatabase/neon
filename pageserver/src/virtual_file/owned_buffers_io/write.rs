@@ -1,6 +1,7 @@
 mod flush;
 
 use bytes::BufMut;
+pub(crate) use flush::FlushControl;
 use flush::FlushHandle;
 pub(crate) use flush::FlushTaskError;
 use flush::ShutdownRequest;
@@ -251,10 +252,24 @@ where
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub async fn write_buffered_borrowed(
         &mut self,
-        mut chunk: &[u8],
+        chunk: &[u8],
         ctx: &RequestContext,
     ) -> Result<usize, FlushTaskError> {
+        let (len, control) = self.write_buffered_borrowed_controlled(chunk, ctx).await?;
+        if let Some(control) = control {
+            control.release().await;
+        }
+        Ok(len)
+    }
+
+    /// In addition to bytes submitted in this write, also returns a handle that can control the flush behavior.
+    pub(crate) async fn write_buffered_borrowed_controlled(
+        &mut self,
+        mut chunk: &[u8],
+        ctx: &RequestContext,
+    ) -> Result<(usize, Option<FlushControl>), FlushTaskError> {
         let chunk_len = chunk.len();
+        let mut control: Option<FlushControl> = None;
         while !chunk.is_empty() {
             let buf = self.mutable.as_mut().expect("must not use after an error");
             let need = buf.cap() - buf.pending();
@@ -264,10 +279,13 @@ where
             chunk = &chunk[n..];
             if buf.pending() >= buf.cap() {
                 assert_eq!(buf.pending(), buf.cap());
-                self.flush(ctx).await?;
+                if let Some(control) = control.take() {
+                    control.release().await;
+                }
+                control = self.flush(ctx).await?;
             }
         }
-        Ok(chunk_len)
+        Ok((chunk_len, control))
     }
 
     /// This function can only error if the flush task got cancelled.
@@ -283,12 +301,15 @@ where
     /// It is in fact quite hard to reason about what exactly happens in today's code.
     /// Best case we accumulate junk in the EphemeralFile, worst case is data corruption.
     #[must_use = "caller must explcitly check the flush control"]
-    async fn flush(&mut self, _ctx: &RequestContext) -> Result<(), FlushTaskError> {
+    async fn flush(
+        &mut self,
+        _ctx: &RequestContext,
+    ) -> Result<Option<FlushControl>, FlushTaskError> {
         let buf = self.mutable.take().expect("must not use after an error");
         let buf_len = buf.pending();
         if buf_len == 0 {
             self.mutable = Some(buf);
-            return Ok(());
+            return Ok(None);
         }
         // Prepare the buffer for read while flushing.
         let slice = buf.flush();
@@ -299,7 +320,7 @@ where
 
         // If we return/panic here or later, we'll leave mutable = None, breaking further
         // writers, but the read path should still work.
-        let recycled = self.flush_handle.flush(slice, offset).await?;
+        let (recycled, flush_control) = self.flush_handle.flush(slice, offset).await?;
 
         // The only other place that could hold a reference to the recycled buffer
         // is in `Self::maybe_flushed`, but we have already replace it with the new buffer.
@@ -308,7 +329,7 @@ where
         // We got back some recycled buffer, can open up for more writes again.
         self.mutable = Some(recycled);
 
-        Ok(())
+        Ok(Some(flush_control))
     }
 }
 
