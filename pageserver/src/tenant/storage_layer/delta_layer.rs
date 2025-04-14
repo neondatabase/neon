@@ -405,8 +405,6 @@ struct DeltaLayerWriterInner {
 
     // Number of key-lsns in the layer.
     num_keys: usize,
-
-    _gate_guard: utils::sync::gate::GateGuard,
 }
 
 impl DeltaLayerWriterInner {
@@ -458,7 +456,6 @@ impl DeltaLayerWriterInner {
             tree: tree_builder,
             blob_writer,
             num_keys: 0,
-            _gate_guard: gate.enter()?,
         })
     }
 

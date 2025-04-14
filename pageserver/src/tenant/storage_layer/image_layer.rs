@@ -753,8 +753,6 @@ struct ImageLayerWriterInner {
 
     #[cfg(feature = "testing")]
     last_written_key: Key,
-
-    _gate_guard: utils::sync::gate::GateGuard,
 }
 
 impl ImageLayerWriterInner {
@@ -824,7 +822,6 @@ impl ImageLayerWriterInner {
             num_keys: 0,
             #[cfg(feature = "testing")]
             last_written_key: Key::MIN,
-            _gate_guard: gate.enter()?,
         };
 
         Ok(writer)
