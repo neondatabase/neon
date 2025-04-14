@@ -126,7 +126,7 @@ impl Drop for LoggingGuard {
             // Shutdown trace pipeline gracefully, so that it has a chance to send any
             // pending traces before we exit.
             tracing::info!("shutting down the tracing machinery");
-            _ = p.shutdown();
+            drop(p.shutdown());
         }
     }
 }
