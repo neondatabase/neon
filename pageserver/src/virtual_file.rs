@@ -35,6 +35,7 @@ use crate::context::RequestContext;
 use crate::metrics::{STORAGE_IO_TIME_METRIC, StorageIoOperation};
 use crate::page_cache::{PAGE_SZ, PageWriteGuard};
 pub(crate) mod io_engine;
+mod temporary;
 pub use io_engine::{
     FeatureTestResult as IoEngineFeatureTestResult, feature_test as io_engine_feature_test,
     io_engine_for_bench,
