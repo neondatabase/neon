@@ -207,6 +207,10 @@ pub struct PageServicePipeliningConfigPipelined {
     /// Causes runtime errors if larger than max get_vectored batch size.
     pub max_batch_size: NonZeroUsize,
     pub execution: PageServiceProtocolPipelinedExecutionStrategy,
+    // The default below is such that new versions of the software can start
+    // with the old configuration.
+    #[serde(default)]
+    pub batching: PageServiceProtocolPipelinedBatchingStrategy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -214,6 +218,19 @@ pub struct PageServicePipeliningConfigPipelined {
 pub enum PageServiceProtocolPipelinedExecutionStrategy {
     ConcurrentFutures,
     Tasks,
+}
+
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PageServiceProtocolPipelinedBatchingStrategy {
+    /// All get page requests in a batch will be at the same LSN
+    #[default]
+    UniformLsn,
+    /// Get page requests in a batch may be at different LSN
+    ///
+    /// One key cannot be present more than once at different LSNs in
+    /// the same batch.
+    ScatteredLsn,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -615,9 +632,12 @@ impl Default for ConfigToml {
             page_service_pipelining: if !cfg!(test) {
                 PageServicePipeliningConfig::Serial
             } else {
+                // Do not turn this into the default until scattered reads have been
+                // validated and rolled-out fully.
                 PageServicePipeliningConfig::Pipelined(PageServicePipeliningConfigPipelined {
                     max_batch_size: NonZeroUsize::new(32).unwrap(),
                     execution: PageServiceProtocolPipelinedExecutionStrategy::ConcurrentFutures,
+                    batching: PageServiceProtocolPipelinedBatchingStrategy::ScatteredLsn,
                 })
             },
             get_vectored_concurrent_io: if !cfg!(test) {

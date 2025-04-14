@@ -1255,6 +1255,7 @@ class NeonEnv:
                 "mode": "pipelined",
                 "execution": "concurrent-futures",
                 "max_batch_size": 32,
+                "batching": "scattered-lsn",
             }
 
             get_vectored_concurrent_io = self.pageserver_get_vectored_concurrent_io
@@ -1320,6 +1321,10 @@ class NeonEnv:
                 # Silence those warnings categorically.
                 log.info("test may use old binaries, ignoring warnings about unknown config items")
                 ps.allowed_errors.append(".*ignoring unknown configuration item.*")
+
+                # Allow old software to start until https://github.com/neondatabase/neon/pull/11275
+                # lands in the compatiblity snapshot.
+                ps_cfg["page_service_pipelining"].pop("batching")
 
             self.pageservers.append(ps)
             cfg["pageservers"].append(ps_cfg)
