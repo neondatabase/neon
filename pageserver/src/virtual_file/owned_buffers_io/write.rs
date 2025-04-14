@@ -329,7 +329,7 @@ impl OwnedAsyncWriter for DeleteVirtualFileOnCleanup {
         offset: u64,
         ctx: &RequestContext,
     ) -> impl std::future::Future<Output = (FullSlice<Buf>, std::io::Result<()>)> + Send {
-        VirtualFile::write_all_at(&self, buf, offset, ctx)
+        VirtualFile::write_all_at(self, buf, offset, ctx)
     }
 }
 
@@ -357,7 +357,7 @@ impl std::ops::Deref for DeleteVirtualFileOnCleanup {
     type Target = VirtualFile;
 
     fn deref(&self) -> &Self::Target {
-        &self.0.as_ref().expect("only None after into_inner or drop")
+        self.0.as_ref().expect("only None after into_inner or drop")
     }
 }
 
