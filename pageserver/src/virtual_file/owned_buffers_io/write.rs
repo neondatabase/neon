@@ -312,7 +312,7 @@ impl std::ops::Deref for DeleteVirtualFileOnCleanup {
 
 impl DeleteVirtualFileOnCleanup {
     pub fn disarm_into_inner(self) -> VirtualFile {
-        return self.0;
+        self.0
     }
 }
 
