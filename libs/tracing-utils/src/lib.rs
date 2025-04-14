@@ -1,11 +1,5 @@
 //! Helper functions to set up OpenTelemetry tracing.
 //!
-//! This comes in two variants, depending on whether you have a Tokio runtime available.
-//! If you do, call `init_tracing()`. It sets up the trace processor and exporter to use
-//! the current tokio runtime. If you don't have a runtime available, or you don't want
-//! to share the runtime with the tracing tasks, call `init_tracing_without_runtime()`
-//! instead. It sets up a dedicated single-threaded Tokio runtime for the tracing tasks.
-//!
 //! Example:
 //!
 //! ```rust,no_run
@@ -21,7 +15,8 @@
 //!         .with_writer(std::io::stderr);
 //!
 //!     // Initialize OpenTelemetry. Exports tracing spans as OpenTelemetry traces
-//!     let otlp_layer = tracing_utils::init_tracing("my_application", tracing_utils::ExportConfig::default()).await;
+//!     let provider = tracing_utils::init_tracing("my_application", tracing_utils::ExportConfig::default());
+//!     let otlp_layer = provider.as_ref().map(tracing_utils::layer);
 //!
 //!     // Put it all together
 //!     tracing_subscriber::registry()
