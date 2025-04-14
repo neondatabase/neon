@@ -28,8 +28,8 @@ use tracing::warn;
 use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::tenant::block_io::BlockCursor;
-use crate::virtual_file::VirtualFile;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
+use crate::virtual_file::owned_buffers_io::write::DeleteVirtualFileOnCleanup;
 
 #[derive(Copy, Clone, Debug)]
 pub struct CompressionInfo {
@@ -161,7 +161,7 @@ pub(super) const BYTE_ZSTD: u8 = BYTE_UNCOMPRESSED | 0x10;
 /// discarded. You need to call [`flush_buffer`](Self::flush_buffer)
 /// manually before dropping.
 pub struct BlobWriter<const BUFFERED: bool> {
-    inner: VirtualFile,
+    inner: DeleteVirtualFileOnCleanup,
     offset: u64,
     /// A buffer to save on write calls, only used if BUFFERED=true
     buf: Vec<u8>,
@@ -171,7 +171,7 @@ pub struct BlobWriter<const BUFFERED: bool> {
 
 impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     pub fn new(
-        inner: VirtualFile,
+        inner: DeleteVirtualFileOnCleanup,
         start_offset: u64,
         _gate: &utils::sync::gate::Gate,
         _cancel: CancellationToken,
@@ -396,23 +396,18 @@ impl BlobWriter<true> {
     ///
     /// This function flushes the internal buffer before giving access
     /// to the underlying `VirtualFile`.
-    pub async fn into_inner(mut self, ctx: &RequestContext) -> Result<VirtualFile, Error> {
+    pub async fn into_inner(
+        mut self,
+        ctx: &RequestContext,
+    ) -> Result<DeleteVirtualFileOnCleanup, Error> {
         self.flush_buffer(ctx).await?;
         Ok(self.inner)
-    }
-
-    /// Access the underlying `VirtualFile`.
-    ///
-    /// Unlike [`into_inner`](Self::into_inner), this doesn't flush
-    /// the internal buffer before giving access.
-    pub fn into_inner_no_flush(self) -> VirtualFile {
-        self.inner
     }
 }
 
 impl BlobWriter<false> {
     /// Access the underlying `VirtualFile`.
-    pub fn into_inner(self) -> VirtualFile {
+    pub fn into_inner(self) -> DeleteVirtualFileOnCleanup {
         self.inner
     }
 }
@@ -427,6 +422,7 @@ pub(crate) mod tests {
     use crate::context::DownloadBehavior;
     use crate::task_mgr::TaskKind;
     use crate::tenant::block_io::BlockReaderRef;
+    use crate::virtual_file::VirtualFile;
 
     async fn round_trip_test<const BUFFERED: bool>(blobs: &[Vec<u8>]) -> Result<(), Error> {
         round_trip_test_compressed::<BUFFERED>(blobs, false).await
@@ -445,7 +441,8 @@ pub(crate) mod tests {
         // Write part (in block to drop the file)
         let mut offsets = Vec::new();
         {
-            let file = VirtualFile::create(pathbuf.as_path(), ctx).await?;
+            let file =
+                DeleteVirtualFileOnCleanup(VirtualFile::create(pathbuf.as_path(), ctx).await?);
             let mut wtr = BlobWriter::<BUFFERED>::new(file, 0, &gate, cancel.clone(), ctx);
             for blob in blobs.iter() {
                 let (_, res) = if compression {

@@ -74,6 +74,7 @@ use crate::tenant::vectored_blob_io::{
     VectoredReadPlanner,
 };
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
+use crate::virtual_file::owned_buffers_io::write::DeleteVirtualFileOnCleanup;
 use crate::virtual_file::{self, IoBufferMut, MaybeFatalIo, VirtualFile};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 
@@ -420,7 +421,7 @@ impl DeltaLayerWriterInner {
         let path =
             DeltaLayer::temp_path_for(conf, &tenant_shard_id, &timeline_id, key_start, &lsn_range);
 
-        let mut file = VirtualFile::create(&path, ctx).await?;
+        let mut file = DeleteVirtualFileOnCleanup(VirtualFile::create(&path, ctx).await?);
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
         let blob_writer = BlobWriter::new(file, PAGE_SZ as u64, gate, cancel, ctx);
@@ -511,22 +512,6 @@ impl DeltaLayerWriterInner {
     /// Finish writing the delta layer.
     ///
     async fn finish(
-        self,
-        key_end: Key,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
-        let temp_path = self.path.clone();
-        let result = self.finish0(key_end, ctx).await;
-        if let Err(ref e) = result {
-            tracing::info!(%temp_path, "cleaning up temporary file after error during writing: {e}");
-            if let Err(e) = std::fs::remove_file(&temp_path) {
-                tracing::warn!(error=%e, %temp_path, "error cleaning up temporary layer file after error during writing");
-            }
-        }
-        result
-    }
-
-    async fn finish0(
         self,
         key_end: Key,
         ctx: &RequestContext,
@@ -722,17 +707,6 @@ impl DeltaLayerWriter {
     pub(crate) fn estimated_size(&self) -> u64 {
         let inner = self.inner.as_ref().unwrap();
         inner.blob_writer.size() + inner.tree.borrow_writer().size() + PAGE_SZ as u64
-    }
-}
-
-impl Drop for DeltaLayerWriter {
-    fn drop(&mut self) {
-        if let Some(inner) = self.inner.take() {
-            // We want to remove the virtual file here, so it's fine to not
-            // having completely flushed unwritten data.
-            let vfile = inner.blob_writer.into_inner_no_flush();
-            vfile.remove();
-        }
     }
 }
 

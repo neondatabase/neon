@@ -310,6 +310,12 @@ impl std::ops::Deref for DeleteVirtualFileOnCleanup {
     }
 }
 
+impl std::ops::DerefMut for DeleteVirtualFileOnCleanup {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 impl DeleteVirtualFileOnCleanup {
     pub fn disarm_into_inner(self) -> VirtualFile {
         self.0

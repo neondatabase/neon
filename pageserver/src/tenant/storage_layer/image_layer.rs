@@ -72,6 +72,7 @@ use crate::tenant::vectored_blob_io::{
     VectoredReadPlanner,
 };
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
+use crate::virtual_file::owned_buffers_io::write::DeleteVirtualFileOnCleanup;
 use crate::virtual_file::{self, IoBufferMut, MaybeFatalIo, VirtualFile};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 
@@ -774,7 +775,7 @@ impl ImageLayerWriterInner {
             },
         );
         trace!("creating image layer {}", path);
-        let mut file = {
+        let mut file = DeleteVirtualFileOnCleanup(
             VirtualFile::open_with_options(
                 &path,
                 virtual_file::OpenOptions::new()
@@ -782,8 +783,8 @@ impl ImageLayerWriterInner {
                     .create_new(true),
                 ctx,
             )
-            .await?
-        };
+            .await?,
+        );
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
         let blob_writer = BlobWriter::new(file, PAGE_SZ as u64, gate, cancel, ctx);
@@ -859,25 +860,6 @@ impl ImageLayerWriterInner {
     /// Finish writing the image layer.
     ///
     async fn finish(
-        self,
-        ctx: &RequestContext,
-        end_key: Option<Key>,
-    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
-        let temp_path = self.path.clone();
-        let result = self.finish0(ctx, end_key).await;
-        if let Err(ref e) = result {
-            tracing::info!(%temp_path, "cleaning up temporary file after error during writing: {e}");
-            if let Err(e) = std::fs::remove_file(&temp_path) {
-                tracing::warn!(error=%e, %temp_path, "error cleaning up temporary layer file after error during writing");
-            }
-        }
-        result
-    }
-
-    ///
-    /// Finish writing the image layer.
-    ///
-    async fn finish0(
         self,
         ctx: &RequestContext,
         end_key: Option<Key>,
@@ -1063,14 +1045,6 @@ impl ImageLayerWriter {
         ctx: &RequestContext,
     ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
         self.inner.take().unwrap().finish(ctx, Some(end_key)).await
-    }
-}
-
-impl Drop for ImageLayerWriter {
-    fn drop(&mut self) {
-        if let Some(inner) = self.inner.take() {
-            inner.blob_writer.into_inner().remove();
-        }
     }
 }
 
