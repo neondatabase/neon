@@ -90,7 +90,8 @@ use crate::{CancellableTask, PERF_TRACE_TARGET, timed_after_cancellation};
 /// is not yet in state [`TenantState::Active`].
 ///
 /// NB: this is a different value than [`crate::http::routes::ACTIVE_TENANT_TIMEOUT`].
-const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
+/// HADRON: reduced timeout and we will retry in Cache::get().
+const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(5000);
 
 /// Threshold at which to log slow GetPage requests.
 const LOG_SLOW_GETPAGE_THRESHOLD: Duration = Duration::from_secs(30);

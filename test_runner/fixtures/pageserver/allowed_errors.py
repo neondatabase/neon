@@ -113,6 +113,10 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*BatchSpanProcessor.*",
     # Can happen in tests that purposely wipe pageserver "local disk" data.
     ".*Local data loss suspected.*",
+    # Too many frozen layers error is normal during intensive benchmarks
+    ".*too many frozen layers.*",
+    # Transient errors when resolving tenant shards by page service
+    ".*Fail to resolve tennat shard in attempt.*",
     *(
         [
             r".*your platform is not a supported production platform, ignoing request for O_DIRECT; this could hide alignment bugs.*"
