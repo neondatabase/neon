@@ -802,7 +802,18 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
+			neon_log(LOG, "Create %c relation %u/%u/%u.%u",
+					 reln->smgr_relpersistence,
+					 RelFileInfoFmt(InfoFromSMgrRel(reln)),
+					 forkNum);
+
+#ifdef DEBUG_COMPARE_LOCAL
+			mdcreate(reln, forkNum, forkNum == INIT_FORKNUM || isRedo);
+			if (forkNum == MAIN_FORKNUM)
+				mdcreate(reln, INIT_FORKNUM, true);
+#else
 			mdcreate(reln, forkNum, isRedo);
+#endif
 			return;
 
 		default:
@@ -1955,7 +1966,7 @@ neon_start_unlogged_build(SMgrRelation reln)
 		neon_log(ERROR, "unlogged relation build is already in progress");
 	Assert(unlogged_build_rel == NULL);
 
-	ereport(SmgrTrace,
+	ereport(LOG,
 			(errmsg(NEON_TAG "starting unlogged build of relation %u/%u/%u",
 					RelFileInfoFmt(InfoFromSMgrRel(reln)))));
 
@@ -1974,7 +1985,7 @@ neon_start_unlogged_build(SMgrRelation reln)
 			unlogged_build_phase = UNLOGGED_BUILD_NOT_PERMANENT;
 #ifdef DEBUG_COMPARE_LOCAL
 			if (!IsParallelWorker())
-				mdcreate(reln, INIT_FORKNUM, false);
+				mdcreate(reln, INIT_FORKNUM, true);
 #endif
 			return;
 
@@ -2003,7 +2014,7 @@ neon_start_unlogged_build(SMgrRelation reln)
 #ifndef DEBUG_COMPARE_LOCAL
 		mdcreate(reln, MAIN_FORKNUM, false);
 #else
-		mdcreate(reln, INIT_FORKNUM, false);
+		mdcreate(reln, INIT_FORKNUM, true);
 #endif
 	}
 }
@@ -2058,7 +2069,7 @@ neon_end_unlogged_build(SMgrRelation reln)
 
 	Assert(unlogged_build_rel == reln);
 
-	ereport(SmgrTrace,
+	ereport(LOG,
 			(errmsg(NEON_TAG "ending unlogged build of relation %u/%u/%u",
 					RelFileInfoFmt(InfoFromNInfoB(rinfob)))));
 
