@@ -1273,7 +1273,10 @@ impl Timeline {
         let pitr_cutoff = self.gc_info.read().unwrap().cutoffs.time;
 
         let layers = self.layers.read().await;
-        for layer_desc in layers.layer_map()?.iter_historic_layers() {
+        let layers_iter = layers.layer_map()?.iter_historic_layers();
+        let (layers_total, mut layers_checked) = (layers_iter.len(), 0);
+        for layer_desc in layers_iter {
+            layers_checked += 1;
             let layer = layers.get_from_desc(&layer_desc);
             if layer.metadata().shard.shard_count == self.shard_identity.count {
                 // This layer does not belong to a historic ancestor, no need to re-image it.
@@ -1371,7 +1374,8 @@ impl Timeline {
         }
 
         info!(
-            "starting shard ancestor compaction, rewriting {} layers and dropping {} layers \
+            "starting shard ancestor compaction, rewriting {} layers and dropping {} layers, \
+                checked {layers_checked}/{layers_total} layers \
                 (latest_gc_cutoff={} pitr_cutoff={})",
             layers_to_rewrite.len(),
             drop_layers.len(),
