@@ -819,7 +819,15 @@ impl KeyHistoryRetention {
             base_img: &Option<(Lsn, &Bytes)>,
             history: &[(Lsn, &NeonWalRecord)],
             tline: &Arc<Timeline>,
+            skip_empty: bool,
         ) -> anyhow::Result<()> {
+            if base_img.is_none() && history.is_empty() {
+                if skip_empty {
+                    return Ok(());
+                }
+                anyhow::bail!("verification failed: key {} has no history at {}", key, lsn);
+            };
+
             let mut records = history
                 .iter()
                 .map(|(lsn, val)| (*lsn, (*val).clone()))
@@ -860,17 +868,12 @@ impl KeyHistoryRetention {
             if *retain_lsn >= min_lsn {
                 // Only verify after the key appears in the full history for the first time.
 
-                if base_img.is_none() && history.is_empty() {
-                    anyhow::bail!(
-                        "verificatoin failed: key {} has no history at {}",
-                        key,
-                        retain_lsn
-                    );
-                };
                 // We don't modify history: in theory, we could replace the history with a single
                 // image as in `generate_key_retention` to make redos at later LSNs faster. But we
                 // want to verify everything as if they are read from the real layer map.
-                collect_and_verify(key, *retain_lsn, &base_img, &history, tline).await?;
+                collect_and_verify(key, *retain_lsn, &base_img, &history, tline, false)
+                    .await
+                    .context("below horizon retain_lsn")?;
             }
         }
 
@@ -878,13 +881,17 @@ impl KeyHistoryRetention {
             match val {
                 Value::Image(img) => {
                     // Above the GC horizon, we verify every time we see an image.
-                    collect_and_verify(key, *lsn, &base_img, &history, tline).await?;
+                    collect_and_verify(key, *lsn, &base_img, &history, tline, true)
+                        .await
+                        .context("above horizon full image")?;
                     base_img = Some((*lsn, img));
                     history.clear();
                 }
                 Value::WalRecord(rec) if val.will_init() => {
                     // Above the GC horizon, we verify every time we see an init record.
-                    collect_and_verify(key, *lsn, &base_img, &history, tline).await?;
+                    collect_and_verify(key, *lsn, &base_img, &history, tline, true)
+                        .await
+                        .context("above horizon init record")?;
                     base_img = None;
                     history.clear();
                     history.push((*lsn, rec));
@@ -895,7 +902,9 @@ impl KeyHistoryRetention {
             }
         }
         // Ensure the latest record is readable.
-        collect_and_verify(key, max_lsn, &base_img, &history, tline).await?;
+        collect_and_verify(key, max_lsn, &base_img, &history, tline, false)
+            .await
+            .context("latest record")?;
         Ok(())
     }
 }
