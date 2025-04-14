@@ -320,7 +320,7 @@ impl Buffer for IoBufferMut {
 }
 
 #[derive(Debug)]
-pub struct DeleteVirtualFileOnCleanup(pub VirtualFile);
+pub struct DeleteVirtualFileOnCleanup(Option<VirtualFile>);
 
 impl OwnedAsyncWriter for DeleteVirtualFileOnCleanup {
     fn write_all_at<Buf: IoBufAligned + Send>(
@@ -329,13 +329,22 @@ impl OwnedAsyncWriter for DeleteVirtualFileOnCleanup {
         offset: u64,
         ctx: &RequestContext,
     ) -> impl std::future::Future<Output = (FullSlice<Buf>, std::io::Result<()>)> + Send {
-        self.0.write_all_at(buf, offset, ctx)
+        VirtualFile::write_all_at(&self, buf, offset, ctx)
     }
 }
 
 impl BufferedWriterSink for DeleteVirtualFileOnCleanup {
     fn cleanup(self) {
-        let path = self.0.path();
+        drop(self);
+    }
+}
+
+impl Drop for DeleteVirtualFileOnCleanup {
+    fn drop(&mut self) {
+        let Some(file) = self.0.take() else {
+            return;
+        };
+        let path = file.path();
         if let Err(e) =
             std::fs::remove_file(path).maybe_fatal_err("failed to remove the virtual file")
         {
@@ -348,13 +357,24 @@ impl std::ops::Deref for DeleteVirtualFileOnCleanup {
     type Target = VirtualFile;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.0.as_ref().expect("only None after into_inner or drop")
+    }
+}
+
+impl std::ops::DerefMut for DeleteVirtualFileOnCleanup {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut().expect("only None after into_inner or drop")
     }
 }
 
 impl DeleteVirtualFileOnCleanup {
-    pub fn disarm_into_inner(self) -> VirtualFile {
+    pub fn new(virtual_file: VirtualFile) -> Self {
+        Self(Some(virtual_file))
+    }
+    pub fn disarm_into_inner(mut self) -> VirtualFile {
         self.0
+            .take()
+            .expect("only None after into_inner or drop, and we are into_inner, and we consume")
     }
 }
 

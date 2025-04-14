@@ -30,6 +30,7 @@ use crate::tenant::storage_layer::{
     AsLayerDesc as _, DeltaLayerWriter, ImageLayerWriter, IoConcurrency, Layer, ResidentLayer,
     ValuesReconstructState,
 };
+use crate::tenant::timeline::VersionedKeySpaceQuery;
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 
 #[derive(Debug, thiserror::Error)]
@@ -212,13 +213,9 @@ async fn generate_tombstone_image_layer(
         }
     }
 
+    let query = VersionedKeySpaceQuery::uniform(KeySpace::single(key_range.clone()), image_lsn);
     let data = ancestor
-        .get_vectored_impl(
-            KeySpace::single(key_range.clone()),
-            image_lsn,
-            &mut reconstruct_state,
-            ctx,
-        )
+        .get_vectored_impl(query, &mut reconstruct_state, ctx)
         .await
         .context("failed to retrieve aux keys")
         .map_err(|e| Error::launder(e, Error::Prepare))?;

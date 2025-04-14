@@ -331,10 +331,7 @@ where
         (srcbuf, res.map(|_| (offset, compression_info)))
     }
 
-    /// Access the underlying `VirtualFile`.
-    ///
-    /// This function flushes the internal buffer before giving access
-    /// to the underlying `VirtualFile`.
+    /// Finish this blob writer and return the underlying `VirtualFile`.
     ///
     /// The caller can use the `handle_tail` function to change the tail of the buffer before flushing it to disk.
     /// The buffer will not be flushed to disk if handle_tail returns `None`.
@@ -380,7 +377,7 @@ pub(crate) mod tests {
         let mut offsets = Vec::new();
         {
             let file =
-                DeleteVirtualFileOnCleanup(VirtualFile::create_v2(pathbuf.as_path(), ctx).await?);
+                DeleteVirtualFileOnCleanup::new(VirtualFile::create_v2(pathbuf.as_path(), ctx).await?);
             let mut wtr =
                 BlobWriter::new(file, 0, &gate, cancel.clone(), ctx, info_span!("test")).unwrap();
             for blob in blobs.iter() {

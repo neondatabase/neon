@@ -783,7 +783,7 @@ impl ImageLayerWriterInner {
             },
         );
         trace!("creating image layer {}", path);
-        let file = DeleteVirtualFileOnCleanup(
+        let file = DeleteVirtualFileOnCleanup::new(
             VirtualFile::open_with_options_v2(
                 &path,
                 virtual_file::OpenOptions::new()
@@ -971,7 +971,7 @@ impl ImageLayerWriterInner {
 
         trace!("created image layer {}", self.path);
 
-        let _file = file.disarm_into_inner();
+        file.disarm_into_inner();
 
         Ok((desc, self.path))
     }

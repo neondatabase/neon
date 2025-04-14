@@ -432,7 +432,7 @@ impl DeltaLayerWriterInner {
         let path =
             DeltaLayer::temp_path_for(conf, &tenant_shard_id, &timeline_id, key_start, &lsn_range);
 
-        let file = DeleteVirtualFileOnCleanup(VirtualFile::create_v2(&path, ctx).await?);
+        let file = DeleteVirtualFileOnCleanup::new(VirtualFile::create_v2(&path, ctx).await?);
 
         // Start at PAGE_SZ, make room for the header block
         let blob_writer = BlobWriter::new(
@@ -617,7 +617,7 @@ impl DeltaLayerWriterInner {
 
         trace!("created delta layer {}", self.path);
 
-        let _file = file.disarm_into_inner();
+        file.disarm_into_inner();
 
         Ok((desc, self.path))
     }

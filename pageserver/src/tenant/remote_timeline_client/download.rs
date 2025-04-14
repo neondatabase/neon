@@ -212,7 +212,7 @@ async fn download_object(
 
             use crate::virtual_file::{IoBufferMut, owned_buffers_io};
             async {
-                let destination_file = DeleteVirtualFileOnCleanup(
+                let destination_file = DeleteVirtualFileOnCleanup::new(
                     VirtualFile::create(dst_path, ctx)
                         .await
                         .with_context(|| {
