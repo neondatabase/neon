@@ -252,8 +252,7 @@ impl ImageLayer {
         tenant_shard_id: TenantShardId,
         fname: &ImageLayerName,
     ) -> Utf8PathBuf {
-        // Never reuse a filename in the lifetime of a pageserver process so that we need
-        // not worry about laggard Drop impl's async unlink hitting an already reused filename.
+        // For robustness, never reuse a filename in the lifetime of a pageserver process.
         static NEXT_TEMP_DISAMBIGUATOR: AtomicU64 = AtomicU64::new(1);
         let filename_disambiguator =
             NEXT_TEMP_DISAMBIGUATOR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
