@@ -276,8 +276,6 @@ impl Buffer for IoBufferMut {
     }
 }
 
-pub use super::super::temporary::DeleteVirtualFileOnCleanup;
-
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;

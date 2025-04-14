@@ -14,9 +14,9 @@ use super::{
 /// A wrapper around [`super::VirtualFile`] that deletes the file on drop.
 /// For use as a [`BufferedWriterSink`] in [`super::owned_buffers_io::write::BufferedWriter`].
 #[derive(Debug)]
-pub struct DeleteVirtualFileOnCleanup(Option<VirtualFile>);
+pub struct TempVirtualFile(Option<VirtualFile>);
 
-impl OwnedAsyncWriter for DeleteVirtualFileOnCleanup {
+impl OwnedAsyncWriter for TempVirtualFile {
     fn write_all_at<Buf: IoBufAligned + Send>(
         &self,
         buf: FullSlice<Buf>,
@@ -27,13 +27,13 @@ impl OwnedAsyncWriter for DeleteVirtualFileOnCleanup {
     }
 }
 
-impl BufferedWriterSink for DeleteVirtualFileOnCleanup {
+impl BufferedWriterSink for TempVirtualFile {
     fn cleanup(self) {
         drop(self);
     }
 }
 
-impl Drop for DeleteVirtualFileOnCleanup {
+impl Drop for TempVirtualFile {
     fn drop(&mut self) {
         let Some(file) = self.0.take() else {
             return;
@@ -47,7 +47,7 @@ impl Drop for DeleteVirtualFileOnCleanup {
     }
 }
 
-impl std::ops::Deref for DeleteVirtualFileOnCleanup {
+impl std::ops::Deref for TempVirtualFile {
     type Target = VirtualFile;
 
     fn deref(&self) -> &Self::Target {
@@ -55,13 +55,13 @@ impl std::ops::Deref for DeleteVirtualFileOnCleanup {
     }
 }
 
-impl std::ops::DerefMut for DeleteVirtualFileOnCleanup {
+impl std::ops::DerefMut for TempVirtualFile {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.0.as_mut().expect("only None after into_inner or drop")
     }
 }
 
-impl DeleteVirtualFileOnCleanup {
+impl TempVirtualFile {
     pub fn new(virtual_file: VirtualFile) -> Self {
         Self(Some(virtual_file))
     }

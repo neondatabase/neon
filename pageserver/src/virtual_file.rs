@@ -40,6 +40,7 @@ pub use io_engine::{
     FeatureTestResult as IoEngineFeatureTestResult, feature_test as io_engine_feature_test,
     io_engine_for_bench,
 };
+pub use temporary::TempVirtualFile;
 mod metadata;
 mod open_options;
 pub(crate) use api::IoMode;

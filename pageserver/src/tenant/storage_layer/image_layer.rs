@@ -71,8 +71,8 @@ use crate::tenant::vectored_blob_io::{
     BlobFlag, BufView, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadPlanner,
 };
+use crate::virtual_file::TempVirtualFile;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
-use crate::virtual_file::owned_buffers_io::write::DeleteVirtualFileOnCleanup;
 use crate::virtual_file::{self, IoBufferMut, MaybeFatalIo, VirtualFile};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 
@@ -775,7 +775,7 @@ impl ImageLayerWriterInner {
             },
         );
         trace!("creating image layer {}", path);
-        let mut file = DeleteVirtualFileOnCleanup::new(
+        let mut file = TempVirtualFile::new(
             VirtualFile::open_with_options(
                 &path,
                 virtual_file::OpenOptions::new()

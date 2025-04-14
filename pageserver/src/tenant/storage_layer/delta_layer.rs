@@ -73,8 +73,8 @@ use crate::tenant::vectored_blob_io::{
     BlobFlag, BufView, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadPlanner,
 };
+use crate::virtual_file::TempVirtualFile;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
-use crate::virtual_file::owned_buffers_io::write::DeleteVirtualFileOnCleanup;
 use crate::virtual_file::{self, IoBufferMut, MaybeFatalIo, VirtualFile};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 
@@ -421,7 +421,7 @@ impl DeltaLayerWriterInner {
         let path =
             DeltaLayer::temp_path_for(conf, &tenant_shard_id, &timeline_id, key_start, &lsn_range);
 
-        let mut file = DeleteVirtualFileOnCleanup::new(VirtualFile::create(&path, ctx).await?);
+        let mut file = TempVirtualFile::new(VirtualFile::create(&path, ctx).await?);
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
         let blob_writer = BlobWriter::new(file, PAGE_SZ as u64, gate, cancel, ctx);

@@ -28,8 +28,8 @@ use tracing::warn;
 use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::tenant::block_io::BlockCursor;
+use crate::virtual_file::TempVirtualFile;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
-use crate::virtual_file::owned_buffers_io::write::DeleteVirtualFileOnCleanup;
 
 #[derive(Copy, Clone, Debug)]
 pub struct CompressionInfo {
@@ -161,7 +161,7 @@ pub(super) const BYTE_ZSTD: u8 = BYTE_UNCOMPRESSED | 0x10;
 /// discarded. You need to call [`flush_buffer`](Self::flush_buffer)
 /// manually before dropping.
 pub struct BlobWriter<const BUFFERED: bool> {
-    inner: DeleteVirtualFileOnCleanup,
+    inner: TempVirtualFile,
     offset: u64,
     /// A buffer to save on write calls, only used if BUFFERED=true
     buf: Vec<u8>,
@@ -171,7 +171,7 @@ pub struct BlobWriter<const BUFFERED: bool> {
 
 impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     pub fn new(
-        inner: DeleteVirtualFileOnCleanup,
+        inner: TempVirtualFile,
         start_offset: u64,
         _gate: &utils::sync::gate::Gate,
         _cancel: CancellationToken,
@@ -396,10 +396,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     ///
     /// If there is an internal buffer (depends on `BUFFERED`), it will
     /// be flushed before this method returns.
-    pub async fn into_inner(
-        mut self,
-        ctx: &RequestContext,
-    ) -> Result<DeleteVirtualFileOnCleanup, Error> {
+    pub async fn into_inner(mut self, ctx: &RequestContext) -> Result<TempVirtualFile, Error> {
         if BUFFERED {
             self.flush_buffer(ctx).await?;
         }
@@ -436,8 +433,7 @@ pub(crate) mod tests {
         // Write part (in block to drop the file)
         let mut offsets = Vec::new();
         {
-            let file =
-                DeleteVirtualFileOnCleanup::new(VirtualFile::create(pathbuf.as_path(), ctx).await?);
+            let file = TempVirtualFile::new(VirtualFile::create(pathbuf.as_path(), ctx).await?);
             let mut wtr = BlobWriter::<BUFFERED>::new(file, 0, &gate, cancel.clone(), ctx);
             for blob in blobs.iter() {
                 let (_, res) = if compression {
