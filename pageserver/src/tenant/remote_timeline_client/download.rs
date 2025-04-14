@@ -15,7 +15,7 @@ use remote_storage::{
     DownloadError, DownloadKind, DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath,
 };
 use tokio::fs::{self, File, OpenOptions};
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::io::AsyncSeekExt;
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -41,7 +41,7 @@ use crate::tenant::Generation;
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::LayerName;
 use crate::virtual_file::TempVirtualFile;
-use crate::virtual_file::{MaybeFatalIo, VirtualFile, on_fatal_io_error};
+use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 
 ///
 /// If 'metadata' is given, we will validate that the downloaded file's size matches that
@@ -148,150 +148,74 @@ async fn download_object(
     storage: &GenericRemoteStorage,
     src_path: &RemotePath,
     dst_path: &Utf8PathBuf,
-    #[cfg_attr(target_os = "macos", allow(unused_variables))] gate: &utils::sync::gate::Gate,
+    gate: &utils::sync::gate::Gate,
     cancel: &CancellationToken,
-    #[cfg_attr(target_os = "macos", allow(unused_variables))] ctx: &RequestContext,
+    ctx: &RequestContext,
 ) -> Result<u64, DownloadError> {
-    let res = match crate::virtual_file::io_engine::get() {
-        crate::virtual_file::io_engine::IoEngine::NotSet => panic!("unset"),
-        crate::virtual_file::io_engine::IoEngine::StdFs => {
-            async {
-                let destination_file = tokio::fs::File::create(dst_path)
-                    .await
-                    .with_context(|| format!("create a destination file for layer '{dst_path}'"))
-                    .map_err(DownloadError::Other)?;
+    use crate::virtual_file::owned_buffers_io::write::FlushTaskError;
 
-                let download = storage
-                    .download(src_path, &DownloadOpts::default(), cancel)
-                    .await?;
-
-                pausable_failpoint!("before-downloading-layer-stream-pausable");
-
-                let mut buf_writer =
-                    tokio::io::BufWriter::with_capacity(super::BUFFER_SIZE, destination_file);
-
-                let mut reader = tokio_util::io::StreamReader::new(download.download_stream);
-
-                let bytes_amount = tokio::io::copy_buf(&mut reader, &mut buf_writer).await?;
-                buf_writer.flush().await?;
-
-                let mut destination_file = buf_writer.into_inner();
-
-                // Tokio doc here: https://docs.rs/tokio/1.17.0/tokio/fs/struct.File.html states that:
-                // A file will not be closed immediately when it goes out of scope if there are any IO operations
-                // that have not yet completed. To ensure that a file is closed immediately when it is dropped,
-                // you should call flush before dropping it.
-                //
-                // From the tokio code I see that it waits for pending operations to complete. There shouldt be any because
-                // we assume that `destination_file` file is fully written. I e there is no pending .write(...).await operations.
-                // But for additional safety lets check/wait for any pending operations.
-                destination_file
-                    .flush()
-                    .await
-                    .maybe_fatal_err("download_object sync_all")
-                    .with_context(|| format!("flush source file at {dst_path}"))
-                    .map_err(DownloadError::Other)?;
-
-                // not using sync_data because it can lose file size update
-                destination_file
-                    .sync_all()
-                    .await
-                    .maybe_fatal_err("download_object sync_all")
-                    .with_context(|| format!("failed to fsync source file at {dst_path}"))
-                    .map_err(DownloadError::Other)?;
-
-                Ok(bytes_amount)
-            }
+    use crate::virtual_file::{IoBufferMut, owned_buffers_io};
+    let destination_file = TempVirtualFile::new(
+        VirtualFile::create(dst_path, ctx)
             .await
+            .with_context(|| format!("create a destination file for layer '{dst_path}'"))
+            .map_err(DownloadError::Other)?,
+    );
+
+    let mut download = storage
+        .download(src_path, &DownloadOpts::default(), cancel)
+        .await?;
+
+    pausable_failpoint!("before-downloading-layer-stream-pausable");
+
+    let mut buffered = owned_buffers_io::write::BufferedWriter::<IoBufferMut, _>::new(
+        destination_file,
+        0,
+        || IoBufferMut::with_capacity(super::BUFFER_SIZE),
+        gate.enter().map_err(|_| DownloadError::Cancelled)?,
+        cancel.child_token(),
+        ctx,
+        tracing::info_span!(parent: None, "download_object_buffered_writer", %dst_path),
+    );
+
+    // TODO: use vectored write (writev) once supported by tokio-epoll-uring.
+    // There's chunks_vectored() on the stream.
+    let (bytes_amount, destination_file) = async {
+        while let Some(res) = futures::StreamExt::next(&mut download.download_stream).await {
+            let chunk = match res {
+                Ok(chunk) => chunk,
+                Err(e) => return Err(DownloadError::from(e)),
+            };
+            buffered
+                .write_buffered_borrowed(&chunk, ctx)
+                .await
+                .map_err(|e| match e {
+                    FlushTaskError::Cancelled => DownloadError::Cancelled,
+                })?;
         }
-        #[cfg(target_os = "linux")]
-        crate::virtual_file::io_engine::IoEngine::TokioEpollUring => {
-            use crate::virtual_file::owned_buffers_io::write::FlushTaskError;
-
-            use crate::virtual_file::{IoBufferMut, owned_buffers_io};
-            async {
-                let destination_file = TempVirtualFile::new(
-                    VirtualFile::create(dst_path, ctx)
-                        .await
-                        .with_context(|| {
-                            format!("create a destination file for layer '{dst_path}'")
-                        })
-                        .map_err(DownloadError::Other)?,
-                );
-
-                let mut download = storage
-                    .download(src_path, &DownloadOpts::default(), cancel)
-                    .await?;
-
-                pausable_failpoint!("before-downloading-layer-stream-pausable");
-
-                let mut buffered = owned_buffers_io::write::BufferedWriter::<IoBufferMut, _>::new(
-                    destination_file,
-                    0,
-                    || IoBufferMut::with_capacity(super::BUFFER_SIZE),
-                    gate.enter().map_err(|_| DownloadError::Cancelled)?,
-                    cancel.child_token(),
-                    ctx,
-                    tracing::info_span!(parent: None, "download_object_buffered_writer", %dst_path),
-                );
-
-                // TODO: use vectored write (writev) once supported by tokio-epoll-uring.
-                // There's chunks_vectored() on the stream.
-                let (bytes_amount, destination_file) = async {
-                    while let Some(res) =
-                        futures::StreamExt::next(&mut download.download_stream).await
-                    {
-                        let chunk = match res {
-                            Ok(chunk) => chunk,
-                            Err(e) => return Err(DownloadError::from(e)),
-                        };
-                        buffered
-                            .write_buffered_borrowed(&chunk, ctx)
-                            .await
-                            .map_err(|e| match e {
-                                FlushTaskError::Cancelled => DownloadError::Cancelled,
-                            })?;
-                    }
-                    buffered
-                        .shutdown(
-                            owned_buffers_io::write::BufferedWriterShutdownMode::PadThenTruncate,
-                            ctx,
-                        )
-                        .await
-                        .map_err(|e| match e {
-                            FlushTaskError::Cancelled => DownloadError::Cancelled,
-                        })
-                }
-                .await?;
-
-                // not using sync_data because it can lose file size update
-                destination_file
-                    .sync_all()
-                    .await
-                    .maybe_fatal_err("download_object sync_all")
-                    .with_context(|| format!("failed to fsync source file at {dst_path}"))
-                    .map_err(DownloadError::Other)?;
-
-                let _: VirtualFile = destination_file.disarm_into_inner();
-
-                Ok(bytes_amount)
-            }
+        buffered
+            .shutdown(
+                owned_buffers_io::write::BufferedWriterShutdownMode::PadThenTruncate,
+                ctx,
+            )
             .await
-        }
-    };
-
-    // in case the download failed, clean up
-    match res {
-        Ok(bytes_amount) => Ok(bytes_amount),
-        Err(e) => {
-            if let Err(e) = tokio::fs::remove_file(dst_path).await {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    on_fatal_io_error(&e, &format!("Removing temporary file {dst_path}"));
-                }
-            }
-            Err(e)
-        }
+            .map_err(|e| match e {
+                FlushTaskError::Cancelled => DownloadError::Cancelled,
+            })
     }
+    .await?;
+
+    // not using sync_data because it can lose file size update
+    destination_file
+        .sync_all()
+        .await
+        .maybe_fatal_err("download_object sync_all")
+        .with_context(|| format!("failed to fsync source file at {dst_path}"))
+        .map_err(DownloadError::Other)?;
+
+    let _: VirtualFile = destination_file.disarm_into_inner();
+
+    Ok(bytes_amount)
 }
 
 const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
