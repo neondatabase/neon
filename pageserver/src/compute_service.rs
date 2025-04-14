@@ -19,6 +19,7 @@
 
 use std::sync::Arc;
 
+use anyhow::Context;
 use futures::FutureExt;
 use pageserver_api::config::PageServicePipeliningConfig;
 use postgres_backend::AuthType;
@@ -260,6 +261,9 @@ pub async fn page_service_conn_main(
 
     // Dispatch
     if grpc {
+        socket
+            .set_nodelay(true)
+            .context("could not set TCP_NODELAY")?;
         grpc_connections_tx.send(Ok(socket)).await?;
         info!("connection sent to channel");
         Ok(())
