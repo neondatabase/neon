@@ -289,7 +289,17 @@ async fn main_impl(
 
         let cancel = cancel.clone();
         Box::pin(async move {
-            client_libpq(args, worker_id, start_work_barrier, cancel, rps_period, live_stats, ranges, weights).await
+            client_libpq(
+                args,
+                worker_id,
+                start_work_barrier,
+                cancel,
+                rps_period,
+                live_stats,
+                ranges,
+                weights,
+            )
+            .await
         })
     };
 
@@ -341,7 +351,6 @@ async fn main_impl(
     anyhow::Ok(())
 }
 
-
 async fn client_libpq(
     args: &Args,
     worker_id: WorkerId,
@@ -351,10 +360,8 @@ async fn client_libpq(
     live_stats: Arc<LiveStats>,
     ranges: Vec<KeyRange>,
     weights: rand::distributions::weighted::WeightedIndex<i128>,
-)
-{
-    let client =
-        pageserver_client::page_service::Client::new(args.page_service_connstring.clone())
+) {
+    let client = pageserver_client::page_service::Client::new(args.page_service_connstring.clone())
         .await
         .unwrap();
     let mut client = client
@@ -370,8 +377,7 @@ async fn client_libpq(
         // Detect if a request took longer than the RPS rate
         if let Some(period) = &rps_period {
             let periods_passed_until_now =
-                usize::try_from(client_start.elapsed().as_micros() / period.as_micros())
-                .unwrap();
+                usize::try_from(client_start.elapsed().as_micros() / period.as_micros()).unwrap();
 
             if periods_passed_until_now > ticks_processed {
                 live_stats.missed((periods_passed_until_now - ticks_processed) as u64);
