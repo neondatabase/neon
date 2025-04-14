@@ -4,7 +4,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info, info_span, warn};
 use utils::sync::duplex;
 
-use super::{Buffer, BufferedWriterSink, CheapCloneForRead};
+use super::{Buffer, CheapCloneForRead, OwnedAsyncWriter};
 use crate::context::RequestContext;
 use crate::virtual_file::MaybeFatalIo;
 use crate::virtual_file::owned_buffers_io::io_buf_aligned::IoBufAligned;
@@ -108,7 +108,7 @@ impl FlushControl {
 impl<Buf, W> FlushHandle<Buf, W>
 where
     Buf: IoBufAligned + Send + Sync + CheapCloneForRead,
-    W: BufferedWriterSink + Send + Sync + 'static + std::fmt::Debug,
+    W: OwnedAsyncWriter + Send + Sync + 'static + std::fmt::Debug,
 {
     /// Spawns a new background flush task and obtains a handle.
     ///
@@ -222,7 +222,7 @@ pub enum FlushTaskError {
 impl<Buf, W> FlushBackgroundTask<Buf, W>
 where
     Buf: IoBufAligned + Send + Sync,
-    W: BufferedWriterSink + Sync + 'static,
+    W: OwnedAsyncWriter + Sync + 'static,
 {
     /// Creates a new background flush task.
     fn new(
@@ -243,9 +243,6 @@ where
 
     /// Runs the background flush task.
     async fn run(mut self) -> Result<W, FlushTaskError> {
-        let writer = scopeguard::guard(self.writer, |writer| {
-            writer.cleanup();
-        });
         //  Exit condition: channel is closed and there is no remaining buffer to be flushed
         while let Some(request) = self.channel.recv().await {
             #[cfg(test)]
@@ -282,7 +279,7 @@ where
                     // If we retry indefinitely, we'll deplete those resources.
                     // Future: teach tokio-epoll-uring io_uring operation cancellation, but still,
                     // wait for cancelled ops to complete and discard their error.
-                    let (slice, res) = writer.write_all_at(slice, request.offset, &self.ctx).await;
+                    let (slice, res) = self.writer.write_all_at(slice, request.offset, &self.ctx).await;
                     slice_storage = Some(slice);
                     let res = res.maybe_fatal_err("owned_buffers_io flush");
                     let Err(err) = res else {
@@ -316,7 +313,7 @@ where
             }
         }
 
-        Ok(scopeguard::ScopeGuard::into_inner(writer))
+        Ok(self.writer)
     }
 }
 

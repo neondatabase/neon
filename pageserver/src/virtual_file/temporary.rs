@@ -5,14 +5,12 @@ use crate::context::RequestContext;
 use super::{
     MaybeFatalIo, VirtualFile,
     owned_buffers_io::{
-        io_buf_aligned::IoBufAligned,
-        io_buf_ext::FullSlice,
-        write::{BufferedWriterSink, OwnedAsyncWriter},
+        io_buf_aligned::IoBufAligned, io_buf_ext::FullSlice, write::OwnedAsyncWriter,
     },
 };
 
 /// A wrapper around [`super::VirtualFile`] that deletes the file on drop.
-/// For use as a [`BufferedWriterSink`] in [`super::owned_buffers_io::write::BufferedWriter`].
+/// For use as a [`OwnedAsyncWriter`] in [`super::owned_buffers_io::write::BufferedWriter`].
 #[derive(Debug)]
 pub struct TempVirtualFile(Option<VirtualFile>);
 
@@ -24,12 +22,6 @@ impl OwnedAsyncWriter for TempVirtualFile {
         ctx: &RequestContext,
     ) -> impl std::future::Future<Output = (FullSlice<Buf>, std::io::Result<()>)> + Send {
         VirtualFile::write_all_at(self, buf, offset, ctx)
-    }
-}
-
-impl BufferedWriterSink for TempVirtualFile {
-    fn cleanup(self) {
-        drop(self);
     }
 }
 

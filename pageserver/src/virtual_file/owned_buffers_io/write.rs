@@ -35,10 +35,6 @@ pub trait OwnedAsyncWriter {
     ) -> impl std::future::Future<Output = (FullSlice<Buf>, std::io::Result<()>)> + Send;
 }
 
-pub trait BufferedWriterSink: OwnedAsyncWriter {
-    fn cleanup(self);
-}
-
 /// A wrapper aorund an [`OwnedAsyncWriter`] that uses a [`Buffer`] to batch
 /// small writes into larger writes of size [`Buffer::cap`].
 // TODO(yuchen): For large write, implementing buffer bypass for aligned parts of the write could be beneficial to throughput,
@@ -68,7 +64,7 @@ impl<B, Buf, W> BufferedWriter<B, W>
 where
     B: Buffer<IoBuf = Buf> + Send + 'static,
     Buf: IoBufAligned + Send + Sync + CheapCloneForRead,
-    W: BufferedWriterSink + Send + Sync + 'static + std::fmt::Debug,
+    W: OwnedAsyncWriter + Send + Sync + 'static + std::fmt::Debug,
 {
     /// Creates a new buffered writer.
     ///
@@ -314,12 +310,6 @@ mod tests {
                 .unwrap()
                 .push((Vec::from(&buf[..]), offset));
             (buf, Ok(()))
-        }
-    }
-
-    impl BufferedWriterSink for RecorderWriter {
-        fn cleanup(self) {
-            // No-op.
         }
     }
 
