@@ -802,11 +802,6 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
-			neon_log(LOG, "Create %c relation %u/%u/%u.%u",
-					 reln->smgr_relpersistence,
-					 RelFileInfoFmt(InfoFromSMgrRel(reln)),
-					 forkNum);
-
 #ifdef DEBUG_COMPARE_LOCAL
 			mdcreate(reln, forkNum, forkNum == INIT_FORKNUM || isRedo);
 			if (forkNum == MAIN_FORKNUM)
