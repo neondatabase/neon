@@ -10998,7 +10998,6 @@ mod tests {
 
                 while used_keys.len() < Timeline::MAX_GET_VECTORED_KEYS as usize {
                     let selected_lsn = interesting_lsns.choose(&mut random).expect("not empty");
-                    interesting_lsns[random.gen_range(0..interesting_lsns.len())];
                     let mut selected_key = start_key.add(random.gen_range(0..KEY_DIMENSION_SIZE));
 
                     while used_keys.len() < Timeline::MAX_GET_VECTORED_KEYS as usize {
