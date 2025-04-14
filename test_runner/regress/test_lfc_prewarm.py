@@ -60,7 +60,7 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv):
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    n_records = 1000000
+    n_records = 10000
     n_threads = 4
 
     endpoint = env.endpoints.create_start(
@@ -76,7 +76,7 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv):
     cur = conn.cursor()
     cur.execute("create extension neon version '1.6'")
     cur.execute(
-        "create table accounts(id integer primary key, balance bigint default 0, payload text default repeat('?', 128))"
+        "create table accounts(id integer primary key, balance bigint default 0, payload text default repeat('?', 1000)) with (fillfactor=10)"
     )
     cur.execute(f"insert into accounts(id) values (generate_series(1,{n_records}))")
     cur.execute("select get_local_cache_state()")
@@ -118,7 +118,7 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv):
     prewarm_thread = threading.Thread(target=prewarm)
     prewarm_thread.start()
 
-    time.sleep(100)
+    time.sleep(20)
 
     running = False
     for t in workload_threads:
