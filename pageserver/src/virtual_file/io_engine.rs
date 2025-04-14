@@ -217,8 +217,13 @@ impl IoEngine {
     ) -> (FileGuard, std::io::Result<()>) {
         match self {
             IoEngine::NotSet => panic!("not initialized"),
-            // TODO: ftruncate op for tokio-epoll-uring
-            IoEngine::StdFs | IoEngine::TokioEpollUring => {
+            IoEngine::StdFs => {
+                let res = file_guard.with_std_file(|std_file| std_file.set_len(len));
+                (file_guard, res)
+            }
+            #[cfg(target_os = "linux")]
+            IoEngine::TokioEpollUring => {
+                // TODO: ftruncate op for tokio-epoll-uring
                 let res = file_guard.with_std_file(|std_file| std_file.set_len(len));
                 (file_guard, res)
             }
