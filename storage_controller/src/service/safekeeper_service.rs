@@ -15,7 +15,7 @@ use http_utils::error::ApiError;
 use pageserver_api::controller_api::{
     SafekeeperDescribeResponse, SkSchedulingPolicy, TimelineImportRequest,
 };
-use pageserver_api::models::{self, SafekeeperInfo, SafekeepersInfo, TimelineInfo};
+use pageserver_api::models::{SafekeeperInfo, SafekeepersInfo, TimelineInfo};
 use safekeeper_api::membership::{MemberSet, SafekeeperId};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
