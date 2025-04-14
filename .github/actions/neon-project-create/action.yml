@@ -150,7 +150,11 @@ runs:
               -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer ${ADMIN_API_KEY}" \
               -d "{\"scheduling\": \"Essential\"}"
           )
-          echo ${PROJECT_DATA} | jq .
+          NEW_PROJECT_SETTINGS=$(echo ${PROJECT_DATA} | jq -rc ".project.settings + ${PROJECT_SETTINGS}")
+          curl -X POST \
+                "https://${API_HOST}/regions/${REGION_ID}/api/v1/admin/projects/${project_id}/settings" \
+                -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer ${ADMIN_API_KEY}" \
+                --data "${NEW_PROJECT_SETTINGS}"
         fi
         
 
