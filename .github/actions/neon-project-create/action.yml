@@ -99,6 +99,7 @@ runs:
 
         # Mask password
         echo "::add-mask::$(echo $project | jq --raw-output '.roles[] | select(.name != "web_access") | .password')"
+        set -x
 
         dsn=$(echo $project | jq --raw-output '.connection_uris[0].connection_uri')
         echo "::add-mask::${dsn}"
