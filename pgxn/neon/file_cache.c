@@ -196,6 +196,8 @@ static int	lfc_blocks_per_chunk = MAX_BLOCKS_PER_CHUNK;
 static char *lfc_path;
 static uint64 lfc_generation;
 static FileCacheControl *lfc_ctl;
+static bool lfc_do_prewarm;
+static bool lfc_prewarm_canceled;
 static shmem_startup_hook_type prev_shmem_startup_hook;
 #if PG_VERSION_NUM>=150000
 static shmem_request_hook_type prev_shmem_request_hook;
@@ -681,7 +683,6 @@ lfc_prewarm(FileCacheState* fcs, uint32 worker_id, uint32 n_workers)
 	size_t max_prefetch_pages;
 	size_t prewarm_batch = Min(lfc_prewarm_batch, readahead_buffer_size);
 	bool save_lfc_store_prefetch_result;
-	size_t vacant_blocks;
 	PrewarmWorkerState* ws;
 	uint8* bitmap;
 	BufferTag tag;
@@ -734,11 +735,6 @@ lfc_prewarm(FileCacheState* fcs, uint32 worker_id, uint32 n_workers)
 		LWLockRelease(lfc_lock);
 		return;
 	}
-	vacant_blocks = (size_t)(lfc_ctl->limit - lfc_ctl->size) << lfc_chunk_size_log;
-	if (n_entries > (vacant_blocks >> fcs_chunk_size_log))
-	{
-		n_entries = vacant_blocks >> fcs_chunk_size_log;
-	}
 	max_prefetch_pages = n_entries << fcs_chunk_size_log;
 
 	if (ws->total_chunks != ws->curr_chunk)
@@ -758,12 +754,15 @@ lfc_prewarm(FileCacheState* fcs, uint32 worker_id, uint32 n_workers)
 	save_lfc_store_prefetch_result = lfc_store_prefetch_result;
 	lfc_store_prefetch_result = true;
 
+	lfc_do_prewarm = true; /* Flag for lfc_prefetch preventing replacement of existed entries if LFC ache is full */
+	lfc_prewarm_canceled = false; /* Flag set if prewarm is canceled because LFC limit is reached */
+
 	elog(LOG, "LFC: start loading %ld chunks", (long)n_entries);
 	PG_TRY();
 	{
 		while (true)
 		{
-			if (snd_idx < max_prefetch_pages)
+			if (snd_idx < max_prefetch_pages && !lfc_prewarm_canceled)
 			{
 				if ((snd_idx >> fcs_chunk_size_log) % n_workers != worker_id)
 				{
@@ -789,9 +788,9 @@ lfc_prewarm(FileCacheState* fcs, uint32 worker_id, uint32 n_workers)
 					snd_idx += 1;
 				}
 			}
-			if (n_sent >= n_received + prewarm_batch || snd_idx == max_prefetch_pages)
+			if (n_sent >= n_received + prewarm_batch || snd_idx == max_prefetch_pages || lfc_prewarm_canceled)
 			{
-				if (n_received == n_sent && snd_idx == max_prefetch_pages)
+				if (n_received == n_sent && (snd_idx == max_prefetch_pages || lfc_prewarm_canceled))
 				{
 					break;
 				}
@@ -831,6 +830,7 @@ lfc_prewarm(FileCacheState* fcs, uint32 worker_id, uint32 n_workers)
 	{
 		lfc_store_prefetch_result = save_lfc_store_prefetch_result;
 		ws->curr_chunk = n_entries;
+		lfc_do_prewarm = false;
 	}
 	PG_END_TRY();
 }
@@ -1274,8 +1274,11 @@ lfc_init_new_entry(FileCacheEntry* entry, uint32 hash)
 	 * If we can't (e.g. because all other slots are being accessed)
 	 * then we will remove this entry from the hash and continue
 	 * on to the next chunk, as we may not exceed the limit.
+	 *
+	 * While prewarming LFC we do not want to replcate existed entries,
+	 * so we just stop prewarm is LFC cache is full.
 	 */
-	else if (!dlist_is_empty(&lfc_ctl->lru))
+	else if (!dlist_is_empty(&lfc_ctl->lru) && !lfc_do_prewarm)
 	{
 		/* Cache overflow: evict least recently used chunk */
 		FileCacheEntry *victim = dlist_container(FileCacheEntry, list_node,
@@ -1299,7 +1302,7 @@ lfc_init_new_entry(FileCacheEntry* entry, uint32 hash)
 		/* Can't add this chunk - we don't have the space for it */
 		hash_search_with_hash_value(lfc_hash, &entry->key, hash,
 									HASH_REMOVE, NULL);
-
+		lfc_prewarm_canceled = true; /* cancel prewarm if LFC limit is reached */
 		return false;
 	}
 
@@ -1373,7 +1376,7 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 		LWLockRelease(lfc_lock);
 		return false;
 	}
-	
+
 	lwlsn = neon_get_lwlsn(rinfo, forknum, blkno);
 
 	if (lwlsn > lsn)
