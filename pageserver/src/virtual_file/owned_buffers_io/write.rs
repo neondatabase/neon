@@ -14,7 +14,6 @@ use super::io_buf_aligned::IoBufAlignedMut;
 use super::io_buf_ext::{FullSlice, IoBufExt};
 use crate::context::RequestContext;
 use crate::virtual_file::MaybeFatalIo;
-use crate::virtual_file::get_io_buffer_alignment;
 use crate::virtual_file::{IoBuffer, IoBufferMut, VirtualFile};
 
 pub(crate) trait CheapCloneForRead {
@@ -135,11 +134,13 @@ where
             padded_pending, "handle_tail returned a result"
         );
         if let Some(padded) = padded {
-            assert_eq!(
-                padded.pending() % get_io_buffer_alignment(),
-                0,
-                "the buffere returned by `handle_tail` must be aligned and have a pending size that will be accepted by the kernel"
-            );
+            // TODO: we can make this assertion, but it's restrictive if the underlying VirtualFile
+            // wasn't opened with O_DIRECT; => make alignment checks at VirtualFile layer.
+            // assert_eq!(
+            //     padded.pending() % get_io_buffer_alignment(),
+            //     0,
+            //     "the buffere returned by `handle_tail` must be aligned and have a pending size that will be accepted by the kernel"
+            // );
             self.mutable = Some(padded);
             self.flush(ctx).await?;
             assert!(self.mutable.is_some(), "flush maintains invariant as usual");
