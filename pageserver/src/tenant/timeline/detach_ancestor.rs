@@ -228,6 +228,8 @@ async fn generate_tombstone_image_layer(
             detached.tenant_shard_id,
             &key_range,
             image_lsn,
+            &detached.gate,
+            detached.cancel.clone(),
             ctx,
         )
         .await
@@ -776,6 +778,8 @@ async fn copy_lsn_prefix(
         target_timeline.tenant_shard_id,
         layer.layer_desc().key_range.start,
         layer.layer_desc().lsn_range.start..end_lsn,
+        &target_timeline.gate,
+        target_timeline.cancel.clone(),
         ctx,
     )
     .await
