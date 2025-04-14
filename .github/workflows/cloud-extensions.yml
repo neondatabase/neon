@@ -72,6 +72,7 @@ jobs:
           postgres_version: ${{ matrix.pg-version }}
           project_settings: ${{ steps.project-settings.outputs.settings }}
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+          admin_api_key: ${{ secrets.NEON_STAGING_ADMIN_API_KEY }}
 
       - name: Run the regression tests
         run: /run-tests.sh -r /ext-src
