@@ -10879,6 +10879,8 @@ mod tests {
     #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_read_path() -> anyhow::Result<()> {
+        use rand::seq::SliceRandom;
+
         let seed = if cfg!(feature = "fuzz-read-path") {
             let seed: u64 = thread_rng().r#gen();
             seed
@@ -10995,8 +10997,8 @@ mod tests {
                 let mut used_keys: HashSet<Key> = HashSet::default();
 
                 while used_keys.len() < Timeline::MAX_GET_VECTORED_KEYS as usize {
-                    let selected_lsn =
-                        interesting_lsns[random.gen_range(0..interesting_lsns.len())];
+                    let selected_lsn = interesting_lsns.choose(&mut random).expect("not empty");
+                    interesting_lsns[random.gen_range(0..interesting_lsns.len())];
                     let mut selected_key = start_key.add(random.gen_range(0..KEY_DIMENSION_SIZE));
 
                     while used_keys.len() < Timeline::MAX_GET_VECTORED_KEYS as usize {
@@ -11007,7 +11009,7 @@ mod tests {
                         }
 
                         keyspaces_at_lsn
-                            .entry(selected_lsn)
+                            .entry(*selected_lsn)
                             .or_default()
                             .add_key(selected_key);
                         used_keys.insert(selected_key);
