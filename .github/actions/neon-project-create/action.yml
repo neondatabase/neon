@@ -84,8 +84,7 @@ runs:
               \"provisioner\": \"k8s-neonvm\",
               \"autoscaling_limit_min_cu\": ${MIN_CU},
               \"autoscaling_limit_max_cu\": ${MAX_CU},
-              \"settings\": ${PROJECT_SETTINGS},
-              \"default_endpoint_settings\": ${DEFAULT_ENDPOINT_SETTINGS}
+              \"settings\": ${PROJECT_SETTINGS}
             }
           }")
         
@@ -140,6 +139,16 @@ runs:
             -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer ${ADMIN_API_KEY}" \
             -d "{\"scheduling\": \"Essential\"}"
         fi
+        # XXX
+        # This is a workaround for project's settings which don't work well in public API now
+        # /regions/aws-us-east-2/api/v1/admin/projects/super-sound-08287150
+        if { [[ -n "${PROJECT_SETTINGS}" ]] && [[ "${PROJECT_SETTINGS}" != "{}" ]] } || { [[ -n "${DEFAULT_ENDPOINT_SETTINGS}" ]] && [[ "${DEFAULT_ENDPOINT_SETTINGS}" != "{}" ]] }; then
+          PROJECT_DATA=$(curl -X GET \
+              "https://${API_HOST}/regions/${REGION_ID}/api/v1/admin/projects/${project_id}" \
+          )
+          echo ${PROJECT_DATA} | jq .
+        fi
+        
 
       env:
         API_HOST: ${{ inputs.api_host }}
