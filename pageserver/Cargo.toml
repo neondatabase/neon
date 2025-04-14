@@ -10,6 +10,8 @@ default = []
 # which adds some runtime cost to run tests on outage conditions
 testing = ["fail/failpoints", "pageserver_api/testing", "wal_decoder/testing", "pageserver_client/testing"]
 
+fuzz-read-path = ["testing"]
+
 [dependencies]
 anyhow.workspace = true
 arc-swap.workspace = true

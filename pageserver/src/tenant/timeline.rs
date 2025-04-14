@@ -4026,7 +4026,7 @@ impl VersionedKeySpaceQuery {
     /// Returns LSN for a specific key.
     ///
     /// Invariant: requested key must be part of [`Self::total_keyspace`]
-    fn map_key_to_lsn(&self, key: &Key) -> Lsn {
+    pub(super) fn map_key_to_lsn(&self, key: &Key) -> Lsn {
         match self {
             Self::Uniform { lsn, .. } => *lsn,
             Self::Scattered { keyspaces_at_lsn } => {
