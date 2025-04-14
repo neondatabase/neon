@@ -29,8 +29,10 @@ use crate::page_cache::PAGE_SZ;
 use crate::tenant::block_io::BlockCursor;
 use crate::virtual_file::IoBufferMut;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
-use crate::virtual_file::owned_buffers_io::write::BufferedWriterSink;
 use crate::virtual_file::owned_buffers_io::write::{BufferedWriter, FlushTaskError};
+use crate::virtual_file::owned_buffers_io::write::{
+    BufferedWriterShutdownMode, BufferedWriterSink,
+};
 
 #[derive(Copy, Clone, Debug)]
 pub struct CompressionInfo {
@@ -165,10 +167,6 @@ pub(super) const BYTE_UNCOMPRESSED: u8 = 0x80;
 pub(super) const BYTE_ZSTD: u8 = BYTE_UNCOMPRESSED | 0x10;
 
 /// A wrapper of `VirtualFile` that allows users to write blobs.
-///
-/// If a `BlobWriter` is dropped, the internal buffer will be
-/// discarded. You need to call [`Self::into_inner`]
-/// manually before dropping.
 pub struct BlobWriter<W> {
     /// We do tiny writes for the length headers; they need to be in an owned buffer;
     io_buf: Option<BytesMut>,
@@ -335,12 +333,12 @@ where
     ///
     /// The caller can use the `handle_tail` function to change the tail of the buffer before flushing it to disk.
     /// The buffer will not be flushed to disk if handle_tail returns `None`.
-    pub async fn into_inner(
+    pub async fn shutdown(
         self,
+        mode: BufferedWriterShutdownMode,
         ctx: &RequestContext,
-        handle_tail: impl FnMut(IoBufferMut) -> Option<IoBufferMut>,
     ) -> Result<W, FlushTaskError> {
-        let (_, file) = self.writer.shutdown(ctx, handle_tail).await?;
+        let (_, file) = self.writer.shutdown(mode, ctx).await?;
         Ok(file)
     }
 }
@@ -396,21 +394,10 @@ pub(crate) mod tests {
                 offsets.push(offs);
             }
             let file = wtr
-                .into_inner(ctx, |mut buf| {
-                    use crate::virtual_file::owned_buffers_io::write::Buffer;
-
-                    let len = buf.pending();
-                    let cap = buf.cap();
-
-                    // pad zeros to the next io alignment requirement.
-                    // TODO: this is actually padding to next PAGE_SZ multiple, but only if the buffer capacity is larger than that.
-                    // We can't let the fact that we do direct IO, or the buffer capacity, dictate the on-disk format we write here.
-                    // Need to find a better API that allows writing the format we intend to.
-                    let count = len.next_multiple_of(PAGE_SZ).min(cap) - len;
-                    buf.extend_with(0, count);
-
-                    Some(buf)
-                })
+                .shutdown(
+                    BufferedWriterShutdownMode::ZeroPadToNextMultiple(PAGE_SZ),
+                    ctx,
+                )
                 .await?;
             file.disarm_into_inner()
         };

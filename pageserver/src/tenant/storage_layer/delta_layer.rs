@@ -75,7 +75,7 @@ use crate::tenant::vectored_blob_io::{
 };
 use crate::virtual_file::TempVirtualFile;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
-use crate::virtual_file::owned_buffers_io::write::Buffer;
+use crate::virtual_file::owned_buffers_io::write::{Buffer, BufferedWriterShutdownMode};
 use crate::virtual_file::{self, IoBuffer, IoBufferMut, MaybeFatalIo, VirtualFile};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 
@@ -537,19 +537,10 @@ impl DeltaLayerWriterInner {
 
         let file = self
             .blob_writer
-            .into_inner(ctx, |mut buf| {
-                let len = buf.pending();
-                let cap = buf.cap();
-
-                // pad zeros to the next io alignment requirement.
-                // TODO: this is actually padding to next PAGE_SZ multiple, but only if the buffer capacity is larger than that.
-                // We can't let the fact that we do direct IO, or the buffer capacity, dictate the on-disk format we write here.
-                // Need to find a better API that allows writing the format we intend to.
-                let count = len.next_multiple_of(PAGE_SZ).min(cap) - len;
-                buf.extend_with(0, count);
-
-                Some(buf)
-            })
+            .shutdown(
+                BufferedWriterShutdownMode::ZeroPadToNextMultiple(PAGE_SZ),
+                ctx,
+            )
             .await?;
 
         // Write out the index

@@ -1,9 +1,9 @@
 mod flush;
 
 use bytes::BufMut;
-pub(crate) use flush::FlushControl;
 use flush::FlushHandle;
 pub(crate) use flush::FlushTaskError;
+use flush::ShutdownRequest;
 use tokio_epoll_uring::IoBuf;
 use tokio_util::sync::CancellationToken;
 use tracing::trace;
@@ -12,6 +12,7 @@ use super::io_buf_aligned::IoBufAligned;
 use super::io_buf_aligned::IoBufAlignedMut;
 use super::io_buf_ext::{FullSlice, IoBufExt};
 use crate::context::RequestContext;
+use crate::virtual_file::UsizeIsU64;
 use crate::virtual_file::{IoBuffer, IoBufferMut};
 
 pub(crate) trait CheapCloneForRead {
@@ -39,11 +40,44 @@ pub trait OwnedAsyncWriter {
 }
 
 pub trait BufferedWriterSink: OwnedAsyncWriter {
+    fn set_len(
+        &self,
+        len: u64,
+        ctx: &RequestContext,
+    ) -> impl Future<Output = std::io::Result<()>> + Send;
     fn cleanup(self);
 }
 
 /// A wrapper aorund an [`OwnedAsyncWriter`] that uses a [`Buffer`] to batch
 /// small writes into larger writes of size [`Buffer::cap`].
+///
+/// The buffer is flushed if and only if it is full ([`Buffer::pending`] == [`Buffer::cap`]).
+/// This guarantees that writes to the filesystem happen
+/// - at offsets that are multiples of [`Buffer::cap`]
+/// - in lengths that are multiples of [`Buffer::cap`]
+///
+/// Above property is useful for Direct IO, where whatever the
+/// effectively dominating disk-sector/filesystem-block/memory-page size
+/// determines the requirements on
+/// - the alignment of the pointer passed to the read/write operation
+/// - the value of `count` (i.e., the length of the read/write operation)
+///   which must be a multiple of the dominating sector/block/page size.
+///
+/// See [`BufferedWriter::shutdown`] / [`BufferedWriterShutdownMode`] for different
+/// ways of dealing with the special case that the buffer is not full by the time
+/// we are done writing.
+///
+/// TODO: decouple buffer capacity from alignment requirement.
+/// Right now we assume [`Buffer::cap`] is the alignment requirement,
+/// but actually [`Buffer::cap`] should only determine how often we flush
+/// while writing, while a separate alignment requirement argument should
+/// be passed to determine alignment requirement. This could be used by
+/// [`BufferedWriterShutdownMode::PadThenTruncate`] to avoid excessive
+/// padding of zeroes. For example, today, with a capacity of 64KiB, we
+/// would pad up to 64KiB-1 bytes of zeroes, then truncate off 64KiB-1.
+/// This is wasteful, e.g., if the alignment requirement is 4KiB, we only
+/// need to pad & truncate up to 4KiB-1 bytes of zeroes
+///
 // TODO(yuchen): For large write, implementing buffer bypass for aligned parts of the write could be beneficial to throughput,
 // since we would avoid copying majority of the data into the internal buffer.
 pub struct BufferedWriter<B: Buffer, W> {
@@ -65,6 +99,21 @@ pub struct BufferedWriter<B: Buffer, W> {
     flush_handle: FlushHandle<B::IoBuf, W>,
     /// The number of bytes submitted to the background task.
     bytes_submitted: u64,
+}
+
+/// How [`BufferedWriter::shutdown`] should deal with pending (=not-yet-flushed) data.
+///
+/// Cf the [`BufferedWriter`] comment's paragraph for context on why we need to think about this.
+pub enum BufferedWriterShutdownMode {
+    /// Drop pending data, don't write back to file.
+    DropTail,
+    /// Pad the pending data with zeroes (cf [`usize::next_multiple_of`]).
+    ZeroPadToNextMultiple(usize),
+    /// Fill the IO buffer with zeroes, flush to disk, the `ftruncate` the
+    /// file to the exact number of bytes written to [`Self`].
+    ///
+    /// TODO: see in [`BufferedWriter`] comment about decoupling buffer capacity from alignment requirement.
+    PadThenTruncate,
 }
 
 impl<B, Buf, W> BufferedWriter<B, W>
@@ -119,44 +168,79 @@ where
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub async fn shutdown(
         mut self,
+        mode: BufferedWriterShutdownMode,
         ctx: &RequestContext,
-        mut handle_tail: impl FnMut(B) -> Option<B>,
     ) -> Result<(u64, W), FlushTaskError> {
-        // TODO: replace the callback with an action so that the buffer never leaves our purview
-        let mutable = self.mutable.take().expect("must not use after an error");
+        let mut mutable = self.mutable.take().expect("must not use after an error");
         let unpadded_pending = mutable.pending();
-        let padded = handle_tail(mutable);
-        let padded_pending = padded.as_ref().map(|b| b.pending());
-        trace!(
-            unpadded_pending,
-            padded_pending, "handle_tail returned a result"
-        );
-        if let Some(padded) = padded {
-            // TODO: we can make this assertion, but it's restrictive if the underlying VirtualFile
-            // wasn't opened with O_DIRECT; => make alignment checks at VirtualFile layer.
-            // assert_eq!(
-            //     padded.pending() % get_io_buffer_alignment(),
-            //     0,
-            //     "the buffere returned by `handle_tail` must be aligned and have a pending size that will be accepted by the kernel"
-            // );
-            self.mutable = Some(padded);
-            self.flush(ctx).await?;
-            assert!(self.mutable.is_some(), "flush maintains invariant as usual");
-            let mutable = self
-                .mutable
-                .as_ref()
-                .expect("flush maintains invariant as usual");
-            assert_eq!(mutable.pending(), 0, "nothing left to flush");
-        }
+        let final_len: u64;
+        let shutdown_req;
+        match mode {
+            BufferedWriterShutdownMode::DropTail => {
+                trace!(pending=%mutable.pending(), "dropping pending data");
+                drop(mutable);
 
+                final_len = self.bytes_submitted;
+                shutdown_req = ShutdownRequest { set_len: None };
+            }
+            BufferedWriterShutdownMode::ZeroPadToNextMultiple(next_multiple) => {
+                let len = mutable.pending();
+                let cap = mutable.cap();
+                assert!(
+                    len <= cap,
+                    "buffer impl ensures this, but let's check because the extend_with below would panic if we go beyond"
+                );
+                let padded_len = len.next_multiple_of(next_multiple);
+                assert!(
+                    padded_len <= cap,
+                    "caller specified a multiple that is larger than the buffer capacity"
+                );
+                let count = padded_len - len;
+                dbg!(len, cap, padded_len, count);
+                mutable.extend_with(0, count);
+                trace!(count, "padding with zeros");
+                self.mutable = Some(mutable);
+
+                final_len = self.bytes_submitted + padded_len.into_u64();
+                shutdown_req = ShutdownRequest { set_len: None };
+            }
+            BufferedWriterShutdownMode::PadThenTruncate => {
+                let len = mutable.pending();
+                let cap = mutable.cap();
+                // TODO: see struct comment TODO on decoupling buffer capacity from alignment requirement.
+                let alignment_requirement = cap;
+                assert!(len <= cap, "buffer impl should ensure this");
+                let padding_end_offset = len.next_multiple_of(alignment_requirement);
+                assert!(
+                    padding_end_offset <= cap,
+                    "{padding_end_offset} <= {cap}  ({alignment_requirement})"
+                );
+                let count = padding_end_offset - len;
+                mutable.extend_with(0, count);
+                trace!(count, "padding with zeros");
+                self.mutable = Some(mutable);
+
+                final_len = self.bytes_submitted + len.into_u64();
+                shutdown_req = ShutdownRequest {
+                    set_len: Some(final_len),
+                };
+            }
+        };
+        let padded_pending = self.mutable.as_ref().map(|b| b.pending());
+        trace!(unpadded_pending, padded_pending, "padding done");
+        if let Some(mutable) = self.mutable {
+            self.mutable = Some(mutable);
+            self.flush(ctx).await?;
+        }
         let Self {
             mutable: _,
             maybe_flushed: _,
             mut flush_handle,
-            bytes_submitted: bytes_amount,
+            bytes_submitted: _,
         } = self;
-        let writer = flush_handle.shutdown().await?;
-        Ok((bytes_amount, writer))
+        let writer = flush_handle.shutdown(shutdown_req).await?;
+
+        Ok((final_len, writer))
     }
 
     #[cfg(test)]
@@ -167,24 +251,10 @@ where
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub async fn write_buffered_borrowed(
         &mut self,
-        chunk: &[u8],
-        ctx: &RequestContext,
-    ) -> Result<usize, FlushTaskError> {
-        let (len, control) = self.write_buffered_borrowed_controlled(chunk, ctx).await?;
-        if let Some(control) = control {
-            control.release().await;
-        }
-        Ok(len)
-    }
-
-    /// In addition to bytes submitted in this write, also returns a handle that can control the flush behavior.
-    pub(crate) async fn write_buffered_borrowed_controlled(
-        &mut self,
         mut chunk: &[u8],
         ctx: &RequestContext,
-    ) -> Result<(usize, Option<FlushControl>), FlushTaskError> {
+    ) -> Result<usize, FlushTaskError> {
         let chunk_len = chunk.len();
-        let mut control: Option<FlushControl> = None;
         while !chunk.is_empty() {
             let buf = self.mutable.as_mut().expect("must not use after an error");
             let need = buf.cap() - buf.pending();
@@ -194,13 +264,10 @@ where
             chunk = &chunk[n..];
             if buf.pending() >= buf.cap() {
                 assert_eq!(buf.pending(), buf.cap());
-                if let Some(control) = control.take() {
-                    control.release().await;
-                }
-                control = self.flush(ctx).await?;
+                self.flush(ctx).await?;
             }
         }
-        Ok((chunk_len, control))
+        Ok(chunk_len)
     }
 
     /// This function can only error if the flush task got cancelled.
@@ -216,15 +283,12 @@ where
     /// It is in fact quite hard to reason about what exactly happens in today's code.
     /// Best case we accumulate junk in the EphemeralFile, worst case is data corruption.
     #[must_use = "caller must explcitly check the flush control"]
-    async fn flush(
-        &mut self,
-        _ctx: &RequestContext,
-    ) -> Result<Option<FlushControl>, FlushTaskError> {
+    async fn flush(&mut self, _ctx: &RequestContext) -> Result<(), FlushTaskError> {
         let buf = self.mutable.take().expect("must not use after an error");
         let buf_len = buf.pending();
         if buf_len == 0 {
             self.mutable = Some(buf);
-            return Ok(None);
+            return Ok(());
         }
         // Prepare the buffer for read while flushing.
         let slice = buf.flush();
@@ -235,7 +299,7 @@ where
 
         // If we return/panic here or later, we'll leave mutable = None, breaking further
         // writers, but the read path should still work.
-        let (recycled, flush_control) = self.flush_handle.flush(slice, offset).await?;
+        let recycled = self.flush_handle.flush(slice, offset).await?;
 
         // The only other place that could hold a reference to the recycled buffer
         // is in `Self::maybe_flushed`, but we have already replace it with the new buffer.
@@ -244,7 +308,7 @@ where
         // We got back some recycled buffer, can open up for more writes again.
         self.mutable = Some(recycled);
 
-        Ok(Some(flush_control))
+        Ok(())
     }
 }
 
@@ -362,6 +426,10 @@ mod tests {
         fn cleanup(self) {
             // No-op.
         }
+
+        async fn set_len(&self, _len: u64, _ctx: &RequestContext) -> std::io::Result<()> {
+            unreachable!("tests don't need this")
+        }
     }
 
     fn test_ctx() -> RequestContext {
@@ -378,7 +446,7 @@ mod tests {
         let mut writer = BufferedWriter::<_, RecorderWriter>::new(
             recorder,
             0,
-            || IoBufferMut::with_capacity(2),
+            || IoBufferMut::with_capacity(4),
             gate.enter()?,
             cancel,
             ctx,
@@ -388,17 +456,17 @@ mod tests {
         writer.write_buffered_borrowed(b"abc", ctx).await?;
         writer.write_buffered_borrowed(b"", ctx).await?;
         writer.write_buffered_borrowed(b"d", ctx).await?;
-        writer.write_buffered_borrowed(b"e", ctx).await?;
-        writer.write_buffered_borrowed(b"fg", ctx).await?;
-        writer.write_buffered_borrowed(b"hi", ctx).await?;
-        writer.write_buffered_borrowed(b"j", ctx).await?;
-        writer.write_buffered_borrowed(b"klmno", ctx).await?;
+        writer.write_buffered_borrowed(b"efg", ctx).await?;
+        writer.write_buffered_borrowed(b"hijklm", ctx).await?;
 
-        let (_, recorder) = writer.shutdown(ctx, Some).await?;
+        let (_, recorder) = writer
+            // it's legitimate for pad-to-next multiple 2 to be < alignment requirement 4 inferred from buffer capacity
+            .shutdown(BufferedWriterShutdownMode::ZeroPadToNextMultiple(2), ctx)
+            .await?;
         assert_eq!(
             recorder.get_writes(),
             {
-                let expect: &[&[u8]] = &[b"ab", b"cd", b"ef", b"gh", b"ij", b"kl", b"mn", b"o"];
+                let expect: &[&[u8]] = &[b"abcd", b"efgh", b"ijkl", b"m\0"];
                 expect
             }
             .iter()

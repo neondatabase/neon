@@ -187,8 +187,8 @@ impl VirtualFile {
         self.inner.sync_data().await
     }
 
-    pub async fn set_len(&self, len: u64) -> Result<(), Error> {
-        self.inner.set_len(len).await
+    pub async fn set_len(&self, len: u64, ctx: &RequestContext) -> Result<(), Error> {
+        self.inner.set_len(len, ctx).await
     }
 
     pub async fn metadata(&self) -> Result<Metadata, Error> {
@@ -675,7 +675,7 @@ impl VirtualFileInner {
         })
     }
 
-    pub async fn set_len(&self, len: u64) -> Result<(), Error> {
+    pub async fn set_len(&self, len: u64, _ctx: &RequestContext) -> Result<(), Error> {
         with_file!(self, StorageIoOperation::SetLen, |file_guard| {
             let (_file_guard, res) = io_engine::get().set_len(file_guard, len).await;
             res.maybe_fatal_err("set_len")

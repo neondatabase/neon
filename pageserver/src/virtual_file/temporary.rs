@@ -31,6 +31,11 @@ impl BufferedWriterSink for TempVirtualFile {
     fn cleanup(self) {
         drop(self);
     }
+
+    async fn set_len(&self, len: u64, ctx: &RequestContext) -> std::io::Result<()> {
+        let file = self.0.as_ref().expect("only None after into_inner or drop");
+        file.set_len(len, ctx).await
+    }
 }
 
 impl Drop for TempVirtualFile {
