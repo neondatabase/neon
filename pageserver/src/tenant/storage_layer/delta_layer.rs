@@ -73,8 +73,9 @@ use crate::tenant::vectored_blob_io::{
     BlobFlag, BufView, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadPlanner,
 };
+use crate::virtual_file::TempVirtualFile;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
-use crate::virtual_file::owned_buffers_io::write::{Buffer, DeleteVirtualFileOnCleanup};
+use crate::virtual_file::owned_buffers_io::write::Buffer;
 use crate::virtual_file::{self, IoBuffer, IoBufferMut, MaybeFatalIo, VirtualFile};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 
@@ -400,7 +401,7 @@ struct DeltaLayerWriterInner {
 
     tree: DiskBtreeBuilder<BlockBuf, DELTA_KEY_SIZE>,
 
-    blob_writer: BlobWriter<DeleteVirtualFileOnCleanup>,
+    blob_writer: BlobWriter<TempVirtualFile>,
 
     // Number of key-lsns in the layer.
     num_keys: usize,
@@ -432,7 +433,7 @@ impl DeltaLayerWriterInner {
         let path =
             DeltaLayer::temp_path_for(conf, &tenant_shard_id, &timeline_id, key_start, &lsn_range);
 
-        let file = DeleteVirtualFileOnCleanup::new(VirtualFile::create_v2(&path, ctx).await?);
+        let file = TempVirtualFile::new(VirtualFile::create_v2(&path, ctx).await?);
 
         // Start at PAGE_SZ, make room for the header block
         let blob_writer = BlobWriter::new(

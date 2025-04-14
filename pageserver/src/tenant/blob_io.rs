@@ -356,8 +356,8 @@ pub(crate) mod tests {
     use crate::context::DownloadBehavior;
     use crate::task_mgr::TaskKind;
     use crate::tenant::block_io::BlockReaderRef;
+    use crate::virtual_file::TempVirtualFile;
     use crate::virtual_file::VirtualFile;
-    use crate::virtual_file::owned_buffers_io::write::DeleteVirtualFileOnCleanup;
 
     async fn round_trip_test(blobs: &[Vec<u8>]) -> anyhow::Result<()> {
         round_trip_test_compressed(blobs, false).await
@@ -376,8 +376,7 @@ pub(crate) mod tests {
         // Write part (in block to drop the file)
         let mut offsets = Vec::new();
         {
-            let file =
-                DeleteVirtualFileOnCleanup::new(VirtualFile::create_v2(pathbuf.as_path(), ctx).await?);
+            let file = TempVirtualFile::new(VirtualFile::create_v2(pathbuf.as_path(), ctx).await?);
             let mut wtr =
                 BlobWriter::new(file, 0, &gate, cancel.clone(), ctx, info_span!("test")).unwrap();
             for blob in blobs.iter() {

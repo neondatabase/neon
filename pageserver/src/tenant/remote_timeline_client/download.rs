@@ -42,7 +42,7 @@ use crate::tenant::Generation;
 use crate::tenant::disk_btree::PAGE_SZ;
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::LayerName;
-use crate::virtual_file::owned_buffers_io::write::DeleteVirtualFileOnCleanup;
+use crate::virtual_file::TempVirtualFile;
 use crate::virtual_file::{MaybeFatalIo, VirtualFile, on_fatal_io_error};
 
 ///
@@ -212,7 +212,7 @@ async fn download_object(
 
             use crate::virtual_file::{IoBufferMut, owned_buffers_io};
             async {
-                let destination_file = DeleteVirtualFileOnCleanup::new(
+                let destination_file = TempVirtualFile::new(
                     VirtualFile::create(dst_path, ctx)
                         .await
                         .with_context(|| {
