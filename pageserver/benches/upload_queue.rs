@@ -45,6 +45,7 @@ fn bench_upload_queue_next_ready(c: &mut Criterion) {
             shard: ShardIndex::new(ShardNumber(1), ShardCount(2)),
             generation: Generation::Valid(1),
             file_size: 0,
+            encrypted_with_key_version: None,
         };
 
         // Construct the (initial and uploaded) index with layer0.

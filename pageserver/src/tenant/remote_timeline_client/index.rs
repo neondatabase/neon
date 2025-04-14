@@ -253,7 +253,7 @@ pub struct LayerFileMetadata {
     pub shard: ShardIndex,
 
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub(crate) encrypted_with_key_version: Option<u32>,
+    pub encrypted_with_key_version: Option<u32>,
 }
 
 impl LayerFileMetadata {
