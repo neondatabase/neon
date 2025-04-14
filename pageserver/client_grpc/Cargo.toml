@@ -1,0 +1,13 @@
+[package]
+name = "pageserver_client_grpc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytes.workspace = true
+http.workspace = true
+thiserror.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+
+pageserver_data_api.workspace = true
