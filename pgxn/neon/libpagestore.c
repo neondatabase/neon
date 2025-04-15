@@ -1432,7 +1432,7 @@ pg_init_libpagestore(void)
 							"PageStream connection when we have pages which "
 							"were read ahead but not yet received.",
 							&readahead_getpage_pull_timeout_ms,
-							60, 0, 5 * 60 * 1000,
+							50, 0, 5 * 60 * 1000,
 							PGC_USERSET,
 							GUC_UNIT_MS,
 							NULL, NULL, NULL);
