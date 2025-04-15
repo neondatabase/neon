@@ -44,8 +44,8 @@ Key storage is optional at a per-tenant granularity: eventually this would be on
 
 - Pageserver layer files and safekeeper segment objects get new metadata fields to
   store wrapped key and version of the wrapping key
-- Pageserver timeline index gets a new `keys` field to store timeline keys
-- Safekeeper gets a new per-timeline manifest object in S3 to store timeline keys
+- Pageserver timeline index gets a new `keys` field to store wrapped timeline keys
+- Safekeeper gets a new per-timeline manifest object in S3 to store wrapped timeline keys
 - Pageserver timeline index gets per-layer metadata for wrapped key and wrapping version
 
 ### Summary of API changes
@@ -59,7 +59,7 @@ Key storage is optional at a per-tenant granularity: eventually this would be on
 
 Neon will interoperate with different KMS APIs on different platforms.  We will implement a generic interface,
 similar to how `remote_storage` wraps different object storage APIs:
-- `generate(accountId, keyType, alias) -> `
+- `generate(accountId, keyType, alias) -> (wrapped key, plaintext key)`
 - `unwrap(accountId, ciphertext key) -> plaintext key`
 
 Hereafter, when we talk about generating or unwrapping a key, this means a call into the KMS API.
@@ -131,15 +131,17 @@ The process of key rotation is:
 
 This is the same for safekeepers and pageservers.
 
-A storage controller API will be exposed for re-keying.
+A storage controller API will be exposed for key rotation.
 
-For the pageserver, it is very important that re-key
+For the pageserver, it is very important that key rotation
 operations respect generation safety rules, the same as timeline CRUD operations: i.e.
-the operation is only durable if the generation of the tenant location updated is still
-the latest generation when the operation is complete.
+the operation is only durable once the new index_part is uploaded _and_ the generation of the tenant location updated is still the latest generation when the operation is complete.
 
-For the safekeeper, it is very important that ... **TODO** rules on racing key updates
-with configuration changes?
+For the safekeeper, the controller can call into one safekeeper to write the new
+key to remote storage, and then when calling into the others they should just load
+the key from remote storage.  Any safekeeper that is unavailable at the time of a key
+rotation will need to be marked "dirty" by the controller and contacted as soon as it
+comes back online (key rotation should not be failed if a single safekeeper is down).
 
 ### Re-keying
 
