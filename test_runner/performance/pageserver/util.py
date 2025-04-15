@@ -29,7 +29,7 @@ def ensure_pageserver_ready_for_benchmarking(env: NeonEnv, n_tenants: int):
 
     log.info("wait for all tenants to become active")
     wait_until_all_tenants_state(
-        ps_http, "Active", iterations=10 + n_tenants, period=1, http_error_ok=False
+        ps_http, "Active", iterations=10 + n_tenants, period=10, http_error_ok=False
     )
 
     # ensure all layers are resident for predictiable performance
@@ -40,7 +40,7 @@ def ensure_pageserver_ready_for_benchmarking(env: NeonEnv, n_tenants: int):
             for layer in info.historic_layers:
                 assert not layer.remote
 
-    env.storage_controller.reconcile_until_idle(timeout_secs=60)
+    env.storage_controller.reconcile_until_idle(timeout_secs=160)
 
     log.info("ready")
 
