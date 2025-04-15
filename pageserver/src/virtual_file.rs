@@ -101,29 +101,22 @@ impl VirtualFile {
         open_options: &OpenOptions,
         ctx: &RequestContext,
     ) -> Result<Self, std::io::Error> {
-        let file = match get_io_mode() {
-            IoMode::Buffered => {
-                let inner = VirtualFileInner::open_with_options(path, open_options, ctx).await?;
-                VirtualFile {
-                    inner,
-                    _mode: IoMode::Buffered,
-                }
-            }
+        let mode = get_io_mode();
+        let set_o_direct = match (mode, open_options.is_write()) {
+            (IoMode::Buffered, _) => false,
             #[cfg(target_os = "linux")]
-            IoMode::Direct => {
-                let inner = VirtualFileInner::open_with_options(
-                    path,
-                    open_options.clone().custom_flags(nix::libc::O_DIRECT),
-                    ctx,
-                )
-                .await?;
-                VirtualFile {
-                    inner,
-                    _mode: IoMode::Direct,
-                }
-            }
+            (IoMode::Direct, false) => true,
+            #[cfg(target_os = "linux")]
+            (IoMode::Direct, true) => false,
+            #[cfg(target_os = "linux")]
+            (IoMode::DirectRw, _) => true,
         };
-        Ok(file)
+        let mut open_options = open_options.clone();
+        if set_o_direct {
+            open_options.custom_flags(nix::libc::O_DIRECT);
+        }
+        let inner = VirtualFileInner::open_with_options(path, open_options, ctx).await?;
+        Ok(VirtualFile { inner, _mode: mode })
     }
 
     pub fn path(&self) -> &Utf8Path {
@@ -525,7 +518,7 @@ impl VirtualFileInner {
         path: P,
         ctx: &RequestContext,
     ) -> Result<VirtualFileInner, std::io::Error> {
-        Self::open_with_options(path.as_ref(), OpenOptions::new().read(true), ctx).await
+        Self::open_with_options(path.as_ref(), OpenOptions::new().read(true).clone(), ctx).await
     }
 
     /// Open a file with given options.
@@ -535,7 +528,7 @@ impl VirtualFileInner {
     /// on the first time. Make sure that's sane!
     pub async fn open_with_options<P: AsRef<Utf8Path>>(
         path: P,
-        open_options: &OpenOptions,
+        open_options: OpenOptions,
         _ctx: &RequestContext,
     ) -> Result<VirtualFileInner, std::io::Error> {
         let path = path.as_ref();
@@ -1461,7 +1454,7 @@ mod tests {
         for _ in 0..VIRTUAL_FILES {
             let f = VirtualFileInner::open_with_options(
                 &test_file_path,
-                OpenOptions::new().read(true),
+                OpenOptions::new().read(true).clone(),
                 &ctx,
             )
             .await?;

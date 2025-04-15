@@ -1798,9 +1798,12 @@ pub mod virtual_file {
     pub enum IoMode {
         /// Uses buffered IO.
         Buffered,
-        /// Uses direct IO, error out if the operation fails.
+        /// Uses direct IO for reads only.
         #[cfg(target_os = "linux")]
         Direct,
+        /// Use direct IO for reads and writes.
+        #[cfg(target_os = "linux")]
+        DirectRw,
     }
 
     impl IoMode {
