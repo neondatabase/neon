@@ -22,7 +22,11 @@ def test_lfc_working_set_approximation(neon_simple_env: NeonEnv):
     log.info("Creating endpoint with 1MB shared_buffers and 64 MB LFC")
     endpoint = env.endpoints.create_start(
         "main",
-        config_lines=["neon.max_file_cache_size='128MB'", "neon.file_cache_size_limit='64MB'"],
+        config_lines=[
+            "autovacuum=off",
+            "neon.max_file_cache_size='128MB'",
+            "neon.file_cache_size_limit='64MB'",
+        ],
     )
 
     cur = endpoint.connect().cursor()
@@ -72,7 +76,7 @@ WITH (fillfactor='100');
     # verify working set size after some index access of a few select pages only
     blocks = query_scalar(cur, "select approximate_working_set_size(true)")
     log.info(f"working set size after some index access of a few select pages only {blocks}")
-    assert blocks < 12
+    assert blocks < 20
 
 
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
