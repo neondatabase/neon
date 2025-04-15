@@ -56,7 +56,8 @@ use crate::tenant::storage_layer::batch_split_writer::{
 use crate::tenant::storage_layer::filter_iterator::FilterIterator;
 use crate::tenant::storage_layer::merge_iterator::MergeIterator;
 use crate::tenant::storage_layer::{
-    AsLayerDesc, PersistentLayerDesc, PersistentLayerKey, ValueReconstructState,
+    AsLayerDesc, LayerVisibilityHint, PersistentLayerDesc, PersistentLayerKey,
+    ValueReconstructState,
 };
 use crate::tenant::tasks::log_compaction_error;
 use crate::tenant::timeline::{
@@ -1348,9 +1349,16 @@ impl Timeline {
                 continue;
             }
 
+            // We do not yet implement rewrite of delta layers.
             if layer_desc.is_delta() {
-                // We do not yet implement rewrite of delta layers
                 debug!(%layer, "Skipping rewrite of delta layer");
+                continue;
+            }
+
+            // We don't bother rewriting layers that aren't visible, since these won't be needed by
+            // reads and will likely be garbage collected soon.
+            if layer.visibility() != LayerVisibilityHint::Visible {
+                debug!(%layer, "Skipping rewrite of invisible layer");
                 continue;
             }
 
