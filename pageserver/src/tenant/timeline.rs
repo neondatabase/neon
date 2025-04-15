@@ -5702,6 +5702,12 @@ impl Timeline {
             return;
         }
 
+        if self.cancel.is_cancelled() {
+            // We already requested stopping the tenant, so we cannot wait for the logical size
+            // calculation to complete given the task might have been already cancelled.
+            return;
+        }
+
         if let Some(await_bg_cancel) = self
             .current_logical_size
             .cancel_wait_for_background_loop_concurrency_limit_semaphore
