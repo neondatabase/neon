@@ -886,8 +886,8 @@ impl TenantManager {
     /// Gets the attached tenant from the in-memory data, erroring if it's absent, in secondary mode, or currently
     /// undergoing a state change (i.e. slot is InProgress).
     ///
-    /// The return Tenant is not guaranteed to be active: check its status after obtaing it, or
-    /// use [`Tenant::wait_to_become_active`] before using it if you will do I/O on it.
+    /// The return TenantShard is not guaranteed to be active: check its status after obtaing it, or
+    /// use [`TenantShard::wait_to_become_active`] before using it if you will do I/O on it.
     pub(crate) fn get_attached_tenant_shard(
         &self,
         tenant_shard_id: TenantShardId,

@@ -175,9 +175,9 @@ impl MetricsKey {
         .absolute_values()
     }
 
-    /// [`Tenant::remote_size`]
+    /// [`TenantShard::remote_size`]
     ///
-    /// [`Tenant::remote_size`]: crate::tenant::Tenant::remote_size
+    /// [`TenantShard::remote_size`]: crate::tenant::TenantShard::remote_size
     const fn remote_storage_size(tenant_id: TenantId) -> AbsoluteValueFactory {
         MetricsKey {
             tenant_id,
@@ -199,9 +199,9 @@ impl MetricsKey {
         .absolute_values()
     }
 
-    /// [`Tenant::cached_synthetic_size`] as refreshed by [`calculate_synthetic_size_worker`].
+    /// [`TenantShard::cached_synthetic_size`] as refreshed by [`calculate_synthetic_size_worker`].
     ///
-    /// [`Tenant::cached_synthetic_size`]: crate::tenant::Tenant::cached_synthetic_size
+    /// [`TenantShard::cached_synthetic_size`]: crate::tenant::TenantShard::cached_synthetic_size
     /// [`calculate_synthetic_size_worker`]: super::calculate_synthetic_size_worker
     const fn synthetic_size(tenant_id: TenantId) -> AbsoluteValueFactory {
         MetricsKey {
