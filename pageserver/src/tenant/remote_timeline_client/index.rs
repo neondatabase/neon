@@ -118,8 +118,8 @@ pub struct IndexPart {
     pub(crate) marked_invisible_at: Option<NaiveDateTime>,
 
     /// The encryption key used to encrypt the timeline layer files.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub(crate) keys: Option<Vec<EncryptionKey>>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub(crate) keys: Vec<EncryptionKey>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
@@ -192,7 +192,7 @@ impl IndexPart {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
-            keys: None,
+            keys: Vec::new(),
         }
     }
 
@@ -509,7 +509,7 @@ mod tests {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
-            keys: None,
+            keys: Vec::new(),
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -561,7 +561,7 @@ mod tests {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
-            keys: None,
+            keys: Vec::new(),
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -614,7 +614,7 @@ mod tests {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
-            keys: None,
+            keys: Vec::new(),
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -668,7 +668,7 @@ mod tests {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
-            keys: None,
+            keys: Vec::new(),
         };
 
         let empty_layers_parsed = IndexPart::from_json_bytes(empty_layers_json.as_bytes()).unwrap();
@@ -719,7 +719,7 @@ mod tests {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
-            keys: None,
+            keys: Vec::new(),
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -773,7 +773,7 @@ mod tests {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
-            keys: None,
+            keys: Vec::new(),
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -832,7 +832,7 @@ mod tests {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
-            keys: None,
+            keys: Vec::new(),
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -896,7 +896,7 @@ mod tests {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
-            keys: None,
+            keys: Vec::new(),
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -961,7 +961,7 @@ mod tests {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
-            keys: None,
+            keys: Vec::new(),
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -1031,7 +1031,7 @@ mod tests {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
-            keys: None,
+            keys: Vec::new(),
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -1114,7 +1114,7 @@ mod tests {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
-            keys: None,
+            keys: Vec::new(),
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -1198,7 +1198,7 @@ mod tests {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
-            keys: None,
+            keys: Vec::new(),
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -1288,7 +1288,7 @@ mod tests {
                 last_completed_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
             }),
             marked_invisible_at: None,
-            keys: None,
+            keys: Vec::new(),
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -1379,7 +1379,7 @@ mod tests {
                 last_completed_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
             }),
             marked_invisible_at: Some(parse_naive_datetime("2023-07-31T09:00:00.123000000")),
-            keys: None,
+            keys: Vec::new(),
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -1391,8 +1391,8 @@ mod tests {
         let example = r#"{
             "version": 15,
             "layer_metadata":{
-                "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9": { "file_size": 25600000, "encryption_key": 1 },
-                "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51": { "file_size": 9007199254741001, "encryption_key": 2 }
+                "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9": { "file_size": 25600000, "encryption_key": { "version": 1, "generation": 5 } },
+                "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51": { "file_size": 9007199254741001, "encryption_key": { "version": 2, "generation": 6 } }
             },
             "disk_consistent_lsn":"0/16960E8",
             "metadata": {
@@ -1494,7 +1494,7 @@ mod tests {
                 last_completed_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
             }),
             marked_invisible_at: Some(parse_naive_datetime("2023-07-31T09:00:00.123000000")),
-            keys: Some(vec![
+            keys: vec![
                 EncryptionKey {
                     key: "test_key".as_bytes().to_vec(),
                     id: EncryptionKeyId {
@@ -1511,7 +1511,7 @@ mod tests {
                     },
                     created_at: parse_naive_datetime("2024-07-19T10:00:00.123000000"),
                 }
-            ]),
+            ],
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
