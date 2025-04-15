@@ -31,7 +31,6 @@ use super::{
     remote_initdb_preserved_archive_path, remote_tenant_manifest_path,
     remote_tenant_manifest_prefix, remote_tenant_path,
 };
-use crate::TEMP_FILE_SUFFIX;
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::span::{
@@ -42,6 +41,7 @@ use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_
 use crate::tenant::storage_layer::LayerName;
 use crate::virtual_file::TempVirtualFile;
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
+use crate::{TEMP_FILE_SUFFIX, virtual_file};
 
 ///
 /// If 'metadata' is given, we will validate that the downloaded file's size matches that
@@ -156,10 +156,18 @@ async fn download_object(
 
     use crate::virtual_file::{IoBufferMut, owned_buffers_io};
     let destination_file = TempVirtualFile::new(
-        VirtualFile::create(dst_path, ctx)
-            .await
-            .with_context(|| format!("create a destination file for layer '{dst_path}'"))
-            .map_err(DownloadError::Other)?,
+        VirtualFile::open_with_options_v2(
+            dst_path,
+            virtual_file::OpenOptions::new()
+                // this function is used inside a retry loop that reuses the dst_path => can't use create_new
+                .create(true)
+                .truncate(true)
+                .write(true),
+            ctx,
+        )
+        .await
+        .with_context(|| format!("create a destination file for layer '{dst_path}'"))
+        .map_err(DownloadError::Other)?,
     );
 
     let mut download = storage
@@ -170,6 +178,7 @@ async fn download_object(
 
     let mut buffered = owned_buffers_io::write::BufferedWriter::<IoBufferMut, _>::new(
         destination_file,
+        0,
         || IoBufferMut::with_capacity(super::BUFFER_SIZE),
         gate.enter().map_err(|_| DownloadError::Cancelled)?,
         cancel.child_token(),
@@ -192,10 +201,15 @@ async fn download_object(
                     FlushTaskError::Cancelled => DownloadError::Cancelled,
                 })?;
         }
-        let inner = buffered.shutdown(ctx).await.map_err(|e| match e {
-            FlushTaskError::Cancelled => DownloadError::Cancelled,
-        })?;
-        Ok(inner)
+        buffered
+            .shutdown(
+                owned_buffers_io::write::BufferedWriterShutdownMode::PadThenTruncate,
+                ctx,
+            )
+            .await
+            .map_err(|e| match e {
+                FlushTaskError::Cancelled => DownloadError::Cancelled,
+            })
     }
     .await?;
 

@@ -82,9 +82,9 @@ impl EphemeralFile {
             VirtualFile::open_with_options_v2(
                 &filename,
                 virtual_file::OpenOptions::new()
+                    .create_new(true)
                     .read(true)
-                    .write(true)
-                    .create(true),
+                    .write(true),
                 ctx,
             )
             .await?,
@@ -101,6 +101,7 @@ impl EphemeralFile {
                 file: file.clone(),
                 buffered_writer: BufferedWriter::new(
                     file,
+                    0,
                     || IoBufferMut::with_capacity(TAIL_SZ),
                     gate.enter()?,
                     cancel.child_token(),
@@ -150,6 +151,14 @@ impl OwnedAsyncWriter for TempVirtualFileCoOwnedByEphemeralFileAndBufferedWriter
         ),
     > + Send {
         self.inner.write_all_at(buf, offset, ctx)
+    }
+
+    fn set_len(
+        &self,
+        len: u64,
+        ctx: &RequestContext,
+    ) -> impl Future<Output = std::io::Result<()>> + Send {
+        self.inner.set_len(len, ctx)
     }
 }
 
