@@ -463,7 +463,7 @@ def test_fast_import_with_pageserver_ingest(
     def cplane_notified():
         assert import_completion_signaled.is_set()
 
-    wait_until(cplane_notified)
+    wait_until(cplane_notified, timeout=60)
 
     import_duration = time.monotonic() - start
     log.info(f"import complete; duration={import_duration:.2f}s")
