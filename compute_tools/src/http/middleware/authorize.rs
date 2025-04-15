@@ -54,8 +54,8 @@ impl AsyncAuthorizeRequest<Body> for Authorize {
         Box::pin(async move {
             let request_id = request.extract_parts::<RequestId>().await.unwrap();
 
-            // TODO: Remove this stanza after teaching neon_local and the
-            // regression tests to use a JWT + JWKS.
+            // TODO(tristan957): Remove this stanza after teaching neon_local
+            // and the regression tests to use a JWT + JWKS.
             //
             // https://github.com/neondatabase/neon/issues/11316
             if cfg!(feature = "testing") {
@@ -112,6 +112,8 @@ impl Authorize {
         token: &str,
         validation: &Validation,
     ) -> Result<TokenData<ComputeClaims>> {
+        debug_assert!(!jwks.keys.is_empty());
+
         debug!("verifying token {}", token);
 
         for jwk in jwks.keys.iter() {
