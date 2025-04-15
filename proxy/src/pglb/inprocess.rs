@@ -1,6 +1,10 @@
+//! Contains types for in-process QUIC connections with `quinn`.
+
+#![allow(dead_code, reason = "work in progress")]
+
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::{fmt, io};
 
@@ -9,28 +13,42 @@ use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{AsyncUdpSocket, UdpPoller, udp};
 use ringbuf::traits::{Consumer, Producer, Split};
 use ringbuf::{CachingCons, CachingProd, HeapRb};
-use rustls::pki_types;
-use try_lock::TryLock;
 
-// TODO: remove encryption for in-process connections.
+/// Special ALPN for in-process connections to avoid conflicts with real PGLB.
+const ALPN_PGLB_INPROCESS: &[u8] = b"pglb-inprocess";
+const MTU: u16 = 4096;
+const PGLB_PORT: u16 = 0x879d;
+const RECEIVE_BUFFER_DATAGRAM_COUNT: usize = 16;
+// quinn will pre-allocate objects for every allowed stream. Keep this reasonable.
+const MAX_CONCURRENT_BIDI_STREAMS: u32 = 200;
+// disallow unidirectional streams.
+const MAX_CONCURRENT_UNI_STREAMS: u32 = 0;
+
+// TODO: remove encryption for in-process connections. Or try to use AES128
+// cipher suite.
 pub fn create_server_endpoint(
     server_socket: InProcessUdpSocket,
-    cert: pki_types::CertificateDer<'static>,
-    key: pki_types::PrivateKeyDer<'static>,
+    mut server_crypto: rustls::ServerConfig,
 ) -> anyhow::Result<quinn::Endpoint> {
-    let mut server_crypto = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(vec![cert], key)?;
-    server_crypto.alpn_protocols = vec![b"pglb".into()];
-    server_crypto.key_log = Arc::new(rustls::KeyLogFile::new());
+    let mut endpoint_config = quinn::EndpointConfig::default();
+    endpoint_config
+        .max_udp_payload_size(MTU)
+        .expect("valid const MTU");
+
+    server_crypto.alpn_protocols = vec![ALPN_PGLB_INPROCESS.into()];
 
     let mut server_config =
         quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
+
     let transport_config = Arc::get_mut(&mut server_config.transport).expect("no other clone");
-    transport_config.max_concurrent_uni_streams(0_u8.into());
+    transport_config.max_concurrent_bidi_streams(MAX_CONCURRENT_BIDI_STREAMS.into());
+    transport_config.max_concurrent_uni_streams(MAX_CONCURRENT_UNI_STREAMS.into());
+    transport_config.mtu_discovery_config(None);
+    transport_config.initial_mtu(MTU);
+    transport_config.min_mtu(MTU);
 
     let server = quinn::Endpoint::new_with_abstract_socket(
-        quinn::EndpointConfig::default(),
+        endpoint_config,
         Some(server_config),
         Arc::new(server_socket),
         Arc::new(quinn::TokioRuntime),
@@ -41,26 +59,30 @@ pub fn create_server_endpoint(
 
 pub fn create_client_endpoint(
     client_socket: InProcessUdpSocket,
-    ca: pki_types::CertificateDer<'static>,
+    mut client_crypto: rustls::ClientConfig,
 ) -> anyhow::Result<quinn::Endpoint> {
+    let mut endpoint_config = quinn::EndpointConfig::default();
+    endpoint_config
+        .max_udp_payload_size(MTU)
+        .expect("valid const MTU");
+
     let mut client = quinn::Endpoint::new_with_abstract_socket(
-        quinn::EndpointConfig::default(),
+        endpoint_config,
         None,
         Arc::new(client_socket),
         Arc::new(quinn::TokioRuntime),
     )?;
 
-    let mut root_certs = rustls::RootCertStore::empty();
-    root_certs.add(ca)?;
+    client_crypto.alpn_protocols = vec![ALPN_PGLB_INPROCESS.into()];
 
-    let mut client_crypto = rustls::ClientConfig::builder()
-        .with_root_certificates(root_certs)
-        .with_no_client_auth();
-    client_crypto.alpn_protocols = vec![b"pglb".into()];
-    client_crypto.key_log = Arc::new(rustls::KeyLogFile::new());
+    let mut transport_config = quinn::TransportConfig::default();
+    transport_config.mtu_discovery_config(None);
+    transport_config.initial_mtu(MTU);
+    transport_config.min_mtu(MTU);
 
-    let client_config =
+    let mut client_config =
         quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto)?));
+    client_config.transport_config(Arc::new(transport_config));
     client.set_default_client_config(client_config);
 
     Ok(client)
@@ -69,12 +91,32 @@ pub fn create_client_endpoint(
 struct Datagram<const MSS: usize> {
     len: usize,
     buf: [u8; MSS],
+    ecn: Option<udp::EcnCodepoint>,
+}
+
+impl<const MSS: usize> Datagram<MSS> {
+    fn new(data: &[u8], ecn: Option<udp::EcnCodepoint>) -> io::Result<Self> {
+        let mut buf = [0u8; MSS];
+        buf.get_mut(..data.len())
+            .ok_or(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "too much data for datagram",
+            ))?
+            .copy_from_slice(data);
+
+        Ok(Self {
+            len: data.len(),
+            buf,
+            ecn,
+        })
+    }
 }
 
 struct DatagramQueue<const MSS: usize> {
-    sender: TryLock<CachingProd<Arc<HeapRb<Datagram<MSS>>>>>,
-    receiver: TryLock<CachingCons<Arc<HeapRb<Datagram<MSS>>>>>,
-    receiver_waker: Arc<ReceiverWaker>,
+    sender: Mutex<CachingProd<Arc<HeapRb<Datagram<MSS>>>>>,
+    // TODO: does not need to be a Mutex, could be a TryLock.
+    receiver: Mutex<CachingCons<Arc<HeapRb<Datagram<MSS>>>>>,
+    sibling_waker: Arc<ReceiveWaker>,
 }
 
 impl<const MSS: usize> DatagramQueue<MSS> {
@@ -83,57 +125,46 @@ impl<const MSS: usize> DatagramQueue<MSS> {
         receiver: CachingCons<Arc<HeapRb<Datagram<MSS>>>>,
     ) -> Self {
         Self {
-            sender: TryLock::new(sender),
-            receiver: TryLock::new(receiver),
-            receiver_waker: Arc::new(ReceiverWaker::new()),
+            sender: Mutex::new(sender),
+            receiver: Mutex::new(receiver),
+            sibling_waker: Arc::new(ReceiveWaker::new()),
         }
     }
 
-    #[tracing::instrument(level = "debug", skip_all, err, fields(packet = packet.len()))]
-    fn send(&self, packet: &[u8]) -> io::Result<()> {
+    fn send(&self, packet: &[u8], ecn: Option<udp::EcnCodepoint>) -> io::Result<()> {
         if packet.len() > MSS {
+            // TODO: can only happen when there's confusion about MTU size. Maybe panic?
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "send: packet too large",
             ));
         }
 
-        let mut sender = self.sender.try_lock().expect("no other thread");
-
-        let s = sender.vacant_slices_mut().0;
-        if s.is_empty() {
+        let mut sender = self.sender.lock().expect("poisoned");
+        if sender.try_push(Datagram::new(packet, ecn)?).is_err() {
             // Drop the packet.
             return Ok(());
         }
 
-        // SAFETY: the ring buffer contains byte arrays that we initialize here
-        // and the advance write index can by incremented by 1 because we checked
-        // that there is at least one vacant slot in the ring buffer.
-        unsafe {
-            let dgram = s[0].assume_init_mut();
-            dgram.len = packet.len();
-            dgram.buf[..packet.len()].copy_from_slice(packet);
-            sender.advance_write_index(1);
-        }
-
-        self.receiver_waker.signal();
+        self.sibling_waker.wake();
 
         Ok(())
     }
 
-    #[tracing::instrument(level = "debug", skip_all, ret, err, fields(buf = buf.len()))]
-    fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut receiver = self.receiver.try_lock().expect("no other thread");
+    fn recv(&self, buf: &mut [u8], ecn: &mut Option<udp::EcnCodepoint>) -> io::Result<usize> {
+        let mut receiver = self.receiver.lock().expect("poisoned");
 
         if let Some(dgram) = receiver.try_peek() {
             let len = dgram.len;
             if len > buf.len() {
+                // TODO: can only happen when there's confusion about MTU size. Maybe panic?
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "recv: buffer too small",
                 ));
             }
             buf[..len].copy_from_slice(&dgram.buf[..len]);
+            *ecn = dgram.ecn;
             receiver.skip(1);
             Ok(len)
         } else {
@@ -145,31 +176,36 @@ impl<const MSS: usize> DatagramQueue<MSS> {
     }
 }
 
-struct ReceiverWaker {
+struct ReceiveWaker {
     waker: AtomicWaker,
 }
 
-impl ReceiverWaker {
-    fn new() -> Self {
-        ReceiverWaker {
+impl ReceiveWaker {
+    const fn new() -> Self {
+        ReceiveWaker {
             waker: AtomicWaker::new(),
         }
     }
 
-    #[tracing::instrument(level = "debug", skip_all)]
+    #[inline]
     fn register(&self, cx: &mut Context<'_>) {
+        if let Some(waker) = self.waker.take() {
+            assert!(waker.will_wake(cx.waker()), "waker of unexpected task");
+        }
         self.waker.register(cx.waker());
     }
 
-    #[tracing::instrument(level = "debug", skip_all)]
-    fn signal(&self) {
+    #[inline]
+    fn wake(&self) {
         self.waker.wake();
     }
 }
 
+/// An implementation of [`quinn::AsyncUdpSocket`] for in-process connections.
 pub struct InProcessUdpSocket {
-    queue: DatagramQueue<65536>,
-    sibling_receiver_waker: Arc<ReceiverWaker>,
+    // MTU == MSS
+    queue: DatagramQueue<{ MTU as usize }>,
+    recv_waker: Arc<ReceiveWaker>,
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
 }
@@ -177,35 +213,35 @@ pub struct InProcessUdpSocket {
 impl fmt::Debug for InProcessUdpSocket {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("InProcessUdpSocket")
-            .field("sockaddr", &self.local_addr)
+            .field("local_addr", &self.local_addr)
             .finish_non_exhaustive()
     }
 }
 
 impl InProcessUdpSocket {
     pub fn new_pair() -> (Self, Self) {
-        let (sender_a, receiver_a) = HeapRb::new(16).split();
-        let (sender_b, receiver_b) = HeapRb::new(16).split();
-
-        let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 111)), 11111);
-        let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 222)), 22222);
+        let (sender_a, receiver_a) = HeapRb::new(RECEIVE_BUFFER_DATAGRAM_COUNT).split();
+        let (sender_b, receiver_b) = HeapRb::new(RECEIVE_BUFFER_DATAGRAM_COUNT).split();
 
         let queue_a = DatagramQueue::new(sender_a, receiver_b);
         let queue_b = DatagramQueue::new(sender_b, receiver_a);
 
-        let receiver_waker_a = Arc::clone(&queue_a.receiver_waker);
-        let receiver_waker_b = Arc::clone(&queue_b.receiver_waker);
+        let waker_b = Arc::clone(&queue_a.sibling_waker);
+        let waker_a = Arc::clone(&queue_b.sibling_waker);
+
+        let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), PGLB_PORT);
+        let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), PGLB_PORT);
 
         let socket_a = InProcessUdpSocket {
             queue: queue_a,
-            sibling_receiver_waker: receiver_waker_b,
+            recv_waker: waker_a,
             local_addr: addr_a,
             remote_addr: addr_b,
         };
 
         let socket_b = InProcessUdpSocket {
             queue: queue_b,
-            sibling_receiver_waker: receiver_waker_a,
+            recv_waker: waker_b,
             local_addr: addr_b,
             remote_addr: addr_a,
         };
@@ -215,12 +251,14 @@ impl InProcessUdpSocket {
 }
 
 impl AsyncUdpSocket for InProcessUdpSocket {
-    #[tracing::instrument(level = "debug", skip_all)]
+    #[inline]
     fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
+        // We don't have a send buffer, just a receive buffer. We accept any
+        // sends and drop packets not fitting into the receive buffer.
+        // TODO: let's see if this works well in prod.
         Box::pin(AlwaysReadyUdpPoller)
     }
 
-    #[tracing::instrument(level = "debug", skip_all, err)]
     fn try_send(&self, transmit: &udp::Transmit<'_>) -> io::Result<()> {
         if transmit.src_ip.is_some_and(|ip| ip != self.local_addr.ip()) {
             return Err(io::Error::new(
@@ -229,17 +267,27 @@ impl AsyncUdpSocket for InProcessUdpSocket {
             ));
         }
         if transmit.destination != self.remote_addr {
-            // TODO: or drop the packet?
+            // Instead of dropping the packet, we return an error.
+            // We could even consider panicking here.
             return Err(io::Error::new(
                 io::ErrorKind::HostUnreachable,
                 "try_send: host unreachable",
             ));
         }
-        self.queue.send(transmit.contents)?;
+        if let Some(segment_size) = transmit.segment_size {
+            if segment_size != transmit.contents.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "try_send: segmented transmit contents",
+                ));
+            }
+        }
+
+        self.queue.send(transmit.contents, transmit.ecn)?;
+
         Ok(())
     }
 
-    #[tracing::instrument(level = "debug", skip_all, ret)]
     fn poll_recv(
         &self,
         cx: &mut Context<'_>,
@@ -252,19 +300,14 @@ impl AsyncUdpSocket for InProcessUdpSocket {
                 "poll_recv: no buffer",
             )));
         }
-        if bufs.len() > 1 {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "poll_recv: multiple buffers",
-            )));
-        }
 
         let buf = &mut bufs[0];
-        let len = match self.queue.recv(buf) {
+        let mut ecn = None;
+        let len = match self.queue.recv(buf, &mut ecn) {
             Ok(len) => len,
             Err(e) => {
                 if e.kind() == io::ErrorKind::WouldBlock {
-                    self.sibling_receiver_waker.register(cx);
+                    self.recv_waker.register(cx);
                     return Poll::Pending;
                 }
                 return Poll::Ready(Err(e));
@@ -275,37 +318,41 @@ impl AsyncUdpSocket for InProcessUdpSocket {
             addr: self.remote_addr,
             len,
             stride: len,
-            ecn: None,
+            ecn,
             dst_ip: Some(self.local_addr.ip()),
         };
 
-        Poll::Ready(Ok(len))
+        Poll::Ready(Ok(1))
     }
 
+    #[inline(always)]
     fn local_addr(&self) -> io::Result<SocketAddr> {
         Ok(self.local_addr)
     }
 
+    #[inline(always)]
     fn max_transmit_segments(&self) -> usize {
         1
     }
 
+    #[inline(always)]
     fn max_receive_segments(&self) -> usize {
         1
     }
 
+    #[inline(always)]
     fn may_fragment(&self) -> bool {
         false
     }
 }
 
-#[derive(Debug)]
+/// A UDP poller implementation that always returns ready to write.
+#[derive(Copy, Clone, Debug)]
 struct AlwaysReadyUdpPoller;
 
 impl UdpPoller for AlwaysReadyUdpPoller {
-    #[tracing::instrument(level = "debug", skip_all)]
+    #[inline(always)]
     fn poll_writable(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<io::Result<()>> {
-        // TODO: let's see if this works well in prod.
         Poll::Ready(Ok(()))
     }
 }
@@ -326,34 +373,36 @@ mod tests {
         let (sender, receiver) = HeapRb::new(4).split();
         let queue = DatagramQueue::<4>::new(sender, receiver);
 
-        assert_eq!(queue.sender.try_lock().unwrap().is_empty(), true);
-        assert_eq!(queue.send(&[1, 2, 3, 4]).ok(), Some(()));
-        assert_eq!(queue.sender.try_lock().unwrap().is_full(), false);
-        assert_eq!(queue.send(&[5, 6, 7, 8]).ok(), Some(()));
-        assert_eq!(queue.sender.try_lock().unwrap().is_full(), false);
-        assert_eq!(queue.send(&[9, 10, 11, 12]).ok(), Some(()));
-        assert_eq!(queue.sender.try_lock().unwrap().is_full(), false);
-        assert_eq!(queue.send(&[13, 14, 15, 16]).ok(), Some(()));
-        assert_eq!(queue.sender.try_lock().unwrap().is_full(), true);
+        assert!(queue.sender.try_lock().unwrap().is_empty());
+        assert_eq!(queue.send(&[1, 2, 3, 4], None).ok(), Some(()));
+        assert!(!queue.sender.try_lock().unwrap().is_full());
+        assert_eq!(queue.send(&[5, 6, 7, 8], None).ok(), Some(()));
+        assert!(!queue.sender.try_lock().unwrap().is_full());
+        assert_eq!(queue.send(&[9, 10, 11, 12], None).ok(), Some(()));
+        assert!(!queue.sender.try_lock().unwrap().is_full());
+        assert_eq!(queue.send(&[13, 14, 15, 16], None).ok(), Some(()));
+        assert!(queue.sender.try_lock().unwrap().is_full());
 
         // dropped packet
-        assert_eq!(queue.send(&[17, 18, 19, 20]).ok(), Some(()));
+        assert_eq!(queue.send(&[17, 18, 19, 20], None).ok(), Some(()));
 
         let mut buf = [0; 4];
-        assert_eq!(queue.recv(&mut buf).expect("recv"), 4);
+        let mut ecn = None;
+        assert_eq!(queue.recv(&mut buf, &mut ecn).expect("recv"), 4);
         assert_eq!(buf, [1, 2, 3, 4]);
+        assert_eq!(ecn, None);
 
-        assert_eq!(queue.recv(&mut buf).expect("recv"), 4);
+        assert_eq!(queue.recv(&mut buf, &mut ecn).expect("recv"), 4);
         assert_eq!(buf, [5, 6, 7, 8]);
 
-        assert_eq!(queue.recv(&mut buf).expect("recv"), 4);
+        assert_eq!(queue.recv(&mut buf, &mut ecn).expect("recv"), 4);
         assert_eq!(buf, [9, 10, 11, 12]);
 
-        assert_eq!(queue.recv(&mut buf).expect("recv"), 4);
+        assert_eq!(queue.recv(&mut buf, &mut ecn).expect("recv"), 4);
         assert_eq!(buf, [13, 14, 15, 16]);
 
         assert_eq!(
-            queue.recv(&mut buf).expect_err("recv").kind(),
+            queue.recv(&mut buf, &mut ecn).expect_err("recv").kind(),
             io::ErrorKind::WouldBlock
         );
     }
@@ -370,33 +419,50 @@ mod tests {
             src_ip: Some(a.local_addr().unwrap().ip()),
         };
 
-        assert_eq!(a.try_send(&tx).ok(), Some(()));
+        let res = a.try_send(&tx);
+        assert!(res.is_ok(), "try_send: {res:?}");
 
-        let mut cx = Context::from_waker(&Waker::noop());
+        let mut cx = Context::from_waker(Waker::noop());
         let mut buf = [0u8; 10];
         let mut iobufs = [io::IoSliceMut::new(&mut buf)];
         let mut metas = [udp::RecvMeta::default()];
 
         match b.poll_recv(&mut cx, &mut iobufs, &mut metas) {
-            Poll::Ready(Ok(4)) => assert_eq!(buf, [1, 2, 3, 4, 0, 0, 0, 0, 0, 0]),
-            _ => panic!("recv"),
+            Poll::Ready(Ok(1)) => assert_eq!(buf, [1, 2, 3, 4, 0, 0, 0, 0, 0, 0]),
+            res => panic!("recv: {res:?}"),
         }
     }
 
     #[tokio::test]
     async fn test_quinn_with_inprocessudpsockets() {
+        tracing_subscriber::fmt::fmt()
+            .with_writer(io::stderr)
+            .with_max_level(tracing::Level::DEBUG)
+            .init();
+
         let (server_socket, client_socket) = InProcessUdpSocket::new_pair();
 
         let (ca, cert, key) = generate_certs("pglb.localhost", "pglb.localhost").unwrap();
 
-        let server = create_server_endpoint(server_socket, cert, key).unwrap();
+        let server_crypto = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key)
+            .unwrap();
+
+        let server = create_server_endpoint(server_socket, server_crypto).unwrap();
         let server_addr = server.local_addr().unwrap();
 
         let cancel = CancellationToken::new();
         let server_cancel = cancel.clone();
         let server_task = tokio::spawn(start_echo_server(cancel.clone(), server));
 
-        let client = create_client_endpoint(client_socket, ca).unwrap();
+        let mut root_certs = rustls::RootCertStore::empty();
+        root_certs.add(ca).unwrap();
+        let client_crypto = rustls::ClientConfig::builder()
+            .with_root_certificates(root_certs)
+            .with_no_client_auth();
+
+        let client = create_client_endpoint(client_socket, client_crypto).unwrap();
 
         let connect = client.connect(server_addr, "pglb.localhost").unwrap();
         let conn = connect.await.unwrap();
@@ -406,7 +472,7 @@ mod tests {
         send.write_all(b"hello, pglb!\n").await.unwrap();
         send.finish().unwrap();
         drop(send);
-        let mut buf = [0u8; 64];
+        let mut buf = [0u8; MTU as usize];
         let n = recv.read(&mut buf).await.unwrap().unwrap();
 
         server_cancel.cancel();
@@ -421,26 +487,26 @@ mod tests {
     ) -> anyhow::Result<()> {
         loop {
             tokio::select! {
-                _ = cancel.cancelled() => break,
+                () = cancel.cancelled() => break,
                 incoming = endpoint.accept() => {
                     let Some(incoming) = incoming else {
                         break;
                     };
-                    tokio::spawn(handle_echo_incoming(cancel.clone(), incoming));
+                    tokio::spawn(handle_echo_connection(cancel.clone(), incoming));
                 }
             }
         }
         Ok(())
     }
 
-    async fn handle_echo_incoming(
+    async fn handle_echo_connection(
         cancel: CancellationToken,
         incoming: quinn::Incoming,
     ) -> anyhow::Result<()> {
         let conn = incoming.accept()?.await?;
         loop {
             tokio::select! {
-                _ = cancel.cancelled() => break,
+                () = cancel.cancelled() => break,
                 stream = conn.accept_bi() => {
                     let Ok(stream) = stream else {
                         break;
@@ -456,7 +522,7 @@ mod tests {
         _cancel: CancellationToken,
         (mut send, mut recv): (SendStream, RecvStream),
     ) -> anyhow::Result<()> {
-        let mut buf = [0u8; 64 * 1024];
+        let mut buf = vec![0u8; MTU as usize].into_boxed_slice();
         while let Some(n) = recv.read(&mut buf).await? {
             send.write_all(&buf[..n]).await?;
         }
