@@ -4346,6 +4346,7 @@ dependencies = [
  "humantime-serde",
  "itertools 0.10.5",
  "nix 0.27.1",
+ "once_cell",
  "postgres_backend",
  "postgres_ffi",
  "rand 0.8.5",
