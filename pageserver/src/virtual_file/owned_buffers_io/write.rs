@@ -219,7 +219,8 @@ where
 
                 final_len = self.bytes_submitted + len.into_u64();
                 shutdown_req = ShutdownRequest {
-                    set_len: Some(final_len),
+                    // Avoid set_len call if we didn't need to pad anything.
+                    set_len: if count > 0 { Some(final_len) } else { None },
                 };
             }
         };
@@ -488,6 +489,9 @@ mod tests {
 
         match &mode {
             BufferedWriterShutdownMode::DropTail => (),
+            // We test the case with padding to next multiple of 2 so that it's different
+            // from the alignment requirement of 4 inferred from buffer capacity.
+            // See TODOs in the `BufferedWriter` struct comment on decoupling buffer capacity from alignment requirement.
             BufferedWriterShutdownMode::ZeroPadToNextMultiple(2) => {
                 expect.push(Op::Write {
                     offset: expect_next_offset,
@@ -507,6 +511,51 @@ mod tests {
 
         let (_, recorder) = writer.shutdown(mode, ctx).await?;
         assert_eq!(&*recorder.recording.lock().unwrap(), &expect);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_set_len_is_skipped_if_not_needed() -> anyhow::Result<()> {
+        let ctx = test_ctx();
+        let ctx = &ctx;
+        let recorder = RecorderWriter::default();
+        let gate = utils::sync::gate::Gate::default();
+        let cancel = CancellationToken::new();
+        let cap = 4;
+        let mut writer = BufferedWriter::<_, RecorderWriter>::new(
+            recorder,
+            0,
+            || IoBufferMut::with_capacity(cap),
+            gate.enter()?,
+            cancel,
+            ctx,
+            tracing::Span::none(),
+        );
+
+        // write a multiple of `cap`
+        writer.write_buffered_borrowed(b"abc", ctx).await?;
+        writer.write_buffered_borrowed(b"defgh", ctx).await?;
+
+        let (_, recorder) = writer
+            .shutdown(BufferedWriterShutdownMode::PadThenTruncate, ctx)
+            .await?;
+
+        let expect = {
+            [(0, b"abcd"), (4, b"efgh")]
+                .into_iter()
+                .map(|(offset, v)| Op::Write {
+                    offset,
+                    buf: v[..].to_vec(),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            &*recorder.recording.lock().unwrap(),
+            &expect,
+            "set_len should not be called if the buffer is already aligned"
+        );
+
         Ok(())
     }
 }
