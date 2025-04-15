@@ -122,12 +122,22 @@ pub struct IndexPart {
     pub(crate) keys: Option<Vec<EncryptionKey>>,
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct KeyVersion(u32);
+
+/// An identifier for an encryption key. The scope of the key is the timeline (TBD).
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct EncryptionKeyId {
+    version: KeyVersion,
+    generation: Generation,
+}
+
 #[serde_as]
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct EncryptionKey {
     #[serde_as(as = "Base64")]
     pub key: Vec<u8>,
-    pub version: u32,
+    pub id: EncryptionKeyId,
     pub created_at: NaiveDateTime,
 }
 
@@ -157,7 +167,7 @@ impl IndexPart {
     /// - 12: +l2_lsn
     /// - 13: +gc_compaction
     /// - 14: +marked_invisible_at
-    /// - 15: +keys and encrypted_with_key_version in layer_metadata
+    /// - 15: +keys and encryption_key in layer_metadata
     const LATEST_VERSION: usize = 15;
 
     // Versions we may see when reading from a bucket.
@@ -240,7 +250,7 @@ impl IndexPart {
 ///
 /// Fields have to be `Option`s because remote [`IndexPart`]'s can be from different version, which
 /// might have less or more metadata depending if upgrading or rolling back an upgrade.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayerFileMetadata {
     pub file_size: u64,
 
@@ -253,7 +263,7 @@ pub struct LayerFileMetadata {
     pub shard: ShardIndex,
 
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub encrypted_with_key_version: Option<u32>,
+    pub encryption_key: Option<EncryptionKeyId>,
 }
 
 impl LayerFileMetadata {
@@ -262,7 +272,7 @@ impl LayerFileMetadata {
             file_size,
             generation,
             shard,
-            encrypted_with_key_version: None,
+            encryption_key: None,
         }
     }
     /// Helper to get both generation and file size in a tuple
@@ -476,7 +486,7 @@ mod tests {
                     file_size: 25600000,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 }),
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
                     // serde_json should always parse this but this might be a double with jq for
@@ -484,7 +494,7 @@ mod tests {
                     file_size: 9007199254741001,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 })
             ]),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
@@ -528,7 +538,7 @@ mod tests {
                     file_size: 25600000,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 }),
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
                     // serde_json should always parse this but this might be a double with jq for
@@ -536,7 +546,7 @@ mod tests {
                     file_size: 9007199254741001,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 })
             ]),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
@@ -581,7 +591,7 @@ mod tests {
                     file_size: 25600000,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 }),
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
                     // serde_json should always parse this but this might be a double with jq for
@@ -589,7 +599,7 @@ mod tests {
                     file_size: 9007199254741001,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 })
             ]),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
@@ -686,7 +696,7 @@ mod tests {
                     file_size: 25600000,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 }),
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
                     // serde_json should always parse this but this might be a double with jq for
@@ -694,7 +704,7 @@ mod tests {
                     file_size: 9007199254741001,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 })
             ]),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
@@ -738,13 +748,13 @@ mod tests {
                     file_size: 23289856,
                     generation: Generation::new(1),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 }),
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000014EF499-00000000015A7619".parse().unwrap(), LayerFileMetadata {
                     file_size: 1015808,
                     generation: Generation::new(1),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 })
             ]),
             disk_consistent_lsn: Lsn::from_str("0/15A7618").unwrap(),
@@ -795,7 +805,7 @@ mod tests {
                     file_size: 25600000,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 }),
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
                     // serde_json should always parse this but this might be a double with jq for
@@ -803,7 +813,7 @@ mod tests {
                     file_size: 9007199254741001,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 })
             ]),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
@@ -857,13 +867,13 @@ mod tests {
                     file_size: 25600000,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 }),
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
                     file_size: 9007199254741001,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 })
             ]),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
@@ -922,13 +932,13 @@ mod tests {
                     file_size: 25600000,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 }),
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
                     file_size: 9007199254741001,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 })
             ]),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
@@ -989,13 +999,13 @@ mod tests {
                     file_size: 25600000,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 }),
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
                     file_size: 9007199254741001,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 })
             ]),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
@@ -1068,13 +1078,13 @@ mod tests {
                     file_size: 25600000,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 }),
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
                     file_size: 9007199254741001,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 })
             ]),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
@@ -1152,13 +1162,13 @@ mod tests {
                     file_size: 25600000,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 }),
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
                     file_size: 9007199254741001,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 })
             ]),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
@@ -1240,13 +1250,13 @@ mod tests {
                     file_size: 25600000,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 }),
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
                     file_size: 9007199254741001,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 })
             ]),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
@@ -1331,13 +1341,13 @@ mod tests {
                     file_size: 25600000,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 }),
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
                     file_size: 9007199254741001,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: None,
+                    encryption_key: None,
                 })
             ]),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
@@ -1381,8 +1391,8 @@ mod tests {
         let example = r#"{
             "version": 15,
             "layer_metadata":{
-                "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9": { "file_size": 25600000, "encrypted_with_key_version": 1 },
-                "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51": { "file_size": 9007199254741001, "encrypted_with_key_version": 2 }
+                "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9": { "file_size": 25600000, "encryption_key": 1 },
+                "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51": { "file_size": 9007199254741001, "encryption_key": 2 }
             },
             "disk_consistent_lsn":"0/16960E8",
             "metadata": {
@@ -1416,12 +1426,18 @@ mod tests {
             "keys": [
                 {
                     "key": "dGVzdF9rZXk=",
-                    "version": 1,
+                    "id": {
+                        "version": 1,
+                        "generation": 5
+                    },
                     "created_at": "2024-07-19T09:00:00.123"
                 },
                 {
                     "key": "dGVzdF9rZXlfMg==",
-                    "version": 2,
+                    "id": {
+                        "version": 2,
+                        "generation": 6
+                    },
                     "created_at": "2024-07-19T10:00:00.123"
                 }
             ]
@@ -1434,13 +1450,19 @@ mod tests {
                     file_size: 25600000,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: Some(1),
+                    encryption_key: Some(EncryptionKeyId {
+                        version: KeyVersion(1),
+                        generation: Generation::Valid(5),
+                    }),
                 }),
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
                     file_size: 9007199254741001,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded(),
-                    encrypted_with_key_version: Some(2),
+                    encryption_key: Some(EncryptionKeyId {
+                        version: KeyVersion(2),
+                        generation: Generation::Valid(6),
+                    }),
                 })
             ]),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
@@ -1475,12 +1497,18 @@ mod tests {
             keys: Some(vec![
                 EncryptionKey {
                     key: "test_key".as_bytes().to_vec(),
-                    version: 1,
+                    id: EncryptionKeyId {
+                        version: KeyVersion(1),
+                        generation: Generation::Valid(5),
+                    },
                     created_at: parse_naive_datetime("2024-07-19T09:00:00.123000000"),
                 },
                 EncryptionKey {
                     key: "test_key_2".as_bytes().to_vec(),
-                    version: 2,
+                    id: EncryptionKeyId {
+                        version: KeyVersion(2),
+                        generation: Generation::Valid(6),
+                    },
                     created_at: parse_naive_datetime("2024-07-19T10:00:00.123000000"),
                 }
             ]),

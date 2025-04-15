@@ -641,7 +641,7 @@ mod tests {
             generation: timeline.generation,
             shard: timeline.get_shard_index(),
             file_size: size as u64,
-            encrypted_with_key_version: None,
+            encryption_key: None,
         };
         make_layer_with_metadata(timeline, name, metadata)
     }
@@ -1379,7 +1379,7 @@ mod tests {
                 shard,
                 generation: Generation::Valid(generation),
                 file_size: 0,
-                encrypted_with_key_version: None,
+                encryption_key: None,
             };
             make_layer_with_metadata(&tli, name, metadata)
         };
