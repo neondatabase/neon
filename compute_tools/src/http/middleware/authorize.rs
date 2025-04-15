@@ -1,7 +1,7 @@
-use std::{collections::HashSet, net::SocketAddr};
+use std::collections::HashSet;
 
 use anyhow::{Result, anyhow};
-use axum::{RequestExt, body::Body, extract::ConnectInfo};
+use axum::{RequestExt, body::Body};
 use axum_extra::{
     TypedHeader,
     headers::{Authorization, authorization::Bearer},
@@ -60,19 +60,6 @@ impl AsyncAuthorizeRequest<Body> for Authorize {
             // https://github.com/neondatabase/neon/issues/11316
             if cfg!(feature = "testing") {
                 warn!(%request_id, "Skipping compute_ctl authorization check");
-
-                return Ok(request);
-            }
-
-            let connect_info = request
-                .extract_parts::<ConnectInfo<SocketAddr>>()
-                .await
-                .unwrap();
-
-            // In the event the request is coming from the loopback interface,
-            // allow all requests
-            if connect_info.ip().is_loopback() {
-                warn!(%request_id, "Bypassed authorization because request is coming from the loopback interface");
 
                 return Ok(request);
             }
