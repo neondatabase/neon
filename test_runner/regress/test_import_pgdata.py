@@ -19,6 +19,7 @@ from fixtures.pageserver.http import (
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import MockS3Server, RemoteStorageKind
+from fixtures.utils import shared_buffers_for_max_cu
 from mypy_boto3_kms import KMSClient
 from mypy_boto3_kms.type_defs import EncryptResponseTypeDef
 from mypy_boto3_s3 import S3Client
@@ -80,7 +81,8 @@ def test_pgdata_import_smoke(
     # doesn't allow any prefetching on v17 and above, where the new streaming
     # read machinery keeps buffers pinned while prefetching them.  Use a higher
     # setting to enable prefetching and speed up the tests
-    ep_config = ["shared_buffers=64MB"]
+    # use shared_buffers size like in production for 8 CU compute
+    ep_config = [f"shared_buffers={shared_buffers_for_max_cu(8.0)}"]
 
     #
     # Put data in vanilla pg

@@ -94,10 +94,10 @@ impl WalReceivers {
 
     /// Get reference to locked slot contents. Slot must exist (registered
     /// earlier).
-    fn get_slot<'a>(
-        self: &'a Arc<WalReceivers>,
+    fn get_slot(
+        self: &Arc<WalReceivers>,
         id: WalReceiverId,
-    ) -> MappedMutexGuard<'a, WalReceiverState> {
+    ) -> MappedMutexGuard<'_, WalReceiverState> {
         MutexGuard::map(self.mutex.lock(), |locked| {
             locked.slots[id]
                 .as_mut()

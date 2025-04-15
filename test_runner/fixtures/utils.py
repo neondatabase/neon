@@ -724,3 +724,20 @@ def skip_on_ci(reason: str):
         os.getenv("CI", "false") == "true",
         reason=reason,
     )
+
+
+def shared_buffers_for_max_cu(max_cu: float) -> str:
+    """
+    Returns the string value of shared_buffers for the given max CU.
+    Use shared_buffers size like in production for max CU compute.
+    See https://github.com/neondatabase/cloud/blob/877e33b4289a471b8f0a35c84009846358f3e5a3/goapp/controlplane/internal/pkg/compute/computespec/pg_settings.go#L405
+
+    e.g. // 2 CU: 225mb; 4 CU: 450mb; 8 CU: 900mb
+    """
+    ramBytes = int(4096 * max_cu * 1024 * 1024)
+    maxConnections = max(100, min(int(ramBytes / 9531392), 4000))
+    maxWorkerProcesses = 12 + int(max_cu * 2)
+    maxBackends = 1 + maxConnections + maxWorkerProcesses
+    sharedBuffersMb = int(max(128, (1023 + maxBackends * 256) / 1024))
+    sharedBuffers = int(sharedBuffersMb * 1024 / 8)
+    return str(sharedBuffers)

@@ -48,6 +48,7 @@ use rand::distributions::Alphanumeric;
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::bin_ser::BeSer;
 use utils::id::{TenantId, TimelineId};
@@ -481,9 +482,9 @@ impl ImageLayerInner {
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
 
-        let ctx = RequestContextBuilder::extend(ctx)
+        let ctx = RequestContextBuilder::from(ctx)
             .page_content_kind(PageContentKind::ImageLayerBtreeNode)
-            .build();
+            .attached_child();
 
         for range in keyspace.ranges.iter() {
             let mut range_end_handled = false;
@@ -748,12 +749,15 @@ impl ImageLayerWriterInner {
     ///
     /// Start building a new image layer.
     ///
+    #[allow(clippy::too_many_arguments)]
     async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
         key_range: &Range<Key>,
         lsn: Lsn,
+        gate: &utils::sync::gate::Gate,
+        cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename.
@@ -780,7 +784,7 @@ impl ImageLayerWriterInner {
         };
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
-        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64);
+        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64, gate, cancel, ctx);
 
         // Initialize the b-tree index builder
         let block_buf = BlockBuf::new();
@@ -988,18 +992,30 @@ impl ImageLayerWriter {
     ///
     /// Start building a new image layer.
     ///
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
         key_range: &Range<Key>,
         lsn: Lsn,
+        gate: &utils::sync::gate::Gate,
+        cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<ImageLayerWriter> {
         Ok(Self {
             inner: Some(
-                ImageLayerWriterInner::new(conf, timeline_id, tenant_shard_id, key_range, lsn, ctx)
-                    .await?,
+                ImageLayerWriterInner::new(
+                    conf,
+                    timeline_id,
+                    tenant_shard_id,
+                    key_range,
+                    lsn,
+                    gate,
+                    cancel,
+                    ctx,
+                )
+                .await?,
             ),
         })
     }
@@ -1192,7 +1208,7 @@ mod test {
 
         // This key range contains several 0x8000 page stripes, only one of which belongs to shard zero
         let input_start = Key::from_hex("000000067f00000001000000ae0000000000").unwrap();
-        let input_end = Key::from_hex("000000067f00000001000000ae0000020000").unwrap();
+        let input_end = Key::from_hex("000000067f00000001000000ae0000002000").unwrap();
         let range = input_start..input_end;
 
         // Build an image layer to filter
@@ -1203,6 +1219,8 @@ mod test {
                 harness.tenant_shard_id,
                 &range,
                 lsn,
+                &timeline.gate,
+                timeline.cancel.clone(),
                 &ctx,
             )
             .await
@@ -1235,7 +1253,7 @@ mod test {
             let shard_identity = ShardIdentity::new(
                 ShardNumber(shard_number),
                 shard_count,
-                ShardStripeSize(0x8000),
+                ShardStripeSize(0x800),
             )
             .unwrap();
             let harness = TenantHarness::create_custom(
@@ -1268,6 +1286,8 @@ mod test {
                 harness.tenant_shard_id,
                 &range,
                 lsn,
+                &timeline.gate,
+                timeline.cancel.clone(),
                 &ctx,
             )
             .await
@@ -1287,12 +1307,12 @@ mod test {
 
             // This exact size and those below will need updating as/when the layer encoding changes, but
             // should be deterministic for a given version of the format, as we used no randomness generating the input.
-            assert_eq!(original_size, 1597440);
+            assert_eq!(original_size, 122880);
 
             match shard_number {
                 0 => {
                     // We should have written out just one stripe for our shard identity
-                    assert_eq!(wrote_keys, 0x8000);
+                    assert_eq!(wrote_keys, 0x800);
                     let replacement = replacement.unwrap();
 
                     // We should have dropped some of the data
@@ -1300,7 +1320,7 @@ mod test {
                     assert!(replacement.metadata().file_size > 0);
 
                     // Assert that we dropped ~3/4 of the data.
-                    assert_eq!(replacement.metadata().file_size, 417792);
+                    assert_eq!(replacement.metadata().file_size, 49152);
                 }
                 1 => {
                     // Shard 1 has no keys in our input range
@@ -1309,19 +1329,19 @@ mod test {
                 }
                 2 => {
                     // Shard 2 has one stripes in the input range
-                    assert_eq!(wrote_keys, 0x8000);
+                    assert_eq!(wrote_keys, 0x800);
                     let replacement = replacement.unwrap();
                     assert!(replacement.metadata().file_size < original_size);
                     assert!(replacement.metadata().file_size > 0);
-                    assert_eq!(replacement.metadata().file_size, 417792);
+                    assert_eq!(replacement.metadata().file_size, 49152);
                 }
                 3 => {
                     // Shard 3 has two stripes in the input range
-                    assert_eq!(wrote_keys, 0x10000);
+                    assert_eq!(wrote_keys, 0x1000);
                     let replacement = replacement.unwrap();
                     assert!(replacement.metadata().file_size < original_size);
                     assert!(replacement.metadata().file_size > 0);
-                    assert_eq!(replacement.metadata().file_size, 811008);
+                    assert_eq!(replacement.metadata().file_size, 73728);
                 }
                 _ => unreachable!(),
             }
@@ -1346,6 +1366,8 @@ mod test {
             tenant.tenant_shard_id,
             &key_range,
             lsn,
+            &tline.gate,
+            tline.cancel.clone(),
             ctx,
         )
         .await?;

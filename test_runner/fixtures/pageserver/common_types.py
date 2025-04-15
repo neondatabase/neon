@@ -105,7 +105,7 @@ def parse_layer_file_name(file_name: str) -> LayerName:
     except InvalidFileName:
         pass
 
-    raise InvalidFileName("neither image nor delta layer")
+    raise InvalidFileName(f"neither image nor delta layer: {file_name}")
 
 
 def is_future_layer(layer_file_name: LayerName, disk_consistent_lsn: Lsn):

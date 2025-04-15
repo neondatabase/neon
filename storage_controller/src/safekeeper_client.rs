@@ -101,7 +101,7 @@ impl SafekeeperClient {
     pub(crate) async fn delete_tenant(
         &self,
         tenant_id: TenantId,
-    ) -> Result<models::TimelineDeleteResult> {
+    ) -> Result<models::TenantDeleteResult> {
         measured_request!(
             "delete_tenant",
             crate::metrics::Method::Delete,

@@ -96,6 +96,7 @@ enum Message {
 
 impl Message {
     /// Convert proto message to internal message.
+    #[allow(clippy::result_large_err, reason = "TODO")]
     pub fn from(proto_msg: TypedMessage) -> Result<Self, Status> {
         match proto_msg.r#type() {
             MessageType::SafekeeperTimelineInfo => Ok(Message::SafekeeperTimelineInfo(
@@ -127,6 +128,7 @@ impl Message {
     }
 
     /// Get the tenant_timeline_id from the message.
+    #[allow(clippy::result_large_err, reason = "TODO")]
     pub fn tenant_timeline_id(&self) -> Result<Option<TenantTimelineId>, Status> {
         match self {
             Message::SafekeeperTimelineInfo(msg) => Ok(msg
@@ -185,6 +187,7 @@ enum SubscriptionKey {
 
 impl SubscriptionKey {
     /// Parse protobuf subkey (protobuf doesn't have fixed size bytes, we get vectors).
+    #[allow(clippy::result_large_err, reason = "TODO")]
     pub fn from_proto_subscription_key(key: ProtoSubscriptionKey) -> Result<Self, Status> {
         match key {
             ProtoSubscriptionKey::All(_) => Ok(SubscriptionKey::All),
@@ -195,6 +198,7 @@ impl SubscriptionKey {
     }
 
     /// Parse from FilterTenantTimelineId
+    #[allow(clippy::result_large_err, reason = "TODO")]
     pub fn from_proto_filter_tenant_timeline_id(
         opt: Option<&FilterTenantTimelineId>,
     ) -> Result<Self, Status> {
@@ -385,6 +389,7 @@ impl Registry {
     }
 
     /// Send msg to relevant subscribers.
+    #[allow(clippy::result_large_err, reason = "TODO")]
     pub fn send_msg(&self, msg: &Message) -> Result<(), Status> {
         PROCESSED_MESSAGES_TOTAL.inc();
 
@@ -436,6 +441,7 @@ struct Publisher {
 
 impl Publisher {
     /// Send msg to relevant subscribers.
+    #[allow(clippy::result_large_err, reason = "TODO")]
     pub fn send_msg(&mut self, msg: &Message) -> Result<(), Status> {
         self.registry.send_msg(msg)
     }
@@ -764,6 +770,7 @@ mod tests {
             peer_horizon_lsn: 5,
             safekeeper_connstr: "neon-1-sk-1.local:7676".to_owned(),
             http_connstr: "neon-1-sk-1.local:7677".to_owned(),
+            https_connstr: Some("neon-1-sk-1.local:7678".to_owned()),
             local_start_lsn: 0,
             availability_zone: None,
             standby_horizon: 0,

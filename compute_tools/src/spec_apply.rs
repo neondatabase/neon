@@ -278,12 +278,12 @@ impl ComputeNode {
             // so that all config operations are audit logged.
             match spec.audit_log_level
             {
-                ComputeAudit::Hipaa => {
+                ComputeAudit::Hipaa | ComputeAudit::Extended | ComputeAudit::Full => {
                     phases.push(CreatePgauditExtension);
                     phases.push(CreatePgauditlogtofileExtension);
                     phases.push(DisablePostgresDBPgAudit);
                 }
-                ComputeAudit::Log => {
+                ComputeAudit::Log | ComputeAudit::Base => {
                     phases.push(CreatePgauditExtension);
                     phases.push(DisablePostgresDBPgAudit);
                 }
@@ -419,7 +419,7 @@ impl ComputeNode {
                 .iter()
                 .filter_map(|val| val.parse::<usize>().ok())
                 .map(|val| if val > 1 { val - 1 } else { 1 })
-                .last()
+                .next_back()
                 .unwrap_or(3)
         }
     }

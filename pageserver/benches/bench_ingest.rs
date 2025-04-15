@@ -126,7 +126,7 @@ async fn ingest(
             max_concurrency: NonZeroUsize::new(1).unwrap(),
         });
         let (_desc, path) = layer
-            .write_to_disk(&ctx, None, l0_flush_state.inner())
+            .write_to_disk(&ctx, None, l0_flush_state.inner(), &gate, cancel.clone())
             .await?
             .unwrap();
         tokio::fs::remove_file(path).await?;

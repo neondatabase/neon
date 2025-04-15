@@ -5,6 +5,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use pageserver_api::key::{KEY_SIZE, Key};
 use pageserver_api::value::Value;
+use tokio_util::sync::CancellationToken;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
 use utils::shard::TenantShardId;
@@ -179,7 +180,7 @@ impl BatchLayerWriter {
 
 /// An image writer that takes images and produces multiple image layers.
 #[must_use]
-pub struct SplitImageLayerWriter {
+pub struct SplitImageLayerWriter<'a> {
     inner: ImageLayerWriter,
     target_layer_size: u64,
     lsn: Lsn,
@@ -188,9 +189,12 @@ pub struct SplitImageLayerWriter {
     tenant_shard_id: TenantShardId,
     batches: BatchLayerWriter,
     start_key: Key,
+    gate: &'a utils::sync::gate::Gate,
+    cancel: CancellationToken,
 }
 
-impl SplitImageLayerWriter {
+impl<'a> SplitImageLayerWriter<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
@@ -198,6 +202,8 @@ impl SplitImageLayerWriter {
         start_key: Key,
         lsn: Lsn,
         target_layer_size: u64,
+        gate: &'a utils::sync::gate::Gate,
+        cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         Ok(Self {
@@ -208,6 +214,8 @@ impl SplitImageLayerWriter {
                 tenant_shard_id,
                 &(start_key..Key::MAX),
                 lsn,
+                gate,
+                cancel.clone(),
                 ctx,
             )
             .await?,
@@ -217,6 +225,8 @@ impl SplitImageLayerWriter {
             batches: BatchLayerWriter::new(conf).await?,
             lsn,
             start_key,
+            gate,
+            cancel,
         })
     }
 
@@ -239,6 +249,8 @@ impl SplitImageLayerWriter {
                 self.tenant_shard_id,
                 &(key..Key::MAX),
                 self.lsn,
+                self.gate,
+                self.cancel.clone(),
                 ctx,
             )
             .await?;
@@ -291,7 +303,7 @@ impl SplitImageLayerWriter {
 /// into a single file. This behavior might change in the future. For reference, the legacy compaction algorithm
 /// will split them into multiple files based on size.
 #[must_use]
-pub struct SplitDeltaLayerWriter {
+pub struct SplitDeltaLayerWriter<'a> {
     inner: Option<(Key, DeltaLayerWriter)>,
     target_layer_size: u64,
     conf: &'static PageServerConf,
@@ -300,15 +312,19 @@ pub struct SplitDeltaLayerWriter {
     lsn_range: Range<Lsn>,
     last_key_written: Key,
     batches: BatchLayerWriter,
+    gate: &'a utils::sync::gate::Gate,
+    cancel: CancellationToken,
 }
 
-impl SplitDeltaLayerWriter {
+impl<'a> SplitDeltaLayerWriter<'a> {
     pub async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
         lsn_range: Range<Lsn>,
         target_layer_size: u64,
+        gate: &'a utils::sync::gate::Gate,
+        cancel: CancellationToken,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             target_layer_size,
@@ -319,6 +335,8 @@ impl SplitDeltaLayerWriter {
             lsn_range,
             last_key_written: Key::MIN,
             batches: BatchLayerWriter::new(conf).await?,
+            gate,
+            cancel,
         })
     }
 
@@ -344,6 +362,8 @@ impl SplitDeltaLayerWriter {
                     self.tenant_shard_id,
                     key,
                     self.lsn_range.clone(),
+                    self.gate,
+                    self.cancel.clone(),
                     ctx,
                 )
                 .await?,
@@ -362,11 +382,13 @@ impl SplitDeltaLayerWriter {
                     self.tenant_shard_id,
                     key,
                     self.lsn_range.clone(),
+                    self.gate,
+                    self.cancel.clone(),
                     ctx,
                 )
                 .await?;
                 let (start_key, prev_delta_writer) =
-                    std::mem::replace(&mut self.inner, Some((key, next_delta_writer))).unwrap();
+                    self.inner.replace((key, next_delta_writer)).unwrap();
                 self.batches.add_unfinished_delta_writer(
                     prev_delta_writer,
                     start_key..key,
@@ -469,6 +491,8 @@ mod tests {
             get_key(0),
             Lsn(0x18),
             4 * 1024 * 1024,
+            &tline.gate,
+            tline.cancel.clone(),
             &ctx,
         )
         .await
@@ -480,6 +504,8 @@ mod tests {
             tenant.tenant_shard_id,
             Lsn(0x18)..Lsn(0x20),
             4 * 1024 * 1024,
+            &tline.gate,
+            tline.cancel.clone(),
         )
         .await
         .unwrap();
@@ -546,6 +572,8 @@ mod tests {
             get_key(0),
             Lsn(0x18),
             4 * 1024 * 1024,
+            &tline.gate,
+            tline.cancel.clone(),
             &ctx,
         )
         .await
@@ -556,6 +584,8 @@ mod tests {
             tenant.tenant_shard_id,
             Lsn(0x18)..Lsn(0x20),
             4 * 1024 * 1024,
+            &tline.gate,
+            tline.cancel.clone(),
         )
         .await
         .unwrap();
@@ -643,6 +673,8 @@ mod tests {
             get_key(0),
             Lsn(0x18),
             4 * 1024,
+            &tline.gate,
+            tline.cancel.clone(),
             &ctx,
         )
         .await
@@ -654,6 +686,8 @@ mod tests {
             tenant.tenant_shard_id,
             Lsn(0x18)..Lsn(0x20),
             4 * 1024,
+            &tline.gate,
+            tline.cancel.clone(),
         )
         .await
         .unwrap();
@@ -730,6 +764,8 @@ mod tests {
             tenant.tenant_shard_id,
             Lsn(0x10)..Lsn(N as u64 * 16 + 0x10),
             4 * 1024 * 1024,
+            &tline.gate,
+            tline.cancel.clone(),
         )
         .await
         .unwrap();

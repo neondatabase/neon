@@ -89,6 +89,10 @@ impl Node {
         self.scheduling = scheduling
     }
 
+    pub(crate) fn has_https_port(&self) -> bool {
+        self.listen_https_port.is_some()
+    }
+
     /// Does this registration request match `self`?  This is used when deciding whether a registration
     /// request should be allowed to update an existing record with the same node ID.
     pub(crate) fn registration_match(&self, register_req: &NodeRegisterRequest) -> bool {

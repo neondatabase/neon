@@ -159,7 +159,7 @@ services:
       #- RUST_BACKTRACE=1
     # Mount the test files directly, for faster editing cycle.
     volumes:
-      - ./compute_wrapper/var/db/postgres/specs/:/var/db/postgres/specs/
+      - ./compute_wrapper/var/db/postgres/configs/:/var/db/postgres/configs/
       - ./compute_wrapper/shell/:/shell/
     ports:
       - 55433:55433 # pg protocol handler

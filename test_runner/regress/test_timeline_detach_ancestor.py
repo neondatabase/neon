@@ -343,7 +343,8 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
     wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline)
 
 
-def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("snapshots_archived", ["archived", "normal"])
+def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder, snapshots_archived: str):
     """
     Test the v2 behavior of ancestor detach.
 
@@ -385,6 +386,11 @@ def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder):
 
         ep.safe_psql("INSERT INTO foo SELECT i::bigint FROM generate_series(0, 8191) g(i);")
 
+        branchpoint_y = wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
+        client.timeline_checkpoint(env.initial_tenant, env.initial_timeline)
+
+        ep.safe_psql("INSERT INTO foo SELECT i::bigint FROM generate_series(0, 8191) g(i);")
+
         branchpoint_x = wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
         client.timeline_checkpoint(env.initial_tenant, env.initial_timeline)
 
@@ -393,6 +399,10 @@ def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder):
 
     earlier = env.create_branch(
         "earlier", ancestor_branch_name="main", ancestor_start_lsn=branchpoint_pipe
+    )
+
+    snapshot_branchpoint_old = env.create_branch(
+        "snapshot_branchpoint_old", ancestor_branch_name="main", ancestor_start_lsn=branchpoint_y
     )
 
     snapshot_branchpoint = env.create_branch(
@@ -407,19 +417,32 @@ def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder):
 
     after = env.create_branch("after", ancestor_branch_name="main", ancestor_start_lsn=None)
 
+    if snapshots_archived == "archived":
+        # archive the previous snapshot branchpoint
+        client.timeline_archival_config(
+            env.initial_tenant, snapshot_branchpoint_old, TimelineArchivalState.ARCHIVED
+        )
+
     all_reparented = client.detach_ancestor(
         env.initial_tenant, branch_to_detach, detach_behavior="v2"
     )
     assert set(all_reparented) == set()
 
+    if snapshots_archived == "archived":
+        # restore the branchpoint so that we can query from the endpoint
+        client.timeline_archival_config(
+            env.initial_tenant, snapshot_branchpoint_old, TimelineArchivalState.UNARCHIVED
+        )
+
     env.pageserver.quiesce_tenants()
 
     # checking the ancestor after is much faster than waiting for the endpoint not start
     expected_result = [
-        ("main", env.initial_timeline, None, 16384, 1),
-        ("after", after, env.initial_timeline, 16384, 1),
-        ("snapshot_branchpoint", snapshot_branchpoint, env.initial_timeline, 8192, 1),
-        ("branch_to_detach", branch_to_detach, None, 8192, 1),
+        ("main", env.initial_timeline, None, 24576, 1),
+        ("after", after, env.initial_timeline, 24576, 1),
+        ("snapshot_branchpoint_old", snapshot_branchpoint_old, env.initial_timeline, 8192, 1),
+        ("snapshot_branchpoint", snapshot_branchpoint, env.initial_timeline, 16384, 1),
+        ("branch_to_detach", branch_to_detach, None, 16384, 1),
         ("earlier", earlier, env.initial_timeline, 0, 1),
     ]
 
@@ -1743,6 +1766,87 @@ def test_pageserver_compaction_detach_ancestor_smoke(neon_env_builder: NeonEnvBu
     log.info("Validating at workload end ...")
     workload_parent.validate(env.pageserver.id)
     workload_child.validate(env.pageserver.id)
+
+
+def test_timeline_detach_with_aux_files_with_detach_v1(
+    neon_env_builder: NeonEnvBuilder,
+):
+    """
+    Validate that "branches do not inherit their parent" is invariant over detach_ancestor.
+
+    Branches hide parent branch aux files etc by stopping lookup of non-inherited keyspace at the parent-child boundary.
+    We had a bug where detach_ancestor running on a child branch would copy aux files key range from child to parent,
+    thereby making parent aux files reappear.
+    """
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "gc_period": "1s",
+            "lsn_lease_length": "0s",
+        }
+    )
+
+    env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+
+    http = env.pageserver.http_client()
+
+    endpoint = env.endpoints.create_start("main", tenant_id=env.initial_tenant)
+    lsn0 = wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
+    endpoint.safe_psql(
+        "SELECT pg_create_logical_replication_slot('test_slot_parent_1', 'pgoutput')"
+    )
+    lsn1 = wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
+    endpoint.safe_psql(
+        "SELECT pg_create_logical_replication_slot('test_slot_parent_2', 'pgoutput')"
+    )
+    lsn2 = wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
+    assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn0).keys()) == set(
+        []
+    )
+    assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn1).keys()) == set(
+        ["pg_replslot/test_slot_parent_1/state"]
+    )
+    assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn2).keys()) == set(
+        ["pg_replslot/test_slot_parent_1/state", "pg_replslot/test_slot_parent_2/state"]
+    )
+
+    # Restore at LSN1
+    branch_timeline_id = env.create_branch("restore", env.initial_tenant, "main", lsn1)
+    endpoint2 = env.endpoints.create_start("restore", tenant_id=env.initial_tenant)
+    assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn1).keys()) == set([])
+
+    # Add a new slot file to the restore branch (This won't happen in reality because cplane immediately detaches the branch on restore,
+    # but we want to ensure that aux files on the detached branch are NOT inherited during ancestor detach. We could change the behavior
+    # in the future.
+    # TL;DR we should NEVER automatically detach a branch as a background optimization for those tenants that already used the restore
+    # feature before branch detach was introduced because it will clean up the aux files and stop logical replication.
+    endpoint2.safe_psql(
+        "SELECT pg_create_logical_replication_slot('test_slot_restore', 'pgoutput')"
+    )
+    lsn3 = wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, branch_timeline_id)
+    assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn1).keys()) == set([])
+    assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn3).keys()) == set(
+        ["pg_replslot/test_slot_restore/state"]
+    )
+
+    print("lsn0=", lsn0)
+    print("lsn1=", lsn1)
+    print("lsn2=", lsn2)
+    print("lsn3=", lsn3)
+    # Detach the restore branch so that main doesn't have any child branches.
+    all_reparented = http.detach_ancestor(
+        env.initial_tenant, branch_timeline_id, detach_behavior="v1"
+    )
+    assert all_reparented == set([])
+
+    # We need to ensure all safekeeper data are ingested before checking aux files: the API does not wait for LSN.
+    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, branch_timeline_id)
+    assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn2).keys()) == set(
+        ["pg_replslot/test_slot_parent_1/state", "pg_replslot/test_slot_parent_2/state"]
+    ), "main branch unaffected"
+    assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn3).keys()) == set(
+        ["pg_replslot/test_slot_restore/state"]
+    )
+    assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn1).keys()) == set([])
 
 
 # TODO:

@@ -115,13 +115,17 @@ impl Client {
             "{}/v1/tenant/{}/timeline/{}",
             self.mgmt_api_endpoint, tenant_id, timeline_id
         );
-        let resp = self.request(Method::DELETE, &uri, ()).await?;
+        let resp = self
+            .request_maybe_body(Method::DELETE, &uri, None::<()>)
+            .await?;
         resp.json().await.map_err(Error::ReceiveBody)
     }
 
-    pub async fn delete_tenant(&self, tenant_id: TenantId) -> Result<models::TimelineDeleteResult> {
+    pub async fn delete_tenant(&self, tenant_id: TenantId) -> Result<models::TenantDeleteResult> {
         let uri = format!("{}/v1/tenant/{}", self.mgmt_api_endpoint, tenant_id);
-        let resp = self.request(Method::DELETE, &uri, ()).await?;
+        let resp = self
+            .request_maybe_body(Method::DELETE, &uri, None::<()>)
+            .await?;
         resp.json().await.map_err(Error::ReceiveBody)
     }
 
@@ -198,6 +202,16 @@ impl Client {
         uri: U,
         body: B,
     ) -> Result<reqwest::Response> {
+        self.request_maybe_body(method, uri, Some(body)).await
+    }
+
+    /// Send the request and check that the status code is good, with an optional body.
+    async fn request_maybe_body<B: serde::Serialize, U: reqwest::IntoUrl>(
+        &self,
+        method: Method,
+        uri: U,
+        body: Option<B>,
+    ) -> Result<reqwest::Response> {
         let res = self.request_noerror(method, uri, body).await?;
         let response = res.error_from_body().await?;
         Ok(response)
@@ -208,12 +222,15 @@ impl Client {
         &self,
         method: Method,
         uri: U,
-        body: B,
+        body: Option<B>,
     ) -> Result<reqwest::Response> {
         let mut req = self.client.request(method, uri);
         if let Some(value) = &self.authorization_header {
             req = req.header(reqwest::header::AUTHORIZATION, value.get_contents())
         }
-        req.json(&body).send().await.map_err(Error::ReceiveBody)
+        if let Some(body) = body {
+            req = req.json(&body);
+        }
+        req.send().await.map_err(Error::ReceiveBody)
     }
 }

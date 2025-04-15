@@ -535,6 +535,11 @@ impl PageServerNode {
                 .map(|x| x.parse::<bool>())
                 .transpose()
                 .context("Failed to parse 'gc_compaction_enabled' as bool")?,
+            gc_compaction_verification: settings
+                .remove("gc_compaction_verification")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'gc_compaction_verification' as bool")?,
             gc_compaction_initial_threshold_kb: settings
                 .remove("gc_compaction_initial_threshold_kb")
                 .map(|x| x.parse::<u64>())
@@ -545,6 +550,11 @@ impl PageServerNode {
                 .map(|x| x.parse::<u64>())
                 .transpose()
                 .context("Failed to parse 'gc_compaction_ratio_percent' as integer")?,
+            sampling_ratio: settings
+                .remove("sampling_ratio")
+                .map(serde_json::from_str)
+                .transpose()
+                .context("Falied to parse 'sampling_ratio'")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")

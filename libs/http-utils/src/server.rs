@@ -4,6 +4,8 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use hyper0::Body;
 use hyper0::server::conn::Http;
+use metrics::{IntCounterVec, register_int_counter_vec};
+use once_cell::sync::Lazy;
 use routerify::{RequestService, RequestServiceBuilder};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::TlsAcceptor;
@@ -25,6 +27,24 @@ pub struct Server {
     listener: tokio::net::TcpListener,
     tls_acceptor: Option<TlsAcceptor>,
 }
+
+static CONNECTION_STARTED_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "http_server_connection_started_total",
+        "Number of established http/https connections",
+        &["scheme"]
+    )
+    .expect("failed to define a metric")
+});
+
+static CONNECTION_ERROR_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "http_server_connection_errors_total",
+        "Number of occured connection errors by type",
+        &["type"]
+    )
+    .expect("failed to define a metric")
+});
 
 impl Server {
     pub fn new(
@@ -60,6 +80,15 @@ impl Server {
             false
         }
 
+        let tcp_error_cnt = CONNECTION_ERROR_COUNT.with_label_values(&["tcp"]);
+        let tls_error_cnt = CONNECTION_ERROR_COUNT.with_label_values(&["tls"]);
+        let http_error_cnt = CONNECTION_ERROR_COUNT.with_label_values(&["http"]);
+        let https_error_cnt = CONNECTION_ERROR_COUNT.with_label_values(&["https"]);
+        let panic_error_cnt = CONNECTION_ERROR_COUNT.with_label_values(&["panic"]);
+
+        let http_connection_cnt = CONNECTION_STARTED_COUNT.with_label_values(&["http"]);
+        let https_connection_cnt = CONNECTION_STARTED_COUNT.with_label_values(&["https"]);
+
         let mut connections = FuturesUnordered::new();
         loop {
             tokio::select! {
@@ -67,6 +96,7 @@ impl Server {
                     let (tcp_stream, remote_addr) = match stream {
                         Ok(stream) => stream,
                         Err(err) => {
+                            tcp_error_cnt.inc();
                             if !suppress_io_error(&err) {
                                 info!("Failed to accept TCP connection: {err:#}");
                             }
@@ -78,11 +108,18 @@ impl Server {
                     let tls_acceptor = self.tls_acceptor.clone();
                     let cancel = cancel.clone();
 
+                    let tls_error_cnt = tls_error_cnt.clone();
+                    let http_error_cnt = http_error_cnt.clone();
+                    let https_error_cnt = https_error_cnt.clone();
+                    let http_connection_cnt = http_connection_cnt.clone();
+                    let https_connection_cnt = https_connection_cnt.clone();
+
                     connections.push(tokio::spawn(
                         async move {
                             match tls_acceptor {
                                 Some(tls_acceptor) => {
                                     // Handle HTTPS connection.
+                                    https_connection_cnt.inc();
                                     let tls_stream = tokio::select! {
                                         tls_stream = tls_acceptor.accept(tcp_stream) => tls_stream,
                                         _ = cancel.cancelled() => return,
@@ -90,23 +127,27 @@ impl Server {
                                     let tls_stream = match tls_stream {
                                         Ok(tls_stream) => tls_stream,
                                         Err(err) => {
+                                            tls_error_cnt.inc();
                                             if !suppress_io_error(&err) {
-                                                info!("Failed to accept TLS connection: {err:#}");
+                                                info!(%remote_addr, "Failed to accept TLS connection: {err:#}");
                                             }
                                             return;
                                         }
                                     };
                                     if let Err(err) = Self::serve_connection(tls_stream, service, cancel).await {
+                                        https_error_cnt.inc();
                                         if !suppress_hyper_error(&err) {
-                                            info!("Failed to serve HTTPS connection: {err:#}");
+                                            info!(%remote_addr, "Failed to serve HTTPS connection: {err:#}");
                                         }
                                     }
                                 }
                                 None => {
                                     // Handle HTTP connection.
+                                    http_connection_cnt.inc();
                                     if let Err(err) = Self::serve_connection(tcp_stream, service, cancel).await {
+                                        http_error_cnt.inc();
                                         if !suppress_hyper_error(&err) {
-                                            info!("Failed to serve HTTP connection: {err:#}");
+                                            info!(%remote_addr, "Failed to serve HTTP connection: {err:#}");
                                         }
                                     }
                                 }
@@ -115,6 +156,7 @@ impl Server {
                  }
                 Some(conn) = connections.next() => {
                     if let Err(err) = conn {
+                        panic_error_cnt.inc();
                         error!("Connection panicked: {err:#}");
                     }
                 }
@@ -122,6 +164,7 @@ impl Server {
                     // Wait for graceful shutdown of all connections.
                     while let Some(conn) = connections.next().await {
                         if let Err(err) = conn {
+                            panic_error_cnt.inc();
                             error!("Connection panicked: {err:#}");
                         }
                     }

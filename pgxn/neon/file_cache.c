@@ -1,14 +1,10 @@
-/*
+/*-------------------------------------------------------------------------
  *
  * file_cache.c
  *
  *
  * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
- *
- *
- * IDENTIFICATION
- *	  pgxn/neon/file_cache.c
  *
  *-------------------------------------------------------------------------
  */
@@ -25,7 +21,6 @@
 #include "access/xlog.h"
 #include "funcapi.h"
 #include "miscadmin.h"
-#include "pagestore_client.h"
 #include "common/hashfn.h"
 #include "pgstat.h"
 #include "port/pg_iovec.h"
@@ -47,6 +42,7 @@
 
 #include "hll.h"
 #include "bitmap.h"
+#include "file_cache.h"
 #include "neon.h"
 #include "neon_lwlsncache.h"
 #include "neon_perf_counters.h"
@@ -647,18 +643,25 @@ lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	return found;
 }
 
+#if PG_MAJORVERSION_NUM >= 16
+static PGIOAlignedBlock voidblock = {0};
+#else
+static PGAlignedBlock voidblock = {0};
+#endif
+#define SCRIBBLEPAGE (&voidblock.data)
+
 /*
  * Try to read pages from local cache.
  * Returns the number of pages read from the local cache, and sets bits in
- * 'read' for the pages which were read. This may scribble over buffers not
- * marked in 'read', so be careful with operation ordering.
+ * 'mask' for the pages which were read. This may scribble over buffers not
+ * marked in 'mask', so be careful with operation ordering.
  *
  * In case of error local file cache is disabled (lfc->limit is set to zero),
- * and -1 is returned. Note that 'read' and the buffers may be touched and in
- * an otherwise invalid state.
+ * and -1 is returned.
  *
- * If the mask argument is supplied, bits will be set at the offsets of pages
- * that were present and read from the LFC.
+ * If the mask argument is supplied, we'll only try to read those pages which
+ * don't have their bits set on entry. At exit, pages which were successfully
+ * read from LFC will have their bits set.
  */
 int
 lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
@@ -693,23 +696,43 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	while (nblocks > 0)
 	{
 		struct iovec iov[PG_IOV_MAX];
-		int		chunk_offs = blkno & (BLOCKS_PER_CHUNK - 1);
+		int8	chunk_mask[BLOCKS_PER_CHUNK / 8] = {0};
+		int		chunk_offs = (blkno & (BLOCKS_PER_CHUNK - 1));
 		int		blocks_in_chunk = Min(nblocks, BLOCKS_PER_CHUNK - (blkno % BLOCKS_PER_CHUNK));
 		int		iteration_hits = 0;
 		int		iteration_misses = 0;
 		uint64	io_time_us = 0;
-		int     n_blocks_to_read = 0;
+		int		n_blocks_to_read = 0;
+		int		iov_last_used = 0;
+		int		first_block_in_chunk_read = -1;
 		ConditionVariable* cv;
 
 		Assert(blocks_in_chunk > 0);
 
 		for (int i = 0; i < blocks_in_chunk; i++)
 		{
-			n_blocks_to_read += (BITMAP_ISSET(mask, buf_offset + i) != 0);
-			iov[i].iov_base = buffers[buf_offset + i];
 			iov[i].iov_len = BLCKSZ;
-			BITMAP_CLR(mask,  buf_offset + i);
+			/* mask not set = we must do work */
+			if (!BITMAP_ISSET(mask, buf_offset + i))
+			{
+				iov[i].iov_base = buffers[buf_offset + i];
+				n_blocks_to_read++;
+				iov_last_used = i + 1;
+
+				if (first_block_in_chunk_read == -1)
+				{
+					first_block_in_chunk_read = i;
+				}
+			}
+			/* mask set = we must do no work */
+			else
+			{
+				/* don't scribble on pages we weren't requested to write to */
+				iov[i].iov_base = SCRIBBLEPAGE;
+			}
 		}
+
+		/* shortcut IO */
 		if (n_blocks_to_read == 0)
 		{
 			buf_offset += blocks_in_chunk;
@@ -717,6 +740,12 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			blkno += blocks_in_chunk;
 			continue;
 		}
+
+		/*
+		 * The effective iov size must be >= the number of blocks we're about
+		 * to read.
+		 */
+		Assert(iov_last_used - first_block_in_chunk_read >= n_blocks_to_read);
 
 		tag.blockNum = blkno - chunk_offs;
 		hash = get_hash_value(lfc_hash, &tag);
@@ -762,10 +791,15 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		generation = lfc_ctl->generation;
 		entry_offset = entry->offset;
 
-		for (int i = 0; i < blocks_in_chunk; i++)
+		for (int i = first_block_in_chunk_read; i < iov_last_used; i++)
 		{
 			FileCacheBlockState state = UNAVAILABLE;
 			bool sleeping = false;
+
+			/* no need to work on something we're not interested in */
+			if (BITMAP_ISSET(mask, buf_offset + i))
+				continue;
+
 			while (lfc_ctl->generation == generation)
 			{
 				state = GET_STATE(entry, chunk_offs + i);
@@ -789,7 +823,7 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			}
 			if (state == AVAILABLE)
 			{
-				BITMAP_SET(mask, buf_offset + i);
+				BITMAP_SET(chunk_mask, i);
 				iteration_hits++;
 			}
 			else
@@ -801,15 +835,33 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 		if (iteration_hits != 0)
 		{
+			/* chunk offset (# of pages) into the LFC file */
+			off_t	first_read_offset = (off_t) entry_offset * BLOCKS_PER_CHUNK;
+			int		nwrite = iov_last_used - first_block_in_chunk_read;
+			/* offset of first IOV */
+			first_read_offset += chunk_offs + first_block_in_chunk_read;
+
 			pgstat_report_wait_start(WAIT_EVENT_NEON_LFC_READ);
-			rc = preadv(lfc_desc, iov, blocks_in_chunk,
-						((off_t) entry_offset * BLOCKS_PER_CHUNK + chunk_offs) * BLCKSZ);
+
+			/* Read only the blocks we're interested in, limiting */
+			rc = preadv(lfc_desc, &iov[first_block_in_chunk_read],
+						nwrite, first_read_offset * BLCKSZ);
 			pgstat_report_wait_end();
 
-			if (rc != (BLCKSZ * blocks_in_chunk))
+			if (rc != (BLCKSZ * nwrite))
 			{
 				lfc_disable("read");
 				return -1;
+			}
+
+			/*
+			 * We successfully read the pages we know were valid when we
+			 * started reading; now mark those pages as read
+			 */
+			for (int i = first_block_in_chunk_read; i < iov_last_used; i++)
+			{
+				if (BITMAP_ISSET(chunk_mask, i))
+					BITMAP_SET(mask, buf_offset + i);
 			}
 		}
 
@@ -1511,8 +1563,12 @@ local_cache_pages(PG_FUNCTION_ARGS)
 				hash_seq_init(&status, lfc_hash);
 				while ((entry = hash_seq_search(&status)) != NULL)
 				{
-					for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
-						n_pages += GET_STATE(entry, i) == AVAILABLE;
+					/* Skip hole tags */
+					if (NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key)) != 0)
+					{
+						for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
+							n_pages += GET_STATE(entry, i) == AVAILABLE;
+					}
 				}
 			}
 		}
@@ -1540,16 +1596,19 @@ local_cache_pages(PG_FUNCTION_ARGS)
 			{
 				for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
 				{
-					if (GET_STATE(entry, i) == AVAILABLE)
+					if (NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key)) != 0)
 					{
-						fctx->record[n].pageoffs = entry->offset * BLOCKS_PER_CHUNK + i;
-						fctx->record[n].relfilenode = NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key));
-						fctx->record[n].reltablespace = NInfoGetSpcOid(BufTagGetNRelFileInfo(entry->key));
-						fctx->record[n].reldatabase = NInfoGetDbOid(BufTagGetNRelFileInfo(entry->key));
-						fctx->record[n].forknum = entry->key.forkNum;
-						fctx->record[n].blocknum = entry->key.blockNum + i;
-						fctx->record[n].accesscount = entry->access_count;
-						n += 1;
+						if (GET_STATE(entry, i) == AVAILABLE)
+						{
+							fctx->record[n].pageoffs = entry->offset * BLOCKS_PER_CHUNK + i;
+							fctx->record[n].relfilenode = NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key));
+							fctx->record[n].reltablespace = NInfoGetSpcOid(BufTagGetNRelFileInfo(entry->key));
+							fctx->record[n].reldatabase = NInfoGetDbOid(BufTagGetNRelFileInfo(entry->key));
+							fctx->record[n].forknum = entry->key.forkNum;
+							fctx->record[n].blocknum = entry->key.blockNum + i;
+							fctx->record[n].accesscount = entry->access_count;
+							n += 1;
+						}
 					}
 				}
 			}

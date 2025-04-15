@@ -43,7 +43,7 @@ def single_timeline(
         f"template tenant is template_tenant={template_tenant} template_timeline={template_timeline}"
     )
 
-    log.info("detach template tenant form pageserver")
+    log.info("detach template tenant from pageserver")
     env.pageserver.tenant_detach(template_tenant)
 
     log.info(f"duplicating template tenant {ncopies} times in remote storage")
@@ -67,7 +67,7 @@ def single_timeline(
     def attach(tenant):
         env.pageserver.tenant_attach(
             tenant,
-            config=template_config.copy(),
+            config=template_config,
             generation=100,
             override_storage_controller_generation=True,
         )

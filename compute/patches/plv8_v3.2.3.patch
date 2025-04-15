@@ -1,0 +1,13 @@
+diff --git a/plv8.cc b/plv8.cc
+index edfa2aa..623e7f2 100644
+--- a/plv8.cc
++++ b/plv8.cc
+@@ -385,7 +385,7 @@ _PG_init(void)
+                                    NULL,
+                                    &plv8_v8_flags,
+                                    NULL,
+-                                   PGC_USERSET, 0,
++                                   PGC_SUSET, 0,
+ #if PG_VERSION_NUM >= 90100
+                                    NULL,
+ #endif

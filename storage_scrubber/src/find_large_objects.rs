@@ -18,7 +18,7 @@ enum LargeObjectKind {
 
 impl LargeObjectKind {
     fn from_key(key: &str) -> Self {
-        let fname = key.split('/').last().unwrap();
+        let fname = key.split('/').next_back().unwrap();
 
         let Ok((layer_name, _generation)) = parse_layer_object_name(fname) else {
             return LargeObjectKind::Other;

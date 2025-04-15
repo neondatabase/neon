@@ -306,36 +306,6 @@ paths:
               schema:
                 $ref: "#/components/schemas/GenericError"
 
-  /configure_telemetry:
-    post:
-      tags:
-        - Configure
-      summary: Configure rsyslog
-      description: |
-        This API endpoint configures rsyslog to forward Postgres logs
-        to a specified otel collector.
-      operationId: configureTelemetry
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                logs_export_host:
-                  type: string
-                  description: |
-                    Hostname and the port of the otel collector. Leave empty to disable logs forwarding.
-                    Example: config-shy-breeze-123-collector-monitoring.neon-telemetry.svc.cluster.local:54526
-      responses:
-        204:
-          description: "Telemetry configured successfully"
-        500:
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/GenericError"
-
 components:
   securitySchemes:
     JWT:

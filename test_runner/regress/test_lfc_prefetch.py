@@ -100,5 +100,5 @@ def test_lfc_prefetch(neon_simple_env: NeonEnv):
     prefetch_expired = cur.fetchall()[0][0][0]["Plan"]["Prefetch Expired Requests"]
     log.info(f"Unused prefetches: {prefetch_expired}")
 
-    # No redundant prefethc requrests if prefetch results are stored in LFC
+    # No redundant prefetch requests if prefetch results are stored in LFC
     assert prefetch_expired == 0

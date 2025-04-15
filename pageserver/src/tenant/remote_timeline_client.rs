@@ -642,6 +642,7 @@ impl RemoteTimelineClient {
             cancel,
         )
         .measure_remote_op(
+            Option::<TaskKind>::None,
             RemoteOpFileKind::Index,
             RemoteOpKind::Download,
             Arc::clone(&self.metrics),
@@ -739,6 +740,7 @@ impl RemoteTimelineClient {
                 ctx,
             )
             .measure_remote_op(
+                Some(ctx.task_kind()),
                 RemoteOpFileKind::Layer,
                 RemoteOpKind::Download,
                 Arc::clone(&self.metrics),
@@ -1968,9 +1970,7 @@ impl RemoteTimelineClient {
     /// Pick next tasks from the queue, and start as many of them as possible without violating
     /// the ordering constraints.
     ///
-    /// TODO: consider limiting the number of in-progress tasks, beyond what remote_storage does.
-    /// This can launch an unbounded number of queued tasks. `UploadQueue::next_ready()` also has
-    /// worst-case quadratic cost in the number of tasks, and may struggle beyond 10,000 tasks.
+    /// The number of inprogress tasks is limited by `Self::inprogress_tasks`, see `next_ready`.
     fn launch_queued_tasks(self: &Arc<Self>, upload_queue: &mut UploadQueueInitialized) {
         while let Some((mut next_op, coalesced_ops)) = upload_queue.next_ready() {
             debug!("starting op: {next_op}");
@@ -2177,6 +2177,7 @@ impl RemoteTimelineClient {
                         &self.cancel,
                     )
                     .measure_remote_op(
+                        Some(TaskKind::RemoteUploadTask),
                         RemoteOpFileKind::Layer,
                         RemoteOpKind::Upload,
                         Arc::clone(&self.metrics),
@@ -2193,6 +2194,7 @@ impl RemoteTimelineClient {
                         &self.cancel,
                     )
                     .measure_remote_op(
+                        Some(TaskKind::RemoteUploadTask),
                         RemoteOpFileKind::Index,
                         RemoteOpKind::Upload,
                         Arc::clone(&self.metrics),
@@ -2218,6 +2220,11 @@ impl RemoteTimelineClient {
                     }
                     res
                 }
+                // TODO: this should wait for the deletion to be executed by the deletion queue.
+                // Otherwise, the deletion may race with an upload and wrongfully delete a newer
+                // file. Some of the above logic attempts to work around this, it should be replaced
+                // by the upload queue ordering guarantees (see `can_bypass`). See:
+                // <https://github.com/neondatabase/neon/issues/10283>.
                 UploadOp::Delete(delete) => {
                     if self.config.read().unwrap().block_deletions {
                         let mut queue_locked = self.upload_queue.lock().unwrap();

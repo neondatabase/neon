@@ -3,15 +3,13 @@
  * neon.h
  *	  Functions used in the initialization of this extension.
  *
- * IDENTIFICATION
- *	 contrib/neon/neon.h
- *
  *-------------------------------------------------------------------------
  */
 
 #ifndef NEON_H
 #define NEON_H
-#include "access/xlogreader.h"
+
+#include "access/xlogdefs.h"
 #include "utils/wait_event.h"
 
 /* GUCs */
@@ -49,17 +47,26 @@ extern uint32		WAIT_EVENT_NEON_WAL_DL;
 #define WAIT_EVENT_NEON_WAL_DL			WAIT_EVENT_WAL_READ
 #endif
 
+
+#define NEON_TAG "[NEON_SMGR] "
+#define neon_log(tag, fmt, ...) ereport(tag,                                  \
+										(errmsg(NEON_TAG fmt, ##__VA_ARGS__), \
+										 errhidestmt(true), errhidecontext(true), errposition(0), internalerrposition(0)))
+#define neon_shard_log(shard_no, tag, fmt, ...) ereport(tag,	\
+														(errmsg(NEON_TAG "[shard %d] " fmt, shard_no, ##__VA_ARGS__), \
+														 errhidestmt(true), errhidecontext(true), errposition(0), internalerrposition(0)))
+
+
 extern void pg_init_libpagestore(void);
 extern void pg_init_walproposer(void);
-extern void pagestore_smgr_init(void);
 
 extern uint64 BackpressureThrottlingTime(void);
 extern void SetNeonCurrentClusterSize(uint64 size);
 extern uint64 GetNeonCurrentClusterSize(void);
 extern void replication_feedback_get_lsns(XLogRecPtr *writeLsn, XLogRecPtr *flushLsn, XLogRecPtr *applyLsn);
 
-extern void PGDLLEXPORT WalProposerSync(int argc, char *argv[]);
-extern void PGDLLEXPORT WalProposerMain(Datum main_arg);
-PGDLLEXPORT void LogicalSlotsMonitorMain(Datum main_arg);
+extern PGDLLEXPORT void WalProposerSync(int argc, char *argv[]);
+extern PGDLLEXPORT void WalProposerMain(Datum main_arg);
+extern PGDLLEXPORT void LogicalSlotsMonitorMain(Datum main_arg);
 
 #endif							/* NEON_H */

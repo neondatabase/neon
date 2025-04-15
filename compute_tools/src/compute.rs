@@ -11,7 +11,7 @@ use std::{env, fs};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
-use compute_api::responses::{ComputeCtlConfig, ComputeMetrics, ComputeStatus};
+use compute_api::responses::{ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus};
 use compute_api::spec::{
     ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PgIdent,
 };
@@ -20,6 +20,7 @@ use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
+use once_cell::sync::Lazy;
 use postgres;
 use postgres::NoTls;
 use postgres::error::SqlState;
@@ -35,6 +36,7 @@ use crate::disk_quota::set_disk_quota;
 use crate::installed_extensions::get_installed_extensions;
 use crate::logger::startup_context_from_env;
 use crate::lsn_lease::launch_lsn_lease_bg_task_for_static;
+use crate::metrics::COMPUTE_CTL_UP;
 use crate::monitor::launch_monitor;
 use crate::pg_helpers::*;
 use crate::rsyslog::{
@@ -49,6 +51,17 @@ use crate::{config, extension_server, local_proxy};
 
 pub static SYNC_SAFEKEEPERS_PID: AtomicU32 = AtomicU32::new(0);
 pub static PG_PID: AtomicU32 = AtomicU32::new(0);
+// This is an arbitrary build tag. Fine as a default / for testing purposes
+// in-case of not-set environment var
+const BUILD_TAG_DEFAULT: &str = "latest";
+/// Build tag/version of the compute node binaries/image. It's tricky and ugly
+/// to pass it everywhere as a part of `ComputeNodeParams`, so we use a
+/// global static variable.
+pub static BUILD_TAG: Lazy<String> = Lazy::new(|| {
+    option_env!("BUILD_TAG")
+        .unwrap_or(BUILD_TAG_DEFAULT)
+        .to_string()
+});
 
 /// Static configuration params that don't change after startup. These mostly
 /// come from the CLI args, or are derived from them.
@@ -72,7 +85,6 @@ pub struct ComputeNodeParams {
     pub pgdata: String,
     pub pgbin: String,
     pub pgversion: String,
-    pub build_tag: String,
 
     /// The port that the compute's external HTTP server listens on
     pub external_http_port: u16,
@@ -81,20 +93,6 @@ pub struct ComputeNodeParams {
 
     /// the address of extension storage proxy gateway
     pub ext_remote_storage: Option<String>,
-
-    /// We should only allow live re- / configuration of the compute node if
-    /// it uses 'pull model', i.e. it can go to control-plane and fetch
-    /// the latest configuration. Otherwise, there could be a case:
-    /// - we start compute with some spec provided as argument
-    /// - we push new spec and it does reconfiguration
-    /// - but then something happens and compute pod / VM is destroyed,
-    ///   so k8s controller starts it again with the **old** spec
-    ///
-    /// and the same for empty computes:
-    /// - we started compute without any spec
-    /// - we push spec and it does configuration
-    /// - but then it is restarted without any spec again
-    pub live_config_allowed: bool,
 }
 
 /// Compute node info shared across several `compute_ctl` threads.
@@ -173,6 +171,11 @@ impl ComputeState {
         info!("Changing compute status from {} to {}", prev, status);
         self.status = status;
         state_changed.notify_all();
+
+        COMPUTE_CTL_UP.reset();
+        COMPUTE_CTL_UP
+            .with_label_values(&[&BUILD_TAG, status.to_string().as_str()])
+            .set(1);
     }
 
     pub fn set_failed_status(&mut self, err: anyhow::Error, state_changed: &Condvar) {
@@ -300,11 +303,7 @@ struct StartVmMonitorResult {
 }
 
 impl ComputeNode {
-    pub fn new(
-        params: ComputeNodeParams,
-        cli_spec: Option<ComputeSpec>,
-        compute_ctl_config: ComputeCtlConfig,
-    ) -> Result<Self> {
+    pub fn new(params: ComputeNodeParams, config: ComputeConfig) -> Result<Self> {
         let connstr = params.connstr.as_str();
         let conn_conf = postgres::config::Config::from_str(connstr)
             .context("cannot build postgres config from connstr")?;
@@ -312,8 +311,8 @@ impl ComputeNode {
             .context("cannot build tokio postgres config from connstr")?;
 
         let mut new_state = ComputeState::new();
-        if let Some(cli_spec) = cli_spec {
-            let pspec = ParsedSpec::try_from(cli_spec).map_err(|msg| anyhow::anyhow!(msg))?;
+        if let Some(spec) = config.spec {
+            let pspec = ParsedSpec::try_from(spec).map_err(|msg| anyhow::anyhow!(msg))?;
             new_state.pspec = Some(pspec);
         }
 
@@ -324,7 +323,7 @@ impl ComputeNode {
             state: Mutex::new(new_state),
             state_changed: Condvar::new(),
             ext_download_progress: RwLock::new(HashMap::new()),
-            compute_ctl_config,
+            compute_ctl_config: config.compute_ctl_config,
         })
     }
 
@@ -342,6 +341,14 @@ impl ComputeNode {
         if cli_spec.is_none() {
             this.prewarm_postgres()?;
         }
+
+        // Set the up metric with Empty status before starting the HTTP server.
+        // That way on the first metric scrape, an external observer will see us
+        // as 'up' and 'empty' (unless the compute was started with a spec or
+        // already configured by control plane).
+        COMPUTE_CTL_UP
+            .with_label_values(&[&BUILD_TAG, ComputeStatus::Empty.to_string().as_str()])
+            .set(1);
 
         // Launch the external HTTP server first, so that we can serve control plane
         // requests while configuration is still in progress.
@@ -512,11 +519,14 @@ impl ComputeNode {
 
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
         info!(
-            "starting compute for project {}, operation {}, tenant {}, timeline {}, features {:?}, spec.remote_extensions {:?}",
+            "starting compute for project {}, operation {}, tenant {}, timeline {}, project {}, branch {}, endpoint {}, features {:?}, spec.remote_extensions {:?}",
             pspec.spec.cluster.cluster_id.as_deref().unwrap_or("None"),
             pspec.spec.operation_uuid.as_deref().unwrap_or("None"),
             pspec.tenant_id,
             pspec.timeline_id,
+            pspec.spec.project_id.as_deref().unwrap_or("None"),
+            pspec.spec.branch_id.as_deref().unwrap_or("None"),
+            pspec.spec.endpoint_id.as_deref().unwrap_or("None"),
             pspec.spec.features,
             pspec.spec.remote_extensions,
         );
@@ -620,31 +630,28 @@ impl ComputeNode {
             });
         }
 
-        // Configure and start rsyslog for HIPAA if necessary
-        if let ComputeAudit::Hipaa = pspec.spec.audit_log_level {
-            let remote_endpoint = std::env::var("AUDIT_LOGGING_ENDPOINT").unwrap_or("".to_string());
-            if remote_endpoint.is_empty() {
-                anyhow::bail!("AUDIT_LOGGING_ENDPOINT is empty");
+        // Configure and start rsyslog for compliance audit logging
+        match pspec.spec.audit_log_level {
+            ComputeAudit::Hipaa | ComputeAudit::Extended | ComputeAudit::Full => {
+                let remote_endpoint =
+                    std::env::var("AUDIT_LOGGING_ENDPOINT").unwrap_or("".to_string());
+                if remote_endpoint.is_empty() {
+                    anyhow::bail!("AUDIT_LOGGING_ENDPOINT is empty");
+                }
+
+                let log_directory_path = Path::new(&self.params.pgdata).join("log");
+                let log_directory_path = log_directory_path.to_string_lossy().to_string();
+                configure_audit_rsyslog(log_directory_path.clone(), "hipaa", &remote_endpoint)?;
+
+                // Launch a background task to clean up the audit logs
+                launch_pgaudit_gc(log_directory_path);
             }
-
-            let log_directory_path = Path::new(&self.params.pgdata).join("log");
-            let log_directory_path = log_directory_path.to_string_lossy().to_string();
-            configure_audit_rsyslog(log_directory_path.clone(), "hipaa", &remote_endpoint)?;
-
-            // Launch a background task to clean up the audit logs
-            launch_pgaudit_gc(log_directory_path);
+            _ => {}
         }
 
         // Configure and start rsyslog for Postgres logs export
-        if self.has_feature(ComputeFeature::PostgresLogsExport) {
-            if let Some(ref project_id) = pspec.spec.cluster.cluster_id {
-                let host = PostgresLogsRsyslogConfig::default_host(project_id);
-                let conf = PostgresLogsRsyslogConfig::new(Some(&host));
-                configure_postgres_logs_export(conf)?;
-            } else {
-                warn!("not configuring rsyslog for Postgres logs export: project ID is missing")
-            }
-        }
+        let conf = PostgresLogsRsyslogConfig::new(pspec.spec.logs_export_host.as_deref());
+        configure_postgres_logs_export(conf)?;
 
         // Launch remaining service threads
         let _monitor_handle = launch_monitor(self);
@@ -1548,6 +1555,10 @@ impl ComputeNode {
             });
         }
 
+        // Reconfigure rsyslog for Postgres logs export
+        let conf = PostgresLogsRsyslogConfig::new(spec.logs_export_host.as_deref());
+        configure_postgres_logs_export(conf)?;
+
         // Write new config
         let pgdata_path = Path::new(&self.params.pgdata);
         config::write_postgres_conf(
@@ -2032,12 +2043,8 @@ LIMIT 100",
 
         let mut download_tasks = Vec::new();
         for library in &libs_vec {
-            let (ext_name, ext_path) = remote_extensions.get_ext(
-                library,
-                true,
-                &self.params.build_tag,
-                &self.params.pgversion,
-            )?;
+            let (ext_name, ext_path) =
+                remote_extensions.get_ext(library, true, &BUILD_TAG, &self.params.pgversion)?;
             download_tasks.push(self.download_extension(ext_name, ext_path));
         }
         let results = join_all(download_tasks).await;

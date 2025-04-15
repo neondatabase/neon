@@ -37,8 +37,8 @@ impl<const A: usize> RawAlignedBuffer<ConstAlign<A>> {
     /// * `align` must be a power of two,
     ///
     /// * `capacity`, when rounded up to the nearest multiple of `align`,
-    ///    must not overflow isize (i.e., the rounded value must be
-    ///    less than or equal to `isize::MAX`).
+    ///   must not overflow isize (i.e., the rounded value must be
+    ///   less than or equal to `isize::MAX`).
     pub fn with_capacity(capacity: usize) -> Self {
         let align = ConstAlign::<A>;
         let layout = Layout::from_size_align(capacity, align.align()).expect("Invalid layout");

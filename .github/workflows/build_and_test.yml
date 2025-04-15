@@ -89,8 +89,8 @@ jobs:
 
   check-codestyle-python:
     needs: [ meta, check-permissions, build-build-tools-image ]
-    # No need to run on `main` because we this in the merge queue
-    if: ${{ needs.meta.outputs.run-kind == 'pr' }}
+    # No need to run on `main` because we this in the merge queue. We do need to run this in `.*-rc-pr` because of hotfixes.
+    if: ${{ contains(fromJSON('["pr", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     uses: ./.github/workflows/_check-codestyle-python.yml
     with:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
@@ -98,7 +98,8 @@ jobs:
 
   check-codestyle-jsonnet:
     needs: [ meta, check-permissions, build-build-tools-image ]
-    if: ${{ contains(fromJSON('["pr", "push-main"]'), needs.meta.outputs.run-kind) }}
+    # We do need to run this in `.*-rc-pr` because of hotfixes.
+    if: ${{ contains(fromJSON('["pr", "push-main", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     runs-on: [ self-hosted, small ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
@@ -181,8 +182,8 @@ jobs:
 
   check-codestyle-rust:
     needs: [ meta, check-permissions, build-build-tools-image ]
-    # No need to run on `main` because we this in the merge queue
-    if: ${{ needs.meta.outputs.run-kind == 'pr' }}
+    # No need to run on `main` because we this in the merge queue. We do need to run this in `.*-rc-pr` because of hotfixes.
+    if: ${{ contains(fromJSON('["pr", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     uses: ./.github/workflows/_check-codestyle-rust.yml
     with:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
@@ -191,7 +192,8 @@ jobs:
 
   check-dependencies-rust:
     needs: [ meta, files-changed, build-build-tools-image ]
-    if: ${{ needs.files-changed.outputs.check-rust-dependencies == 'true' && needs.meta.outputs.run-kind == 'pr' }}
+    # No need to run on `main` because we this in the merge queue. We do need to run this in `.*-rc-pr` because of hotfixes.
+    if: ${{ needs.files-changed.outputs.check-rust-dependencies == 'true' && contains(fromJSON('["pr", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     uses: ./.github/workflows/cargo-deny.yml
     with:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
@@ -199,7 +201,8 @@ jobs:
 
   build-and-test-locally:
     needs: [ meta, build-build-tools-image ]
-    if: ${{ contains(fromJSON('["pr", "push-main"]'), needs.meta.outputs.run-kind) }}
+    # We do need to run this in `.*-rc-pr` because of hotfixes.
+    if: ${{ contains(fromJSON('["pr", "push-main", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     strategy:
       fail-fast: false
       matrix:
@@ -281,7 +284,7 @@ jobs:
       statuses: write
       contents: write
       pull-requests: write
-    runs-on: [ self-hosted, small-metal ]
+    runs-on: [ self-hosted, unit-perf ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
@@ -977,7 +980,7 @@ jobs:
           TEST_EXTENSIONS_TAG: >-
             ${{
               contains(fromJSON('["storage-rc-pr", "proxy-rc-pr"]'), needs.meta.outputs.run-kind)
-              && 'latest'
+              && needs.meta.outputs.previous-compute-release
               || needs.meta.outputs.build-tag
             }}
           TEST_VERSION_ONLY: ${{ matrix.pg_version }}
@@ -1268,7 +1271,7 @@ jobs:
           exit 1
 
   deploy:
-    needs: [ check-permissions, push-neon-image-dev, push-compute-image-dev, push-neon-image-prod, push-compute-image-prod, meta, build-and-test-locally, trigger-custom-extensions-build-and-wait ]
+    needs: [ check-permissions, push-neon-image-dev, push-compute-image-dev, push-neon-image-prod, push-compute-image-prod, meta, trigger-custom-extensions-build-and-wait ]
     # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `push-neon-image-prod` and `push-compute-image-prod`
     if: ${{ contains(fromJSON('["push-main", "storage-release", "proxy-release", "compute-release"]'), needs.meta.outputs.run-kind) && !failure() && !cancelled() }}
     permissions:
@@ -1565,10 +1568,10 @@ jobs:
         if: |
           contains(needs.*.result, 'failure')
           || contains(needs.*.result, 'cancelled')
-          || (needs.check-dependencies-rust.result == 'skipped' && needs.files-changed.outputs.check-rust-dependencies == 'true' && needs.meta.outputs.run-kind == 'pr')
-          || (needs.build-and-test-locally.result == 'skipped' && needs.meta.outputs.run-kind == 'pr')
-          || (needs.check-codestyle-python.result == 'skipped' && needs.meta.outputs.run-kind == 'pr')
-          || (needs.check-codestyle-rust.result == 'skipped' && needs.meta.outputs.run-kind == 'pr')
+          || (needs.check-dependencies-rust.result == 'skipped' && needs.files-changed.outputs.check-rust-dependencies == 'true' && contains(fromJSON('["pr", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind))
+          || (needs.build-and-test-locally.result == 'skipped' && contains(fromJSON('["pr", "push-main", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind))
+          || (needs.check-codestyle-python.result == 'skipped' && contains(fromJSON('["pr", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind))
+          || (needs.check-codestyle-rust.result == 'skipped' && contains(fromJSON('["pr", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind))
           || needs.files-changed.result == 'skipped'
           || (needs.push-compute-image-dev.result == 'skipped' && contains(fromJSON('["push-main", "pr", "compute-release", "compute-rc-pr"]'), needs.meta.outputs.run-kind))
           || (needs.push-neon-image-dev.result == 'skipped' && contains(fromJSON('["push-main", "pr", "storage-release", "storage-rc-pr", "proxy-release", "proxy-rc-pr"]'), needs.meta.outputs.run-kind))

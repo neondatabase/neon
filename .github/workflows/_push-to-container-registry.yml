@@ -104,6 +104,25 @@ jobs:
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
       - name: Copy docker images to target registries
+        id: push
         run: python3 .github/scripts/push_with_image_map.py
         env:
           IMAGE_MAP: ${{ inputs.image-map }}
+
+      - name: Notify Slack if container image pushing fails
+        if: steps.push.outputs.push_failures || failure()
+        uses: slackapi/slack-github-action@485a9d42d3a73031f12ec201c457e2162c45d02d # v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ vars.SLACK_ON_CALL_DEVPROD_STREAM }}
+            text: >
+              *Container image pushing ${{
+                steps.push.outcome == 'failure' && 'failed completely' || 'succeeded with some retries'
+              }}* in
+              <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+
+              ${{ steps.push.outputs.push_failures && format(
+                '*Failed targets:*\n• {0}', join(fromJson(steps.push.outputs.push_failures), '\n• ')
+              ) || '' }}

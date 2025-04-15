@@ -1369,6 +1369,65 @@ impl Persistence {
         Ok(timeline_from_db)
     }
 
+    /// Set `delete_at` for the given timeline
+    pub(crate) async fn timeline_set_deleted_at(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> DatabaseResult<()> {
+        use crate::schema::timelines;
+
+        let deletion_time = chrono::Local::now().to_utc();
+        self.with_measured_conn(DatabaseOperation::InsertTimeline, move |conn| {
+            Box::pin(async move {
+                let updated = diesel::update(timelines::table)
+                    .filter(timelines::tenant_id.eq(tenant_id.to_string()))
+                    .filter(timelines::timeline_id.eq(timeline_id.to_string()))
+                    .set(timelines::deleted_at.eq(Some(deletion_time)))
+                    .execute(conn)
+                    .await?;
+
+                match updated {
+                    0 => Ok(()),
+                    1 => Ok(()),
+                    _ => Err(DatabaseError::Logical(format!(
+                        "unexpected number of rows ({})",
+                        updated
+                    ))),
+                }
+            })
+        })
+        .await
+    }
+
+    /// Load timeline from db. Returns `None` if not present.
+    ///
+    /// Only works if `deleted_at` is set, so you should call [`Self::timeline_set_deleted_at`] before.
+    pub(crate) async fn delete_timeline(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> DatabaseResult<()> {
+        use crate::schema::timelines::dsl;
+
+        let tenant_id = &tenant_id;
+        let timeline_id = &timeline_id;
+        self.with_measured_conn(DatabaseOperation::GetTimeline, move |conn| {
+            Box::pin(async move {
+                diesel::delete(dsl::timelines)
+                    .filter(dsl::tenant_id.eq(&tenant_id.to_string()))
+                    .filter(dsl::timeline_id.eq(&timeline_id.to_string()))
+                    .filter(dsl::deleted_at.is_not_null())
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .await?;
+
+        Ok(())
+    }
+
     /// Loads a list of all timelines from database.
     pub(crate) async fn list_timelines_for_tenant(
         &self,
@@ -1465,22 +1524,39 @@ impl Persistence {
     /// Load pending operations from db.
     pub(crate) async fn list_pending_ops(
         &self,
-        filter_for_sk: Option<NodeId>,
     ) -> DatabaseResult<Vec<TimelinePendingOpPersistence>> {
         use crate::schema::safekeeper_timeline_pending_ops::dsl;
 
-        const FILTER_VAL_1: i64 = 1;
-        const FILTER_VAL_2: i64 = 2;
-        let filter_opt = filter_for_sk.map(|id| id.0 as i64);
         let timeline_from_db = self
             .with_measured_conn(DatabaseOperation::ListTimelineReconcile, move |conn| {
                 Box::pin(async move {
                     let from_db: Vec<TimelinePendingOpPersistence> =
+                        dsl::safekeeper_timeline_pending_ops.load(conn).await?;
+                    Ok(from_db)
+                })
+            })
+            .await?;
+
+        Ok(timeline_from_db)
+    }
+    /// List pending operations for a given timeline (including tenant-global ones)
+    pub(crate) async fn list_pending_ops_for_timeline(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> DatabaseResult<Vec<TimelinePendingOpPersistence>> {
+        use crate::schema::safekeeper_timeline_pending_ops::dsl;
+
+        let timelines_from_db = self
+            .with_measured_conn(DatabaseOperation::ListTimelineReconcile, move |conn| {
+                Box::pin(async move {
+                    let from_db: Vec<TimelinePendingOpPersistence> =
                         dsl::safekeeper_timeline_pending_ops
+                            .filter(dsl::tenant_id.eq(tenant_id.to_string()))
                             .filter(
-                                dsl::sk_id
-                                    .eq(filter_opt.unwrap_or(FILTER_VAL_1))
-                                    .and(dsl::sk_id.eq(filter_opt.unwrap_or(FILTER_VAL_2))),
+                                dsl::timeline_id
+                                    .eq(timeline_id.to_string())
+                                    .or(dsl::timeline_id.eq("")),
                             )
                             .load(conn)
                             .await?;
@@ -1489,7 +1565,7 @@ impl Persistence {
             })
             .await?;
 
-        Ok(timeline_from_db)
+        Ok(timelines_from_db)
     }
 
     /// Delete all pending ops for the given timeline.
@@ -1974,7 +2050,7 @@ impl ToSql<crate::schema::sql_types::PgLsn, Pg> for LsnWrapper {
     }
 }
 
-#[derive(Insertable, AsChangeset, Queryable, Selectable, Clone)]
+#[derive(Insertable, AsChangeset, Clone)]
 #[diesel(table_name = crate::schema::timelines)]
 pub(crate) struct TimelinePersistence {
     pub(crate) tenant_id: String,
