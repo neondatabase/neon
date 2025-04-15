@@ -225,6 +225,9 @@ pub struct PageServerConf {
     /// Uses key and certificate from ssl_key_file/ssl_cert_file.
     pub enable_tls_page_service_api: bool,
 
+    /// Run in development mode, which disables certain safety checks
+    /// such as authentication requirements for HTTP and PostgreSQL APIs.
+    /// This is insecure and should only be used in development environments.
     pub dev_mode: bool,
 }
 
