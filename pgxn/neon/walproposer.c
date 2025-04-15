@@ -2118,9 +2118,6 @@ HandleSafekeeperResponse(WalProposer *wp, Safekeeper *fromsk)
 	 */
 	if (wp->config->syncSafekeepers)
 	{
-		int			n_synced;
-
-		n_synced = 0;
 		for (int i = 0; i < wp->n_safekeepers; i++)
 		{
 			Safekeeper *sk = &wp->safekeeper[i];
@@ -2129,8 +2126,6 @@ HandleSafekeeperResponse(WalProposer *wp, Safekeeper *fromsk)
 			/* alive safekeeper which is not synced yet; wait for it */
 			if (sk->state != SS_OFFLINE && !synced)
 				return;
-			if (synced)
-				n_synced++;
 		}
 
 		if (newCommitLsn >= wp->propTermStartLsn)

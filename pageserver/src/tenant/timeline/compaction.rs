@@ -80,6 +80,7 @@ impl std::fmt::Display for GcCompactionJobId {
 
 pub struct GcCompactionCombinedSettings {
     pub gc_compaction_enabled: bool,
+    pub gc_compaction_verification: bool,
     pub gc_compaction_initial_threshold_kb: u64,
     pub gc_compaction_ratio_percent: u64,
 }
@@ -225,6 +226,7 @@ impl GcCompactionQueue {
             gc_compaction_enabled,
             gc_compaction_initial_threshold_kb,
             gc_compaction_ratio_percent,
+            ..
         } = timeline.get_gc_compaction_settings();
         if !gc_compaction_enabled {
             return Ok(());
@@ -747,8 +749,8 @@ impl KeyHistoryRetention {
     async fn pipe_to(
         self,
         key: Key,
-        delta_writer: &mut SplitDeltaLayerWriter,
-        mut image_writer: Option<&mut SplitImageLayerWriter>,
+        delta_writer: &mut SplitDeltaLayerWriter<'_>,
+        mut image_writer: Option<&mut SplitImageLayerWriter<'_>>,
         stat: &mut CompactionStatistics,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
@@ -786,6 +788,114 @@ impl KeyHistoryRetention {
             stat.produce_key(&val);
             delta_writer.put_value(key, lsn, val, ctx).await?;
         }
+        Ok(())
+    }
+
+    /// Verify if every key in the retention is readable by replaying the logs.
+    async fn verify(
+        &self,
+        key: Key,
+        base_img_from_ancestor: &Option<(Key, Lsn, Bytes)>,
+        full_history: &[(Key, Lsn, Value)],
+        tline: &Arc<Timeline>,
+    ) -> anyhow::Result<()> {
+        // Usually the min_lsn should be the first record but we do a full iteration to be safe.
+        let Some(min_lsn) = full_history.iter().map(|(_, lsn, _)| *lsn).min() else {
+            // This should never happen b/c if we don't have any history of a key, we won't even do `generate_key_retention`.
+            return Ok(());
+        };
+        let Some(max_lsn) = full_history.iter().map(|(_, lsn, _)| *lsn).max() else {
+            // This should never happen b/c if we don't have any history of a key, we won't even do `generate_key_retention`.
+            return Ok(());
+        };
+        let mut base_img = base_img_from_ancestor
+            .as_ref()
+            .map(|(_, lsn, img)| (*lsn, img));
+        let mut history = Vec::new();
+
+        async fn collect_and_verify(
+            key: Key,
+            lsn: Lsn,
+            base_img: &Option<(Lsn, &Bytes)>,
+            history: &[(Lsn, &NeonWalRecord)],
+            tline: &Arc<Timeline>,
+        ) -> anyhow::Result<()> {
+            let mut records = history
+                .iter()
+                .map(|(lsn, val)| (*lsn, (*val).clone()))
+                .collect::<Vec<_>>();
+
+            // WAL redo requires records in the reverse LSN order
+            records.reverse();
+            let data = ValueReconstructState {
+                img: base_img.as_ref().map(|(lsn, img)| (*lsn, (*img).clone())),
+                records,
+            };
+
+            tline
+                .reconstruct_value(key, lsn, data, RedoAttemptType::GcCompaction)
+                .await
+                .with_context(|| format!("verification failed for key {} at lsn {}", key, lsn))?;
+
+            Ok(())
+        }
+
+        for (retain_lsn, KeyLogAtLsn(logs)) in &self.below_horizon {
+            for (lsn, val) in logs {
+                match val {
+                    Value::Image(img) => {
+                        base_img = Some((*lsn, img));
+                        history.clear();
+                    }
+                    Value::WalRecord(rec) if val.will_init() => {
+                        base_img = None;
+                        history.clear();
+                        history.push((*lsn, rec));
+                    }
+                    Value::WalRecord(rec) => {
+                        history.push((*lsn, rec));
+                    }
+                }
+            }
+            if *retain_lsn >= min_lsn {
+                // Only verify after the key appears in the full history for the first time.
+
+                if base_img.is_none() && history.is_empty() {
+                    anyhow::bail!(
+                        "verificatoin failed: key {} has no history at {}",
+                        key,
+                        retain_lsn
+                    );
+                };
+                // We don't modify history: in theory, we could replace the history with a single
+                // image as in `generate_key_retention` to make redos at later LSNs faster. But we
+                // want to verify everything as if they are read from the real layer map.
+                collect_and_verify(key, *retain_lsn, &base_img, &history, tline).await?;
+            }
+        }
+
+        for (lsn, val) in &self.above_horizon.0 {
+            match val {
+                Value::Image(img) => {
+                    // Above the GC horizon, we verify every time we see an image.
+                    collect_and_verify(key, *lsn, &base_img, &history, tline).await?;
+                    base_img = Some((*lsn, img));
+                    history.clear();
+                }
+                Value::WalRecord(rec) if val.will_init() => {
+                    // Above the GC horizon, we verify every time we see an init record.
+                    collect_and_verify(key, *lsn, &base_img, &history, tline).await?;
+                    base_img = None;
+                    history.clear();
+                    history.push((*lsn, rec));
+                }
+                Value::WalRecord(rec) => {
+                    history.push((*lsn, rec));
+                }
+            }
+        }
+        // Ensure the latest record is readable.
+        collect_and_verify(key, max_lsn, &base_img, &history, tline).await?;
         Ok(())
     }
 }
@@ -1119,7 +1229,17 @@ impl Timeline {
             // being potentially much longer.
             let rewrite_max = partition_count;
 
-            self.compact_shard_ancestors(rewrite_max, ctx).await?;
+            let outcome = self
+                .compact_shard_ancestors(
+                    rewrite_max,
+                    options.flags.contains(CompactFlags::YieldForL0),
+                    ctx,
+                )
+                .await?;
+            match outcome {
+                CompactionOutcome::Pending | CompactionOutcome::YieldForL0 => return Ok(outcome),
+                CompactionOutcome::Done | CompactionOutcome::Skipped => {}
+            }
         }
 
         Ok(CompactionOutcome::Done)
@@ -1136,11 +1256,12 @@ impl Timeline {
     async fn compact_shard_ancestors(
         self: &Arc<Self>,
         rewrite_max: usize,
+        yield_for_l0: bool,
         ctx: &RequestContext,
-    ) -> Result<(), CompactionError> {
+    ) -> Result<CompactionOutcome, CompactionError> {
+        let mut outcome = CompactionOutcome::Done;
         let mut drop_layers = Vec::new();
         let mut layers_to_rewrite: Vec<Layer> = Vec::new();
-        let mut rewrite_max_exceeded: bool = false;
 
         // We will use the Lsn cutoff of the last GC as a threshold for rewriting layers: if a
         // layer is behind this Lsn, it indicates that the layer is being retained beyond the
@@ -1152,7 +1273,10 @@ impl Timeline {
         let pitr_cutoff = self.gc_info.read().unwrap().cutoffs.time;
 
         let layers = self.layers.read().await;
-        for layer_desc in layers.layer_map()?.iter_historic_layers() {
+        let layers_iter = layers.layer_map()?.iter_historic_layers();
+        let (layers_total, mut layers_checked) = (layers_iter.len(), 0);
+        for layer_desc in layers_iter {
+            layers_checked += 1;
             let layer = layers.get_from_desc(&layer_desc);
             if layer.metadata().shard.shard_count == self.shard_identity.count {
                 // This layer does not belong to a historic ancestor, no need to re-image it.
@@ -1233,8 +1357,8 @@ impl Timeline {
                 debug!(%layer, "Will rewrite layer on a future compaction, already rewrote {}",
                     layers_to_rewrite.len()
                 );
-                rewrite_max_exceeded = true;
-                continue;
+                outcome = CompactionOutcome::Pending;
+                break;
             }
 
             // Fall through: all our conditions for doing a rewrite passed.
@@ -1246,11 +1370,12 @@ impl Timeline {
 
         // Drop out early if there's nothing to do.
         if layers_to_rewrite.is_empty() && drop_layers.is_empty() {
-            return Ok(());
+            return Ok(CompactionOutcome::Done);
         }
 
         info!(
-            "starting shard ancestor compaction, rewriting {} layers and dropping {} layers \
+            "starting shard ancestor compaction, rewriting {} layers and dropping {} layers, \
+                checked {layers_checked}/{layers_total} layers \
                 (latest_gc_cutoff={} pitr_cutoff={})",
             layers_to_rewrite.len(),
             drop_layers.len(),
@@ -1273,6 +1398,8 @@ impl Timeline {
                 self.tenant_shard_id,
                 &layer.layer_desc().key_range,
                 layer.layer_desc().image_layer_lsn(),
+                &self.gate,
+                self.cancel.clone(),
                 ctx,
             )
             .await
@@ -1314,6 +1441,20 @@ impl Timeline {
                 // the layer has no data for us with the ShardedRange check above, but
                 drop_layers.push(layer);
             }
+
+            // Yield for L0 compaction if necessary, but make sure we update the layer map below
+            // with the work we've already done.
+            if yield_for_l0
+                && self
+                    .l0_compaction_trigger
+                    .notified()
+                    .now_or_never()
+                    .is_some()
+            {
+                info!("shard ancestor compaction yielding for L0 compaction");
+                outcome = CompactionOutcome::YieldForL0;
+                break;
+            }
         }
 
         for layer in &drop_layers {
@@ -1337,27 +1478,36 @@ impl Timeline {
         // necessary for correctness, but it simplifies testing, and avoids proceeding with another
         // Timeline's compaction while this timeline's uploads may be generating lots of disk I/O
         // load.
-        info!("shard ancestor compaction waiting for uploads");
-        match self.remote_client.wait_completion().await {
-            Ok(()) => (),
-            Err(WaitCompletionError::NotInitialized(ni)) => return Err(CompactionError::from(ni)),
-            Err(WaitCompletionError::UploadQueueShutDownOrStopped) => {
-                return Err(CompactionError::ShuttingDown);
+        if outcome != CompactionOutcome::YieldForL0 {
+            info!("shard ancestor compaction waiting for uploads");
+            tokio::select! {
+                result = self.remote_client.wait_completion() => match result {
+                    Ok(()) => {},
+                    Err(WaitCompletionError::NotInitialized(ni)) => return Err(CompactionError::from(ni)),
+                    Err(WaitCompletionError::UploadQueueShutDownOrStopped) => {
+                        return Err(CompactionError::ShuttingDown);
+                    }
+                },
+                // Don't wait if there's L0 compaction to do. We don't need to update the outcome
+                // here, because we've already done the actual work.
+                _ = self.l0_compaction_trigger.notified(), if yield_for_l0 => {},
             }
         }
 
         info!(
             "shard ancestor compaction done in {:.3}s{}",
             started.elapsed().as_secs_f64(),
-            match rewrite_max_exceeded {
-                true => format!(", more work pending due to rewrite_max={rewrite_max}"),
-                false => String::new(),
+            match outcome {
+                CompactionOutcome::Pending =>
+                    format!(", with pending work (rewrite_max={rewrite_max})"),
+                CompactionOutcome::YieldForL0 => String::from(", yielding for L0 compaction"),
+                CompactionOutcome::Skipped | CompactionOutcome::Done => String::new(),
             }
         );
 
         fail::fail_point!("compact-shard-ancestors-persistent");
 
-        Ok(())
+        Ok(outcome)
     }
 
     /// Update the LayerVisibilityHint of layers covered by image layers, based on whether there is
@@ -1889,6 +2039,8 @@ impl Timeline {
                                 debug!("Create new layer {}..{}", lsn_range.start, lsn_range.end);
                                 lsn_range.clone()
                             },
+                            &self.gate,
+                            self.cancel.clone(),
                             ctx,
                         )
                         .await
@@ -2176,6 +2328,7 @@ impl Timeline {
     /// ```
     ///
     /// Note that `accumulated_values` must be sorted by LSN and should belong to a single key.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn generate_key_retention(
         self: &Arc<Timeline>,
         key: Key,
@@ -2184,6 +2337,7 @@ impl Timeline {
         retain_lsn_below_horizon: &[Lsn],
         delta_threshold_cnt: usize,
         base_img_from_ancestor: Option<(Key, Lsn, Bytes)>,
+        verification: bool,
     ) -> anyhow::Result<KeyHistoryRetention> {
         // Pre-checks for the invariants
 
@@ -2270,8 +2424,8 @@ impl Timeline {
             "should have at least below + above horizon batches"
         );
         let mut replay_history: Vec<(Key, Lsn, Value)> = Vec::new();
-        if let Some((key, lsn, img)) = base_img_from_ancestor {
-            replay_history.push((key, lsn, Value::Image(img)));
+        if let Some((key, lsn, ref img)) = base_img_from_ancestor {
+            replay_history.push((key, lsn, Value::Image(img.clone())));
         }
 
         /// Generate debug information for the replay history
@@ -2385,22 +2539,15 @@ impl Timeline {
             // Whether to reconstruct the image. In debug mode, we will generate an image
             // at every retain_lsn to ensure data is not corrupted, but we won't put the
             // image into the final layer.
-            let generate_image = produce_image || debug_mode;
-            if produce_image {
+            let img_and_lsn = if produce_image {
                 records_since_last_image = 0;
-            }
-            let img_and_lsn = if generate_image {
                 let replay_history_for_debug = if debug_mode {
                     Some(replay_history.clone())
                 } else {
                     None
                 };
                 let replay_history_for_debug_ref = replay_history_for_debug.as_deref();
-                let history = if produce_image {
-                    std::mem::take(&mut replay_history)
-                } else {
-                    replay_history.clone()
-                };
+                let history = std::mem::take(&mut replay_history);
                 let mut img = None;
                 let mut records = Vec::with_capacity(history.len());
                 if let (_, lsn, Value::Image(val)) = history.first().as_ref().unwrap() {
@@ -2435,6 +2582,7 @@ impl Timeline {
                         records.push((lsn, rec));
                     }
                 }
+                // WAL redo requires records in the reverse LSN order
                 records.reverse();
                 let state = ValueReconstructState { img, records };
                 // last batch does not generate image so i is always in range, unless we force generate
@@ -2467,10 +2615,16 @@ impl Timeline {
         assert_eq!(retention.len(), lsn_split_points.len() + 1);
         for (idx, logs) in retention.into_iter().enumerate() {
             if idx == lsn_split_points.len() {
-                return Ok(KeyHistoryRetention {
+                let retention = KeyHistoryRetention {
                     below_horizon: result,
                     above_horizon: KeyLogAtLsn(logs),
-                });
+                };
+                if verification {
+                    retention
+                        .verify(key, &base_img_from_ancestor, full_history, self)
+                        .await?;
+                }
+                return Ok(retention);
             } else {
                 result.push((lsn_split_points[idx], KeyLogAtLsn(logs)));
             }
@@ -2937,6 +3091,9 @@ impl Timeline {
             }
             (false, res)
         };
+
+        let verification = self.get_gc_compaction_settings().gc_compaction_verification;
+
         info!(
             "picked {} layers for compaction ({} layers need rewriting) with max_layer_lsn={} min_layer_lsn={} gc_cutoff={} lowest_retain_lsn={}, key_range={}..{}, has_data_below={}",
             job_desc.selected_layers.len(),
@@ -3083,6 +3240,8 @@ impl Timeline {
                     job_desc.compaction_key_range.start,
                     lowest_retain_lsn,
                     self.get_compaction_target_size(),
+                    &self.gate,
+                    self.cancel.clone(),
                     ctx,
                 )
                 .await
@@ -3099,6 +3258,8 @@ impl Timeline {
             self.tenant_shard_id,
             lowest_retain_lsn..end_lsn,
             self.get_compaction_target_size(),
+            &self.gate,
+            self.cancel.clone(),
         )
         .await
         .context("failed to create delta layer writer")
@@ -3195,6 +3356,8 @@ impl Timeline {
                                 self.tenant_shard_id,
                                 desc.key_range.start,
                                 desc.lsn_range.clone(),
+                                &self.gate,
+                                self.cancel.clone(),
                                 ctx,
                             )
                             .await
@@ -3212,6 +3375,8 @@ impl Timeline {
                                 self.tenant_shard_id,
                                 job_desc.compaction_key_range.end,
                                 desc.lsn_range.clone(),
+                                &self.gate,
+                                self.cancel.clone(),
                                 ctx,
                             )
                             .await
@@ -3253,6 +3418,7 @@ impl Timeline {
                             .await
                             .context("failed to get ancestor image")
                             .map_err(CompactionError::Other)?,
+                        verification,
                     )
                     .await
                     .context("failed to generate key retention")
@@ -3293,6 +3459,7 @@ impl Timeline {
                     .await
                     .context("failed to get ancestor image")
                     .map_err(CompactionError::Other)?,
+                verification,
             )
             .await
             .context("failed to generate key retention")
@@ -3781,6 +3948,8 @@ impl CompactionJobExecutor for TimelineAdaptor {
             self.timeline.tenant_shard_id,
             key_range.start,
             lsn_range.clone(),
+            &self.timeline.gate,
+            self.timeline.cancel.clone(),
             ctx,
         )
         .await?;
@@ -3856,6 +4025,8 @@ impl TimelineAdaptor {
             self.timeline.tenant_shard_id,
             key_range,
             lsn,
+            &self.timeline.gate,
+            self.timeline.cancel.clone(),
             ctx,
         )
         .await?;

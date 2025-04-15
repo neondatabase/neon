@@ -980,7 +980,7 @@ fn generate_ssl_ca_cert(cert_path: &Path, key_path: &Path) -> anyhow::Result<()>
     // -out rootCA.crt -keyout rootCA.key
     let keygen_output = Command::new("openssl")
         .args([
-            "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "36500",
+            "req", "-x509", "-newkey", "ed25519", "-nodes", "-days", "36500",
         ])
         .args(["-subj", "/CN=Neon Local CA"])
         .args(["-out", cert_path.to_str().unwrap()])
@@ -1010,7 +1010,7 @@ fn generate_ssl_cert(
     // -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
     let keygen_output = Command::new("openssl")
         .args(["req", "-new", "-nodes"])
-        .args(["-newkey", "rsa:2048"])
+        .args(["-newkey", "ed25519"])
         .args(["-subj", "/CN=localhost"])
         .args(["-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"])
         .args(["-keyout", key_path.to_str().unwrap()])

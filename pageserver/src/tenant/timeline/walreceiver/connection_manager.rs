@@ -580,6 +580,7 @@ impl ConnectionManagerState {
                                 );
                                 Ok(())
                             }
+                            WalReceiverError::Cancelled => Ok(()),
                             WalReceiverError::Other(e) => {
                                 // give out an error to have task_mgr give it a really verbose logging
                                 if cancellation.is_cancelled() {

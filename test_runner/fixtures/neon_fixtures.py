@@ -947,6 +947,8 @@ class NeonEnvBuilder:
                     continue
                 if SMALL_DB_FILE_NAME_REGEX.fullmatch(test_file.name):
                     continue
+                if FINAL_METRICS_FILE_NAME == test_file.name:
+                    continue
                 log.debug(f"Removing large database {test_file} file")
                 test_file.unlink()
             elif test_entry.is_dir():
@@ -1255,6 +1257,7 @@ class NeonEnv:
                 "mode": "pipelined",
                 "execution": "concurrent-futures",
                 "max_batch_size": 32,
+                "batching": "scattered-lsn",
             }
 
             get_vectored_concurrent_io = self.pageserver_get_vectored_concurrent_io
@@ -1456,6 +1459,12 @@ class NeonEnv:
                 except Exception as e:
                     metric_errors.append(e)
                     log.error(f"metric validation failed on {pageserver.id}: {e}")
+
+            try:
+                pageserver.snapshot_final_metrics()
+            except Exception as e:
+                log.error(f"metric snapshot failed on {pageserver.id}: {e}")
+
             try:
                 pageserver.stop(immediate=immediate)
             except RuntimeError:
@@ -2971,6 +2980,20 @@ class NeonPageserver(PgProtocol, LogUtils):
             value = self.http_client().get_metric_value(metric)
             assert value == 0, f"Nonzero {metric} == {value}"
 
+    def snapshot_final_metrics(self):
+        """
+        Take a snapshot of this pageserver's metrics and stash in its work directory.
+        """
+        if not self.running:
+            log.info(f"Skipping metrics snapshot on pageserver {self.id}, it is not running")
+            return
+
+        metrics = self.http_client().get_metrics_str()
+        metrics_snapshot_path = self.workdir / FINAL_METRICS_FILE_NAME
+
+        with open(metrics_snapshot_path, "w") as f:
+            f.write(metrics)
+
     def tenant_attach(
         self,
         tenant_id: TenantId,
@@ -4302,10 +4325,10 @@ class Endpoint(PgProtocol, LogUtils):
 
     def respec_deep(self, **kwargs: Any) -> None:
         """
-        Update the spec.json file taking into account nested keys.
-        Distinct method from respec() to not break existing functionality.
-        NOTE: This method also updates the spec.json file, not endpoint.json.
-        We need it because neon_local also writes to spec.json, so intended
+        Update the endpoint.json file taking into account nested keys.
+        Distinct method from respec() to do not break existing functionality.
+        NOTE: This method also updates the config.json file, not endpoint.json.
+        We need it because neon_local also writes to config.json, so intended
         use-case is i) start endpoint with some config, ii) respec_deep(),
         iii) call reconfigure() to apply the changes.
         """
@@ -4318,17 +4341,17 @@ class Endpoint(PgProtocol, LogUtils):
                     curr[k] = v
             return curr
 
-        config_path = os.path.join(self.endpoint_path(), "spec.json")
+        config_path = os.path.join(self.endpoint_path(), "config.json")
         with open(config_path) as f:
-            data_dict: dict[str, Any] = json.load(f)
+            config: dict[str, Any] = json.load(f)
 
-        log.debug("Current compute spec: %s", json.dumps(data_dict, indent=4))
+        log.debug("Current compute config: %s", json.dumps(config, indent=4))
 
-        update(data_dict, kwargs)
+        update(config, kwargs)
 
         with open(config_path, "w") as file:
-            log.debug("Updating compute spec to: %s", json.dumps(data_dict, indent=4))
-            json.dump(data_dict, file, indent=4)
+            log.debug("Updating compute config to: %s", json.dumps(config, indent=4))
+            json.dump(config, file, indent=4)
 
     def wait_for_migrations(self, wait_for: int = NUM_COMPUTE_MIGRATIONS) -> None:
         """
@@ -4345,7 +4368,7 @@ class Endpoint(PgProtocol, LogUtils):
             wait_until(check_migrations_done)
 
     # Mock the extension part of spec passed from control plane for local testing
-    # endpooint.rs adds content of this file as a part of the spec.json
+    # endpooint.rs adds content of this file as a part of the config.json
     def create_remote_extension_spec(self, spec: dict[str, Any]):
         """Create a remote extension spec file for the endpoint."""
         remote_extensions_spec_path = os.path.join(
@@ -5132,6 +5155,8 @@ def pytest_addoption(parser: Parser):
 SMALL_DB_FILE_NAME_REGEX: re.Pattern[str] = re.compile(
     r"config-v1|heatmap-v1|tenant-manifest|metadata|.+\.(?:toml|pid|json|sql|conf)"
 )
+
+FINAL_METRICS_FILE_NAME: str = "final_metrics.txt"
 
 
 SKIP_DIRS = frozenset(

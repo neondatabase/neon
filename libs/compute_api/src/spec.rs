@@ -1,8 +1,8 @@
-//! `ComputeSpec` represents the contents of the spec.json file.
-//!
-//! The spec.json file is used to pass information to 'compute_ctl'. It contains
-//! all the information needed to start up the right version of PostgreSQL,
-//! and connect it to the storage nodes.
+//! The ComputeSpec contains all the information needed to start up
+//! the right version of PostgreSQL, and connect it to the storage nodes.
+//! It can be passed as part of the `config.json`, or the control plane can
+//! provide it by calling the compute_ctl's `/compute_ctl` endpoint, or
+//! compute_ctl can fetch it by calling the control plane's API.
 use std::collections::HashMap;
 
 use indexmap::IndexMap;
