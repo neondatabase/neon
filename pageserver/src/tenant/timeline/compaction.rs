@@ -69,6 +69,13 @@ use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 /// Maximum number of deltas before generating an image layer in bottom-most compaction.
 const COMPACTION_DELTA_THRESHOLD: usize = 5;
 
+/// Ratio of shard-local pages below which we trigger shard ancestor layer rewrites. 0.3 means that
+/// <= 30% of layer pages must belong to the descendant shard to rewrite the layer.
+///
+/// We choose a value < 0.5 to avoid rewriting all visible layers every time we do a power-of-two
+/// shard split, which gets expensive for large tenants.
+const ANCESTOR_COMPACTION_REWRITE_THRESHOLD: f64 = 0.3;
+
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct GcCompactionJobId(pub usize);
 
@@ -1320,14 +1327,15 @@ impl Timeline {
                 continue;
             }
 
-            // Don't bother re-writing a layer unless it will at least halve its size
+            // Only rewrite a layer if we can reclaim significant space.
             if layer_local_page_count != u32::MAX
-                && layer_local_page_count > layer_raw_page_count / 2
+                && layer_local_page_count as f64 / layer_raw_page_count as f64
+                    <= ANCESTOR_COMPACTION_REWRITE_THRESHOLD
             {
                 debug!(%layer,
-                    "layer is already mostly local ({}/{}), not rewriting",
-                    layer_local_page_count,
-                    layer_raw_page_count
+                    "layer has a large share of local pages \
+                        ({layer_local_page_count}/{layer_raw_page_count} > \
+                        {ANCESTOR_COMPACTION_REWRITE_THRESHOLD}), not rewriting",
                 );
             }
 
