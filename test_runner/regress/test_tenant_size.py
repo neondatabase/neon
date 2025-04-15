@@ -757,6 +757,47 @@ def test_lsn_lease_size(neon_env_builder: NeonEnvBuilder, test_output_dir: Path,
     env.stop(immediate=True)
 
 
+def test_lsn_lease_storcon(neon_env_builder: NeonEnvBuilder):
+    conf = {
+        "pitr_interval": "0s",
+        "gc_period": "0s",
+        "compaction_period": "0s",
+    }
+    env = neon_env_builder.init_start(initial_tenant_conf=conf)
+    with env.endpoints.create_start(
+        "main",
+    ) as ep:
+        with ep.cursor() as cur:
+            cur.execute(
+                "CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, 1000000) s(i)"
+            )
+        last_flush_lsn = wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
+    env.storage_controller.pageserver_api().timeline_lsn_lease(
+        env.initial_tenant, env.initial_timeline, last_flush_lsn
+    )
+    env.storage_controller.tenant_shard_split(env.initial_tenant, 8)
+    env.storage_controller.reconcile_until_idle(timeout_secs=120)
+    # TODO: do we preserve LSN leases across shard splits?
+    env.storage_controller.pageserver_api().timeline_lsn_lease(
+        env.initial_tenant, env.initial_timeline, last_flush_lsn
+    )
+
+
+def test_mark_invisible_storcon(neon_env_builder: NeonEnvBuilder):
+    conf = {
+        "pitr_interval": "0s",
+        "gc_period": "0s",
+        "compaction_period": "0s",
+    }
+    env = neon_env_builder.init_start(initial_tenant_conf=conf)
+    env.storage_controller.pageserver_api().timeline_mark_invisible(
+        env.initial_tenant, env.initial_timeline
+    )
+    env.storage_controller.pageserver_api().timeline_mark_invisible(
+        env.initial_tenant, env.initial_timeline, True
+    )
+
+
 def insert_with_action(
     env: NeonEnv,
     tenant: TenantId,

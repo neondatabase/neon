@@ -1,7 +1,8 @@
 use metrics::core::{AtomicF64, Collector, GenericGauge};
 use metrics::proto::MetricFamily;
 use metrics::{
-    IntCounterVec, UIntGaugeVec, register_gauge, register_int_counter_vec, register_uint_gauge_vec,
+    IntCounterVec, IntGaugeVec, UIntGaugeVec, register_gauge, register_int_counter_vec,
+    register_int_gauge_vec, register_uint_gauge_vec,
 };
 use once_cell::sync::Lazy;
 
@@ -18,13 +19,13 @@ pub(crate) static INSTALLED_EXTENSIONS: Lazy<UIntGaugeVec> = Lazy::new(|| {
 // but for all our APIs we defined a 'slug'/method/operationId in the OpenAPI spec.
 // And it's fair to call it a 'RPC' (Remote Procedure Call).
 pub enum CPlaneRequestRPC {
-    GetSpec,
+    GetConfig,
 }
 
 impl CPlaneRequestRPC {
     pub fn as_str(&self) -> &str {
         match self {
-            CPlaneRequestRPC::GetSpec => "GetSpec",
+            CPlaneRequestRPC::GetConfig => "GetConfig",
         }
     }
 }
@@ -70,8 +71,19 @@ pub(crate) static AUDIT_LOG_DIR_SIZE: Lazy<GenericGauge<AtomicF64>> = Lazy::new(
     .expect("failed to define a metric")
 });
 
+// Report that `compute_ctl` is up and what's the current compute status.
+pub(crate) static COMPUTE_CTL_UP: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "compute_ctl_up",
+        "Whether compute_ctl is running",
+        &["build_tag", "status"]
+    )
+    .expect("failed to define a metric")
+});
+
 pub fn collect() -> Vec<MetricFamily> {
-    let mut metrics = INSTALLED_EXTENSIONS.collect();
+    let mut metrics = COMPUTE_CTL_UP.collect();
+    metrics.extend(INSTALLED_EXTENSIONS.collect());
     metrics.extend(CPLANE_REQUESTS_TOTAL.collect());
     metrics.extend(REMOTE_EXT_REQUESTS_TOTAL.collect());
     metrics.extend(DB_MIGRATION_FAILED.collect());

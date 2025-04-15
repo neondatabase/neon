@@ -29,13 +29,12 @@
 //! ```sh
 //! compute_ctl -D /var/db/postgres/compute \
 //!             -C 'postgresql://cloud_admin@localhost/postgres' \
-//!             -S /var/db/postgres/specs/current.json \
+//!             -c /var/db/postgres/configs/config.json \
 //!             -b /usr/local/bin/postgres \
 //!             -r http://pg-ext-s3-gateway \
 //! ```
 use std::ffi::OsString;
 use std::fs::File;
-use std::path::Path;
 use std::process::exit;
 use std::sync::mpsc;
 use std::thread;
@@ -43,9 +42,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use compute_api::responses::ComputeCtlConfig;
-use compute_api::spec::ComputeSpec;
-use compute_tools::compute::{ComputeNode, ComputeNodeParams, forward_termination_signal};
+use compute_api::responses::ComputeConfig;
+use compute_tools::compute::{
+    BUILD_TAG, ComputeNode, ComputeNodeParams, forward_termination_signal,
+};
 use compute_tools::extension_server::get_pg_version_string;
 use compute_tools::logger::*;
 use compute_tools::params::*;
@@ -56,10 +56,6 @@ use signal_hook::iterator::Signals;
 use tracing::{error, info};
 use url::Url;
 use utils::failpoint_support;
-
-// this is an arbitrary build tag. Fine as a default / for testing purposes
-// in-case of not-set environment var
-const BUILD_TAG_DEFAULT: &str = "latest";
 
 // Compatibility hack: if the control plane specified any remote-ext-config
 // use the default value for extension storage proxy gateway.
@@ -120,16 +116,21 @@ struct Cli {
     #[arg(long)]
     pub set_disk_quota_for_fs: Option<String>,
 
-    #[arg(short = 's', long = "spec", group = "spec")]
-    pub spec_json: Option<String>,
-
-    #[arg(short = 'S', long, group = "spec-path")]
-    pub spec_path: Option<OsString>,
+    // TODO(tristan957): remove alias after compatibility tests are no longer
+    // an issue
+    #[arg(short = 'c', long, alias = "spec-path")]
+    pub config: Option<OsString>,
 
     #[arg(short = 'i', long, group = "compute-id")]
     pub compute_id: String,
 
-    #[arg(short = 'p', long, conflicts_with_all = ["spec", "spec-path"], value_name = "CONTROL_PLANE_API_BASE_URL")]
+    #[arg(
+        short = 'p',
+        long,
+        conflicts_with = "config",
+        value_name = "CONTROL_PLANE_API_BASE_URL",
+        requires = "compute-id"
+    )]
     pub control_plane_uri: Option<String>,
 }
 
@@ -138,7 +139,7 @@ fn main() -> Result<()> {
 
     let scenario = failpoint_support::init();
 
-    // For historical reasons, the main thread that processes the spec and launches postgres
+    // For historical reasons, the main thread that processes the config and launches postgres
     // is synchronous, but we always have this tokio runtime available and we "enter" it so
     // that you can use tokio::spawn() and tokio::runtime::Handle::current().block_on(...)
     // from all parts of compute_ctl.
@@ -147,14 +148,14 @@ fn main() -> Result<()> {
         .build()?;
     let _rt_guard = runtime.enter();
 
-    let build_tag = runtime.block_on(init())?;
+    runtime.block_on(init())?;
 
     // enable core dumping for all child processes
     setrlimit(Resource::CORE, rlimit::INFINITY, rlimit::INFINITY)?;
 
     let connstr = Url::parse(&cli.connstr).context("cannot parse connstr as a URL")?;
 
-    let cli_spec = try_spec_from_cli(&cli)?;
+    let config = get_config(&cli)?;
 
     let compute_node = ComputeNode::new(
         ComputeNodeParams {
@@ -174,12 +175,8 @@ fn main() -> Result<()> {
             cgroup: cli.cgroup,
             #[cfg(target_os = "linux")]
             vm_monitor_addr: cli.vm_monitor_addr,
-            build_tag,
-
-            live_config_allowed: cli_spec.live_config_allowed,
         },
-        cli_spec.spec,
-        cli_spec.compute_ctl_config,
+        config,
     )?;
 
     let exit_code = compute_node.run()?;
@@ -189,7 +186,7 @@ fn main() -> Result<()> {
     deinit_and_exit(exit_code);
 }
 
-async fn init() -> Result<String> {
+async fn init() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL).await?;
 
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGQUIT])?;
@@ -199,45 +196,22 @@ async fn init() -> Result<String> {
         }
     });
 
-    let build_tag = option_env!("BUILD_TAG")
-        .unwrap_or(BUILD_TAG_DEFAULT)
-        .to_string();
-    info!("build_tag: {build_tag}");
+    info!("compute build_tag: {}", &BUILD_TAG.to_string());
 
-    Ok(build_tag)
+    Ok(())
 }
 
-fn try_spec_from_cli(cli: &Cli) -> Result<CliSpecParams> {
-    // First, try to get cluster spec from the cli argument
-    if let Some(ref spec_json) = cli.spec_json {
-        info!("got spec from cli argument {}", spec_json);
-        return Ok(CliSpecParams {
-            spec: Some(serde_json::from_str(spec_json)?),
-            compute_ctl_config: ComputeCtlConfig::default(),
-            live_config_allowed: false,
-        });
+fn get_config(cli: &Cli) -> Result<ComputeConfig> {
+    // First, read the config from the path if provided
+    if let Some(ref config) = cli.config {
+        let file = File::open(config)?;
+        return Ok(serde_json::from_reader(&file)?);
     }
 
-    // Second, try to read it from the file if path is provided
-    if let Some(ref spec_path) = cli.spec_path {
-        let file = File::open(Path::new(spec_path))?;
-        return Ok(CliSpecParams {
-            spec: Some(serde_json::from_reader(file)?),
-            compute_ctl_config: ComputeCtlConfig::default(),
-            live_config_allowed: true,
-        });
-    }
-
-    if cli.control_plane_uri.is_none() {
-        panic!("must specify --control-plane-uri");
-    };
-
-    match get_spec_from_control_plane(cli.control_plane_uri.as_ref().unwrap(), &cli.compute_id) {
-        Ok(resp) => Ok(CliSpecParams {
-            spec: resp.0,
-            compute_ctl_config: resp.1,
-            live_config_allowed: true,
-        }),
+    // If the config wasn't provided in the CLI arguments, then retrieve it from
+    // the control plane
+    match get_config_from_control_plane(cli.control_plane_uri.as_ref().unwrap(), &cli.compute_id) {
+        Ok(config) => Ok(config),
         Err(e) => {
             error!(
                 "cannot get response from control plane: {}\n\
@@ -247,14 +221,6 @@ fn try_spec_from_cli(cli: &Cli) -> Result<CliSpecParams> {
             Err(e)
         }
     }
-}
-
-struct CliSpecParams {
-    /// If a spec was provided via CLI or file, the [`ComputeSpec`]
-    spec: Option<ComputeSpec>,
-    #[allow(dead_code)]
-    compute_ctl_config: ComputeCtlConfig,
-    live_config_allowed: bool,
 }
 
 fn deinit_and_exit(exit_code: Option<i32>) -> ! {

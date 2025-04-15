@@ -28,7 +28,7 @@ toml_edit.workspace = true
 tracing.workspace = true
 scopeguard.workspace = true
 metrics.workspace = true
-utils.workspace = true
+utils = { path = "../utils", default-features = false }
 pin-project-lite.workspace = true
 
 azure_core.workspace = true

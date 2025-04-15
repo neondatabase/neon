@@ -212,6 +212,12 @@ paths:
               schema:
                 type: string
                 format: date-time
+        "412":
+          description: No timestamp is found for given LSN, e.g. if there had been no commits till LSN
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreconditionFailedError"
 
   /v1/tenant/{tenant_id}/timeline/{timeline_id}/get_lsn_by_timestamp:
     parameters:
@@ -1133,6 +1139,40 @@ components:
         applied_gc_cutoff_lsn:
           type: string
           format: hex
+        safekeepers:
+          $ref: "#/components/schemas/TimelineSafekeepersInfo"
+
+    TimelineSafekeepersInfo:
+      type: object
+      required:
+        - tenant_id
+        - timeline_id
+        - generation
+        - safekeepers
+      properties:
+        tenant_id:
+          type: string
+          format: hex
+        timeline_id:
+          type: string
+          format: hex
+        generation:
+          type: integer
+        safekeepers:
+          type: array
+          items:
+            $ref: "#/components/schemas/TimelineSafekeeperInfo"
+
+    TimelineSafekeeperInfo:
+      type: object
+      required:
+        - id
+        - hostname
+      properties:
+        id:
+          type: integer
+        hostname:
+          type: string
 
     SyntheticSizeResponse:
       type: object

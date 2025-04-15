@@ -3,9 +3,6 @@
  * extension_server.c
  *	  Request compute_ctl to download extension files.
  *
- * IDENTIFICATION
- *	 contrib/neon/extension_server.c
- *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"

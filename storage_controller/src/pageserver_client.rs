@@ -1,6 +1,6 @@
 use pageserver_api::models::detach_ancestor::AncestorDetached;
 use pageserver_api::models::{
-    DetachBehavior, LocationConfig, LocationConfigListResponse, PageserverUtilization,
+    DetachBehavior, LocationConfig, LocationConfigListResponse, LsnLease, PageserverUtilization,
     SecondaryProgress, TenantScanRemoteStorageResponse, TenantShardSplitRequest,
     TenantShardSplitResponse, TenantWaitLsnRequest, TimelineArchivalConfigRequest,
     TimelineCreateRequest, TimelineInfo, TopTenantShardsRequest, TopTenantShardsResponse,
@@ -10,6 +10,7 @@ use pageserver_client::BlockUnblock;
 use pageserver_client::mgmt_api::{Client, Result};
 use reqwest::StatusCode;
 use utils::id::{NodeId, TenantId, TimelineId};
+use utils::lsn::Lsn;
 
 /// Thin wrapper around [`pageserver_client::mgmt_api::Client`]. It allows the storage
 /// controller to collect metrics in a non-intrusive manner.
@@ -191,6 +192,22 @@ impl PageserverClient {
             &self.node_id_label,
             self.inner
                 .timeline_delete(tenant_shard_id, timeline_id)
+                .await
+        )
+    }
+
+    pub(crate) async fn timeline_lease_lsn(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        lsn: Lsn,
+    ) -> Result<LsnLease> {
+        measured_request!(
+            "timeline_lease_lsn",
+            crate::metrics::Method::Post,
+            &self.node_id_label,
+            self.inner
+                .timeline_init_lsn_lease(tenant_shard_id, timeline_id, lsn)
                 .await
         )
     }

@@ -257,7 +257,7 @@ pub enum ProtocolError {
 impl ProtocolError {
     /// Proxy stream.rs uses only io::Error; provide it.
     pub fn into_io_error(self) -> io::Error {
-        io::Error::new(io::ErrorKind::Other, self.to_string())
+        io::Error::other(self.to_string())
     }
 }
 

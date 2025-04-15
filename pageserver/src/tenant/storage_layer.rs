@@ -13,13 +13,13 @@ pub mod merge_iterator;
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
 use std::collections::{BinaryHeap, HashMap};
-use std::future::Future;
 use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::PERF_TRACE_TARGET;
 pub use batch_split_writer::{BatchLayerWriter, SplitDeltaLayerWriter, SplitImageLayerWriter};
 use bytes::Bytes;
 pub use delta_layer::{DeltaLayer, DeltaLayerWriter, ValueRef};
@@ -34,7 +34,7 @@ use pageserver_api::key::Key;
 use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::value::Value;
-use tracing::{Instrument, trace};
+use tracing::{Instrument, info_span, trace};
 use utils::lsn::Lsn;
 use utils::sync::gate::GateGuard;
 
@@ -43,7 +43,9 @@ use super::PageReconstructError;
 use super::layer_map::InMemoryLayerDesc;
 use super::timeline::{GetVectoredError, ReadPath};
 use crate::config::PageServerConf;
-use crate::context::{AccessStatsBehavior, RequestContext};
+use crate::context::{
+    AccessStatsBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
+};
 
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where
@@ -713,13 +715,34 @@ pub(crate) enum LayerId {
 }
 
 /// Uniquely identify a layer visit by the layer
-/// and LSN floor (or start LSN) of the reads.
-/// The layer itself is not enough since we may
-/// have different LSN lower bounds for delta layer reads.
+/// and LSN range of the reads. Note that the end of the range is exclusive.
+///
+/// The layer itself is not enough since we may have different LSN lower
+/// bounds for delta layer reads. Scenarios where this can happen are:
+///
+/// 1. Layer overlaps: imagine an image layer inside and in-memory layer
+///    and a query that only partially hits the image layer. Part of the query
+///    needs to read the whole in-memory layer and the other part needs to read
+///    only up to the image layer. Hence, they'll have different LSN floor values
+///    for the read.
+///
+/// 2. Scattered reads: the read path supports starting at different LSNs. Imagine
+///    The start LSN for one range is inside a layer and the start LSN for another range
+///    Is above the layer (includes all of it). Both ranges need to read the layer all the
+///    Way to the end but starting at different points. Hence, they'll have different LSN
+///    Ceil values.
+///
+/// The implication is that we might visit the same layer multiple times
+/// in order to read different LSN ranges from it. In practice, this isn't very concerning
+/// because:
+/// 1. Layer overlaps are rare and generally not intended
+/// 2. Scattered reads will stabilise after the first few layers provided their starting LSNs
+///    are grouped tightly enough (likely the case).
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
 struct LayerToVisitId {
     layer_id: LayerId,
     lsn_floor: Lsn,
+    lsn_ceil: Lsn,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -803,6 +826,7 @@ impl LayerFringe {
         let layer_to_visit_id = LayerToVisitId {
             layer_id: layer.id(),
             lsn_floor: lsn_range.start,
+            lsn_ceil: lsn_range.end,
         };
 
         let entry = self.visit_reads.entry(layer_to_visit_id.clone());
@@ -874,13 +898,37 @@ impl ReadableLayer {
     ) -> Result<(), GetVectoredError> {
         match self {
             ReadableLayer::PersistentLayer(layer) => {
+                let ctx = RequestContextBuilder::from(ctx)
+                    .perf_span(|crnt_perf_span| {
+                        info_span!(
+                            target: PERF_TRACE_TARGET,
+                            parent: crnt_perf_span,
+                            "PLAN_LAYER",
+                            layer = %layer
+                        )
+                    })
+                    .attached_child();
+
                 layer
-                    .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, ctx)
+                    .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, &ctx)
+                    .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
                     .await
             }
             ReadableLayer::InMemoryLayer(layer) => {
+                let ctx = RequestContextBuilder::from(ctx)
+                    .perf_span(|crnt_perf_span| {
+                        info_span!(
+                            target: PERF_TRACE_TARGET,
+                            parent: crnt_perf_span,
+                            "PLAN_LAYER",
+                            layer = %layer
+                        )
+                    })
+                    .attached_child();
+
                 layer
-                    .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, ctx)
+                    .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, &ctx)
+                    .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
                     .await
             }
         }
