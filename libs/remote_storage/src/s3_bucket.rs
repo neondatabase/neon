@@ -732,10 +732,10 @@ impl RemoteStorage for S3Bucket {
 
         if let Some(encryption_key) = encryption_key {
             upload = upload.sse_customer_algorithm("AES256");
-            let base64_key = base64::encode(&encryption_key);
+            let base64_key = base64::encode(encryption_key);
             upload = upload.sse_customer_key(&base64_key);
             upload = upload
-                .sse_customer_key_md5(base64::encode(md5::compute(&encryption_key).as_slice()));
+                .sse_customer_key_md5(base64::encode(md5::compute(encryption_key).as_slice()));
         }
 
         let upload = upload.send();
