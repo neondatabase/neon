@@ -79,8 +79,6 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let cli_dev_mode = arg_matches.get_flag("dev");
-
     // Initialize up failpoints support
     let scenario = failpoint_support::init();
 
@@ -101,9 +99,7 @@ fn main() -> anyhow::Result<()> {
 
     let (conf, ignored) = initialize_config(&identity_file_path, &cfg_file_path, &workdir)?;
 
-    let dev_mode = cli_dev_mode || conf.dev_mode;
-    
-    if !dev_mode {
+    if !conf.dev_mode {
         if matches!(conf.http_auth_type, AuthType::Trust)
             || matches!(conf.pg_auth_type, AuthType::Trust)
         {
@@ -833,12 +829,6 @@ fn cli() -> Command {
                 .long("enabled-features")
                 .action(ArgAction::SetTrue)
                 .help("Show enabled compile time features"),
-        )
-        .arg(
-            Arg::new("dev")
-                .long("dev")
-                .action(ArgAction::SetTrue)
-                .help("Run in development mode (disables security checks)"),
         )
 }
 
