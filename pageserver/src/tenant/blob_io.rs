@@ -446,6 +446,34 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         };
         (srcbuf, res.map(|_| (offset, compression_info)))
     }
+
+    /// Writes a raw blob containing both header and data, returning its offset.
+    pub(crate) async fn write_blob_raw<Buf: IoBuf + Send>(
+        &mut self,
+        raw_with_header: FullSlice<Buf>,
+        ctx: &RequestContext,
+    ) -> (FullSlice<Buf>, Result<u64, Error>) {
+        // Verify the header, to ensure we don't write invalid/corrupt data.
+        let header = match Header::decode(&raw_with_header) {
+            Ok(header) => header,
+            Err(err) => return (raw_with_header, Err(err)),
+        };
+        if raw_with_header.len() != header.total_len() {
+            let header_total_len = header.total_len();
+            let raw_len = raw_with_header.len();
+            return (
+                raw_with_header,
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("header length mismatch: {header_total_len} != {raw_len}"),
+                )),
+            );
+        }
+
+        let offset = self.offset;
+        let (raw_with_header, result) = self.write_all(raw_with_header, ctx).await;
+        (raw_with_header, result.map(|_| offset))
+    }
 }
 
 impl BlobWriter<true> {
