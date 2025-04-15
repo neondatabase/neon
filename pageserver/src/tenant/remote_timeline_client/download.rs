@@ -192,12 +192,9 @@ async fn download_object(
                     FlushTaskError::Cancelled => DownloadError::Cancelled,
                 })?;
         }
-        let inner = buffered
-            .flush_and_into_inner(ctx)
-            .await
-            .map_err(|e| match e {
-                FlushTaskError::Cancelled => DownloadError::Cancelled,
-            })?;
+        let inner = buffered.shutdown(ctx).await.map_err(|e| match e {
+            FlushTaskError::Cancelled => DownloadError::Cancelled,
+        })?;
         Ok(inner)
     }
     .await?;

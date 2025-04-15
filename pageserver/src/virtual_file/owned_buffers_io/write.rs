@@ -109,10 +109,7 @@ where
     }
 
     #[cfg_attr(target_os = "macos", allow(dead_code))]
-    pub async fn flush_and_into_inner(
-        mut self,
-        ctx: &RequestContext,
-    ) -> Result<(u64, W), FlushTaskError> {
+    pub async fn shutdown(mut self, ctx: &RequestContext) -> Result<(u64, W), FlushTaskError> {
         self.flush(ctx).await?;
 
         let Self {
@@ -342,7 +339,7 @@ mod tests {
         writer.write_buffered_borrowed(b"j", ctx).await?;
         writer.write_buffered_borrowed(b"klmno", ctx).await?;
 
-        let (_, recorder) = writer.flush_and_into_inner(ctx).await?;
+        let (_, recorder) = writer.shutdown(ctx).await?;
         assert_eq!(
             recorder.get_writes(),
             {
