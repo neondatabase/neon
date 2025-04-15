@@ -193,7 +193,6 @@ where
                     "caller specified a multiple that is larger than the buffer capacity"
                 );
                 let count = padded_len - len;
-                dbg!(len, cap, padded_len, count);
                 mutable.extend_with(0, count);
                 trace!(count, "padding with zeros");
                 self.mutable = Some(mutable);
