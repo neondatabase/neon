@@ -54,3 +54,14 @@ jobs:
             done
             exit 1
           fi
+
+      - name: Lint with zizmor
+        run: zizmor --persona pedantic --format sarif . > zizmor.sarif
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload zizmor results
+        uses: github/codeql-action/upload-sarif@fc7e4a0fa01c3cca5fd6a1fddec5c0740c977aa2  # v3.28.14
+        with:
+          sarif_file: zizmor.sarif
+          category: zizmor
