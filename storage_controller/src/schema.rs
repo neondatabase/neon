@@ -77,6 +77,14 @@ diesel::table! {
 }
 
 diesel::table! {
+    timeline_imports (tenant_id, timeline_id) {
+        tenant_id -> Varchar,
+        timeline_id -> Varchar,
+        shard_statuses -> Jsonb,
+    }
+}
+
+diesel::table! {
     use diesel::sql_types::*;
     use super::sql_types::PgLsn;
 
@@ -92,14 +100,6 @@ diesel::table! {
     }
 }
 
-diesel::table! {
-    timeline_imports (tenant_id, timeline_id) {
-        tenant_id -> Varchar,
-        timeline_id -> Varchar,
-        shard_statuses -> Jsonb,
-    }
-}
-
 diesel::allow_tables_to_appear_in_same_query!(
     controllers,
     metadata_health,
@@ -107,6 +107,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     safekeeper_timeline_pending_ops,
     safekeepers,
     tenant_shards,
-    timelines,
     timeline_imports,
+    timelines,
 );
