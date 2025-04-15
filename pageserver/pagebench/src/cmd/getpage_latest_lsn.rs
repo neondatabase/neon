@@ -68,6 +68,13 @@ pub(crate) struct Args {
     targets: Option<Vec<TenantTimelineId>>,
 }
 
+/// State shared by all clients
+#[derive(Debug)]
+struct SharedState {
+    start_work_barrier: tokio::sync::Barrier,
+    live_stats: LiveStats,
+}
+
 #[derive(Debug, Default)]
 struct LiveStats {
     completed_requests: AtomicU64,
@@ -240,24 +247,26 @@ async fn main_impl(
         all_ranges
     };
 
-    let live_stats = Arc::new(LiveStats::default());
-
     let num_live_stats_dump = 1;
     let num_work_sender_tasks = args.num_clients.get() * timelines.len();
     let num_main_impl = 1;
 
-    let start_work_barrier = Arc::new(tokio::sync::Barrier::new(
-        num_live_stats_dump + num_work_sender_tasks + num_main_impl,
-    ));
+    let shared_state = Arc::new(SharedState {
+        start_work_barrier: tokio::sync::Barrier::new(
+            num_live_stats_dump + num_work_sender_tasks + num_main_impl,
+        ),
+        live_stats: LiveStats::default(),
+    });
+    let cancel = CancellationToken::new();
 
+    let ss = shared_state.clone();
     tokio::spawn({
-        let stats = Arc::clone(&live_stats);
-        let start_work_barrier = Arc::clone(&start_work_barrier);
         async move {
-            start_work_barrier.wait().await;
+            ss.start_work_barrier.wait().await;
             loop {
                 let start = std::time::Instant::now();
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                let stats = &ss.live_stats;
                 let completed_requests = stats.completed_requests.swap(0, Ordering::Relaxed);
                 let missed = stats.missed.swap(0, Ordering::Relaxed);
                 let elapsed = start.elapsed();
@@ -270,14 +279,12 @@ async fn main_impl(
         }
     });
 
-    let cancel = CancellationToken::new();
-
     let rps_period = args
         .per_client_rate
         .map(|rps_limit| Duration::from_secs_f64(1.0 / (rps_limit as f64)));
     let make_worker: &dyn Fn(WorkerId) -> Pin<Box<dyn Send + Future<Output = ()>>> = &|worker_id| {
-        let live_stats = live_stats.clone();
-        let start_work_barrier = start_work_barrier.clone();
+        let ss = shared_state.clone();
+        let cancel = cancel.clone();
         let ranges: Vec<KeyRange> = all_ranges
             .iter()
             .filter(|r| r.timeline == worker_id.timeline)
@@ -287,19 +294,8 @@ async fn main_impl(
             rand::distributions::weighted::WeightedIndex::new(ranges.iter().map(|v| v.len()))
                 .unwrap();
 
-        let cancel = cancel.clone();
         Box::pin(async move {
-            client_libpq(
-                args,
-                worker_id,
-                start_work_barrier,
-                cancel,
-                rps_period,
-                live_stats,
-                ranges,
-                weights,
-            )
-            .await
+            client_libpq(args, worker_id, ss, cancel, rps_period, ranges, weights).await
         })
     };
 
@@ -321,7 +317,7 @@ async fn main_impl(
     };
 
     info!("waiting for everything to become ready");
-    start_work_barrier.wait().await;
+    shared_state.start_work_barrier.wait().await;
     info!("work started");
     if let Some(runtime) = args.runtime {
         tokio::time::sleep(runtime.into()).await;
@@ -354,10 +350,9 @@ async fn main_impl(
 async fn client_libpq(
     args: &Args,
     worker_id: WorkerId,
-    start_work_barrier: Arc<tokio::sync::Barrier>,
+    shared_state: Arc<SharedState>,
     cancel: CancellationToken,
     rps_period: Option<Duration>,
-    live_stats: Arc<LiveStats>,
     ranges: Vec<KeyRange>,
     weights: rand::distributions::weighted::WeightedIndex<i128>,
 ) {
@@ -369,7 +364,7 @@ async fn client_libpq(
         .await
         .unwrap();
 
-    start_work_barrier.wait().await;
+    shared_state.start_work_barrier.wait().await;
     let client_start = Instant::now();
     let mut ticks_processed = 0;
     let mut inflight = VecDeque::new();
@@ -380,7 +375,9 @@ async fn client_libpq(
                 usize::try_from(client_start.elapsed().as_micros() / period.as_micros()).unwrap();
 
             if periods_passed_until_now > ticks_processed {
-                live_stats.missed((periods_passed_until_now - ticks_processed) as u64);
+                shared_state
+                    .live_stats
+                    .missed((periods_passed_until_now - ticks_processed) as u64);
             }
             ticks_processed = periods_passed_until_now;
         }
@@ -417,7 +414,7 @@ async fn client_libpq(
         let start = inflight.pop_front().unwrap();
         client.getpage_recv().await.unwrap();
         let end = Instant::now();
-        live_stats.request_done();
+        shared_state.live_stats.request_done();
         ticks_processed += 1;
         STATS.with(|stats| {
             stats
