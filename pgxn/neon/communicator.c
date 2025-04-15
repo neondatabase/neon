@@ -1018,7 +1018,7 @@ communicator_prefetch_lookupv(NRelFileInfo rinfo, ForkNumber forknum, BlockNumbe
 			 * under buffer lock.
 			 */
 			if (!lfc_store_prefetch_result)
-				lfc_write(rinfo, forknum, blocknum + i, buffers[i]);
+				lfc_write(rinfo, forknum, blocknum + i, buffers[i], true);
 
 			prefetch_set_unused(ring_index);
 			BITMAP_SET(mask, i);
@@ -2162,7 +2162,7 @@ Retry:
 				 * under buffer lock.
 				 */
 				if (!lfc_store_prefetch_result)
-					lfc_write(rinfo, forkNum, blockno, buffer);
+					lfc_write(rinfo, forkNum, blockno, buffer, true);
 				break;
 			}
 			case T_NeonErrorResponse:

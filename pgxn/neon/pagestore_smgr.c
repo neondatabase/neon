@@ -915,7 +915,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 			mdextend(reln, forkNum, blkno, buffer, skipFsync);
 			/* Update LFC in case of unlogged index build */
 			if (reln == unlogged_build_rel && unlogged_build_phase == UNLOGGED_BUILD_PHASE_2)
-				lfc_write(InfoFromSMgrRel(reln), forkNum, blkno, buffer);
+				lfc_write(InfoFromSMgrRel(reln), forkNum, blkno, buffer, false);
 			return;
 
 		default:
@@ -962,7 +962,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		 forkNum, blkno,
 		 (uint32) (lsn >> 32), (uint32) lsn);
 
-	lfc_write(InfoFromSMgrRel(reln), forkNum, blkno, buffer);
+	lfc_write(InfoFromSMgrRel(reln), forkNum, blkno, buffer, false);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -1009,7 +1009,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 			{
 				for (int i = 0; i < nblocks; i++)
 				{
-					lfc_write(InfoFromSMgrRel(reln), forkNum, blocknum + i, buffer.data);
+					lfc_write(InfoFromSMgrRel(reln), forkNum, blocknum + i, buffer.data, false);
 				}
 			}
 			return;
@@ -1075,7 +1075,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 
 		for (int i = 0; i < count; i++)
 		{
-			lfc_write(InfoFromSMgrRel(reln), forkNum, blocknum + i, buffer.data);
+			lfc_write(InfoFromSMgrRel(reln), forkNum, blocknum + i, buffer.data, false);
 			neon_set_lwlsn_block(lsn, InfoFromSMgrRel(reln), forkNum,
 									  blocknum + i);
 		}
@@ -1643,7 +1643,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 			#endif
 			/* Update LFC in case of unlogged index build */
 			if (reln == unlogged_build_rel && unlogged_build_phase == UNLOGGED_BUILD_PHASE_2)
-				lfc_write(InfoFromSMgrRel(reln), forknum, blocknum, buffer);
+				lfc_write(InfoFromSMgrRel(reln), forknum, blocknum, buffer, false);
 			return;
 		default:
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
@@ -1657,7 +1657,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 		 forknum, blocknum,
 		 (uint32) (lsn >> 32), (uint32) lsn);
 
-	lfc_write(InfoFromSMgrRel(reln), forknum, blocknum, buffer);
+	lfc_write(InfoFromSMgrRel(reln), forknum, blocknum, buffer, false);
 
 	communicator_prefetch_pump_state(false);
 
@@ -1711,7 +1711,7 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 			mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
 			/* Update LFC in case of unlogged index build */
 			if (reln == unlogged_build_rel && unlogged_build_phase == UNLOGGED_BUILD_PHASE_2)
-				lfc_writev(InfoFromSMgrRel(reln), forknum, blkno, buffers, nblocks);
+				lfc_writev(InfoFromSMgrRel(reln), forknum, blkno, buffers, nblocks, false);
 			return;
 		default:
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
@@ -1719,7 +1719,7 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 
 	neon_wallog_pagev(reln, forknum, blkno, nblocks, (const char **) buffers, false);
 
-	lfc_writev(InfoFromSMgrRel(reln), forknum, blkno, buffers, nblocks);
+	lfc_writev(InfoFromSMgrRel(reln), forknum, blkno, buffers, nblocks, false);
 
 	communicator_prefetch_pump_state(false);
 
