@@ -424,13 +424,18 @@ impl DeltaLayerWriterInner {
         // Create the file initially with a temporary filename. We don't know
         // the end key yet, so we cannot form the final filename yet. We will
         // rename it when we're done.
-        //
-        // Note: This overwrites any existing file. There shouldn't be any.
-        // FIXME: throw an error instead?
         let path =
             DeltaLayer::temp_path_for(conf, &tenant_shard_id, &timeline_id, key_start, &lsn_range);
-
-        let file = TempVirtualFile::new(VirtualFile::create_v2(&path, ctx).await?);
+        let file = TempVirtualFile::new(
+            VirtualFile::open_with_options_v2(
+                &path,
+                virtual_file::OpenOptions::new()
+                    .create_new(true)
+                    .write(true),
+                ctx,
+            )
+            .await?,
+        );
 
         // Start at PAGE_SZ, make room for the header block
         let blob_writer = BlobWriter::new(

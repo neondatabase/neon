@@ -96,41 +96,6 @@ impl VirtualFile {
         Self::open_with_options_v2(path.as_ref(), OpenOptions::new().read(true), ctx).await
     }
 
-    pub async fn create<P: AsRef<Utf8Path>>(
-        path: P,
-        ctx: &RequestContext,
-    ) -> Result<Self, std::io::Error> {
-        let inner = VirtualFileInner::create(path, ctx).await?;
-        Ok(VirtualFile {
-            inner,
-            _mode: IoMode::Buffered,
-        })
-    }
-
-    pub async fn create_v2<P: AsRef<Utf8Path>>(
-        path: P,
-        ctx: &RequestContext,
-    ) -> Result<Self, std::io::Error> {
-        VirtualFile::open_with_options_v2(
-            path.as_ref(),
-            OpenOptions::new().write(true).create(true).truncate(true),
-            ctx,
-        )
-        .await
-    }
-
-    pub async fn open_with_options<P: AsRef<Utf8Path>>(
-        path: P,
-        open_options: &OpenOptions,
-        ctx: &RequestContext,
-    ) -> Result<Self, std::io::Error> {
-        let inner = VirtualFileInner::open_with_options(path, open_options, ctx).await?;
-        Ok(VirtualFile {
-            inner,
-            _mode: IoMode::Buffered,
-        })
-    }
-
     pub async fn open_with_options_v2<P: AsRef<Utf8Path>>(
         path: P,
         open_options: &OpenOptions,
@@ -561,20 +526,6 @@ impl VirtualFileInner {
         ctx: &RequestContext,
     ) -> Result<VirtualFileInner, std::io::Error> {
         Self::open_with_options(path.as_ref(), OpenOptions::new().read(true), ctx).await
-    }
-
-    /// Create a new file for writing. If the file exists, it will be truncated.
-    /// Like File::create.
-    pub async fn create<P: AsRef<Utf8Path>>(
-        path: P,
-        ctx: &RequestContext,
-    ) -> Result<VirtualFileInner, std::io::Error> {
-        Self::open_with_options(
-            path.as_ref(),
-            OpenOptions::new().write(true).create(true).truncate(true),
-            ctx,
-        )
-        .await
     }
 
     /// Open a file with given options.
@@ -1351,7 +1302,7 @@ mod tests {
                 opts: OpenOptions,
                 ctx: &RequestContext,
             ) -> Result<MaybeVirtualFile, anyhow::Error> {
-                let vf = VirtualFile::open_with_options(&path, &opts, ctx).await?;
+                let vf = VirtualFile::open_with_options_v2(&path, &opts, ctx).await?;
                 Ok(MaybeVirtualFile::VirtualFile(vf))
             }
         }

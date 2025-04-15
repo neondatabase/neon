@@ -352,6 +352,7 @@ pub(crate) mod tests {
     use crate::context::DownloadBehavior;
     use crate::task_mgr::TaskKind;
     use crate::tenant::block_io::BlockReaderRef;
+    use crate::virtual_file;
     use crate::virtual_file::TempVirtualFile;
     use crate::virtual_file::VirtualFile;
 
@@ -372,7 +373,16 @@ pub(crate) mod tests {
         // Write part (in block to drop the file)
         let mut offsets = Vec::new();
         {
-            let file = TempVirtualFile::new(VirtualFile::create_v2(pathbuf.as_path(), ctx).await?);
+            let file = TempVirtualFile::new(
+                VirtualFile::open_with_options_v2(
+                    pathbuf.as_path(),
+                    virtual_file::OpenOptions::new()
+                        .create_new(true)
+                        .write(true),
+                    ctx,
+                )
+                .await?,
+            );
             let mut wtr =
                 BlobWriter::new(file, 0, &gate, cancel.clone(), ctx, info_span!("test")).unwrap();
             for blob in blobs.iter() {

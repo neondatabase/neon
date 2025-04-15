@@ -785,8 +785,8 @@ impl ImageLayerWriterInner {
             VirtualFile::open_with_options_v2(
                 &path,
                 virtual_file::OpenOptions::new()
-                    .write(true)
-                    .create_new(true),
+                    .create_new(true)
+                    .write(true),
                 ctx,
             )
             .await?,

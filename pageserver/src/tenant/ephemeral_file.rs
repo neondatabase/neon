@@ -82,9 +82,9 @@ impl EphemeralFile {
             VirtualFile::open_with_options_v2(
                 &filename,
                 virtual_file::OpenOptions::new()
+                    .create_new(true)
                     .read(true)
-                    .write(true)
-                    .create(true),
+                    .write(true),
                 ctx,
             )
             .await?,
