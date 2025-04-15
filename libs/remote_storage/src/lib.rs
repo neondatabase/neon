@@ -12,12 +12,12 @@
 mod azure_blob;
 mod config;
 mod error;
+mod kms;
 mod local_fs;
 mod metrics;
 mod s3_bucket;
 mod simulate_failures;
 mod support;
-mod kms;
 
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -332,6 +332,28 @@ pub trait RemoteStorage: Send + Sync + 'static {
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError>;
 
+    /// Same as download, but with SSE-C encryption if the backend supports it.
+    async fn download_with_encryption(
+        &self,
+        from: &RemotePath,
+        opts: &DownloadOpts,
+        encryption_key: Option<&[u8]>,
+        cancel: &CancellationToken,
+    ) -> Result<Download, DownloadError>;
+
+    /// Same as upload, but with SSE-C encryption if the backend supports it.
+    async fn upload_with_encryption(
+        &self,
+        from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
+        // S3 PUT request requires the content length to be specified,
+        // otherwise it starts to fail with the concurrent connection count increasing.
+        data_size_bytes: usize,
+        to: &RemotePath,
+        metadata: Option<StorageMetadata>,
+        encryption_key: Option<&[u8]>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()>;
+
     /// Delete a single path from remote storage.
     ///
     /// If the operation fails because of timeout or cancellation, the root cause of the error will be
@@ -613,6 +635,90 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             Self::Unreliable(s) => {
                 s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
                     .await
+            }
+        }
+    }
+
+    pub async fn download_with_encryption(
+        &self,
+        from: &RemotePath,
+        opts: &DownloadOpts,
+        encryption_key: Option<&[u8]>,
+        cancel: &CancellationToken,
+    ) -> Result<Download, DownloadError> {
+        match self {
+            Self::LocalFs(s) => {
+                s.download_with_encryption(from, opts, encryption_key, cancel)
+                    .await
+            }
+            Self::AwsS3(s) => {
+                s.download_with_encryption(from, opts, encryption_key, cancel)
+                    .await
+            }
+            Self::AzureBlob(s) => {
+                s.download_with_encryption(from, opts, encryption_key, cancel)
+                    .await
+            }
+            Self::Unreliable(s) => {
+                s.download_with_encryption(from, opts, encryption_key, cancel)
+                    .await
+            }
+        }
+    }
+
+    pub async fn upload_with_encryption(
+        &self,
+        from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
+        data_size_bytes: usize,
+        to: &RemotePath,
+        metadata: Option<StorageMetadata>,
+        encryption_key: Option<&[u8]>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::LocalFs(s) => {
+                s.upload_with_encryption(
+                    from,
+                    data_size_bytes,
+                    to,
+                    metadata,
+                    encryption_key,
+                    cancel,
+                )
+                .await
+            }
+            Self::AwsS3(s) => {
+                s.upload_with_encryption(
+                    from,
+                    data_size_bytes,
+                    to,
+                    metadata,
+                    encryption_key,
+                    cancel,
+                )
+                .await
+            }
+            Self::AzureBlob(s) => {
+                s.upload_with_encryption(
+                    from,
+                    data_size_bytes,
+                    to,
+                    metadata,
+                    encryption_key,
+                    cancel,
+                )
+                .await
+            }
+            Self::Unreliable(s) => {
+                s.upload_with_encryption(
+                    from,
+                    data_size_bytes,
+                    to,
+                    metadata,
+                    encryption_key,
+                    cancel,
+                )
+                .await
             }
         }
     }

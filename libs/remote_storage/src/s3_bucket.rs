@@ -66,7 +66,10 @@ struct GetObjectRequest {
     key: String,
     etag: Option<String>,
     range: Option<String>,
+    /// Base64 encoded SSE-C key for server-side encryption.
+    sse_c_key: Option<Vec<u8>>,
 }
+
 impl S3Bucket {
     /// Creates the S3 storage, errors if incorrect AWS S3 configuration provided.
     pub async fn new(remote_storage_config: &S3Config, timeout: Duration) -> anyhow::Result<Self> {
@@ -255,6 +258,13 @@ impl S3Bucket {
 
         if let Some(etag) = request.etag {
             builder = builder.if_none_match(etag);
+        }
+
+        if let Some(encryption_key) = request.sse_c_key {
+            builder = builder.sse_customer_algorithm("AES256");
+            builder = builder.sse_customer_key(base64::encode(&encryption_key));
+            builder = builder
+                .sse_customer_key_md5(base64::encode(md5::compute(&encryption_key).as_slice()));
         }
 
         let get_object = builder.send();
@@ -693,12 +703,13 @@ impl RemoteStorage for S3Bucket {
         })
     }
 
-    async fn upload(
+    async fn upload_with_encryption(
         &self,
         from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
         from_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
+        encryption_key: Option<&[u8]>,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let kind = RequestKind::Put;
@@ -709,7 +720,7 @@ impl RemoteStorage for S3Bucket {
         let body = StreamBody::new(from.map(|x| x.map(Frame::data)));
         let bytes_stream = ByteStream::new(SdkBody::from_body_1_x(body));
 
-        let upload = self
+        let mut upload = self
             .client
             .put_object()
             .bucket(self.bucket_name.clone())
@@ -717,8 +728,17 @@ impl RemoteStorage for S3Bucket {
             .set_metadata(metadata.map(|m| m.0))
             .set_storage_class(self.upload_storage_class.clone())
             .content_length(from_size_bytes.try_into()?)
-            .body(bytes_stream)
-            .send();
+            .body(bytes_stream);
+
+        if let Some(encryption_key) = encryption_key {
+            upload = upload.sse_customer_algorithm("AES256");
+            let base64_key = base64::encode(&encryption_key);
+            upload = upload.sse_customer_key(&base64_key);
+            upload = upload
+                .sse_customer_key_md5(base64::encode(md5::compute(&encryption_key).as_slice()));
+        }
+
+        let upload = upload.send();
 
         let upload = tokio::time::timeout(self.timeout, upload);
 
@@ -740,6 +760,18 @@ impl RemoteStorage for S3Bucket {
             Ok(Err(sdk)) => Err(sdk.into()),
             Err(_timeout) => Err(TimeoutOrCancel::Timeout.into()),
         }
+    }
+
+    async fn upload(
+        &self,
+        from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
+        data_size_bytes: usize,
+        to: &RemotePath,
+        metadata: Option<StorageMetadata>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        self.upload_with_encryption(from, data_size_bytes, to, metadata, None, cancel)
+            .await
     }
 
     async fn copy(
@@ -787,10 +819,11 @@ impl RemoteStorage for S3Bucket {
         Ok(())
     }
 
-    async fn download(
+    async fn download_with_encryption(
         &self,
         from: &RemotePath,
         opts: &DownloadOpts,
+        encryption_key: Option<&[u8]>,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         // if prefix is not none then download file `prefix/from`
@@ -801,10 +834,21 @@ impl RemoteStorage for S3Bucket {
                 key: self.relative_path_to_s3_object(from),
                 etag: opts.etag.as_ref().map(|e| e.to_string()),
                 range: opts.byte_range_header(),
+                sse_c_key: encryption_key.map(|k| k.to_vec()),
             },
             cancel,
         )
         .await
+    }
+
+    async fn download(
+        &self,
+        from: &RemotePath,
+        opts: &DownloadOpts,
+        cancel: &CancellationToken,
+    ) -> Result<Download, DownloadError> {
+        self.download_with_encryption(from, opts, None, cancel)
+            .await
     }
 
     async fn delete_objects(

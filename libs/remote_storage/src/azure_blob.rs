@@ -550,6 +550,30 @@ impl RemoteStorage for AzureBlobStorage {
         self.download_for_builder(builder, timeout, cancel).await
     }
 
+    #[allow(unused_variables)]
+    async fn download_with_encryption(
+        &self,
+        from: &RemotePath,
+        opts: &DownloadOpts,
+        encryption_key: Option<&[u8]>,
+        cancel: &CancellationToken,
+    ) -> Result<Download, DownloadError> {
+        unimplemented!()
+    }
+
+    #[allow(unused_variables)]
+    async fn upload_with_encryption(
+        &self,
+        from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
+        data_size_bytes: usize,
+        to: &RemotePath,
+        metadata: Option<StorageMetadata>,
+        encryption_key: Option<&[u8]>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        unimplemented!()
+    }
+
     async fn delete(&self, path: &RemotePath, cancel: &CancellationToken) -> anyhow::Result<()> {
         self.delete_objects(std::array::from_ref(path), cancel)
             .await
