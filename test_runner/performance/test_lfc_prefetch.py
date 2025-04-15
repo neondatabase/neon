@@ -3,10 +3,13 @@ from __future__ import annotations
 import random
 import threading
 import time
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import USE_LFC
 
 
