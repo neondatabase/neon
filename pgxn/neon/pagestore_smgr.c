@@ -2078,10 +2078,10 @@ neon_end_unlogged_build(SMgrRelation reln)
 		recptr = GetXLogInsertRecPtr();
 
 		neon_set_lwlsn_block_range(recptr,
-								   reln->smgr_rlocator.locator,
+								   InfoFromNInfoB(rinfob),
 								   MAIN_FORKNUM, 0, nblocks);
 		neon_set_lwlsn_relation(recptr,
-								reln->smgr_rlocator.locator,
+								InfoFromNInfoB(rinfob),
 								MAIN_FORKNUM);
 
 		/* Make the relation look permanent again */
