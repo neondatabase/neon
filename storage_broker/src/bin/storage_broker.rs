@@ -17,10 +17,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use camino::Utf8PathBuf;
 use clap::{Parser, command};
+use futures::future::OptionFuture;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use http_body_util::Full;
+use http_utils::tls_certs::ReloadingCertificateResolver;
 use hyper::body::Incoming;
 use hyper::header::CONTENT_TYPE;
 use hyper::service::service_fn;
@@ -59,12 +62,19 @@ project_build_tag!(BUILD_TAG);
 const DEFAULT_CHAN_SIZE: usize = 32;
 const DEFAULT_ALL_KEYS_CHAN_SIZE: usize = 16384;
 
+const DEFAULT_SSL_KEY_FILE: &str = "server.key";
+const DEFAULT_SSL_CERT_FILE: &str = "server.crt";
+const DEFAULT_SSL_CERT_RELOAD_PERIOD: &str = "60s";
+
 #[derive(Parser, Debug)]
 #[command(version = GIT_VERSION, about = "Broker for neon storage nodes communication", long_about = None)]
 struct Args {
-    /// Endpoint to listen on.
-    #[arg(short, long, default_value = DEFAULT_LISTEN_ADDR)]
-    listen_addr: SocketAddr,
+    /// Endpoint to listen HTTP on.
+    #[arg(short, long)]
+    listen_addr: Option<SocketAddr>,
+    /// Endpoint to listen HTTPS on.
+    #[arg(long)]
+    listen_https_addr: Option<SocketAddr>,
     /// Size of the queue to the per timeline subscriber.
     #[arg(long, default_value_t = DEFAULT_CHAN_SIZE)]
     timeline_chan_size: usize,
@@ -72,11 +82,20 @@ struct Args {
     #[arg(long, default_value_t = DEFAULT_ALL_KEYS_CHAN_SIZE)]
     all_keys_chan_size: usize,
     /// HTTP/2 keepalive interval.
-    #[arg(long, value_parser= humantime::parse_duration, default_value = DEFAULT_KEEPALIVE_INTERVAL)]
+    #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_KEEPALIVE_INTERVAL)]
     http2_keepalive_interval: Duration,
     /// Format for logging, either 'plain' or 'json'.
     #[arg(long, default_value = "plain")]
     log_format: String,
+    /// Path to a file with certificate's private key for https API.
+    #[arg(long, default_value = DEFAULT_SSL_KEY_FILE)]
+    ssl_key_file: Utf8PathBuf,
+    /// Path to a file with a X509 certificate for https API.
+    #[arg(long, default_value = DEFAULT_SSL_CERT_FILE)]
+    ssl_cert_file: Utf8PathBuf,
+    /// Period to reload certificate and private key from files.
+    #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_SSL_CERT_RELOAD_PERIOD)]
+    ssl_cert_reload_period: Duration,
 }
 
 /// Id of publisher for registering in maps
@@ -674,12 +693,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let storage_broker_server = BrokerServiceServer::new(storage_broker_impl);
 
+    let http_listener = match &args.listen_addr {
+        Some(addr) => {
+            info!("listening HTTP on {}", addr);
+            Some(TcpListener::bind(addr).await?)
+        }
+        None if args.listen_https_addr.is_none() => {
+            info!("listening HTTP on default address {}", DEFAULT_LISTEN_ADDR);
+            Some(TcpListener::bind(DEFAULT_LISTEN_ADDR).await?)
+        }
+        None => None,
+    };
+
+    let (https_listener, tls_acceptor) = match &args.listen_https_addr {
+        Some(addr) => {
+            let listener = TcpListener::bind(addr).await?;
+
+            let cert_resolver = ReloadingCertificateResolver::new(
+                "main",
+                &args.ssl_key_file,
+                &args.ssl_cert_file,
+                args.ssl_cert_reload_period,
+            )
+            .await?;
+
+            let tls_config = rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_cert_resolver(cert_resolver);
+
+            let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls_config));
+
+            info!("listening HTTPS on {}", addr);
+            (Some(listener), Some(acceptor))
+        }
+        None => (None, None),
+    };
+
     // grpc is served along with http1 for metrics on a single port, hence we
     // don't use tonic's Server.
-    let tcp_listener = TcpListener::bind(&args.listen_addr).await?;
-    info!("listening on {}", &args.listen_addr);
     loop {
-        let (stream, addr) = match tcp_listener.accept().await {
+        let (conn, is_https) = tokio::select! {
+            Some(conn) = OptionFuture::from(http_listener.as_ref().map(|l| l.accept())) => (conn, false),
+            Some(conn) = OptionFuture::from(https_listener.as_ref().map(|l| l.accept())) => (conn, true),
+        };
+
+        let (tcp_stream, addr) = match conn {
             Ok(v) => v,
             Err(e) => {
                 info!("couldn't accept connection: {e}");
@@ -734,13 +792,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         .await;
 
-        tokio::task::spawn(async move {
-            let res = builder
-                .serve_connection(TokioIo::new(stream), service_fn_)
-                .await;
+        let tls_acceptor = tls_acceptor.clone();
 
-            if let Err(e) = res {
-                info!("error serving connection from {addr}: {e}");
+        tokio::task::spawn(async move {
+            if is_https {
+                let tls_acceptor =
+                    tls_acceptor.expect("tls_acceptor is set together with https_listener");
+
+                let tls_stream = match tls_acceptor.accept(tcp_stream).await {
+                    Ok(tls_stream) => tls_stream,
+                    Err(e) => {
+                        info!("error accepting TLS connection from {addr}: {e}");
+                        return;
+                    }
+                };
+
+                let res = builder
+                    .serve_connection(TokioIo::new(tls_stream), service_fn_)
+                    .await;
+
+                if let Err(e) = res {
+                    info!("error serving HTTPS connection from {addr}: {e}");
+                }
+            } else {
+                let res = builder
+                    .serve_connection(TokioIo::new(tcp_stream), service_fn_)
+                    .await;
+
+                if let Err(e) = res {
+                    info!("error serving HTTP connection from {addr}: {e}");
+                }
             }
         });
     }

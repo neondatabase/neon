@@ -979,7 +979,8 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
         NeonLocalInitConf {
             control_plane_api: Some(DEFAULT_PAGESERVER_CONTROL_PLANE_API.parse().unwrap()),
             broker: NeonBroker {
-                listen_addr: DEFAULT_BROKER_ADDR.parse().unwrap(),
+                listen_addr: Some(DEFAULT_BROKER_ADDR.parse().unwrap()),
+                listen_https_addr: None,
             },
             safekeepers: vec![SafekeeperConf {
                 id: DEFAULT_SAFEKEEPER_ID,

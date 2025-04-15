@@ -212,3 +212,19 @@ def test_server_and_cert_metrics(neon_env_builder: NeonEnvBuilder):
         assert reload_error_cnt > 0
 
     wait_until(reload_failed)
+
+
+def test_storage_broker_https_api(neon_env_builder: NeonEnvBuilder):
+    """
+    Test HTTPS storage broker API.
+    If NeonEnv starts with use_https_storage_broker_api with no errors, it's already a success.
+    Make /status request to HTTPS API to ensure it's appropriately configured.
+    TODO(DimasKovas): add some real workload to test interaction between safekeepers/pageservers
+    and storage broker after SKs/PSs support ssl_ca_file for tonic requests.
+    """
+    neon_env_builder.use_https_storage_broker_api = True
+    env = neon_env_builder.init_start()
+
+    url = env.broker.client_url() + "/status"
+    assert url.startswith("https://")
+    requests.get(url, verify=str(env.ssl_ca_file)).raise_for_status()

@@ -501,6 +501,9 @@ class NeonEnvBuilder:
         # Flag to use https listener in storage controller, generate local ssl certs,
         # and force pageservers and neon_local to use https for storage controller api.
         self.use_https_storage_controller_api: bool = False
+        # Flag to use https listener in storage broker, generate local ssl certs,
+        # and force pageservers and safekeepers to use https for storage broker api.
+        self.use_https_storage_broker_api: bool = False
 
         self.pageserver_virtual_file_io_engine: str | None = pageserver_virtual_file_io_engine
         self.pageserver_get_vectored_concurrent_io: str | None = (
@@ -1088,7 +1091,7 @@ class NeonEnv:
         self.safekeepers: list[Safekeeper] = []
         self.pageservers: list[NeonPageserver] = []
         self.num_azs = config.num_azs
-        self.broker = NeonBroker(self)
+        self.broker = NeonBroker(self, config.use_https_storage_broker_api)
         self.pageserver_remote_storage = config.pageserver_remote_storage
         self.safekeepers_remote_storage = config.safekeepers_remote_storage
         self.pg_version = config.pg_version
@@ -1108,6 +1111,7 @@ class NeonEnv:
             config.use_https_pageserver_api
             or config.use_https_safekeeper_api
             or config.use_https_storage_controller_api
+            or config.use_https_storage_broker_api
         )
         self.ssl_ca_file = (
             self.repo_dir.joinpath("rootCA.crt") if self.generate_local_ssl_certs else None
@@ -1180,14 +1184,17 @@ class NeonEnv:
         # Create the neon_local's `NeonLocalInitConf`
         cfg: dict[str, Any] = {
             "default_tenant_id": str(self.initial_tenant),
-            "broker": {
-                "listen_addr": self.broker.listen_addr(),
-            },
+            "broker": {},
             "safekeepers": [],
             "pageservers": [],
             "object_storage": {"port": self.port_distributor.get_port()},
             "generate_local_ssl_certs": self.generate_local_ssl_certs,
         }
+
+        if config.use_https_storage_broker_api:
+            cfg["broker"]["listen_https_addr"] = self.broker.listen_addr()
+        else:
+            cfg["broker"]["listen_addr"] = self.broker.listen_addr()
 
         if self.control_plane_api is not None:
             cfg["control_plane_api"] = self.control_plane_api
@@ -4922,9 +4929,10 @@ class Safekeeper(LogUtils):
 class NeonBroker(LogUtils):
     """An object managing storage_broker instance"""
 
-    def __init__(self, env: NeonEnv):
+    def __init__(self, env: NeonEnv, use_https: bool):
         super().__init__(logfile=env.repo_dir / "storage_broker.log")
         self.env = env
+        self.scheme = "https" if use_https else "http"
         self.port: int = self.env.port_distributor.get_port()
         self.running = False
 
@@ -4947,7 +4955,7 @@ class NeonBroker(LogUtils):
         return f"127.0.0.1:{self.port}"
 
     def client_url(self):
-        return f"http://{self.listen_addr()}"
+        return f"{self.scheme}://{self.listen_addr()}"
 
     def assert_no_errors(self):
         assert_no_errors(self.logfile, "storage_controller", [])

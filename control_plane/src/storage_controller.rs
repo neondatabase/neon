@@ -19,7 +19,7 @@ use pageserver_api::models::{
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
-use reqwest::{Certificate, Method};
+use reqwest::Method;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
@@ -146,24 +146,11 @@ impl StorageController {
             }
         };
 
-        let ssl_ca_certs = env.ssl_ca_cert_path().map(|ssl_ca_file| {
-            let buf = std::fs::read(ssl_ca_file).expect("SSL CA file should exist");
-            Certificate::from_pem_bundle(&buf).expect("SSL CA file should be valid")
-        });
-
-        let mut http_client = reqwest::Client::builder();
-        for ssl_ca_cert in ssl_ca_certs.unwrap_or_default() {
-            http_client = http_client.add_root_certificate(ssl_ca_cert);
-        }
-        let http_client = http_client
-            .build()
-            .expect("HTTP client should construct with no error");
-
         Self {
             env: env.clone(),
             private_key,
             public_key,
-            client: http_client,
+            client: env.create_http_client(),
             config: env.storage_controller.clone(),
             listen_port: OnceLock::default(),
         }

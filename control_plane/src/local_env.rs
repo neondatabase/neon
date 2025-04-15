@@ -4,7 +4,7 @@
 //! script which will use local paths.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -13,7 +13,7 @@ use std::{env, fs};
 use anyhow::{Context, bail};
 use clap::ValueEnum;
 use postgres_backend::AuthType;
-use reqwest::Url;
+use reqwest::{Certificate, Url};
 use serde::{Deserialize, Serialize};
 use utils::auth::encode_from_key_file;
 use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
@@ -155,11 +155,16 @@ pub struct ObjectStorageConf {
 }
 
 /// Broker config for cluster internal communication.
-#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug, Default)]
 #[serde(default)]
 pub struct NeonBroker {
-    /// Broker listen address for storage nodes coordination, e.g. '127.0.0.1:50051'.
-    pub listen_addr: SocketAddr,
+    /// Broker listen HTTP address for storage nodes coordination, e.g. '127.0.0.1:50051'.
+    /// At least one of listen_addr or listen_https_addr must be set.
+    pub listen_addr: Option<SocketAddr>,
+    /// Broker listen HTTPS address for storage nodes coordination, e.g. '127.0.0.1:50051'.
+    /// At least one of listen_addr or listen_https_addr must be set.
+    /// listen_https_addr is preferred over listen_addr in neon_local.
+    pub listen_https_addr: Option<SocketAddr>,
 }
 
 /// A part of storage controller's config the neon_local knows about.
@@ -233,18 +238,19 @@ impl Default for NeonStorageControllerConf {
     }
 }
 
-// Dummy Default impl to satisfy Deserialize derive.
-impl Default for NeonBroker {
-    fn default() -> Self {
-        NeonBroker {
-            listen_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0),
-        }
-    }
-}
-
 impl NeonBroker {
     pub fn client_url(&self) -> Url {
-        Url::parse(&format!("http://{}", self.listen_addr)).expect("failed to construct url")
+        let url = self
+            .listen_https_addr
+            .map(|addr| format!("https://{}", addr))
+            .unwrap_or_else(|| {
+                format!(
+                    "http://{}",
+                    self.listen_addr.expect("at least one address is set")
+                )
+            });
+
+        Url::parse(&url).expect("failed to construct url")
     }
 }
 
@@ -439,6 +445,10 @@ impl LocalEnv {
         self.base_data_dir.join("endpoints")
     }
 
+    pub fn storage_broker_data_dir(&self) -> PathBuf {
+        self.base_data_dir.join("storage_broker")
+    }
+
     pub fn pageserver_data_dir(&self, pageserver_id: NodeId) -> PathBuf {
         self.base_data_dir
             .join(format!("pageserver_{pageserver_id}"))
@@ -499,6 +509,23 @@ impl LocalEnv {
             self.ssl_ca_cert_path().unwrap().as_path(),
             self.ssl_ca_key_path().unwrap().as_path(),
         )
+    }
+
+    /// Creates HTTP client with local SSL CA certificates.
+    pub fn create_http_client(&self) -> reqwest::Client {
+        let ssl_ca_certs = self.ssl_ca_cert_path().map(|ssl_ca_file| {
+            let buf = std::fs::read(ssl_ca_file).expect("SSL CA file should exist");
+            Certificate::from_pem_bundle(&buf).expect("SSL CA file should be valid")
+        });
+
+        let mut http_client = reqwest::Client::builder();
+        for ssl_ca_cert in ssl_ca_certs.unwrap_or_default() {
+            http_client = http_client.add_root_certificate(ssl_ca_cert);
+        }
+
+        http_client
+            .build()
+            .expect("HTTP client should construct with no error")
     }
 
     /// Inspect the base data directory and extract the instance id and instance directory path
@@ -885,6 +912,15 @@ impl LocalEnv {
 
         // create endpoints dir
         fs::create_dir_all(env.endpoints_path())?;
+
+        // create storage controller dir
+        fs::create_dir_all(env.storage_broker_data_dir())?;
+        if generate_local_ssl_certs {
+            env.generate_ssl_cert(
+                &env.storage_broker_data_dir().join("server.crt"),
+                &env.storage_broker_data_dir().join("server.key"),
+            )?;
+        }
 
         // create safekeeper dirs
         for safekeeper in &env.safekeepers {
