@@ -201,7 +201,8 @@ def test_pgdata_import_smoke(
     def cplane_notified():
         assert import_completion_signaled.is_set()
 
-    wait_until(cplane_notified)
+    # Generous timeout for the MULTIPLE_RELATION_SEGMENTS test variants
+    wait_until(cplane_notified, timeout=90)
 
     import_duration = time.monotonic() - start
     log.info(f"import complete; duration={import_duration:.2f}s")
