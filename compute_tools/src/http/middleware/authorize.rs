@@ -11,7 +11,7 @@ use futures::future::BoxFuture;
 use http::{Request, Response, StatusCode};
 use jsonwebtoken::{Algorithm, DecodingKey, TokenData, Validation, jwk::JwkSet};
 use tower_http::auth::AsyncAuthorizeRequest;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::http::{JsonResponse, extract::RequestId};
 
@@ -92,7 +92,7 @@ impl AsyncAuthorizeRequest<Body> for Authorize {
             if data.claims.compute_id != compute_id {
                 return Err(JsonResponse::error(
                     StatusCode::UNAUTHORIZED,
-                    "invalid claims in authorization token",
+                    "invalid compute ID in authorization token claims",
                 ));
             }
 
@@ -112,12 +112,14 @@ impl Authorize {
         token: &str,
         validation: &Validation,
     ) -> Result<TokenData<ComputeClaims>> {
+        debug!("verifying token {}", token);
+
         for jwk in jwks.keys.iter() {
             let decoding_key = match DecodingKey::from_jwk(jwk) {
                 Ok(key) => key,
                 Err(e) => {
                     warn!(
-                        "Failed to construct decoding key from {}: {}",
+                        "failed to construct decoding key from {}: {}",
                         jwk.common.key_id.as_ref().unwrap(),
                         e
                     );
@@ -130,7 +132,7 @@ impl Authorize {
                 Ok(data) => return Ok(data),
                 Err(e) => {
                     warn!(
-                        "Failed to decode authorization token using {}: {}",
+                        "failed to decode authorization token using {}: {}",
                         jwk.common.key_id.as_ref().unwrap(),
                         e
                     );
@@ -140,6 +142,6 @@ impl Authorize {
             }
         }
 
-        Err(anyhow!("Failed to verify authorization token"))
+        Err(anyhow!("failed to verify authorization token"))
     }
 }
