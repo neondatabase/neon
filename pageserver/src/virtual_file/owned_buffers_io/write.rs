@@ -134,6 +134,20 @@ where
         Ok((bytes_amount, writer))
     }
 
+    pub async fn into_inner_no_flush(self) -> Arc<W> {
+        let Self {
+            mutable: buf,
+            maybe_flushed: _,
+            writer,
+            mut flush_handle,
+            bytes_submitted: _,
+        } = self;
+        // If the flush task panicked, that's fine.
+        let _ = flush_handle.shutdown().await;
+        assert!(buf.is_some());
+        writer
+    }
+
     #[cfg(test)]
     pub(crate) fn mutable(&self) -> &B {
         self.mutable.as_ref().expect("must not use after an error")
