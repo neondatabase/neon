@@ -17,6 +17,7 @@ mod metrics;
 mod s3_bucket;
 mod simulate_failures;
 mod support;
+mod kms;
 
 use std::collections::HashMap;
 use std::fmt::Debug;
