@@ -111,9 +111,17 @@ impl<T> OnceCell<T> {
         }
     }
 
+    /// Like [`Self::get_or_init_detached_measured`], but without out parameter for time spent waiting.
+    pub async fn get_or_init_detached(&self) -> Result<Guard<'_, T>, InitPermit> {
+        self.get_or_init_detached_measured(None).await
+    }
+
     /// Returns a guard to an existing initialized value, or returns an unique initialization
     /// permit which can be used to initialize this `OnceCell` using `OnceCell::set`.
-    pub async fn get_or_init_detached(&self) -> Result<Guard<'_, T>, InitPermit> {
+    pub async fn get_or_init_detached_measured(
+        &self,
+        mut wait_time: Option<&mut crate::elapsed_accum::ElapsedAccum>,
+    ) -> Result<Guard<'_, T>, InitPermit> {
         // It looks like OnceCell::get_or_init could be implemented using this method instead of
         // duplication. However, that makes the future be !Send due to possibly holding on to the
         // MutexGuard over an await point.
@@ -125,12 +133,16 @@ impl<T> OnceCell<T> {
                 }
                 guard.init_semaphore.clone()
             };
-
             {
                 let permit = {
                     // increment the count for the duration of queued
                     let _guard = CountWaitingInitializers::start(self);
-                    sem.acquire().await
+                    let fut = sem.acquire();
+                    if let Some(wait_time) = wait_time.as_mut() {
+                        wait_time.measure(fut).await
+                    } else {
+                        fut.await
+                    }
                 };
 
                 let Ok(permit) = permit else {

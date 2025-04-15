@@ -268,7 +268,12 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 error_run += 1;
                 let backoff =
                     exponential_backoff_duration(error_run, BASE_BACKOFF_SECS, MAX_BACKOFF_SECS);
-                log_compaction_error(&err, Some((error_run, backoff)), cancel.is_cancelled());
+                log_compaction_error(
+                    &err,
+                    Some((error_run, backoff)),
+                    cancel.is_cancelled(),
+                    false,
+                );
                 continue;
             }
         }
@@ -285,6 +290,7 @@ pub(crate) fn log_compaction_error(
     err: &CompactionError,
     retry_info: Option<(u32, Duration)>,
     task_cancelled: bool,
+    degrade_to_warning: bool,
 ) {
     use CompactionError::*;
 
@@ -333,6 +339,7 @@ pub(crate) fn log_compaction_error(
         }
     } else {
         match level {
+            Level::ERROR if degrade_to_warning => warn!("Compaction failed and discarded: {err:#}"),
             Level::ERROR => error!("Compaction failed: {err:#}"),
             Level::INFO => info!("Compaction failed: {err:#}"),
             level => unimplemented!("unexpected level {level:?}"),

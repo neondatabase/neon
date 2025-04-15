@@ -43,7 +43,7 @@ use pageserver_api::models::{
     TimelineInfo, TopTenantShardItem, TopTenantShardsRequest,
 };
 use pageserver_api::shard::{
-    ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId,
+    DEFAULT_STRIPE_SIZE, ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId,
 };
 use pageserver_api::upcall_api::{
     ReAttachRequest, ReAttachResponse, ReAttachResponseTenant, ValidateRequest, ValidateResponse,
@@ -61,7 +61,7 @@ use utils::completion::Barrier;
 use utils::generation::Generation;
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
-use utils::sync::gate::Gate;
+use utils::sync::gate::{Gate, GateGuard};
 use utils::{failpoint_support, pausable_failpoint};
 
 use crate::background_node_operations::{
@@ -357,18 +357,10 @@ pub struct Config {
     // This JWT token will be used to authenticate with other storage controller instances
     pub peer_jwt_token: Option<String>,
 
-    /// Where the compute hook should send notifications of pageserver attachment locations
-    /// (this URL points to the control plane in prod). If this is None, the compute hook will
-    /// assume it is running in a test environment and try to update neon_local.
-    pub compute_hook_url: Option<String>,
-
     /// Prefix for storage API endpoints of the control plane. We use this prefix to compute
     /// URLs that we use to send pageserver and safekeeper attachment locations.
     /// If this is None, the compute hook will assume it is running in a test environment
     /// and try to invoke neon_local instead.
-    ///
-    /// For now, there is also `compute_hook_url` which allows configuration of the pageserver
-    /// specific endpoint, but it is in the process of being phased out.
     pub control_plane_url: Option<String>,
 
     /// Grace period within which a pageserver does not respond to heartbeats, but is still
@@ -594,6 +586,8 @@ struct TenantShardSplitAbort {
     new_stripe_size: Option<ShardStripeSize>,
     /// Until this abort op is complete, no other operations may be done on the tenant
     _tenant_lock: TracingExclusiveGuard<TenantOperations>,
+    /// The reconciler gate for the duration of the split operation, and any included abort.
+    _gate: GateGuard,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -1460,7 +1454,7 @@ impl Service {
             // Retry until shutdown: we must keep this request object alive until it is properly
             // processed, as it holds a lock guard that prevents other operations trying to do things
             // to the tenant while it is in a weird part-split state.
-            while !self.cancel.is_cancelled() {
+            while !self.reconcilers_cancel.is_cancelled() {
                 match self.abort_tenant_shard_split(&op).await {
                     Ok(_) => break,
                     Err(e) => {
@@ -1473,9 +1467,12 @@ impl Service {
                         // when we retry, so that the abort op will succeed.  If the abort op is failing
                         // for some other reason, we will keep retrying forever, or until a human notices
                         // and does something about it (either fixing a pageserver or restarting the controller).
-                        tokio::time::timeout(Duration::from_secs(5), self.cancel.cancelled())
-                            .await
-                            .ok();
+                        tokio::time::timeout(
+                            Duration::from_secs(5),
+                            self.reconcilers_cancel.cancelled(),
+                        )
+                        .await
+                        .ok();
                     }
                 }
             }
@@ -1509,6 +1506,10 @@ impl Service {
             .metrics_group
             .storage_controller_pageserver_nodes
             .set(nodes.len() as i64);
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_https_pageserver_nodes
+            .set(nodes.values().filter(|n| n.has_https_port()).count() as i64);
 
         tracing::info!("Loading safekeepers from database...");
         let safekeepers = persistence
@@ -1526,6 +1527,14 @@ impl Service {
         let safekeepers: HashMap<NodeId, Safekeeper> =
             safekeepers.into_iter().map(|n| (n.get_id(), n)).collect();
         tracing::info!("Loaded {} safekeepers from database.", safekeepers.len());
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_safekeeper_nodes
+            .set(safekeepers.len() as i64);
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_https_safekeeper_nodes
+            .set(safekeepers.values().filter(|s| s.has_https_port()).count() as i64);
 
         tracing::info!("Loading shards from database...");
         let mut tenant_shard_persistence = persistence.load_active_tenant_shards().await?;
@@ -1711,7 +1720,7 @@ impl Service {
             ))),
             config: config.clone(),
             persistence,
-            compute_hook: Arc::new(ComputeHook::new(config.clone())),
+            compute_hook: Arc::new(ComputeHook::new(config.clone())?),
             result_tx,
             heartbeater_ps,
             heartbeater_sk,
@@ -1835,6 +1844,7 @@ impl Service {
         };
 
         if insert {
+            let config = attach_req.config.clone().unwrap_or_default();
             let tsp = TenantShardPersistence {
                 tenant_id: attach_req.tenant_shard_id.tenant_id.to_string(),
                 shard_number: attach_req.tenant_shard_id.shard_number.0 as i32,
@@ -1843,7 +1853,7 @@ impl Service {
                 generation: attach_req.generation_override.or(Some(0)),
                 generation_pageserver: None,
                 placement_policy: serde_json::to_string(&PlacementPolicy::Attached(0)).unwrap(),
-                config: serde_json::to_string(&TenantConfig::default()).unwrap(),
+                config: serde_json::to_string(&config).unwrap(),
                 splitting: SplitState::default(),
                 scheduling_policy: serde_json::to_string(&ShardSchedulingPolicy::default())
                     .unwrap(),
@@ -1866,16 +1876,16 @@ impl Service {
                 Ok(()) => {
                     tracing::info!("Inserted shard {} in database", attach_req.tenant_shard_id);
 
-                    let mut locked = self.inner.write().unwrap();
-                    locked.tenants.insert(
+                    let mut shard = TenantShard::new(
                         attach_req.tenant_shard_id,
-                        TenantShard::new(
-                            attach_req.tenant_shard_id,
-                            ShardIdentity::unsharded(),
-                            PlacementPolicy::Attached(0),
-                            None,
-                        ),
+                        ShardIdentity::unsharded(),
+                        PlacementPolicy::Attached(0),
+                        None,
                     );
+                    shard.config = config;
+
+                    let mut locked = self.inner.write().unwrap();
+                    locked.tenants.insert(attach_req.tenant_shard_id, shard);
                     tracing::info!("Inserted shard {} in memory", attach_req.tenant_shard_id);
                 }
             }
@@ -1960,11 +1970,12 @@ impl Service {
             .set_attached(scheduler, attach_req.node_id);
 
         tracing::info!(
-            "attach_hook: tenant {} set generation {:?}, pageserver {}",
+            "attach_hook: tenant {} set generation {:?}, pageserver {}, config {:?}",
             attach_req.tenant_shard_id,
             tenant_shard.generation,
             // TODO: this is an odd number of 0xf's
-            attach_req.node_id.unwrap_or(utils::id::NodeId(0xfffffff))
+            attach_req.node_id.unwrap_or(utils::id::NodeId(0xfffffff)),
+            attach_req.config,
         );
 
         // Trick the reconciler into not doing anything for this tenant: this helps
@@ -2742,7 +2753,7 @@ impl Service {
                         count: tenant_shard_id.shard_count,
                         // We only import un-sharded or single-sharded tenants, so stripe
                         // size can be made up arbitrarily here.
-                        stripe_size: ShardParameters::DEFAULT_STRIPE_SIZE,
+                        stripe_size: DEFAULT_STRIPE_SIZE,
                     },
                     placement_policy: Some(placement_policy),
                     config: req.config.tenant_conf,
@@ -4898,7 +4909,7 @@ impl Service {
                     1,
                     10,
                     Duration::from_secs(5),
-                    &self.cancel,
+                    &self.reconcilers_cancel,
                 )
                 .await
             {
@@ -5149,6 +5160,11 @@ impl Service {
         )
         .await;
 
+        let _gate = self
+            .reconcilers_gate
+            .enter()
+            .map_err(|_| ApiError::ShuttingDown)?;
+
         let new_shard_count = ShardCount::new(split_req.new_shard_count);
         let new_stripe_size = split_req.new_stripe_size;
 
@@ -5176,6 +5192,7 @@ impl Service {
                         new_shard_count,
                         new_stripe_size,
                         _tenant_lock,
+                        _gate,
                     })
                     // Ignore error sending: that just means we're shutting down: aborts are ephemeral so it's fine to drop it.
                     .ok();
@@ -5515,7 +5532,10 @@ impl Service {
                 "failpoint".to_string()
             )));
 
-            failpoint_support::sleep_millis_async!("shard-split-post-remote-sleep", &self.cancel);
+            failpoint_support::sleep_millis_async!(
+                "shard-split-post-remote-sleep",
+                &self.reconcilers_cancel
+            );
 
             tracing::info!(
                 "Split {} into {}",
@@ -5573,7 +5593,7 @@ impl Service {
                         stripe_size,
                         preferred_az: preferred_az_id.as_ref().map(Cow::Borrowed),
                     },
-                    &self.cancel,
+                    &self.reconcilers_cancel,
                 )
                 .await
             {
@@ -6014,9 +6034,21 @@ impl Service {
             .max()
             .expect("We already validated >0 shards");
 
-        // FIXME: we have no way to recover the shard stripe size from contents of remote storage: this will
-        // only work if they were using the default stripe size.
-        let stripe_size = ShardParameters::DEFAULT_STRIPE_SIZE;
+        // Find the tenant's stripe size. This wasn't always persisted in the tenant manifest, so
+        // fall back to the original default stripe size of 32768 (256 MB) if it's not specified.
+        const ORIGINAL_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(32768);
+        let stripe_size = scan_result
+            .shards
+            .iter()
+            .find(|s| s.tenant_shard_id.shard_count == shard_count && s.generation == generation)
+            .expect("we validated >0 shards above")
+            .stripe_size
+            .unwrap_or_else(|| {
+                if shard_count.count() > 1 {
+                    warn!("unknown stripe size, assuming {ORIGINAL_STRIPE_SIZE}");
+                }
+                ORIGINAL_STRIPE_SIZE
+            });
 
         let (response, waiters) = self
             .do_tenant_create(TenantCreateRequest {
@@ -6242,6 +6274,10 @@ impl Service {
             .metrics_group
             .storage_controller_pageserver_nodes
             .set(locked.nodes.len() as i64);
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_https_pageserver_nodes
+            .set(locked.nodes.values().filter(|n| n.has_https_port()).count() as i64);
 
         locked.scheduler.node_remove(node_id);
 
@@ -6333,6 +6369,10 @@ impl Service {
                     .metrics_group
                     .storage_controller_pageserver_nodes
                     .set(nodes.len() as i64);
+                metrics::METRICS_REGISTRY
+                    .metrics_group
+                    .storage_controller_https_pageserver_nodes
+                    .set(nodes.values().filter(|n| n.has_https_port()).count() as i64);
             }
         }
 
@@ -6557,6 +6597,10 @@ impl Service {
             .metrics_group
             .storage_controller_pageserver_nodes
             .set(locked.nodes.len() as i64);
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_https_pageserver_nodes
+            .set(locked.nodes.values().filter(|n| n.has_https_port()).count() as i64);
 
         match registration_status {
             RegistrationStatus::New => {
@@ -7270,7 +7314,7 @@ impl Service {
             }
 
             // Eventual consistency: if an earlier reconcile job failed, and the shard is still
-            // dirty, spawn another rone
+            // dirty, spawn another one
             if self
                 .maybe_reconcile_shard(shard, &pageservers, ReconcilerPriority::Normal)
                 .is_some()
@@ -7829,7 +7873,7 @@ impl Service {
         // old, persisted stripe size.
         let new_stripe_size = match candidate.id.shard_count.count() {
             0 => panic!("invalid shard count 0"),
-            1 => Some(ShardParameters::DEFAULT_STRIPE_SIZE),
+            1 => Some(DEFAULT_STRIPE_SIZE),
             2.. => None,
         };
 
@@ -8634,9 +8678,24 @@ impl Service {
         failpoint_support::sleep_millis_async!("sleep-on-step-down-handling");
 
         self.inner.write().unwrap().step_down();
-        // TODO: would it make sense to have a time-out for this?
-        self.stop_reconciliations(StopReconciliationsReason::SteppingDown)
-            .await;
+
+        // Wait for reconciliations to stop, or terminate this process if they
+        // fail to stop in time (this indicates a bug in shutdown)
+        tokio::select! {
+            _ = self.stop_reconciliations(StopReconciliationsReason::SteppingDown) => {
+                tracing::info!("Reconciliations stopped, proceeding with step down");
+            }
+            _ = async {
+                failpoint_support::sleep_millis_async!("step-down-delay-timeout");
+                tokio::time::sleep(Duration::from_secs(10)).await
+            } => {
+                tracing::warn!("Step down timed out while waiting for reconciliation gate, terminating process");
+
+                // The caller may proceed to act as leader when it sees this request fail: reduce the chance
+                // of a split-brain situation by terminating this controller instead of leaving it up in a partially-shut-down state.
+                std::process::exit(1);
+            }
+        }
 
         let mut global_observed = GlobalObservedState::default();
         let locked = self.inner.read().unwrap();

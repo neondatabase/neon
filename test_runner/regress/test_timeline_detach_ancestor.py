@@ -1768,6 +1768,87 @@ def test_pageserver_compaction_detach_ancestor_smoke(neon_env_builder: NeonEnvBu
     workload_child.validate(env.pageserver.id)
 
 
+def test_timeline_detach_with_aux_files_with_detach_v1(
+    neon_env_builder: NeonEnvBuilder,
+):
+    """
+    Validate that "branches do not inherit their parent" is invariant over detach_ancestor.
+
+    Branches hide parent branch aux files etc by stopping lookup of non-inherited keyspace at the parent-child boundary.
+    We had a bug where detach_ancestor running on a child branch would copy aux files key range from child to parent,
+    thereby making parent aux files reappear.
+    """
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "gc_period": "1s",
+            "lsn_lease_length": "0s",
+        }
+    )
+
+    env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+
+    http = env.pageserver.http_client()
+
+    endpoint = env.endpoints.create_start("main", tenant_id=env.initial_tenant)
+    lsn0 = wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
+    endpoint.safe_psql(
+        "SELECT pg_create_logical_replication_slot('test_slot_parent_1', 'pgoutput')"
+    )
+    lsn1 = wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
+    endpoint.safe_psql(
+        "SELECT pg_create_logical_replication_slot('test_slot_parent_2', 'pgoutput')"
+    )
+    lsn2 = wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
+    assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn0).keys()) == set(
+        []
+    )
+    assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn1).keys()) == set(
+        ["pg_replslot/test_slot_parent_1/state"]
+    )
+    assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn2).keys()) == set(
+        ["pg_replslot/test_slot_parent_1/state", "pg_replslot/test_slot_parent_2/state"]
+    )
+
+    # Restore at LSN1
+    branch_timeline_id = env.create_branch("restore", env.initial_tenant, "main", lsn1)
+    endpoint2 = env.endpoints.create_start("restore", tenant_id=env.initial_tenant)
+    assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn1).keys()) == set([])
+
+    # Add a new slot file to the restore branch (This won't happen in reality because cplane immediately detaches the branch on restore,
+    # but we want to ensure that aux files on the detached branch are NOT inherited during ancestor detach. We could change the behavior
+    # in the future.
+    # TL;DR we should NEVER automatically detach a branch as a background optimization for those tenants that already used the restore
+    # feature before branch detach was introduced because it will clean up the aux files and stop logical replication.
+    endpoint2.safe_psql(
+        "SELECT pg_create_logical_replication_slot('test_slot_restore', 'pgoutput')"
+    )
+    lsn3 = wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, branch_timeline_id)
+    assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn1).keys()) == set([])
+    assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn3).keys()) == set(
+        ["pg_replslot/test_slot_restore/state"]
+    )
+
+    print("lsn0=", lsn0)
+    print("lsn1=", lsn1)
+    print("lsn2=", lsn2)
+    print("lsn3=", lsn3)
+    # Detach the restore branch so that main doesn't have any child branches.
+    all_reparented = http.detach_ancestor(
+        env.initial_tenant, branch_timeline_id, detach_behavior="v1"
+    )
+    assert all_reparented == set([])
+
+    # We need to ensure all safekeeper data are ingested before checking aux files: the API does not wait for LSN.
+    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, branch_timeline_id)
+    assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn2).keys()) == set(
+        ["pg_replslot/test_slot_parent_1/state", "pg_replslot/test_slot_parent_2/state"]
+    ), "main branch unaffected"
+    assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn3).keys()) == set(
+        ["pg_replslot/test_slot_restore/state"]
+    )
+    assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn1).keys()) == set([])
+
+
 # TODO:
 # - branch near existing L1 boundary, image layers?
 # - investigate: why are layers started at uneven lsn? not just after branching, but in general.

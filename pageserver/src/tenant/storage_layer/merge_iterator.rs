@@ -59,6 +59,7 @@ impl LayerIterRef<'_> {
 /// 1. Unified iterator for image and delta layers.
 /// 2. `Ord` for use in [`MergeIterator::heap`] (for the k-merge).
 /// 3. Lazy creation of the real delta/image iterator.
+#[allow(clippy::large_enum_variant, reason = "TODO")]
 pub(crate) enum IteratorWrapper<'a> {
     NotLoaded {
         ctx: &'a RequestContext,

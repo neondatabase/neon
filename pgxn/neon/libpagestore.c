@@ -6,10 +6,6 @@
  * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- *
- * IDENTIFICATION
- *	 contrib/neon/libpqpagestore.c
- *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
@@ -34,6 +30,7 @@
 #include "storage/lwlock.h"
 #include "storage/pg_shmem.h"
 #include "utils/guc.h"
+#include "utils/memutils.h"
 
 #include "neon.h"
 #include "neon_perf_counters.h"
@@ -68,6 +65,9 @@ static const struct config_enum_entry neon_compute_modes[] = {
 /* GUCs */
 char	   *neon_timeline;
 char	   *neon_tenant;
+char	   *neon_project_id;
+char	   *neon_branch_id;
+char	   *neon_endpoint_id;
 int32		max_cluster_size;
 char	   *page_server_connstring;
 char	   *neon_auth_token;
@@ -1355,6 +1355,31 @@ pg_init_libpagestore(void)
 							   0,	/* no flags required */
 							   check_neon_id, NULL, NULL);
 
+	DefineCustomStringVariable("neon.project_id",
+							   "Neon project_id the server is running on",
+							   NULL,
+							   &neon_project_id,
+							   "",
+							   PGC_POSTMASTER,
+							   0,	/* no flags required */
+							   check_neon_id, NULL, NULL);
+	DefineCustomStringVariable("neon.branch_id",
+							   "Neon branch_id the server is running on",
+							   NULL,
+							   &neon_branch_id,
+							   "",
+							   PGC_POSTMASTER,
+							   0,	/* no flags required */
+							   check_neon_id, NULL, NULL);
+	DefineCustomStringVariable("neon.endpoint_id",
+							   "Neon endpoint_id the server is running on",
+							   NULL,
+							   &neon_endpoint_id,
+							   "",
+							   PGC_POSTMASTER,
+							   0,	/* no flags required */
+							   check_neon_id, NULL, NULL);
+
 	DefineCustomIntVariable("neon.stripe_size",
 							"sharding stripe size",
 							NULL,
@@ -1478,6 +1503,4 @@ pg_init_libpagestore(void)
 	}
 
 	memset(page_servers, 0, sizeof(page_servers));
-
-	lfc_init();
 }

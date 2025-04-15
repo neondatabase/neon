@@ -558,7 +558,7 @@ async fn upload_large_enough_file(
 ) -> usize {
     let header = bytes::Bytes::from_static("remote blob data content".as_bytes());
     let body = bytes::Bytes::from(vec![0u8; 1024]);
-    let contents = std::iter::once(header).chain(std::iter::repeat(body).take(128));
+    let contents = std::iter::once(header).chain(std::iter::repeat_n(body, 128));
 
     let len = contents.clone().fold(0, |acc, next| acc + next.len());
 

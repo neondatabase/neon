@@ -151,7 +151,7 @@ Example body:
 ```
 {
   "tenant_id": "1f359dd625e519a1a4e8d7509690f6fc",
-  "stripe_size": 32768,
+  "stripe_size": 2048,
   "shards": [
       {"node_id": 344, "shard_number": 0},
       {"node_id": 722, "shard_number": 1},

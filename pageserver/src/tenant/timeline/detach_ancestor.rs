@@ -2,10 +2,14 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Context;
+use bytes::Bytes;
 use http_utils::error::ApiError;
+use pageserver_api::key::Key;
+use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::DetachBehavior;
 use pageserver_api::models::detach_ancestor::AncestorDetached;
 use pageserver_api::shard::ShardIdentity;
+use pageserver_compaction::helpers::overlaps_with;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -22,7 +26,11 @@ use crate::task_mgr::TaskKind;
 use crate::tenant::Tenant;
 use crate::tenant::remote_timeline_client::index::GcBlockingReason::DetachAncestor;
 use crate::tenant::storage_layer::layer::local_layer_path;
-use crate::tenant::storage_layer::{AsLayerDesc as _, DeltaLayerWriter, Layer, ResidentLayer};
+use crate::tenant::storage_layer::{
+    AsLayerDesc as _, DeltaLayerWriter, ImageLayerWriter, IoConcurrency, Layer, ResidentLayer,
+    ValuesReconstructState,
+};
+use crate::tenant::timeline::VersionedKeySpaceQuery;
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 
 #[derive(Debug, thiserror::Error)]
@@ -167,6 +175,90 @@ impl Attempt {
 
     pub(crate) fn new_barrier(&self) -> completion::Barrier {
         self._guard.barrier()
+    }
+}
+
+async fn generate_tombstone_image_layer(
+    detached: &Arc<Timeline>,
+    ancestor: &Arc<Timeline>,
+    ancestor_lsn: Lsn,
+    ctx: &RequestContext,
+) -> Result<Option<ResidentLayer>, Error> {
+    tracing::info!(
+        "removing non-inherited keys by writing an image layer with tombstones at the detach LSN"
+    );
+    let io_concurrency = IoConcurrency::spawn_from_conf(
+        detached.conf,
+        detached.gate.enter().map_err(|_| Error::ShuttingDown)?,
+    );
+    let mut reconstruct_state = ValuesReconstructState::new(io_concurrency);
+    // Directly use `get_vectored_impl` to skip the max_vectored_read_key limit check. Note that the keyspace should
+    // not contain too many keys, otherwise this takes a lot of memory. Currently we limit it to 10k keys in the compute.
+    let key_range = Key::sparse_non_inherited_keyspace();
+    // avoid generating a "future layer" which will then be removed
+    let image_lsn = ancestor_lsn;
+
+    {
+        let layers = detached.layers.read().await;
+        for layer in layers.all_persistent_layers() {
+            if !layer.is_delta
+                && layer.lsn_range.start == image_lsn
+                && overlaps_with(&key_range, &layer.key_range)
+            {
+                tracing::warn!(
+                    layer=%layer, "image layer at the detach LSN already exists, skipping removing aux files"
+                );
+                return Ok(None);
+            }
+        }
+    }
+
+    let query = VersionedKeySpaceQuery::uniform(KeySpace::single(key_range.clone()), image_lsn);
+    let data = ancestor
+        .get_vectored_impl(query, &mut reconstruct_state, ctx)
+        .await
+        .context("failed to retrieve aux keys")
+        .map_err(|e| Error::launder(e, Error::Prepare))?;
+    if !data.is_empty() {
+        // TODO: is it possible that we can have an image at `image_lsn`? Unlikely because image layers are only generated
+        // upon compaction but theoretically possible.
+        let mut image_layer_writer = ImageLayerWriter::new(
+            detached.conf,
+            detached.timeline_id,
+            detached.tenant_shard_id,
+            &key_range,
+            image_lsn,
+            &detached.gate,
+            detached.cancel.clone(),
+            ctx,
+        )
+        .await
+        .context("failed to create image layer writer")
+        .map_err(Error::Prepare)?;
+        for key in data.keys() {
+            image_layer_writer
+                .put_image(*key, Bytes::new(), ctx)
+                .await
+                .context("failed to write key")
+                .map_err(|e| Error::launder(e, Error::Prepare))?;
+        }
+        let (desc, path) = image_layer_writer
+            .finish(ctx)
+            .await
+            .context("failed to finish image layer writer for removing the metadata keys")
+            .map_err(|e| Error::launder(e, Error::Prepare))?;
+        let generated = Layer::finish_creating(detached.conf, detached, desc, &path)
+            .map_err(|e| Error::launder(e, Error::Prepare))?;
+        detached
+            .remote_client
+            .upload_layer_file(&generated, &detached.cancel)
+            .await
+            .map_err(|e| Error::launder(e, Error::Prepare))?;
+        tracing::info!(layer=%generated, "wrote image layer");
+        Ok(Some(generated))
+    } else {
+        tracing::info!("no aux keys found in ancestor");
+        Ok(None)
     }
 }
 
@@ -352,10 +444,16 @@ pub(super) async fn prepare(
 
     // TODO: copying and lsn prefix copying could be done at the same time with a single fsync after
     let mut new_layers: Vec<Layer> =
-        Vec::with_capacity(straddling_branchpoint.len() + rest_of_historic.len());
+        Vec::with_capacity(straddling_branchpoint.len() + rest_of_historic.len() + 1);
+
+    if let Some(tombstone_layer) =
+        generate_tombstone_image_layer(detached, &ancestor, ancestor_lsn, ctx).await?
+    {
+        new_layers.push(tombstone_layer.into());
+    }
 
     {
-        tracing::debug!(to_rewrite = %straddling_branchpoint.len(), "copying prefix of delta layers");
+        tracing::info!(to_rewrite = %straddling_branchpoint.len(), "copying prefix of delta layers");
 
         let mut tasks = tokio::task::JoinSet::new();
 
@@ -680,6 +778,8 @@ async fn copy_lsn_prefix(
         target_timeline.tenant_shard_id,
         layer.layer_desc().key_range.start,
         layer.layer_desc().lsn_range.start..end_lsn,
+        &target_timeline.gate,
+        target_timeline.cancel.clone(),
         ctx,
     )
     .await

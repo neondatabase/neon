@@ -89,7 +89,7 @@
 //! [`RequestContext`] argument. Functions in the middle of the call chain
 //! only need to pass it on.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use once_cell::sync::Lazy;
 use tracing::warn;
@@ -100,6 +100,12 @@ use crate::{
     task_mgr::TaskKind,
     tenant::Timeline,
 };
+use futures::FutureExt;
+use futures::future::BoxFuture;
+use std::future::Future;
+use tracing_utils::perf_span::{PerfInstrument, PerfSpan};
+
+use tracing::{Dispatch, Span};
 
 // The main structure of this module, see module-level comment.
 pub struct RequestContext {
@@ -109,6 +115,8 @@ pub struct RequestContext {
     page_content_kind: PageContentKind,
     read_path_debug: bool,
     scope: Scope,
+    perf_span: Option<PerfSpan>,
+    perf_span_dispatch: Option<Dispatch>,
 }
 
 #[derive(Clone)]
@@ -263,22 +271,15 @@ impl RequestContextBuilder {
                 page_content_kind: PageContentKind::Unknown,
                 read_path_debug: false,
                 scope: Scope::new_global(),
+                perf_span: None,
+                perf_span_dispatch: None,
             },
         }
     }
 
-    pub fn extend(original: &RequestContext) -> Self {
+    pub fn from(original: &RequestContext) -> Self {
         Self {
-            // This is like a Copy, but avoid implementing Copy because ordinary users of
-            // RequestContext should always move or ref it.
-            inner: RequestContext {
-                task_kind: original.task_kind,
-                download_behavior: original.download_behavior,
-                access_stats_behavior: original.access_stats_behavior,
-                page_content_kind: original.page_content_kind,
-                read_path_debug: original.read_path_debug,
-                scope: original.scope.clone(),
-            },
+            inner: original.clone(),
         }
     }
 
@@ -316,12 +317,74 @@ impl RequestContextBuilder {
         self
     }
 
-    pub fn build(self) -> RequestContext {
+    pub(crate) fn perf_span_dispatch(mut self, dispatch: Option<Dispatch>) -> Self {
+        self.inner.perf_span_dispatch = dispatch;
+        self
+    }
+
+    pub fn root_perf_span<Fn>(mut self, make_span: Fn) -> Self
+    where
+        Fn: FnOnce() -> Span,
+    {
+        assert!(self.inner.perf_span.is_none());
+        assert!(self.inner.perf_span_dispatch.is_some());
+
+        let dispatcher = self.inner.perf_span_dispatch.as_ref().unwrap();
+        let new_span = tracing::dispatcher::with_default(dispatcher, make_span);
+
+        self.inner.perf_span = Some(PerfSpan::new(new_span, dispatcher.clone()));
+
+        self
+    }
+
+    pub fn perf_span<Fn>(mut self, make_span: Fn) -> Self
+    where
+        Fn: FnOnce(&Span) -> Span,
+    {
+        if let Some(ref perf_span) = self.inner.perf_span {
+            assert!(self.inner.perf_span_dispatch.is_some());
+            let dispatcher = self.inner.perf_span_dispatch.as_ref().unwrap();
+
+            let new_span =
+                tracing::dispatcher::with_default(dispatcher, || make_span(perf_span.inner()));
+
+            self.inner.perf_span = Some(PerfSpan::new(new_span, dispatcher.clone()));
+        }
+
+        self
+    }
+
+    pub fn root(self) -> RequestContext {
+        self.inner
+    }
+
+    pub fn attached_child(self) -> RequestContext {
+        self.inner
+    }
+
+    pub fn detached_child(self) -> RequestContext {
         self.inner
     }
 }
 
 impl RequestContext {
+    /// Private clone implementation
+    ///
+    /// Callers should use the [`RequestContextBuilder`] or child spaning APIs of
+    /// [`RequestContext`].
+    fn clone(&self) -> Self {
+        Self {
+            task_kind: self.task_kind,
+            download_behavior: self.download_behavior,
+            access_stats_behavior: self.access_stats_behavior,
+            page_content_kind: self.page_content_kind,
+            read_path_debug: self.read_path_debug,
+            scope: self.scope.clone(),
+            perf_span: self.perf_span.clone(),
+            perf_span_dispatch: self.perf_span_dispatch.clone(),
+        }
+    }
+
     /// Create a new RequestContext that has no parent.
     ///
     /// The function is called `new` because, once we add children
@@ -337,7 +400,7 @@ impl RequestContext {
     pub fn new(task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
         RequestContextBuilder::new(task_kind)
             .download_behavior(download_behavior)
-            .build()
+            .root()
     }
 
     /// Create a detached child context for a task that may outlive `self`.
@@ -358,7 +421,10 @@ impl RequestContext {
     ///
     /// We could make new calls to this function fail if `self` is already canceled.
     pub fn detached_child(&self, task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
-        self.child_impl(task_kind, download_behavior)
+        RequestContextBuilder::from(self)
+            .task_kind(task_kind)
+            .download_behavior(download_behavior)
+            .detached_child()
     }
 
     /// Create a child of context `self` for a task that shall not outlive `self`.
@@ -382,7 +448,7 @@ impl RequestContext {
     /// The method to wait for child tasks would return an error, indicating
     /// that the child task was not started because the context was canceled.
     pub fn attached_child(&self) -> Self {
-        self.child_impl(self.task_kind(), self.download_behavior())
+        RequestContextBuilder::from(self).attached_child()
     }
 
     /// Use this function when you should be creating a child context using
@@ -397,17 +463,10 @@ impl RequestContext {
         Self::new(task_kind, download_behavior)
     }
 
-    fn child_impl(&self, task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
-        RequestContextBuilder::extend(self)
-            .task_kind(task_kind)
-            .download_behavior(download_behavior)
-            .build()
-    }
-
     pub fn with_scope_timeline(&self, timeline: &Arc<Timeline>) -> Self {
-        RequestContextBuilder::extend(self)
+        RequestContextBuilder::from(self)
             .scope(Scope::new_timeline(timeline))
-            .build()
+            .attached_child()
     }
 
     pub(crate) fn with_scope_page_service_pagestream(
@@ -416,9 +475,9 @@ impl RequestContext {
             crate::page_service::TenantManagerTypes,
         >,
     ) -> Self {
-        RequestContextBuilder::extend(self)
+        RequestContextBuilder::from(self)
             .scope(Scope::new_page_service_pagestream(timeline_handle))
-            .build()
+            .attached_child()
     }
 
     pub fn with_scope_secondary_timeline(
@@ -426,28 +485,30 @@ impl RequestContext {
         tenant_shard_id: &TenantShardId,
         timeline_id: &TimelineId,
     ) -> Self {
-        RequestContextBuilder::extend(self)
+        RequestContextBuilder::from(self)
             .scope(Scope::new_secondary_timeline(tenant_shard_id, timeline_id))
-            .build()
+            .attached_child()
     }
 
     pub fn with_scope_secondary_tenant(&self, tenant_shard_id: &TenantShardId) -> Self {
-        RequestContextBuilder::extend(self)
+        RequestContextBuilder::from(self)
             .scope(Scope::new_secondary_tenant(tenant_shard_id))
-            .build()
+            .attached_child()
     }
 
     #[cfg(test)]
     pub fn with_scope_unit_test(&self) -> Self {
-        RequestContextBuilder::new(TaskKind::UnitTest)
+        RequestContextBuilder::from(self)
+            .task_kind(TaskKind::UnitTest)
             .scope(Scope::new_unit_test())
-            .build()
+            .attached_child()
     }
 
     pub fn with_scope_debug_tools(&self) -> Self {
-        RequestContextBuilder::new(TaskKind::DebugTool)
+        RequestContextBuilder::from(self)
+            .task_kind(TaskKind::DebugTool)
             .scope(Scope::new_debug_tools())
-            .build()
+            .attached_child()
     }
 
     pub fn task_kind(&self) -> TaskKind {
@@ -504,4 +565,76 @@ impl RequestContext {
             Scope::DebugTools { io_size_metrics } => io_size_metrics,
         }
     }
+
+    pub(crate) fn ondemand_download_wait_observe(&self, duration: Duration) {
+        if duration == Duration::ZERO {
+            return;
+        }
+
+        match &self.scope {
+            Scope::Timeline { arc_arc } => arc_arc
+                .wait_ondemand_download_time
+                .observe(self.task_kind, duration),
+            _ => {
+                use once_cell::sync::Lazy;
+                use std::sync::Mutex;
+                use std::time::Duration;
+                use utils::rate_limit::RateLimit;
+                static LIMIT: Lazy<Mutex<RateLimit>> =
+                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(1))));
+                let mut guard = LIMIT.lock().unwrap();
+                guard.call2(|rate_limit_stats| {
+                    warn!(
+                        %rate_limit_stats,
+                        backtrace=%std::backtrace::Backtrace::force_capture(),
+                        "ondemand downloads should always happen within timeline scope",
+                    );
+                });
+            }
+        }
+    }
+
+    pub(crate) fn perf_follows_from(&self, from: &RequestContext) {
+        if let (Some(span), Some(from_span)) = (&self.perf_span, &from.perf_span) {
+            span.inner().follows_from(from_span.inner());
+        }
+    }
+
+    pub(crate) fn has_perf_span(&self) -> bool {
+        self.perf_span.is_some()
+    }
 }
+
+/// [`Future`] extension trait that allow for creating performance
+/// spans on sampled requests
+pub(crate) trait PerfInstrumentFutureExt<'a>: Future + Send {
+    /// Instrument this future with a new performance span when the
+    /// provided request context indicates the originator request
+    /// was sampled. Otherwise, just box the future and return it as is.
+    fn maybe_perf_instrument<Fn>(
+        self,
+        ctx: &RequestContext,
+        make_span: Fn,
+    ) -> BoxFuture<'a, Self::Output>
+    where
+        Self: Sized + 'a,
+        Fn: FnOnce(&Span) -> Span,
+    {
+        match &ctx.perf_span {
+            Some(perf_span) => {
+                assert!(ctx.perf_span_dispatch.is_some());
+                let dispatcher = ctx.perf_span_dispatch.as_ref().unwrap();
+
+                let new_span =
+                    tracing::dispatcher::with_default(dispatcher, || make_span(perf_span.inner()));
+
+                let new_perf_span = PerfSpan::new(new_span, dispatcher.clone());
+                self.instrument(new_perf_span).boxed()
+            }
+            None => self.boxed(),
+        }
+    }
+}
+
+// Implement the trait for all types that satisfy the trait bounds
+impl<'a, T: Future + Send + 'a> PerfInstrumentFutureExt<'a> for T {}
