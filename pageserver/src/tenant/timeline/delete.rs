@@ -18,8 +18,8 @@ use crate::tenant::remote_timeline_client::{
     PersistIndexPartWithDeletedFlagError, RemoteTimelineClient,
 };
 use crate::tenant::{
-    CreateTimelineCause, DeleteTimelineError, MaybeDeletedIndexPart, Tenant, TenantManifestError,
-    Timeline, TimelineOrOffloaded,
+    CreateTimelineCause, DeleteTimelineError, MaybeDeletedIndexPart, TenantManifestError,
+    TenantShard, Timeline, TimelineOrOffloaded,
 };
 use crate::virtual_file::MaybeFatalIo;
 
@@ -113,7 +113,7 @@ pub(super) async fn delete_local_timeline_directory(
 /// It is important that this gets called when DeletionGuard is being held.
 /// For more context see comments in [`make_timeline_delete_guard`]
 async fn remove_maybe_offloaded_timeline_from_tenant(
-    tenant: &Tenant,
+    tenant: &TenantShard,
     timeline: &TimelineOrOffloaded,
     _: &DeletionGuard, // using it as a witness
 ) -> anyhow::Result<()> {
@@ -192,7 +192,7 @@ impl DeleteTimelineFlow {
     // error out if some of the shutdown tasks have already been completed!
     #[instrument(skip_all)]
     pub async fn run(
-        tenant: &Arc<Tenant>,
+        tenant: &Arc<TenantShard>,
         timeline_id: TimelineId,
     ) -> Result<(), DeleteTimelineError> {
         super::debug_assert_current_span_has_tenant_and_timeline_id();
@@ -288,7 +288,7 @@ impl DeleteTimelineFlow {
     /// Shortcut to create Timeline in stopping state and spawn deletion task.
     #[instrument(skip_all, fields(%timeline_id))]
     pub(crate) async fn resume_deletion(
-        tenant: Arc<Tenant>,
+        tenant: Arc<TenantShard>,
         timeline_id: TimelineId,
         local_metadata: &TimelineMetadata,
         remote_client: RemoteTimelineClient,
@@ -338,7 +338,7 @@ impl DeleteTimelineFlow {
     fn schedule_background(
         guard: DeletionGuard,
         conf: &'static PageServerConf,
-        tenant: Arc<Tenant>,
+        tenant: Arc<TenantShard>,
         timeline: TimelineOrOffloaded,
         remote_client: Arc<RemoteTimelineClient>,
     ) {
@@ -381,7 +381,7 @@ impl DeleteTimelineFlow {
     async fn background(
         mut guard: DeletionGuard,
         conf: &PageServerConf,
-        tenant: &Tenant,
+        tenant: &TenantShard,
         timeline: &TimelineOrOffloaded,
         remote_client: Arc<RemoteTimelineClient>,
     ) -> Result<(), DeleteTimelineError> {
@@ -435,7 +435,7 @@ pub(super) enum TimelineDeleteGuardKind {
 }
 
 pub(super) fn make_timeline_delete_guard(
-    tenant: &Tenant,
+    tenant: &TenantShard,
     timeline_id: TimelineId,
     guard_kind: TimelineDeleteGuardKind,
 ) -> Result<(TimelineOrOffloaded, DeletionGuard), DeleteTimelineError> {

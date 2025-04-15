@@ -2743,7 +2743,7 @@ mod tests {
     use crate::tenant::config::AttachmentMode;
     use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
     use crate::tenant::storage_layer::layer::local_layer_path;
-    use crate::tenant::{Tenant, Timeline};
+    use crate::tenant::{TenantShard, Timeline};
 
     pub(super) fn dummy_contents(name: &str) -> Vec<u8> {
         format!("contents for {name}").into()
@@ -2796,7 +2796,7 @@ mod tests {
 
     struct TestSetup {
         harness: TenantHarness,
-        tenant: Arc<Tenant>,
+        tenant: Arc<TenantShard>,
         timeline: Arc<Timeline>,
         tenant_ctx: RequestContext,
     }

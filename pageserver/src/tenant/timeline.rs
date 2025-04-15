@@ -2065,7 +2065,7 @@ impl Timeline {
 
     pub(crate) fn activate(
         self: &Arc<Self>,
-        parent: Arc<crate::tenant::Tenant>,
+        parent: Arc<crate::tenant::TenantShard>,
         broker_client: BrokerClientChannel,
         background_jobs_can_start: Option<&completion::Barrier>,
         ctx: &RequestContext,
@@ -5754,7 +5754,7 @@ impl Timeline {
     /// from our ancestor to be branches of this timeline.
     pub(crate) async fn prepare_to_detach_from_ancestor(
         self: &Arc<Timeline>,
-        tenant: &crate::tenant::Tenant,
+        tenant: &crate::tenant::TenantShard,
         options: detach_ancestor::Options,
         behavior: DetachBehavior,
         ctx: &RequestContext,
@@ -5773,7 +5773,7 @@ impl Timeline {
     /// resetting the tenant.
     pub(crate) async fn detach_from_ancestor_and_reparent(
         self: &Arc<Timeline>,
-        tenant: &crate::tenant::Tenant,
+        tenant: &crate::tenant::TenantShard,
         prepared: detach_ancestor::PreparedTimelineDetach,
         ancestor_timeline_id: TimelineId,
         ancestor_lsn: Lsn,
@@ -5797,7 +5797,7 @@ impl Timeline {
     /// The tenant must've been reset if ancestry was modified previously (in tenant manager).
     pub(crate) async fn complete_detaching_timeline_ancestor(
         self: &Arc<Timeline>,
-        tenant: &crate::tenant::Tenant,
+        tenant: &crate::tenant::TenantShard,
         attempt: detach_ancestor::Attempt,
         ctx: &RequestContext,
     ) -> Result<(), detach_ancestor::Error> {
@@ -6859,14 +6859,14 @@ impl Timeline {
     /// Persistently blocks gc for `Manual` reason.
     ///
     /// Returns true if no such block existed before, false otherwise.
-    pub(crate) async fn block_gc(&self, tenant: &super::Tenant) -> anyhow::Result<bool> {
+    pub(crate) async fn block_gc(&self, tenant: &super::TenantShard) -> anyhow::Result<bool> {
         use crate::tenant::remote_timeline_client::index::GcBlockingReason;
         assert_eq!(self.tenant_shard_id, tenant.tenant_shard_id);
         tenant.gc_block.insert(self, GcBlockingReason::Manual).await
     }
 
     /// Persistently unblocks gc for `Manual` reason.
-    pub(crate) async fn unblock_gc(&self, tenant: &super::Tenant) -> anyhow::Result<()> {
+    pub(crate) async fn unblock_gc(&self, tenant: &super::TenantShard) -> anyhow::Result<()> {
         use crate::tenant::remote_timeline_client::index::GcBlockingReason;
         assert_eq!(self.tenant_shard_id, tenant.tenant_shard_id);
         tenant.gc_block.remove(self, GcBlockingReason::Manual).await
