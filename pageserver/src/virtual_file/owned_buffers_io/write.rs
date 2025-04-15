@@ -402,26 +402,22 @@ impl Buffer for IoBufferMut {
 mod tests {
     use std::sync::Mutex;
 
+    use rstest::rstest;
+
     use super::*;
     use crate::context::{DownloadBehavior, RequestContext};
     use crate::task_mgr::TaskKind;
 
+    #[derive(Debug, PartialEq, Eq)]
+    enum Op {
+        Write { buf: Vec<u8>, offset: u64 },
+        SetLen { len: u64 },
+    }
+
     #[derive(Default, Debug)]
     struct RecorderWriter {
         /// record bytes and write offsets.
-        writes: Mutex<Vec<(Vec<u8>, u64)>>,
-    }
-
-    impl RecorderWriter {
-        /// Gets recorded bytes and write offsets.
-        fn get_writes(&self) -> Vec<Vec<u8>> {
-            self.writes
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|(buf, _)| buf.clone())
-                .collect()
-        }
+        recording: Mutex<Vec<Op>>,
     }
 
     impl OwnedAsyncWriter for RecorderWriter {
@@ -431,14 +427,15 @@ mod tests {
             offset: u64,
             _: &RequestContext,
         ) -> (FullSlice<Buf>, std::io::Result<()>) {
-            self.writes
-                .lock()
-                .unwrap()
-                .push((Vec::from(&buf[..]), offset));
+            self.recording.lock().unwrap().push(Op::Write {
+                buf: Vec::from(&buf[..]),
+                offset,
+            });
             (buf, Ok(()))
         }
-        async fn set_len(&self, _len: u64, _ctx: &RequestContext) -> std::io::Result<()> {
-            unreachable!("tests don't need this")
+        async fn set_len(&self, len: u64, _ctx: &RequestContext) -> std::io::Result<()> {
+            self.recording.lock().unwrap().push(Op::SetLen { len });
+            Ok(())
         }
     }
 
@@ -446,17 +443,26 @@ mod tests {
         RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error)
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_write_all_borrowed_always_goes_through_buffer() -> anyhow::Result<()> {
+    async fn test_write_all_borrowed_always_goes_through_buffer(
+        #[values(
+            BufferedWriterShutdownMode::DropTail,
+            BufferedWriterShutdownMode::ZeroPadToNextMultiple(2),
+            BufferedWriterShutdownMode::PadThenTruncate
+        )]
+        mode: BufferedWriterShutdownMode,
+    ) -> anyhow::Result<()> {
         let ctx = test_ctx();
         let ctx = &ctx;
         let recorder = RecorderWriter::default();
         let gate = utils::sync::gate::Gate::default();
         let cancel = CancellationToken::new();
+        let cap = 4;
         let mut writer = BufferedWriter::<_, RecorderWriter>::new(
             recorder,
             0,
-            || IoBufferMut::with_capacity(4),
+            || IoBufferMut::with_capacity(cap),
             gate.enter()?,
             cancel,
             ctx,
@@ -469,20 +475,38 @@ mod tests {
         writer.write_buffered_borrowed(b"efg", ctx).await?;
         writer.write_buffered_borrowed(b"hijklm", ctx).await?;
 
-        let (_, recorder) = writer
-            // it's legitimate for pad-to-next multiple 2 to be < alignment requirement 4 inferred from buffer capacity
-            .shutdown(BufferedWriterShutdownMode::ZeroPadToNextMultiple(2), ctx)
-            .await?;
-        assert_eq!(
-            recorder.get_writes(),
-            {
-                let expect: &[&[u8]] = &[b"abcd", b"efgh", b"ijkl", b"m\0"];
-                expect
+        let mut expect = {
+            [(0, b"abcd"), (4, b"efgh"), (8, b"ijkl")]
+                .into_iter()
+                .map(|(offset, v)| Op::Write {
+                    offset,
+                    buf: v[..].to_vec(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let expect_next_offset = 12;
+
+        match &mode {
+            BufferedWriterShutdownMode::DropTail => (),
+            BufferedWriterShutdownMode::ZeroPadToNextMultiple(2) => {
+                expect.push(Op::Write {
+                    offset: expect_next_offset,
+                    // it's legitimate for pad-to-next multiple 2 to be < alignment requirement 4 inferred from buffer capacity
+                    buf: b"m\0".to_vec(),
+                });
             }
-            .iter()
-            .map(|v| v[..].to_vec())
-            .collect::<Vec<_>>()
-        );
+            BufferedWriterShutdownMode::ZeroPadToNextMultiple(_) => unimplemented!(),
+            BufferedWriterShutdownMode::PadThenTruncate => {
+                expect.push(Op::Write {
+                    offset: expect_next_offset,
+                    buf: b"m\0\0\0".to_vec(),
+                });
+                expect.push(Op::SetLen { len: 13 });
+            }
+        }
+
+        let (_, recorder) = writer.shutdown(mode, ctx).await?;
+        assert_eq!(&*recorder.recording.lock().unwrap(), &expect);
         Ok(())
     }
 }
