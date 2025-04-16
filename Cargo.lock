@@ -8551,6 +8551,7 @@ dependencies = [
  "subtle",
  "syn 2.0.100",
  "sync_wrapper 0.1.2",
+ "thiserror 2.0.11",
  "tikv-jemalloc-ctl",
  "tikv-jemalloc-sys",
  "time",
