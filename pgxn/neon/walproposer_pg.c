@@ -63,7 +63,7 @@
 char	   *wal_acceptors_list = "";
 int			wal_acceptor_reconnect_timeout = 1000;
 int			wal_acceptor_connection_timeout = 10000;
-int			safekeeper_proto_version = 2;
+int			safekeeper_proto_version = 3;
 
 /* Set to true in the walproposer bgw. */
 static bool am_walproposer;
