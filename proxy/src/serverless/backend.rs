@@ -42,7 +42,7 @@ use crate::rate_limiter::EndpointRateLimiter;
 use crate::types::{EndpointId, Host, LOCAL_PROXY_SUFFIX};
 
 pub(crate) struct PoolingBackend {
-    pub(crate) http_conn_pool: Arc<GlobalConnPool<Send, HttpConnPool<Send>>>,
+    pub(crate) http_conn_pool: Arc<GlobalConnPool<Send, HttpConnPool>>,
     pub(crate) local_pool: Arc<LocalConnPool<postgres_client::Client>>,
     pub(crate) pool:
         Arc<GlobalConnPool<postgres_client::Client, EndpointConnPool<postgres_client::Client>>>,
@@ -593,7 +593,7 @@ impl ConnectMechanism for TokioMechanism {
 }
 
 struct HyperMechanism {
-    pool: Arc<GlobalConnPool<Send, HttpConnPool<Send>>>,
+    pool: Arc<GlobalConnPool<Send, HttpConnPool>>,
     conn_info: ConnInfo,
     conn_id: uuid::Uuid,
 
