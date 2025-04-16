@@ -83,7 +83,32 @@ jobs:
 
       - name: Run the regression tests
         run: |
-          env
+          cd /ext-src/pg_mooncake-src
+          if [[ -v BENCHMARK_CONNSTR ]]; then
+            uri_no_proto="${BENCHMARK_CONNSTR#postgres://}"
+            uri_no_proto="${uri_no_proto#postgresql://}"
+            if [[ $uri_no_proto == *\?* ]]; then
+              base="${uri_no_proto%%\?*}"       # before '?'
+            else
+              base="$uri_no_proto"
+            fi
+            if [[ $base =~ ^([^:]+):([^@]+)@([^:/]+):?([0-9]*)/(.+)$ ]]; then
+              export PGUSER="${BASH_REMATCH[1]}"
+              export PGPASSWORD="${BASH_REMATCH[2]}"
+              export PGHOST="${BASH_REMATCH[3]}"
+              export PGPORT="${BASH_REMATCH[4]:-5432}"
+              export PGDATABASE="${BASH_REMATCH[5]}"
+            else
+              echo "Invalid PostgreSQL base URI"
+              exit 1
+            fi
+          fi
+          dropdb --if-exists contrib_regression
+          createdb contrib_regression
+          psql -c "CREATE EXTENSION pg_mooncake" -c "SELECT mooncake.create_secret('neon-github-ci-tests', 'S3', '${AWS_ACCESS_KEY_ID}', '${AWS_SECRET_ACCESS_KEY}', '{\"REGION\": \"${AWS_REGION}\"}');"
+          /usr/local/pgsql/lib/pgxs/src/makefiles/../../src/test/regress/pg_regress --use-existing --inputdir=./ --bindir='/usr/local/pgsql/bin'    \
+            --inputdir=./test --load-extension=pg_mooncake --dbname=contrib_regression approx_count_distinct columns constraints copy create_table_as \
+            cursor non_superuser returning sanity segment_elimination transaction trigger unsupported/alter unsupported/columns unsupported/update unsupported/types update_delete_with_join
         env:
           BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
           SKIP: "pg_hint_plan-src,pg_repack-src,pg_cron-src,plpgsql_check-src"
