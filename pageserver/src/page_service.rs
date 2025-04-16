@@ -1281,7 +1281,7 @@ impl PageServerHandler {
 
         // Dispatch the batch to the appropriate request handler.
         let log_slow_name = batch.as_static_str();
-        let (mut handler_results, span) = {
+        let (handler_results, span) = {
             // TODO: we unfortunately have to pin the future on the heap, since GetPage futures are huge and
             // won't fit on the stack.
             let mut boxpinned =
@@ -1381,7 +1381,7 @@ impl PageServerHandler {
             failpoint_support::sleep_millis_async!("before-pagestream-msg-flush", cancel);
 
             // what we want to do
-            let socket_fd = pgb_writer.socket_fd;
+           
             let flush_fut = pgb_writer.flush();
             // metric for how long flushing takes
             // let flush_fut = match flushing_timer {
