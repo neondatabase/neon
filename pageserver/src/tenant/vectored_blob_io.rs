@@ -151,7 +151,6 @@ impl VectoredBlob {
     }
 
     /// Returns the raw blob including header.
-    #[allow(unused)]
     pub(crate) fn raw_with_header<'a>(&self, buf: &BufView<'a>) -> BufView<'a> {
         buf.view(self.header_start..self.end)
     }
