@@ -24,6 +24,7 @@ def test_lfc_working_set_approximation(neon_simple_env: NeonEnv):
         "main",
         config_lines=[
             "autovacuum=off",
+            "bgwriter_lru_maxpages=0",
             "neon.max_file_cache_size='128MB'",
             "neon.file_cache_size_limit='64MB'",
         ],
@@ -87,6 +88,7 @@ def test_sliding_working_set_approximation(neon_simple_env: NeonEnv):
         branch_name="main",
         config_lines=[
             "autovacuum = off",
+            "bgwriter_lru_maxpages=0",
             "shared_buffers=1MB",
             "neon.max_file_cache_size=256MB",
             "neon.file_cache_size_limit=245MB",
@@ -119,5 +121,5 @@ def test_sliding_working_set_approximation(neon_simple_env: NeonEnv):
     size = cur.fetchall()[0][0] // 8192
     log.info(f"Table size {size} blocks")
 
-    assert estimation_1k >= 20 and estimation_1k <= 40
-    assert estimation_10k >= 200 and estimation_10k <= 440
+    assert estimation_1k >= 20 and estimation_1k <= 50
+    assert estimation_10k >= 200 and estimation_10k <= 500

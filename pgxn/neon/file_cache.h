@@ -19,7 +19,7 @@ extern bool lfc_store_prefetch_result;
 /* functions for local file cache */
 extern void lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum,
 					   BlockNumber blkno, const void *const *buffers,
-					   BlockNumber nblocks, bool update_hll);
+					   BlockNumber nblocks);
 /* returns number of blocks read, with one bit set in *read for each  */
 extern int lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum,
 							BlockNumber blkno, void **buffers,
@@ -44,9 +44,9 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 static inline void
 lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
-		  const void *buffer, bool update_hll)
+		  const void *buffer)
 {
-	return lfc_writev(rinfo, forkNum, blkno, &buffer, 1, update_hll);
+	return lfc_writev(rinfo, forkNum, blkno, &buffer, 1);
 }
 
 #endif							/* FILE_CACHE_H */

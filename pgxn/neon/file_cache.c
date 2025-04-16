@@ -1159,7 +1159,7 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
  */
 void
 lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
-		   const void *const *buffers, BlockNumber nblocks, bool update_hll)
+		   const void *const *buffers, BlockNumber nblocks)
 {
 	BufferTag	tag;
 	FileCacheEntry *entry;
@@ -1218,14 +1218,11 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 		entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_ENTER, &found);
 
-		if (update_hll)
+		/* Approximate working set for the blocks assumed in this entry */
+		for (int i = 0; i < blocks_in_chunk; i++)
 		{
-			/* Approximate working set for the blocks assumed in this entry */
-			for (int i = 0; i < blocks_in_chunk; i++)
-			{
-				tag.blockNum = blkno + i;
-				addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
-			}
+			tag.blockNum = blkno + i;
+			addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
 		}
 
 		if (found)
