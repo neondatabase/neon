@@ -88,22 +88,14 @@ jobs:
           project_id: ${{ steps.create-neon-project.outputs.project_id }}
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
-      - name: Create Allure report
-        id: create-allure-report
-        if: ${{ !cancelled() }}
-        uses: ./.github/actions/allure-report-generate
-        with:
-          aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
-
       - name: Post to a Slack channel
         if: ${{ github.event.schedule && failure() }}
         uses: slackapi/slack-github-action@fcfb566f8b0aab22203f066d80ca1d7e4b5d05b3 # v1.27.1
         with:
           channel-id: ${{ vars.SLACK_ON_CALL_QA_STAGING_STREAM }}
           slack-message: |
-            Periodic pg_regress on staging: ${{ job.status }}
+            Periodic extensions test on staging: ${{ job.status }}
             <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
-            <${{ steps.create-allure-report.outputs.report-url }}|Allure report>
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
