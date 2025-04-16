@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::atomic::{self, AtomicUsize};
 use std::sync::{Arc, Weak};
@@ -326,12 +325,15 @@ impl<C: ClientInnerExt> DbUserConn<C> for DbUserConnPool<C> {
     }
 }
 
-pub(crate) trait EndpointConnPoolExt<C: ClientInnerExt> {
+pub(crate) trait EndpointConnPoolExt {
+    type Client;
     fn clear_closed(&mut self) -> usize;
     fn total_conns(&self) -> usize;
 }
 
-impl<C: ClientInnerExt> EndpointConnPoolExt<C> for EndpointConnPool<C> {
+impl<C: ClientInnerExt> EndpointConnPoolExt for EndpointConnPool<C> {
+    type Client = Client<C>;
+
     fn clear_closed(&mut self) -> usize {
         let mut clients_removed: usize = 0;
         for db_pool in self.pools.values_mut() {
@@ -345,10 +347,9 @@ impl<C: ClientInnerExt> EndpointConnPoolExt<C> for EndpointConnPool<C> {
     }
 }
 
-pub(crate) struct GlobalConnPool<C, P>
+pub(crate) struct GlobalConnPool<P>
 where
-    C: ClientInnerExt,
-    P: EndpointConnPoolExt<C>,
+    P: EndpointConnPoolExt,
 {
     // endpoint -> per-endpoint connection pool
     //
@@ -367,8 +368,6 @@ where
     pub(crate) global_connections_count: Arc<AtomicUsize>,
 
     pub(crate) config: &'static crate::config::HttpConfig,
-
-    _marker: PhantomData<C>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -391,10 +390,9 @@ pub struct GlobalConnPoolOptions {
     pub max_total_conns: usize,
 }
 
-impl<C, P> GlobalConnPool<C, P>
+impl<P> GlobalConnPool<P>
 where
-    C: ClientInnerExt,
-    P: EndpointConnPoolExt<C>,
+    P: EndpointConnPoolExt,
 {
     pub(crate) fn new(config: &'static crate::config::HttpConfig) -> Arc<Self> {
         let shards = config.pool_options.pool_shards;
@@ -403,7 +401,6 @@ where
             global_pool_size: AtomicUsize::new(0),
             config,
             global_connections_count: Arc::new(AtomicUsize::new(0)),
-            _marker: PhantomData,
         })
     }
 
@@ -492,7 +489,7 @@ where
     }
 }
 
-impl<C: ClientInnerExt> GlobalConnPool<C, EndpointConnPool<C>> {
+impl<C: ClientInnerExt> GlobalConnPool<EndpointConnPool<C>> {
     pub(crate) fn get(
         self: &Arc<Self>,
         ctx: &RequestContext,

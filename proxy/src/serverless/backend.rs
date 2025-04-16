@@ -42,10 +42,9 @@ use crate::rate_limiter::EndpointRateLimiter;
 use crate::types::{EndpointId, Host, LOCAL_PROXY_SUFFIX};
 
 pub(crate) struct PoolingBackend {
-    pub(crate) http_conn_pool: Arc<GlobalConnPool<Send, HttpConnPool>>,
+    pub(crate) http_conn_pool: Arc<GlobalConnPool<HttpConnPool>>,
     pub(crate) local_pool: Arc<LocalConnPool<postgres_client::Client>>,
-    pub(crate) pool:
-        Arc<GlobalConnPool<postgres_client::Client, EndpointConnPool<postgres_client::Client>>>,
+    pub(crate) pool: Arc<GlobalConnPool<EndpointConnPool<postgres_client::Client>>>,
 
     pub(crate) config: &'static ProxyConfig,
     pub(crate) auth_backend: &'static crate::auth::Backend<'static, ()>,
@@ -248,7 +247,7 @@ impl PoolingBackend {
         conn_info: ConnInfo,
     ) -> Result<http_conn_pool::Client<Send>, HttpConnError> {
         debug!("pool: looking for an existing connection");
-        if let Ok(Some(client)) = self.http_conn_pool.get(ctx, &conn_info) {
+        if let Some(client) = self.http_conn_pool.get(ctx, &conn_info) {
             return Ok(client);
         }
 
@@ -532,7 +531,7 @@ impl ShouldRetryWakeCompute for LocalProxyConnError {
 }
 
 struct TokioMechanism {
-    pool: Arc<GlobalConnPool<postgres_client::Client, EndpointConnPool<postgres_client::Client>>>,
+    pool: Arc<GlobalConnPool<EndpointConnPool<postgres_client::Client>>>,
     conn_info: ConnInfo,
     conn_id: uuid::Uuid,
 
@@ -593,7 +592,7 @@ impl ConnectMechanism for TokioMechanism {
 }
 
 struct HyperMechanism {
-    pool: Arc<GlobalConnPool<Send, HttpConnPool>>,
+    pool: Arc<GlobalConnPool<HttpConnPool>>,
     conn_info: ConnInfo,
     conn_id: uuid::Uuid,
 

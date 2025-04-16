@@ -57,7 +57,7 @@ impl fmt::Display for ConnInfo {
 }
 
 pub(crate) fn poll_client<C: ClientInnerExt>(
-    global_pool: Arc<GlobalConnPool<C, EndpointConnPool<C>>>,
+    global_pool: Arc<GlobalConnPool<EndpointConnPool<C>>>,
     ctx: &RequestContext,
     conn_info: ConnInfo,
     client: C,
