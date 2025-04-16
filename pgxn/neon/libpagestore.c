@@ -1362,7 +1362,7 @@ pg_init_libpagestore(void)
 							   "",
 							   PGC_POSTMASTER,
 							   0,	/* no flags required */
-							   check_neon_id, NULL, NULL);
+							   NULL, NULL, NULL);
 	DefineCustomStringVariable("neon.branch_id",
 							   "Neon branch_id the server is running on",
 							   NULL,
@@ -1370,7 +1370,7 @@ pg_init_libpagestore(void)
 							   "",
 							   PGC_POSTMASTER,
 							   0,	/* no flags required */
-							   check_neon_id, NULL, NULL);
+							   NULL, NULL, NULL);
 	DefineCustomStringVariable("neon.endpoint_id",
 							   "Neon endpoint_id the server is running on",
 							   NULL,
@@ -1378,7 +1378,7 @@ pg_init_libpagestore(void)
 							   "",
 							   PGC_POSTMASTER,
 							   0,	/* no flags required */
-							   check_neon_id, NULL, NULL);
+							   NULL, NULL, NULL);
 
 	DefineCustomIntVariable("neon.stripe_size",
 							"sharding stripe size",
