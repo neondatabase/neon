@@ -334,9 +334,10 @@ pub(crate) static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMet
                 },
 
                 read_hits_immutable: {
-                    PAGE_CACHE_READ_HITS
-                        .get_metric_with_label_values(&[task_kind, "immutable", content_kind, "-"])
-                        .unwrap()
+                    // PAGE_CACHE_READ_HITS
+                        // .get_metric_with_label_values(&[task_kind, "immutable", content_kind, "-"])
+                        // .unwrap()
+                        todo!() // FIXME: Cannot provide IntCounter here without uncommenting above
                 },
             }
         }))
@@ -420,8 +421,8 @@ pub(crate) mod page_cache_eviction_metrics {
                     Lazy::new(|| ITERS_TOTAL_VEC.with_label_values(&[LABEL]));
                 static CALLS: Lazy<IntCounter> =
                     Lazy::new(|| CALLS_VEC.with_label_values(&[LABEL]));
-                ITERS_TOTAL.inc_by(($iters.get()) as u64);
-                CALLS.inc();
+                // ITERS_TOTAL.inc_by(($iters.get()) as u64);
+                // CALLS.inc();
             }};
         }
         match outcome {
@@ -454,10 +455,10 @@ pub(crate) enum PageCacheErrorKind {
 }
 
 pub(crate) fn page_cache_errors_inc(error_kind: PageCacheErrorKind) {
-    PAGE_CACHE_ERRORS
-        .get_metric_with_label_values(&[error_kind.into()])
-        .unwrap()
-        .inc();
+    // PAGE_CACHE_ERRORS
+        // .get_metric_with_label_values(&[error_kind.into()])
+        // .unwrap()
+        // .inc();
 }
 
 pub(crate) static WAIT_LSN_TIME: Lazy<Histogram> = Lazy::new(|| {
@@ -569,9 +570,9 @@ pub(crate) mod wait_ondemand_download_time {
             let Some((idx, _)) = maybe else {
                 return;
             };
-            WAIT_ONDEMAND_DOWNLOAD_TIME_GLOBAL[idx].observe(duration.as_secs_f64());
+            // WAIT_ONDEMAND_DOWNLOAD_TIME_GLOBAL[idx].observe(duration.as_secs_f64());
             let counter = &self.counters[idx];
-            counter.inc_by(duration.as_secs_f64());
+            // counter.inc_by(duration.as_secs_f64());
         }
     }
 
@@ -1509,11 +1510,11 @@ impl SmgrOpTimer {
             }
             ThrottleResult::Throttled { end } => {
                 // update metrics
-                inner.throttling.count_throttled.inc();
-                inner
-                    .throttling
-                    .wait_time
-                    .inc_by((end - *throttle_started_at).as_micros().try_into().unwrap());
+                // inner.throttling.count_throttled.inc();
+                // inner
+                    // .throttling
+                    // .wait_time
+                    // .inc_by((end - *throttle_started_at).as_micros().try_into().unwrap());
                 // state transition
                 inner.timings = SmgrOpTimerState::Batching {
                     throttle_done_at: end,
@@ -1532,10 +1533,10 @@ impl SmgrOpTimer {
         };
         // update metrics
         let batch = at - *throttle_done_at;
-        inner.global_batch_wait_time.observe(batch.as_secs_f64());
-        inner
-            .per_timeline_batch_wait_time
-            .observe(batch.as_secs_f64());
+        // inner.global_batch_wait_time.observe(batch.as_secs_f64());
+        // inner
+            // .per_timeline_batch_wait_time
+            // .observe(batch.as_secs_f64());
         // state transition
         inner.timings = SmgrOpTimerState::Executing {
             execution_started_at: at,
@@ -1560,13 +1561,13 @@ impl SmgrOpTimer {
         };
         // update metrics
         let execution = at - *execution_started_at;
-        inner
-            .global_execution_latency_histo
-            .observe(execution.as_secs_f64());
+        // inner
+            // .global_execution_latency_histo
+            // .observe(execution.as_secs_f64());
         if let Some(per_timeline_execution_latency_histo) =
             &inner.per_timeline_execution_latency_histo
         {
-            per_timeline_execution_latency_histo.observe(execution.as_secs_f64());
+            // per_timeline_execution_latency_histo.observe(execution.as_secs_f64());
         }
 
         // state transition
@@ -1640,10 +1641,10 @@ impl SmgrOpFlushInProgress {
                 // Increment counter
                 {
                     let elapsed_since_last_observe = now - last_counter_increment_at;
-                    self.global_micros
-                        .inc_by(u64::try_from(elapsed_since_last_observe.as_micros()).unwrap());
-                    self.per_timeline_micros
-                        .inc_by(u64::try_from(elapsed_since_last_observe.as_micros()).unwrap());
+                    // self.global_micros
+                        // .inc_by(u64::try_from(elapsed_since_last_observe.as_micros()).unwrap());
+                    // self.per_timeline_micros
+                        // .inc_by(u64::try_from(elapsed_since_last_observe.as_micros()).unwrap());
                     last_counter_increment_at = now;
                 }
 
@@ -2113,11 +2114,11 @@ impl SmgrQueryTimePerTimeline {
         batch_size: usize,
         break_reason: GetPageBatchBreakReason,
     ) {
-        self.global_batch_size.observe(batch_size as f64);
-        self.per_timeline_batch_size.observe(batch_size as f64);
+        // self.global_batch_size.observe(batch_size as f64);
+        // self.per_timeline_batch_size.observe(batch_size as f64);
 
-        self.global_batch_break_reason[break_reason.into_usize()].inc();
-        self.per_timeline_batch_break_reason.inc(break_reason);
+        // self.global_batch_break_reason[break_reason.into_usize()].inc();
+        // self.per_timeline_batch_break_reason.inc(break_reason);
     }
 }
 
@@ -2229,6 +2230,7 @@ pub(crate) static COMPUTE_COMMANDS_COUNTERS: Lazy<ComputeCommandCounters> = Lazy
 impl ComputeCommandCounters {
     pub(crate) fn for_command(&self, command: ComputeCommandKind) -> &IntCounter {
         &self.map[command]
+        // TODO: .inc() needs to be commented out at call site
     }
 }
 
@@ -2286,13 +2288,13 @@ impl TenantManagerMetrics {
     pub(crate) fn slot_inserted(&self, slot: &TenantSlot) {
         match slot {
             TenantSlot::Attached(_) => {
-                self.tenant_slots_attached.inc();
+                // self.tenant_slots_attached.inc();
             }
             TenantSlot::Secondary(_) => {
-                self.tenant_slots_secondary.inc();
+                // self.tenant_slots_secondary.inc();
             }
             TenantSlot::InProgress(_) => {
-                self.tenant_slots_inprogress.inc();
+                // self.tenant_slots_inprogress.inc();
             }
         }
     }
@@ -2300,22 +2302,23 @@ impl TenantManagerMetrics {
     pub(crate) fn slot_removed(&self, slot: &TenantSlot) {
         match slot {
             TenantSlot::Attached(_) => {
-                self.tenant_slots_attached.dec();
+                // self.tenant_slots_attached.dec();
             }
             TenantSlot::Secondary(_) => {
-                self.tenant_slots_secondary.dec();
+                // self.tenant_slots_secondary.dec();
             }
             TenantSlot::InProgress(_) => {
-                self.tenant_slots_inprogress.dec();
+                // self.tenant_slots_inprogress.dec();
             }
         }
     }
 
     #[cfg(all(debug_assertions, not(test)))]
     pub(crate) fn slots_total(&self) -> u64 {
-        self.tenant_slots_attached.get()
-            + self.tenant_slots_secondary.get()
-            + self.tenant_slots_inprogress.get()
+        // self.tenant_slots_attached.get()
+            // + self.tenant_slots_secondary.get()
+            // + self.tenant_slots_inprogress.get()
+        0
     }
 }
 
@@ -2605,7 +2608,7 @@ impl<'a> BackgroundLoopSemaphoreMetricsRecorder<'a> {
     /// Starts recording semaphore metrics, by recording wait time and incrementing
     /// `wait_start_count` and `waiting_tasks`.
     fn start(metrics: &'a BackgroundLoopSemaphoreMetrics, task: BackgroundLoopKind) -> Self {
-        metrics.waiting_tasks[task].inc();
+        // metrics.waiting_tasks[task].inc();
         Self {
             metrics,
             task,
@@ -2618,9 +2621,9 @@ impl<'a> BackgroundLoopSemaphoreMetricsRecorder<'a> {
     pub fn acquired(&mut self) -> Duration {
         let waited = self.start.elapsed();
         self.wait_counter_guard.take().expect("already acquired");
-        self.metrics.durations[self.task].observe(waited.as_secs_f64());
-        self.metrics.waiting_tasks[self.task].dec();
-        self.metrics.running_tasks[self.task].inc();
+        // self.metrics.durations[self.task].observe(waited.as_secs_f64());
+        // self.metrics.waiting_tasks[self.task].dec();
+        // self.metrics.running_tasks[self.task].inc();
         waited
     }
 }
@@ -2630,11 +2633,11 @@ impl Drop for BackgroundLoopSemaphoreMetricsRecorder<'_> {
     fn drop(&mut self) {
         if self.wait_counter_guard.take().is_some() {
             // Waiting.
-            self.metrics.durations[self.task].observe(self.start.elapsed().as_secs_f64());
-            self.metrics.waiting_tasks[self.task].dec();
+            // self.metrics.durations[self.task].observe(self.start.elapsed().as_secs_f64());
+            // self.metrics.waiting_tasks[self.task].dec();
         } else {
             // Running.
-            self.metrics.running_tasks[self.task].dec();
+            // self.metrics.running_tasks[self.task].dec();
         }
     }
 }
@@ -2758,18 +2761,18 @@ pub(crate) struct WalIngestMetrics {
 impl WalIngestMetrics {
     pub(crate) fn inc_values_committed(&self, stats: &DatadirModificationStats) {
         if stats.metadata_images > 0 {
-            self.values_committed_metadata_images
-                .inc_by(stats.metadata_images);
+            // self.values_committed_metadata_images
+                // .inc_by(stats.metadata_images);
         }
         if stats.metadata_deltas > 0 {
-            self.values_committed_metadata_deltas
-                .inc_by(stats.metadata_deltas);
+            // self.values_committed_metadata_deltas
+                // .inc_by(stats.metadata_deltas);
         }
         if stats.data_images > 0 {
-            self.values_committed_data_images.inc_by(stats.data_images);
+            // self.values_committed_data_images.inc_by(stats.data_images);
         }
         if stats.data_deltas > 0 {
-            self.values_committed_data_deltas.inc_by(stats.data_deltas);
+            // self.values_committed_data_deltas.inc_by(stats.data_deltas);
         }
     }
 }
@@ -2961,9 +2964,9 @@ impl StorageTimeMetricsTimer {
     pub fn stop_and_record(self) -> Duration {
         let duration = self.elapsed();
         let seconds = duration.as_secs_f64();
-        self.metrics.timeline_sum.inc_by(seconds);
-        self.metrics.timeline_count.inc();
-        self.metrics.global_histogram.observe(seconds);
+        // self.metrics.timeline_sum.inc_by(seconds);
+        // self.metrics.timeline_count.inc();
+        // self.metrics.global_histogram.observe(seconds);
         duration
     }
 
@@ -3266,17 +3269,18 @@ impl TimelineMetrics {
     }
 
     pub(crate) fn resident_physical_size_sub(&self, sz: u64) {
-        self.resident_physical_size_gauge.sub(sz);
-        crate::metrics::RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(sz);
+        // self.resident_physical_size_gauge.sub(sz);
+        // crate::metrics::RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(sz);
     }
 
     pub(crate) fn resident_physical_size_add(&self, sz: u64) {
-        self.resident_physical_size_gauge.add(sz);
-        crate::metrics::RESIDENT_PHYSICAL_SIZE_GLOBAL.add(sz);
+        // self.resident_physical_size_gauge.add(sz);
+        // crate::metrics::RESIDENT_PHYSICAL_SIZE_GLOBAL.add(sz);
     }
 
     pub(crate) fn resident_physical_size_get(&self) -> u64 {
-        self.resident_physical_size_gauge.get()
+        // self.resident_physical_size_gauge.get()
+        0 // FIXME: Return dummy value as gauge access is commented out
     }
 
     /// Generates TIMELINE_LAYER labels for a persistent layer.
@@ -3314,14 +3318,14 @@ impl TimelineMetrics {
         assert!(matches!(layer.info(), InMemoryLayerInfo::Frozen { .. }));
         let labels = self.make_frozen_layer_labels(layer);
         let size = layer.try_len().expect("frozen layer should have no writer");
-        TIMELINE_LAYER_COUNT
-            .get_metric_with_label_values(&labels)
-            .unwrap()
-            .dec();
-        TIMELINE_LAYER_SIZE
-            .get_metric_with_label_values(&labels)
-            .unwrap()
-            .sub(size);
+        // TIMELINE_LAYER_COUNT
+            // .get_metric_with_label_values(&labels)
+            // .unwrap()
+            // .dec();
+        // TIMELINE_LAYER_SIZE
+            // .get_metric_with_label_values(&labels)
+            // .unwrap()
+            // .sub(size);
     }
 
     /// Adds a frozen ephemeral layer to TIMELINE_LAYER metrics.
@@ -3329,40 +3333,40 @@ impl TimelineMetrics {
         assert!(matches!(layer.info(), InMemoryLayerInfo::Frozen { .. }));
         let labels = self.make_frozen_layer_labels(layer);
         let size = layer.try_len().expect("frozen layer should have no writer");
-        TIMELINE_LAYER_COUNT
-            .get_metric_with_label_values(&labels)
-            .unwrap()
-            .inc();
-        TIMELINE_LAYER_SIZE
-            .get_metric_with_label_values(&labels)
-            .unwrap()
-            .add(size);
+        // TIMELINE_LAYER_COUNT
+            // .get_metric_with_label_values(&labels)
+            // .unwrap()
+            // .inc();
+        // TIMELINE_LAYER_SIZE
+            // .get_metric_with_label_values(&labels)
+            // .unwrap()
+            // .add(size);
     }
 
     /// Removes a persistent layer from TIMELINE_LAYER metrics.
     pub fn dec_layer(&self, layer_desc: &PersistentLayerDesc) {
         let labels = self.make_layer_labels(layer_desc);
-        TIMELINE_LAYER_COUNT
-            .get_metric_with_label_values(&labels)
-            .unwrap()
-            .dec();
-        TIMELINE_LAYER_SIZE
-            .get_metric_with_label_values(&labels)
-            .unwrap()
-            .sub(layer_desc.file_size);
+        // TIMELINE_LAYER_COUNT
+            // .get_metric_with_label_values(&labels)
+            // .unwrap()
+            // .dec();
+        // TIMELINE_LAYER_SIZE
+            // .get_metric_with_label_values(&labels)
+            // .unwrap()
+            // .sub(layer_desc.file_size);
     }
 
     /// Adds a persistent layer to TIMELINE_LAYER metrics.
     pub fn inc_layer(&self, layer_desc: &PersistentLayerDesc) {
         let labels = self.make_layer_labels(layer_desc);
-        TIMELINE_LAYER_COUNT
-            .get_metric_with_label_values(&labels)
-            .unwrap()
-            .inc();
-        TIMELINE_LAYER_SIZE
-            .get_metric_with_label_values(&labels)
-            .unwrap()
-            .add(layer_desc.file_size);
+        // TIMELINE_LAYER_COUNT
+            // .get_metric_with_label_values(&labels)
+            // .unwrap()
+            // .inc();
+        // TIMELINE_LAYER_SIZE
+            // .get_metric_with_label_values(&labels)
+            // .unwrap()
+            // .add(layer_desc.file_size);
     }
 
     pub(crate) fn shutdown(&self) {
@@ -3384,7 +3388,7 @@ impl TimelineMetrics {
         let _ = DISK_CONSISTENT_LSN.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = STANDBY_HORIZON.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         {
-            RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(self.resident_physical_size_get());
+            // RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(self.resident_physical_size_get());
             let _ = RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         }
         let _ = VISIBLE_PHYSICAL_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
@@ -3521,22 +3525,23 @@ impl PerTimelineRemotePhysicalSizeGauge {
         }
     }
     pub(crate) fn set(&self, sz: u64) {
-        self.gauge.set(sz);
+        // self.gauge.set(sz);
         let prev = self.last_set.swap(sz, std::sync::atomic::Ordering::Relaxed);
-        if sz < prev {
-            REMOTE_PHYSICAL_SIZE_GLOBAL.sub(prev - sz);
-        } else {
-            REMOTE_PHYSICAL_SIZE_GLOBAL.add(sz - prev);
-        };
+        // if sz < prev {
+            // REMOTE_PHYSICAL_SIZE_GLOBAL.sub(prev - sz);
+        // } else {
+            // REMOTE_PHYSICAL_SIZE_GLOBAL.add(sz - prev);
+        // };
     }
     pub(crate) fn get(&self) -> u64 {
-        self.gauge.get()
+        // self.gauge.get()
+        0 // FIXME: Return dummy value as gauge access is commented out
     }
 }
 
 impl Drop for PerTimelineRemotePhysicalSizeGauge {
     fn drop(&mut self) {
-        REMOTE_PHYSICAL_SIZE_GLOBAL.sub(self.last_set.load(std::sync::atomic::Ordering::Relaxed));
+        // REMOTE_PHYSICAL_SIZE_GLOBAL.sub(self.last_set.load(std::sync::atomic::Ordering::Relaxed));
     }
 }
 
@@ -3669,7 +3674,8 @@ impl RemoteTimelineClientMetrics {
     ) -> Option<u64> {
         let guard = self.bytes_started_counter.lock().unwrap();
         let key = (file_kind.as_str(), op_kind.as_str());
-        guard.get(&key).map(|counter| counter.get())
+        // guard.get(&key).map(|counter| counter.get())
+        None // FIXME: Return dummy value as counter access is commented out
     }
 
     pub fn get_bytes_finished_counter_value(
@@ -3679,7 +3685,8 @@ impl RemoteTimelineClientMetrics {
     ) -> Option<u64> {
         let guard = self.bytes_finished_counter.lock().unwrap();
         let key = (file_kind.as_str(), op_kind.as_str());
-        guard.get(&key).map(|counter| counter.get())
+        // guard.get(&key).map(|counter| counter.get())
+        None // FIXME: Return dummy value as counter access is commented out
     }
 }
 
@@ -3712,10 +3719,10 @@ impl Drop for RemoteTimelineClientCallMetricGuard {
             bytes_finished,
         } = self;
         if let Some(guard) = calls_counter_pair.take() {
-            guard.dec();
+            // guard.dec();
         }
         if let Some((bytes_finished_metric, value)) = bytes_finished {
-            bytes_finished_metric.inc_by(*value);
+            // bytes_finished_metric.inc_by(*value);
         }
     }
 }
@@ -3745,7 +3752,7 @@ impl RemoteTimelineClientMetrics {
         size: RemoteTimelineClientMetricsCallTrackSize,
     ) -> RemoteTimelineClientCallMetricGuard {
         let calls_counter_pair = self.calls_counter_pair(file_kind, op_kind);
-        calls_counter_pair.inc();
+        // calls_counter_pair.inc();
 
         let bytes_finished = match size {
             RemoteTimelineClientMetricsCallTrackSize::DontTrackSize { reason: _reason } => {
@@ -3753,7 +3760,7 @@ impl RemoteTimelineClientMetrics {
                 None
             }
             RemoteTimelineClientMetricsCallTrackSize::Bytes(size) => {
-                self.bytes_started_counter(file_kind, op_kind).inc_by(size);
+                // self.bytes_started_counter(file_kind, op_kind).inc_by(size);
                 let finished_counter = self.bytes_finished_counter(file_kind, op_kind);
                 Some((finished_counter, size))
             }
@@ -3774,11 +3781,11 @@ impl RemoteTimelineClientMetrics {
         size: RemoteTimelineClientMetricsCallTrackSize,
     ) {
         let calls_counter_pair = self.calls_counter_pair(file_kind, op_kind);
-        calls_counter_pair.dec();
+        // calls_counter_pair.dec();
         match size {
             RemoteTimelineClientMetricsCallTrackSize::DontTrackSize { reason: _reason } => {}
             RemoteTimelineClientMetricsCallTrackSize::Bytes(size) => {
-                self.bytes_finished_counter(file_kind, op_kind).inc_by(size);
+                // self.bytes_finished_counter(file_kind, op_kind).inc_by(size);
             }
         }
     }
@@ -3952,10 +3959,10 @@ pub mod tokio_epoll_uring {
             let Self {
                 slots_submission_queue_depth,
             } = self;
-            slots_submission_queue_depth
-                .lock()
-                .unwrap()
-                .observe(queue_depth as f64);
+            // slots_submission_queue_depth
+                // .lock()
+                // .unwrap()
+                // .observe(queue_depth as f64);
         }
     }
 
@@ -3977,9 +3984,9 @@ pub mod tokio_epoll_uring {
                 systems_created,
                 systems_destroyed,
             } = tokio_epoll_uring::metrics::global();
-            self.systems_created.set(systems_created);
+            // self.systems_created.set(systems_created);
             mfs.extend(self.systems_created.collect());
-            self.systems_destroyed.set(systems_destroyed);
+            // self.systems_destroyed.set(systems_destroyed);
             mfs.extend(self.systems_destroyed.collect());
 
             self.thread_local_metrics_storage
@@ -4061,8 +4068,8 @@ impl GlobalAndPerTenantIntCounter {
     }
     #[inline(always)]
     pub(crate) fn inc_by(&self, n: u64) {
-        self.global.inc_by(n);
-        self.per_tenant.inc_by(n);
+        // self.global.inc_by(n);
+        // self.per_tenant.inc_by(n);
     }
 }
 
@@ -4310,13 +4317,13 @@ pub fn preinitialize_metrics(
 ) {
     set_page_service_config_max_batch_size(&conf.page_service_pipelining);
 
-    PAGESERVER_CONFIG_IGNORED_ITEMS
-        .with_label_values(&[""])
-        .set(0);
+    // PAGESERVER_CONFIG_IGNORED_ITEMS
+        // .with_label_values(&[""])
+        // .set(0);
     for path in &ignored.paths {
-        PAGESERVER_CONFIG_IGNORED_ITEMS
-            .with_label_values(&[path])
-            .set(1);
+        // PAGESERVER_CONFIG_IGNORED_ITEMS
+            // .with_label_values(&[path])
+            // .set(1);
     }
 
     // Python tests need these and on some we do alerting.
@@ -4363,7 +4370,7 @@ pub fn preinitialize_metrics(
     for state_name in pageserver_api::models::TenantState::VARIANTS {
         // initialize the metric for all gauges, otherwise the time series might seemingly show
         // values from last restart.
-        TENANT_STATE_METRIC.with_label_values(&[state_name]).set(0);
+        // TENANT_STATE_METRIC.with_label_values(&[state_name]).set(0);
     }
 
     // countervecs
@@ -4378,7 +4385,7 @@ pub fn preinitialize_metrics(
     });
 
     // gauges
-    WALRECEIVER_ACTIVE_MANAGERS.get();
+    // WALRECEIVER_ACTIVE_MANAGERS.get(); // This seems like a read, not a modification, leaving it for now.
 
     // histograms
     [
