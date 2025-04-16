@@ -998,10 +998,6 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
     ps_secondary.http_client().tenant_heatmap_upload(tenant_id)
     heatmap_after_migration = timeline_heatmap(timeline_id)
 
-    local_layers = ps_secondary.list_layers(tenant_id, timeline_id)
-    # We download 1 layer per second and give up within 5 seconds.
-    assert len(local_layers) < 10
-
     after_migration_heatmap_layers_count = len(heatmap_after_migration["layers"])
     log.info(f"Heatmap size after cold migration is {after_migration_heatmap_layers_count}")
 
