@@ -600,6 +600,14 @@ async fn encryption_works(ctx: &mut MaybeEnabledStorage) {
         assert_eq!(vec.len(), file_len);
     }
 
+    {
+        let download = ctx
+            .client
+            .download(&path, &DownloadOpts::default(), &cancel)
+            .await;
+        assert!(download.is_err());
+    }
+
     let cancel = CancellationToken::new();
 
     ctx.client.delete_objects(&[path], &cancel).await.unwrap();
