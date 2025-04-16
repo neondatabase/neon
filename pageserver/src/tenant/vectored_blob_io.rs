@@ -26,7 +26,7 @@ use utils::lsn::Lsn;
 use utils::vec_map::VecMap;
 
 use crate::context::RequestContext;
-use crate::tenant::blob_io::{BYTE_UNCOMPRESSED, BYTE_ZSTD, LEN_COMPRESSION_BIT_MASK};
+use crate::tenant::blob_io::{BYTE_UNCOMPRESSED, BYTE_ZSTD, Header};
 use crate::virtual_file::{self, IoBufferMut, VirtualFile};
 
 /// Metadata bundled with the start and end offset of a blob.
@@ -508,27 +508,10 @@ impl<'a> VectoredBlobReader<'a> {
 
         for (blob_start, meta) in blobs_at.iter().copied() {
             let header_start = (blob_start - read.start) as usize;
-            let first_header_byte = buf[header_start];
-
-            // Each blob is prefixed by a header containing its size and compression information.
-            // Extract the size and skip that header to find the start of the data.
-            // The size can be 1 or 4 bytes. The most significant bit is 0 in the
-            // 1 byte case and 1 in the 4 byte case.
-            let (header_len, data_len, compression_bits) = if first_header_byte < 0x80 {
-                const HEADER_LEN: usize = 1;
-                (HEADER_LEN, first_header_byte as usize, BYTE_UNCOMPRESSED)
-            } else {
-                const HEADER_LEN: usize = 4;
-                let mut header_buf = [0u8; HEADER_LEN];
-                header_buf.copy_from_slice(&buf[header_start..header_start + HEADER_LEN]);
-                let compression_bits = header_buf[0] & LEN_COMPRESSION_BIT_MASK;
-                header_buf[0] &= !LEN_COMPRESSION_BIT_MASK;
-                let data_len = u32::from_be_bytes(header_buf) as usize;
-                (HEADER_LEN, data_len, compression_bits)
-            };
-
-            let data_start = header_start + header_len;
-            let end = data_start + data_len;
+            let header = Header::decode(&buf[header_start..])?;
+            let data_start = header_start + header.header_len;
+            let end = data_start + header.data_len;
+            let compression_bits = header.compression_bits;
 
             blobs.push(VectoredBlob {
                 header_start,
@@ -1000,6 +983,15 @@ mod tests {
                 &read_buf[..],
                 "mismatch for idx={idx} at offset={offset}"
             );
+
+            // Check that raw_with_header returns a valid header.
+            let raw = read_blob.raw_with_header(&view);
+            let header = Header::decode(&raw)?;
+            if !compression || header.header_len == 1 {
+                assert_eq!(header.compression_bits, BYTE_UNCOMPRESSED);
+            }
+            assert_eq!(raw.len(), header.total_len());
+
             buf = result.buf;
         }
         Ok(())
