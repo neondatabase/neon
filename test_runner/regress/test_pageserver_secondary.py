@@ -14,6 +14,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     NeonPageserver,
     StorageControllerMigrationConfig,
+    flush_ep_to_pageserver,
 )
 from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.utils import (
@@ -1038,8 +1039,13 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
         .value
     )
 
-    workload.stop()
     assert before == after
+
+    # Stop the endpoint and wait until any finally written WAL propagates to
+    # the pageserver and is uploaded to remote storage.
+    flush_ep_to_pageserver(env, workload.endpoint(), tenant_id, timeline_id)
+    ps_secondary.http_client().timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
+    workload.stop()
 
     # Now simulate the case where a child timeline is archived, parent layers
     # are evicted and the child is unarchived. When the child is unarchived,
