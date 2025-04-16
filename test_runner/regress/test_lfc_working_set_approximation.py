@@ -98,9 +98,9 @@ def test_sliding_working_set_approximation(neon_simple_env: NeonEnv):
     cur = conn.cursor()
     cur.execute("create extension neon")
     cur.execute(
-        "create table t(pk integer primary key, count integer default 0, payload text default repeat('?', 128))"
+        "create table t(pk integer primary key, count integer default 0, payload text default repeat('?', 1000)) with (fillfactor=10)"
     )
-    cur.execute("insert into t (pk) values (generate_series(1,1000000))")
+    cur.execute("insert into t (pk) values (generate_series(1,100000))")
     time.sleep(2)
     before_10k = time.monotonic()
     cur.execute("select sum(count) from t where pk between 10000 and 20000")
@@ -121,5 +121,5 @@ def test_sliding_working_set_approximation(neon_simple_env: NeonEnv):
     size = cur.fetchall()[0][0] // 8192
     log.info(f"Table size {size} blocks")
 
-    assert estimation_1k >= 20 and estimation_1k <= 50
-    assert estimation_10k >= 200 and estimation_10k <= 500
+    assert estimation_1k >= 900 and estimation_1k <= 2000
+    assert estimation_10k >= 9000 and estimation_10k <= 20000
