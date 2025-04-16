@@ -76,10 +76,17 @@ impl HttpConnPool {
         }
         removed > 0
     }
+
+    pub fn register(&mut self, client: &Client) {
+        self.conns.push_back(ConnPoolEntry {
+            conn: client.inner.clone(),
+            _last_access: std::time::Instant::now(),
+        });
+    }
 }
 
 impl EndpointConnPoolExt for HttpConnPool {
-    type Client = Client<Send>;
+    type Client = Client;
     type ClientInner = Send;
     type Connection = Connect;
 
@@ -150,12 +157,12 @@ impl Drop for HttpConnPool {
     }
 }
 
-pub(crate) struct Client<C: ClientInnerExt + Clone> {
-    pub(crate) inner: ClientInnerCommon<C>,
+pub(crate) struct Client {
+    pub(crate) inner: ClientInnerCommon<Send>,
 }
 
-impl<C: ClientInnerExt + Clone> Client<C> {
-    pub(self) fn new(inner: ClientInnerCommon<C>) -> Self {
+impl Client {
+    pub(self) fn new(inner: ClientInnerCommon<Send>) -> Self {
         Self { inner }
     }
 

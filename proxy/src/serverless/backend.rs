@@ -18,7 +18,7 @@ use tracing::{debug, info};
 use super::AsyncRW;
 use super::conn_pool::poll_client_generic;
 use super::conn_pool_lib::{Client, ConnInfo, EndpointConnPool, GlobalConnPool};
-use super::http_conn_pool::{self, HttpConnPool, Send};
+use super::http_conn_pool::{self, HttpConnPool};
 use super::local_conn_pool::{self, EXT_NAME, EXT_SCHEMA, EXT_VERSION, LocalConnPool};
 use crate::auth::backend::local::StaticAuthRules;
 use crate::auth::backend::{ComputeCredentials, ComputeUserInfo};
@@ -245,7 +245,7 @@ impl PoolingBackend {
         &self,
         ctx: &RequestContext,
         conn_info: ConnInfo,
-    ) -> Result<http_conn_pool::Client<Send>, HttpConnError> {
+    ) -> Result<http_conn_pool::Client, HttpConnError> {
         debug!("pool: looking for an existing connection");
         if let Some(client) = self.http_conn_pool.get(ctx, &conn_info) {
             return Ok(client);
@@ -602,7 +602,7 @@ struct HyperMechanism {
 
 #[async_trait]
 impl ConnectMechanism for HyperMechanism {
-    type Connection = http_conn_pool::Client<Send>;
+    type Connection = http_conn_pool::Client;
     type ConnectError = HttpConnError;
     type Error = HttpConnError;
 
@@ -638,7 +638,7 @@ impl ConnectMechanism for HyperMechanism {
             info!("latency={}, query_id={}", ctx.get_proxy_latency(), query_id);
         }
 
-        Ok(poll_client_generic(
+        let client = poll_client_generic(
             self.pool.clone(),
             ctx,
             self.conn_info.clone(),
@@ -646,7 +646,18 @@ impl ConnectMechanism for HyperMechanism {
             connection,
             self.conn_id,
             node_info.aux.clone(),
-        ))
+        );
+
+        // auth-broker -> local-proxy clients don't return to the pool, since
+        // they are multiplexing and cloneable. So instead we insert it once here.
+        if let Some(endpoint) = self.conn_info.endpoint_cache_key() {
+            self.pool
+                .get_or_create_endpoint_pool(&endpoint)
+                .write()
+                .register(&client);
+        }
+
+        Ok(client)
     }
 
     fn update_connect_config(&self, _config: &mut compute::ConnCfg) {}
