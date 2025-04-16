@@ -29,7 +29,7 @@ pub(crate) struct ClientDataHttp();
 
 // Per-endpoint connection pool
 // Number of open connections is limited by the `max_conns_per_endpoint`.
-pub(crate) struct HttpConnPool<C: ClientInnerExt + Clone> {
+pub(crate) struct HttpConnPool {
     // TODO(conrad):
     // either we should open more connections depending on stream count
     // (not exposed by hyper, need our own counter)
@@ -39,13 +39,13 @@ pub(crate) struct HttpConnPool<C: ClientInnerExt + Clone> {
     // seems somewhat redundant though.
     //
     // Probably we should run a semaphore and just the single conn. TBD.
-    conns: VecDeque<ConnPoolEntry<C>>,
+    conns: VecDeque<ConnPoolEntry<Send>>,
     _guard: HttpEndpointPoolsGuard<'static>,
     global_connections_count: Arc<AtomicUsize>,
 }
 
-impl<C: ClientInnerExt + Clone> HttpConnPool<C> {
-    fn get_conn_entry(&mut self) -> Option<ConnPoolEntry<C>> {
+impl HttpConnPool {
+    fn get_conn_entry(&mut self) -> Option<ConnPoolEntry<Send>> {
         let Self { conns, .. } = self;
 
         loop {
@@ -85,7 +85,7 @@ impl<C: ClientInnerExt + Clone> HttpConnPool<C> {
     }
 }
 
-impl<C: ClientInnerExt + Clone> EndpointConnPoolExt<C> for HttpConnPool<C> {
+impl EndpointConnPoolExt<Send> for HttpConnPool {
     fn clear_closed(&mut self) -> usize {
         let Self { conns, .. } = self;
         let old_len = conns.len();
@@ -100,7 +100,7 @@ impl<C: ClientInnerExt + Clone> EndpointConnPoolExt<C> for HttpConnPool<C> {
     }
 }
 
-impl<C: ClientInnerExt + Clone> Drop for HttpConnPool<C> {
+impl Drop for HttpConnPool {
     fn drop(&mut self) {
         if !self.conns.is_empty() {
             self.global_connections_count
@@ -114,14 +114,14 @@ impl<C: ClientInnerExt + Clone> Drop for HttpConnPool<C> {
     }
 }
 
-impl<C: ClientInnerExt + Clone> GlobalConnPool<C, HttpConnPool<C>> {
+impl GlobalConnPool<Send, HttpConnPool> {
     #[expect(unused_results)]
     pub(crate) fn get(
         self: &Arc<Self>,
         ctx: &RequestContext,
         conn_info: &ConnInfo,
-    ) -> Result<Option<Client<C>>, HttpConnError> {
-        let result: Result<Option<Client<C>>, HttpConnError>;
+    ) -> Result<Option<Client<Send>>, HttpConnError> {
+        let result: Result<Option<Client<Send>>, HttpConnError>;
         let Some(endpoint) = conn_info.endpoint_cache_key() else {
             result = Ok(None);
             return result;
@@ -146,7 +146,7 @@ impl<C: ClientInnerExt + Clone> GlobalConnPool<C, HttpConnPool<C>> {
     fn get_or_create_endpoint_pool(
         self: &Arc<Self>,
         endpoint: &EndpointCacheKey,
-    ) -> Arc<RwLock<HttpConnPool<C>>> {
+    ) -> Arc<RwLock<HttpConnPool>> {
         // fast path
         if let Some(pool) = self.global_pool.get(endpoint) {
             return pool.clone();
@@ -186,7 +186,7 @@ impl<C: ClientInnerExt + Clone> GlobalConnPool<C, HttpConnPool<C>> {
 }
 
 pub(crate) fn poll_http2_client(
-    global_pool: Arc<GlobalConnPool<Send, HttpConnPool<Send>>>,
+    global_pool: Arc<GlobalConnPool<Send, HttpConnPool>>,
     ctx: &RequestContext,
     conn_info: &ConnInfo,
     client: Send,
