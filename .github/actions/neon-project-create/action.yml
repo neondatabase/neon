@@ -99,7 +99,6 @@ runs:
 
         # Mask password
         echo "::add-mask::$(echo $project | jq --raw-output '.roles[] | select(.name != "web_access") | .password')"
-        set -x
 
         dsn=$(echo $project | jq --raw-output '.connection_uris[0].connection_uri')
         echo "::add-mask::${dsn}"
@@ -142,8 +141,6 @@ runs:
         fi
         # XXX
         # This is a workaround for project's settings which don't work well in public API now
-        echo ${PROJECT_SETTINGS}
-        echo ${DEFAULT_ENDPOINT_SETTINGS}
         if ( [[ -n "${PROJECT_SETTINGS}" ]] && [[ "${PROJECT_SETTINGS}" != "{}" ]] ) || ( [[ -n "${DEFAULT_ENDPOINT_SETTINGS}" ]] && [[ "${DEFAULT_ENDPOINT_SETTINGS}" != "{}" ]] ); then
           PROJECT_DATA=$(curl -X GET \
               "https://${API_HOST}/regions/${REGION_ID}/api/v1/admin/projects/${project_id}" \
