@@ -1751,14 +1751,15 @@ def test_back_pressure_per_shard(neon_env_builder: NeonEnvBuilder):
             "max_replication_apply_lag = 0",
             "max_replication_flush_lag = 15MB",
             "neon.max_cluster_size = 10GB",
+            "neon.lakebase_mode = true",
         ],
     )
     endpoint.respec(skip_pg_catalog_updates=False)
     endpoint.start()
 
-    # generate 10MB of data
+    # generate 20MB of data
     endpoint.safe_psql(
-        "CREATE TABLE usertable AS SELECT s AS KEY, repeat('a', 1000) as VALUE from generate_series(1, 10000) s;"
+        "CREATE TABLE usertable AS SELECT s AS KEY, repeat('a', 1000) as VALUE from generate_series(1, 20000) s;"
     )
     res = endpoint.safe_psql("SELECT neon.backpressure_throttling_time() as throttling_time")[0]
     assert res[0] == 0, f"throttling_time should be 0, but got {res[0]}"
