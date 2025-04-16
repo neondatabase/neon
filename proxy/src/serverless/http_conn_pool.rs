@@ -5,7 +5,7 @@ use std::sync::{Arc, Weak};
 use hyper::client::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use smol_str::ToSmolStr;
-use tracing::{Instrument, debug, error, info, info_span};
+use tracing::{Instrument, error, info, info_span};
 
 use super::AsyncRW;
 use super::conn_pool_lib::{
@@ -14,7 +14,7 @@ use super::conn_pool_lib::{
 };
 use crate::config::HttpConfig;
 use crate::context::RequestContext;
-use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
+use crate::control_plane::messages::MetricsAuxInfo;
 use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
 use crate::protocol2::ConnectionInfoExtra;
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
@@ -95,6 +95,21 @@ impl EndpointConnPoolExt for HttpConnPool {
         }
     }
 
+    fn wrap_client(
+        inner: ClientInnerCommon<Self::ClientInner>,
+        _conn_info: ConnInfo,
+        _pool: Weak<parking_lot::RwLock<Self>>,
+    ) -> Self::Client {
+        Client::new(inner)
+    }
+
+    fn get_conn_entry(
+        &mut self,
+        _db_user: (crate::types::DbName, crate::types::RoleName),
+    ) -> Option<ClientInnerCommon<Self::ClientInner>> {
+        Some(self.get_conn_entry()?.conn)
+    }
+
     fn clear_closed(&mut self) -> usize {
         let Self { conns, .. } = self;
         let old_len = conns.len();
@@ -120,28 +135,6 @@ impl Drop for HttpConnPool {
                 .get_metric()
                 .dec_by(self.conns.len() as i64);
         }
-    }
-}
-
-impl GlobalConnPool<HttpConnPool> {
-    pub(crate) fn get(
-        self: &Arc<Self>,
-        ctx: &RequestContext,
-        conn_info: &ConnInfo,
-    ) -> Option<Client<Send>> {
-        let endpoint = conn_info.endpoint_cache_key()?;
-        let endpoint_pool = self.global_pool.get(&endpoint)?.clone();
-        let client = endpoint_pool.write().get_conn_entry()?;
-
-        tracing::Span::current().record("conn_id", tracing::field::display(client.conn.conn_id));
-        debug!(
-            cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
-            "pool: reusing connection '{conn_info}'"
-        );
-        ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
-        ctx.success();
-
-        Some(Client::new(client.conn.clone()))
     }
 }
 
