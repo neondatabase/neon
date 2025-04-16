@@ -12,7 +12,6 @@
 mod azure_blob;
 mod config;
 mod error;
-mod kms;
 mod local_fs;
 mod metrics;
 mod s3_bucket;

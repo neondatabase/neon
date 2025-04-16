@@ -8,25 +8,17 @@ pub struct NaiveKms {
     account_id: String,
 }
 
-pub struct KeyPair {
-    pub wrapped: Vec<u8>,
-    pub plain: Vec<u8>,
-}
-
 impl NaiveKms {
     pub fn new(account_id: String) -> Self {
         Self { account_id }
     }
 
-    /// Generate a new key in the KMS. Returns the plain and wrapped keys.
-    pub fn generate_key(&self) -> anyhow::Result<KeyPair> {
-        // TODO: use a proper library for generating the key (i.e., ring).
-        let plain = rand::random::<[u8; 32]>().to_vec();
-        let wrapped = [self.account_id.as_bytes(), "-wrapped-".as_bytes(), &plain].concat();
-        Ok(KeyPair { wrapped, plain })
+    pub fn encrypt(&self, plain: &[u8]) -> anyhow::Result<Vec<u8>> {
+        let wrapped = [self.account_id.as_bytes(), "-wrapped-".as_bytes(), plain].concat();
+        Ok(wrapped)
     }
 
-    pub fn unwrap_key(&self, wrapped: &[u8]) -> anyhow::Result<Vec<u8>> {
+    pub fn decrypt(&self, wrapped: &[u8]) -> anyhow::Result<Vec<u8>> {
         let Some(wrapped) = wrapped.strip_prefix(self.account_id.as_bytes()) else {
             return Err(anyhow::anyhow!("invalid key"));
         };
@@ -44,7 +36,9 @@ mod tests {
     #[test]
     fn test_generate_key() {
         let kms = NaiveKms::new("test-tenant".to_string());
-        let key_pair = kms.generate_key().unwrap();
-        assert_eq!(kms.unwrap_key(&key_pair.wrapped).unwrap(), key_pair.plain);
+        let data = rand::random::<[u8; 32]>().to_vec();
+        let encrypted = kms.encrypt(&data).unwrap();
+        let decrypted = kms.decrypt(&encrypted).unwrap();
+        assert_eq!(data, decrypted);
     }
 }

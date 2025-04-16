@@ -5496,6 +5496,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c707298afce11da2efef2f600116fa93ffa7a032b5d7b628aa17711ec81383ca"
 
 [[package]]
+name = "remote_keys"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aws-config",
+ "aws-sdk-kms",
+ "aws-smithy-types",
+ "rand 0.8.5",
+ "utils",
+]
+
+[[package]]
 name = "remote_storage"
 version = "0.1.0"
 dependencies = [
