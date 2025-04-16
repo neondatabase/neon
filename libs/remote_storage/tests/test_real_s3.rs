@@ -593,7 +593,11 @@ async fn encryption_works(ctx: &mut MaybeEnabledStorage) {
     {
         let download = ctx
             .client
-            .download_with_encryption(&path, &DownloadOpts::default(), Some(&key), &cancel)
+            .download(
+                &path,
+                &DownloadOpts::default().with_encryption_key(Some(&key)),
+                &cancel,
+            )
             .await
             .expect("should succeed");
         let vec = download_to_vec(download).await.expect("should succeed");
@@ -601,6 +605,7 @@ async fn encryption_works(ctx: &mut MaybeEnabledStorage) {
     }
 
     {
+        // Download without encryption key should fail
         let download = ctx
             .client
             .download(&path, &DownloadOpts::default(), &cancel)

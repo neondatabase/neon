@@ -819,11 +819,10 @@ impl RemoteStorage for S3Bucket {
         Ok(())
     }
 
-    async fn download_with_encryption(
+    async fn download(
         &self,
         from: &RemotePath,
         opts: &DownloadOpts,
-        encryption_key: Option<&[u8]>,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         // if prefix is not none then download file `prefix/from`
@@ -834,21 +833,11 @@ impl RemoteStorage for S3Bucket {
                 key: self.relative_path_to_s3_object(from),
                 etag: opts.etag.as_ref().map(|e| e.to_string()),
                 range: opts.byte_range_header(),
-                sse_c_key: encryption_key.map(|k| k.to_vec()),
+                sse_c_key: opts.encryption_key.clone(),
             },
             cancel,
         )
         .await
-    }
-
-    async fn download(
-        &self,
-        from: &RemotePath,
-        opts: &DownloadOpts,
-        cancel: &CancellationToken,
-    ) -> Result<Download, DownloadError> {
-        self.download_with_encryption(from, opts, None, cancel)
-            .await
     }
 
     async fn delete_objects(

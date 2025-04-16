@@ -179,17 +179,6 @@ impl RemoteStorage for UnreliableWrapper {
     }
 
     #[allow(unused_variables)]
-    async fn download_with_encryption(
-        &self,
-        from: &RemotePath,
-        opts: &DownloadOpts,
-        encryption_key: Option<&[u8]>,
-        cancel: &CancellationToken,
-    ) -> Result<Download, DownloadError> {
-        unimplemented!()
-    }
-
-    #[allow(unused_variables)]
     async fn upload_with_encryption(
         &self,
         from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,

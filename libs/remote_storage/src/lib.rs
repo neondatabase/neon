@@ -190,6 +190,8 @@ pub struct DownloadOpts {
     /// timeouts: for something like an index/manifest/heatmap, we should time out faster than
     /// for layer files
     pub kind: DownloadKind,
+    /// The encryption key to use for the download.
+    pub encryption_key: Option<Vec<u8>>,
 }
 
 pub enum DownloadKind {
@@ -204,6 +206,7 @@ impl Default for DownloadOpts {
             byte_start: Bound::Unbounded,
             byte_end: Bound::Unbounded,
             kind: DownloadKind::Large,
+            encryption_key: None,
         }
     }
 }
@@ -240,6 +243,15 @@ impl DownloadOpts {
                 Some(end) => format!("bytes={start}-{end}"),
                 None => format!("bytes={start}-"),
             })
+    }
+
+    pub fn with_encryption_key(mut self, encryption_key: Option<impl AsRef<[u8]>>) -> Self {
+        self.encryption_key = encryption_key.map(|k| k.as_ref().to_vec());
+        self
+    }
+
+    pub fn encryption_key(&self) -> Option<&[u8]> {
+        self.encryption_key.as_deref()
     }
 }
 
@@ -328,15 +340,6 @@ pub trait RemoteStorage: Send + Sync + 'static {
         &self,
         from: &RemotePath,
         opts: &DownloadOpts,
-        cancel: &CancellationToken,
-    ) -> Result<Download, DownloadError>;
-
-    /// Same as download, but with encryption if the backend supports it (e.g. SSE-C on AWS).
-    async fn download_with_encryption(
-        &self,
-        from: &RemotePath,
-        opts: &DownloadOpts,
-        encryption_key: Option<&[u8]>,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError>;
 
@@ -633,33 +636,6 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             }
             Self::Unreliable(s) => {
                 s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
-                    .await
-            }
-        }
-    }
-
-    pub async fn download_with_encryption(
-        &self,
-        from: &RemotePath,
-        opts: &DownloadOpts,
-        encryption_key: Option<&[u8]>,
-        cancel: &CancellationToken,
-    ) -> Result<Download, DownloadError> {
-        match self {
-            Self::LocalFs(s) => {
-                s.download_with_encryption(from, opts, encryption_key, cancel)
-                    .await
-            }
-            Self::AwsS3(s) => {
-                s.download_with_encryption(from, opts, encryption_key, cancel)
-                    .await
-            }
-            Self::AzureBlob(s) => {
-                s.download_with_encryption(from, opts, encryption_key, cancel)
-                    .await
-            }
-            Self::Unreliable(s) => {
-                s.download_with_encryption(from, opts, encryption_key, cancel)
                     .await
             }
         }
