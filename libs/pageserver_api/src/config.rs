@@ -678,14 +678,14 @@ pub mod tenant_conf_defaults {
     pub const DEFAULT_COMPACTION_TARGET_SIZE: u64 = 128 * 1024 * 1024;
 
     pub const DEFAULT_COMPACTION_PERIOD: &str = "20 s";
-    pub const DEFAULT_COMPACTION_THRESHOLD: usize = 10;
+    pub const DEFAULT_COMPACTION_THRESHOLD: usize = 8;
     pub const DEFAULT_COMPACTION_SHARD_ANCESTOR: bool = true;
 
     // This value needs to be tuned to avoid OOM. We have 3/4*CPUs threads for L0 compaction, that's
-    // 3/4*16=9 on most of our pageservers. Compacting 20 layers requires about 1 GB memory (could
-    // be reduced later by optimizing L0 hole calculation to avoid loading all keys into memory). So
-    // with this config, we can get a maximum peak compaction usage of 9 GB.
-    pub const DEFAULT_COMPACTION_UPPER_LIMIT: usize = 20;
+    // 3/4*8=6 on most of our pageservers. Compacting 12 layers requires a maximum of
+    // DEFAULT_CHECKPOINT_DISTANCE*12 memory, that's 3072MB. So with this config, we can get a maximum peak
+    // compaction usage of 18432MB.
+    pub const DEFAULT_COMPACTION_UPPER_LIMIT: usize = 12;
     // Enable L0 compaction pass and semaphore by default. L0 compaction must be responsive to avoid
     // read amp.
     pub const DEFAULT_COMPACTION_L0_FIRST: bool = true;
@@ -702,8 +702,11 @@ pub mod tenant_conf_defaults {
     // Relevant: https://github.com/neondatabase/neon/issues/3394
     pub const DEFAULT_GC_PERIOD: &str = "1 hr";
     pub const DEFAULT_IMAGE_CREATION_THRESHOLD: usize = 3;
-    // If there are more than threshold * compaction_threshold (that is 3 * 10 in the default config) L0 layers, image
-    // layer creation will end immediately. Set to 0 to disable.
+    // Currently, any value other than 0 will trigger image layer creation preemption immediately with L0 backpressure
+    // without looking at the exact number of L0 layers.
+    // It was expected to have the following behavior:
+    // > If there are more than threshold * compaction_threshold (that is 3 * 10 in the default config) L0 layers, image
+    // > layer creation will end immediately. Set to 0 to disable.
     pub const DEFAULT_IMAGE_CREATION_PREEMPT_THRESHOLD: usize = 3;
     pub const DEFAULT_PITR_INTERVAL: &str = "7 days";
     pub const DEFAULT_WALRECEIVER_CONNECT_TIMEOUT: &str = "10 seconds";
