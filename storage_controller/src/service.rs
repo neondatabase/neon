@@ -878,6 +878,22 @@ impl Service {
             });
         }
 
+        // Fetch the list of completed imports and attempt to finalize them in the background.
+        // This handles the case where the previous storage controller instance shut down
+        // whilst finalizing imports.
+        let complete_imports = self.persistence.list_complete_timeline_imports().await;
+        match complete_imports {
+            Ok(ok) => {
+                tokio::task::spawn({
+                    let finalize_imports_self = self.clone();
+                    async move { finalize_imports_self.finalize_timeline_imports(ok).await }
+                });
+            }
+            Err(err) => {
+                tracing::error!("Could not retrieve completed imports from database: {err}");
+            }
+        }
+
         tracing::info!(
             "Startup complete, spawned {reconcile_tasks} reconciliation tasks ({shard_count} shards total)"
         );
@@ -3869,11 +3885,6 @@ impl Service {
         self: &Arc<Self>,
         import: TimelineImport,
     ) -> anyhow::Result<()> {
-        // TODO(vlad): On start-up, load up the imports and notify cplane of the
-        // ones that have been completed. This assumes the new cplane API will
-        // be idempotent. If that's not possible, bang a flag in the database.
-        // https://github.com/neondatabase/neon/issues/11570
-
         tracing::info!("Finalizing timeline import");
 
         let import_failed = import.completion_error().is_some();
@@ -3924,6 +3935,15 @@ impl Service {
         tracing::info!(%import_failed, "Timeline import complete");
 
         Ok(())
+    }
+
+    async fn finalize_timeline_imports(self: &Arc<Self>, imports: Vec<TimelineImport>) {
+        futures::future::join_all(
+            imports
+                .into_iter()
+                .map(|import| self.finalize_timeline_import(import)),
+        )
+        .await;
     }
 
     async fn timeline_active_on_all_shards(
