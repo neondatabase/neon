@@ -60,11 +60,12 @@ use jsonwebtoken::jwk::{
 use nix::sys::signal::{Signal, kill};
 use pageserver_api::shard::ShardStripeSize;
 use pem::Pem;
-use pkcs8::der::Decode;
 use reqwest::header::CONTENT_TYPE;
 use safekeeper_api::membership::SafekeeperGeneration;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use spki::der::Decode;
+use spki::{SubjectPublicKeyInfo, SubjectPublicKeyInfoRef};
 use tracing::debug;
 use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
@@ -147,11 +148,12 @@ impl ComputeControlPlane {
 
     /// Create a JSON Web Key Set. This ideally matches the way we create a JWKS
     /// from the production control plane.
-    fn create_jwks_from_pem(pem: Pem) -> Result<JwkSet> {
-        let document = pkcs8::Document::from_der(&pem.into_contents())?;
+    fn create_jwks_from_pem(pem: &Pem) -> Result<JwkSet> {
+        let spki: SubjectPublicKeyInfoRef = SubjectPublicKeyInfo::from_der(pem.contents())?;
+        let public_key = spki.subject_public_key.raw_bytes();
 
         let mut hasher = Sha256::new();
-        hasher.update(&document);
+        hasher.update(public_key);
         let key_hash = hasher.finalize();
 
         Ok(JwkSet {
@@ -169,7 +171,7 @@ impl ComputeControlPlane {
                 algorithm: AlgorithmParameters::OctetKeyPair(OctetKeyPairParameters {
                     key_type: OctetKeyPairType::OctetKeyPair,
                     curve: EllipticCurve::Ed25519,
-                    x: base64::encode_config(&document, base64::URL_SAFE_NO_PAD),
+                    x: base64::encode_config(public_key, base64::URL_SAFE_NO_PAD),
                 }),
             }],
         })
@@ -193,7 +195,7 @@ impl ComputeControlPlane {
         let external_http_port = external_http_port.unwrap_or_else(|| self.get_port() + 1);
         let internal_http_port = internal_http_port.unwrap_or_else(|| external_http_port + 1);
         let compute_ctl_config = ComputeCtlConfig {
-            jwks: Self::create_jwks_from_pem(self.env.read_public_key()?)?,
+            jwks: Self::create_jwks_from_pem(&self.env.read_public_key()?)?,
             tls: None::<TlsConfig>,
         };
         let ep = Arc::new(Endpoint {
