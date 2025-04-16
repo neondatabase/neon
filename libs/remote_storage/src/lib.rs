@@ -341,7 +341,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError>;
 
-    /// Same as upload, but with SSE-C encryption if the backend supports it.
+    /// Same as upload, but with remote encryption if the backend supports it (e.g. SSE-C on AWS).
     async fn upload_with_encryption(
         &self,
         from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
