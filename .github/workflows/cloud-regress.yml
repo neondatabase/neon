@@ -68,7 +68,7 @@ jobs:
         with:
           aws-region: eu-central-1
           role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
-          role-duration-seconds: 180 # 5 hours
+          role-duration-seconds: 900
 
       - name: Create Neon Project
         id: create-neon-project
