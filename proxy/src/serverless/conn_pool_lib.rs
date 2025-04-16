@@ -330,6 +330,16 @@ pub(crate) trait EndpointConnPoolExt {
     type ClientInner: ClientInnerExt;
 
     fn create(config: &HttpConfig, global_connections_count: Arc<AtomicUsize>) -> Self;
+    fn wrap_client(
+        inner: ClientInnerCommon<Self::ClientInner>,
+        conn_info: ConnInfo,
+        pool: Weak<RwLock<Self>>,
+    ) -> Self::Client;
+
+    fn get_conn_entry(
+        &mut self,
+        db_user: (DbName, RoleName),
+    ) -> Option<ClientInnerCommon<Self::ClientInner>>;
 
     fn clear_closed(&mut self) -> usize;
     fn total_conns(&self) -> usize;
@@ -349,6 +359,21 @@ impl<C: ClientInnerExt> EndpointConnPoolExt for EndpointConnPool<C> {
             global_pool_size_max_conns: config.pool_options.max_total_conns,
             pool_name: String::from("remote"),
         }
+    }
+
+    fn wrap_client(
+        client: ClientInnerCommon<Self::ClientInner>,
+        conn_info: ConnInfo,
+        pool: Weak<RwLock<Self>>,
+    ) -> Self::Client {
+        Client::new(client, conn_info.clone(), pool)
+    }
+
+    fn get_conn_entry(
+        &mut self,
+        db_user: (DbName, RoleName),
+    ) -> Option<ClientInnerCommon<Self::ClientInner>> {
+        Some(self.get_conn_entry(db_user)?.conn)
     }
 
     fn clear_closed(&mut self) -> usize {
@@ -506,19 +531,18 @@ where
     }
 }
 
-impl<C: ClientInnerExt> GlobalConnPool<EndpointConnPool<C>> {
+impl<P: EndpointConnPoolExt> GlobalConnPool<P> {
     pub(crate) fn get(
         self: &Arc<Self>,
         ctx: &RequestContext,
         conn_info: &ConnInfo,
-    ) -> Option<Client<C>> {
+    ) -> Option<P::Client> {
         let endpoint = conn_info.endpoint_cache_key()?;
 
         let endpoint_pool = self.get_endpoint_pool(&endpoint)?;
         let client = endpoint_pool
             .write()
-            .get_conn_entry(conn_info.db_and_user())?
-            .conn;
+            .get_conn_entry(conn_info.db_and_user())?;
 
         let endpoint_pool = Arc::downgrade(&endpoint_pool);
 
@@ -548,7 +572,7 @@ impl<C: ClientInnerExt> GlobalConnPool<EndpointConnPool<C>> {
         }
 
         ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
-        Some(Client::new(client, conn_info.clone(), endpoint_pool))
+        Some(P::wrap_client(client, conn_info.clone(), endpoint_pool))
     }
 }
 
