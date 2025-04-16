@@ -561,7 +561,8 @@ impl ConnectMechanism for TokioMechanism {
             .dbname(&self.conn_info.dbname)
             .connect_timeout(compute_config.timeout);
 
-        let mk_tls = crate::tls::postgres_rustls::MakeRustlsConnect::new(compute_config.tls.clone());
+        let mk_tls =
+            crate::tls::postgres_rustls::MakeRustlsConnect::new(compute_config.tls.clone());
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let res = config.connect(mk_tls).await;
         drop(pause);
