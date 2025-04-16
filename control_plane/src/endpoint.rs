@@ -766,10 +766,6 @@ impl Endpoint {
             }
         };
 
-        // TODO(tristan957): Remove the write to spec.json after compatibility
-        // tests work themselves out
-        let spec_path = self.endpoint_path().join("spec.json");
-        std::fs::write(spec_path, serde_json::to_string_pretty(&config.spec)?)?;
         let config_path = self.endpoint_path().join("config.json");
         std::fs::write(config_path, serde_json::to_string_pretty(&config)?)?;
 
@@ -778,16 +774,6 @@ impl Endpoint {
             .create(true)
             .append(true)
             .open(self.endpoint_path().join("compute.log"))?;
-
-        // TODO(tristan957): Remove when compatibility tests are no longer an
-        // issue
-        let old_compute_ctl = {
-            let mut cmd = Command::new(self.env.neon_distrib_dir.join("compute_ctl"));
-            let help_output = cmd.arg("--help").output()?;
-            let help_output = String::from_utf8_lossy(&help_output.stdout);
-
-            !help_output.contains("--config")
-        };
 
         // Launch compute_ctl
         let conn_str = self.connstr("cloud_admin", "postgres");
@@ -807,19 +793,8 @@ impl Endpoint {
         ])
         .args(["--pgdata", self.pgdata().to_str().unwrap()])
         .args(["--connstr", &conn_str])
-        // TODO(tristan957): Change this to --config when compatibility tests
-        // are no longer an issue
-        .args([
-            "--spec-path",
-            self.endpoint_path()
-                .join(if old_compute_ctl {
-                    "spec.json"
-                } else {
-                    "config.json"
-                })
-                .to_str()
-                .unwrap(),
-        ])
+        .arg("--config")
+        .arg(self.endpoint_path().join("config.json").as_os_str())
         .args([
             "--pgbin",
             self.env
