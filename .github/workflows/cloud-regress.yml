@@ -106,7 +106,7 @@ jobs:
           dropdb --if-exists contrib_regression
           createdb contrib_regression
           mkdir -p /ext-src/pg_mooncake-src/results/unsupported
-          psql -c "CREATE EXTENSION pg_mooncake" -c "SELECT mooncake.create_secret('neon-github-ci-tests', 'S3', '${AWS_ACCESS_KEY_ID}', '${AWS_SECRET_ACCESS_KEY}', '{\"REGION\": \"${AWS_REGION}\"}');"
+          psql -d contrib_regression -c "CREATE EXTENSION pg_mooncake" -c "SELECT mooncake.create_secret('neon-github-ci-tests', 'S3', '${AWS_ACCESS_KEY_ID}', '${AWS_SECRET_ACCESS_KEY}', '{\"REGION\": \"${AWS_REGION}\"}');"
           /usr/local/pgsql/lib/pgxs/src/makefiles/../../src/test/regress/pg_regress --use-existing --inputdir=./ --bindir='/usr/local/pgsql/bin'    \
             --inputdir=./test --load-extension=pg_mooncake --dbname=contrib_regression approx_count_distinct columns constraints copy create_table_as \
             cursor non_superuser returning sanity segment_elimination transaction trigger unsupported/alter unsupported/columns unsupported/update unsupported/types update_delete_with_join || true
