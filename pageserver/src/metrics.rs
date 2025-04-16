@@ -334,10 +334,9 @@ pub(crate) static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMet
                 },
 
                 read_hits_immutable: {
-                    // PAGE_CACHE_READ_HITS
-                        // .get_metric_with_label_values(&[task_kind, "immutable", content_kind, "-"])
-                        // .unwrap()
-                        todo!() // FIXME: Cannot provide IntCounter here without uncommenting above
+                    PAGE_CACHE_READ_HITS
+                        .get_metric_with_label_values(&[task_kind, "immutable", content_kind, "-"])
+                        .unwrap()
                 },
             }
         }))
@@ -454,7 +453,7 @@ pub(crate) enum PageCacheErrorKind {
     EvictIterLimit,
 }
 
-pub(crate) fn page_cache_errors_inc(error_kind: PageCacheErrorKind) {
+pub(crate) fn page_cache_errors_inc(_error_kind: PageCacheErrorKind) {
     // PAGE_CACHE_ERRORS
         // .get_metric_with_label_values(&[error_kind.into()])
         // .unwrap()
