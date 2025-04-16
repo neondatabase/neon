@@ -5500,9 +5500,6 @@ name = "remote_keys"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "aws-config",
- "aws-sdk-kms",
- "aws-smithy-types",
  "rand 0.8.5",
  "utils",
 ]

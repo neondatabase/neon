@@ -1,8 +1,6 @@
 //! A module that provides a KMS implementation that generates and unwraps the keys.
 //!
 
-#![allow(dead_code)]
-
 /// A KMS implementation that does static wrapping and unwrapping of the keys.
 pub struct NaiveKms {
     account_id: String,
