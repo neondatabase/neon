@@ -240,15 +240,15 @@ impl Default for NeonStorageControllerConf {
 
 impl NeonBroker {
     pub fn client_url(&self) -> Url {
-        let url = self
-            .listen_https_addr
-            .map(|addr| format!("https://{}", addr))
-            .unwrap_or_else(|| {
-                format!(
-                    "http://{}",
-                    self.listen_addr.expect("at least one address is set")
-                )
-            });
+        let url = if let Some(addr) = self.listen_https_addr {
+            format!("https://{}", addr)
+        } else {
+            format!(
+                "http://{}",
+                self.listen_addr
+                    .expect("at least one address should be set")
+            )
+        };
 
         Url::parse(&url).expect("failed to construct url")
     }
