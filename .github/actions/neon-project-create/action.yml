@@ -157,6 +157,11 @@ runs:
                 "https://${API_HOST}/regions/${REGION_ID}/api/v1/admin/projects/${project_id}/default_endpoint_settings" \
                 -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer ${ADMIN_API_KEY}" \
                 --data "${NEW_DEFAULT_ENDPOINT_SETTINGS}"
+          endpoint_id=$(echo ${PROJECT_DATA} | jq -rc .endpoints[0].id)
+          curl -X POST --fail \
+                "https://${API_HOST}/regions/${REGION_ID}/api/v1/admin/projects/${project_id}/endpoints/${endpoint_id}/restart" \
+                -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer ${API_KEY}" 
+          sleep 3
         fi
         
 
