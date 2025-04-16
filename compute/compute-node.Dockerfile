@@ -1793,7 +1793,7 @@ COPY --from=pg_semver-src /ext-src/ /ext-src/
 #COPY --from=wal2json-src /ext-src/ /ext-src/
 COPY --from=pg_ivm-src /ext-src/ /ext-src/
 COPY --from=pg_partman-src /ext-src/ /ext-src/
-#COPY --from=pg_mooncake-src /ext-src/ /ext-src/
+COPY --from=pg_mooncake-src /ext-src/ /ext-src/
 COPY --from=pg_repack-src /ext-src/ /ext-src/
 COPY --from=pg_repack-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY compute/patches/pg_repack.patch /ext-src
