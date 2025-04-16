@@ -13,7 +13,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, TokenData, Validation, jwk::JwkSet};
 use tower_http::auth::AsyncAuthorizeRequest;
 use tracing::{debug, warn};
 
-use crate::http::{JsonResponse, extract::RequestId};
+use crate::http::JsonResponse;
 
 #[derive(Clone, Debug)]
 pub(in crate::http) struct Authorize {
@@ -52,18 +52,6 @@ impl AsyncAuthorizeRequest<Body> for Authorize {
         let validation = self.validation.clone();
 
         Box::pin(async move {
-            let request_id = request.extract_parts::<RequestId>().await.unwrap();
-
-            // TODO(tristan957): Remove this stanza after teaching neon_local
-            // and the regression tests to use a JWT + JWKS.
-            //
-            // https://github.com/neondatabase/neon/issues/11316
-            if cfg!(feature = "testing") {
-                warn!(%request_id, "Skipping compute_ctl authorization check");
-
-                return Ok(request);
-            }
-
             let TypedHeader(Authorization(bearer)) = request
                 .extract_parts::<TypedHeader<Authorization<Bearer>>>()
                 .await

@@ -1544,7 +1544,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
             let jwt = endpoint.generate_jwt()?;
 
-            println!("{jwt}");
+            print!("{jwt}");
         }
     }
 
