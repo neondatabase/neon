@@ -4,7 +4,6 @@ use std::sync::{Arc, Weak};
 
 use hyper::client::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use parking_lot::RwLock;
 use smol_str::ToSmolStr;
 use tracing::{Instrument, debug, error, info, info_span};
 
@@ -13,11 +12,11 @@ use super::conn_pool_lib::{
     ClientDataEnum, ClientInnerCommon, ClientInnerExt, ConnInfo, ConnPoolEntry,
     EndpointConnPoolExt, GlobalConnPool,
 };
+use crate::config::HttpConfig;
 use crate::context::RequestContext;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
 use crate::protocol2::ConnectionInfoExtra;
-use crate::types::EndpointCacheKey;
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
 
 pub(crate) type Send = http2::SendRequest<hyper::body::Incoming>;
@@ -86,6 +85,15 @@ impl HttpConnPool {
 
 impl EndpointConnPoolExt for HttpConnPool {
     type Client = Client<Send>;
+    type ClientInner = Send;
+
+    fn create(_config: &HttpConfig, global_connections_count: Arc<AtomicUsize>) -> Self {
+        HttpConnPool {
+            conns: VecDeque::new(),
+            _guard: Metrics::get().proxy.http_endpoint_pools.guard(),
+            global_connections_count,
+        }
+    }
 
     fn clear_closed(&mut self) -> usize {
         let Self { conns, .. } = self;
@@ -134,47 +142,6 @@ impl GlobalConnPool<HttpConnPool> {
         ctx.success();
 
         Some(Client::new(client.conn.clone()))
-    }
-
-    fn get_or_create_endpoint_pool(
-        self: &Arc<Self>,
-        endpoint: &EndpointCacheKey,
-    ) -> Arc<RwLock<HttpConnPool>> {
-        // fast path
-        if let Some(pool) = self.global_pool.get(endpoint) {
-            return pool.clone();
-        }
-
-        // slow path
-        let new_pool = Arc::new(RwLock::new(HttpConnPool {
-            conns: VecDeque::new(),
-            _guard: Metrics::get().proxy.http_endpoint_pools.guard(),
-            global_connections_count: self.global_connections_count.clone(),
-        }));
-
-        // find or create a pool for this endpoint
-        let mut created = false;
-        let pool = self
-            .global_pool
-            .entry(endpoint.clone())
-            .or_insert_with(|| {
-                created = true;
-                new_pool
-            })
-            .clone();
-
-        // log new global pool size
-        if created {
-            let global_pool_size = self
-                .global_pool_size
-                .fetch_add(1, atomic::Ordering::Relaxed)
-                + 1;
-            info!(
-                "pool: created new pool for '{endpoint}', global pool size now {global_pool_size}"
-            );
-        }
-
-        pool
     }
 }
 
