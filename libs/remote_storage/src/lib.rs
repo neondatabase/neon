@@ -332,7 +332,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError>;
 
-    /// Same as download, but with SSE-C encryption if the backend supports it.
+    /// Same as download, but with encryption if the backend supports it (e.g. SSE-C on AWS).
     async fn download_with_encryption(
         &self,
         from: &RemotePath,
