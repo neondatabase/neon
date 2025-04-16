@@ -45,8 +45,8 @@ pub struct Stats {
 }
 
 pub enum ThrottleResult {
-    NotThrottled { end: Instant },
-    Throttled { end: Instant },
+    NotThrottled {  },
+    Throttled {  },
 }
 
 impl Throttle {
@@ -114,7 +114,7 @@ impl Throttle {
         let inner = self.inner.load_full(); // clones the `Inner` Arc
 
         if !inner.enabled {
-            return ThrottleResult::NotThrottled { end: start };
+            return ThrottleResult::NotThrottled { };
         }
 
         self.count_accounted_start.fetch_add(1, Ordering::Relaxed);
@@ -127,9 +127,9 @@ impl Throttle {
             let wait_time = end - start;
             self.sum_throttled_usecs
                 .fetch_add(wait_time.as_micros() as u64, Ordering::Relaxed);
-            ThrottleResult::Throttled { end }
+            ThrottleResult::Throttled {  }
         } else {
-            ThrottleResult::NotThrottled { end: start }
+            ThrottleResult::NotThrottled { }
         }
     }
 }

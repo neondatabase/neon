@@ -1,14 +1,13 @@
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::os::fd::RawFd;
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use enum_map::{Enum as _, EnumMap};
 use futures::Future;
 use metrics::{
-    Counter, CounterVec, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPair,
+    CounterVec, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPair,
     IntCounterPairVec, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
     register_int_counter, register_int_counter_pair_vec, register_int_counter_vec,
@@ -33,7 +32,6 @@ use crate::context::{PageContentKind, RequestContext};
 use crate::pgdatadir_mapping::DatadirModificationStats;
 use crate::task_mgr::TaskKind;
 use crate::tenant::Timeline;
-use crate::tenant::layer_map::LayerMap;
 use crate::tenant::mgr::TenantSlot;
 use crate::tenant::storage_layer::{InMemoryLayer, PersistentLayerDesc};
 use crate::tenant::tasks::BackgroundLoopKind;
@@ -104,16 +102,6 @@ pub(crate) static STORAGE_TIME_COUNT_PER_TIMELINE: Lazy<IntCounterVec> = Lazy::n
 
 // Buckets for background operation duration in seconds, like compaction, GC, size calculation.
 const STORAGE_OP_BUCKETS: &[f64] = &[0.010, 0.100, 1.0, 10.0, 100.0, 1000.0];
-
-pub(crate) static STORAGE_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "pageserver_storage_operations_seconds_global",
-        "Time spent on storage operations",
-        &["operation"],
-        STORAGE_OP_BUCKETS.into(),
-    )
-    .expect("failed to define a metric")
-});
 
 /// Measures layers visited per read (i.e. read amplification).
 ///
@@ -2289,10 +2277,6 @@ pub(crate) struct WalIngestMetrics {
     pub(crate) records_observed: IntCounter,
     pub(crate) records_committed: IntCounter,
     pub(crate) records_filtered: IntCounter,
-    pub(crate) values_committed_metadata_images: IntCounter,
-    pub(crate) values_committed_metadata_deltas: IntCounter,
-    pub(crate) values_committed_data_images: IntCounter,
-    pub(crate) values_committed_data_deltas: IntCounter,
     pub(crate) gap_blocks_zeroed_on_rel_extend: IntCounter,
 }
 
@@ -2316,13 +2300,6 @@ impl WalIngestMetrics {
 }
 
 pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| {
-    let values_committed = register_int_counter_vec!(
-        "pageserver_wal_ingest_values_committed",
-        "Number of values committed to pageserver storage from WAL records",
-        &["class", "kind"],
-    )
-    .expect("failed to define a metric");
-
     WalIngestMetrics {
     bytes_received: register_int_counter!(
         "pageserver_wal_ingest_bytes_received",
@@ -2349,10 +2326,6 @@ pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| {
         "Number of WAL records filtered out due to sharding"
     )
     .expect("failed to define a metric"),
-    values_committed_metadata_images: values_committed.with_label_values(&["metadata", "image"]),
-    values_committed_metadata_deltas: values_committed.with_label_values(&["metadata", "delta"]),
-    values_committed_data_images: values_committed.with_label_values(&["data", "image"]),
-    values_committed_data_deltas: values_committed.with_label_values(&["data", "delta"]),
     gap_blocks_zeroed_on_rel_extend: register_int_counter!(
         "pageserver_gap_blocks_zeroed_on_rel_extend",
         "Total number of zero gap blocks written on relation extends"
@@ -2481,14 +2454,12 @@ pub(crate) static WAL_REDO_PROCESS_COUNTERS: Lazy<WalRedoProcessCounters> =
 
 /// Similar to `prometheus::HistogramTimer` but does not record on drop.
 pub(crate) struct StorageTimeMetricsTimer {
-    metrics: StorageTimeMetrics,
     start: Instant,
 }
 
 impl StorageTimeMetricsTimer {
-    fn new(metrics: StorageTimeMetrics) -> Self {
+    fn new(_metrics: StorageTimeMetrics) -> Self {
         Self {
-            metrics,
             start: Instant::now(),
         }
     }
@@ -2500,8 +2471,7 @@ impl StorageTimeMetricsTimer {
 
     /// Record the time from creation to now and return it.
     pub fn stop_and_record(self) -> Duration {
-        let duration = self.elapsed();
-        duration
+        self.elapsed()
     }
 
     /// Turns this timer into a timer, which will always record -- usually this means recording
@@ -2532,37 +2502,17 @@ impl AlwaysRecordingStorageTimeMetricsTimer {
 /// timeline total sum and count.
 #[derive(Clone, Debug)]
 pub(crate) struct StorageTimeMetrics {
-    /// Sum of f64 seconds, per operation, tenant_id and timeline_id
-    timeline_sum: Counter,
-    /// Number of oeprations, per operation, tenant_id and timeline_id
-    timeline_count: IntCounter,
-    /// Global histogram having only the "operation" label.
-    global_histogram: Histogram,
 }
 
 impl StorageTimeMetrics {
     pub fn new(
-        operation: StorageTimeOperation,
-        tenant_id: &str,
-        shard_id: &str,
-        timeline_id: &str,
+        _operation: StorageTimeOperation,
+        _tenant_id: &str,
+        _shard_id: &str,
+        _timeline_id: &str,
     ) -> Self {
-        let operation: &'static str = operation.into();
-
-        let timeline_sum = STORAGE_TIME_SUM_PER_TIMELINE
-            .get_metric_with_label_values(&[operation, tenant_id, shard_id, timeline_id])
-            .unwrap();
-        let timeline_count = STORAGE_TIME_COUNT_PER_TIMELINE
-            .get_metric_with_label_values(&[operation, tenant_id, shard_id, timeline_id])
-            .unwrap();
-        let global_histogram = STORAGE_TIME_GLOBAL
-            .get_metric_with_label_values(&[operation])
-            .unwrap();
 
         StorageTimeMetrics {
-            timeline_sum,
-            timeline_count,
-            global_histogram,
         }
     }
 
@@ -2743,10 +2693,7 @@ impl TimelineMetrics {
         let storage_io_size = StorageIoSizeMetrics::new(&tenant_id, &shard_id, &timeline_id);
 
         let wait_lsn_in_progress_micros = GlobalAndPerTenantIntCounter {
-            global: WAIT_LSN_IN_PROGRESS_GLOBAL_MICROS.clone(),
-            per_tenant: WAIT_LSN_IN_PROGRESS_MICROS
-                .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-                .unwrap(),
+
         };
 
         let wait_lsn_start_finish_counterpair = WAIT_LSN_START_FINISH_COUNTERPAIR
@@ -2817,35 +2764,6 @@ impl TimelineMetrics {
         0 // FIXME: Return dummy value as gauge access is commented out
     }
 
-    /// Generates TIMELINE_LAYER labels for a persistent layer.
-    fn make_layer_labels(&self, layer_desc: &PersistentLayerDesc) -> [&str; 5] {
-        let level = match LayerMap::is_l0(&layer_desc.key_range, layer_desc.is_delta()) {
-            true => LayerLevel::L0,
-            false => LayerLevel::L1,
-        };
-        let kind = match layer_desc.is_delta() {
-            true => LayerKind::Delta,
-            false => LayerKind::Image,
-        };
-        [
-            &self.tenant_id,
-            &self.shard_id,
-            &self.timeline_id,
-            level.into(),
-            kind.into(),
-        ]
-    }
-
-    /// Generates TIMELINE_LAYER labels for a frozen ephemeral layer.
-    fn make_frozen_layer_labels(&self, _layer: &InMemoryLayer) -> [&str; 5] {
-        [
-            &self.tenant_id,
-            &self.shard_id,
-            &self.timeline_id,
-            LayerLevel::Frozen.into(),
-            LayerKind::Delta.into(), // by definition
-        ]
-    }
 
     /// Removes a frozen ephemeral layer to TIMELINE_LAYER metrics.
     pub fn dec_frozen_layer(&self, layer: &InMemoryLayer) {
@@ -3018,35 +2936,25 @@ pub(crate) fn remove_tenant_metrics(tenant_shard_id: &TenantShardId) {
 
 /// Maintain a per timeline gauge in addition to the global gauge.
 pub(crate) struct PerTimelineRemotePhysicalSizeGauge {
-    last_set: AtomicU64,
-    gauge: UIntGauge,
 }
 
 impl PerTimelineRemotePhysicalSizeGauge {
-    fn new(per_timeline_gauge: UIntGauge) -> Self {
+    fn new(_per_timeline_gauge: UIntGauge) -> Self {
         Self {
-            last_set: AtomicU64::new(0),
-            gauge: per_timeline_gauge,
         }
     }
     pub(crate) fn set(&self,_sz: u64) {
-        // self.gauge.set(sz);
-        
-        // if sz < prev {
-            // REMOTE_PHYSICAL_SIZE_GLOBAL.sub(prev - sz);
-        // } else {
-            // REMOTE_PHYSICAL_SIZE_GLOBAL.add(sz - prev);
-        // };
+    
     }
     pub(crate) fn get(&self) -> u64 {
-        // self.gauge.get()
-        0 // FIXME: Return dummy value as gauge access is commented out
+        
+        0 
     }
 }
 
 impl Drop for PerTimelineRemotePhysicalSizeGauge {
     fn drop(&mut self) {
-        // REMOTE_PHYSICAL_SIZE_GLOBAL.sub(self.last_set.load(std::sync::atomic::Ordering::Relaxed));
+        
     }
 }
 
@@ -3115,27 +3023,6 @@ impl RemoteTimelineClientMetrics {
         let key = (file_kind.as_str(), op_kind.as_str());
         let metric = guard.entry(key).or_insert_with(move || {
             REMOTE_TIMELINE_CLIENT_CALLS
-                .get_metric_with_label_values(&[
-                    &self.tenant_id,
-                    &self.shard_id,
-                    &self.timeline_id,
-                    key.0,
-                    key.1,
-                ])
-                .unwrap()
-        });
-        metric.clone()
-    }
-
-    fn bytes_started_counter(
-        &self,
-        file_kind: &RemoteOpFileKind,
-        op_kind: &RemoteOpKind,
-    ) -> IntCounter {
-        let mut guard = self.bytes_started_counter.lock().unwrap();
-        let key = (file_kind.as_str(), op_kind.as_str());
-        let metric = guard.entry(key).or_insert_with(move || {
-            REMOTE_TIMELINE_CLIENT_BYTES_STARTED_COUNTER
                 .get_metric_with_label_values(&[
                     &self.tenant_id,
                     &self.shard_id,
@@ -3443,9 +3330,6 @@ pub mod tokio_epoll_uring {
 
     pub struct Collector {
         descs: Vec<metrics::core::Desc>,
-        systems_created: UIntGauge,
-        systems_destroyed: UIntGauge,
-        thread_local_metrics_storage: &'static ThreadLocalMetricsStorage,
     }
 
     impl metrics::core::Collector for Collector {
@@ -3489,9 +3373,6 @@ pub mod tokio_epoll_uring {
 
             Self {
                 descs,
-                systems_created,
-                systems_destroyed,
-                thread_local_metrics_storage: &THREAD_LOCAL_METRICS_STORAGE,
             }
         }
     }
@@ -3514,15 +3395,9 @@ pub mod tokio_epoll_uring {
 }
 
 pub(crate) struct GlobalAndPerTenantIntCounter {
-    global: IntCounter,
-    per_tenant: IntCounter,
 }
 
 impl GlobalAndPerTenantIntCounter {
-    #[inline(always)]
-    pub(crate) fn inc(&self) {
-        self.inc_by(1)
-    }
     #[inline(always)]
     pub(crate) fn inc_by(&self, _n: u64) {
         // self.global.inc_by(n);
@@ -3535,13 +3410,7 @@ pub(crate) mod tenant_throttling {
     use once_cell::sync::Lazy;
     use utils::shard::TenantShardId;
 
-    use super::GlobalAndPerTenantIntCounter;
-
     pub(crate) struct Metrics<const KIND: usize> {
-        pub(super) count_accounted_start: GlobalAndPerTenantIntCounter,
-        pub(super) count_accounted_finish: GlobalAndPerTenantIntCounter,
-        pub(super) wait_time: GlobalAndPerTenantIntCounter,
-        pub(super) count_throttled: GlobalAndPerTenantIntCounter,
     }
 
     static COUNT_ACCOUNTED_START: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
@@ -3614,41 +3483,8 @@ pub(crate) mod tenant_throttling {
     pub type Pagestream = Metrics<0>;
 
     impl<const KIND: usize> Metrics<KIND> {
-        pub(crate) fn new(tenant_shard_id: &TenantShardId) -> Self {
-            let per_tenant_label_values = &[
-                KINDS[KIND],
-                &tenant_shard_id.tenant_id.to_string(),
-                &tenant_shard_id.shard_slug().to_string(),
-            ];
+        pub(crate) fn new(_tenant_shard_id: &TenantShardId) -> Self {
             Metrics {
-                count_accounted_start: {
-                    GlobalAndPerTenantIntCounter {
-                        global: COUNT_ACCOUNTED_START.with_label_values(&[KINDS[KIND]]),
-                        per_tenant: COUNT_ACCOUNTED_START_PER_TENANT
-                            .with_label_values(per_tenant_label_values),
-                    }
-                },
-                count_accounted_finish: {
-                    GlobalAndPerTenantIntCounter {
-                        global: COUNT_ACCOUNTED_FINISH.with_label_values(&[KINDS[KIND]]),
-                        per_tenant: COUNT_ACCOUNTED_FINISH_PER_TENANT
-                            .with_label_values(per_tenant_label_values),
-                    }
-                },
-                wait_time: {
-                    GlobalAndPerTenantIntCounter {
-                        global: WAIT_USECS.with_label_values(&[KINDS[KIND]]),
-                        per_tenant: WAIT_USECS_PER_TENANT
-                            .with_label_values(per_tenant_label_values),
-                    }
-                },
-                count_throttled: {
-                    GlobalAndPerTenantIntCounter {
-                        global: WAIT_COUNT.with_label_values(&[KINDS[KIND]]),
-                        per_tenant: WAIT_COUNT_PER_TENANT
-                            .with_label_values(per_tenant_label_values),
-                    }
-                },
             }
         }
     }
@@ -3756,36 +3592,11 @@ pub(crate) fn set_tokio_runtime_setup(setup: &str, num_threads: NonZeroUsize) {
         .set(u64::try_from(num_threads.get()).unwrap());
 }
 
-static PAGESERVER_CONFIG_IGNORED_ITEMS: Lazy<UIntGaugeVec> = Lazy::new(|| {
-    register_uint_gauge_vec!(
-        "pageserver_config_ignored_items",
-        "TOML items present in the on-disk configuration file but ignored by the pageserver config parser.\
-         The `item` label is the dot-separated path of the ignored item in the on-disk configuration file.\
-         The value for an unknown config item is always 1.\
-         There is a special label value \"\", which is 0, so that there is always a metric exposed (simplifies dashboards).",
-        &["item"]
-    )
-    .unwrap()
-});
-
 pub fn preinitialize_metrics(
     conf: &'static PageServerConf,
     _ignored: config::ignored_fields::Paths,
 ) {
     set_page_service_config_max_batch_size(&conf.page_service_pipelining);
-
-    // PAGESERVER_CONFIG_IGNORED_ITEMS
-        // .with_label_values(&[""])
-        // .set(0);
-    
-
-    // Python tests need these and on some we do alerting.
-    //
-    // FIXME(4813): make it so that we have no top level metrics as this fn will easily fall out of
-    // order:
-    // - global metrics reside in a Lazy<PageserverMetrics>
-    //   - access via crate::metrics::PS_METRICS.some_metric.inc()
-    // - could move the statics into TimelineMetrics::new()?
 
     // counters
     [
