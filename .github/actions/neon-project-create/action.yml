@@ -159,7 +159,7 @@ runs:
                 --data "${NEW_DEFAULT_ENDPOINT_SETTINGS}"
           endpoint_id=$(echo ${PROJECT_DATA} | jq -rc .endpoints[0].id)
           res=$(curl -X POST  \
-                "https://${API_HOST}/regions/${REGION_ID}/api/v1/admin/projects/${project_id}/endpoints/${endpoint_id}/restart" \
+                "https://${API_HOST}/api/v2/projects/${project_id}/endpoints/${endpoint_id}/restart" \
                 -w "%{http_code}" \
                 -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer ${API_KEY}" )
           code=${res: -3}
