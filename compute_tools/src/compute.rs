@@ -11,7 +11,9 @@ use std::{env, fs};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
-use compute_api::responses::{ActivityKind, ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus};
+use compute_api::responses::{
+    ActivityKind, ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus,
+};
 use compute_api::spec::{
     ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PgIdent,
 };
