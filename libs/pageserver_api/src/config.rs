@@ -678,7 +678,7 @@ pub mod tenant_conf_defaults {
     pub const DEFAULT_COMPACTION_TARGET_SIZE: u64 = 128 * 1024 * 1024;
 
     pub const DEFAULT_COMPACTION_PERIOD: &str = "20 s";
-    pub const DEFAULT_COMPACTION_THRESHOLD: usize = 8;
+    pub const DEFAULT_COMPACTION_THRESHOLD: usize = 10;
     pub const DEFAULT_COMPACTION_SHARD_ANCESTOR: bool = true;
 
     // This value needs to be tuned to avoid OOM. We have 3/4*CPUs threads for L0 compaction, that's
