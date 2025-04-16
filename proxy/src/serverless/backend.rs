@@ -211,7 +211,7 @@ impl PoolingBackend {
             None
         } else {
             debug!("pool: looking for an existing connection");
-            self.pool.get(ctx, &conn_info)?
+            self.pool.get(ctx, &conn_info)
         };
 
         if let Some(client) = maybe_client {

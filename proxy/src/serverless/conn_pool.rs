@@ -179,8 +179,8 @@ pub(crate) struct ClientDataRemote {
 }
 
 impl ClientDataRemote {
-    pub fn session(&mut self) -> &mut tokio::sync::watch::Sender<uuid::Uuid> {
-        &mut self.session
+    pub fn session(&self) -> &tokio::sync::watch::Sender<uuid::Uuid> {
+        &self.session
     }
 
     pub fn cancel(&mut self) {
