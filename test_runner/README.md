@@ -72,7 +72,7 @@ Inside that dir, a `bin/postgres` binary should be present.
 `COMPATIBILITY_POSTGRES_DISTRIB_DIR`: The directory where the prevoius version of postgres distribution can be found.
 `DEFAULT_PG_VERSION`: The version of Postgres to use,
 This is used to construct full path to the postgres binaries.
-Format is 2-digit major version nubmer, i.e. `DEFAULT_PG_VERSION=16`
+Format is 2-digit major version nubmer, i.e. `DEFAULT_PG_VERSION=17`
 `TEST_OUTPUT`: Set the directory where test state and test output files
 should go.
 `RUST_LOG`: logging configuration to pass into Neon CLI

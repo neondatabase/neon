@@ -30,7 +30,7 @@ permissions:
   statuses: write # require for posting a status update
 
 env:
-  DEFAULT_PG_VERSION: 16
+  DEFAULT_PG_VERSION: 17
   PLATFORM: neon-captest-new
   AWS_DEFAULT_REGION: eu-central-1
 

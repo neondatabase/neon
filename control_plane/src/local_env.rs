@@ -23,7 +23,7 @@ use crate::object_storage::{OBJECT_STORAGE_REMOTE_STORAGE_DIR, ObjectStorage};
 use crate::pageserver::{PAGESERVER_REMOTE_STORAGE_DIR, PageServerNode};
 use crate::safekeeper::SafekeeperNode;
 
-pub const DEFAULT_PG_VERSION: u32 = 16;
+pub const DEFAULT_PG_VERSION: u32 = 17;
 
 //
 // This data structures represents neon_local CLI config
