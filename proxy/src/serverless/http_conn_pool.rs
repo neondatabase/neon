@@ -9,7 +9,6 @@ use smol_str::ToSmolStr;
 use tracing::{Instrument, debug, error, info, info_span};
 
 use super::AsyncRW;
-use super::backend::HttpConnError;
 use super::conn_pool_lib::{
     ClientDataEnum, ClientInnerCommon, ClientInnerExt, ConnInfo, ConnPoolEntry,
     EndpointConnPoolExt, GlobalConnPool,
@@ -85,7 +84,9 @@ impl HttpConnPool {
     }
 }
 
-impl EndpointConnPoolExt<Send> for HttpConnPool {
+impl EndpointConnPoolExt for HttpConnPool {
+    type Client = Client<Send>;
+
     fn clear_closed(&mut self) -> usize {
         let Self { conns, .. } = self;
         let old_len = conns.len();
@@ -114,23 +115,15 @@ impl Drop for HttpConnPool {
     }
 }
 
-impl GlobalConnPool<Send, HttpConnPool> {
-    #[expect(unused_results)]
+impl GlobalConnPool<HttpConnPool> {
     pub(crate) fn get(
         self: &Arc<Self>,
         ctx: &RequestContext,
         conn_info: &ConnInfo,
-    ) -> Result<Option<Client<Send>>, HttpConnError> {
-        let result: Result<Option<Client<Send>>, HttpConnError>;
-        let Some(endpoint) = conn_info.endpoint_cache_key() else {
-            result = Ok(None);
-            return result;
-        };
-        let endpoint_pool = self.get_or_create_endpoint_pool(&endpoint);
-        let Some(client) = endpoint_pool.write().get_conn_entry() else {
-            result = Ok(None);
-            return result;
-        };
+    ) -> Option<Client<Send>> {
+        let endpoint = conn_info.endpoint_cache_key()?;
+        let endpoint_pool = self.global_pool.get(&endpoint)?.clone();
+        let client = endpoint_pool.write().get_conn_entry()?;
 
         tracing::Span::current().record("conn_id", tracing::field::display(client.conn.conn_id));
         debug!(
@@ -140,7 +133,7 @@ impl GlobalConnPool<Send, HttpConnPool> {
         ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
         ctx.success();
 
-        Ok(Some(Client::new(client.conn.clone())))
+        Some(Client::new(client.conn.clone()))
     }
 
     fn get_or_create_endpoint_pool(
@@ -186,7 +179,7 @@ impl GlobalConnPool<Send, HttpConnPool> {
 }
 
 pub(crate) fn poll_http2_client(
-    global_pool: Arc<GlobalConnPool<Send, HttpConnPool>>,
+    global_pool: Arc<GlobalConnPool<HttpConnPool>>,
     ctx: &RequestContext,
     conn_info: &ConnInfo,
     client: Send,
