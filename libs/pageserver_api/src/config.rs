@@ -379,6 +379,8 @@ pub struct TenantConfigToml {
     /// size exceeds `compaction_upper_limit * checkpoint_distance`.
     pub compaction_upper_limit: usize,
     pub compaction_algorithm: crate::models::CompactionAlgorithmSettings,
+    /// If true, enable shard ancestor compaction (enabled by default).
+    pub compaction_shard_ancestor: bool,
     /// If true, compact down L0 across all tenant timelines before doing regular compaction. L0
     /// compaction must be responsive to avoid read amp during heavy ingestion. Defaults to true.
     pub compaction_l0_first: bool,
@@ -677,6 +679,7 @@ pub mod tenant_conf_defaults {
 
     pub const DEFAULT_COMPACTION_PERIOD: &str = "20 s";
     pub const DEFAULT_COMPACTION_THRESHOLD: usize = 10;
+    pub const DEFAULT_COMPACTION_SHARD_ANCESTOR: bool = true;
 
     // This value needs to be tuned to avoid OOM. We have 3/4*CPUs threads for L0 compaction, that's
     // 3/4*16=9 on most of our pageservers. Compacting 20 layers requires about 1 GB memory (could
@@ -734,6 +737,7 @@ impl Default for TenantConfigToml {
             compaction_algorithm: crate::models::CompactionAlgorithmSettings {
                 kind: DEFAULT_COMPACTION_ALGORITHM,
             },
+            compaction_shard_ancestor: DEFAULT_COMPACTION_SHARD_ANCESTOR,
             compaction_l0_first: DEFAULT_COMPACTION_L0_FIRST,
             compaction_l0_semaphore: DEFAULT_COMPACTION_L0_SEMAPHORE,
             l0_flush_delay_threshold: None,

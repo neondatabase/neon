@@ -2702,6 +2702,14 @@ impl Timeline {
             .clone()
     }
 
+    pub fn get_compaction_shard_ancestor(&self) -> bool {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .compaction_shard_ancestor
+            .unwrap_or(self.conf.default_tenant_conf.compaction_shard_ancestor)
+    }
+
     fn get_eviction_policy(&self) -> EvictionPolicy {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf

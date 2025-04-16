@@ -1239,8 +1239,7 @@ impl Timeline {
         let partition_count = self.partitioning.read().0.0.parts.len();
 
         // 4. Shard ancestor compaction
-
-        if self.shard_identity.count >= ShardCount::new(2) {
+        if self.get_compaction_shard_ancestor() && self.shard_identity.count >= ShardCount::new(2) {
             // Limit the number of layer rewrites to the number of partitions: this means its
             // runtime should be comparable to a full round of image layer creations, rather than
             // being potentially much longer.
