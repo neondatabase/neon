@@ -2486,7 +2486,7 @@ impl PageServerHandler {
                     prev_lsn,
                     full_backup,
                     replica,
-					lazy_slru_download,
+                    lazy_slru_download,
                     &ctx,
                 )
                 .await

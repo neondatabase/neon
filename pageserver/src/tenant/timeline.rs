@@ -2520,10 +2520,6 @@ impl Timeline {
             }
             None => false,
         }
-
-    pub(crate) fn set_lazy_slru_download(&self, enabled: bool) {
-        self.lazy_slru_download
-            .store(enabled, AtomicOrdering::Relaxed);
     }
 
     fn get_checkpoint_distance(&self) -> u64 {

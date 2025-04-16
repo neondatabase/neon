@@ -537,7 +537,6 @@ pub mod defaults {
 
     pub const DEFAULT_SSL_KEY_FILE: &str = "server.key";
     pub const DEFAULT_SSL_CERT_FILE: &str = "server.crt";
-    pub const DEFAULT_LAZY_SLRU_DOWNLOAD_THRESHOLD: usize = 128;
 }
 
 impl Default for ConfigToml {
