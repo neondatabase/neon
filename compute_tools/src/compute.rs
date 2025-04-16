@@ -645,13 +645,26 @@ impl ComputeNode {
 
                 let log_directory_path = Path::new(&self.params.pgdata).join("log");
                 let log_directory_path = log_directory_path.to_string_lossy().to_string();
+
                 // Add project_id,endpoint_id tag to identify the logs.
-                let tag = format!(
-                    "{},{}",
-                    pspec.spec.project_id.as_deref().unwrap_or("None"),
-                    pspec.spec.endpoint_id.as_deref().unwrap_or("None")
-                );
-                configure_audit_rsyslog(log_directory_path.clone(), &tag, &remote_endpoint)?;
+                //
+                // These ids are passed from cplane,
+                // for backwards compatibility (old computes that don't have them),
+                // we set them to None.
+                // TODO: Clean up this code when all computes have them.
+                let tag: Option<String> = match (
+                    pspec.spec.project_id.as_deref(),
+                    pspec.spec.endpoint_id.as_deref(),
+                ) {
+                    (Some(project_id), Some(endpoint_id)) => {
+                        Some(format!("{project_id}/{endpoint_id}"))
+                    }
+                    (Some(project_id), None) => Some(format!("{project_id}/None")),
+                    (None, Some(endpoint_id)) => Some(format!("None,{endpoint_id}")),
+                    (None, None) => None,
+                };
+
+                configure_audit_rsyslog(log_directory_path.clone(), tag, &remote_endpoint)?;
 
                 // Launch a background task to clean up the audit logs
                 launch_pgaudit_gc(log_directory_path);
