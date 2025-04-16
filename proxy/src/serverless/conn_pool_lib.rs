@@ -11,8 +11,7 @@ use rand::Rng;
 use smol_str::ToSmolStr;
 use tracing::{Span, debug, info};
 
-use super::conn_pool::ClientDataRemote;
-use super::http_conn_pool::ClientDataHttp;
+use super::conn_pool::{ClientDataRemote, poll_tokio_postgres_conn_really};
 use super::local_conn_pool::ClientDataLocal;
 use crate::auth::backend::ComputeUserInfo;
 use crate::config::HttpConfig;
@@ -50,7 +49,6 @@ impl ConnInfo {
 pub(crate) enum ClientDataEnum {
     Remote(ClientDataRemote),
     Local(ClientDataLocal),
-    Http(ClientDataHttp),
 }
 
 #[derive(Clone)]
@@ -63,14 +61,9 @@ pub(crate) struct ClientInnerCommon<C: ClientInnerExt> {
 
 impl<C: ClientInnerExt> Drop for ClientInnerCommon<C> {
     fn drop(&mut self) {
-        match &mut self.data {
-            ClientDataEnum::Remote(remote_data) => {
-                remote_data.cancel();
-            }
-            ClientDataEnum::Local(local_data) => {
-                local_data.cancel();
-            }
-            ClientDataEnum::Http(_http_data) => (),
+        match &self.data {
+            ClientDataEnum::Remote(remote_data) => remote_data.cancel(),
+            ClientDataEnum::Local(local_data) => local_data.cancel(),
         }
     }
 }
@@ -325,9 +318,10 @@ impl<C: ClientInnerExt> DbUserConn<C> for DbUserConnPool<C> {
     }
 }
 
-pub(crate) trait EndpointConnPoolExt {
+pub(crate) trait EndpointConnPoolExt: Send + Sync + 'static {
     type Client;
     type ClientInner: ClientInnerExt;
+    type Connection: Send + 'static;
 
     fn create(config: &HttpConfig, global_connections_count: Arc<AtomicUsize>) -> Self;
     fn wrap_client(
@@ -340,6 +334,9 @@ pub(crate) trait EndpointConnPoolExt {
         &mut self,
         db_user: (DbName, RoleName),
     ) -> Option<ClientInnerCommon<Self::ClientInner>>;
+    fn remove_conn(&mut self, db_user: (DbName, RoleName), conn_id: uuid::Uuid) -> bool;
+
+    fn spawn_conn(conn: Self::Connection) -> impl Future<Output = ()> + Send + 'static;
 
     fn clear_closed(&mut self) -> usize;
     fn total_conns(&self) -> usize;
@@ -348,6 +345,7 @@ pub(crate) trait EndpointConnPoolExt {
 impl<C: ClientInnerExt> EndpointConnPoolExt for EndpointConnPool<C> {
     type Client = Client<C>;
     type ClientInner = C;
+    type Connection = super::conn_pool::Conn;
 
     fn create(config: &HttpConfig, global_connections_count: Arc<AtomicUsize>) -> Self {
         EndpointConnPool {
@@ -374,6 +372,14 @@ impl<C: ClientInnerExt> EndpointConnPoolExt for EndpointConnPool<C> {
         db_user: (DbName, RoleName),
     ) -> Option<ClientInnerCommon<Self::ClientInner>> {
         Some(self.get_conn_entry(db_user)?.conn)
+    }
+
+    fn remove_conn(&mut self, db_user: (DbName, RoleName), conn_id: uuid::Uuid) -> bool {
+        self.remove_client(db_user, conn_id)
+    }
+
+    async fn spawn_conn(conn: Self::Connection) {
+        poll_tokio_postgres_conn_really(conn).await;
     }
 
     fn clear_closed(&mut self) -> usize {
@@ -568,7 +574,6 @@ impl<P: EndpointConnPoolExt> GlobalConnPool<P> {
             ClientDataEnum::Remote(data) => {
                 data.session().send(ctx.session_id()).ok()?;
             }
-            ClientDataEnum::Http(_) => (),
         }
 
         ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);

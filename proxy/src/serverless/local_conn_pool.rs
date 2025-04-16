@@ -57,7 +57,7 @@ impl ClientDataLocal {
         &self.session
     }
 
-    pub fn cancel(&mut self) {
+    pub fn cancel(&self) {
         self.cancel.cancel();
     }
 }
@@ -120,11 +120,9 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
                 ClientDataEnum::Local(data) => {
                     data.session().send(ctx.session_id())?;
                 }
-
                 ClientDataEnum::Remote(data) => {
                     data.session().send(ctx.session_id())?;
                 }
-                ClientDataEnum::Http(_) => (),
             }
 
             ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);

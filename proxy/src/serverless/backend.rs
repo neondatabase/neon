@@ -16,9 +16,9 @@ use tracing::field::display;
 use tracing::{debug, info};
 
 use super::AsyncRW;
-use super::conn_pool::poll_client;
+use super::conn_pool::poll_client_generic;
 use super::conn_pool_lib::{Client, ConnInfo, EndpointConnPool, GlobalConnPool};
-use super::http_conn_pool::{self, HttpConnPool, Send, poll_http2_client};
+use super::http_conn_pool::{self, HttpConnPool, Send};
 use super::local_conn_pool::{self, EXT_NAME, EXT_SCHEMA, EXT_VERSION, LocalConnPool};
 use crate::auth::backend::local::StaticAuthRules;
 use crate::auth::backend::{ComputeCredentials, ComputeUserInfo};
@@ -577,7 +577,7 @@ impl ConnectMechanism for TokioMechanism {
             info!("latency={}, query_id={}", ctx.get_proxy_latency(), query_id);
         }
 
-        Ok(poll_client(
+        Ok(poll_client_generic(
             self.pool.clone(),
             ctx,
             self.conn_info.clone(),
@@ -638,10 +638,10 @@ impl ConnectMechanism for HyperMechanism {
             info!("latency={}, query_id={}", ctx.get_proxy_latency(), query_id);
         }
 
-        Ok(poll_http2_client(
+        Ok(poll_client_generic(
             self.pool.clone(),
             ctx,
-            &self.conn_info,
+            self.conn_info.clone(),
             client,
             connection,
             self.conn_id,
