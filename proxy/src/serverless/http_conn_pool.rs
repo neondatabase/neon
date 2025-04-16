@@ -5,25 +5,20 @@ use std::sync::{Arc, Weak};
 use hyper::client::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use smol_str::ToSmolStr;
-use tracing::{Instrument, error, info, info_span};
+use tracing::{error, info};
 
 use super::AsyncRW;
 use super::conn_pool_lib::{
-    ClientDataEnum, ClientInnerCommon, ClientInnerExt, ConnInfo, ConnPoolEntry,
-    EndpointConnPoolExt, GlobalConnPool,
+    ClientInnerCommon, ClientInnerExt, ConnInfo, ConnPoolEntry, EndpointConnPoolExt,
 };
 use crate::config::HttpConfig;
 use crate::context::RequestContext;
-use crate::control_plane::messages::MetricsAuxInfo;
 use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
 use crate::protocol2::ConnectionInfoExtra;
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
 
 pub(crate) type Send = http2::SendRequest<hyper::body::Incoming>;
 pub(crate) type Connect = http2::Connection<TokioIo<AsyncRW>, hyper::body::Incoming, TokioExecutor>;
-
-#[derive(Clone)]
-pub(crate) struct ClientDataHttp();
 
 // Per-endpoint connection pool
 // Number of open connections is limited by the `max_conns_per_endpoint`.
@@ -86,6 +81,7 @@ impl HttpConnPool {
 impl EndpointConnPoolExt for HttpConnPool {
     type Client = Client<Send>;
     type ClientInner = Send;
+    type Connection = Connect;
 
     fn create(_config: &HttpConfig, global_connections_count: Arc<AtomicUsize>) -> Self {
         HttpConnPool {
@@ -108,6 +104,22 @@ impl EndpointConnPoolExt for HttpConnPool {
         _db_user: (crate::types::DbName, crate::types::RoleName),
     ) -> Option<ClientInnerCommon<Self::ClientInner>> {
         Some(self.get_conn_entry()?.conn)
+    }
+
+    fn remove_conn(
+        &mut self,
+        _db_user: (crate::types::DbName, crate::types::RoleName),
+        conn_id: uuid::Uuid,
+    ) -> bool {
+        self.remove_conn(conn_id)
+    }
+
+    async fn spawn_conn(conn: Self::Connection) {
+        let res = conn.await;
+        match res {
+            Ok(()) => info!("connection closed"),
+            Err(e) => error!("connection error: {e:?}"),
+        }
     }
 
     fn clear_closed(&mut self) -> usize {
@@ -136,77 +148,6 @@ impl Drop for HttpConnPool {
                 .dec_by(self.conns.len() as i64);
         }
     }
-}
-
-pub(crate) fn poll_http2_client(
-    global_pool: Arc<GlobalConnPool<HttpConnPool>>,
-    ctx: &RequestContext,
-    conn_info: &ConnInfo,
-    client: Send,
-    connection: Connect,
-    conn_id: uuid::Uuid,
-    aux: MetricsAuxInfo,
-) -> Client<Send> {
-    let conn_gauge = Metrics::get().proxy.db_connections.guard(ctx.protocol());
-    let session_id = ctx.session_id();
-
-    let span = info_span!(parent: None, "connection", %conn_id);
-    let cold_start_info = ctx.cold_start_info();
-    span.in_scope(|| {
-        info!(cold_start_info = cold_start_info.as_str(), %conn_info, %session_id, "new connection");
-    });
-
-    let pool = match conn_info.endpoint_cache_key() {
-        Some(endpoint) => {
-            let pool = global_pool.get_or_create_endpoint_pool(&endpoint);
-            let client = ClientInnerCommon {
-                inner: client.clone(),
-                aux: aux.clone(),
-                conn_id,
-                data: ClientDataEnum::Http(ClientDataHttp()),
-            };
-            pool.write().conns.push_back(ConnPoolEntry {
-                conn: client,
-                _last_access: std::time::Instant::now(),
-            });
-            Metrics::get()
-                .proxy
-                .http_pool_opened_connections
-                .get_metric()
-                .inc();
-
-            Arc::downgrade(&pool)
-        }
-        None => Weak::new(),
-    };
-
-    tokio::spawn(
-        async move {
-            let _conn_gauge = conn_gauge;
-            let res = connection.await;
-            match res {
-                Ok(()) => info!("connection closed"),
-                Err(e) => error!(%session_id, "connection error: {e:?}"),
-            }
-
-            // remove from connection pool
-            if let Some(pool) = pool.clone().upgrade() {
-                if pool.write().remove_conn(conn_id) {
-                    info!("closed connection removed");
-                }
-            }
-        }
-        .instrument(span),
-    );
-
-    let client = ClientInnerCommon {
-        inner: client,
-        aux,
-        conn_id,
-        data: ClientDataEnum::Http(ClientDataHttp()),
-    };
-
-    Client::new(client)
 }
 
 pub(crate) struct Client<C: ClientInnerExt + Clone> {
