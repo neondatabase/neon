@@ -273,7 +273,7 @@ jobs:
           for get_vectored_concurrent_io in sequential sidecar-task; do
             for io_engine in std-fs tokio-epoll-uring ; do
                 for io_mode in buffered direct direct-rw ; do
-                NEON_PAGESERVER_UNIT_TEST_GET_VECTORED_CONCURRENT_IO=$get_vectored_concurrent_io \
+                  NEON_PAGESERVER_UNIT_TEST_GET_VECTORED_CONCURRENT_IO=$get_vectored_concurrent_io \
                   NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine \
                   NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOMODE=$io_mode \
                   ${cov_prefix} \
