@@ -226,6 +226,9 @@ struct Args {
     /// Path to the JWT auth token used to authenticate with other safekeepers.
     #[arg(long)]
     auth_token_path: Option<Utf8PathBuf>,
+
+    #[arg(long, help = "Run in development mode (disables security checks)")]
+    dev: bool,
 }
 
 // Like PathBufValueParser, but allows empty string.

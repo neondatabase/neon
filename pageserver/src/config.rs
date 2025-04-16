@@ -224,6 +224,11 @@ pub struct PageServerConf {
     /// Does not force TLS: the client negotiates TLS usage during the handshake.
     /// Uses key and certificate from ssl_key_file/ssl_cert_file.
     pub enable_tls_page_service_api: bool,
+
+    /// Run in development mode, which disables certain safety checks
+    /// such as authentication requirements for HTTP and PostgreSQL APIs.
+    /// This is insecure and should only be used in development environments.
+    pub dev_mode: bool,
 }
 
 /// Token for authentication to safekeepers
@@ -397,6 +402,7 @@ impl PageServerConf {
             generate_unarchival_heatmap,
             tracing,
             enable_tls_page_service_api,
+            dev_mode,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -448,6 +454,7 @@ impl PageServerConf {
             get_vectored_concurrent_io,
             tracing,
             enable_tls_page_service_api,
+            dev_mode,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling
