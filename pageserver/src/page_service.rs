@@ -15,6 +15,7 @@ use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
 use futures::FutureExt;
 use itertools::Itertools;
+use jsonwebtoken::TokenData;
 use once_cell::sync::OnceCell;
 use pageserver_api::config::{
     PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
@@ -2833,7 +2834,7 @@ where
     ) -> Result<(), QueryError> {
         // this unwrap is never triggered, because check_auth_jwt only called when auth_type is NeonJWT
         // which requires auth to be present
-        let data = self
+        let data: TokenData<Claims> = self
             .auth
             .as_ref()
             .unwrap()

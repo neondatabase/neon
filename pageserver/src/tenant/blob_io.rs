@@ -37,6 +37,63 @@ pub struct CompressionInfo {
     pub compressed_size: Option<usize>,
 }
 
+/// A blob header, with header+data length and compression info.
+///
+/// TODO: use this more widely, and add an encode() method too.
+/// TODO: document the header format.
+#[derive(Clone, Copy, Default)]
+pub struct Header {
+    pub header_len: usize,
+    pub data_len: usize,
+    pub compression_bits: u8,
+}
+
+impl Header {
+    /// Decodes a header from a byte slice.
+    pub fn decode(bytes: &[u8]) -> Result<Self, std::io::Error> {
+        let Some(&first_header_byte) = bytes.first() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "zero-length blob header",
+            ));
+        };
+
+        // If the first bit is 0, this is just a 1-byte length prefix up to 128 bytes.
+        if first_header_byte < 0x80 {
+            return Ok(Self {
+                header_len: 1, // by definition
+                data_len: first_header_byte as usize,
+                compression_bits: BYTE_UNCOMPRESSED,
+            });
+        }
+
+        // Otherwise, this is a 4-byte header containing compression information and length.
+        const HEADER_LEN: usize = 4;
+        let mut header_buf: [u8; HEADER_LEN] = bytes[0..HEADER_LEN].try_into().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("blob header too short: {bytes:?}"),
+            )
+        })?;
+
+        // TODO: verify the compression bits and convert to an enum.
+        let compression_bits = header_buf[0] & LEN_COMPRESSION_BIT_MASK;
+        header_buf[0] &= !LEN_COMPRESSION_BIT_MASK;
+        let data_len = u32::from_be_bytes(header_buf) as usize;
+
+        Ok(Self {
+            header_len: HEADER_LEN,
+            data_len,
+            compression_bits,
+        })
+    }
+
+    /// Returns the total header+data length.
+    pub fn total_len(&self) -> usize {
+        self.header_len + self.data_len
+    }
+}
+
 impl BlockCursor<'_> {
     /// Read a blob into a new buffer.
     pub async fn read_blob(

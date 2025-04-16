@@ -2702,6 +2702,14 @@ impl Timeline {
             .clone()
     }
 
+    pub fn get_compaction_shard_ancestor(&self) -> bool {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .compaction_shard_ancestor
+            .unwrap_or(self.conf.default_tenant_conf.compaction_shard_ancestor)
+    }
+
     fn get_eviction_policy(&self) -> EvictionPolicy {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -4026,7 +4034,7 @@ impl VersionedKeySpaceQuery {
     /// Returns LSN for a specific key.
     ///
     /// Invariant: requested key must be part of [`Self::total_keyspace`]
-    fn map_key_to_lsn(&self, key: &Key) -> Lsn {
+    pub(super) fn map_key_to_lsn(&self, key: &Key) -> Lsn {
         match self {
             Self::Uniform { lsn, .. } => *lsn,
             Self::Scattered { keyspaces_at_lsn } => {
@@ -5699,6 +5707,12 @@ impl Timeline {
         if self.current_logical_size.current_size().is_exact() {
             // root timelines are initialized with exact count, but never start the background
             // calculation
+            return;
+        }
+
+        if self.cancel.is_cancelled() {
+            // We already requested stopping the tenant, so we cannot wait for the logical size
+            // calculation to complete given the task might have been already cancelled.
             return;
         }
 

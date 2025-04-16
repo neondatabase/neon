@@ -11,7 +11,7 @@ use std::{env, fs};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
-use compute_api::responses::{ComputeCtlConfig, ComputeMetrics, ComputeStatus};
+use compute_api::responses::{ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus};
 use compute_api::spec::{
     ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PgIdent,
 };
@@ -303,11 +303,7 @@ struct StartVmMonitorResult {
 }
 
 impl ComputeNode {
-    pub fn new(
-        params: ComputeNodeParams,
-        cli_spec: Option<ComputeSpec>,
-        compute_ctl_config: ComputeCtlConfig,
-    ) -> Result<Self> {
+    pub fn new(params: ComputeNodeParams, config: ComputeConfig) -> Result<Self> {
         let connstr = params.connstr.as_str();
         let conn_conf = postgres::config::Config::from_str(connstr)
             .context("cannot build postgres config from connstr")?;
@@ -315,8 +311,8 @@ impl ComputeNode {
             .context("cannot build tokio postgres config from connstr")?;
 
         let mut new_state = ComputeState::new();
-        if let Some(cli_spec) = cli_spec {
-            let pspec = ParsedSpec::try_from(cli_spec).map_err(|msg| anyhow::anyhow!(msg))?;
+        if let Some(spec) = config.spec {
+            let pspec = ParsedSpec::try_from(spec).map_err(|msg| anyhow::anyhow!(msg))?;
             new_state.pspec = Some(pspec);
         }
 
@@ -327,7 +323,7 @@ impl ComputeNode {
             state: Mutex::new(new_state),
             state_changed: Condvar::new(),
             ext_download_progress: RwLock::new(HashMap::new()),
-            compute_ctl_config,
+            compute_ctl_config: config.compute_ctl_config,
         })
     }
 

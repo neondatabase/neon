@@ -139,7 +139,7 @@ fn main() -> Result<()> {
 
     let scenario = failpoint_support::init();
 
-    // For historical reasons, the main thread that processes the spec and launches postgres
+    // For historical reasons, the main thread that processes the config and launches postgres
     // is synchronous, but we always have this tokio runtime available and we "enter" it so
     // that you can use tokio::spawn() and tokio::runtime::Handle::current().block_on(...)
     // from all parts of compute_ctl.
@@ -155,7 +155,7 @@ fn main() -> Result<()> {
 
     let connstr = Url::parse(&cli.connstr).context("cannot parse connstr as a URL")?;
 
-    let cli_spec = get_config(&cli)?;
+    let config = get_config(&cli)?;
 
     let compute_node = ComputeNode::new(
         ComputeNodeParams {
@@ -176,8 +176,7 @@ fn main() -> Result<()> {
             #[cfg(target_os = "linux")]
             vm_monitor_addr: cli.vm_monitor_addr,
         },
-        cli_spec.spec,
-        cli_spec.compute_ctl_config,
+        config,
     )?;
 
     let exit_code = compute_node.run()?;
