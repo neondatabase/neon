@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 #
 # How to run `test_backward_compatibility` locally:
 #
-#    export DEFAULT_PG_VERSION=16
+#    export DEFAULT_PG_VERSION=17
 #    export BUILD_TYPE=release
 #    export CHECK_ONDISK_DATA_COMPATIBILITY=true
 #    export COMPATIBILITY_SNAPSHOT_DIR=test_output/compatibility_snapshot_pgv${DEFAULT_PG_VERSION}
@@ -70,7 +70,7 @@ if TYPE_CHECKING:
 #
 # How to run `test_forward_compatibility` locally:
 #
-#    export DEFAULT_PG_VERSION=16
+#    export DEFAULT_PG_VERSION=17
 #    export BUILD_TYPE=release
 #    export CHECK_ONDISK_DATA_COMPATIBILITY=true
 #    export COMPATIBILITY_NEON_BIN=neon_previous/target/${BUILD_TYPE}
@@ -96,7 +96,7 @@ if TYPE_CHECKING:
 #
 # How to run `test_version_mismatch` locally:
 #
-#    export DEFAULT_PG_VERSION=16
+#    export DEFAULT_PG_VERSION=17
 #    export BUILD_TYPE=release
 #    export CHECK_ONDISK_DATA_COMPATIBILITY=true
 #    export COMPATIBILITY_NEON_BIN=neon_previous/target/${BUILD_TYPE}

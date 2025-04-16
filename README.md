@@ -270,7 +270,7 @@ By default, this runs both debug and release modes, and all supported postgres v
 testing locally, it is convenient to run just one set of permutations, like this:
 
 ```sh
-DEFAULT_PG_VERSION=16 BUILD_TYPE=release ./scripts/pytest
+DEFAULT_PG_VERSION=17 BUILD_TYPE=release ./scripts/pytest
 ```
 
 ## Flamegraphs
