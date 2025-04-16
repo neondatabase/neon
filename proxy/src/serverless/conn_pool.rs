@@ -186,7 +186,6 @@ impl ClientDataRemote {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used)]
 mod tests {
     use std::sync::atomic::AtomicBool;
 
