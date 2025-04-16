@@ -77,7 +77,7 @@ use anyhow::Context;
 use once_cell::sync::OnceCell;
 
 use crate::context::RequestContext;
-use crate::metrics::{PageCacheSizeMetrics, page_cache_eviction_metrics};
+use crate::metrics::PageCacheSizeMetrics;
 use crate::virtual_file::{IoBufferMut, IoPageSlice};
 
 static PAGE_CACHE: OnceCell<PageCache> = OnceCell::new();
@@ -595,11 +595,7 @@ impl PageCache {
                             // Note that just yielding to tokio during iteration without such
                             // priority boosting is likely counter-productive. We'd just give more opportunities
                             // for B to bump usage count, further starving A.
-                            page_cache_eviction_metrics::observe(
-                                page_cache_eviction_metrics::Outcome::ItersExceeded {
-                                    iters: iters.try_into().unwrap(),
-                                },
-                            );
+                            
                             anyhow::bail!("exceeded evict iter limit");
                         }
                         continue;
@@ -609,18 +605,8 @@ impl PageCache {
                     // remove mapping for old buffer
                     self.remove_mapping(old_key);
                     inner.key = None;
-                    page_cache_eviction_metrics::observe(
-                        page_cache_eviction_metrics::Outcome::FoundSlotEvicted {
-                            iters: iters.try_into().unwrap(),
-                        },
-                    );
-                } else {
-                    page_cache_eviction_metrics::observe(
-                        page_cache_eviction_metrics::Outcome::FoundSlotUnused {
-                            iters: iters.try_into().unwrap(),
-                        },
-                    );
-                }
+                    
+                } 
                 return Ok((slot_idx, inner));
             }
         }

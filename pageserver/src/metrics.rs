@@ -380,84 +380,14 @@ pub(crate) static PAGE_CACHE_SIZE: Lazy<PageCacheSizeMetrics> =
         },
     });
 
-pub(crate) mod page_cache_eviction_metrics {
-    use std::num::NonZeroUsize;
-
-    use metrics::{IntCounter, IntCounterVec, register_int_counter_vec};
-    use once_cell::sync::Lazy;
-
-    #[derive(Clone, Copy)]
-    pub(crate) enum Outcome {
-        FoundSlotUnused { iters: NonZeroUsize },
-        FoundSlotEvicted { iters: NonZeroUsize },
-        ItersExceeded { iters: NonZeroUsize },
-    }
-
-    static ITERS_TOTAL_VEC: Lazy<IntCounterVec> = Lazy::new(|| {
-        register_int_counter_vec!(
-            "pageserver_page_cache_find_victim_iters_total",
-            "Counter for the number of iterations in the find_victim loop",
-            &["outcome"],
-        )
-        .expect("failed to define a metric")
-    });
-
-    static CALLS_VEC: Lazy<IntCounterVec> = Lazy::new(|| {
-        register_int_counter_vec!(
-            "pageserver_page_cache_find_victim_calls",
-            "Incremented at the end of each find_victim() call.\
-             Filter by outcome to get e.g., eviction rate.",
-            &["outcome"]
-        )
-        .unwrap()
-    });
-
-    pub(crate) fn observe(outcome: Outcome) {
-        macro_rules! dry {
-            ($label:literal, $iters:expr) => {{
-                static LABEL: &'static str = $label;
-                static ITERS_TOTAL: Lazy<IntCounter> =
-                    Lazy::new(|| ITERS_TOTAL_VEC.with_label_values(&[LABEL]));
-                static CALLS: Lazy<IntCounter> =
-                    Lazy::new(|| CALLS_VEC.with_label_values(&[LABEL]));
-                // ITERS_TOTAL.inc_by(($iters.get()) as u64);
-                // CALLS.inc();
-            }};
-        }
-        match outcome {
-            Outcome::FoundSlotUnused { iters } => dry!("found_empty", iters),
-            Outcome::FoundSlotEvicted { iters } => {
-                dry!("found_evicted", iters)
-            }
-            Outcome::ItersExceeded { iters } => {
-                dry!("err_iters_exceeded", iters);
-                super::page_cache_errors_inc(super::PageCacheErrorKind::EvictIterLimit);
-            }
-        }
-    }
-}
-
-static PAGE_CACHE_ERRORS: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "page_cache_errors_total",
-        "Number of timeouts while acquiring a pinned slot in the page cache",
-        &["error_kind"]
-    )
-    .expect("failed to define a metric")
-});
 
 #[derive(IntoStaticStr)]
 #[strum(serialize_all = "kebab_case")]
 pub(crate) enum PageCacheErrorKind {
     AcquirePinnedSlotTimeout,
-    EvictIterLimit,
 }
 
 pub(crate) fn page_cache_errors_inc(_error_kind: PageCacheErrorKind) {
-    // PAGE_CACHE_ERRORS
-        // .get_metric_with_label_values(&[error_kind.into()])
-        // .unwrap()
-        // .inc();
 }
 
 pub(crate) static WAIT_LSN_TIME: Lazy<Histogram> = Lazy::new(|| {
@@ -539,39 +469,15 @@ pub(crate) mod wait_ondemand_download_time {
     });
 
     pub struct WaitOndemandDownloadTimeSum {
-        counters: [Counter; WAIT_ONDEMAND_DOWNLOAD_METRIC_TASK_KINDS.len()],
     }
 
     impl WaitOndemandDownloadTimeSum {
-        pub(crate) fn new(tenant_id: &str, shard_id: &str, timeline_id: &str) -> Self {
-            let counters = WAIT_ONDEMAND_DOWNLOAD_METRIC_TASK_KINDS
-                .iter()
-                .map(|task_kind| {
-                    WAIT_ONDEMAND_DOWNLOAD_TIME_SUM
-                        .get_metric_with_label_values(&[
-                            tenant_id,
-                            shard_id,
-                            timeline_id,
-                            task_kind.into(),
-                        ])
-                        .unwrap()
-                })
-                .collect::<Vec<_>>();
+        pub(crate) fn new(_tenant_id: &str, _shard_id: &str, _timeline_id: &str) -> Self {
             Self {
-                counters: counters.try_into().unwrap(),
             }
         }
-        pub(crate) fn observe(&self, task_kind: TaskKind, duration: Duration) {
-            let maybe = WAIT_ONDEMAND_DOWNLOAD_METRIC_TASK_KINDS
-                .iter()
-                .enumerate()
-                .find(|(_, kind)| **kind == task_kind);
-            let Some((idx, _)) = maybe else {
-                return;
-            };
-            // WAIT_ONDEMAND_DOWNLOAD_TIME_GLOBAL[idx].observe(duration.as_secs_f64());
-            let counter = &self.counters[idx];
-            // counter.inc_by(duration.as_secs_f64());
+        pub(crate) fn observe(&self, _task_kind: TaskKind, _duration: Duration) {
+            
         }
     }
 
@@ -708,28 +614,12 @@ static VISIBLE_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static RESIDENT_PHYSICAL_SIZE_GLOBAL: Lazy<UIntGauge> = Lazy::new(|| {
-    register_uint_gauge!(
-        "pageserver_resident_physical_size_global",
-        "Like `pageserver_resident_physical_size`, but without tenant/timeline dimensions."
-    )
-    .expect("failed to define a metric")
-});
-
 static REMOTE_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_remote_physical_size",
         "The size of the layer files present in the remote storage that are listed in the remote index_part.json.",
         // Corollary: If any files are missing from the index part, they won't be included here.
         &["tenant_id", "shard_id", "timeline_id"]
-    )
-    .expect("failed to define a metric")
-});
-
-static REMOTE_PHYSICAL_SIZE_GLOBAL: Lazy<UIntGauge> = Lazy::new(|| {
-    register_uint_gauge!(
-        "pageserver_remote_physical_size_global",
-        "Like `pageserver_remote_physical_size`, but without tenant/timeline dimensions."
     )
     .expect("failed to define a metric")
 });
@@ -1427,17 +1317,6 @@ pub(crate) mod virtual_file_io_engine {
 
 pub(crate) struct SmgrOpTimer(Option<SmgrOpTimerInner>);
 pub(crate) struct SmgrOpTimerInner {
-    global_execution_latency_histo: Histogram,
-    per_timeline_execution_latency_histo: Option<Histogram>,
-
-    global_batch_wait_time: Histogram,
-    per_timeline_batch_wait_time: Histogram,
-
-    global_flush_in_progress_micros: IntCounter,
-    per_timeline_flush_in_progress_micros: IntCounter,
-
-    throttling: Arc<tenant_throttling::Pagestream>,
-
     timings: SmgrOpTimerState,
 }
 
@@ -1461,128 +1340,38 @@ enum SmgrOpTimerState {
         received_at: Instant,
     },
     Throttling {
-        throttle_started_at: Instant,
     },
-    Batching {
-        throttle_done_at: Instant,
-    },
-    Executing {
-        execution_started_at: Instant,
-    },
-    Flushing,
     // NB: when adding observation points, remember to update the Drop impl.
 }
 
 // NB: when adding observation points, remember to update the Drop impl.
 impl SmgrOpTimer {
     /// See [`SmgrOpTimerState`] for more context.
-    pub(crate) fn observe_throttle_start(&mut self, at: Instant) {
+    pub(crate) fn observe_throttle_start(&mut self, _at: Instant) {
         let Some(inner) = self.0.as_mut() else {
             return;
         };
         let SmgrOpTimerState::Received { received_at: _ } = &mut inner.timings else {
             return;
         };
-        inner.throttling.count_accounted_start.inc();
         inner.timings = SmgrOpTimerState::Throttling {
-            throttle_started_at: at,
         };
     }
 
     /// See [`SmgrOpTimerState`] for more context.
-    pub(crate) fn observe_throttle_done(&mut self, throttle: ThrottleResult) {
-        let Some(inner) = self.0.as_mut() else {
-            return;
-        };
-        let SmgrOpTimerState::Throttling {
-            throttle_started_at,
-        } = &inner.timings
-        else {
-            return;
-        };
-        inner.throttling.count_accounted_finish.inc();
-        match throttle {
-            ThrottleResult::NotThrottled { end } => {
-                inner.timings = SmgrOpTimerState::Batching {
-                    throttle_done_at: end,
-                };
-            }
-            ThrottleResult::Throttled { end } => {
-                // update metrics
-                // inner.throttling.count_throttled.inc();
-                // inner
-                    // .throttling
-                    // .wait_time
-                    // .inc_by((end - *throttle_started_at).as_micros().try_into().unwrap());
-                // state transition
-                inner.timings = SmgrOpTimerState::Batching {
-                    throttle_done_at: end,
-                };
-            }
-        }
+    pub(crate) fn observe_throttle_done(&mut self, _throttle: ThrottleResult) {
     }
 
     /// See [`SmgrOpTimerState`] for more context.
-    pub(crate) fn observe_execution_start(&mut self, at: Instant) {
-        let Some(inner) = self.0.as_mut() else {
-            return;
-        };
-        let SmgrOpTimerState::Batching { throttle_done_at } = &inner.timings else {
-            return;
-        };
-        // update metrics
-        let batch = at - *throttle_done_at;
-        // inner.global_batch_wait_time.observe(batch.as_secs_f64());
-        // inner
-            // .per_timeline_batch_wait_time
-            // .observe(batch.as_secs_f64());
-        // state transition
-        inner.timings = SmgrOpTimerState::Executing {
-            execution_started_at: at,
-        }
+    pub(crate) fn observe_execution_start(&mut self, _at: Instant) {
     }
 
     /// For all but the first caller, this is a no-op.
     /// The first callers receives Some, subsequent ones None.
     ///
     /// See [`SmgrOpTimerState`] for more context.
-    pub(crate) fn observe_execution_end(&mut self, at: Instant) -> Option<SmgrOpFlushInProgress> {
-        // NB: unlike the other observe_* methods, this one take()s.
-        #[allow(clippy::question_mark)] // maintain similar code pattern.
-        let Some(mut inner) = self.0.take() else {
-            return None;
-        };
-        let SmgrOpTimerState::Executing {
-            execution_started_at,
-        } = &inner.timings
-        else {
-            return None;
-        };
-        // update metrics
-        let execution = at - *execution_started_at;
-        // inner
-            // .global_execution_latency_histo
-            // .observe(execution.as_secs_f64());
-        if let Some(per_timeline_execution_latency_histo) =
-            &inner.per_timeline_execution_latency_histo
-        {
-            // per_timeline_execution_latency_histo.observe(execution.as_secs_f64());
-        }
-
-        // state transition
-        inner.timings = SmgrOpTimerState::Flushing;
-
-        // return the flush in progress object which
-        // will do the remaining metrics updates
-        let SmgrOpTimerInner {
-            global_flush_in_progress_micros,
-            per_timeline_flush_in_progress_micros,
-            ..
-        } = inner;
-        Some(SmgrOpFlushInProgress {
-            global_micros: global_flush_in_progress_micros,
-            per_timeline_micros: per_timeline_flush_in_progress_micros,
-        })
+    pub(crate) fn observe_execution_end(&mut self, _at: Instant) -> Option<SmgrOpFlushInProgress> {
+        None
     }
 }
 
@@ -1595,27 +1384,6 @@ impl SmgrOpTimer {
 /// add another `observe_*` method to [`SmgrOpTimer`], follow the existing pattern there,
 /// and remove this struct from the code base.
 pub(crate) struct SmgrOpFlushInProgress {
-    global_micros: IntCounter,
-    per_timeline_micros: IntCounter,
-}
-
-impl Drop for SmgrOpTimer {
-    fn drop(&mut self) {
-        // In case of early drop, update any of the remaining metrics with
-        // observations so that (started,finished) counter pairs balance out
-        // and all counters on the latency path have the the same number of
-        // observations.
-        // It's technically lying and it would be better if each metric had
-        // a separate label or similar for cancelled requests.
-        // But we don't have that right now and counter pairs balancing
-        // out is useful when using the metrics in panels and whatnot.
-        let now = Instant::now();
-        self.observe_throttle_start(now);
-        self.observe_throttle_done(ThrottleResult::NotThrottled { end: now });
-        self.observe_execution_start(now);
-        let maybe_flush_timer = self.observe_execution_end(now);
-        drop(maybe_flush_timer);
-    }
 }
 
 impl SmgrOpFlushInProgress {
@@ -1639,11 +1407,6 @@ impl SmgrOpFlushInProgress {
 
                 // Increment counter
                 {
-                    let elapsed_since_last_observe = now - last_counter_increment_at;
-                    // self.global_micros
-                        // .inc_by(u64::try_from(elapsed_since_last_observe.as_micros()).unwrap());
-                    // self.per_timeline_micros
-                        // .inc_by(u64::try_from(elapsed_since_last_observe.as_micros()).unwrap());
                     last_counter_increment_at = now;
                 }
 
@@ -1737,19 +1500,6 @@ pub enum GetPageBatchBreakReason {
 }
 
 pub(crate) struct SmgrQueryTimePerTimeline {
-    global_started: [IntCounter; SmgrQueryType::COUNT],
-    global_latency: [Histogram; SmgrQueryType::COUNT],
-    per_timeline_getpage_started: IntCounter,
-    per_timeline_getpage_latency: Histogram,
-    global_batch_size: Histogram,
-    per_timeline_batch_size: Histogram,
-    global_flush_in_progress_micros: IntCounter,
-    per_timeline_flush_in_progress_micros: IntCounter,
-    global_batch_wait_time: Histogram,
-    per_timeline_batch_wait_time: Histogram,
-    global_batch_break_reason: [IntCounter; GetPageBatchBreakReason::COUNT],
-    per_timeline_batch_break_reason: GetPageBatchBreakReasonTimelineMetrics,
-    throttling: Arc<tenant_throttling::Pagestream>,
 }
 
 static SMGR_QUERY_STARTED_GLOBAL: Lazy<IntCounterVec> = Lazy::new(|| {
@@ -1835,16 +1585,6 @@ static SMGR_QUERY_TIME_GLOBAL_BUCKETS: Lazy<Vec<f64>> = Lazy::new(|| {
     .collect()
 });
 
-static SMGR_QUERY_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "pageserver_smgr_query_seconds_global",
-        "Like pageserver_smgr_query_seconds, but aggregated to instance level.",
-        &["smgr_query_type"],
-        SMGR_QUERY_TIME_GLOBAL_BUCKETS.clone(),
-    )
-    .expect("failed to define a metric")
-});
-
 static PAGE_SERVICE_BATCH_SIZE_BUCKETS_GLOBAL: Lazy<Vec<f64>> = Lazy::new(|| {
     (1..=u32::try_from(Timeline::MAX_GET_VECTORED_KEYS).unwrap())
         .map(|v| v.into())
@@ -1892,29 +1632,6 @@ static PAGE_SERVICE_BATCH_BREAK_REASON_GLOBAL: Lazy<IntCounterVec> = Lazy::new(|
     .expect("failed to define a metric")
 });
 
-struct GetPageBatchBreakReasonTimelineMetrics {
-    map: EnumMap<GetPageBatchBreakReason, IntCounter>,
-}
-
-impl GetPageBatchBreakReasonTimelineMetrics {
-    fn new(tenant_id: &str, shard_slug: &str, timeline_id: &str) -> Self {
-        GetPageBatchBreakReasonTimelineMetrics {
-            map: EnumMap::from_array(std::array::from_fn(|reason_idx| {
-                let reason = GetPageBatchBreakReason::from_usize(reason_idx);
-                PAGE_SERVICE_BATCH_BREAK_REASON_PER_TENANT_TIMELINE.with_label_values(&[
-                    tenant_id,
-                    shard_slug,
-                    timeline_id,
-                    reason.into(),
-                ])
-            })),
-        }
-    }
-
-    fn inc(&self, reason: GetPageBatchBreakReason) {
-        self.map[reason].inc()
-    }
-}
 
 static PAGE_SERVICE_BATCH_BREAK_REASON_PER_TENANT_TIMELINE: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
@@ -2005,120 +1722,21 @@ static PAGE_SERVICE_SMGR_BATCH_WAIT_TIME_GLOBAL: Lazy<Histogram> = Lazy::new(|| 
 
 impl SmgrQueryTimePerTimeline {
     pub(crate) fn new(
-        tenant_shard_id: &TenantShardId,
-        timeline_id: &TimelineId,
-        pagestream_throttle_metrics: Arc<tenant_throttling::Pagestream>,
+        _tenant_shard_id: &TenantShardId,
+        _timeline_id: &TimelineId,
+        _pagestream_throttle_metrics: Arc<tenant_throttling::Pagestream>,
     ) -> Self {
-        let tenant_id = tenant_shard_id.tenant_id.to_string();
-        let shard_slug = format!("{}", tenant_shard_id.shard_slug());
-        let timeline_id = timeline_id.to_string();
-        let global_started = std::array::from_fn(|i| {
-            let op = SmgrQueryType::from_repr(i).unwrap();
-            SMGR_QUERY_STARTED_GLOBAL
-                .get_metric_with_label_values(&[op.into()])
-                .unwrap()
-        });
-        let global_latency = std::array::from_fn(|i| {
-            let op = SmgrQueryType::from_repr(i).unwrap();
-            SMGR_QUERY_TIME_GLOBAL
-                .get_metric_with_label_values(&[op.into()])
-                .unwrap()
-        });
-
-        let per_timeline_getpage_started = SMGR_QUERY_STARTED_PER_TENANT_TIMELINE
-            .get_metric_with_label_values(&[
-                SmgrQueryType::GetPageAtLsn.into(),
-                &tenant_id,
-                &shard_slug,
-                &timeline_id,
-            ])
-            .unwrap();
-        let per_timeline_getpage_latency = SMGR_QUERY_TIME_PER_TENANT_TIMELINE
-            .get_metric_with_label_values(&[
-                SmgrQueryType::GetPageAtLsn.into(),
-                &tenant_id,
-                &shard_slug,
-                &timeline_id,
-            ])
-            .unwrap();
-
-        let global_batch_size = PAGE_SERVICE_BATCH_SIZE_GLOBAL.clone();
-        let per_timeline_batch_size = PAGE_SERVICE_BATCH_SIZE_PER_TENANT_TIMELINE
-            .get_metric_with_label_values(&[&tenant_id, &shard_slug, &timeline_id])
-            .unwrap();
-
-        let global_batch_wait_time = PAGE_SERVICE_SMGR_BATCH_WAIT_TIME_GLOBAL.clone();
-        let per_timeline_batch_wait_time = PAGE_SERVICE_SMGR_BATCH_WAIT_TIME
-            .get_metric_with_label_values(&[&tenant_id, &shard_slug, &timeline_id])
-            .unwrap();
-
-        let global_batch_break_reason = std::array::from_fn(|i| {
-            let reason = GetPageBatchBreakReason::from_usize(i);
-            PAGE_SERVICE_BATCH_BREAK_REASON_GLOBAL
-                .get_metric_with_label_values(&[reason.into()])
-                .unwrap()
-        });
-        let per_timeline_batch_break_reason =
-            GetPageBatchBreakReasonTimelineMetrics::new(&tenant_id, &shard_slug, &timeline_id);
-
-        let global_flush_in_progress_micros =
-            PAGE_SERVICE_SMGR_FLUSH_INPROGRESS_MICROS_GLOBAL.clone();
-        let per_timeline_flush_in_progress_micros = PAGE_SERVICE_SMGR_FLUSH_INPROGRESS_MICROS
-            .get_metric_with_label_values(&[&tenant_id, &shard_slug, &timeline_id])
-            .unwrap();
-
+        
         Self {
-            global_started,
-            global_latency,
-            per_timeline_getpage_latency,
-            per_timeline_getpage_started,
-            global_batch_size,
-            per_timeline_batch_size,
-            global_flush_in_progress_micros,
-            per_timeline_flush_in_progress_micros,
-            global_batch_wait_time,
-            per_timeline_batch_wait_time,
-            global_batch_break_reason,
-            per_timeline_batch_break_reason,
-            throttling: pagestream_throttle_metrics,
         }
     }
-    pub(crate) fn start_smgr_op(&self, op: SmgrQueryType, received_at: Instant) -> SmgrOpTimer {
-        self.global_started[op as usize].inc();
-
-        let per_timeline_latency_histo = if matches!(op, SmgrQueryType::GetPageAtLsn) {
-            self.per_timeline_getpage_started.inc();
-            Some(self.per_timeline_getpage_latency.clone())
-        } else {
-            None
-        };
-
+    pub(crate) fn start_smgr_op(&self, _op: SmgrQueryType, received_at: Instant) -> SmgrOpTimer {
+        
         SmgrOpTimer(Some(SmgrOpTimerInner {
-            global_execution_latency_histo: self.global_latency[op as usize].clone(),
-            per_timeline_execution_latency_histo: per_timeline_latency_histo,
-            global_flush_in_progress_micros: self.global_flush_in_progress_micros.clone(),
-            per_timeline_flush_in_progress_micros: self
-                .per_timeline_flush_in_progress_micros
-                .clone(),
-            global_batch_wait_time: self.global_batch_wait_time.clone(),
-            per_timeline_batch_wait_time: self.per_timeline_batch_wait_time.clone(),
-            throttling: self.throttling.clone(),
             timings: SmgrOpTimerState::Received { received_at },
         }))
     }
 
-    /// TODO: do something about this? seems odd, we have a similar call on SmgrOpTimer
-    pub(crate) fn observe_getpage_batch_start(
-        &self,
-        batch_size: usize,
-        break_reason: GetPageBatchBreakReason,
-    ) {
-        // self.global_batch_size.observe(batch_size as f64);
-        // self.per_timeline_batch_size.observe(batch_size as f64);
-
-        // self.global_batch_break_reason[break_reason.into_usize()].inc();
-        // self.per_timeline_batch_break_reason.inc(break_reason);
-    }
 }
 
 // keep in sync with control plane Go code so that we can validate
@@ -2274,9 +1892,6 @@ static REMOTE_TIMELINE_CLIENT_BYTES_FINISHED_COUNTER: Lazy<IntCounterVec> = Lazy
 });
 
 pub(crate) struct TenantManagerMetrics {
-    tenant_slots_attached: UIntGauge,
-    tenant_slots_secondary: UIntGauge,
-    tenant_slots_inprogress: UIntGauge,
     pub(crate) tenant_slot_writes: IntCounter,
     pub(crate) unexpected_errors: IntCounter,
 }
@@ -2284,32 +1899,10 @@ pub(crate) struct TenantManagerMetrics {
 impl TenantManagerMetrics {
     /// Helpers for tracking slots.  Note that these do not track the lifetime of TenantSlot objects
     /// exactly: they track the lifetime of the slots _in the tenant map_.
-    pub(crate) fn slot_inserted(&self, slot: &TenantSlot) {
-        match slot {
-            TenantSlot::Attached(_) => {
-                // self.tenant_slots_attached.inc();
-            }
-            TenantSlot::Secondary(_) => {
-                // self.tenant_slots_secondary.inc();
-            }
-            TenantSlot::InProgress(_) => {
-                // self.tenant_slots_inprogress.inc();
-            }
-        }
+    pub(crate) fn slot_inserted(&self, _slot: &TenantSlot) {
     }
 
-    pub(crate) fn slot_removed(&self, slot: &TenantSlot) {
-        match slot {
-            TenantSlot::Attached(_) => {
-                // self.tenant_slots_attached.dec();
-            }
-            TenantSlot::Secondary(_) => {
-                // self.tenant_slots_secondary.dec();
-            }
-            TenantSlot::InProgress(_) => {
-                // self.tenant_slots_inprogress.dec();
-            }
-        }
+    pub(crate) fn slot_removed(&self, _slot: &TenantSlot) {
     }
 
     #[cfg(all(debug_assertions, not(test)))]
@@ -2322,22 +1915,7 @@ impl TenantManagerMetrics {
 }
 
 pub(crate) static TENANT_MANAGER: Lazy<TenantManagerMetrics> = Lazy::new(|| {
-    let tenant_slots = register_uint_gauge_vec!(
-        "pageserver_tenant_manager_slots",
-        "How many slots currently exist, including all attached, secondary and in-progress operations",
-        &["mode"]
-    )
-    .expect("failed to define a metric");
     TenantManagerMetrics {
-        tenant_slots_attached: tenant_slots
-            .get_metric_with_label_values(&["attached"])
-            .unwrap(),
-        tenant_slots_secondary: tenant_slots
-            .get_metric_with_label_values(&["secondary"])
-            .unwrap(),
-        tenant_slots_inprogress: tenant_slots
-            .get_metric_with_label_values(&["inprogress"])
-            .unwrap(),
         tenant_slot_writes: register_int_counter!(
             "pageserver_tenant_manager_slot_writes",
             "Writes to a tenant slot, including all of create/attach/detach/delete"
@@ -2526,9 +2104,6 @@ pub(crate) static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
 
 pub struct BackgroundLoopSemaphoreMetrics {
     counters: EnumMap<BackgroundLoopKind, IntCounterPair>,
-    durations: EnumMap<BackgroundLoopKind, Histogram>,
-    waiting_tasks: EnumMap<BackgroundLoopKind, IntGauge>,
-    running_tasks: EnumMap<BackgroundLoopKind, IntGauge>,
 }
 
 pub(crate) static BACKGROUND_LOOP_SEMAPHORE: Lazy<BackgroundLoopSemaphoreMetrics> =
@@ -2542,44 +2117,10 @@ pub(crate) static BACKGROUND_LOOP_SEMAPHORE: Lazy<BackgroundLoopSemaphoreMetrics
         )
         .unwrap();
 
-        let durations = register_histogram_vec!(
-            "pageserver_background_loop_semaphore_wait_seconds",
-            "Seconds spent waiting on background loop semaphore acquisition",
-            &["task"],
-            vec![0.01, 1.0, 5.0, 10.0, 30.0, 60.0, 180.0, 300.0, 600.0],
-        )
-        .unwrap();
-
-        let waiting_tasks = register_int_gauge_vec!(
-            "pageserver_background_loop_semaphore_waiting_tasks",
-            "Number of background loop tasks waiting for semaphore",
-            &["task"],
-        )
-        .unwrap();
-
-        let running_tasks = register_int_gauge_vec!(
-            "pageserver_background_loop_semaphore_running_tasks",
-            "Number of background loop tasks running concurrently",
-            &["task"],
-        )
-        .unwrap();
-
         BackgroundLoopSemaphoreMetrics {
             counters: EnumMap::from_array(std::array::from_fn(|i| {
                 let kind = BackgroundLoopKind::from_usize(i);
                 counters.with_label_values(&[kind.into()])
-            })),
-            durations: EnumMap::from_array(std::array::from_fn(|i| {
-                let kind = BackgroundLoopKind::from_usize(i);
-                durations.with_label_values(&[kind.into()])
-            })),
-            waiting_tasks: EnumMap::from_array(std::array::from_fn(|i| {
-                let kind = BackgroundLoopKind::from_usize(i);
-                waiting_tasks.with_label_values(&[kind.into()])
-            })),
-            running_tasks: EnumMap::from_array(std::array::from_fn(|i| {
-                let kind = BackgroundLoopKind::from_usize(i);
-                running_tasks.with_label_values(&[kind.into()])
             })),
         }
     });
@@ -2596,21 +2137,19 @@ impl BackgroundLoopSemaphoreMetrics {
 }
 
 /// Records metrics for a background task.
-pub struct BackgroundLoopSemaphoreMetricsRecorder<'a> {
-    metrics: &'a BackgroundLoopSemaphoreMetrics,
-    task: BackgroundLoopKind,
+pub struct BackgroundLoopSemaphoreMetricsRecorder {
+
     start: Instant,
     wait_counter_guard: Option<metrics::IntCounterPairGuard>,
 }
 
-impl<'a> BackgroundLoopSemaphoreMetricsRecorder<'a> {
+impl<'a> BackgroundLoopSemaphoreMetricsRecorder {
     /// Starts recording semaphore metrics, by recording wait time and incrementing
     /// `wait_start_count` and `waiting_tasks`.
     fn start(metrics: &'a BackgroundLoopSemaphoreMetrics, task: BackgroundLoopKind) -> Self {
         // metrics.waiting_tasks[task].inc();
         Self {
-            metrics,
-            task,
+           
             start: Instant::now(),
             wait_counter_guard: Some(metrics.counters[task].guard()),
         }
@@ -2627,7 +2166,7 @@ impl<'a> BackgroundLoopSemaphoreMetricsRecorder<'a> {
     }
 }
 
-impl Drop for BackgroundLoopSemaphoreMetricsRecorder<'_> {
+impl Drop for BackgroundLoopSemaphoreMetricsRecorder {
     /// The task either completed or was cancelled.
     fn drop(&mut self) {
         if self.wait_counter_guard.take().is_some() {
@@ -2962,10 +2501,6 @@ impl StorageTimeMetricsTimer {
     /// Record the time from creation to now and return it.
     pub fn stop_and_record(self) -> Duration {
         let duration = self.elapsed();
-        let seconds = duration.as_secs_f64();
-        // self.metrics.timeline_sum.inc_by(seconds);
-        // self.metrics.timeline_count.inc();
-        // self.metrics.global_histogram.observe(seconds);
         duration
     }
 
@@ -3267,12 +2802,12 @@ impl TimelineMetrics {
         self.resident_physical_size_add(sz);
     }
 
-    pub(crate) fn resident_physical_size_sub(&self, sz: u64) {
+    pub(crate) fn resident_physical_size_sub(&self, _sz: u64) {
         // self.resident_physical_size_gauge.sub(sz);
         // crate::metrics::RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(sz);
     }
 
-    pub(crate) fn resident_physical_size_add(&self, sz: u64) {
+    pub(crate) fn resident_physical_size_add(&self, _sz: u64) {
         // self.resident_physical_size_gauge.add(sz);
         // crate::metrics::RESIDENT_PHYSICAL_SIZE_GLOBAL.add(sz);
     }
@@ -3315,49 +2850,20 @@ impl TimelineMetrics {
     /// Removes a frozen ephemeral layer to TIMELINE_LAYER metrics.
     pub fn dec_frozen_layer(&self, layer: &InMemoryLayer) {
         assert!(matches!(layer.info(), InMemoryLayerInfo::Frozen { .. }));
-        let labels = self.make_frozen_layer_labels(layer);
-        let size = layer.try_len().expect("frozen layer should have no writer");
-        // TIMELINE_LAYER_COUNT
-            // .get_metric_with_label_values(&labels)
-            // .unwrap()
-            // .dec();
-        // TIMELINE_LAYER_SIZE
-            // .get_metric_with_label_values(&labels)
-            // .unwrap()
-            // .sub(size);
+
     }
 
     /// Adds a frozen ephemeral layer to TIMELINE_LAYER metrics.
-    pub fn inc_frozen_layer(&self, layer: &InMemoryLayer) {
-        assert!(matches!(layer.info(), InMemoryLayerInfo::Frozen { .. }));
-        let labels = self.make_frozen_layer_labels(layer);
-        let size = layer.try_len().expect("frozen layer should have no writer");
-        // TIMELINE_LAYER_COUNT
-            // .get_metric_with_label_values(&labels)
-            // .unwrap()
-            // .inc();
-        // TIMELINE_LAYER_SIZE
-            // .get_metric_with_label_values(&labels)
-            // .unwrap()
-            // .add(size);
+    pub fn inc_frozen_layer(&self, _layer: &InMemoryLayer) {
     }
 
     /// Removes a persistent layer from TIMELINE_LAYER metrics.
-    pub fn dec_layer(&self, layer_desc: &PersistentLayerDesc) {
-        let labels = self.make_layer_labels(layer_desc);
-        // TIMELINE_LAYER_COUNT
-            // .get_metric_with_label_values(&labels)
-            // .unwrap()
-            // .dec();
-        // TIMELINE_LAYER_SIZE
-            // .get_metric_with_label_values(&labels)
-            // .unwrap()
-            // .sub(layer_desc.file_size);
+    pub fn dec_layer(&self, _layer_desc: &PersistentLayerDesc) {
     }
 
     /// Adds a persistent layer to TIMELINE_LAYER metrics.
-    pub fn inc_layer(&self, layer_desc: &PersistentLayerDesc) {
-        let labels = self.make_layer_labels(layer_desc);
+    pub fn inc_layer(&self, _layer_desc: &PersistentLayerDesc) {
+        //let labels = self.make_layer_labels(layer_desc);
         // TIMELINE_LAYER_COUNT
             // .get_metric_with_label_values(&labels)
             // .unwrap()
@@ -3523,9 +3029,9 @@ impl PerTimelineRemotePhysicalSizeGauge {
             gauge: per_timeline_gauge,
         }
     }
-    pub(crate) fn set(&self, sz: u64) {
+    pub(crate) fn set(&self,_sz: u64) {
         // self.gauge.set(sz);
-        let prev = self.last_set.swap(sz, std::sync::atomic::Ordering::Relaxed);
+        
         // if sz < prev {
             // REMOTE_PHYSICAL_SIZE_GLOBAL.sub(prev - sz);
         // } else {
@@ -3668,23 +3174,17 @@ impl RemoteTimelineClientMetrics {
 impl RemoteTimelineClientMetrics {
     pub fn get_bytes_started_counter_value(
         &self,
-        file_kind: &RemoteOpFileKind,
-        op_kind: &RemoteOpKind,
+        _file_kind: &RemoteOpFileKind,
+        _op_kind: &RemoteOpKind,
     ) -> Option<u64> {
-        let guard = self.bytes_started_counter.lock().unwrap();
-        let key = (file_kind.as_str(), op_kind.as_str());
-        // guard.get(&key).map(|counter| counter.get())
         None // FIXME: Return dummy value as counter access is commented out
     }
 
     pub fn get_bytes_finished_counter_value(
         &self,
-        file_kind: &RemoteOpFileKind,
-        op_kind: &RemoteOpKind,
+        _file_kind: &RemoteOpFileKind,
+        _op_kind: &RemoteOpKind,
     ) -> Option<u64> {
-        let guard = self.bytes_finished_counter.lock().unwrap();
-        let key = (file_kind.as_str(), op_kind.as_str());
-        // guard.get(&key).map(|counter| counter.get())
         None // FIXME: Return dummy value as counter access is commented out
     }
 }
@@ -3713,16 +3213,6 @@ impl RemoteTimelineClientCallMetricGuard {
 
 impl Drop for RemoteTimelineClientCallMetricGuard {
     fn drop(&mut self) {
-        let RemoteTimelineClientCallMetricGuard {
-            calls_counter_pair,
-            bytes_finished,
-        } = self;
-        if let Some(guard) = calls_counter_pair.take() {
-            // guard.dec();
-        }
-        if let Some((bytes_finished_metric, value)) = bytes_finished {
-            // bytes_finished_metric.inc_by(*value);
-        }
     }
 }
 
@@ -3775,18 +3265,11 @@ impl RemoteTimelineClientMetrics {
     /// See [`call_begin`](Self::call_begin) for more context.
     pub(crate) fn call_end(
         &self,
-        file_kind: &RemoteOpFileKind,
-        op_kind: &RemoteOpKind,
-        size: RemoteTimelineClientMetricsCallTrackSize,
+        _file_kind: &RemoteOpFileKind,
+        _op_kind: &RemoteOpKind,
+        _size: RemoteTimelineClientMetricsCallTrackSize,
     ) {
-        let calls_counter_pair = self.calls_counter_pair(file_kind, op_kind);
-        // calls_counter_pair.dec();
-        match size {
-            RemoteTimelineClientMetricsCallTrackSize::DontTrackSize { reason: _reason } => {}
-            RemoteTimelineClientMetricsCallTrackSize::Bytes(size) => {
-                // self.bytes_finished_counter(file_kind, op_kind).inc_by(size);
-            }
-        }
+        
     }
 }
 
@@ -3954,14 +3437,7 @@ pub mod tokio_epoll_uring {
     }
 
     impl tokio_epoll_uring::metrics::PerSystemMetrics for ThreadLocalMetrics {
-        fn observe_slots_submission_queue_depth(&self, queue_depth: u64) {
-            let Self {
-                slots_submission_queue_depth,
-            } = self;
-            // slots_submission_queue_depth
-                // .lock()
-                // .unwrap()
-                // .observe(queue_depth as f64);
+        fn observe_slots_submission_queue_depth(&self, _queue_depth: u64) {
         }
     }
 
@@ -3978,25 +3454,7 @@ pub mod tokio_epoll_uring {
         }
 
         fn collect(&self) -> Vec<metrics::proto::MetricFamily> {
-            let mut mfs = Vec::with_capacity(Self::NMETRICS);
-            let tokio_epoll_uring::metrics::GlobalMetrics {
-                systems_created,
-                systems_destroyed,
-            } = tokio_epoll_uring::metrics::global();
-            // self.systems_created.set(systems_created);
-            mfs.extend(self.systems_created.collect());
-            // self.systems_destroyed.set(systems_destroyed);
-            mfs.extend(self.systems_destroyed.collect());
-
-            self.thread_local_metrics_storage
-                .flush_thread_local_metrics();
-
-            mfs.extend(
-                self.thread_local_metrics_storage
-                    .slots_submission_queue_depth
-                    .collect(),
-            );
-            mfs
+            Vec::with_capacity(Self::NMETRICS)
         }
     }
 
@@ -4066,7 +3524,7 @@ impl GlobalAndPerTenantIntCounter {
         self.inc_by(1)
     }
     #[inline(always)]
-    pub(crate) fn inc_by(&self, n: u64) {
+    pub(crate) fn inc_by(&self, _n: u64) {
         // self.global.inc_by(n);
         // self.per_tenant.inc_by(n);
     }
@@ -4312,18 +3770,14 @@ static PAGESERVER_CONFIG_IGNORED_ITEMS: Lazy<UIntGaugeVec> = Lazy::new(|| {
 
 pub fn preinitialize_metrics(
     conf: &'static PageServerConf,
-    ignored: config::ignored_fields::Paths,
+    _ignored: config::ignored_fields::Paths,
 ) {
     set_page_service_config_max_batch_size(&conf.page_service_pipelining);
 
     // PAGESERVER_CONFIG_IGNORED_ITEMS
         // .with_label_values(&[""])
         // .set(0);
-    for path in &ignored.paths {
-        // PAGESERVER_CONFIG_IGNORED_ITEMS
-            // .with_label_values(&[path])
-            // .set(1);
-    }
+    
 
     // Python tests need these and on some we do alerting.
     //
@@ -4366,11 +3820,6 @@ pub fn preinitialize_metrics(
     Lazy::force(&crate::tenant::storage_layer::layer::LAYER_IMPL_METRICS);
     Lazy::force(&disk_usage_based_eviction::METRICS);
 
-    for state_name in pageserver_api::models::TenantState::VARIANTS {
-        // initialize the metric for all gauges, otherwise the time series might seemingly show
-        // values from last restart.
-        // TENANT_STATE_METRIC.with_label_values(&[state_name]).set(0);
-    }
 
     // countervecs
     [

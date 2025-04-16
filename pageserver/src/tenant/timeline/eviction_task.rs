@@ -325,7 +325,7 @@ impl Timeline {
         &self,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> ControlFlow<(), BackgroundLoopSemaphorePermit<'static>> {
+    ) -> ControlFlow<(), BackgroundLoopSemaphorePermit> {
         let acquire_permit =
             crate::tenant::tasks::acquire_concurrency_permit(BackgroundLoopKind::Eviction, ctx);
 
@@ -367,7 +367,7 @@ impl Timeline {
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
         gate: &GateGuard,
-        permit: BackgroundLoopSemaphorePermit<'static>,
+        permit: BackgroundLoopSemaphorePermit,
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
         if !self.tenant_shard_id.is_shard_zero() {

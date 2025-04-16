@@ -2178,14 +2178,10 @@ impl PageServerHandler {
         timeline: &Timeline,
         requests: smallvec::SmallVec<[BatchedGetPageRequest; 1]>,
         io_concurrency: IoConcurrency,
-        batch_break_reason: GetPageBatchBreakReason,
+        _batch_break_reason: GetPageBatchBreakReason,
         ctx: &RequestContext,
     ) -> Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>> {
         debug_assert_current_span_has_tenant_and_timeline_id();
-
-        timeline
-            .query_metrics
-            .observe_getpage_batch_start(requests.len(), batch_break_reason);
 
         // If a page trace is running, submit an event for this request.
         if let Some(page_trace) = timeline.page_trace.load().as_ref() {

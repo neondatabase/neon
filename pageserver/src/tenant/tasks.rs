@@ -85,16 +85,16 @@ pub(crate) enum BackgroundLoopKind {
     SecondaryDownload,
 }
 
-pub struct BackgroundLoopSemaphorePermit<'a> {
+pub struct BackgroundLoopSemaphorePermit {
     _permit: SemaphorePermit<'static>,
-    _recorder: BackgroundLoopSemaphoreMetricsRecorder<'a>,
+    _recorder: BackgroundLoopSemaphoreMetricsRecorder,
 }
 
 /// Acquires a semaphore permit, to limit concurrent background jobs.
 pub(crate) async fn acquire_concurrency_permit(
     loop_kind: BackgroundLoopKind,
     _ctx: &RequestContext,
-) -> BackgroundLoopSemaphorePermit<'static> {
+) -> BackgroundLoopSemaphorePermit {
     let mut recorder = metrics::BACKGROUND_LOOP_SEMAPHORE.record(loop_kind);
 
     if loop_kind == BackgroundLoopKind::InitialLogicalSizeCalculation {
