@@ -37,7 +37,7 @@ jobs:
 
     runs-on: small
     container:
-      image: ghcr.io/neondatabase/neon-test-extensions-v${{ matrix.pg-version }}:14487801101
+      image: ghcr.io/neondatabase/neon-test-extensions-v${{ matrix.pg-version }}:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}

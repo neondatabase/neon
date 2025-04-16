@@ -81,7 +81,7 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
             for d in $FAILED $CONTRIB_FAILED; do
                 docker exec $TEST_CONTAINER_NAME bash -c 'for file in $(find '"$d"' -name regression.diffs -o -name regression.out); do cat $file; done' || [ $? -eq 1 ]
             done
-        exit 1
+            exit 1
         fi
     fi
 done
