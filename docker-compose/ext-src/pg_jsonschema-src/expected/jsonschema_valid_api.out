@@ -1,0 +1,65 @@
+-- Define schema
+SELECT jsonschema_is_valid('{
+  "type": "object",
+  "properties": {
+    "username": { "type": "string" },
+    "age": { "type": "integer" }
+  },
+  "required": ["username"]
+}'::json);
+ jsonschema_is_valid 
+---------------------
+ t
+(1 row)
+
+-- Valid instance
+SELECT jsonschema_validation_errors(
+  '{
+    "type": "object",
+    "properties": {
+      "username": { "type": "string" },
+      "age": { "type": "integer" }
+    },
+    "required": ["username"]
+  }'::json,
+  '{"username": "alice", "age": 25}'::json
+);
+ jsonschema_validation_errors 
+------------------------------
+ {}
+(1 row)
+
+-- Invalid instance: missing required "username"
+SELECT jsonschema_validation_errors(
+  '{
+    "type": "object",
+    "properties": {
+      "username": { "type": "string" },
+      "age": { "type": "integer" }
+    },
+    "required": ["username"]
+  }'::json,
+  '{"age": 25}'::json
+);
+      jsonschema_validation_errors       
+-----------------------------------------
+ {"\"username\" is a required property"}
+(1 row)
+
+-- Invalid instance: wrong type for "age"
+SELECT jsonschema_validation_errors(
+  '{
+    "type": "object",
+    "properties": {
+      "username": { "type": "string" },
+      "age": { "type": "integer" }
+    },
+    "required": ["username"]
+  }'::json,
+  '{"username": "bob", "age": "twenty"}'::json
+);
+       jsonschema_validation_errors        
+-------------------------------------------
+ {"\"twenty\" is not of type \"integer\""}
+(1 row)
+

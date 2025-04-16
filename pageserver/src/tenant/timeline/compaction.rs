@@ -56,7 +56,8 @@ use crate::tenant::storage_layer::batch_split_writer::{
 use crate::tenant::storage_layer::filter_iterator::FilterIterator;
 use crate::tenant::storage_layer::merge_iterator::MergeIterator;
 use crate::tenant::storage_layer::{
-    AsLayerDesc, PersistentLayerDesc, PersistentLayerKey, ValueReconstructState,
+    AsLayerDesc, LayerVisibilityHint, PersistentLayerDesc, PersistentLayerKey,
+    ValueReconstructState,
 };
 use crate::tenant::tasks::log_compaction_error;
 use crate::tenant::timeline::{
@@ -68,6 +69,13 @@ use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 
 /// Maximum number of deltas before generating an image layer in bottom-most compaction.
 const COMPACTION_DELTA_THRESHOLD: usize = 5;
+
+/// Ratio of shard-local pages below which we trigger shard ancestor layer rewrites. 0.3 means that
+/// <= 30% of layer pages must belong to the descendant shard to rewrite the layer.
+///
+/// We choose a value < 0.5 to avoid rewriting all visible layers every time we do a power-of-two
+/// shard split, which gets expensive for large tenants.
+const ANCESTOR_COMPACTION_REWRITE_THRESHOLD: f64 = 0.3;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct GcCompactionJobId(pub usize);
@@ -819,7 +827,15 @@ impl KeyHistoryRetention {
             base_img: &Option<(Lsn, &Bytes)>,
             history: &[(Lsn, &NeonWalRecord)],
             tline: &Arc<Timeline>,
+            skip_empty: bool,
         ) -> anyhow::Result<()> {
+            if base_img.is_none() && history.is_empty() {
+                if skip_empty {
+                    return Ok(());
+                }
+                anyhow::bail!("verification failed: key {} has no history at {}", key, lsn);
+            };
+
             let mut records = history
                 .iter()
                 .map(|(lsn, val)| (*lsn, (*val).clone()))
@@ -860,17 +876,12 @@ impl KeyHistoryRetention {
             if *retain_lsn >= min_lsn {
                 // Only verify after the key appears in the full history for the first time.
 
-                if base_img.is_none() && history.is_empty() {
-                    anyhow::bail!(
-                        "verificatoin failed: key {} has no history at {}",
-                        key,
-                        retain_lsn
-                    );
-                };
                 // We don't modify history: in theory, we could replace the history with a single
                 // image as in `generate_key_retention` to make redos at later LSNs faster. But we
                 // want to verify everything as if they are read from the real layer map.
-                collect_and_verify(key, *retain_lsn, &base_img, &history, tline).await?;
+                collect_and_verify(key, *retain_lsn, &base_img, &history, tline, false)
+                    .await
+                    .context("below horizon retain_lsn")?;
             }
         }
 
@@ -878,13 +889,17 @@ impl KeyHistoryRetention {
             match val {
                 Value::Image(img) => {
                     // Above the GC horizon, we verify every time we see an image.
-                    collect_and_verify(key, *lsn, &base_img, &history, tline).await?;
+                    collect_and_verify(key, *lsn, &base_img, &history, tline, true)
+                        .await
+                        .context("above horizon full image")?;
                     base_img = Some((*lsn, img));
                     history.clear();
                 }
                 Value::WalRecord(rec) if val.will_init() => {
                     // Above the GC horizon, we verify every time we see an init record.
-                    collect_and_verify(key, *lsn, &base_img, &history, tline).await?;
+                    collect_and_verify(key, *lsn, &base_img, &history, tline, true)
+                        .await
+                        .context("above horizon init record")?;
                     base_img = None;
                     history.clear();
                     history.push((*lsn, rec));
@@ -895,7 +910,9 @@ impl KeyHistoryRetention {
             }
         }
         // Ensure the latest record is readable.
-        collect_and_verify(key, max_lsn, &base_img, &history, tline).await?;
+        collect_and_verify(key, max_lsn, &base_img, &history, tline, false)
+            .await
+            .context("latest record")?;
         Ok(())
     }
 }
@@ -1222,8 +1239,7 @@ impl Timeline {
         let partition_count = self.partitioning.read().0.0.parts.len();
 
         // 4. Shard ancestor compaction
-
-        if self.shard_identity.count >= ShardCount::new(2) {
+        if self.get_compaction_shard_ancestor() && self.shard_identity.count >= ShardCount::new(2) {
             // Limit the number of layer rewrites to the number of partitions: this means its
             // runtime should be comparable to a full round of image layer creations, rather than
             // being potentially much longer.
@@ -1320,14 +1336,15 @@ impl Timeline {
                 continue;
             }
 
-            // Don't bother re-writing a layer unless it will at least halve its size
+            // Only rewrite a layer if we can reclaim significant space.
             if layer_local_page_count != u32::MAX
-                && layer_local_page_count > layer_raw_page_count / 2
+                && layer_local_page_count as f64 / layer_raw_page_count as f64
+                    <= ANCESTOR_COMPACTION_REWRITE_THRESHOLD
             {
                 debug!(%layer,
-                    "layer is already mostly local ({}/{}), not rewriting",
-                    layer_local_page_count,
-                    layer_raw_page_count
+                    "layer has a large share of local pages \
+                        ({layer_local_page_count}/{layer_raw_page_count} > \
+                        {ANCESTOR_COMPACTION_REWRITE_THRESHOLD}), not rewriting",
                 );
             }
 
@@ -1339,9 +1356,16 @@ impl Timeline {
                 continue;
             }
 
+            // We do not yet implement rewrite of delta layers.
             if layer_desc.is_delta() {
-                // We do not yet implement rewrite of delta layers
                 debug!(%layer, "Skipping rewrite of delta layer");
+                continue;
+            }
+
+            // We don't bother rewriting layers that aren't visible, since these won't be needed by
+            // reads and will likely be garbage collected soon.
+            if layer.visibility() != LayerVisibilityHint::Visible {
+                debug!(%layer, "Skipping rewrite of invisible layer");
                 continue;
             }
 
