@@ -46,6 +46,7 @@ impl Service {
             .map(SecretString::from);
         let mut joinset = JoinSet::new();
 
+        // Prepare membership::Configuration from choosen safekeepers.
         let safekeepers = {
             let locked = self.inner.read().unwrap();
             locked.safekeepers.clone()
@@ -205,7 +206,7 @@ impl Service {
             tenant_id: tenant_id.to_string(),
             timeline_id: timeline_id.to_string(),
             start_lsn: start_lsn.into(),
-            generation: 0,
+            generation: 1,
             sk_set: sks_persistence.clone(),
             new_sk_set: None,
             cplane_notified_generation: 0,
@@ -254,7 +255,7 @@ impl Service {
             self.persistence.insert_pending_op(pending_op).await?;
         }
         if !remaining.is_empty() {
-            let mut locked = self.inner.write().unwrap();
+            let locked = self.inner.read().unwrap();
             for remaining_id in remaining {
                 let Some(sk) = locked.safekeepers.get(&remaining_id) else {
                     return Err(ApiError::InternalServerError(anyhow::anyhow!(
@@ -290,7 +291,7 @@ impl Service {
                     generation: timeline_persist.generation as u32,
                     kind: crate::persistence::SafekeeperTimelineOpKind::Pull,
                 };
-                locked.safekeeper_reconcilers.schedule_request(self, req);
+                locked.safekeeper_reconcilers.schedule_request(req);
             }
         }
 
@@ -357,7 +358,7 @@ impl Service {
             let pending_op = TimelinePendingOpPersistence {
                 tenant_id: tenant_id.to_string(),
                 timeline_id: timeline_id.to_string(),
-                generation: tl.generation,
+                generation: i32::MAX,
                 op_kind: SafekeeperTimelineOpKind::Delete,
                 sk_id: *sk_id,
             };
@@ -365,7 +366,7 @@ impl Service {
             self.persistence.insert_pending_op(pending_op).await?;
         }
         {
-            let mut locked = self.inner.write().unwrap();
+            let locked = self.inner.read().unwrap();
             for sk_id in all_sks {
                 let sk_id = NodeId(*sk_id as u64);
                 let Some(sk) = locked.safekeepers.get(&sk_id) else {
@@ -383,7 +384,7 @@ impl Service {
                     generation: tl.generation as u32,
                     kind: SafekeeperTimelineOpKind::Delete,
                 };
-                locked.safekeeper_reconcilers.schedule_request(self, req);
+                locked.safekeeper_reconcilers.schedule_request(req);
             }
         }
         Ok(())
@@ -482,7 +483,7 @@ impl Service {
                 tenant_id,
                 timeline_id: None,
             };
-            locked.safekeeper_reconcilers.schedule_request(self, req);
+            locked.safekeeper_reconcilers.schedule_request(req);
         }
         Ok(())
     }
@@ -579,7 +580,7 @@ impl Service {
     }
 
     pub(crate) async fn upsert_safekeeper(
-        &self,
+        self: &Arc<Service>,
         record: crate::persistence::SafekeeperUpsert,
     ) -> Result<(), ApiError> {
         let node_id = NodeId(record.id as u64);
@@ -618,6 +619,9 @@ impl Service {
                     );
                 }
             }
+            locked
+                .safekeeper_reconcilers
+                .start_reconciler(node_id, self);
             locked.safekeepers = Arc::new(safekeepers);
             metrics::METRICS_REGISTRY
                 .metrics_group
@@ -638,7 +642,7 @@ impl Service {
     }
 
     pub(crate) async fn set_safekeeper_scheduling_policy(
-        &self,
+        self: &Arc<Service>,
         id: i64,
         scheduling_policy: SkSchedulingPolicy,
     ) -> Result<(), DatabaseError> {
@@ -656,9 +660,13 @@ impl Service {
             sk.set_scheduling_policy(scheduling_policy);
 
             match scheduling_policy {
-                SkSchedulingPolicy::Active => (),
+                SkSchedulingPolicy::Active => {
+                    locked
+                        .safekeeper_reconcilers
+                        .start_reconciler(node_id, self);
+                }
                 SkSchedulingPolicy::Decomissioned | SkSchedulingPolicy::Pause => {
-                    locked.safekeeper_reconcilers.cancel_safekeeper(node_id);
+                    locked.safekeeper_reconcilers.stop_reconciler(node_id);
                 }
             }
 
