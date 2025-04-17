@@ -4316,6 +4316,7 @@ dependencies = [
  "tenant_size_model",
  "thiserror 1.0.69",
  "tikv-jemallocator",
+ "time",
  "tokio",
  "tokio-epoll-uring",
  "tokio-io-timeout",
