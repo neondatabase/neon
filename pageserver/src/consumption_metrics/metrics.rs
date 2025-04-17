@@ -175,9 +175,9 @@ impl MetricsKey {
         .absolute_values()
     }
 
-    /// [`Tenant::remote_size`]
+    /// [`TenantShard::remote_size`]
     ///
-    /// [`Tenant::remote_size`]: crate::tenant::Tenant::remote_size
+    /// [`TenantShard::remote_size`]: crate::tenant::TenantShard::remote_size
     const fn remote_storage_size(tenant_id: TenantId) -> AbsoluteValueFactory {
         MetricsKey {
             tenant_id,
@@ -199,9 +199,9 @@ impl MetricsKey {
         .absolute_values()
     }
 
-    /// [`Tenant::cached_synthetic_size`] as refreshed by [`calculate_synthetic_size_worker`].
+    /// [`TenantShard::cached_synthetic_size`] as refreshed by [`calculate_synthetic_size_worker`].
     ///
-    /// [`Tenant::cached_synthetic_size`]: crate::tenant::Tenant::cached_synthetic_size
+    /// [`TenantShard::cached_synthetic_size`]: crate::tenant::TenantShard::cached_synthetic_size
     /// [`calculate_synthetic_size_worker`]: super::calculate_synthetic_size_worker
     const fn synthetic_size(tenant_id: TenantId) -> AbsoluteValueFactory {
         MetricsKey {
@@ -254,7 +254,7 @@ pub(super) async fn collect_all_metrics(
 
 async fn collect<S>(tenants: S, cache: &Cache, ctx: &RequestContext) -> Vec<NewRawMetric>
 where
-    S: futures::stream::Stream<Item = (TenantId, Arc<crate::tenant::Tenant>)>,
+    S: futures::stream::Stream<Item = (TenantId, Arc<crate::tenant::TenantShard>)>,
 {
     let mut current_metrics: Vec<NewRawMetric> = Vec::new();
 
@@ -308,7 +308,7 @@ impl TenantSnapshot {
     ///
     /// `resident_size` is calculated of the timelines we had access to for other metrics, so we
     /// cannot just list timelines here.
-    fn collect(t: &Arc<crate::tenant::Tenant>, resident_size: u64) -> Self {
+    fn collect(t: &Arc<crate::tenant::TenantShard>, resident_size: u64) -> Self {
         TenantSnapshot {
             resident_size,
             remote_size: t.remote_size(),
