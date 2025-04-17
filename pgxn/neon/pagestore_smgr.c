@@ -62,6 +62,7 @@
 
 #include "bitmap.h"
 #include "communicator.h"
+#include "communicator_new.h"
 #include "file_cache.h"
 #include "neon.h"
 #include "neon_lwlsncache.h"
@@ -1793,7 +1794,10 @@ neon_dbsize(Oid dbNode)
 	neon_get_request_lsns(dummy_node, MAIN_FORKNUM,
 						  REL_METADATA_PSEUDO_BLOCKNO, &request_lsns, 1);
 
-	db_size = communicator_dbsize(dbNode, &request_lsns);
+	if (neon_enable_new_communicator)
+		db_size = communicator_new_dbsize(dbNode, &request_lsns);
+	else
+		db_size = communicator_dbsize(dbNode, &request_lsns);
 
 	neon_log(SmgrTrace, "neon_dbsize: db %u (request LSN %X/%08X): %ld bytes",
 			 dbNode, LSN_FORMAT_ARGS(request_lsns.effective_request_lsn), db_size);
@@ -2257,6 +2261,8 @@ smgr_init_neon(void)
 	smgr_init_standard();
 	neon_init();
 	communicator_init();
+	if (neon_enable_new_communicator)
+		communicator_new_init();
 }
 
 

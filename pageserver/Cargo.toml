@@ -42,12 +42,14 @@ nix.workspace = true
 num_cpus.workspace = true
 num-traits.workspace = true
 once_cell.workspace = true
+peekable.workspace = true
 pin-project-lite.workspace = true
 postgres_backend.workspace = true
 postgres-protocol.workspace = true
 postgres-types.workspace = true
 postgres_initdb.workspace = true
 pprof.workspace = true
+prost.workspace = true
 rand.workspace = true
 range-set-blaze = { version = "0.1.16", features = ["alloc"] }
 regex.workspace = true
@@ -60,6 +62,7 @@ serde_path_to_error.workspace = true
 serde_with.workspace = true
 sysinfo.workspace = true
 tokio-tar.workspace = true
+tonic.workspace = true
 thiserror.workspace = true
 tikv-jemallocator.workspace = true
 tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time"] }
@@ -129,3 +132,6 @@ harness = false
 [[bin]]
 name = "test_helper_slow_client_reads"
 required-features = [ "testing" ]
+
+[build-dependencies]
+tonic-build.workspace = true

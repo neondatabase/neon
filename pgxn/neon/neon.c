@@ -20,6 +20,7 @@
 #include "replication/logicallauncher.h"
 #include "replication/slot.h"
 #include "replication/walsender.h"
+#include "storage/ipc.h"
 #include "storage/proc.h"
 #include "funcapi.h"
 #include "access/htup_details.h"
@@ -29,6 +30,7 @@
 #include "utils/guc_tables.h"
 
 #include "communicator.h"
+#include "communicator_new.h"
 #include "extension_server.h"
 #include "file_cache.h"
 #include "neon.h"
@@ -45,13 +47,17 @@ PG_MODULE_MAGIC;
 void		_PG_init(void);
 
 
+bool neon_enable_new_communicator;
 static int  running_xacts_overflow_policy;
 
-#if PG_MAJORVERSION_NUM >= 16
 static shmem_startup_hook_type prev_shmem_startup_hook;
-
-static void neon_shmem_startup_hook(void);
+#if PG_VERSION_NUM>=150000
+static shmem_request_hook_type prev_shmem_request_hook;
 #endif
+
+static void neon_shmem_request(void);
+static void neon_shmem_startup_hook(void);
+
 #if PG_MAJORVERSION_NUM >= 17
 uint32		WAIT_EVENT_NEON_LFC_MAINTENANCE;
 uint32		WAIT_EVENT_NEON_LFC_READ;
@@ -430,10 +436,26 @@ _PG_init(void)
 	 */
 #if PG_VERSION_NUM >= 160000
 	load_file("$libdir/neon_rmgr", false);
+#endif
 
 	prev_shmem_startup_hook = shmem_startup_hook;
 	shmem_startup_hook = neon_shmem_startup_hook;
+#if PG_VERSION_NUM>=150000
+	prev_shmem_request_hook = shmem_request_hook;
+	shmem_request_hook = neon_shmem_request;
+#else
+	neon_shmem_request();
 #endif
+
+	DefineCustomBoolVariable(
+							"neon.enable_new_communicator",
+							"Enables new communicator implementation",
+							NULL,
+							&neon_enable_new_communicator,
+							true,
+							PGC_POSTMASTER,
+							0,
+							NULL, NULL, NULL);
 
 	pg_init_libpagestore();
 	lfc_init();
@@ -441,6 +463,9 @@ _PG_init(void)
 	init_lwlsncache();
 
 	pg_init_communicator();
+	if (neon_enable_new_communicator)
+		pg_init_communicator_new();
+
 	Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 
 	InitUnstableExtensionsSupport();
@@ -559,7 +584,17 @@ backpressure_throttling_time(PG_FUNCTION_ARGS)
 	PG_RETURN_UINT64(BackpressureThrottlingTime());
 }
 
-#if PG_MAJORVERSION_NUM >= 16
+static void
+neon_shmem_request(void)
+{
+#if PG_VERSION_NUM>=150000
+	if (prev_shmem_request_hook)
+		prev_shmem_request_hook();
+#endif
+
+	communicator_new_shmem_request();
+}
+
 static void
 neon_shmem_startup_hook(void)
 {
@@ -579,5 +614,6 @@ neon_shmem_startup_hook(void)
 	WAIT_EVENT_NEON_PS_READ = WaitEventExtensionNew("Neon/PS_ReadIO");
 	WAIT_EVENT_NEON_WAL_DL = WaitEventExtensionNew("Neon/WAL_Download");
 #endif
+
+	communicator_new_shmem_startup();
 }
-#endif

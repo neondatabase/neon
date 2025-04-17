@@ -41,6 +41,7 @@ members = [
     "libs/proxy/postgres-types2",
     "libs/proxy/tokio-postgres2",
     "object_storage",
+    "pgxn/neon/communicator",
 ]
 
 [workspace.package]
@@ -142,6 +143,7 @@ parquet = { version = "53", default-features = false, features = ["zstd"] }
 parquet_derive = "53"
 pbkdf2 = { version = "0.12.1", features = ["simple", "std"] }
 pem = "3.0.3"
+peekable = "0.3.0"
 pin-project-lite = "0.2"
 pprof = { version = "0.14", features = ["criterion", "flamegraph", "frame-pointer", "prost-codec"] }
 procfs = "0.16"
@@ -188,6 +190,7 @@ tikv-jemallocator = { version = "0.6", features = ["profiling", "stats", "unpref
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 tokio = { version = "1.43.1", features = ["macros"] }
 tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "main" }
+tokio-eventfd = "0.2.2"
 tokio-io-timeout = "1.2.0"
 tokio-postgres-rustls = "0.12.0"
 tokio-rustls = { version = "0.26.0", default-features = false, features = ["tls12", "ring"]}
@@ -196,7 +199,7 @@ tokio-tar = "0.3"
 tokio-util = { version = "0.7.10", features = ["io", "rt"] }
 toml = "0.8"
 toml_edit = "0.22"
-tonic = {version = "0.12.3", default-features = false, features = ["channel", "tls", "tls-roots"]}
+tonic = {version = "0.12.3", default-features = false, features = ["channel", "server", "tls", "tls-roots"]}
 tower = { version = "0.5.2", default-features = false }
 tower-http = { version = "0.6.2", features = ["auth", "request-id", "trace"] }
 
@@ -271,6 +274,7 @@ wal_decoder = { version = "0.1", path = "./libs/wal_decoder" }
 workspace_hack = { version = "0.1", path = "./workspace_hack/" }
 
 ## Build dependencies
+cbindgen = "0.28.0"
 criterion = "0.5.1"
 rcgen = "0.13"
 rstest = "0.18"

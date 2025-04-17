@@ -1,0 +1,22 @@
+[package]
+name = "communicator"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+http.workspace = true
+nix.workspace = true
+atomic_enum = "0.3.0"
+prost.workspace = true
+tonic = { version = "0.12.0", default-features = false, features=["codegen", "prost", "transport"] }
+tokio = { version = "1.43.1", features = ["macros", "net", "io-util", "rt", "rt-multi-thread"] }
+tokio-pipe = { version = "0.2.12" }
+thiserror.workspace = true
+tracing.workspace = true
+
+[build-dependencies]
+cbindgen.workspace = true
+tonic-build.workspace = true

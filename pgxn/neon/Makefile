@@ -5,6 +5,7 @@ MODULE_big = neon
 OBJS = \
 	$(WIN32RES) \
 	communicator.o \
+	communicator_new.o \
 	extension_server.o \
 	file_cache.o \
 	hll.o \
@@ -22,7 +23,8 @@ OBJS = \
 	walproposer.o \
 	walproposer_pg.o \
 	control_plane_connector.o \
-	walsender_hooks.o
+	walsender_hooks.o \
+	$(srcdir)/../../target/debug/libcommunicator.a
 
 PG_CPPFLAGS = -I$(libpq_srcdir)
 SHLIB_LINK_INTERNAL = $(libpq)
