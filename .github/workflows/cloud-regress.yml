@@ -107,7 +107,7 @@ jobs:
           dropdb --if-exists contrib_regression
           createdb contrib_regression
           mkdir -p /ext-src/pg_mooncake-src/results/unsupported
-          psql -d contrib_regression -c "CREATE EXTENSION pg_mooncake" -c "SELECT mooncake.create_secret('amazon', 'S3', '${AWS_ACCESS_KEY_ID}', '${AWS_SECRET_ACCESS_KEY}', '{\"ENDPOINT\": \"s3.eu-central-1.amazonaws.com\"}');" \
+          psql -d contrib_regression -c "CREATE EXTENSION pg_mooncake" -c "SELECT mooncake.create_secret('amazon', 'S3', '${AWS_ACCESS_KEY_ID}', '${AWS_SECRET_ACCESS_KEY}', '{\"ENDPOINT\": \"s3.eu-central-1.amazonaws.com\", \"REGION\": \"eu-central-1\"}');" \
             -c "ALTER DATABASE contrib_regression SET mooncake.default_bucket = 's3://neon-github-ci-tests'"
           psql -d contrib_regression -c "SELECT * FROM mooncake.secrets" -c "SHOW mooncake.default_bucket"
           /usr/local/pgsql/lib/pgxs/src/makefiles/../../src/test/regress/pg_regress --use-existing --inputdir=./ --bindir='/usr/local/pgsql/bin'    \
