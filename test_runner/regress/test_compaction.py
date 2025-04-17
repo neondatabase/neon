@@ -72,7 +72,7 @@ PREEMPT_GC_COMPACTION_TENANT_CONF = {
     "wal_receiver_protocol",
     [PageserverWalReceiverProtocol.VANILLA, PageserverWalReceiverProtocol.INTERPRETED],
 )
-@pytest.mark.timeout(900)
+@pytest.mark.timeout(600)
 def test_pageserver_compaction_smoke(
     neon_env_builder: NeonEnvBuilder,
     wal_receiver_protocol: PageserverWalReceiverProtocol,
@@ -229,7 +229,7 @@ def test_pageserver_gc_compaction_preempt(
 
 
 @skip_in_debug_build("only run with release build")
-@pytest.mark.timeout(600)  # This test is slow with sanitizers enabled, especially on ARM
+@pytest.mark.timeout(900)  # This test is slow with sanitizers enabled, especially on ARM
 @pytest.mark.parametrize(
     "with_branches",
     ["with_branches", "no_branches"],
