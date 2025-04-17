@@ -1799,6 +1799,12 @@ COPY --from=pg_repack-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY compute/patches/pg_repack.patch /ext-src
 RUN cd /ext-src/pg_repack-src && patch -p1 </ext-src/pg_repack.patch && rm -f /ext-src/pg_repack.patch
 
+# AWS CLI
+RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "awscliv2.zip" \
+    && unzip -q awscliv2.zip \
+    && ./aws/install \
+    && rm awscliv2.zip \
+
 COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
 RUN apt-get update && apt-get install -y libtap-parser-sourcehandler-pgtap-perl jq \
    && apt clean && rm -rf /ext-src/*.tar.gz /ext-src/*.patch /var/lib/apt/lists/*

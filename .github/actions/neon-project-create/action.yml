@@ -175,7 +175,6 @@ runs:
                 echo ${res::-3}
                 exit 2
               fi
-        
               sleep 3
             fi
           fi
