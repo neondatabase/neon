@@ -1456,7 +1456,7 @@ WORKDIR /ext-src
 COPY compute/patches/pg_duckdb_v031.patch .
 COPY compute/patches/duckdb_v120.patch .
 # pg_duckdb build requires source dir to be a git repo to get submodules
-# allow neon_superuser to execute some functions that in pg_duckdb are available to superuser only: 
+# allow neon_superuser to execute some functions that in pg_duckdb are available to superuser only:
 # - extension management function duckdb.install_extension()
 # - access to duckdb.extensions table and its sequence
 RUN git clone --depth 1 --branch v0.3.1 https://github.com/duckdb/pg_duckdb.git pg_duckdb-src && \
@@ -1471,8 +1471,8 @@ ARG PG_VERSION
 COPY --from=pg_duckdb-src /ext-src/ /ext-src/
 WORKDIR /ext-src/pg_duckdb-src
 RUN make install -j $(getconf _NPROCESSORS_ONLN) && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_duckdb.control 
-        
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_duckdb.control
+
 #########################################################################################
 #
 # Layer "pg_repack"
@@ -1706,6 +1706,8 @@ RUN set -e \
         libevent-dev \
         libtool \
         pkg-config \
+        libcurl4-openssl-dev \
+        libssl-dev \
     && apt clean && rm -rf /var/lib/apt/lists/*
 
 # Use `dist_man_MANS=` to skip manpage generation (which requires python3/pandoc)
@@ -1714,7 +1716,7 @@ RUN set -e \
     && git clone --recurse-submodules --depth 1 --branch ${PGBOUNCER_TAG} https://github.com/pgbouncer/pgbouncer.git pgbouncer \
     && cd pgbouncer \
     && ./autogen.sh \
-    && ./configure --prefix=/usr/local/pgbouncer --without-openssl \
+    && ./configure --prefix=/usr/local/pgbouncer \
     && make -j $(nproc) dist_man_MANS= \
     && make install dist_man_MANS=
 
@@ -1729,15 +1731,15 @@ ARG TARGETARCH
 # test_runner/regress/test_compute_metrics.py
 # See comment on the top of the file regading `echo`, `-e` and `\n`
 RUN if [ "$TARGETARCH" = "amd64" ]; then\
-        postgres_exporter_sha256='027e75dda7af621237ff8f5ac66b78a40b0093595f06768612b92b1374bd3105';\
+        postgres_exporter_sha256='59aa4a7bb0f7d361f5e05732f5ed8c03cc08f78449cef5856eadec33a627694b';\
         pgbouncer_exporter_sha256='c9f7cf8dcff44f0472057e9bf52613d93f3ffbc381ad7547a959daa63c5e84ac';\
         sql_exporter_sha256='38e439732bbf6e28ca4a94d7bc3686d3fa1abdb0050773d5617a9efdb9e64d08';\
     else\
-        postgres_exporter_sha256='131a376d25778ff9701a4c81f703f179e0b58db5c2c496e66fa43f8179484786';\
+        postgres_exporter_sha256='d1dedea97f56c6d965837bfd1fbb3e35a3b4a4556f8cccee8bd513d8ee086124';\
         pgbouncer_exporter_sha256='217c4afd7e6492ae904055bc14fe603552cf9bac458c063407e991d68c519da3';\
         sql_exporter_sha256='11918b00be6e2c3a67564adfdb2414fdcbb15a5db76ea17d1d1a944237a893c6';\
     fi\
-    && curl -sL https://github.com/prometheus-community/postgres_exporter/releases/download/v0.16.0/postgres_exporter-0.16.0.linux-${TARGETARCH}.tar.gz\
+    && curl -sL https://github.com/prometheus-community/postgres_exporter/releases/download/v0.17.1/postgres_exporter-0.17.1.linux-${TARGETARCH}.tar.gz\
      | tar xzf - --strip-components=1 -C.\
     && curl -sL https://github.com/prometheus-community/pgbouncer_exporter/releases/download/v0.10.2/pgbouncer_exporter-0.10.2.linux-${TARGETARCH}.tar.gz\
      | tar xzf - --strip-components=1 -C.\
@@ -1789,7 +1791,7 @@ RUN make PG_VERSION="${PG_VERSION:?}" -C compute
 
 FROM pg-build AS extension-tests
 ARG PG_VERSION
-RUN mkdir /ext-src
+COPY docker-compose/ext-src/ /ext-src/
 
 COPY --from=pg-build /postgres /postgres
 #COPY --from=postgis-src /ext-src/ /ext-src/
@@ -1822,7 +1824,7 @@ COPY --from=pg_cron-src /ext-src/ /ext-src/
 COPY --from=pg_uuidv7-src /ext-src/ /ext-src/
 COPY --from=pg_roaringbitmap-src /ext-src/ /ext-src/
 COPY --from=pg_semver-src /ext-src/ /ext-src/
-#COPY --from=pg_embedding-src /ext-src/ /ext-src/
+COPY --from=pg_embedding-src /ext-src/ /ext-src/
 #COPY --from=wal2json-src /ext-src/ /ext-src/
 COPY --from=pg_ivm-src /ext-src/ /ext-src/
 COPY --from=pg_partman-src /ext-src/ /ext-src/
@@ -1885,25 +1887,30 @@ RUN apt update && \
       ;; \
     esac && \
     apt install --no-install-recommends -y \
+        ca-certificates \
         gdb \
-        liblz4-1 \
-        libreadline8 \
+        iproute2 \
         libboost-iostreams1.74.0 \
         libboost-regex1.74.0 \
         libboost-serialization1.74.0 \
         libboost-system1.74.0 \
-        libossp-uuid16 \
+        libcurl4 \
+        libevent-2.1-7 \
         libgeos-c1v5 \
+        liblz4-1 \
+        libossp-uuid16 \
         libprotobuf-c1 \
+        libreadline8 \
         libsfcgal1 \
         libxml2 \
         libxslt1.1 \
         libzstd1 \
-        libcurl4 \
-        libevent-2.1-7 \
         locales \
+        lsof \
         procps \
-        ca-certificates \
+        rsyslog \
+        screen \
+        tcpdump \
         $VERSION_INSTALLS && \
     apt clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
@@ -1948,6 +1955,13 @@ COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neo
 
 # Make the libraries we built available
 RUN echo '/usr/local/lib' >> /etc/ld.so.conf && /sbin/ldconfig
+
+# rsyslog config permissions
+# directory for rsyslogd pid file
+RUN mkdir /var/run/rsyslogd && \
+    chown -R postgres:postgres /var/run/rsyslogd && \
+    chown -R postgres:postgres /etc/rsyslog.d/
+
 
 ENV LANG=en_US.utf8
 USER postgres
