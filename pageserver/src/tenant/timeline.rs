@@ -106,7 +106,7 @@ use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::l0_flush::{self, L0FlushGlobalState};
 use crate::metrics::{
     DELTAS_PER_READ_GLOBAL, LAYERS_PER_READ_AMORTIZED_GLOBAL, LAYERS_PER_READ_BATCH_GLOBAL,
-    LAYERS_PER_READ_GLOBAL, ScanLatencyOngoingRecording, TimelineMetrics,
+    LAYERS_PER_READ_GLOBAL, TimelineMetrics,
 };
 use crate::page_service::TenantManagerTypes;
 use crate::pgdatadir_mapping::{
@@ -1210,20 +1210,20 @@ impl Timeline {
             ctx.task_kind(),
         );
 
-        let start = crate::metrics::GET_VECTORED_LATENCY
-            .for_task_kind(ctx.task_kind())
-            .map(|metric| (metric, Instant::now()));
+        // let start = crate::metrics::GET_VECTORED_LATENCY
+        //     .for_task_kind(ctx.task_kind())
+        //     .map(|metric| (metric, Instant::now()));
 
-        let res = self
+         self
             .get_vectored_impl(query, &mut ValuesReconstructState::new(io_concurrency), ctx)
-            .await;
+            .await
 
-        if let Some((metric, start)) = start {
-            let elapsed = start.elapsed();
-            metric.observe(elapsed.as_secs_f64());
-        }
+        // if let Some((metric, start)) = start {
+        //     let elapsed = start.elapsed();
+        //     metric.observe(elapsed.as_secs_f64());
+        // }
 
-        res
+        
     }
 
     /// Scan the keyspace and return all existing key-values in the keyspace. This currently uses vectored
@@ -1262,21 +1262,21 @@ impl Timeline {
             }
         }
 
-        let start = crate::metrics::SCAN_LATENCY
-            .for_task_kind(ctx.task_kind())
-            .map(ScanLatencyOngoingRecording::start_recording);
+        // let start = crate::metrics::SCAN_LATENCY
+        //     .for_task_kind(ctx.task_kind())
+        //     .map(ScanLatencyOngoingRecording::start_recording);
 
         let query = VersionedKeySpaceQuery::uniform(keyspace, lsn);
 
-        let vectored_res = self
+         self
             .get_vectored_impl(query, &mut ValuesReconstructState::new(io_concurrency), ctx)
-            .await;
+            .await
 
-        if let Some(recording) = start {
-            recording.observe();
-        }
+        // if let Some(recording) = start {
+        //     recording.observe();
+        // }
 
-        vectored_res
+       
     }
 
     pub(super) async fn get_vectored_impl(

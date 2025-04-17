@@ -187,97 +187,12 @@ pub(crate) static INITDB_RUN_TIME: Lazy<Histogram> = Lazy::new(|| {
     .expect("failed to define metric")
 });
 
-pub(crate) struct GetVectoredLatency {
-    map: EnumMap<TaskKind, Option<Histogram>>,
-}
 
 #[allow(dead_code)]
 pub(crate) struct ScanLatency {
     map: EnumMap<TaskKind, Option<Histogram>>,
 }
 
-impl GetVectoredLatency {
-    // Only these task types perform vectored gets. Filter all other tasks out to reduce total
-    // cardinality of the metric.
-    const TRACKED_TASK_KINDS: [TaskKind; 2] = [TaskKind::Compaction, TaskKind::PageRequestHandler];
-
-    pub(crate) fn for_task_kind(&self, task_kind: TaskKind) -> Option<&Histogram> {
-        self.map[task_kind].as_ref()
-    }
-}
-
-impl ScanLatency {
-    // Only these task types perform vectored gets. Filter all other tasks out to reduce total
-    // cardinality of the metric.
-    const TRACKED_TASK_KINDS: [TaskKind; 1] = [TaskKind::PageRequestHandler];
-
-    pub(crate) fn for_task_kind(&self, task_kind: TaskKind) -> Option<&Histogram> {
-        self.map[task_kind].as_ref()
-    }
-}
-
-pub(crate) struct ScanLatencyOngoingRecording<'a> {
-    parent: &'a Histogram,
-    start: std::time::Instant,
-}
-
-impl<'a> ScanLatencyOngoingRecording<'a> {
-    pub(crate) fn start_recording(parent: &'a Histogram) -> ScanLatencyOngoingRecording<'a> {
-        let start = Instant::now();
-        ScanLatencyOngoingRecording { parent, start }
-    }
-
-    pub(crate) fn observe(self) {
-        let elapsed = self.start.elapsed();
-        self.parent.observe(elapsed.as_secs_f64());
-    }
-}
-
-pub(crate) static GET_VECTORED_LATENCY: Lazy<GetVectoredLatency> = Lazy::new(|| {
-    let inner = register_histogram_vec!(
-        "pageserver_get_vectored_seconds",
-        "Time spent in get_vectored.",
-        &["task_kind"],
-        CRITICAL_OP_BUCKETS.into(),
-    )
-    .expect("failed to define a metric");
-
-    GetVectoredLatency {
-        map: EnumMap::from_array(std::array::from_fn(|task_kind_idx| {
-            let task_kind = TaskKind::from_usize(task_kind_idx);
-
-            if GetVectoredLatency::TRACKED_TASK_KINDS.contains(&task_kind) {
-                let task_kind = task_kind.into();
-                Some(inner.with_label_values(&[task_kind]))
-            } else {
-                None
-            }
-        })),
-    }
-});
-
-pub(crate) static SCAN_LATENCY: Lazy<ScanLatency> = Lazy::new(|| {
-    let inner = register_histogram_vec!(
-        "pageserver_scan_seconds",
-        "Time spent in scan.",
-        &["task_kind"],
-        CRITICAL_OP_BUCKETS.into(),
-    )
-    .expect("failed to define a metric");
-
-    ScanLatency {
-        map: EnumMap::from_array(std::array::from_fn(|task_kind_idx| {
-            let task_kind = TaskKind::from_usize(task_kind_idx);
-
-            if ScanLatency::TRACKED_TASK_KINDS.contains(&task_kind) {
-                let task_kind = task_kind.into();
-                Some(inner.with_label_values(&[task_kind]))
-            } else {
-                None
-            }
-        })),
-    }
-});
 
 pub(crate) struct PageCacheMetricsForTaskKind {
     pub read_accesses_immutable: IntCounter,
@@ -2694,15 +2609,6 @@ impl TimelineMetrics {
 
     /// Adds a persistent layer to TIMELINE_LAYER metrics.
     pub fn inc_layer(&self, _layer_desc: &PersistentLayerDesc) {
-        //let labels = self.make_layer_labels(layer_desc);
-        // TIMELINE_LAYER_COUNT
-            // .get_metric_with_label_values(&labels)
-            // .unwrap()
-            // .inc();
-        // TIMELINE_LAYER_SIZE
-            // .get_metric_with_label_values(&labels)
-            // .unwrap()
-            // .add(layer_desc.file_size);
     }
 
     pub(crate) fn shutdown(&self) {
