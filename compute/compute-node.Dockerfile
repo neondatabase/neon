@@ -1097,7 +1097,7 @@ USER root
 FROM pg-build-nonroot-with-cargo AS rust-extensions-build-pgrx14
 ARG PG_VERSION
 
-RUN cargo install --locked --version 0.14.1 cargo-pgrx --features unsafe-postgres && \
+RUN cargo install --locked --version 0.14.1 cargo-pgrx && \
     /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
 
 USER root
@@ -1354,7 +1354,7 @@ ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN wget https://gitlab.com/dalibo/postgresql_anonymizer/-/archive/latest/postgresql_anonymizer-latest.tar.gz -O pg_anon.tar.gz && \
     mkdir pg_anon-src && cd pg_anon-src && tar xzf ../pg_anon.tar.gz --strip-components=1 -C . && \
     find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt && \
-    sed -i 's/pgrx = "0.12.9"/pgrx = { version = "=0.14.1", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx = "0.14.1"/pgrx = { version = "=0.14.1", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     patch -p1 < /ext-src/anon_v2.patch
 
 FROM rust-extensions-build-pgrx14 AS pg-anon-pg-build
