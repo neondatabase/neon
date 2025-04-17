@@ -158,6 +158,7 @@ runs:
                 -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer ${ADMIN_API_KEY}" \
                 --data "${NEW_DEFAULT_ENDPOINT_SETTINGS}"
           endpoint_id=$(echo ${PROJECT_DATA} | jq -rc .endpoints[0].id)
+          echo ${PROJECT_DATA} | jq .endpoints
           set -x
           res=$(curl -X POST  \
                 "https://${API_HOST}/api/v2/projects/${project_id}/endpoints/${endpoint_id}/restart" \
