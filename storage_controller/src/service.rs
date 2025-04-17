@@ -3887,6 +3887,9 @@ impl Service {
     ) -> anyhow::Result<()> {
         tracing::info!("Finalizing timeline import");
 
+
+        pausable_failpoint!("timeline-import-pre-cplane-notification");
+
         let import_failed = import.completion_error().is_some();
 
         if !import_failed {
