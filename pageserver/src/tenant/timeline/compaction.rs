@@ -119,10 +119,10 @@ pub struct GcCompactionMetaStatistics {
     /// The layer size after compaction.
     pub after_compaction_layer_size: u64,
     /// The start time of the meta job.
-    #[serde(serialize_with = "time::serde::iso8601::option::serialize")]
+    #[serde(serialize_with = "time::serde::rfc3339::option::serialize")]
     pub start_time: Option<time::OffsetDateTime>,
     /// The end time of the meta job.
-    #[serde(serialize_with = "time::serde::iso8601::option::serialize")]
+    #[serde(serialize_with = "time::serde::rfc3339::option::serialize")]
     pub end_time: Option<time::OffsetDateTime>,
     /// The duration of the meta job.
     pub duration_secs: f64,
