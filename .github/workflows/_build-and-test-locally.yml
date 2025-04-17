@@ -349,7 +349,7 @@ jobs:
       contents: read
       statuses: write
     needs: [ build-neon ]
-    runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64' || 'large')) }}
+    runs-on: ${{ fromJSON(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64' || 'large-metal')) }}
     container:
       image: ${{ inputs.build-tools-image }}
       credentials:
