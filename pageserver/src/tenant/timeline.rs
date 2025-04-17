@@ -412,7 +412,7 @@ pub struct Timeline {
     /// Timeline deletion will acquire both compaction and gc locks in whatever order.
     gc_lock: tokio::sync::Mutex<()>,
 
-    /// Cloned from [`super::Tenant::pagestream_throttle`] on construction.
+    /// Cloned from [`super::TenantShard::pagestream_throttle`] on construction.
     pub(crate) pagestream_throttle: Arc<crate::tenant::throttle::Throttle>,
 
     /// Size estimator for aux file v2
@@ -2065,7 +2065,7 @@ impl Timeline {
 
     pub(crate) fn activate(
         self: &Arc<Self>,
-        parent: Arc<crate::tenant::Tenant>,
+        parent: Arc<crate::tenant::TenantShard>,
         broker_client: BrokerClientChannel,
         background_jobs_can_start: Option<&completion::Barrier>,
         ctx: &RequestContext,
@@ -3325,7 +3325,7 @@ impl Timeline {
         //     (1) and (4)
         // TODO: this is basically a no-op now, should we remove it?
         self.remote_client.schedule_barrier()?;
-        // Tenant::create_timeline will wait for these uploads to happen before returning, or
+        // TenantShard::create_timeline will wait for these uploads to happen before returning, or
         // on retry.
 
         // Now that we have the full layer map, we may calculate the visibility of layers within it (a global scan)
@@ -5754,7 +5754,7 @@ impl Timeline {
     /// from our ancestor to be branches of this timeline.
     pub(crate) async fn prepare_to_detach_from_ancestor(
         self: &Arc<Timeline>,
-        tenant: &crate::tenant::Tenant,
+        tenant: &crate::tenant::TenantShard,
         options: detach_ancestor::Options,
         behavior: DetachBehavior,
         ctx: &RequestContext,
@@ -5773,7 +5773,7 @@ impl Timeline {
     /// resetting the tenant.
     pub(crate) async fn detach_from_ancestor_and_reparent(
         self: &Arc<Timeline>,
-        tenant: &crate::tenant::Tenant,
+        tenant: &crate::tenant::TenantShard,
         prepared: detach_ancestor::PreparedTimelineDetach,
         ancestor_timeline_id: TimelineId,
         ancestor_lsn: Lsn,
@@ -5797,7 +5797,7 @@ impl Timeline {
     /// The tenant must've been reset if ancestry was modified previously (in tenant manager).
     pub(crate) async fn complete_detaching_timeline_ancestor(
         self: &Arc<Timeline>,
-        tenant: &crate::tenant::Tenant,
+        tenant: &crate::tenant::TenantShard,
         attempt: detach_ancestor::Attempt,
         ctx: &RequestContext,
     ) -> Result<(), detach_ancestor::Error> {
@@ -6859,14 +6859,14 @@ impl Timeline {
     /// Persistently blocks gc for `Manual` reason.
     ///
     /// Returns true if no such block existed before, false otherwise.
-    pub(crate) async fn block_gc(&self, tenant: &super::Tenant) -> anyhow::Result<bool> {
+    pub(crate) async fn block_gc(&self, tenant: &super::TenantShard) -> anyhow::Result<bool> {
         use crate::tenant::remote_timeline_client::index::GcBlockingReason;
         assert_eq!(self.tenant_shard_id, tenant.tenant_shard_id);
         tenant.gc_block.insert(self, GcBlockingReason::Manual).await
     }
 
     /// Persistently unblocks gc for `Manual` reason.
-    pub(crate) async fn unblock_gc(&self, tenant: &super::Tenant) -> anyhow::Result<()> {
+    pub(crate) async fn unblock_gc(&self, tenant: &super::TenantShard) -> anyhow::Result<()> {
         use crate::tenant::remote_timeline_client::index::GcBlockingReason;
         assert_eq!(self.tenant_shard_id, tenant.tenant_shard_id);
         tenant.gc_block.remove(self, GcBlockingReason::Manual).await
@@ -6884,8 +6884,8 @@ impl Timeline {
 
     /// Force create an image layer and place it into the layer map.
     ///
-    /// DO NOT use this function directly. Use [`Tenant::branch_timeline_test_with_layers`]
-    /// or [`Tenant::create_test_timeline_with_layers`] to ensure all these layers are
+    /// DO NOT use this function directly. Use [`TenantShard::branch_timeline_test_with_layers`]
+    /// or [`TenantShard::create_test_timeline_with_layers`] to ensure all these layers are
     /// placed into the layer map in one run AND be validated.
     #[cfg(test)]
     pub(super) async fn force_create_image_layer(
@@ -6941,8 +6941,8 @@ impl Timeline {
 
     /// Force create a delta layer and place it into the layer map.
     ///
-    /// DO NOT use this function directly. Use [`Tenant::branch_timeline_test_with_layers`]
-    /// or [`Tenant::create_test_timeline_with_layers`] to ensure all these layers are
+    /// DO NOT use this function directly. Use [`TenantShard::branch_timeline_test_with_layers`]
+    /// or [`TenantShard::create_test_timeline_with_layers`] to ensure all these layers are
     /// placed into the layer map in one run AND be validated.
     #[cfg(test)]
     pub(super) async fn force_create_delta_layer(
