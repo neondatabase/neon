@@ -191,7 +191,7 @@ impl SecondaryDetailTimeline {
         tenant_shard_id: &TenantShardId,
         timeline_id: &TimelineId,
         touched: &HeatMapLayer,
-        resident_metric: &UIntGauge,
+        _resident_metric: &UIntGauge,
         local_path: F,
     ) where
         F: FnOnce() -> Utf8PathBuf,
@@ -211,7 +211,6 @@ impl SecondaryDetailTimeline {
                     touched.access_time,
                     local_path(),
                 ));
-                resident_metric.add(touched.metadata.file_size);
             }
         }
     }

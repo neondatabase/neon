@@ -519,36 +519,6 @@ static DIRECTORY_ENTRIES_COUNT: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static TENANT_STATE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
-    register_uint_gauge_vec!(
-        "pageserver_tenant_states_count",
-        "Count of tenants per state",
-        &["state"]
-    )
-    .expect("Failed to register pageserver_tenant_states_count metric")
-});
-
-/// A set of broken tenants.
-///
-/// These are expected to be so rare that a set is fine. Set as in a new timeseries per each broken
-/// tenant.
-pub(crate) static BROKEN_TENANTS_SET: Lazy<UIntGaugeVec> = Lazy::new(|| {
-    register_uint_gauge_vec!(
-        "pageserver_broken_tenants_count",
-        "Set of broken tenants",
-        &["tenant_id", "shard_id"]
-    )
-    .expect("Failed to register pageserver_tenant_states_count metric")
-});
-
-pub(crate) static TENANT_SYNTHETIC_SIZE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
-    register_uint_gauge_vec!(
-        "pageserver_tenant_synthetic_cached_size_bytes",
-        "Synthetic size of each tenant in bytes",
-        &["tenant_id"]
-    )
-    .expect("Failed to register pageserver_tenant_synthetic_cached_size_bytes metric")
-});
 
 pub(crate) static EVICTION_ITERATION_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
@@ -1438,14 +1408,6 @@ pub(crate) static WALRECEIVER_ACTIVE_MANAGERS: Lazy<IntGauge> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static WALRECEIVER_SWITCHES: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "pageserver_walreceiver_switches_total",
-        "Number of walreceiver manager change_connection calls",
-        &["reason"]
-    )
-    .expect("failed to define a metric")
-});
 
 pub(crate) static WALRECEIVER_BROKER_UPDATES: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
@@ -1778,10 +1740,7 @@ pub(crate) struct TimelineMetrics {
     pub imitate_logical_size_histo: StorageTimeMetrics,
     pub garbage_collect_histo: StorageTimeMetrics,
     pub find_gc_cutoffs_histo: StorageTimeMetrics,
-    pub pitr_history_size: UIntGauge,
-    pub archival_size: UIntGauge,
     pub standby_horizon_gauge: IntGauge,
-    pub visible_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
     pub current_logical_size_gauge: UIntGauge,
     pub aux_file_size_gauge: IntGauge,
@@ -1844,18 +1803,9 @@ impl TimelineMetrics {
             &timeline_id,
         );
 
-        let pitr_history_size = PITR_HISTORY_SIZE
-            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-            .unwrap();
-
-        let archival_size = TIMELINE_ARCHIVE_SIZE
-            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-            .unwrap();
+        
 
         let standby_horizon_gauge = STANDBY_HORIZON
-            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-            .unwrap();
-        let visible_physical_size_gauge = VISIBLE_PHYSICAL_SIZE
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
         // TODO: we shouldn't expose this metric
@@ -1902,10 +1852,7 @@ impl TimelineMetrics {
             imitate_logical_size_histo,
             garbage_collect_histo,
             find_gc_cutoffs_histo,
-            pitr_history_size,
-            archival_size,
             standby_horizon_gauge,
-            visible_physical_size_gauge,
             current_logical_size_gauge,
             aux_file_size_gauge,
             directory_entries_count_gauge,
@@ -2066,11 +2013,6 @@ impl TimelineMetrics {
 }
 
 pub(crate) fn remove_tenant_metrics(tenant_shard_id: &TenantShardId) {
-    // Only shard zero deals in synthetic sizes
-    if tenant_shard_id.is_shard_zero() {
-        let tid = tenant_shard_id.tenant_id.to_string();
-        let _ = TENANT_SYNTHETIC_SIZE_METRIC.remove_label_values(&[&tid]);
-    }
 
     tenant_throttling::remove_tenant_metrics(tenant_shard_id);
 

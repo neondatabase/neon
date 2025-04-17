@@ -20,7 +20,6 @@ use pageserver::config::{PageServerConf, PageserverIdentity, ignored_fields};
 use pageserver::controller_upcall_client::StorageControllerUpcallClient;
 use pageserver::deletion_queue::DeletionQueue;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
-use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
 use pageserver::task_mgr::{
     BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
 };
@@ -321,10 +320,9 @@ where
     }
 }
 
-fn startup_checkpoint(started_at: Instant, phase: &str, human_phase: &str) {
+fn startup_checkpoint(started_at: Instant, _phase: &str, human_phase: &str) {
     let elapsed = started_at.elapsed();
     let secs = elapsed.as_secs_f64();
-    STARTUP_DURATION.with_label_values(&[phase]).set(secs);
 
     info!(
         elapsed_ms = elapsed.as_millis(),
@@ -502,7 +500,6 @@ fn start_pageserver(
     // Up to this point no significant I/O has been done: this should have been fast.  Record
     // duration prior to starting I/O intensive phase of startup.
     startup_checkpoint(started_startup_at, "initial", "Starting loading tenants");
-    STARTUP_IS_LOADING.set(1);
 
     // Startup staging or optimizing:
     //
@@ -578,7 +575,6 @@ fn start_pageserver(
                     "initial_tenant_load",
                     "Initial load completed",
                 );
-                STARTUP_IS_LOADING.set(0);
             });
 
             let WaitForPhaseResult {

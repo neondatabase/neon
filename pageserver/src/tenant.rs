@@ -84,9 +84,9 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::{DeletionQueueClient, DeletionQueueError};
 use crate::l0_flush::L0FlushGlobalState;
 use crate::metrics::{
-    BROKEN_TENANTS_SET, CIRCUIT_BREAKERS_BROKEN, CIRCUIT_BREAKERS_UNBROKEN, CONCURRENT_INITDBS,
-    INITDB_RUN_TIME, INITDB_SEMAPHORE_ACQUISITION_TIME, TENANT, TENANT_STATE_METRIC,
-    TENANT_SYNTHETIC_SIZE_METRIC, remove_tenant_metrics,
+    CIRCUIT_BREAKERS_BROKEN, CIRCUIT_BREAKERS_UNBROKEN, CONCURRENT_INITDBS,
+    INITDB_RUN_TIME, INITDB_SEMAPHORE_ACQUISITION_TIME, TENANT, 
+    remove_tenant_metrics,
 };
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::LocationMode;
@@ -4223,55 +4223,15 @@ impl Tenant {
         let (state, mut rx) = watch::channel(state);
 
         tokio::spawn(async move {
-            // reflect tenant state in metrics:
-            // - global per tenant state: TENANT_STATE_METRIC
-            // - "set" of broken tenants: BROKEN_TENANTS_SET
-            //
-            // set of broken tenants should not have zero counts so that it remains accessible for
-            // alerting.
-
-            let tid = tenant_shard_id.to_string();
-            let shard_id = tenant_shard_id.shard_slug().to_string();
-            let set_key = &[tid.as_str(), shard_id.as_str()][..];
-
-            fn inspect_state(state: &TenantState) -> ([&'static str; 1], bool) {
-                ([state.into()], matches!(state, TenantState::Broken { .. }))
-            }
-
-            let mut tuple = inspect_state(&rx.borrow_and_update());
-
-            let is_broken = tuple.1;
-            let mut counted_broken = if is_broken {
-                // add the id to the set right away, there should not be any updates on the channel
-                // after before tenant is removed, if ever
-                BROKEN_TENANTS_SET.with_label_values(set_key).set(1);
-                true
-            } else {
-                false
-            };
-
+            
             loop {
-                let labels = &tuple.0;
-                let current = TENANT_STATE_METRIC.with_label_values(labels);
-                current.inc();
+
 
                 if rx.changed().await.is_err() {
-                    // tenant has been dropped
-                    current.dec();
-                    drop(BROKEN_TENANTS_SET.remove_label_values(set_key));
+                   
                     break;
                 }
 
-                current.dec();
-                tuple = inspect_state(&rx.borrow_and_update());
-
-                let is_broken = tuple.1;
-                if is_broken && !counted_broken {
-                    counted_broken = true;
-                    // insert the tenant_id (back) into the set while avoiding needless counter
-                    // access
-                    BROKEN_TENANTS_SET.with_label_values(set_key).set(1);
-                }
             }
         });
 
@@ -4655,22 +4615,6 @@ impl Tenant {
                     }
                 }
 
-                // Update metrics that depend on GC state
-                timeline
-                    .metrics
-                    .archival_size
-                    .set(if target.within_ancestor_pitr {
-                        timeline.metrics.current_logical_size_gauge.get()
-                    } else {
-                        0
-                    });
-                timeline.metrics.pitr_history_size.set(
-                    timeline
-                        .get_last_record_lsn()
-                        .checked_sub(target.cutoffs.time)
-                        .unwrap_or(Lsn(0))
-                        .0,
-                );
 
                 // Apply the cutoffs we found to the Timeline's GcInfo.  Why might we _not_ have cutoffs for a timeline?
                 // - this timeline was created while we were finding cutoffs
@@ -5420,10 +5364,6 @@ impl Tenant {
         // Only shard zero should be calculating synthetic sizes
         debug_assert!(self.shard_identity.is_shard_zero());
 
-        TENANT_SYNTHETIC_SIZE_METRIC
-            .get_metric_with_label_values(&[&self.tenant_shard_id.tenant_id.to_string()])
-            .unwrap()
-            .set(size);
     }
 
     pub fn cached_synthetic_size(&self) -> u64 {
@@ -5500,16 +5440,7 @@ impl Tenant {
     /// than they report here, due to layer eviction.  Tenants with many active branches may
     /// actually use more than they report here.
     pub(crate) fn local_storage_wanted(&self) -> u64 {
-        let timelines = self.timelines.lock().unwrap();
-
-        // Heuristic: we use the max() of the timelines' visible sizes, rather than the sum.  This
-        // reflects the observation that on tenants with multiple large branches, typically only one
-        // of them is used actively enough to occupy space on disk.
-        timelines
-            .values()
-            .map(|t| t.metrics.visible_physical_size_gauge.get())
-            .max()
-            .unwrap_or(0)
+        1000
     }
 
     /// Builds a new tenant manifest, and uploads it if it differs from the last-known tenant

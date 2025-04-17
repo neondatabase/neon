@@ -41,7 +41,7 @@ use super::{TaskEvent, TaskHandle, TaskStateUpdate, WalReceiverConf};
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::{
     WALRECEIVER_ACTIVE_MANAGERS, WALRECEIVER_BROKER_UPDATES, WALRECEIVER_CANDIDATES_ADDED,
-    WALRECEIVER_CANDIDATES_REMOVED, WALRECEIVER_SWITCHES,
+    WALRECEIVER_CANDIDATES_REMOVED, 
 };
 use crate::task_mgr::TaskKind;
 use crate::tenant::{Timeline, debug_assert_current_span_has_tenant_and_timeline_id};
@@ -526,9 +526,6 @@ impl ConnectionManagerState {
 
     /// Shuts down the current connection (if any) and immediately starts another one with the given connection string.
     async fn change_connection(&mut self, new_sk: NewWalConnectionCandidate, ctx: &RequestContext) {
-        WALRECEIVER_SWITCHES
-            .with_label_values(&[new_sk.reason.name()])
-            .inc();
 
         self.drop_old_connection(true).await;
 
@@ -1078,6 +1075,7 @@ struct NewWalConnectionCandidate {
     safekeeper_id: NodeId,
     wal_source_connconf: PgConnectionConfig,
     availability_zone: Option<String>,
+    #[allow(dead_code)]
     reason: ReconnectReason,
 }
 
@@ -1104,18 +1102,6 @@ enum ReconnectReason {
         check_time: NaiveDateTime,
         threshold: Duration,
     },
-}
-
-impl ReconnectReason {
-    fn name(&self) -> &str {
-        match self {
-            ReconnectReason::NoExistingConnection => "NoExistingConnection",
-            ReconnectReason::LaggingWal { .. } => "LaggingWal",
-            ReconnectReason::SwitchAvailabilityZone => "SwitchAvailabilityZone",
-            ReconnectReason::NoWalTimeout { .. } => "NoWalTimeout",
-            ReconnectReason::NoKeepAlives { .. } => "NoKeepAlives",
-        }
-    }
 }
 
 #[cfg(test)]

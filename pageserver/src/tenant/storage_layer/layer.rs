@@ -526,12 +526,6 @@ impl Layer {
                 }
             }
 
-            // Update the timeline's visible bytes count
-            if let Some(tl) = self.0.timeline.upgrade() {
-                tl.metrics
-                    .visible_physical_size_gauge
-                    .add(self.0.desc.file_size)
-            }
         }
     }
 
@@ -540,23 +534,10 @@ impl Layer {
         use LayerVisibilityHint::*;
         match (old_visibility, visibility) {
             (Visible, Covered) => {
-                // Subtract this layer's contribution to the visible size metric
-                if let Some(tl) = self.0.timeline.upgrade() {
-                    debug_assert!(
-                        tl.metrics.visible_physical_size_gauge.get() >= self.0.desc.file_size
-                    );
-                    tl.metrics
-                        .visible_physical_size_gauge
-                        .sub(self.0.desc.file_size)
-                }
+                
             }
             (Covered, Visible) => {
-                // Add this layer's contribution to the visible size metric
-                if let Some(tl) = self.0.timeline.upgrade() {
-                    tl.metrics
-                        .visible_physical_size_gauge
-                        .add(self.0.desc.file_size)
-                }
+                
             }
             (Covered, Covered) | (Visible, Visible) => {
                 // no change
@@ -759,13 +740,6 @@ impl Drop for LayerInner {
             timeline.metrics.dec_layer(&self.desc);
 
             if matches!(self.access_stats.visibility(), LayerVisibilityHint::Visible) {
-                debug_assert!(
-                    timeline.metrics.visible_physical_size_gauge.get() >= self.desc.file_size
-                );
-                timeline
-                    .metrics
-                    .visible_physical_size_gauge
-                    .sub(self.desc.file_size);
             }
         }
 
@@ -867,12 +841,6 @@ impl LayerInner {
 
         // This object acts as a RAII guard on these metrics: increment on construction
         timeline.metrics.inc_layer(&desc);
-
-        // New layers are visible by default. This metric is later updated on drop or in set_visibility
-        timeline
-            .metrics
-            .visible_physical_size_gauge
-            .add(desc.file_size);
 
         LayerInner {
             conf,
