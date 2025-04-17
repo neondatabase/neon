@@ -105,8 +105,7 @@ use crate::disk_usage_eviction_task::{DiskUsageEvictionInfo, EvictionCandidate, 
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::l0_flush::{self, L0FlushGlobalState};
 use crate::metrics::{
-    DELTAS_PER_READ_GLOBAL, LAYERS_PER_READ_AMORTIZED_GLOBAL, LAYERS_PER_READ_BATCH_GLOBAL,
-    LAYERS_PER_READ_GLOBAL, TimelineMetrics,
+    DELTAS_PER_READ_GLOBAL, TimelineMetrics,
 };
 use crate::page_service::TenantManagerTypes;
 use crate::pgdatadir_mapping::{
@@ -1423,42 +1422,21 @@ impl Timeline {
         // when they're missing. Instead they are omitted from the resulting btree
         // (this is a requirement, not a bug). Skip updating the metric in these cases
         // to avoid infinite results.
-        if !results.is_empty() {
-            if layers_visited >= Self::LAYERS_VISITED_WARN_THRESHOLD {
-                let total_keyspace = query.total_keyspace();
-                let max_request_lsn = query.high_watermark_lsn().expect("Validated previously");
+        if !results.is_empty() && layers_visited >= Self::LAYERS_VISITED_WARN_THRESHOLD {
+            let total_keyspace = query.total_keyspace();
+            let max_request_lsn = query.high_watermark_lsn().expect("Validated previously");
 
-                static LOG_PACER: Lazy<Mutex<RateLimit>> =
-                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(60))));
-                LOG_PACER.lock().unwrap().call(|| {
-                    let num_keys = total_keyspace.total_raw_size();
-                    let num_pages = results.len();
-                    tracing::info!(
-                      shard_id = %self.tenant_shard_id.shard_slug(),
-                      lsn = %max_request_lsn,
-                      "Vectored read for {total_keyspace} visited {layers_visited} layers. Returned {num_pages}/{num_keys} pages.",
-                    );
-                });
-            }
-
-            // Records the number of layers visited in a few different ways:
-            //
-            // * LAYERS_PER_READ: all layers count towards every read in the batch, because each
-            //   layer directly affects its observed latency.
-            //
-            // * LAYERS_PER_READ_BATCH: all layers count towards each batch, to get the per-batch
-            //   layer visits and access cost.
-            //
-            // * LAYERS_PER_READ_AMORTIZED: the average layer count per read, to get the amortized
-            //   read amplification after batching.
-            let layers_visited = layers_visited as f64;
-            let avg_layers_visited = layers_visited / results.len() as f64;
-            LAYERS_PER_READ_BATCH_GLOBAL.observe(layers_visited);
-            for _ in &results {
-                self.metrics.layers_per_read.observe(layers_visited);
-                LAYERS_PER_READ_GLOBAL.observe(layers_visited);
-                LAYERS_PER_READ_AMORTIZED_GLOBAL.observe(avg_layers_visited);
-            }
+            static LOG_PACER: Lazy<Mutex<RateLimit>> =
+                Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(60))));
+            LOG_PACER.lock().unwrap().call(|| {
+                let num_keys = total_keyspace.total_raw_size();
+                let num_pages = results.len();
+                tracing::info!(
+                  shard_id = %self.tenant_shard_id.shard_slug(),
+                  lsn = %max_request_lsn,
+                  "Vectored read for {total_keyspace} visited {layers_visited} layers. Returned {num_pages}/{num_keys} pages.",
+                );
+            });
         }
 
         Ok(results)
@@ -1576,8 +1554,6 @@ impl Timeline {
         };
 
         let timer = crate::metrics::WAIT_LSN_TIME.start_timer();
-        let start_finish_counterpair_guard = self.metrics.wait_lsn_start_finish_counterpair.guard();
-
         let wait_for_timeout = self.last_record_lsn.wait_for_timeout(lsn, timeout);
         let wait_for_timeout = std::pin::pin!(wait_for_timeout);
         // Use threshold of 1 because even 1 second of wait for ingest is very much abnormal.
@@ -1593,11 +1569,8 @@ impl Timeline {
                  ready,
                  is_slow,
                  elapsed_total,
-                 elapsed_since_last_callback,
+                 elapsed_since_last_callback: _,
              }| {
-                self.metrics
-                    .wait_lsn_in_progress_micros
-                    .inc_by(u64::try_from(elapsed_since_last_callback.as_micros()).unwrap());
                 if !is_slow {
                     return;
                 }
@@ -1627,7 +1600,6 @@ impl Timeline {
         let res = wait_for_timeout.await;
         // don't count the time spent waiting for lock below, and also in walreceiver.status(), towards the wait_lsn_time_histo
         drop(logging_permit);
-        drop(start_finish_counterpair_guard);
         drop(timer);
         match res {
             Ok(()) => Ok(()),
@@ -3131,8 +3103,6 @@ impl Timeline {
 
         let mut guard = self.layers.write().await;
 
-        let timer = self.metrics.load_layer_map_histo.start_timer();
-
         // Scan timeline directory and create ImageLayerName and DeltaFilename
         // structs representing all files on disk
         let timeline_path = self
@@ -3293,7 +3263,6 @@ impl Timeline {
             num_layers, disk_consistent_lsn, total_physical_size
         );
 
-        timer.stop_and_record();
         Ok(())
     }
 
@@ -4590,7 +4559,7 @@ impl Timeline {
                 }
 
                 // Flush the layer.
-                let flush_timer = self.metrics.flush_time_histo.start_timer();
+                let flush_timer = Instant::now();
                 match self.flush_frozen_layer(layer, ctx).await {
                     Ok(layer_lsn) => flushed_to_lsn = max(flushed_to_lsn, layer_lsn),
                     Err(FlushLayerError::Cancelled) => {
@@ -4606,7 +4575,7 @@ impl Timeline {
                         break err.map(|_| ());
                     }
                 }
-                let flush_duration = flush_timer.stop_and_record();
+                let flush_duration = flush_timer.elapsed();
 
                 // Notify the tenant compaction loop if L0 compaction is needed.
                 let l0_count = *watch_l0.borrow();
@@ -4870,9 +4839,6 @@ impl Timeline {
             "disk_consistent_lsn must be growing monotonously at runtime; current {old_value}, offered {new_value}"
         );
 
-        self.metrics
-            .disk_consistent_lsn_gauge
-            .set(new_value.0 as i64);
         new_value != old_value
     }
 

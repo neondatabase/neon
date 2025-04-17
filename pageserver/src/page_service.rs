@@ -637,7 +637,6 @@ impl std::fmt::Display for BatchedPageStreamError {
 
 struct BatchedGetPageRequest {
     req: PagestreamGetPageRequest,
-    timer: SmgrOpTimer,
     effective_request_lsn: Lsn,
     ctx: RequestContext,
 }
@@ -645,7 +644,6 @@ struct BatchedGetPageRequest {
 #[cfg(feature = "testing")]
 struct BatchedTestRequest {
     req: models::PagestreamTestRequest,
-    timer: SmgrOpTimer,
 }
 
 /// NB: we only hold [`timeline::handle::WeakHandle`] inside this enum,
@@ -655,13 +653,13 @@ struct BatchedTestRequest {
 enum BatchedFeMessage {
     Exists {
         span: Span,
-        timer: SmgrOpTimer,
+       
         shard: timeline::handle::WeakHandle<TenantManagerTypes>,
         req: models::PagestreamExistsRequest,
     },
     Nblocks {
         span: Span,
-        timer: SmgrOpTimer,
+     
         shard: timeline::handle::WeakHandle<TenantManagerTypes>,
         req: models::PagestreamNblocksRequest,
     },
@@ -673,13 +671,13 @@ enum BatchedFeMessage {
     },
     DbSize {
         span: Span,
-        timer: SmgrOpTimer,
+  
         shard: timeline::handle::WeakHandle<TenantManagerTypes>,
         req: models::PagestreamDbSizeRequest,
     },
     GetSlruSegment {
         span: Span,
-        timer: SmgrOpTimer,
+   
         shard: timeline::handle::WeakHandle<TenantManagerTypes>,
         req: models::PagestreamGetSlruSegmentRequest,
     },
@@ -700,27 +698,7 @@ impl BatchedFeMessage {
         self.into()
     }
 
-    fn observe_execution_start(&mut self, at: Instant) {
-        match self {
-            BatchedFeMessage::Exists { timer, .. }
-            | BatchedFeMessage::Nblocks { timer, .. }
-            | BatchedFeMessage::DbSize { timer, .. }
-            | BatchedFeMessage::GetSlruSegment { timer, .. } => {
-                timer.observe_execution_start(at);
-            }
-            BatchedFeMessage::GetPage { pages, .. } => {
-                for page in pages {
-                    page.timer.observe_execution_start(at);
-                }
-            }
-            #[cfg(feature = "testing")]
-            BatchedFeMessage::Test { requests, .. } => {
-                for req in requests {
-                    req.timer.observe_execution_start(at);
-                }
-            }
-            BatchedFeMessage::RespondError { .. } => {}
-        }
+    fn observe_execution_start(&mut self, _at: Instant) {
     }
 
     fn should_break_batch(
@@ -960,7 +938,7 @@ impl PageServerHandler {
                     .await?;
                 debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
                 let span = tracing::info_span!(parent: &parent_span, "handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.hdr.request_lsn, shard_id = %shard.tenant_shard_id.shard_slug());
-                let timer = record_op_start_and_throttle(
+                record_op_start_and_throttle(
                     &shard,
                     metrics::SmgrQueryType::GetRelExists,
                     received_at,
@@ -968,7 +946,7 @@ impl PageServerHandler {
                 .await?;
                 BatchedFeMessage::Exists {
                     span,
-                    timer,
+                
                     shard: shard.downgrade(),
                     req,
                 }
@@ -978,7 +956,7 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .await?;
                 let span = tracing::info_span!(parent: &parent_span, "handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.hdr.request_lsn, shard_id = %shard.tenant_shard_id.shard_slug());
-                let timer = record_op_start_and_throttle(
+                record_op_start_and_throttle(
                     &shard,
                     metrics::SmgrQueryType::GetRelSize,
                     received_at,
@@ -986,7 +964,7 @@ impl PageServerHandler {
                 .await?;
                 BatchedFeMessage::Nblocks {
                     span,
-                    timer,
+                   
                     shard: shard.downgrade(),
                     req,
                 }
@@ -996,7 +974,7 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .await?;
                 let span = tracing::info_span!(parent: &parent_span, "handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.hdr.request_lsn, shard_id = %shard.tenant_shard_id.shard_slug());
-                let timer = record_op_start_and_throttle(
+                record_op_start_and_throttle(
                     &shard,
                     metrics::SmgrQueryType::GetDbSize,
                     received_at,
@@ -1004,7 +982,7 @@ impl PageServerHandler {
                 .await?;
                 BatchedFeMessage::DbSize {
                     span,
-                    timer,
+              
                     shard: shard.downgrade(),
                     req,
                 }
@@ -1014,7 +992,7 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .await?;
                 let span = tracing::info_span!(parent: &parent_span, "handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.hdr.request_lsn, shard_id = %shard.tenant_shard_id.shard_slug());
-                let timer = record_op_start_and_throttle(
+                record_op_start_and_throttle(
                     &shard,
                     metrics::SmgrQueryType::GetSlruSegment,
                     received_at,
@@ -1022,7 +1000,7 @@ impl PageServerHandler {
                 .await?;
                 BatchedFeMessage::GetSlruSegment {
                     span,
-                    timer,
+               
                     shard: shard.downgrade(),
                     req,
                 }
@@ -1121,7 +1099,7 @@ impl PageServerHandler {
                 // request handler log messages contain the request-specific fields.
                 let span = mkspan!(shard.tenant_shard_id.shard_slug());
 
-                let timer = record_op_start_and_throttle(
+                record_op_start_and_throttle(
                     &shard,
                     metrics::SmgrQueryType::GetPageAtLsn,
                     received_at,
@@ -1154,7 +1132,6 @@ impl PageServerHandler {
                     shard: shard.downgrade(),
                     pages: smallvec::smallvec![BatchedGetPageRequest {
                         req,
-                        timer,
                         effective_request_lsn,
                         ctx,
                     }],
@@ -1170,13 +1147,12 @@ impl PageServerHandler {
                     .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .await?;
                 let span = tracing::info_span!(parent: &parent_span, "handle_test_request", shard_id = %shard.tenant_shard_id.shard_slug());
-                let timer =
-                    record_op_start_and_throttle(&shard, metrics::SmgrQueryType::Test, received_at)
+                record_op_start_and_throttle(&shard, metrics::SmgrQueryType::Test, received_at)
                         .await?;
                 BatchedFeMessage::Test {
                     span,
                     shard: shard.downgrade(),
-                    requests: vec![BatchedTestRequest { req, timer }],
+                    requests: vec![BatchedTestRequest { req,  }],
                 }
             }
         };
@@ -1363,7 +1339,7 @@ impl PageServerHandler {
                         })
                     }
                 },
-                Ok((response_msg, _op_timer_already_observed)) => response_msg,
+                Ok((response_msg, )) => response_msg,
             };
 
             //
@@ -1417,7 +1393,7 @@ impl PageServerHandler {
         ctx: &RequestContext,
     ) -> Result<
         (
-            Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>>,
+            Vec<Result<(PagestreamBeMessage, ), BatchedPageStreamError>>,
             Span,
         ),
         QueryError,
@@ -1433,7 +1409,7 @@ impl PageServerHandler {
         Ok(match batch {
             BatchedFeMessage::Exists {
                 span,
-                timer,
+               
                 shard,
                 req,
             } => {
@@ -1444,7 +1420,7 @@ impl PageServerHandler {
                         self.handle_get_rel_exists_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
-                            .map(|msg| (msg, timer))
+                            .map(|msg| (msg, ))
                             .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
                     ],
                     span,
@@ -1452,7 +1428,7 @@ impl PageServerHandler {
             }
             BatchedFeMessage::Nblocks {
                 span,
-                timer,
+           
                 shard,
                 req,
             } => {
@@ -1463,7 +1439,7 @@ impl PageServerHandler {
                         self.handle_get_nblocks_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
-                            .map(|msg| (msg, timer))
+                            .map(|msg| (msg, ))
                             .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
                     ],
                     span,
@@ -1499,7 +1475,6 @@ impl PageServerHandler {
             }
             BatchedFeMessage::DbSize {
                 span,
-                timer,
                 shard,
                 req,
             } => {
@@ -1510,7 +1485,7 @@ impl PageServerHandler {
                         self.handle_db_size_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
-                            .map(|msg| (msg, timer))
+                            .map(|msg| (msg, ))
                             .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
                     ],
                     span,
@@ -1518,7 +1493,6 @@ impl PageServerHandler {
             }
             BatchedFeMessage::GetSlruSegment {
                 span,
-                timer,
                 shard,
                 req,
             } => {
@@ -1529,7 +1503,7 @@ impl PageServerHandler {
                         self.handle_get_slru_segment_request(&shard, &req, &ctx)
                             .instrument(span.clone())
                             .await
-                            .map(|msg| (msg, timer))
+                            .map(|msg| (msg, ))
                             .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
                     ],
                     span,
@@ -2177,7 +2151,7 @@ impl PageServerHandler {
         io_concurrency: IoConcurrency,
         _batch_break_reason: GetPageBatchBreakReason,
         ctx: &RequestContext,
-    ) -> Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>> {
+    ) -> Vec<Result<(PagestreamBeMessage, ), BatchedPageStreamError>> {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
         // If a page trace is running, submit an event for this request.
@@ -2279,7 +2253,7 @@ impl PageServerHandler {
                                 req: req.req,
                                 page,
                             }),
-                            req.timer,
+                            
                         )
                     })
                     .map_err(|e| BatchedPageStreamError {
@@ -2324,7 +2298,7 @@ impl PageServerHandler {
         timeline: &Timeline,
         requests: Vec<BatchedTestRequest>,
         _ctx: &RequestContext,
-    ) -> Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>> {
+    ) -> Vec<Result<(PagestreamBeMessage,), BatchedPageStreamError>> {
         // real requests would do something with the timeline
         let mut results = Vec::with_capacity(requests.len());
         for _req in requests.iter() {
@@ -2350,7 +2324,6 @@ impl PageServerHandler {
                             PagestreamBeMessage::Test(models::PagestreamTestResponse {
                                 req: req.req.clone(),
                             }),
-                            req.timer,
                         )
                     })
                     .map_err(|e| BatchedPageStreamError {

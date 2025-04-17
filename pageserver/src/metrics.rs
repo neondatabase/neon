@@ -17,7 +17,6 @@ use pageserver_api::config::{
     PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
     PageServiceProtocolPipelinedBatchingStrategy, PageServiceProtocolPipelinedExecutionStrategy,
 };
-use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
 use postgres_backend::{QueryError, is_expected_io_error};
 use pq_proto::framed::ConnectionError;
@@ -31,7 +30,7 @@ use crate::pgdatadir_mapping::DatadirModificationStats;
 use crate::task_mgr::TaskKind;
 use crate::tenant::Timeline;
 use crate::tenant::mgr::TenantSlot;
-use crate::tenant::storage_layer::{InMemoryLayer, PersistentLayerDesc};
+use crate::tenant::storage_layer::PersistentLayerDesc;
 use crate::tenant::throttle::ThrottleResult;
 
 /// Prometheus histogram buckets (in seconds) for operations in the critical
@@ -51,8 +50,6 @@ const CRITICAL_OP_BUCKETS: &[f64] = &[
 #[derive(Debug, VariantNames, IntoStaticStr)]
 #[strum(serialize_all = "kebab_case")]
 pub(crate) enum StorageTimeOperation {
-    #[strum(serialize = "layer flush")]
-    LayerFlush,
 
     #[strum(serialize = "layer flush delay")]
     LayerFlushDelay,
@@ -68,9 +65,6 @@ pub(crate) enum StorageTimeOperation {
 
     #[strum(serialize = "imitate logical size")]
     ImitateLogicalSize,
-
-    #[strum(serialize = "load layer map")]
-    LoadLayerMap,
 
     #[strum(serialize = "gc")]
     Gc,
@@ -238,20 +232,6 @@ pub(crate) static WAIT_LSN_IN_PROGRESS_GLOBAL_MICROS: Lazy<IntCounter> = Lazy::n
 });
 
 pub(crate) mod wait_ondemand_download_time {
-    use super::*;
-
-    pub struct WaitOndemandDownloadTimeSum {
-    }
-
-    impl WaitOndemandDownloadTimeSum {
-        pub(crate) fn new(_tenant_id: &str, _shard_id: &str, _timeline_id: &str) -> Self {
-            Self {
-            }
-        }
-        pub(crate) fn observe(&self, _task_kind: TaskKind, _duration: Duration) {
-            
-        }
-    }
 
     pub(crate) fn shutdown_timeline(_tenant_id: &str, _shard_id: &str, _timeline_id: &str) {
     }
@@ -769,16 +749,6 @@ pub(crate) mod virtual_file_descriptor_cache {
 
 #[cfg(not(test))]
 pub(crate) mod virtual_file_io_engine {
-    use super::*;
-
-    pub(crate) static KIND: Lazy<UIntGaugeVec> = Lazy::new(|| {
-        register_uint_gauge_vec!(
-            "pageserver_virtual_file_io_engine_kind",
-            "The configured io engine for VirtualFile",
-            &["kind"],
-        )
-        .unwrap()
-    });
 }
 
 pub(crate) struct SmgrOpTimer(Option<SmgrOpTimerInner>);
@@ -828,9 +798,6 @@ impl SmgrOpTimer {
     pub(crate) fn observe_throttle_done(&mut self, _throttle: ThrottleResult) {
     }
 
-    /// See [`SmgrOpTimerState`] for more context.
-    pub(crate) fn observe_execution_start(&mut self, _at: Instant) {
-    }
 
 }
 
@@ -1804,34 +1771,24 @@ pub(crate) struct TimelineMetrics {
     tenant_id: String,
     shard_id: String,
     timeline_id: String,
-    pub flush_time_histo: StorageTimeMetrics,
     pub flush_delay_histo: StorageTimeMetrics,
     pub compact_time_histo: StorageTimeMetrics,
     pub create_images_time_histo: StorageTimeMetrics,
     pub logical_size_histo: StorageTimeMetrics,
     pub imitate_logical_size_histo: StorageTimeMetrics,
-    pub load_layer_map_histo: StorageTimeMetrics,
     pub garbage_collect_histo: StorageTimeMetrics,
     pub find_gc_cutoffs_histo: StorageTimeMetrics,
-    pub disk_consistent_lsn_gauge: IntGauge,
     pub pitr_history_size: UIntGauge,
     pub archival_size: UIntGauge,
-    pub layers_per_read: Histogram,
     pub standby_horizon_gauge: IntGauge,
-    pub resident_physical_size_gauge: UIntGauge,
     pub visible_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
     pub current_logical_size_gauge: UIntGauge,
     pub aux_file_size_gauge: IntGauge,
     pub directory_entries_count_gauge: Lazy<UIntGauge, Box<dyn Send + Fn() -> UIntGauge>>,
-    pub evictions: IntCounter,
-    /// Number of valid LSN leases.
-    pub valid_lsn_lease_count_gauge: UIntGauge,
+    pub evictions: IntCounter, 
     pub wal_records_received: IntCounter,
     pub storage_io_size: StorageIoSizeMetrics,
-    pub wait_lsn_in_progress_micros: GlobalAndPerTenantIntCounter,
-    pub wait_lsn_start_finish_counterpair: IntCounterPair,
-    pub wait_ondemand_download_time: wait_ondemand_download_time::WaitOndemandDownloadTimeSum,
     shutdown: std::sync::atomic::AtomicBool,
 }
 
@@ -1843,12 +1800,7 @@ impl TimelineMetrics {
         let tenant_id = tenant_shard_id.tenant_id.to_string();
         let shard_id = format!("{}", tenant_shard_id.shard_slug());
         let timeline_id = timeline_id_raw.to_string();
-        let flush_time_histo = StorageTimeMetrics::new(
-            StorageTimeOperation::LayerFlush,
-            &tenant_id,
-            &shard_id,
-            &timeline_id,
-        );
+       
         let flush_delay_histo = StorageTimeMetrics::new(
             StorageTimeOperation::LayerFlushDelay,
             &tenant_id,
@@ -1879,12 +1831,6 @@ impl TimelineMetrics {
             &shard_id,
             &timeline_id,
         );
-        let load_layer_map_histo = StorageTimeMetrics::new(
-            StorageTimeOperation::LoadLayerMap,
-            &tenant_id,
-            &shard_id,
-            &timeline_id,
-        );
         let garbage_collect_histo = StorageTimeMetrics::new(
             StorageTimeOperation::Gc,
             &tenant_id,
@@ -1898,10 +1844,6 @@ impl TimelineMetrics {
             &timeline_id,
         );
 
-        let disk_consistent_lsn_gauge = DISK_CONSISTENT_LSN
-            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-            .unwrap();
-
         let pitr_history_size = PITR_HISTORY_SIZE
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
@@ -1910,14 +1852,7 @@ impl TimelineMetrics {
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
 
-        let layers_per_read = LAYERS_PER_READ
-            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-            .unwrap();
-
         let standby_horizon_gauge = STANDBY_HORIZON
-            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-            .unwrap();
-        let resident_physical_size_gauge = RESIDENT_PHYSICAL_SIZE
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
         let visible_physical_size_gauge = VISIBLE_PHYSICAL_SIZE
@@ -1950,36 +1885,16 @@ impl TimelineMetrics {
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
 
-        let valid_lsn_lease_count_gauge = VALID_LSN_LEASE_COUNT
-            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-            .unwrap();
-
         let wal_records_received = PAGESERVER_TIMELINE_WAL_RECORDS_RECEIVED
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
 
         let storage_io_size = StorageIoSizeMetrics::new(&tenant_id, &shard_id, &timeline_id);
 
-        let wait_lsn_in_progress_micros = GlobalAndPerTenantIntCounter {
-
-        };
-
-        let wait_lsn_start_finish_counterpair = WAIT_LSN_START_FINISH_COUNTERPAIR
-            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-            .unwrap();
-
-        let wait_ondemand_download_time =
-            wait_ondemand_download_time::WaitOndemandDownloadTimeSum::new(
-                &tenant_id,
-                &shard_id,
-                &timeline_id,
-            );
-
         TimelineMetrics {
             tenant_id,
             shard_id,
             timeline_id,
-            flush_time_histo,
             flush_delay_histo,
             compact_time_histo,
             create_images_time_histo,
@@ -1987,31 +1902,20 @@ impl TimelineMetrics {
             imitate_logical_size_histo,
             garbage_collect_histo,
             find_gc_cutoffs_histo,
-            load_layer_map_histo,
-            disk_consistent_lsn_gauge,
             pitr_history_size,
             archival_size,
-            layers_per_read,
             standby_horizon_gauge,
-            resident_physical_size_gauge,
             visible_physical_size_gauge,
             current_logical_size_gauge,
             aux_file_size_gauge,
             directory_entries_count_gauge,
             evictions,
             storage_io_size,
-            valid_lsn_lease_count_gauge,
             wal_records_received,
-            wait_lsn_in_progress_micros,
-            wait_lsn_start_finish_counterpair,
-            wait_ondemand_download_time,
             shutdown: std::sync::atomic::AtomicBool::default(),
         }
     }
 
-    pub(crate) fn record_new_file_metrics(&self, sz: u64) {
-        self.resident_physical_size_add(sz);
-    }
 
     pub(crate) fn resident_physical_size_sub(&self, _sz: u64) {
         // self.resident_physical_size_gauge.sub(sz);
@@ -2026,17 +1930,6 @@ impl TimelineMetrics {
     pub(crate) fn resident_physical_size_get(&self) -> u64 {
         // self.resident_physical_size_gauge.get()
         0 // FIXME: Return dummy value as gauge access is commented out
-    }
-
-
-    /// Removes a frozen ephemeral layer to TIMELINE_LAYER metrics.
-    pub fn dec_frozen_layer(&self, layer: &InMemoryLayer) {
-        assert!(matches!(layer.info(), InMemoryLayerInfo::Frozen { .. }));
-
-    }
-
-    /// Adds a frozen ephemeral layer to TIMELINE_LAYER metrics.
-    pub fn inc_frozen_layer(&self, _layer: &InMemoryLayer) {
     }
 
     /// Removes a persistent layer from TIMELINE_LAYER metrics.
@@ -2643,18 +2536,6 @@ pub mod tokio_epoll_uring {
         .unwrap()
     });
 }
-
-pub(crate) struct GlobalAndPerTenantIntCounter {
-}
-
-impl GlobalAndPerTenantIntCounter {
-    #[inline(always)]
-    pub(crate) fn inc_by(&self, _n: u64) {
-        // self.global.inc_by(n);
-        // self.per_tenant.inc_by(n);
-    }
-}
-
 pub(crate) mod tenant_throttling {
     use metrics::register_int_counter_vec;
     use once_cell::sync::Lazy;

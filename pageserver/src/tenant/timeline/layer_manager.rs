@@ -290,7 +290,7 @@ impl OpenLayerManager {
         lsn: Lsn,
         last_freeze_at: &AtomicLsn,
         write_lock: &mut tokio::sync::MutexGuard<'_, Option<TimelineWriterState>>,
-        metrics: &TimelineMetrics,
+        _metrics: &TimelineMetrics,
     ) -> bool {
         let Lsn(last_record_lsn) = lsn;
         let end_lsn = Lsn(last_record_lsn + 1);
@@ -299,10 +299,6 @@ impl OpenLayerManager {
             let open_layer_rc = Arc::clone(open_layer);
             open_layer.freeze(end_lsn).await;
 
-            // Increment the frozen layer metrics. This is decremented in `finish_flush_l0_layer()`.
-            // TODO: It would be nicer to do this via `InMemoryLayer::drop()`, but it requires a
-            // reference to the timeline metrics. Other methods use a metrics borrow as well.
-            metrics.inc_frozen_layer(open_layer);
 
             // The layer is no longer open, update the layer map to reflect this.
             // We will replace it with on-disk historics below.
@@ -334,16 +330,12 @@ impl OpenLayerManager {
     pub(crate) fn track_new_image_layers(
         &mut self,
         image_layers: &[ResidentLayer],
-        metrics: &TimelineMetrics,
+        _metrics: &TimelineMetrics,
     ) {
         let mut updates = self.layer_map.batch_update();
         for layer in image_layers {
             Self::insert_historic_layer(layer.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
 
-            // record these here instead of Layer::finish_creating because otherwise partial
-            // failure with create_image_layers would balloon up the physical size gauge. downside
-            // is that all layers need to be created before metrics are updated.
-            metrics.record_new_file_metrics(layer.layer_desc().file_size);
         }
         updates.flush();
     }
@@ -353,14 +345,13 @@ impl OpenLayerManager {
         &mut self,
         delta_layer: Option<&ResidentLayer>,
         frozen_layer_for_check: &Arc<InMemoryLayer>,
-        metrics: &TimelineMetrics,
+        _metrics: &TimelineMetrics,
     ) {
         let inmem = self
             .layer_map
             .frozen_layers
             .pop_front()
             .expect("there must be a inmem layer to flush");
-        metrics.dec_frozen_layer(&inmem);
 
         // Only one task may call this function at a time (for this
         // timeline). If two tasks tried to flush the same frozen
@@ -370,7 +361,6 @@ impl OpenLayerManager {
         if let Some(l) = delta_layer {
             let mut updates = self.layer_map.batch_update();
             Self::insert_historic_layer(l.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
-            metrics.record_new_file_metrics(l.layer_desc().file_size);
             updates.flush();
         }
     }
@@ -380,12 +370,11 @@ impl OpenLayerManager {
         &mut self,
         compact_from: &[Layer],
         compact_to: &[ResidentLayer],
-        metrics: &TimelineMetrics,
+        _metrics: &TimelineMetrics,
     ) {
         let mut updates = self.layer_map.batch_update();
         for l in compact_to {
             Self::insert_historic_layer(l.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
-            metrics.record_new_file_metrics(l.layer_desc().file_size);
         }
         for l in compact_from {
             Self::delete_historic_layer(l, &mut updates, &mut self.layer_fmgr);
@@ -438,7 +427,7 @@ impl OpenLayerManager {
         rewrite_layers: &[(Layer, ResidentLayer)],
         drop_layers: &[Layer],
         add_layers: &[ResidentLayer],
-        metrics: &TimelineMetrics,
+        _metrics: &TimelineMetrics,
     ) {
         let mut updates = self.layer_map.batch_update();
         for (old_layer, new_layer) in rewrite_layers {
@@ -469,14 +458,12 @@ impl OpenLayerManager {
                 &mut self.layer_fmgr,
             );
 
-            metrics.record_new_file_metrics(new_layer.layer_desc().file_size);
         }
         for l in drop_layers {
             Self::delete_historic_layer(l, &mut updates, &mut self.layer_fmgr);
         }
         for l in add_layers {
             Self::insert_historic_layer(l.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
-            metrics.record_new_file_metrics(l.layer_desc().file_size);
         }
         updates.flush();
     }

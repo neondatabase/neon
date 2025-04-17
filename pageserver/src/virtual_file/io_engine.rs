@@ -54,14 +54,7 @@ static IO_ENGINE: AtomicU8 = AtomicU8::new(IoEngine::NotSet as u8);
 pub(crate) fn set(engine_kind: IoEngineKind) {
     let engine: IoEngine = engine_kind.into();
     IO_ENGINE.store(engine as u8, std::sync::atomic::Ordering::Relaxed);
-    #[cfg(not(test))]
-    {
-        let metric = &crate::metrics::virtual_file_io_engine::KIND;
-        metric.reset();
-        metric
-            .with_label_values(&[&format!("{engine_kind}")])
-            .set(1);
-    }
+    
 }
 
 #[cfg(not(test))]

@@ -572,7 +572,6 @@ pub(super) async fn handle_walreceiver_connection(
                         }
 
                         // Ingest the records without immediately committing them.
-                        timeline.metrics.wal_records_received.inc();
                         let ingested = walingest
                             .ingest_record(interpreted, &mut modification, &ctx)
                             .await

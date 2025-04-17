@@ -569,9 +569,7 @@ impl RequestContext {
         }
 
         match &self.scope {
-            Scope::Timeline { arc_arc } => arc_arc
-                .wait_ondemand_download_time
-                .observe(self.task_kind, duration),
+            Scope::Timeline { arc_arc: _ } => {},
             _ => {
                 use once_cell::sync::Lazy;
                 use std::sync::Mutex;

@@ -3850,33 +3850,13 @@ impl Tenant {
     }
 
     pub(crate) fn get_sizes(&self) -> TopTenantShardItem {
-        let mut result = TopTenantShardItem {
+         TopTenantShardItem {
             id: self.tenant_shard_id,
             resident_size: 0,
             physical_size: 0,
             max_logical_size: 0,
             max_logical_size_per_shard: 0,
-        };
-
-        for timeline in self.timelines.lock().unwrap().values() {
-            result.resident_size += timeline.metrics.resident_physical_size_gauge.get();
-
-            result.physical_size += timeline
-                .remote_client
-                .metrics
-                .remote_physical_size_gauge
-                .get();
-            result.max_logical_size = std::cmp::max(
-                result.max_logical_size,
-                timeline.metrics.current_logical_size_gauge.get(),
-            );
         }
-
-        result.max_logical_size_per_shard = result
-            .max_logical_size
-            .div_ceil(self.tenant_shard_id.shard_count.count() as u64);
-
-        result
     }
 }
 
@@ -4666,10 +4646,6 @@ impl Tenant {
                 let now = SystemTime::now();
                 target.leases.retain(|_, lease| !lease.is_expired(&now));
 
-                timeline
-                    .metrics
-                    .valid_lsn_lease_count_gauge
-                    .set(target.leases.len() as u64);
 
                 // Look up parent's PITR cutoff to update the child's knowledge of whether it is within parent's PITR
                 if let Some(ancestor_id) = timeline.get_ancestor_timeline_id() {
