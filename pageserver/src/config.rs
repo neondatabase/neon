@@ -17,9 +17,10 @@ use once_cell::sync::OnceCell;
 use pageserver_api::config::{DiskUsageEvictionTaskConfig, MaxVectoredReadBytes};
 use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
+use pem::Pem;
 use postgres_backend::AuthType;
 use remote_storage::{RemotePath, RemoteStorageConfig};
-use reqwest::{Certificate, Url};
+use reqwest::Url;
 use storage_broker::Uri;
 use utils::id::{NodeId, TimelineId};
 use utils::logging::{LogFormat, SecretString};
@@ -67,8 +68,8 @@ pub struct PageServerConf {
     /// Period to reload certificate and private key from files.
     /// Default: 60s.
     pub ssl_cert_reload_period: Duration,
-    /// Trusted root CA certificates to use in https APIs.
-    pub ssl_ca_certs: Vec<Certificate>,
+    /// Trusted root CA certificates to use in https APIs in PEM format.
+    pub ssl_ca_certs: Vec<Pem>,
 
     /// Current availability zone. Used for traffic metrics.
     pub availability_zone: Option<String>,
@@ -497,7 +498,10 @@ impl PageServerConf {
             ssl_ca_certs: match ssl_ca_file {
                 Some(ssl_ca_file) => {
                     let buf = std::fs::read(ssl_ca_file)?;
-                    Certificate::from_pem_bundle(&buf)?
+                    pem::parse_many(&buf)?
+                        .into_iter()
+                        .filter(|pem| pem.tag() == "CERTIFICATE")
+                        .collect()
                 }
                 None => Vec::new(),
             },
