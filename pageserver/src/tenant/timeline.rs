@@ -2718,15 +2718,6 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.eviction_policy)
     }
 
-    fn get_evictions_low_residence_duration_metric_threshold(
-        tenant_conf: &pageserver_api::models::TenantConfig,
-        default_tenant_conf: &pageserver_api::config::TenantConfigToml,
-    ) -> Duration {
-        tenant_conf
-            .evictions_low_residence_duration_metric_threshold
-            .unwrap_or(default_tenant_conf.evictions_low_residence_duration_metric_threshold)
-    }
-
     fn get_image_layer_creation_check_threshold(&self) -> u8 {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -2802,28 +2793,8 @@ impl Timeline {
 
         // The threshold is embedded in the metric. So, we need to update it.
         {
-            let new_threshold = Self::get_evictions_low_residence_duration_metric_threshold(
-                &new_conf.tenant_conf,
-                &self.conf.default_tenant_conf,
-            );
-
-            let tenant_id_str = self.tenant_shard_id.tenant_id.to_string();
-            let shard_id_str = format!("{}", self.tenant_shard_id.shard_slug());
-
-            let timeline_id_str = self.timeline_id.to_string();
-
             self.remote_client.update_config(&new_conf.location);
 
-            self.metrics
-                .evictions_with_low_residence_duration
-                .write()
-                .unwrap()
-                .change_threshold(
-                    &tenant_id_str,
-                    &shard_id_str,
-                    &timeline_id_str,
-                    new_threshold,
-                );
         }
     }
 
@@ -2857,13 +2828,6 @@ impl Timeline {
         let (layer_flush_start_tx, _) = tokio::sync::watch::channel((0, disk_consistent_lsn));
         let (layer_flush_done_tx, _) = tokio::sync::watch::channel((0, Ok(())));
 
-        let evictions_low_residence_duration_metric_threshold = {
-            let loaded_tenant_conf = tenant_conf.load();
-            Self::get_evictions_low_residence_duration_metric_threshold(
-                &loaded_tenant_conf.tenant_conf,
-                &conf.default_tenant_conf,
-            )
-        };
 
         if let Some(ancestor) = &ancestor {
             let mut ancestor_gc_info = ancestor.gc_info.write().unwrap();
@@ -2876,10 +2840,6 @@ impl Timeline {
             let metrics = Arc::new(TimelineMetrics::new(
                 &tenant_shard_id,
                 &timeline_id,
-                crate::metrics::EvictionsWithLowResidenceDurationBuilder::new(
-                    "mtime",
-                    evictions_low_residence_duration_metric_threshold,
-                ),
             ));
             let aux_file_metrics = metrics.aux_file_size_gauge.clone();
 
@@ -3016,10 +2976,6 @@ impl Timeline {
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
 
-            result
-                .metrics
-                .last_record_lsn_gauge
-                .set(disk_consistent_lsn.0 as i64);
             result
         })
     }
@@ -3489,7 +3445,7 @@ impl Timeline {
             self.current_logical_size.initialized.add_permits(1);
         }
 
-        let try_once = |attempt: usize| {
+        let try_once = |_attempt: usize| {
             let background_ctx = &background_ctx;
             let self_ref = &self;
             let skip_concurrency_limiter = &skip_concurrency_limiter;
@@ -3500,7 +3456,7 @@ impl Timeline {
                 );
 
                 use crate::metrics::initial_logical_size::StartCircumstances;
-                let (_maybe_permit, circumstances) = tokio::select! {
+                let (_maybe_permit, _circumstances) = tokio::select! {
                     permit = wait_for_permit => {
                         (Some(permit), StartCircumstances::AfterBackgroundTasksRateLimit)
                     }
@@ -3515,12 +3471,6 @@ impl Timeline {
                         // one runtime across the entire process, so, let's leave this for now.
                         (None, StartCircumstances::SkippedConcurrencyLimiter)
                     }
-                };
-
-                let metrics_guard = if attempt == 1 {
-                    crate::metrics::initial_logical_size::START_CALCULATION.first(circumstances)
-                } else {
-                    crate::metrics::initial_logical_size::START_CALCULATION.retry(circumstances)
                 };
 
                 let io_concurrency = IoConcurrency::spawn_from_conf(
@@ -3549,7 +3499,7 @@ impl Timeline {
 
                 // TODO: add aux file size to logical size
 
-                Ok((calculated_size, metrics_guard))
+                Ok(calculated_size)
             }
         };
 
@@ -3586,7 +3536,7 @@ impl Timeline {
             }
         };
 
-        let (calculated_size, metrics_guard) = match retrying.await {
+        let calculated_size = match retrying.await {
             ControlFlow::Continue(calculated_size) => calculated_size,
             ControlFlow::Break(()) => return,
         };
@@ -3605,8 +3555,7 @@ impl Timeline {
 
         self.current_logical_size
             .initial_logical_size
-            .set((calculated_size, metrics_guard.calculation_result_saved()))
-            .ok()
+            .set((calculated_size,))
             .expect("only this task sets it");
     }
 
@@ -4503,8 +4452,6 @@ impl Timeline {
 
     pub(crate) fn finish_write(&self, new_lsn: Lsn) {
         assert!(new_lsn.is_aligned());
-
-        self.metrics.last_record_lsn_gauge.set(new_lsn.0 as i64);
         self.last_record_lsn.advance(new_lsn);
     }
 

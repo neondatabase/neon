@@ -1121,7 +1121,6 @@ impl LayerInner {
                     "unexpectedly on-demand downloading for task kind {:?}",
                     ctx.task_kind()
                 );
-                crate::metrics::UNEXPECTED_ONDEMAND_DOWNLOADS.inc();
 
                 let really_error =
                     matches!(b, Error) && !self.conf.ondemand_download_behavior_treat_error_as_warn;
@@ -1570,17 +1569,7 @@ impl LayerInner {
                     Ok(elapsed) => {
                         let accessed_and_visible = self.access_stats.accessed()
                             && self.access_stats.visibility() == LayerVisibilityHint::Visible;
-                        if accessed_and_visible {
-                            // Only layers used for reads contribute to our "low residence" metric that is used
-                            // to detect thrashing.  Layers promoted for other reasons (e.g. compaction) are allowed
-                            // to be rapidly evicted without contributing to this metric.
-                            timeline
-                                .metrics
-                                .evictions_with_low_residence_duration
-                                .read()
-                                .unwrap()
-                                .observe(elapsed);
-                        }
+                        
 
                         tracing::info!(
                             residence_millis = elapsed.as_millis(),

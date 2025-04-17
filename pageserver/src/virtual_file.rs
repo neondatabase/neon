@@ -27,12 +27,10 @@ use owned_buffers_io::io_buf_ext::FullSlice;
 use pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
 pub use pageserver_api::models::virtual_file as api;
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use tokio::time::Instant;
 use tokio_epoll_uring::{BoundedBuf, IoBuf, IoBufMut, Slice};
 
 use crate::assert_u64_eq_usize::UsizeIsU64;
 use crate::context::RequestContext;
-use crate::metrics::{STORAGE_IO_TIME_METRIC, StorageIoOperation};
 use crate::page_cache::{PAGE_SZ, PageWriteGuard};
 pub(crate) mod io_engine;
 pub use io_engine::{
@@ -431,9 +429,7 @@ impl OpenFiles {
         if let Some(old_file) = slot_guard.file.take() {
             // the normal path of dropping VirtualFile uses "close", use "close-by-replace" here to
             // distinguish the two.
-            STORAGE_IO_TIME_METRIC
-                .get(StorageIoOperation::CloseByReplace)
-                .observe_closure_duration(|| drop(old_file));
+            drop(old_file);
         }
 
         // Prepare the slot for reuse and return it
@@ -532,13 +528,9 @@ impl<T> MaybeFatalIo<T> for std::io::Result<T> {
 /// where "support" means that we measure wall clock time.
 macro_rules! observe_duration {
     ($op:expr, $($body:tt)*) => {{
-        let instant = Instant::now();
-        let result = $($body)*;
-        let elapsed = instant.elapsed().as_secs_f64();
-        STORAGE_IO_TIME_METRIC
-            .get($op)
-            .observe(elapsed);
-        result
+        
+        $($body)*
+        
     }}
 }
 
@@ -1263,9 +1255,7 @@ impl Drop for VirtualFileInner {
                 // there is also operation "close-by-replace" for closes done on eviction for
                 // comparison.
                 if let Some(fd) = slot_guard.file.take() {
-                    STORAGE_IO_TIME_METRIC
-                        .get(StorageIoOperation::Close)
-                        .observe_closure_duration(|| drop(fd));
+                    drop(fd);
                 }
             }
         }

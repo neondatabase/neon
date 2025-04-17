@@ -23,7 +23,6 @@ pub(super) struct LogicalSize {
     /// the initial size at a different LSN.
     pub initial_logical_size: OnceCell<(
         u64,
-        crate::metrics::initial_logical_size::FinishedCalculationGuard,
     )>,
 
     /// Cancellation for the best-effort logical size calculation.
@@ -130,11 +129,7 @@ impl CurrentLogicalSize {
 impl LogicalSize {
     pub(super) fn empty_initial() -> Self {
         Self {
-            initial_logical_size: OnceCell::with_value((0, {
-                crate::metrics::initial_logical_size::START_CALCULATION
-                    .first(crate::metrics::initial_logical_size::StartCircumstances::EmptyInitial)
-                    .calculation_result_saved()
-            })),
+            initial_logical_size: OnceCell::with_value((0,)),
             cancel_wait_for_background_loop_concurrency_limit_semaphore: OnceCell::new(),
             initial_part_end: None,
             size_added_after_initial: AtomicI64::new(0),
@@ -159,7 +154,7 @@ impl LogicalSize {
         //                  ^^^ keep this type explicit so that the casts in this function break if
         //                  we change the type.
         match self.initial_logical_size.get() {
-            Some((initial_size, _)) => {
+            Some((initial_size, )) => {
                 CurrentLogicalSize::Exact(Exact(initial_size.checked_add_signed(size_increment)
                     .with_context(|| format!("Overflow during logical size calculation, initial_size: {initial_size}, size_increment: {size_increment}"))
                     .unwrap()))
@@ -181,7 +176,7 @@ impl LogicalSize {
     /// available for re-use. This doesn't contain the incremental part.
     pub(super) fn initialized_size(&self, lsn: Lsn) -> Option<u64> {
         match self.initial_part_end {
-            Some(v) if v == lsn => self.initial_logical_size.get().map(|(s, _)| *s),
+            Some(v) if v == lsn => self.initial_logical_size.get().map(|(s, )| *s),
             _ => None,
         }
     }
