@@ -103,7 +103,7 @@ jobs:
               exit 1
             fi
           fi
-          #aws s3 ls s3://neon-github-ci-tests
+          aws s3 ls s3://neon-github-ci-tests | head
           dropdb --if-exists contrib_regression
           createdb contrib_regression
           mkdir -p /ext-src/pg_mooncake-src/results/unsupported
