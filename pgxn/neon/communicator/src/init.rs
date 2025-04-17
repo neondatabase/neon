@@ -27,10 +27,10 @@ use crate::backend_comms::NeonIOHandle;
 const NUM_NEON_REQUEST_SLOTS_PER_BACKEND: u32 = 5;
 
 #[unsafe(no_mangle)]
-pub extern "C" fn rcommunicator_shmem_size(max_backends: u32) -> u64 {
+pub extern "C" fn rcommunicator_shmem_size(max_procs: u32) -> u64 {
     let mut size = 0;
 
-    let num_neon_request_slots = max_backends * NUM_NEON_REQUEST_SLOTS_PER_BACKEND;
+    let num_neon_request_slots = max_procs * NUM_NEON_REQUEST_SLOTS_PER_BACKEND;
     size += mem::size_of::<NeonIOHandle>() * num_neon_request_slots as usize;
 
     size as u64
@@ -42,14 +42,14 @@ pub extern "C" fn rcommunicator_shmem_size(max_backends: u32) -> u64 {
 pub extern "C" fn rcommunicator_shmem_init(
     submission_pipe_read_fd: c_int,
     submission_pipe_write_fd: c_int,
-    max_backends: u32,
+    max_procs: u32,
     shmem_ptr: *mut u8,
     shmem_size: u64,
 ) -> *mut CommunicatorInitStruct {
     let mut ptr = shmem_ptr;
     let neon_request_slots = ptr.cast::<NeonIOHandle>();
     let num_neon_request_slots_per_backend = NUM_NEON_REQUEST_SLOTS_PER_BACKEND;
-    let num_neon_request_slots = max_backends * num_neon_request_slots_per_backend;
+    let num_neon_request_slots = max_procs * num_neon_request_slots_per_backend;
     unsafe {
         for i in 0..num_neon_request_slots {
             let slot: *mut NeonIOHandle = neon_request_slots.offset(i as isize);
@@ -60,7 +60,7 @@ pub extern "C" fn rcommunicator_shmem_init(
         assert!(ptr.addr() - shmem_ptr.addr() == shmem_size as usize);
     }
     let cis: &'static mut CommunicatorInitStruct = Box::leak(Box::new(CommunicatorInitStruct {
-        max_backends,
+        max_procs,
         shmem_ptr,
         shmem_size,
         submission_pipe_read_fd,

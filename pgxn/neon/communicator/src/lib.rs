@@ -18,7 +18,7 @@ use backend_comms::NeonIOHandle;
 #[derive(Clone)]
 pub struct CommunicatorInitStruct {
     #[allow(dead_code)]
-    max_backends: u32,
+    max_procs: u32,
     #[allow(dead_code)]
     shmem_ptr: *mut u8,
     #[allow(dead_code)]
