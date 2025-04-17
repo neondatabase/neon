@@ -37,7 +37,7 @@ jobs:
 
     runs-on: small
     container:
-      image: ghcr.io/neondatabase/neon-test-extensions-v${{ matrix.pg-version }}:14492108533
+      image: ghcr.io/neondatabase/neon-test-extensions-v${{ matrix.pg-version }}:14512141428
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -103,6 +103,7 @@ jobs:
               exit 1
             fi
           fi
+          aws s3 ls s3://neon-github-ci-tests
           dropdb --if-exists contrib_regression
           createdb contrib_regression
           mkdir -p /ext-src/pg_mooncake-src/results/unsupported
