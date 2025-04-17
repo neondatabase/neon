@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import urllib.parse
+from enum import StrEnum
 from typing import TYPE_CHECKING, final
 
 import requests
@@ -12,6 +13,17 @@ from fixtures.log_helper import log
 
 if TYPE_CHECKING:
     from requests import PreparedRequest
+
+
+COMPUTE_AUDIENCE = "compute"
+"""
+The value to place in the `aud` claim.
+"""
+
+
+@final
+class ComputeClaimsScope(StrEnum):
+    ADMIN = "admin"
 
 
 @final

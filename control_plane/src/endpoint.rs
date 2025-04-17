@@ -45,7 +45,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use compute_api::requests::{ComputeClaims, ConfigurationRequest};
+use compute_api::requests::{
+    COMPUTE_AUDIENCE, ComputeClaims, ComputeClaimsScope, ConfigurationRequest,
+};
 use compute_api::responses::{
     ComputeConfig, ComputeCtlConfig, ComputeStatus, ComputeStatusResponse, TlsConfig,
 };
@@ -630,9 +632,17 @@ impl Endpoint {
     }
 
     /// Generate a JWT with the correct claims.
-    pub fn generate_jwt(&self) -> Result<String> {
+    pub fn generate_jwt(&self, scope: Option<ComputeClaimsScope>) -> Result<String> {
         self.env.generate_auth_token(&ComputeClaims {
-            compute_id: self.endpoint_id.clone(),
+            audience: match scope {
+                Some(ComputeClaimsScope::Admin) => Some(COMPUTE_AUDIENCE.to_owned()),
+                _ => Some(self.endpoint_id.clone()),
+            },
+            compute_id: match scope {
+                Some(ComputeClaimsScope::Admin) => None,
+                _ => Some(self.endpoint_id.clone()),
+            },
+            scope,
         })
     }
 
@@ -903,7 +913,7 @@ impl Endpoint {
                     self.external_http_address.port()
                 ),
             )
-            .bearer_auth(self.generate_jwt()?)
+            .bearer_auth(self.generate_jwt(None::<ComputeClaimsScope>)?)
             .send()
             .await?;
 
@@ -980,7 +990,7 @@ impl Endpoint {
                 self.external_http_address.port()
             ))
             .header(CONTENT_TYPE.as_str(), "application/json")
-            .bearer_auth(self.generate_jwt()?)
+            .bearer_auth(self.generate_jwt(None::<ComputeClaimsScope>)?)
             .body(
                 serde_json::to_string(&ConfigurationRequest {
                     spec,
