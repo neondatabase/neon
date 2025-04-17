@@ -5502,6 +5502,7 @@ dependencies = [
  "anyhow",
  "rand 0.8.5",
  "utils",
+ "workspace_hack",
 ]
 
 [[package]]

@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 utils.workspace = true
+workspace_hack.workspace = true
 
 [dev-dependencies]
 rand.workspace = true
