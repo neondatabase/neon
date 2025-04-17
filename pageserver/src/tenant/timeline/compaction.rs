@@ -137,7 +137,10 @@ impl GcCompactionMetaStatistics {
         let end_time = chrono::Utc::now();
         if let Some(start_time) = self.start_time {
             if end_time > start_time {
-                self.duration_secs = (end_time - start_time).duration().as_secs_f64();
+                let delta = end_time - start_time;
+                if let Ok(std_dur) = delta.to_std() {
+                    self.duration_secs = std_dur.as_secs_f64();
+                }
             }
         }
         self.retention_ratio = self.after_compaction_layer_size as f64
