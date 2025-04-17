@@ -284,7 +284,7 @@ impl From<&OtelExporterConfig> for tracing_utils::ExportConfig {
         tracing_utils::ExportConfig {
             endpoint: Some(val.endpoint.clone()),
             protocol: val.protocol.into(),
-            timeout: val.timeout,
+            timeout: Some(val.timeout),
         }
     }
 }
