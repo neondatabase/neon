@@ -1310,6 +1310,7 @@ impl<'a> TenantDownloader<'a> {
         let downloaded_bytes = download_layer_file(
             self.conf,
             self.remote_storage,
+            None, // TODO: add encryption key pair
             *tenant_shard_id,
             *timeline_id,
             &layer.name,

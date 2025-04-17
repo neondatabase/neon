@@ -23,7 +23,7 @@ use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
 use utils::{backoff, pausable_failpoint};
 
-use super::index::{IndexPart, LayerFileMetadata};
+use super::index::{EncryptionKeyPair, IndexPart, LayerFileMetadata};
 use super::manifest::TenantManifest;
 use super::{
     FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES, INITDB_PATH, parse_remote_index_path,
@@ -51,6 +51,7 @@ use crate::virtual_file::{MaybeFatalIo, VirtualFile, on_fatal_io_error};
 pub async fn download_layer_file<'a>(
     conf: &'static PageServerConf,
     storage: &'a GenericRemoteStorage,
+    key_pair: Option<&'a EncryptionKeyPair>,
     tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
     layer_file_name: &'a LayerName,
@@ -86,7 +87,16 @@ pub async fn download_layer_file<'a>(
 
     let bytes_amount = download_retry(
         || async {
-            download_object(storage, &remote_path, &temp_file_path, gate, cancel, ctx).await
+            download_object(
+                storage,
+                key_pair,
+                &remote_path,
+                &temp_file_path,
+                gate,
+                cancel,
+                ctx,
+            )
+            .await
         },
         &format!("download {remote_path:?}"),
         cancel,
@@ -145,6 +155,7 @@ pub async fn download_layer_file<'a>(
 /// The unlinking has _not_ been made durable.
 async fn download_object(
     storage: &GenericRemoteStorage,
+    encryption_key_pair: Option<&EncryptionKeyPair>,
     src_path: &RemotePath,
     dst_path: &Utf8PathBuf,
     #[cfg_attr(target_os = "macos", allow(unused_variables))] gate: &utils::sync::gate::Gate,
@@ -160,9 +171,12 @@ async fn download_object(
                     .with_context(|| format!("create a destination file for layer '{dst_path}'"))
                     .map_err(DownloadError::Other)?;
 
-                let download = storage
-                    .download(src_path, &DownloadOpts::default(), cancel)
-                    .await?;
+                let mut opts = DownloadOpts::default();
+                if let Some(encryption_key_pair) = encryption_key_pair {
+                    opts.encryption_key = Some(encryption_key_pair.plain_key.to_vec());
+                }
+
+                let download = storage.download(src_path, &opts, cancel).await?;
 
                 pausable_failpoint!("before-downloading-layer-stream-pausable");
 

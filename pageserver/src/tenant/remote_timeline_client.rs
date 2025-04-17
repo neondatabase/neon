@@ -732,9 +732,43 @@ impl RemoteTimelineClient {
                     reason: "no need for a downloads gauge",
                 },
             );
+            let key_pair = if let Some(ref key_id) = layer_metadata.encryption_key {
+                let wrapped_key = {
+                    let mut queue = self.upload_queue.lock().unwrap();
+                    let upload_queue = queue.initialized_mut().unwrap();
+                    let encryption_key_pair =
+                        upload_queue.dirty.keys.iter().find(|key| &key.id == key_id);
+                    if let Some(encryption_key_pair) = encryption_key_pair {
+                        // TODO: also check if we have uploaded the key yet; we should never use a key that is not persisted
+                        encryption_key_pair.clone()
+                    } else {
+                        return Err(DownloadError::Other(anyhow::anyhow!(
+                            "Encryption key pair not found in index_part.json"
+                        )));
+                    }
+                };
+                let Some(kms) = self.kms_impl.as_ref() else {
+                    return Err(DownloadError::Other(anyhow::anyhow!(
+                        "KMS not configured when downloading encrypted layer file"
+                    )));
+                };
+                let plain_key = kms
+                    .decrypt(&wrapped_key.key)
+                    .context("failed to decrypt encryption key")
+                    .map_err(DownloadError::Other)?;
+                Some(EncryptionKeyPair::new(
+                    wrapped_key.id,
+                    plain_key,
+                    wrapped_key.key,
+                ))
+            } else {
+                None
+            };
+
             download::download_layer_file(
                 self.conf,
                 &self.storage_impl,
+                key_pair.as_ref(),
                 self.tenant_shard_id,
                 self.timeline_id,
                 layer_file_name,
