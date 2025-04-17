@@ -608,7 +608,6 @@ jobs:
             BUILD_TAG=${{ needs.meta.outputs.release-tag || needs.meta.outputs.build-tag }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}-bookworm
             DEBIAN_VERSION=bookworm
-          provenance: false
           push: true
           pull: true
           file: Dockerfile
@@ -616,6 +615,8 @@ jobs:
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon:cache-{0}-{1},mode=max', 'bookworm', matrix.arch) || '' }}
           tags: |
             ghcr.io/neondatabase/neon:${{ needs.meta.outputs.build-tag }}-bookworm-${{ matrix.arch }}
+          provenance: mode=max
+          sbom: true
 
   neon-image:
     needs: [ neon-image-arch, meta ]
@@ -722,7 +723,6 @@ jobs:
             BUILD_TAG=${{ needs.meta.outputs.release-tag || needs.meta.outputs.build-tag }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}-${{ matrix.version.debian }}
             DEBIAN_VERSION=${{ matrix.version.debian }}
-          provenance: false
           push: true
           pull: true
           file: compute/compute-node.Dockerfile
@@ -730,6 +730,8 @@ jobs:
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-node-{0}:cache-{1}-{2},mode=max', matrix.version.pg, matrix.version.debian, matrix.arch) || '' }}
           tags: |
             ghcr.io/neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.meta.outputs.build-tag }}-${{ matrix.version.debian }}-${{ matrix.arch }}
+          provenance: mode=max
+          sbom: true
 
       - name: Build neon extensions test image
         if: matrix.version.pg >= 'v16'
@@ -742,7 +744,6 @@ jobs:
             BUILD_TAG=${{ needs.meta.outputs.release-tag || needs.meta.outputs.build-tag }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}-${{ matrix.version.debian }}
             DEBIAN_VERSION=${{ matrix.version.debian }}
-          provenance: false
           push: true
           pull: true
           file: compute/compute-node.Dockerfile
@@ -750,6 +751,8 @@ jobs:
           cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
           tags: |
             ghcr.io/neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{needs.meta.outputs.build-tag}}-${{ matrix.version.debian }}-${{ matrix.arch }}
+          provenance: mode=max
+          sbom: true
 
   compute-node-image:
     needs: [ compute-node-image-arch, meta ]
