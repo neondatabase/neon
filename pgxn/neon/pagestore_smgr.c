@@ -293,7 +293,6 @@ neon_wallog_pagev(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 								blkno,
 								RelFileInfoFmt(InfoFromSMgrRel(reln)),
 								forknum)));
-				Assert(false);
 
 				lsn = GetXLogReplayRecPtr(NULL); /* in standby mode, soldier on */
 			}
@@ -803,7 +802,13 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
+#ifdef DEBUG_COMPARE_LOCAL
+			mdcreate(reln, forkNum, forkNum == INIT_FORKNUM || isRedo);
+			if (forkNum == MAIN_FORKNUM)
+				mdcreate(reln, INIT_FORKNUM, true);
+#else
 			mdcreate(reln, forkNum, isRedo);
+#endif
 			return;
 
 		default:
@@ -1973,6 +1978,10 @@ neon_start_unlogged_build(SMgrRelation reln)
 		case RELPERSISTENCE_UNLOGGED:
 			unlogged_build_rel = reln;
 			unlogged_build_phase = UNLOGGED_BUILD_NOT_PERMANENT;
+#ifdef DEBUG_COMPARE_LOCAL
+			if (!IsParallelWorker())
+				mdcreate(reln, INIT_FORKNUM, true);
+#endif
 			return;
 
 		default:
@@ -1995,12 +2004,14 @@ neon_start_unlogged_build(SMgrRelation reln)
 	 * FIXME: should we pass isRedo true to create the tablespace dir if it
 	 * doesn't exist? Is it needed?
 	 */
-#ifndef DEBUG_COMPARE_LOCAL
  	if (!IsParallelWorker())
+	{
+#ifndef DEBUG_COMPARE_LOCAL
 		mdcreate(reln, MAIN_FORKNUM, false);
 #else
-	mdcreate(reln, INIT_FORKNUM, false);
+		mdcreate(reln, INIT_FORKNUM, true);
 #endif
+	}
 }
 
 /*
@@ -2099,12 +2110,12 @@ neon_end_unlogged_build(SMgrRelation reln)
 #ifndef DEBUG_COMPARE_LOCAL
 			/* use isRedo == true, so that we drop it immediately */
 			mdunlink(rinfob, forknum, true);
-#else
-			mdunlink(rinfob, INIT_FORKNUM, true);
 #endif
 		}
+#ifdef DEBUG_COMPARE_LOCAL
+		mdunlink(rinfob, INIT_FORKNUM, true);
+#endif
 	}
-
 	unlogged_build_rel = NULL;
 	unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 }
