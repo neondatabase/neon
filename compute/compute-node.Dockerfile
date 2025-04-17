@@ -1089,8 +1089,7 @@ USER root
 #
 # Layer "rust extensions pgrx14"
 #
-# The anon extension now requires version 14. Hence, this
-# is being introduced with version 12.
+# Version 14 is now required by a few 
 # This layer should be used as a base for new pgrx extensions,
 # and eventually get merged with `rust-extensions-build`
 #
