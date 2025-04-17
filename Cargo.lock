@@ -5504,6 +5504,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c707298afce11da2efef2f600116fa93ffa7a032b5d7b628aa17711ec81383ca"
 
 [[package]]
+name = "remote_keys"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rand 0.8.5",
+ "utils",
+ "workspace_hack",
+]
+
+[[package]]
 name = "remote_storage"
 version = "0.1.0"
 dependencies = [
@@ -5518,6 +5528,7 @@ dependencies = [
  "azure_identity",
  "azure_storage",
  "azure_storage_blobs",
+ "base64 0.13.1",
  "bytes",
  "camino",
  "camino-tempfile",
@@ -5528,6 +5539,7 @@ dependencies = [
  "humantime-serde",
  "hyper 1.4.1",
  "itertools 0.10.5",
+ "md5",
  "metrics",
  "once_cell",
  "pin-project-lite",

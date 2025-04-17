@@ -178,6 +178,19 @@ impl RemoteStorage for UnreliableWrapper {
         self.inner.download(from, opts, cancel).await
     }
 
+    #[allow(unused_variables)]
+    async fn upload_with_encryption(
+        &self,
+        from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
+        data_size_bytes: usize,
+        to: &RemotePath,
+        metadata: Option<StorageMetadata>,
+        encryption_key: Option<&[u8]>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        unimplemented!()
+    }
+
     async fn delete(&self, path: &RemotePath, cancel: &CancellationToken) -> anyhow::Result<()> {
         self.delete_inner(path, true, cancel).await
     }

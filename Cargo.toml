@@ -30,6 +30,7 @@ members = [
     "libs/tenant_size_model",
     "libs/metrics",
     "libs/postgres_connection",
+    "libs/remote_keys",
     "libs/remote_storage",
     "libs/tracing-utils",
     "libs/postgres_ffi/wal_craft",

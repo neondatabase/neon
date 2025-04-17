@@ -421,7 +421,7 @@ async fn download_is_timeouted(ctx: &mut MaybeEnabledStorage) {
     ))
     .unwrap();
 
-    let len = upload_large_enough_file(&ctx.client, &path, &cancel).await;
+    let len = upload_large_enough_file(&ctx.client, &path, &cancel, None).await;
 
     let timeout = std::time::Duration::from_secs(5);
 
@@ -500,7 +500,7 @@ async fn download_is_cancelled(ctx: &mut MaybeEnabledStorage) {
     ))
     .unwrap();
 
-    let file_len = upload_large_enough_file(&ctx.client, &path, &cancel).await;
+    let file_len = upload_large_enough_file(&ctx.client, &path, &cancel, None).await;
 
     {
         let stream = ctx
@@ -555,6 +555,7 @@ async fn upload_large_enough_file(
     client: &GenericRemoteStorage,
     path: &RemotePath,
     cancel: &CancellationToken,
+    encryption_key: Option<&[u8]>,
 ) -> usize {
     let header = bytes::Bytes::from_static("remote blob data content".as_bytes());
     let body = bytes::Bytes::from(vec![0u8; 1024]);
@@ -565,9 +566,54 @@ async fn upload_large_enough_file(
     let contents = futures::stream::iter(contents.map(std::io::Result::Ok));
 
     client
-        .upload(contents, len, path, None, cancel)
+        .upload_with_encryption(contents, len, path, None, encryption_key, cancel)
         .await
         .expect("upload succeeds");
 
     len
+}
+
+#[test_context(MaybeEnabledStorage)]
+#[tokio::test]
+async fn encryption_works(ctx: &mut MaybeEnabledStorage) {
+    let MaybeEnabledStorage::Enabled(ctx) = ctx else {
+        return;
+    };
+
+    let cancel = CancellationToken::new();
+
+    let path = RemotePath::new(Utf8Path::new(
+        format!("{}/file_to_copy", ctx.base_prefix).as_str(),
+    ))
+    .unwrap();
+
+    let key = rand::random::<[u8; 32]>();
+    let file_len = upload_large_enough_file(&ctx.client, &path, &cancel, Some(&key)).await;
+
+    {
+        let download = ctx
+            .client
+            .download(
+                &path,
+                &DownloadOpts::default().with_encryption_key(Some(&key)),
+                &cancel,
+            )
+            .await
+            .expect("should succeed");
+        let vec = download_to_vec(download).await.expect("should succeed");
+        assert_eq!(vec.len(), file_len);
+    }
+
+    {
+        // Download without encryption key should fail
+        let download = ctx
+            .client
+            .download(&path, &DownloadOpts::default(), &cancel)
+            .await;
+        assert!(download.is_err());
+    }
+
+    let cancel = CancellationToken::new();
+
+    ctx.client.delete_objects(&[path], &cancel).await.unwrap();
 }
