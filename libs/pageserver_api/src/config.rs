@@ -682,10 +682,10 @@ pub mod tenant_conf_defaults {
     pub const DEFAULT_COMPACTION_SHARD_ANCESTOR: bool = true;
 
     // This value needs to be tuned to avoid OOM. We have 3/4*CPUs threads for L0 compaction, that's
-    // 3/4*8=6 on most of our pageservers. Compacting 12 layers requires a maximum of
-    // DEFAULT_CHECKPOINT_DISTANCE*12 memory, that's 3072MB. So with this config, we can get a maximum peak
-    // compaction usage of 18432MB.
-    pub const DEFAULT_COMPACTION_UPPER_LIMIT: usize = 12;
+    // 3/4*8=6 on most of our pageservers. Compacting 10 layers requires a maximum of
+    // DEFAULT_CHECKPOINT_DISTANCE*10 memory, that's 2560MB. So with this config, we can get a maximum peak
+    // compaction usage of 15360MB.
+    pub const DEFAULT_COMPACTION_UPPER_LIMIT: usize = 10;
     // Enable L0 compaction pass and semaphore by default. L0 compaction must be responsive to avoid
     // read amp.
     pub const DEFAULT_COMPACTION_L0_FIRST: bool = true;
