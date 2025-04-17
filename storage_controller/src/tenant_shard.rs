@@ -33,6 +33,7 @@ use crate::scheduler::{
     RefCountUpdate, ScheduleContext, ScheduleError, Scheduler, SecondaryShardTag, ShardTag,
 };
 use crate::service::ReconcileResultRequest;
+use crate::timeline_import::TimelineImportState;
 use crate::{Sequence, service};
 
 /// Serialization helper
@@ -99,6 +100,10 @@ pub(crate) struct TenantShard {
     /// SplitState set, this acts as a guard against other operations such as background
     /// reconciliation, and timeline creation.
     pub(crate) splitting: SplitState,
+
+    /// Flag indicating whether the tenant has an in-progress timeline import.
+    /// Used to disallow shard splits while an import is in progress.
+    pub(crate) importing: TimelineImportState,
 
     /// If a tenant was enqueued for later reconcile due to hitting concurrency limit, this flag
     /// is set. This flag is cleared when the tenant is popped off the delay queue.
@@ -583,6 +588,7 @@ impl TenantShard {
             config: TenantConfig::default(),
             reconciler: None,
             splitting: SplitState::Idle,
+            importing: TimelineImportState::Idle,
             sequence: Sequence(1),
             delayed_reconcile: false,
             waiter: Arc::new(SeqWait::new(Sequence(0))),
@@ -1844,6 +1850,8 @@ impl TenantShard {
             config: serde_json::from_str(&tsp.config).unwrap(),
             reconciler: None,
             splitting: tsp.splitting,
+            // Filled in during [`Service::startup_reconcile`]
+            importing: TimelineImportState::Idle,
             waiter: Arc::new(SeqWait::new(Sequence::initial())),
             error_waiter: Arc::new(SeqWait::new(Sequence::initial())),
             last_error: Arc::default(),
