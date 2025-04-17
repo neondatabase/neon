@@ -1817,8 +1817,34 @@ pub mod virtual_file {
     }
 
     impl IoMode {
-        pub const fn preferred() -> Self {
-            Self::Buffered
+        pub fn preferred() -> Self {
+            // The default behavior when running Rust unit tests without any further
+            // flags is to use the newest behavior if available on the platform (Direct).
+            // The CI uses the following environment variable to unit tests for all
+            // different modes.
+            // NB: the Python regression & perf tests have their own defaults management
+            // that writes pageserver.toml; they do not use this variable.
+            if cfg!(test) {
+                use once_cell::sync::Lazy;
+                static CACHED: Lazy<IoMode> = Lazy::new(|| {
+                    utils::env::var_serde_json_string(
+                        "NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IO_MODE",
+                    )
+                    .unwrap_or({
+                        #[cfg(target_os = "linux")]
+                        {
+                            IoMode::Direct
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            IoMode::Buffered
+                        }
+                    })
+                });
+                *CACHED
+            } else {
+                IoMode::Buffered
+            }
         }
     }
 
