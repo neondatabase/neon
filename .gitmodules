@@ -13,4 +13,4 @@
 [submodule "vendor/postgres-v17"]
 	path = vendor/postgres-v17
 	url = https://github.com/neondatabase/postgres.git
-	branch = thesuhas/anonv2_debugging_pg_catalog
+	branch = REL_17_STABLE_neon
