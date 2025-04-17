@@ -1,19 +1,18 @@
 diff --git a/sql/anon.sql b/sql/anon.sql
-index 0cdc769..ed7c1d9 100644
+index 0cdc769..f6cc950 100644
 --- a/sql/anon.sql
 +++ b/sql/anon.sql
-@@ -1141,3 +1141,9 @@ $$
+@@ -1141,3 +1141,8 @@ $$
  -- TODO : https://en.wikipedia.org/wiki/L-diversity
  
  -- TODO : https://en.wikipedia.org/wiki/T-closeness
 +
 +-- NEON Patches
 +
-+GRANT EXECUTE ON FUNCTION pg_config to neon_superuser;
 +GRANT ALL ON SCHEMA anon to neon_superuser;
 +GRANT ALL ON ALL TABLES IN SCHEMA anon TO neon_superuser;
 diff --git a/sql/init.sql b/sql/init.sql
-index 7da6553..222935c 100644
+index 7da6553..f2414f8 100644
 --- a/sql/init.sql
 +++ b/sql/init.sql
 @@ -11,8 +11,22 @@ CREATE OR REPLACE FUNCTION anon.load_csv(
@@ -10410,16 +10409,19 @@ index 7da6553..222935c 100644
    RETURN success;
  
  END;
-diff --git a/src/guc.rs b/src/guc.rs
-index fc5f18d..42a3c5d 100644
---- a/src/guc.rs
-+++ b/src/guc.rs
-@@ -108,7 +108,7 @@ pub fn register_gucs() {
-         "New masking engine (EXPERIMENTAL)",
-         "",
-         &ANON_TRANSPARENT_DYNAMIC_MASKING,
--        GucContext::Suset,
-+        GucContext::Userset,
-         GucFlags::default(),
-     );
- 
+@@ -159,14 +10460,7 @@ SECURITY LABEL FOR anon ON FUNCTION anon.load(TEXT) IS 'UNTRUSTED';
+ CREATE OR REPLACE FUNCTION anon.init()
+ RETURNS BOOLEAN
+ AS $$
+-  WITH conf AS (
+-        -- find the local extension directory
+-        SELECT setting AS sharedir
+-        FROM pg_catalog.pg_config
+-        WHERE name = 'SHAREDIR'
+-    )
+-  SELECT anon.init(conf.sharedir || '/extension/anon/')
+-  FROM conf;
++  SELECT anon.init('');
+ $$
+   LANGUAGE SQL
+   VOLATILE
