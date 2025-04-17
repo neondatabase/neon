@@ -4201,7 +4201,7 @@ class Endpoint(PgProtocol, LogUtils):
 
         self.config(config_lines)
 
-        self.__jwt = self.env.neon_cli.endpoint_generate_jwt(self.endpoint_id)
+        self.__jwt = self.generate_jwt()
 
         return self
 
@@ -4247,6 +4247,14 @@ class Endpoint(PgProtocol, LogUtils):
         self.log_config_value("neon.file_cache_size_limit")
 
         return self
+
+    def generate_jwt(self, scope: str | None = None) -> str:
+        """
+        Generate a JWT for making requests to the endpoint's external HTTP
+        server.
+        """
+        assert self.endpoint_id is not None
+        return self.env.neon_cli.endpoint_generate_jwt(self.endpoint_id, scope)
 
     def endpoint_path(self) -> Path:
         """Path to endpoint directory"""
