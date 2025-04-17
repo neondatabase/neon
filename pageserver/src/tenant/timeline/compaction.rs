@@ -119,11 +119,9 @@ pub struct GcCompactionMetaStatistics {
     /// The layer size after compaction.
     pub after_compaction_layer_size: u64,
     /// The start time of the meta job.
-    #[serde(serialize_with = "time::serde::rfc3339::option::serialize")]
-    pub start_time: Option<time::OffsetDateTime>,
+    pub start_time: Option<chrono::DateTime<chrono::Utc>>,
     /// The end time of the meta job.
-    #[serde(serialize_with = "time::serde::rfc3339::option::serialize")]
-    pub end_time: Option<time::OffsetDateTime>,
+    pub end_time: Option<chrono::DateTime<chrono::Utc>>,
     /// The duration of the meta job.
     pub duration_secs: f64,
     /// The id of the meta job.
@@ -136,10 +134,10 @@ pub struct GcCompactionMetaStatistics {
 
 impl GcCompactionMetaStatistics {
     fn finalize(&mut self) {
-        let end_time = time::OffsetDateTime::now_utc();
+        let end_time = chrono::Utc::now();
         if let Some(start_time) = self.start_time {
             if end_time > start_time {
-                self.duration_secs = (end_time - start_time).as_seconds_f64();
+                self.duration_secs = (end_time - start_time).duration().as_secs_f64();
             }
         }
         self.retention_ratio = self.after_compaction_layer_size as f64
@@ -526,7 +524,7 @@ impl GcCompactionQueue {
                 }
                 guard.meta_statistics = Some(GcCompactionMetaStatistics {
                     meta_job_id: id,
-                    start_time: Some(time::OffsetDateTime::now_utc()),
+                    start_time: Some(chrono::Utc::now()),
                     before_compaction_layer_size: layer_size,
                     below_lsn: expected_l2_lsn,
                     total_sub_compaction_jobs: jobs_len,

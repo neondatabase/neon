@@ -184,7 +184,6 @@ sync_wrapper = "0.1.2"
 tar = "0.4"
 test-context = "0.3"
 thiserror = "1.0"
-time = { version = "0.3", features = ["formatting"] }
 tikv-jemallocator = { version = "0.6", features = ["profiling", "stats", "unprefixed_malloc_on_supported_platforms"] }
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 tokio = { version = "1.43.1", features = ["macros"] }
