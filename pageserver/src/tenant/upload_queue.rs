@@ -9,6 +9,7 @@ use tracing::info;
 use utils::generation::Generation;
 use utils::lsn::{AtomicLsn, Lsn};
 
+use super::remote_timeline_client::index::EncryptionKeyPair;
 use super::remote_timeline_client::is_same_remote_layer_path;
 use super::storage_layer::{AsLayerDesc as _, LayerName, ResidentLayer};
 use crate::tenant::metadata::TimelineMetadata;
@@ -245,7 +246,7 @@ impl UploadQueueInitialized {
     pub(crate) fn num_inprogress_layer_uploads(&self) -> usize {
         self.inprogress_tasks
             .iter()
-            .filter(|(_, t)| matches!(t.op, UploadOp::UploadLayer(_, _, _)))
+            .filter(|(_, t)| matches!(t.op, UploadOp::UploadLayer(_, _, _, _)))
             .count()
     }
 
@@ -461,7 +462,12 @@ pub struct Delete {
 #[derive(Clone, Debug)]
 pub enum UploadOp {
     /// Upload a layer file. The last field indicates the last operation for thie file.
-    UploadLayer(ResidentLayer, LayerFileMetadata, Option<OpType>),
+    UploadLayer(
+        ResidentLayer,
+        LayerFileMetadata,
+        Option<EncryptionKeyPair>,
+        Option<OpType>,
+    ),
 
     /// Upload a index_part.json file
     UploadMetadata {
@@ -483,7 +489,7 @@ pub enum UploadOp {
 impl std::fmt::Display for UploadOp {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            UploadOp::UploadLayer(layer, metadata, mode) => {
+            UploadOp::UploadLayer(layer, metadata, _, mode) => {
                 write!(
                     f,
                     "UploadLayer({}, size={:?}, gen={:?}, mode={:?})",
@@ -517,13 +523,13 @@ impl UploadOp {
             (UploadOp::Shutdown, _) | (_, UploadOp::Shutdown) => false,
 
             // Uploads and deletes can bypass each other unless they're for the same file.
-            (UploadOp::UploadLayer(a, ameta, _), UploadOp::UploadLayer(b, bmeta, _)) => {
+            (UploadOp::UploadLayer(a, ameta, _, _), UploadOp::UploadLayer(b, bmeta, _, _)) => {
                 let aname = &a.layer_desc().layer_name();
                 let bname = &b.layer_desc().layer_name();
                 !is_same_remote_layer_path(aname, ameta, bname, bmeta)
             }
-            (UploadOp::UploadLayer(u, umeta, _), UploadOp::Delete(d))
-            | (UploadOp::Delete(d), UploadOp::UploadLayer(u, umeta, _)) => {
+            (UploadOp::UploadLayer(u, umeta, _, _), UploadOp::Delete(d))
+            | (UploadOp::Delete(d), UploadOp::UploadLayer(u, umeta, _, _)) => {
                 d.layers.iter().all(|(dname, dmeta)| {
                     !is_same_remote_layer_path(&u.layer_desc().layer_name(), umeta, dname, dmeta)
                 })
@@ -539,8 +545,8 @@ impl UploadOp {
             // Similarly, index uploads can bypass uploads and deletes as long as neither the
             // uploaded index nor the active index references the file (the latter would be
             // incorrect use by the caller).
-            (UploadOp::UploadLayer(u, umeta, _), UploadOp::UploadMetadata { uploaded: i })
-            | (UploadOp::UploadMetadata { uploaded: i }, UploadOp::UploadLayer(u, umeta, _)) => {
+            (UploadOp::UploadLayer(u, umeta, _, _), UploadOp::UploadMetadata { uploaded: i })
+            | (UploadOp::UploadMetadata { uploaded: i }, UploadOp::UploadLayer(u, umeta, _, _)) => {
                 let uname = u.layer_desc().layer_name();
                 !i.references(&uname, umeta) && !index.references(&uname, umeta)
             }
@@ -577,7 +583,7 @@ mod tests {
     fn assert_same_op(a: &UploadOp, b: &UploadOp) {
         use UploadOp::*;
         match (a, b) {
-            (UploadLayer(a, ameta, atype), UploadLayer(b, bmeta, btype)) => {
+            (UploadLayer(a, ameta, _, atype), UploadLayer(b, bmeta, _, btype)) => {
                 assert_eq!(a.layer_desc().layer_name(), b.layer_desc().layer_name());
                 assert_eq!(ameta, bmeta);
                 assert_eq!(atype, btype);
@@ -711,7 +717,7 @@ mod tests {
 
         // Enqueue non-conflicting upload, delete, and index before and after a barrier.
         let ops = [
-            UploadOp::UploadLayer(layer0.clone(), layer0.metadata(), None),
+            UploadOp::UploadLayer(layer0.clone(), layer0.metadata(), None, None),
             UploadOp::Delete(Delete {
                 layers: vec![(layer1.layer_desc().layer_name(), layer1.metadata())],
             }),
@@ -719,7 +725,7 @@ mod tests {
                 uploaded: index.clone(),
             },
             UploadOp::Barrier(barrier),
-            UploadOp::UploadLayer(layer2.clone(), layer2.metadata(), None),
+            UploadOp::UploadLayer(layer2.clone(), layer2.metadata(), None, None),
             UploadOp::Delete(Delete {
                 layers: vec![(layer3.layer_desc().layer_name(), layer3.metadata())],
             }),
@@ -844,9 +850,9 @@ mod tests {
         );
 
         let ops = [
-            UploadOp::UploadLayer(layer0a.clone(), layer0a.metadata(), None),
-            UploadOp::UploadLayer(layer0b.clone(), layer0b.metadata(), None),
-            UploadOp::UploadLayer(layer0c.clone(), layer0c.metadata(), None),
+            UploadOp::UploadLayer(layer0a.clone(), layer0a.metadata(), None, None),
+            UploadOp::UploadLayer(layer0b.clone(), layer0b.metadata(), None, None),
+            UploadOp::UploadLayer(layer0c.clone(), layer0c.metadata(), None, None),
         ];
 
         queue.queued_operations.extend(ops.clone());
@@ -883,14 +889,14 @@ mod tests {
         );
 
         let ops = [
-            UploadOp::UploadLayer(layer0.clone(), layer0.metadata(), None),
+            UploadOp::UploadLayer(layer0.clone(), layer0.metadata(), None, None),
             UploadOp::Delete(Delete {
                 layers: vec![
                     (layer0.layer_desc().layer_name(), layer0.metadata()),
                     (layer1.layer_desc().layer_name(), layer1.metadata()),
                 ],
             }),
-            UploadOp::UploadLayer(layer1.clone(), layer1.metadata(), None),
+            UploadOp::UploadLayer(layer1.clone(), layer1.metadata(), None, None),
         ];
 
         queue.queued_operations.extend(ops.clone());
@@ -939,15 +945,15 @@ mod tests {
         );
 
         let ops = [
-            UploadOp::UploadLayer(layer0.clone(), layer0.metadata(), None),
+            UploadOp::UploadLayer(layer0.clone(), layer0.metadata(), None, None),
             UploadOp::Delete(Delete {
                 layers: vec![
                     (layer0.layer_desc().layer_name(), layer0.metadata()),
                     (layer1.layer_desc().layer_name(), layer1.metadata()),
                 ],
             }),
-            UploadOp::UploadLayer(layer1.clone(), layer1.metadata(), None),
-            UploadOp::UploadLayer(layer2.clone(), layer2.metadata(), None),
+            UploadOp::UploadLayer(layer1.clone(), layer1.metadata(), None, None),
+            UploadOp::UploadLayer(layer2.clone(), layer2.metadata(), None, None),
             UploadOp::Delete(Delete {
                 layers: vec![(layer3.layer_desc().layer_name(), layer3.metadata())],
             }),
@@ -985,9 +991,9 @@ mod tests {
         );
 
         let ops = [
-            UploadOp::UploadLayer(layer0.clone(), layer0.metadata(), None),
-            UploadOp::UploadLayer(layer1.clone(), layer1.metadata(), None),
-            UploadOp::UploadLayer(layer2.clone(), layer2.metadata(), None),
+            UploadOp::UploadLayer(layer0.clone(), layer0.metadata(), None, None),
+            UploadOp::UploadLayer(layer1.clone(), layer1.metadata(), None, None),
+            UploadOp::UploadLayer(layer2.clone(), layer2.metadata(), None, None),
         ];
 
         queue.queued_operations.extend(ops.clone());
@@ -1062,15 +1068,15 @@ mod tests {
         let index2 = index_with(&index1, &layer2);
 
         let ops = [
-            UploadOp::UploadLayer(layer0.clone(), layer0.metadata(), None),
+            UploadOp::UploadLayer(layer0.clone(), layer0.metadata(), None, None),
             UploadOp::UploadMetadata {
                 uploaded: index0.clone(),
             },
-            UploadOp::UploadLayer(layer1.clone(), layer1.metadata(), None),
+            UploadOp::UploadLayer(layer1.clone(), layer1.metadata(), None, None),
             UploadOp::UploadMetadata {
                 uploaded: index1.clone(),
             },
-            UploadOp::UploadLayer(layer2.clone(), layer2.metadata(), None),
+            UploadOp::UploadLayer(layer2.clone(), layer2.metadata(), None, None),
             UploadOp::UploadMetadata {
                 uploaded: index2.clone(),
             },
@@ -1129,7 +1135,7 @@ mod tests {
 
         let ops = [
             // Initial upload, with a barrier to prevent index coalescing.
-            UploadOp::UploadLayer(layer.clone(), layer.metadata(), None),
+            UploadOp::UploadLayer(layer.clone(), layer.metadata(), None, None),
             UploadOp::UploadMetadata {
                 uploaded: index_upload.clone(),
             },
@@ -1178,7 +1184,7 @@ mod tests {
 
         let ops = [
             // Initial upload, with a barrier to prevent index coalescing.
-            UploadOp::UploadLayer(layer.clone(), layer.metadata(), None),
+            UploadOp::UploadLayer(layer.clone(), layer.metadata(), None, None),
             UploadOp::UploadMetadata {
                 uploaded: index_upload.clone(),
             },
@@ -1188,7 +1194,7 @@ mod tests {
                 uploaded: index_deref.clone(),
             },
             // Replace and reference the layer.
-            UploadOp::UploadLayer(layer.clone(), layer.metadata(), None),
+            UploadOp::UploadLayer(layer.clone(), layer.metadata(), None, None),
             UploadOp::UploadMetadata {
                 uploaded: index_ref.clone(),
             },
@@ -1236,7 +1242,7 @@ mod tests {
 
         // Enqueue non-conflicting upload, delete, and index before and after a shutdown.
         let ops = [
-            UploadOp::UploadLayer(layer0.clone(), layer0.metadata(), None),
+            UploadOp::UploadLayer(layer0.clone(), layer0.metadata(), None, None),
             UploadOp::Delete(Delete {
                 layers: vec![(layer1.layer_desc().layer_name(), layer1.metadata())],
             }),
@@ -1244,7 +1250,7 @@ mod tests {
                 uploaded: index.clone(),
             },
             UploadOp::Shutdown,
-            UploadOp::UploadLayer(layer2.clone(), layer2.metadata(), None),
+            UploadOp::UploadLayer(layer2.clone(), layer2.metadata(), None, None),
             UploadOp::Delete(Delete {
                 layers: vec![(layer3.layer_desc().layer_name(), layer3.metadata())],
             }),
@@ -1306,10 +1312,10 @@ mod tests {
         );
 
         let ops = [
-            UploadOp::UploadLayer(layer0.clone(), layer0.metadata(), None),
-            UploadOp::UploadLayer(layer1.clone(), layer1.metadata(), None),
-            UploadOp::UploadLayer(layer2.clone(), layer2.metadata(), None),
-            UploadOp::UploadLayer(layer3.clone(), layer3.metadata(), None),
+            UploadOp::UploadLayer(layer0.clone(), layer0.metadata(), None, None),
+            UploadOp::UploadLayer(layer1.clone(), layer1.metadata(), None, None),
+            UploadOp::UploadLayer(layer2.clone(), layer2.metadata(), None, None),
+            UploadOp::UploadLayer(layer3.clone(), layer3.metadata(), None, None),
         ];
 
         queue.queued_operations.extend(ops.clone());
@@ -1360,7 +1366,7 @@ mod tests {
                 .layer_metadata
                 .insert(layer.layer_desc().layer_name(), layer.metadata());
             vec![
-                UploadOp::UploadLayer(layer.clone(), layer.metadata(), None),
+                UploadOp::UploadLayer(layer.clone(), layer.metadata(), None, None),
                 UploadOp::Delete(Delete {
                     layers: vec![(layer.layer_desc().layer_name(), layer.metadata())],
                 }),

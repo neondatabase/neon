@@ -192,11 +192,12 @@ pub(crate) use download::{
     download_index_part, download_initdb_tar_zst, download_tenant_manifest, is_temp_download_file,
     list_remote_tenant_shards, list_remote_timelines,
 };
-use index::GcCompactionState;
 pub(crate) use index::LayerFileMetadata;
+use index::{EncryptionKey, EncryptionKeyId, EncryptionKeyPair, GcCompactionState, KeyVersion};
 use pageserver_api::models::{RelSizeMigration, TimelineArchivalState, TimelineVisibilityState};
 use pageserver_api::shard::{ShardIndex, TenantShardId};
 use regex::Regex;
+use remote_keys::NaiveKms;
 use remote_storage::{
     DownloadError, GenericRemoteStorage, ListingMode, RemotePath, TimeoutOrCancel,
 };
@@ -367,6 +368,8 @@ pub(crate) struct RemoteTimelineClient {
     config: std::sync::RwLock<RemoteTimelineClientConfig>,
 
     cancel: CancellationToken,
+
+    kms_impl: Option<NaiveKms>,
 }
 
 impl Drop for RemoteTimelineClient {
@@ -411,6 +414,8 @@ impl RemoteTimelineClient {
             )),
             config: std::sync::RwLock::new(RemoteTimelineClientConfig::from(location_conf)),
             cancel: CancellationToken::new(),
+            // TODO: make this configurable
+            kms_impl: Some(NaiveKms::new(tenant_shard_id.tenant_id.to_string())),
         }
     }
 
@@ -1237,10 +1242,12 @@ impl RemoteTimelineClient {
         self: &Arc<Self>,
         layer: ResidentLayer,
     ) -> Result<(), NotInitialized> {
+        let key_pair = self.schedule_generate_encryption_key()?;
+
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
-        self.schedule_layer_file_upload0(upload_queue, layer);
+        self.schedule_layer_file_upload0(upload_queue, layer, key_pair);
         self.launch_queued_tasks(upload_queue);
         Ok(())
     }
@@ -1249,8 +1256,16 @@ impl RemoteTimelineClient {
         self: &Arc<Self>,
         upload_queue: &mut UploadQueueInitialized,
         layer: ResidentLayer,
+        key_pair: Option<EncryptionKeyPair>,
     ) {
-        let metadata = layer.metadata();
+        let mut metadata = layer.metadata();
+        assert!(
+            metadata.encryption_key.is_none(),
+            "layer key is set automatically in schedule_layer_file_upload, should not be set manually"
+        );
+        if let Some(ref key_pair) = key_pair {
+            metadata.encryption_key = Some(key_pair.id.clone());
+        }
 
         upload_queue
             .dirty
@@ -1264,7 +1279,7 @@ impl RemoteTimelineClient {
             "scheduled layer file upload {layer}",
         );
 
-        let op = UploadOp::UploadLayer(layer, metadata, None);
+        let op = UploadOp::UploadLayer(layer, metadata, key_pair, None);
         self.metric_begin(&op);
         upload_queue.queued_operations.push_back(op);
     }
@@ -1446,6 +1461,55 @@ impl RemoteTimelineClient {
         upload_queue.queued_operations.push_back(op);
     }
 
+    fn is_kms_enabled(&self) -> bool {
+        self.kms_impl.is_some()
+    }
+
+    pub(crate) fn schedule_generate_encryption_key(
+        self: &Arc<Self>,
+    ) -> Result<Option<EncryptionKeyPair>, NotInitialized> {
+        let Some(kms_impl) = self.kms_impl.as_ref() else {
+            return Ok(None);
+        };
+
+        let plain_key = rand::random::<[u8; 32]>().to_vec(); // StdRng is cryptographically secure (?)
+        let wrapped_key = kms_impl.encrypt(&plain_key).unwrap();
+
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+
+        let last_key = upload_queue.dirty.keys.last();
+        let this_key_version = if let Some(last_key) = last_key {
+            let key_version = EncryptionKeyId {
+                version: last_key.id.version.next(),
+                generation: self.generation,
+            };
+            assert!(key_version > last_key.id); // ensure key version is strictly increasing; no dup key versions
+            key_version
+        } else {
+            EncryptionKeyId {
+                version: KeyVersion(1),
+                generation: self.generation,
+            }
+        };
+
+        let key_pair = EncryptionKeyPair {
+            id: this_key_version.clone(),
+            plain_key: plain_key.clone(),
+            wrapped_key,
+        };
+
+        upload_queue.dirty.keys.push(EncryptionKey {
+            key: plain_key,
+            id: this_key_version,
+            created_at: Utc::now().naive_utc(),
+        });
+
+        self.schedule_index_upload(upload_queue);
+
+        Ok(Some(key_pair))
+    }
+
     /// Schedules a compaction update to the remote `index_part.json`.
     ///
     /// `compacted_from` represent the L0 names which have been `compacted_to` L1 layers.
@@ -1454,11 +1518,14 @@ impl RemoteTimelineClient {
         compacted_from: &[Layer],
         compacted_to: &[ResidentLayer],
     ) -> Result<(), NotInitialized> {
+        // Use the same key for all layers in a single compaction job
+        let key_pair = self.schedule_generate_encryption_key()?;
+
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
         for layer in compacted_to {
-            self.schedule_layer_file_upload0(upload_queue, layer.clone());
+            self.schedule_layer_file_upload0(upload_queue, layer.clone(), key_pair.clone());
         }
 
         let names = compacted_from.iter().map(|x| x.layer_desc().layer_name());
@@ -1715,6 +1782,7 @@ impl RemoteTimelineClient {
                     uploaded.local_path(),
                     &remote_path,
                     uploaded.metadata().file_size,
+                    None, // TODO(chi): support encryption for those layer files uploaded using this interface
                     cancel,
                 )
                 .await
@@ -1756,6 +1824,8 @@ impl RemoteTimelineClient {
             &adopted_as.layer_desc().layer_name(),
             adopted_as.metadata().generation,
         );
+
+        // TODO: support encryption for those layer files uploaded using this interface
 
         backoff::retry(
             || async {
@@ -1977,7 +2047,7 @@ impl RemoteTimelineClient {
 
             // Prepare upload.
             match &mut next_op {
-                UploadOp::UploadLayer(layer, meta, mode) => {
+                UploadOp::UploadLayer(layer, meta, _, mode) => {
                     if upload_queue
                         .recently_deleted
                         .remove(&(layer.layer_desc().layer_name().clone(), meta.generation))
@@ -2071,7 +2141,7 @@ impl RemoteTimelineClient {
             // Assert that we don't modify a layer that's referenced by the current index.
             if cfg!(debug_assertions) {
                 let modified = match &task.op {
-                    UploadOp::UploadLayer(layer, layer_metadata, _) => {
+                    UploadOp::UploadLayer(layer, layer_metadata, _, _) => {
                         vec![(layer.layer_desc().layer_name(), layer_metadata)]
                     }
                     UploadOp::Delete(delete) => {
@@ -2093,7 +2163,7 @@ impl RemoteTimelineClient {
             }
 
             let upload_result: anyhow::Result<()> = match &task.op {
-                UploadOp::UploadLayer(layer, layer_metadata, mode) => {
+                UploadOp::UploadLayer(layer, layer_metadata, encryption_key_pair, mode) => {
                     // TODO: check if this mechanism can be removed now that can_bypass() performs
                     // conflict checks during scheduling.
                     if let Some(OpType::FlushDeletion) = mode {
@@ -2174,6 +2244,7 @@ impl RemoteTimelineClient {
                         local_path,
                         &remote_path,
                         layer_metadata.file_size,
+                        encryption_key_pair.clone(),
                         &self.cancel,
                     )
                     .measure_remote_op(
@@ -2324,7 +2395,7 @@ impl RemoteTimelineClient {
             upload_queue.inprogress_tasks.remove(&task.task_id);
 
             let lsn_update = match task.op {
-                UploadOp::UploadLayer(_, _, _) => None,
+                UploadOp::UploadLayer(_, _, _, _) => None,
                 UploadOp::UploadMetadata { ref uploaded } => {
                     // the task id is reused as a monotonicity check for storing the "clean"
                     // IndexPart.
@@ -2403,7 +2474,7 @@ impl RemoteTimelineClient {
     )> {
         use RemoteTimelineClientMetricsCallTrackSize::DontTrackSize;
         let res = match op {
-            UploadOp::UploadLayer(_, m, _) => (
+            UploadOp::UploadLayer(_, m, _, _) => (
                 RemoteOpFileKind::Layer,
                 RemoteOpKind::Upload,
                 RemoteTimelineClientMetricsCallTrackSize::Bytes(m.file_size),
@@ -2840,6 +2911,7 @@ mod tests {
                 )),
                 config: std::sync::RwLock::new(RemoteTimelineClientConfig::from(&location_conf)),
                 cancel: CancellationToken::new(),
+                kms_impl: None,
             })
         }
 

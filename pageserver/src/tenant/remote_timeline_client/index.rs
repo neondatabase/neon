@@ -122,14 +122,55 @@ pub struct IndexPart {
     pub(crate) keys: Vec<EncryptionKey>,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-pub struct KeyVersion(u32);
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Ord, PartialOrd)]
+pub struct KeyVersion(pub u32);
+
+impl KeyVersion {
+    pub fn next(&self) -> Self {
+        Self(self.0 + 1)
+    }
+}
 
 /// An identifier for an encryption key. The scope of the key is the timeline (TBD).
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Ord, PartialOrd)]
 pub struct EncryptionKeyId {
-    version: KeyVersion,
-    generation: Generation,
+    pub version: KeyVersion,
+    pub generation: Generation,
+}
+
+#[derive(Clone)]
+pub struct EncryptionKeyPair {
+    pub id: EncryptionKeyId,
+    pub plain_key: Vec<u8>,
+    pub wrapped_key: Vec<u8>,
+}
+
+impl EncryptionKeyPair {
+    pub fn new(id: EncryptionKeyId, plain_key: Vec<u8>, wrapped_key: Vec<u8>) -> Self {
+        Self {
+            id,
+            plain_key,
+            wrapped_key,
+        }
+    }
+}
+
+impl std::fmt::Debug for EncryptionKeyPair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let display =
+            base64::display::Base64Display::with_config(&self.wrapped_key, base64::STANDARD);
+        struct DisplayAsDebug<T: std::fmt::Display>(T);
+        impl<T: std::fmt::Display> std::fmt::Debug for DisplayAsDebug<T> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+        f.debug_struct("EncryptionKeyPair")
+            .field("id", &self.id)
+            .field("plain_key", &"<REDACTED>")
+            .field("wrapped_key", &DisplayAsDebug(&display))
+            .finish()
+    }
 }
 
 #[serde_as]
