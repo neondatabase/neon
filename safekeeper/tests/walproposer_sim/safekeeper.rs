@@ -161,6 +161,7 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
         max_offloader_lag_bytes: 0,
         /* BEGIN_HADRON */
         max_reelect_offloader_lag_bytes: 0,
+        max_timeline_disk_usage_bytes: 0,
         /* END_HADRON */
         wal_backup_enabled: false,
         listen_pg_addr_tenant_only: None,

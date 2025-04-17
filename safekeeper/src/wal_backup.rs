@@ -410,6 +410,8 @@ async fn backup_lsn_range(
         anyhow::bail!("parallel_jobs must be >= 1");
     }
 
+    pausable_failpoint!("backup-lsn-range-pausable");
+
     let remote_timeline_path = &timeline.remote_path;
     let start_lsn = *backup_lsn;
     let segments = get_segments(start_lsn, end_lsn, wal_seg_size);

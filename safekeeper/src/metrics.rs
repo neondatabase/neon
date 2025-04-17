@@ -62,9 +62,19 @@ pub static FLUSH_WAL_SECONDS: Lazy<Histogram> = Lazy::new(|| {
 pub static WAL_DISK_IO_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
         "safekeeper_wal_disk_io_errors",
-        "Number of disk I/Os when creating and flushing WALs and control files"
+        "Number of disk I/O errors when creating and flushing WALs and control files"
     )
     .expect("Failed to register safekeeper_wal_disk_io_errors counter")
+});
+pub static WAL_STORAGE_LIMIT_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_wal_storage_limit_errors",
+        concat!(
+            "Number of errors due to timeline WAL storage utilization exceeding configured limit. ",
+            "An increase in this metric indicates issues backing up or removing WALs."
+        )
+    )
+    .expect("Failed to register safekeeper_wal_storage_limit_errors counter")
 });
 /* END_HADRON */
 pub static PERSIST_CONTROL_FILE_SECONDS: Lazy<Histogram> = Lazy::new(|| {

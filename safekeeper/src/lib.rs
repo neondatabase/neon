@@ -63,6 +63,9 @@ pub mod defaults {
     pub const DEFAULT_MAX_OFFLOADER_LAG_BYTES: u64 = 128 * (1 << 20);
     /* BEGIN_HADRON */
     pub const DEFAULT_MAX_REELECT_OFFLOADER_LAG_BYTES: u64 = 128 * (1 << 20);
+    // Default disk usage limit is 100GB. It means each timeline by default can use up to 100GB of WAL
+    // disk space on this SK until SK begins to reject WALs.
+    pub const DEFAULT_MAX_TIMELINE_DISK_USAGE_BYTES: u64 = 100 * (1 << 30);
     /* END_HADRON */
     pub const DEFAULT_PARTIAL_BACKUP_TIMEOUT: &str = "15m";
     pub const DEFAULT_CONTROL_FILE_SAVE_INTERVAL: &str = "300s";
@@ -104,6 +107,7 @@ pub struct SafeKeeperConf {
     pub max_offloader_lag_bytes: u64,
     /* BEGIN_HADRON */
     pub max_reelect_offloader_lag_bytes: u64,
+    pub max_timeline_disk_usage_bytes: u64,
     /* END_HADRON */
     pub backup_parallel_jobs: usize,
     pub wal_backup_enabled: bool,
@@ -159,6 +163,7 @@ impl SafeKeeperConf {
             max_offloader_lag_bytes: defaults::DEFAULT_MAX_OFFLOADER_LAG_BYTES,
             /* BEGIN_HADRON */
             max_reelect_offloader_lag_bytes: defaults::DEFAULT_MAX_REELECT_OFFLOADER_LAG_BYTES,
+            max_timeline_disk_usage_bytes: defaults::DEFAULT_MAX_TIMELINE_DISK_USAGE_BYTES,
             /* END_HADRON */
             current_thread_runtime: false,
             walsenders_keep_horizon: false,

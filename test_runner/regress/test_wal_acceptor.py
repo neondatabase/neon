@@ -2740,3 +2740,85 @@ def test_pull_timeline_partial_segment_integrity(neon_env_builder: NeonEnvBuilde
             raise Exception("Uneviction did not happen on source safekeeper yet")
 
     wait_until(unevicted)
+
+
+def test_timeline_disk_usage_limit(neon_env_builder: NeonEnvBuilder):
+    """
+    Test that the timeline disk usage circuit breaker works as expected. We test that:
+    1. The circuit breaker kicks in when the timeline's disk usage exceeds the configured limit,
+       and it causes writes to hang.
+    2. The hanging writes unblock when the issue resolves (by restarting the safekeeper in the
+       test to simulate a more realistic production troubleshooting scenario).
+    3. We can continue to write as normal after the issue resolves.
+    4. There is no data corruption throughout the test.
+    """
+    # Set up environment with a very small disk usage limit (1KB)
+    neon_env_builder.num_safekeepers = 1
+    remote_storage_kind = s3_storage()
+    neon_env_builder.enable_safekeeper_remote_storage(remote_storage_kind)
+
+    # Set a very small disk usage limit (1KB)
+    neon_env_builder.safekeeper_extra_opts = ["--max-timeline-disk-usage-bytes=1024"]
+
+    env = neon_env_builder.init_start()
+
+    # Create a timeline and endpoint
+    env.create_branch("test_timeline_disk_usage_limit")
+    endpoint = env.endpoints.create_start("test_timeline_disk_usage_limit")
+
+    # Get the safekeeper
+    sk = env.safekeepers[0]
+
+    # Inject a failpoint to stop WAL backup
+    with sk.http_client() as http_cli:
+        http_cli.configure_failpoints([("backup-lsn-range-pausable", "pause")])
+
+    # Write some data that will exceed the 1KB limit. While the failpoint is active, this operation
+    # will hang as Postgres encounters safekeeper-returned errors and retries.
+    def run_hanging_insert():
+        with closing(endpoint.connect()) as bg_conn:
+            with bg_conn.cursor() as bg_cur:
+                # This should generate more than 1KB of WAL
+                bg_cur.execute("create table t(key int, value text)")
+                bg_cur.execute("insert into t select generate_series(1,2000), 'payload'")
+
+    # Start the inserts in a background thread
+    bg_thread = threading.Thread(target=run_hanging_insert)
+    bg_thread.start()
+
+    # Wait for the error message to appear in the compute log
+    def error_logged():
+        return endpoint.log_contains("WAL storage utilization exceeds configured limit") is not None
+
+    wait_until(error_logged)
+    log.info("Found expected error message in compute log, resuming.")
+
+    # Sanity check that the hanging insert is indeed still hanging. Otherwise means the circuit breaker we
+    # implemented didn't work as expected.
+    time.sleep(2)
+    assert (
+        bg_thread.is_alive()
+    ), "The hanging insert somehow unblocked without resolving the disk usage issue!"
+
+    log.info("Restarting the safekeeper to resume WAL backup.")
+    # Restart the safekeeper with defaults to both clear the failpoint and resume the larger disk usage limit.
+    for sk in env.safekeepers:
+        sk.stop().start(extra_opts=[])
+
+    # The hanging insert will now complete. Join the background thread so that we can
+    # verify that the insert completed successfully.
+    bg_thread.join(timeout=120)
+    assert not bg_thread.is_alive(), "Hanging insert did not complete after safekeeper restart"
+    log.info("Hanging insert unblocked.")
+
+    # Verify we can continue to write as normal
+    with closing(endpoint.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("insert into t select generate_series(2001,3000), 'payload'")
+
+    # Sanity check data correctness
+    with closing(endpoint.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("select count(*) from t")
+            # 2000 rows from first insert + 1000 from last insert
+            assert cur.fetchone() == (3000,)
