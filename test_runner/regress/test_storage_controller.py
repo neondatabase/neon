@@ -4131,7 +4131,7 @@ def test_storcon_create_delete_sk_down(
         ]
     )
 
-    if restart_storcon is RestartStorcon.RESTART:
+    if restart_storcon == RestartStorcon.RESTART:
         # Restart the storcon to check that we persist operations
         env.storage_controller.stop()
         env.storage_controller.start()
@@ -4167,7 +4167,7 @@ def test_storcon_create_delete_sk_down(
 
     env.safekeepers[1].stop()
 
-    if deletetion_subject is DeletionSubject.TENANT:
+    if deletetion_subject == DeletionSubject.TENANT:
         env.storage_controller.pageserver_api().tenant_delete(tenant_id)
     else:
         env.storage_controller.pageserver_api().timeline_delete(tenant_id, child_timeline_id)
@@ -4183,7 +4183,7 @@ def test_storcon_create_delete_sk_down(
 
     wait_until(timeline_deleted_on_active_sks)
 
-    if restart_storcon is RestartStorcon.RESTART:
+    if restart_storcon == RestartStorcon.RESTART:
         # Restart the storcon to check that we persist operations
         env.storage_controller.stop()
         env.storage_controller.start()
