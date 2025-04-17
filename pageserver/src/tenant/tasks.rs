@@ -19,7 +19,7 @@ use utils::completion::Barrier;
 use utils::pausable_failpoint;
 
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::metrics::{self, BackgroundLoopSemaphoreMetricsRecorder, TENANT_TASK_EVENTS};
+use crate::metrics::{self, TENANT_TASK_EVENTS};
 use crate::task_mgr::{self, BACKGROUND_RUNTIME, TOKIO_WORKER_THREADS, TaskKind};
 use crate::tenant::throttle::Stats;
 use crate::tenant::timeline::CompactionError;
@@ -87,7 +87,6 @@ pub(crate) enum BackgroundLoopKind {
 
 pub struct BackgroundLoopSemaphorePermit {
     _permit: SemaphorePermit<'static>,
-    _recorder: BackgroundLoopSemaphoreMetricsRecorder,
 }
 
 /// Acquires a semaphore permit, to limit concurrent background jobs.
@@ -95,7 +94,6 @@ pub(crate) async fn acquire_concurrency_permit(
     loop_kind: BackgroundLoopKind,
     _ctx: &RequestContext,
 ) -> BackgroundLoopSemaphorePermit {
-    let mut recorder = metrics::BACKGROUND_LOOP_SEMAPHORE.record(loop_kind);
 
     if loop_kind == BackgroundLoopKind::InitialLogicalSizeCalculation {
         pausable_failpoint!("initial-size-calculation-permit-pause");
@@ -108,11 +106,9 @@ pub(crate) async fn acquire_concurrency_permit(
     };
     let permit = semaphore.acquire().await.expect("should never close");
 
-    recorder.acquired();
 
     BackgroundLoopSemaphorePermit {
         _permit: permit,
-        _recorder: recorder,
     }
 }
 

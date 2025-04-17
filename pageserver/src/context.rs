@@ -523,9 +523,6 @@ impl RequestContext {
         self.access_stats_behavior
     }
 
-    pub(crate) fn page_content_kind(&self) -> PageContentKind {
-        self.page_content_kind
-    }
 
     pub(crate) fn read_path_debug(&self) -> bool {
         self.read_path_debug

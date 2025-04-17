@@ -36,7 +36,7 @@ use wal_decoder::wire_format::FromWireFormat;
 
 use super::TaskStateUpdate;
 use crate::context::RequestContext;
-use crate::metrics::{LIVE_CONNECTIONS, WAL_INGEST, WALRECEIVER_STARTED_CONNECTIONS};
+use crate::metrics::{WAL_INGEST, WALRECEIVER_STARTED_CONNECTIONS};
 use crate::pgdatadir_mapping::DatadirModification;
 use crate::task_mgr::{TaskKind, WALRECEIVER_RUNTIME};
 use crate::tenant::{
@@ -222,10 +222,6 @@ pub(super) async fn handle_walreceiver_connection(
         // spans won't be properly nested.
         .instrument(tracing::info_span!("poller")),
     );
-
-    let _guard = LIVE_CONNECTIONS
-        .with_label_values(&["wal_receiver"])
-        .guard();
 
     let identify = identify_system(&replication_client).await?;
     info!("{identify:?}");

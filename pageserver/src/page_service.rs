@@ -59,8 +59,7 @@ use crate::context::{
     DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
 };
 use crate::metrics::{
-    self, COMPUTE_COMMANDS_COUNTERS, ComputeCommandKind, GetPageBatchBreakReason, LIVE_CONNECTIONS,
-    SmgrOpTimer, TimelineMetrics,
+    self, GetPageBatchBreakReason, SmgrOpTimer, TimelineMetrics,
 };
 use crate::pgdatadir_mapping::Version;
 use crate::span::{
@@ -275,9 +274,6 @@ async fn page_service_conn_main(
     cancel: CancellationToken,
     gate_guard: GateGuard,
 ) -> ConnectionHandlerResult {
-    let _guard = LIVE_CONNECTIONS
-        .with_label_values(&["page_service"])
-        .guard();
 
     socket
         .set_nodelay(true)
@@ -2909,12 +2905,7 @@ where
                     .record("timeline_id", field::display(timeline_id));
 
                 self.check_permission(Some(tenant_id))?;
-                let command_kind = match protocol_version {
-                    PagestreamProtocolVersion::V2 => ComputeCommandKind::PageStreamV2,
-                    PagestreamProtocolVersion::V3 => ComputeCommandKind::PageStreamV3,
-                };
-                COMPUTE_COMMANDS_COUNTERS.for_command(command_kind).inc();
-
+                
                 self.handle_pagerequests(pgb, tenant_id, timeline_id, protocol_version, ctx)
                     .await?;
             }
@@ -2931,9 +2922,7 @@ where
 
                 self.check_permission(Some(tenant_id))?;
 
-                COMPUTE_COMMANDS_COUNTERS
-                    .for_command(ComputeCommandKind::Basebackup)
-                    .inc();
+                
                 let metric_recording = metrics::BASEBACKUP_QUERY_TIME.start_recording();
                 let res = async {
                     self.handle_basebackup_request(
@@ -2968,9 +2957,7 @@ where
 
                 self.check_permission(Some(tenant_id))?;
 
-                COMPUTE_COMMANDS_COUNTERS
-                    .for_command(ComputeCommandKind::Fullbackup)
-                    .inc();
+                
 
                 // Check that the timeline exists
                 self.handle_basebackup_request(
@@ -3004,9 +2991,7 @@ where
 
                 self.check_permission(Some(tenant_shard_id.tenant_id))?;
 
-                COMPUTE_COMMANDS_COUNTERS
-                    .for_command(ComputeCommandKind::LeaseLsn)
-                    .inc();
+                
 
                 match self
                     .handle_make_lsn_lease(pgb, tenant_shard_id, timeline_id, lsn, &ctx)

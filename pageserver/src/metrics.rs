@@ -27,13 +27,11 @@ use utils::id::TimelineId;
 
 use crate::config;
 use crate::config::PageServerConf;
-use crate::context::{PageContentKind, RequestContext};
 use crate::pgdatadir_mapping::DatadirModificationStats;
 use crate::task_mgr::TaskKind;
 use crate::tenant::Timeline;
 use crate::tenant::mgr::TenantSlot;
 use crate::tenant::storage_layer::{InMemoryLayer, PersistentLayerDesc};
-use crate::tenant::tasks::BackgroundLoopKind;
 use crate::tenant::throttle::ThrottleResult;
 
 /// Prometheus histogram buckets (in seconds) for operations in the critical
@@ -193,63 +191,6 @@ pub(crate) struct ScanLatency {
     map: EnumMap<TaskKind, Option<Histogram>>,
 }
 
-
-pub(crate) struct PageCacheMetricsForTaskKind {
-    pub read_accesses_immutable: IntCounter,
-    pub read_hits_immutable: IntCounter,
-}
-
-pub(crate) struct PageCacheMetrics {
-    map: EnumMap<TaskKind, EnumMap<PageContentKind, PageCacheMetricsForTaskKind>>,
-}
-
-static PAGE_CACHE_READ_HITS: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "pageserver_page_cache_read_hits_total",
-        "Number of read accesses to the page cache that hit",
-        &["task_kind", "key_kind", "content_kind", "hit_kind"]
-    )
-    .expect("failed to define a metric")
-});
-
-static PAGE_CACHE_READ_ACCESSES: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "pageserver_page_cache_read_accesses_total",
-        "Number of read accesses to the page cache",
-        &["task_kind", "key_kind", "content_kind"]
-    )
-    .expect("failed to define a metric")
-});
-
-pub(crate) static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMetrics {
-    map: EnumMap::from_array(std::array::from_fn(|task_kind| {
-        let task_kind = TaskKind::from_usize(task_kind);
-        let task_kind: &'static str = task_kind.into();
-        EnumMap::from_array(std::array::from_fn(|content_kind| {
-            let content_kind = PageContentKind::from_usize(content_kind);
-            let content_kind: &'static str = content_kind.into();
-            PageCacheMetricsForTaskKind {
-                read_accesses_immutable: {
-                    PAGE_CACHE_READ_ACCESSES
-                        .get_metric_with_label_values(&[task_kind, "immutable", content_kind])
-                        .unwrap()
-                },
-
-                read_hits_immutable: {
-                    PAGE_CACHE_READ_HITS
-                        .get_metric_with_label_values(&[task_kind, "immutable", content_kind, "-"])
-                        .unwrap()
-                },
-            }
-        }))
-    })),
-});
-
-impl PageCacheMetrics {
-    pub(crate) fn for_ctx(&self, ctx: &RequestContext) -> &PageCacheMetricsForTaskKind {
-        &self.map[ctx.task_kind()][ctx.page_content_kind()]
-    }
-}
 
 pub(crate) struct PageCacheSizeMetrics {
     pub max_bytes: UIntGauge,
@@ -1619,17 +1560,6 @@ impl BasebackupQueryTimeOngoingRecording<'_> {
     }
 }
 
-pub(crate) static LIVE_CONNECTIONS: Lazy<IntCounterPairVec> = Lazy::new(|| {
-    register_int_counter_pair_vec!(
-        "pageserver_live_connections_started",
-        "Number of network connections that we started handling",
-        "pageserver_live_connections_finished",
-        "Number of network connections that we finished handling",
-        &["pageserver_connection_kind"]
-    )
-    .expect("failed to define a metric")
-});
-
 #[derive(Clone, Copy, enum_map::Enum, IntoStaticStr)]
 pub(crate) enum ComputeCommandKind {
     PageStreamV3,
@@ -1639,33 +1569,6 @@ pub(crate) enum ComputeCommandKind {
     LeaseLsn,
 }
 
-pub(crate) struct ComputeCommandCounters {
-    map: EnumMap<ComputeCommandKind, IntCounter>,
-}
-
-pub(crate) static COMPUTE_COMMANDS_COUNTERS: Lazy<ComputeCommandCounters> = Lazy::new(|| {
-    let inner = register_int_counter_vec!(
-        "pageserver_compute_commands",
-        "Number of compute -> pageserver commands processed",
-        &["command"]
-    )
-    .expect("failed to define a metric");
-
-    ComputeCommandCounters {
-        map: EnumMap::from_array(std::array::from_fn(|i| {
-            let command = ComputeCommandKind::from_usize(i);
-            let command_str: &'static str = command.into();
-            inner.with_label_values(&[command_str])
-        })),
-    }
-});
-
-impl ComputeCommandCounters {
-    pub(crate) fn for_command(&self, command: ComputeCommandKind) -> &IntCounter {
-        &self.map[command]
-        // TODO: .inc() needs to be commented out at call site
-    }
-}
 
 // remote storage metrics
 
@@ -1917,84 +1820,6 @@ pub(crate) static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
     )
     .expect("Failed to register tenant_task_events metric")
 });
-
-pub struct BackgroundLoopSemaphoreMetrics {
-    counters: EnumMap<BackgroundLoopKind, IntCounterPair>,
-}
-
-pub(crate) static BACKGROUND_LOOP_SEMAPHORE: Lazy<BackgroundLoopSemaphoreMetrics> =
-    Lazy::new(|| {
-        let counters = register_int_counter_pair_vec!(
-            "pageserver_background_loop_semaphore_wait_start_count",
-            "Counter for background loop concurrency-limiting semaphore acquire calls started",
-            "pageserver_background_loop_semaphore_wait_finish_count",
-            "Counter for background loop concurrency-limiting semaphore acquire calls finished",
-            &["task"],
-        )
-        .unwrap();
-
-        BackgroundLoopSemaphoreMetrics {
-            counters: EnumMap::from_array(std::array::from_fn(|i| {
-                let kind = BackgroundLoopKind::from_usize(i);
-                counters.with_label_values(&[kind.into()])
-            })),
-        }
-    });
-
-impl BackgroundLoopSemaphoreMetrics {
-    /// Starts recording semaphore metrics. Call `acquired()` on the returned recorder when the
-    /// semaphore is acquired, and drop it when the task completes or is cancelled.
-    pub(crate) fn record(
-        &self,
-        task: BackgroundLoopKind,
-    ) -> BackgroundLoopSemaphoreMetricsRecorder {
-        BackgroundLoopSemaphoreMetricsRecorder::start(self, task)
-    }
-}
-
-/// Records metrics for a background task.
-pub struct BackgroundLoopSemaphoreMetricsRecorder {
-
-    start: Instant,
-    wait_counter_guard: Option<metrics::IntCounterPairGuard>,
-}
-
-impl<'a> BackgroundLoopSemaphoreMetricsRecorder {
-    /// Starts recording semaphore metrics, by recording wait time and incrementing
-    /// `wait_start_count` and `waiting_tasks`.
-    fn start(metrics: &'a BackgroundLoopSemaphoreMetrics, task: BackgroundLoopKind) -> Self {
-        // metrics.waiting_tasks[task].inc();
-        Self {
-           
-            start: Instant::now(),
-            wait_counter_guard: Some(metrics.counters[task].guard()),
-        }
-    }
-
-    /// Signals that the semaphore has been acquired, and updates relevant metrics.
-    pub fn acquired(&mut self) -> Duration {
-        let waited = self.start.elapsed();
-        self.wait_counter_guard.take().expect("already acquired");
-        // self.metrics.durations[self.task].observe(waited.as_secs_f64());
-        // self.metrics.waiting_tasks[self.task].dec();
-        // self.metrics.running_tasks[self.task].inc();
-        waited
-    }
-}
-
-impl Drop for BackgroundLoopSemaphoreMetricsRecorder {
-    /// The task either completed or was cancelled.
-    fn drop(&mut self) {
-        if self.wait_counter_guard.take().is_some() {
-            // Waiting.
-            // self.metrics.durations[self.task].observe(self.start.elapsed().as_secs_f64());
-            // self.metrics.waiting_tasks[self.task].dec();
-        } else {
-            // Running.
-            // self.metrics.running_tasks[self.task].dec();
-        }
-    }
-}
 
 pub(crate) static BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
@@ -3486,7 +3311,6 @@ pub fn preinitialize_metrics(
 
     // Custom
     Lazy::force(&BASEBACKUP_QUERY_TIME);
-    Lazy::force(&COMPUTE_COMMANDS_COUNTERS);
     Lazy::force(&tokio_epoll_uring::THREAD_LOCAL_METRICS_STORAGE);
 
     tenant_throttling::preinitialize_global_metrics();

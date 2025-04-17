@@ -414,32 +414,17 @@ impl PageCache {
     async fn lock_for_read(
         &self,
         cache_key: &CacheKey,
-        ctx: &RequestContext,
+        _ctx: &RequestContext,
     ) -> anyhow::Result<ReadBufResult> {
         let mut permit = Some(self.try_get_pinned_slot_permit().await?);
 
-        let (read_access, hit) = match cache_key {
-            CacheKey::ImmutableFilePage { .. } => (
-                &crate::metrics::PAGE_CACHE
-                    .for_ctx(ctx)
-                    .read_accesses_immutable,
-                &crate::metrics::PAGE_CACHE.for_ctx(ctx).read_hits_immutable,
-            ),
-        };
-        read_access.inc();
-
-        let mut is_first_iteration = true;
         loop {
             // First check if the key already exists in the cache.
             if let Some(read_guard) = self.try_lock_for_read(cache_key, &mut permit).await {
                 debug_assert!(permit.is_none());
-                if is_first_iteration {
-                    hit.inc();
-                }
                 return Ok(ReadBufResult::Found(read_guard));
             }
             debug_assert!(permit.is_some());
-            is_first_iteration = false;
 
             // Not found. Find a victim buffer
             let (slot_idx, mut inner) = self
