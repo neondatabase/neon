@@ -113,8 +113,6 @@ runs:
         TEST_OUTPUT: /tmp/test_output
         BUILD_TYPE: ${{ inputs.build_type }}
         COMPATIBILITY_SNAPSHOT_DIR: /tmp/compatibility_snapshot_pg${{ inputs.pg_version }}
-        ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE: contains(github.event.pull_request.labels.*.name, 'backward compatibility breakage')
-        ALLOW_FORWARD_COMPATIBILITY_BREAKAGE: contains(github.event.pull_request.labels.*.name, 'forward compatibility breakage')
         RERUN_FAILED: ${{ inputs.rerun_failed }}
         PG_VERSION: ${{ inputs.pg_version }}
         SANITIZERS: ${{ inputs.sanitizers }}
