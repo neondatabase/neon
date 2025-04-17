@@ -3,10 +3,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-import requests
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 
 if TYPE_CHECKING:
+    from fixtures.endpoint.http import EndpointHttpClient
     from fixtures.neon_fixtures import NeonEnvBuilder, PgBin
 
 
@@ -40,6 +40,7 @@ def test_compute_startup_simple(
     env.create_branch("test_startup")
 
     endpoint = None
+    http_client: EndpointHttpClient
 
     # We do two iterations so we can see if the second startup is faster. It should
     # be because the compute node should already be configured with roles, databases,
@@ -67,10 +68,10 @@ def test_compute_startup_simple(
                 endpoint.start()
             endpoint.safe_psql("select 1;")
 
+        http_client = endpoint.http_client()
+
         # Get metrics
-        metrics = requests.get(
-            f"http://localhost:{endpoint.external_http_port}/metrics.json"
-        ).json()
+        metrics = http_client.metrics_json()
         durations = {
             "wait_for_spec_ms": f"{i}_wait_for_spec",
             "sync_safekeepers_ms": f"{i}_sync_safekeepers",
@@ -118,6 +119,8 @@ def test_compute_ondemand_slru_startup(
     )
 
     endpoint = env.endpoints.create_start("main", tenant_id=tenant)
+    http_client = endpoint.http_client()
+
     with endpoint.cursor() as cur:
         cur.execute("CREATE TABLE t (pk integer PRIMARY KEY, x integer)")
         cur.execute("ALTER TABLE t SET (autovacuum_enabled = false)")
@@ -155,9 +158,7 @@ def test_compute_ondemand_slru_startup(
             assert sum == 1000000
 
         # Get metrics
-        metrics = requests.get(
-            f"http://localhost:{endpoint.external_http_port}/metrics.json"
-        ).json()
+        metrics = http_client.metrics_json()
         durations = {
             "wait_for_spec_ms": f"{slru}_{i}_wait_for_spec",
             "sync_safekeepers_ms": f"{slru}_{i}_sync_safekeepers",
