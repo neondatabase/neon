@@ -134,7 +134,7 @@ pub struct ComputeState {
     /// Timestamp of the last Postgres activity. It could be `None` if
     /// compute wasn't used since start.
     pub last_active: Option<DateTime<Utc>>,
-    /// Timestamp of the last client's activity. Unlike `last_time` it doesn't take in account
+    /// Timestamp of the last client's activity. Unlike `last_active` it doesn't take into account
     /// baclkground activity: autovacuum, LR,...
     pub last_active_query: Option<DateTime<Utc>>,
     pub last_activity_kind: Option<ActivityKind>,
