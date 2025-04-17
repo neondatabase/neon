@@ -164,7 +164,7 @@ runs:
                 -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer ${API_KEY}" )
           code=${res: -3}
           if [[ ${code} -eq 200 ]]; then
-            endpoint_id=$(echo ${res::-3} | jq -rc '.endpoints.[] | select(.current_state == "active").id')
+            endpoint_id=$(echo ${res::-3} | jq -rc '.endpoints[] | select(.current_state == "active").id')
             if [[ -n "${endpoint_id}" ]] && [[ "${endpoint_id}" != null ]]; then
               res=$(curl -X POST  \
                       "https://${API_HOST}/api/v2/projects/${project_id}/endpoints/${endpoint_id}/restart" \
