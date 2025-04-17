@@ -157,20 +157,28 @@ runs:
                 "https://${API_HOST}/regions/${REGION_ID}/api/v1/admin/projects/${project_id}/default_endpoint_settings" \
                 -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer ${ADMIN_API_KEY}" \
                 --data "${NEW_DEFAULT_ENDPOINT_SETTINGS}"
-          endpoint_id=$(echo ${PROJECT_DATA} | jq -rc .endpoints[0].id)
-          echo ${PROJECT_DATA} | jq .
           set -x
-          res=$(curl -X POST  \
-                "https://${API_HOST}/api/v2/projects/${project_id}/endpoints/${endpoint_id}/restart" \
+          res=$(curl -X GET  \
+                "https://${API_HOST}/api/v2/projects/${project_id}/endpoints" \
                 -w "%{http_code}" \
                 -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer ${API_KEY}" )
           code=${res: -3}
-          if [[ $code -ge 400 ]]; then
-            echo ${res::-3}
-            exit 2
-          fi
+          if [[ ${code} -eq 200 ]]; then
+            endpoint_id=$(echo ${res::-3} | jq .endpoints[0].id)
+            if [[ "${endpoint_id}" != null ]]; then
+              res=$(curl -X POST  \
+                      "https://${API_HOST}/api/v2/projects/${project_id}/endpoints/${endpoint_id}/restart" \
+                      -w "%{http_code}" \
+                      -H "Accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer ${API_KEY}" )
+              code=${res: -3}
+              if [[ $code -ge 400 ]]; then
+                echo ${res::-3}
+                exit 2
+              fi
         
-          sleep 3
+              sleep 3
+            fi
+          fi
         fi
         
 
