@@ -149,9 +149,10 @@ impl Service {
         let quorum_size = match timeline_persistence.sk_set.len() {
             1 => 1,
             2 => 2,
-            _ => (timeline_persistence.sk_set.len() * 3) / 2,
+            _ => (timeline_persistence.sk_set.len() * 2) / 3,
         };
-        if remaining.len() >= quorum_size {
+        let success_count = timeline_persistence.sk_set.len() - remaining.len();
+        if success_count < quorum_size {
             // Failure
             return Err(ApiError::InternalServerError(anyhow::anyhow!(
                 "not enough successful reconciliations to reach quorum size {}, please retry: {} errored",
