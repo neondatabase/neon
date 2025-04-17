@@ -590,7 +590,9 @@ impl Service {
                     );
                 }
             }
-            locked.safekeeper_reconcilers.add_safekeeper(node_id, self);
+            locked
+                .safekeeper_reconcilers
+                .start_reconciler(node_id, self);
             locked.safekeepers = Arc::new(safekeepers);
         }
         Ok(())
@@ -616,10 +618,12 @@ impl Service {
 
             match scheduling_policy {
                 SkSchedulingPolicy::Active => {
-                    locked.safekeeper_reconcilers.add_safekeeper(node_id, self);
+                    locked
+                        .safekeeper_reconcilers
+                        .start_reconciler(node_id, self);
                 }
                 SkSchedulingPolicy::Decomissioned | SkSchedulingPolicy::Pause => {
-                    locked.safekeeper_reconcilers.cancel_safekeeper(node_id);
+                    locked.safekeeper_reconcilers.stop_reconciler(node_id);
                 }
             }
 

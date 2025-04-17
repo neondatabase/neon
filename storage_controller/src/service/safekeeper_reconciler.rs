@@ -33,12 +33,14 @@ impl SafekeeperReconcilers {
     /// Adds a safekeeper-specific reconciler.
     /// Can be called multiple times, but it needs to be called at least once
     /// for every new safekeeper added.
-    pub(crate) fn add_safekeeper(&mut self, node_id: NodeId, service: &Arc<Service>) {
+    pub(crate) fn start_reconciler(&mut self, node_id: NodeId, service: &Arc<Service>) {
         self.reconcilers.entry(node_id).or_insert_with(|| {
             SafekeeperReconciler::spawn(self.cancel.child_token(), service.clone())
         });
     }
-    pub(crate) fn cancel_safekeeper(&mut self, node_id: NodeId) {
+    /// Stop a safekeeper-specific reconciler.
+    /// Stops the reconciler, cancelling all ongoing tasks.
+    pub(crate) fn stop_reconciler(&mut self, node_id: NodeId) {
         if let Some(handle) = self.reconcilers.remove(&node_id) {
             handle.cancel.cancel();
         }

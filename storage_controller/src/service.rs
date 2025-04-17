@@ -831,7 +831,7 @@ impl Service {
             locked.become_leader();
 
             for (sk_id, _sk) in locked.safekeepers.clone().iter() {
-                locked.safekeeper_reconcilers.add_safekeeper(*sk_id, self);
+                locked.safekeeper_reconcilers.start_reconciler(*sk_id, self);
             }
 
             locked
