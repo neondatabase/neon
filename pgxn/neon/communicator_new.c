@@ -45,9 +45,31 @@
 static CommunicatorInitStruct *cis;
 static CommunicatorBackendStruct *my_bs;
 
+typedef struct CommunicatorShmemData {
+	int			dummy;
+
+	/*
+	 * Latches used to notify backends of IO completion. We cannot use the
+	 * standard process latch (MyProc->latch) because we cannot clear that
+	 * latch as part of the IO handling, or we might cause the caller to miss
+	 * some other events.
+	 *
+	 * FIXME: These should probably be padded to cache line, to avoid false
+	 * sharing and bouncing the cache lines between processes
+	 */
+	Latch		io_completion_latches[];	/* MaxProcs */
+
+	/* rust-managed shmem area follows at next MAXALIGN boundary */
+} CommunicatorShmemData;
+
+static CommunicatorShmemData *communicator_shmem_ptr;
+
+#define MyIOCompletionLatch (&communicator_shmem_ptr->io_completion_latches[MyProcNumber])
+
 static slock_t in_elog;
 
 PGDLLEXPORT void communicator_new_bgworker_main(Datum main_arg);
+static void communicator_new_backend_exit(int code, Datum arg);
 
 /**** Initialization functions. These run in postmaster ****/
 
@@ -73,13 +95,26 @@ pg_init_communicator_new(void)
 	SpinLockInit(&in_elog);
 }
 
+static size_t
+communicator_new_shmem_size(void)
+{
+	size_t		size = 0;
+
+	size += MAXALIGN(
+		offsetof(CommunicatorShmemData, io_completion_latches) +
+		MaxProcs * sizeof(Latch)
+		);
+
+	/* space needed by the rust code */
+	size += rcommunicator_shmem_size(MaxProcs);
+
+	return size;
+}
+
 void
 communicator_new_shmem_request(void)
 {
-	size_t		size;
-
-	size = rcommunicator_shmem_size(MaxProcs);
-	RequestAddinShmemSpace(size);
+	RequestAddinShmemSpace(communicator_new_shmem_size());
 }
 
 void
@@ -88,6 +123,7 @@ communicator_new_shmem_startup(void)
 	bool		found;
 	int			pipefd[2];
 	int			rc;
+	size_t		communicator_size;
 	size_t		shmem_size;
 	void	   *shmem_ptr;
 
@@ -101,13 +137,24 @@ communicator_new_shmem_startup(void)
 	if (fcntl(pipefd[1], F_SETFL, O_NONBLOCK) == -1)
 		elog(FATAL, "fcntl(F_SETFL) failed on write-end of communicator pipe: %m");
 
-	shmem_size = rcommunicator_shmem_size(MaxProcs);
-
+	shmem_size = communicator_new_shmem_size();
 	shmem_ptr = ShmemInitStruct("Communicator shmem state",
 								shmem_size,
 								&found);
 	Assert(!found);
 
+	/* Initialize the C-managed parts */
+	communicator_shmem_ptr = (CommunicatorShmemData *) shmem_ptr;
+	communicator_size = MAXALIGN(offsetof(CommunicatorShmemData, io_completion_latches) + MaxProcs * sizeof(Latch));
+	shmem_ptr = (char *) shmem_ptr + communicator_size;
+	shmem_size -= communicator_size;
+
+	for (int i = 0; i < MaxProcs; i++)
+	{
+		InitSharedLatch(&communicator_shmem_ptr->io_completion_latches[i]);
+	}
+
+	/* Initialize the rust-managed parts */
 	cis = rcommunicator_shmem_init(pipefd[0], pipefd[1], MaxProcs, shmem_ptr, shmem_size);
 }
 
@@ -172,11 +219,11 @@ communicator_new_bgworker_main(Datum main_arg)
 			}
 		}
 
-		(void) WaitLatch(MyLatch,
+		(void) WaitLatch(MyIOCompletionLatch,
 						 WL_LATCH_SET | WL_EXIT_ON_PM_DEATH,
 						 0,
 						 PG_WAIT_EXTENSION);
-		ResetLatch(MyLatch);
+		ResetLatch(MyIOCompletionLatch);
 	}
 }
 
@@ -191,10 +238,7 @@ communicator_new_bgworker_main(Datum main_arg)
 void
 notify_proc_unsafe(int procno)
 {
-	PGPROC	   *proc;
-
-	proc = GetPGProcByNumber(procno);
-	SetLatch(&proc->procLatch);
+	SetLatch(&communicator_shmem_ptr->io_completion_latches[procno]);
 }
 
 void
@@ -209,14 +253,23 @@ callback_set_my_latch_unsafe(void)
 void
 communicator_new_init(void)
 {
-#if PG_VERSION_NUM < 170000
-	int			MyProcNumber = (MyProc - &ProcGlobal->allProcs[0]);
-#endif
-
 	Assert(cis != NULL);
 	Assert(my_bs == NULL);
 
+	OwnLatch(MyIOCompletionLatch);
+
 	my_bs = rcommunicator_backend_init(cis, MyProcNumber);
+
+	/*
+	 * Arrange to clean up at backend exit.
+	 */
+	on_shmem_exit(communicator_new_backend_exit, 0);
+}
+
+static void
+communicator_new_backend_exit(int code, Datum arg)
+{
+	DisownLatch(MyIOCompletionLatch);
 }
 
 /*
@@ -277,7 +330,7 @@ perform_request(NeonIORequest *request)
 
 	for (;;)
 	{
-		ResetLatch(MyLatch);
+		ResetLatch(MyIOCompletionLatch);
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -286,7 +339,12 @@ perform_request(NeonIORequest *request)
 
 		elog(DEBUG5, "sent request with idx %d: tag %d", request_idx, request->tag);
 
-		(void) WaitLatch(MyLatch,
+		/*
+		 * TODO: wake up periodically for CHECK_FOR_INTERRUPTS(). Because we wait on
+		 * MyIOCompletionLatch rather than MyLatch, we won't be woken up for the standard
+		 * interrupts.
+		 */
+		(void) WaitLatch(MyIOCompletionLatch,
 						 WL_EXIT_ON_PM_DEATH | WL_LATCH_SET,
 						 0,
 						 WAIT_EVENT_NEON_PS_STARTING);

@@ -154,6 +154,10 @@ InitBufferTag(BufferTag *tag, const RelFileNode *rnode,
 #define AmAutoVacuumWorkerProcess() (IsAutoVacuumWorkerProcess())
 #endif
 
+#if PG_MAJORVERSION_NUM < 17
+#define	MyProcNumber (MyProc - &ProcGlobal->allProcs[0])
+#endif
+
 #if PG_MAJORVERSION_NUM < 15
 extern void InitMaterializedSRF(FunctionCallInfo fcinfo, bits32 flags);
 #endif
