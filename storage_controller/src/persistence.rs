@@ -134,6 +134,7 @@ pub(crate) enum DatabaseOperation {
     UpdateTimelineImport,
     DeleteTimelineImport,
     ListTimelineImports,
+    IsTenantImportingTimeline,
 }
 
 #[must_use]
@@ -1641,9 +1642,7 @@ impl Persistence {
         .await
     }
 
-    pub(crate) async fn list_complete_timeline_imports(
-        &self,
-    ) -> DatabaseResult<Vec<TimelineImport>> {
+    pub(crate) async fn list_timeline_imports(&self) -> DatabaseResult<Vec<TimelineImport>> {
         use crate::schema::timeline_imports::dsl;
         let persistent = self
             .with_measured_conn(DatabaseOperation::ListTimelineImports, move |conn| {
@@ -1660,10 +1659,7 @@ impl Persistence {
             .map(TimelineImport::from_persistent)
             .collect();
         match imports {
-            Ok(ok) => Ok(ok
-                .into_iter()
-                .filter(|import| import.is_complete())
-                .collect()),
+            Ok(ok) => Ok(ok.into_iter().collect()),
             Err(err) => Err(DatabaseError::Logical(format!(
                 "failed to deserialize import: {err}"
             ))),
@@ -1769,6 +1765,25 @@ impl Persistence {
                         TimelineImportUpdateFollowUp::None => Ok(Ok(None)),
                     }
                 }
+            })
+        })
+        .await
+    }
+
+    pub(crate) async fn is_tenant_importing_timeline(
+        &self,
+        tenant_id: TenantId,
+    ) -> DatabaseResult<bool> {
+        use crate::schema::timeline_imports::dsl;
+        self.with_measured_conn(DatabaseOperation::IsTenantImportingTimeline, move |conn| {
+            Box::pin(async move {
+                let imports: i64 = dsl::timeline_imports
+                    .filter(dsl::tenant_id.eq(tenant_id.to_string()))
+                    .count()
+                    .get_result(conn)
+                    .await?;
+
+                Ok(imports > 0)
             })
         })
         .await

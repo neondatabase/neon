@@ -14,6 +14,12 @@ use utils::{
 
 use crate::{persistence::TimelineImportPersistence, service::Config};
 
+#[derive(Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) enum TimelineImportState {
+    Importing,
+    Idle,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub(crate) struct ShardImportStatuses(pub(crate) HashMap<ShardIndex, ShardImportStatus>);
 
