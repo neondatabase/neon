@@ -46,12 +46,12 @@ async fn metrics() -> Result {
 
 async fn get(S3Path { path }: S3Path, state: State) -> Result {
     info!(%path, "downloading");
-    let download_err = |e| {
-        if let DownloadError::NotFound = e {
-            info!(%path, %e, "downloading"); // 404 is not an issue of _this_ service
+    let download_err = |err| {
+        if let DownloadError::NotFound = err {
+            info!(%path, %err, "downloading"); // 404 is not an issue of _this_ service
             return not_found(&path);
         }
-        internal_error(e, &path, "downloading")
+        internal_error(err, &path, "downloading")
     };
     let cancel = state.cancel.clone();
     let opts = &DownloadOpts::default();
@@ -364,7 +364,10 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
             vec![TIMELINE_ID.to_string(), TimelineId::generate().to_string()],
             vec![ENDPOINT_ID, "ep-ololo"]
         )
-        .skip(1);
+        // first one is fully valid path, second path is valid for GET as
+        // read paths may have different endpoint if tenant and timeline matches
+        // (needed for prewarming RO->RW replica)
+        .skip(2);
 
         for ((uri, method), (tenant, timeline, endpoint)) in iproduct!(routes(), args) {
             info!(%uri, %method, %tenant, %timeline, %endpoint);
@@ -471,6 +474,16 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
             (uri.clone(), "GET", "пыщьпыщь", StatusCode::OK, true),
             (uri.clone(), "DELETE", "", StatusCode::OK, false),
             (uri, "GET", "", StatusCode::NOT_FOUND, false),
+        ];
+        requests_chain(chain.into_iter(), |_| token()).await;
+    }
+
+    #[testlog(tokio::test)]
+    async fn read_other_endpoint_data() {
+        let uri = format!("/{TENANT_ID}/{TIMELINE_ID}/other_endpoint/key");
+        let chain = vec![
+            (uri.clone(), "GET", "", StatusCode::NOT_FOUND, false),
+            (uri.clone(), "PUT", "", StatusCode::UNAUTHORIZED, false),
         ];
         requests_chain(chain.into_iter(), |_| token()).await;
     }
