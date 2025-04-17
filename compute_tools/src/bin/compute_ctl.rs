@@ -116,9 +116,7 @@ struct Cli {
     #[arg(long)]
     pub set_disk_quota_for_fs: Option<String>,
 
-    // TODO(tristan957): remove alias after compatibility tests are no longer
-    // an issue
-    #[arg(short = 'c', long, alias = "spec-path")]
+    #[arg(short = 'c', long)]
     pub config: Option<OsString>,
 
     #[arg(short = 'i', long, group = "compute-id")]

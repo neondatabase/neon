@@ -18,6 +18,7 @@ use pageserver_api::models::{
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
+use pem::Pem;
 use postgres_backend::AuthType;
 use reqwest::{Certificate, Method};
 use serde::de::DeserializeOwned;
@@ -34,8 +35,8 @@ use crate::local_env::{LocalEnv, NeonStorageControllerConf};
 
 pub struct StorageController {
     env: LocalEnv,
-    private_key: Option<Vec<u8>>,
-    public_key: Option<String>,
+    private_key: Option<Pem>,
+    public_key: Option<Pem>,
     client: reqwest::Client,
     config: NeonStorageControllerConf,
 
@@ -116,7 +117,9 @@ impl StorageController {
             AuthType::Trust => (None, None),
             AuthType::NeonJWT => {
                 let private_key_path = env.get_private_key_path();
-                let private_key = fs::read(private_key_path).expect("failed to read private key");
+                let private_key =
+                    pem::parse(fs::read(private_key_path).expect("failed to read private key"))
+                        .expect("failed to parse PEM file");
 
                 // If pageserver auth is enabled, this implicitly enables auth for this service,
                 // using the same credentials.
@@ -138,9 +141,13 @@ impl StorageController {
                         .expect("Empty key dir")
                         .expect("Error reading key dir");
 
-                    std::fs::read_to_string(dent.path()).expect("Can't read public key")
+                    pem::parse(std::fs::read_to_string(dent.path()).expect("Can't read public key"))
+                        .expect("Failed to parse PEM file")
                 } else {
-                    std::fs::read_to_string(&public_key_path).expect("Can't read public key")
+                    pem::parse(
+                        std::fs::read_to_string(&public_key_path).expect("Can't read public key"),
+                    )
+                    .expect("Failed to parse PEM file")
                 };
                 (Some(private_key), Some(public_key))
             }

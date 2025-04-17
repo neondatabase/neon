@@ -222,7 +222,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     {
         Ok(auth_result) => auth_result,
         Err(e) => {
-            return stream.throw_error(e).await?;
+            return stream.throw_error(e, Some(ctx)).await?;
         }
     };
 
@@ -238,7 +238,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         config.wake_compute_retry_config,
         &config.connect_to_compute,
     )
-    .or_else(|e| stream.throw_error(e))
+    .or_else(|e| stream.throw_error(e, Some(ctx)))
     .await?;
 
     let cancellation_handler_clone = Arc::clone(&cancellation_handler);
