@@ -81,6 +81,23 @@ static int	neon_compute_mode = 0;
 static int	max_reconnect_attempts = 60;
 static int	stripe_size;
 
+static char	*pageserver_sslcert = NULL;
+static char	*pageserver_sslcertmode = NULL;
+static char	*pageserver_sslcompression = NULL;
+static char	*pageserver_sslcrl = NULL;
+static char	*pageserver_sslcrldir = NULL;
+static char	*pageserver_sslkey = NULL;
+static char	*pageserver_sslmode = NULL;
+static char	*pageserver_sslpassword = NULL;
+static char	*pageserver_sslrootcert = NULL;
+static char	*pageserver_sslsni = NULL;
+static char	*pageserver_ssl_min_protocol_version = NULL;
+static char	*pageserver_ssl_max_protocol_version = NULL;
+
+#if PG_MAJORVERSION_NUM >= 17
+static char	*pageserver_sslnegotiation = NULL;
+#endif
+
 static int pageserver_response_log_timeout = 10000;
 /* 2.5 minutes. A bit higher than highest default TCP retransmission timeout */
 static int pageserver_response_disconnect_timeout = 150000;
@@ -127,7 +144,7 @@ static uint64 pagestore_local_counter = 0;
 typedef enum PSConnectionState {
 	PS_Disconnected,			/* no connection yet */
 	PS_Connecting_Startup,		/* connection starting up */
-	PS_Connecting_PageStream,	/* negotiating pagestream */ 
+	PS_Connecting_PageStream,	/* negotiating pagestream */
 	PS_Connected,				/* connected, pagestream established */
 } PSConnectionState;
 
@@ -362,7 +379,7 @@ get_shard_number(BufferTag *tag)
 }
 
 static inline void
-CLEANUP_AND_DISCONNECT(PageServer *shard) 
+CLEANUP_AND_DISCONNECT(PageServer *shard)
 {
 	if (shard->wes_read)
 	{
@@ -384,7 +401,7 @@ CLEANUP_AND_DISCONNECT(PageServer *shard)
  * complete the connection (e.g. due to receiving an earlier cancellation
  * during connection start).
  * Returns true if successfully connected; false if the connection failed.
- * 
+ *
  * Throws errors in unrecoverable situations, or when this backend's query
  * is canceled.
  */
@@ -407,8 +424,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	{
 	case PS_Disconnected:
 	{
-		const char *keywords[5];
-		const char *values[5];
+		const char *keywords[17];
+		const char *values[17];
 		char pid_str[16] = { 0 };
 		char endpoint_str[36] = { 0 };
 		int			n_pgsql_params;
@@ -479,6 +496,92 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		{
 			keywords[n_pgsql_params] = "password";
 			values[n_pgsql_params] = neon_auth_token;
+			n_pgsql_params++;
+		}
+
+		if (pageserver_sslcertmode)
+		{
+			keywords[n_pgsql_params] = "sslcertmode";
+			values[n_pgsql_params] = pageserver_sslcertmode;
+			n_pgsql_params++;
+		}
+
+		if (pageserver_sslcompression)
+		{
+			keywords[n_pgsql_params] = "sslcompression";
+			values[n_pgsql_params] = pageserver_sslcompression;
+			n_pgsql_params++;
+		}
+
+		if (pageserver_sslcrl)
+		{
+			keywords[n_pgsql_params] = "sslcrl";
+			values[n_pgsql_params] = pageserver_sslcrl;
+			n_pgsql_params++;
+		}
+
+		if (pageserver_sslcrldir)
+		{
+			keywords[n_pgsql_params] = "sslcrldir";
+			values[n_pgsql_params] = pageserver_sslcrldir;
+			n_pgsql_params++;
+		}
+
+		if (pageserver_sslkey)
+		{
+			keywords[n_pgsql_params] = "sslkey";
+			values[n_pgsql_params] = pageserver_sslkey;
+			n_pgsql_params++;
+		}
+
+		if (pageserver_sslmode)
+		{
+			keywords[n_pgsql_params] = "sslmode";
+			values[n_pgsql_params] = pageserver_sslmode;
+			n_pgsql_params++;
+		}
+
+#if PG_MAJORVERSION_NUM >= 17
+		if (pageserver_sslnegotiation)
+		{
+			keywords[n_pgsql_params] = "sslnegotiation";
+			values[n_pgsql_params] = pageserver_sslnegotiation;
+			n_pgsql_params++;
+		}
+#endif
+
+		if (pageserver_sslpassword)
+		{
+			keywords[n_pgsql_params] = "sslpassword";
+			values[n_pgsql_params] = pageserver_sslpassword;
+			n_pgsql_params++;
+		}
+
+		if (pageserver_sslrootcert)
+		{
+			keywords[n_pgsql_params] = "sslrootcert";
+			values[n_pgsql_params] = pageserver_sslrootcert;
+			n_pgsql_params++;
+		}
+
+		if (pageserver_sslsni)
+		{
+			keywords[n_pgsql_params] = "sslsni";
+			values[n_pgsql_params] = pageserver_sslsni;
+			n_pgsql_params++;
+		}
+
+		if (pageserver_ssl_max_protocol_version)
+		{
+			keywords[n_pgsql_params] = "ssl_max_protocol_version";
+			values[n_pgsql_params] = pageserver_ssl_max_protocol_version;
+			n_pgsql_params++;
+		}
+
+		if (pageserver_ssl_min_protocol_version)
+		{
+			keywords[n_pgsql_params] = "ssl_min_protocol_version";
+			values[n_pgsql_params] = pageserver_ssl_min_protocol_version;
 			n_pgsql_params++;
 		}
 
@@ -1477,6 +1580,125 @@ pg_init_libpagestore(void)
 							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.pageserver_sslcert",
+							   "SSL certificate path",
+							   "Refer to the Postgres documentation on libpq's sslcert keyword.",
+							   &pageserver_sslcert,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.pageserver_sslcertmode",
+							   "SSL certificate mode",
+							   "Refer to the Postgres documentation on libpq's sslcertmode keyword.",
+							   &pageserver_sslcertmode,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.pageserver_sslcrl",
+							   "Path to the SSL server certificate revocation list",
+							   "Refer to the Postgres documentation on libpq's sslcrl keyword.",
+							   &pageserver_sslcrl,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.pageserver_sslcrldir",
+							   "Path to the directory of the SSL server certificate revocation list",
+							   "Refer to the Postgres documentation on libpq's sslcrldir keyword.",
+							   &pageserver_sslcrldir,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.pageserver_sslcompression",
+							   "SSL compression",
+							   "Refer to the Postgres documentation on libpq's sslcompression keyword.",
+							   &pageserver_sslcompression,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.pageserver_sslkey",
+							   "SSL key",
+							   "Refer to the Postgres documentation on libpq's sslkey keyword.",
+							   &pageserver_sslkey,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.pageserver_sslmode",
+							   "SSL mode",
+							   "Refer to the Postgres documentation on libpq's sslmode keyword.",
+							   &pageserver_sslmode,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+#if PG_MAJORVERSION_NUM >= 17
+	DefineCustomStringVariable(
+							   "neon.pageserver_sslnegotiation",
+							   "SSL negotiation",
+							   "Refer to the Postgres documentation on libpq's sslnegotiation keyword.",
+							   &pageserver_sslnegotiation,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+#endif
+	DefineCustomStringVariable(
+							   "neon.pageserver_sslpassword",
+							   "SSL passphrase",
+							   "Refer to the Postgres documentation on libpq's sslpassword keyword.",
+							   &pageserver_sslpassword,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.pageserver_sslrootcert",
+							   "SSL root certificate",
+							   "Refer to the Postgres documentation on libpq's sslrootcert keyword.",
+							   &pageserver_sslrootcert,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.pageserver_sslsni",
+							   "TLS SNI extension",
+							   "Refer to the Postgres documentation on libpq's sslsni keyword.",
+							   &pageserver_sslsni,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.pageserver_ssl_max_protocol_version",
+							   "SSL maxiumum protocol version",
+							   "Refer to the Postgres documentation on libpq's ssl_max_protocol_version keyword.",
+							   &pageserver_ssl_max_protocol_version,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.pageserver_ssl_min_protocol_version",
+							   "SSL minimum protocol version",
+							   "Refer to the Postgres documentation on libpq's ssl_min_protocol_version keyword.",
+							   &pageserver_ssl_min_protocol_version,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
 
 	relsize_hash_init();
 

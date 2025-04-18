@@ -64,6 +64,22 @@ char	   *wal_acceptors_list = "";
 int			wal_acceptor_reconnect_timeout = 1000;
 int			wal_acceptor_connection_timeout = 10000;
 int			safekeeper_proto_version = 2;
+static char	*safekeeper_sslcert = NULL;
+static char	*safekeeper_sslcertmode = NULL;
+static char	*safekeeper_sslcompression = NULL;
+static char	*safekeeper_sslcrl = NULL;
+static char	*safekeeper_sslcrldir = NULL;
+static char	*safekeeper_sslkey = NULL;
+static char	*safekeeper_sslmode = NULL;
+static char	*safekeeper_sslpassword = NULL;
+static char	*safekeeper_sslrootcert = NULL;
+static char	*safekeeper_sslsni = NULL;
+static char	*safekeeper_ssl_min_protocol_version = NULL;
+static char	*safekeeper_ssl_max_protocol_version = NULL;
+
+#if PG_MAJORVERSION_NUM >= 17
+static char	*safekeeper_sslnegotiation = NULL;
+#endif
 
 /* Set to true in the walproposer bgw. */
 static bool am_walproposer;
@@ -232,6 +248,125 @@ nwp_register_gucs(void)
 							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.safekeeper_sslcert",
+							   "SSL certificate path",
+							   "Refer to the Postgres documentation on libpq's sslcert keyword.",
+							   &safekeeper_sslcert,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.safekeeper_sslcertmode",
+							   "SSL certificate mode",
+							   "Refer to the Postgres documentation on libpq's sslcertmode keyword.",
+							   &safekeeper_sslcertmode,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.safekeeper_sslcrl",
+							   "Path to the SSL server certificate revocation list",
+							   "Refer to the Postgres documentation on libpq's sslcrl keyword.",
+							   &safekeeper_sslcrl,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.safekeeper_sslcrldir",
+							   "Path to the directory of the SSL server certificate revocation list",
+							   "Refer to the Postgres documentation on libpq's sslcrldir keyword.",
+							   &safekeeper_sslcrldir,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.safekeeper_sslcompression",
+							   "SSL compression",
+							   "Refer to the Postgres documentation on libpq's sslcompression keyword.",
+							   &safekeeper_sslcompression,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.safekeeper_sslkey",
+							   "SSL key",
+							   "Refer to the Postgres documentation on libpq's sslkey keyword.",
+							   &safekeeper_sslkey,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.safekeeper_sslmode",
+							   "SSL mode",
+							   "Refer to the Postgres documentation on libpq's sslmode keyword.",
+							   &safekeeper_sslmode,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+#if PG_MAJORVERSION_NUM >= 17
+	DefineCustomStringVariable(
+							   "neon.safekeeper_sslnegotiation",
+							   "SSL negotiation",
+							   "Refer to the Postgres documentation on libpq's sslnegotiation keyword.",
+							   &safekeeper_sslnegotiation,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+#endif
+	DefineCustomStringVariable(
+							   "neon.safekeeper_sslpassword",
+							   "SSL passphrase",
+							   "Refer to the Postgres documentation on libpq's sslpassword keyword.",
+							   &safekeeper_sslpassword,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.safekeeper_sslrootcert",
+							   "SSL root certificate",
+							   "Refer to the Postgres documentation on libpq's sslrootcert keyword.",
+							   &safekeeper_sslrootcert,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.safekeeper_sslsni",
+							   "TLS SNI extension",
+							   "Refer to the Postgres documentation on libpq's sslsni keyword.",
+							   &safekeeper_sslsni,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.safekeeper_ssl_max_protocol_version",
+							   "SSL maxiumum protocol version",
+							   "Refer to the Postgres documentation on libpq's ssl_max_protocol_version keyword.",
+							   &safekeeper_ssl_max_protocol_version,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.safekeeper_ssl_min_protocol_version",
+							   "SSL minimum protocol version",
+							   "Refer to the Postgres documentation on libpq's ssl_min_protocol_version keyword.",
+							   &safekeeper_ssl_min_protocol_version,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
 }
 
 
@@ -843,14 +978,12 @@ walprop_status(Safekeeper *sk)
 WalProposerConn *
 libpqwp_connect_start(char *conninfo)
 {
-
 	PGconn	   *pg_conn;
 	WalProposerConn *conn;
-	const char *keywords[3];
-	const char *values[3];
+	const char *keywords[16];
+	const char *values[16];
 	int			n;
 	char	   *password = neon_auth_token;
-
 
 	/*
 	 * Connect using the given connection string. If the NEON_AUTH_TOKEN
@@ -871,9 +1004,90 @@ libpqwp_connect_start(char *conninfo)
 	keywords[n] = "dbname";
 	values[n] = conninfo;
 	n++;
+	if (safekeeper_sslcert)
+	{
+		keywords[n] = "sslcert";
+		values[n] = safekeeper_sslcert;
+		n++;
+	}
+	if (safekeeper_sslcertmode)
+	{
+		keywords[n] = "sslcertmode";
+		values[n] = safekeeper_sslcertmode;
+		n++;
+	}
+	if (safekeeper_sslcompression)
+	{
+		keywords[n] = "sslcompression";
+		values[n] = safekeeper_sslcompression;
+		n++;
+	}
+	if (safekeeper_sslcrl)
+	{
+		keywords[n] = "sslcrl";
+		values[n] = safekeeper_sslcrl;
+		n++;
+	}
+	if (safekeeper_sslcrldir)
+	{
+		keywords[n] = "sslcrldir";
+		values[n] = safekeeper_sslcrldir;
+		n++;
+	}
+	if (safekeeper_sslkey)
+	{
+		keywords[n] = "sslkey";
+		values[n] = safekeeper_sslkey;
+		n++;
+	}
+	if (safekeeper_sslmode)
+	{
+		keywords[n] = "sslmode";
+		values[n] = safekeeper_sslmode;
+		n++;
+	}
+#if PG_MAJORVERSION_NUM >= 17
+	if (safekeeper_sslnegotiation)
+	{
+		keywords[n] = "sslnegotiation";
+		values[n] = safekeeper_sslnegotiation;
+		n++;
+	}
+#endif
+	if (safekeeper_sslpassword)
+	{
+		keywords[n] = "sslpassword";
+		values[n] = safekeeper_sslpassword;
+		n++;
+	}
+	if (safekeeper_sslrootcert)
+	{
+		keywords[n] = "sslrootcert";
+		values[n] = safekeeper_sslrootcert;
+		n++;
+	}
+	if (safekeeper_sslsni)
+	{
+		keywords[n] = "sslsni";
+		values[n] = safekeeper_sslsni;
+		n++;
+	}
+	if (safekeeper_ssl_max_protocol_version)
+	{
+		keywords[n] = "ssl_max_protocol_version";
+		values[n] = safekeeper_ssl_max_protocol_version;
+		n++;
+	}
+	if (safekeeper_ssl_min_protocol_version)
+	{
+		keywords[n] = "ssl_min_protocol_version";
+		values[n] = safekeeper_ssl_min_protocol_version;
+		n++;
+	}
 	keywords[n] = NULL;
 	values[n] = NULL;
 	n++;
+
 	pg_conn = PQconnectStartParams(keywords, values, 1);
 
 	/*
