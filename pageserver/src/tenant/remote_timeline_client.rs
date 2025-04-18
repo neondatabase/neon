@@ -1495,6 +1495,7 @@ impl RemoteTimelineClient {
         upload_queue.queued_operations.push_back(op);
     }
 
+    #[allow(dead_code)]
     fn is_kms_enabled(&self) -> bool {
         self.kms_impl.is_some()
     }

@@ -570,7 +570,8 @@ impl RemoteStorage for LocalFs {
         encryption_key: Option<&[u8]>,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
-        unimplemented!()
+        self.upload(from, data_size_bytes, to, metadata, cancel)
+            .await
     }
 
     async fn delete_objects(
