@@ -5,12 +5,37 @@ use crate::privilege::Privilege;
 use crate::responses::ComputeCtlConfig;
 use crate::spec::{ComputeSpec, ExtVersion, PgIdent};
 
+#[derive(Copy, Clone, Debug, Deserialize, Serialize)]
+#[serde(rename = "snake_case")]
+/// Available scopes for a compute's JWT
+pub enum ComputeClaimsScope {
+    Admin,
+}
+
+impl TryFrom<&str> for ComputeClaimsScope {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "admin" => Ok(ComputeClaimsScope::Admin),
+            _ => Err(anyhow::anyhow!(format!(
+                "invalid compute claims scope \"{value}\""
+            ))),
+        }
+    }
+}
+
 /// When making requests to the `compute_ctl` external HTTP server, the client
 /// must specify a set of claims in `Authorization` header JWTs such that
 /// `compute_ctl` can authorize the request.
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename = "snake_case")]
 pub struct ComputeClaims {
-    pub compute_id: String,
+    /// The compute ID that will validate the token.
+    pub compute_id: Option<String>,
+
+    /// The scope of the what the token authorizes.
+    pub scope: Option<ComputeClaimsScope>,
 }
 
 /// Request of the /configure API

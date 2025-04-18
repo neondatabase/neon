@@ -6,7 +6,7 @@ use axum_extra::{
     TypedHeader,
     headers::{Authorization, authorization::Bearer},
 };
-use compute_api::requests::ComputeClaims;
+use compute_api::requests::{ComputeClaims, ComputeClaimsScope};
 use futures::future::BoxFuture;
 use http::{Request, Response, StatusCode};
 use jsonwebtoken::{Algorithm, DecodingKey, TokenData, Validation, jwk::JwkSet};
@@ -64,11 +64,25 @@ impl AsyncAuthorizeRequest<Body> for Authorize {
                 Err(e) => return Err(JsonResponse::error(StatusCode::UNAUTHORIZED, e)),
             };
 
-            if data.claims.compute_id != compute_id {
-                return Err(JsonResponse::error(
-                    StatusCode::UNAUTHORIZED,
-                    "invalid compute ID in authorization token claims",
-                ));
+            // If the scope if not [`ComputeClaimsScope::Admin`], then we must
+            // validate the compute_id.
+            if !matches!(data.claims.scope, Some(ComputeClaimsScope::Admin)) {
+                let claimed_compute_id = match data.claims.compute_id.as_ref() {
+                    Some(compute_id) => compute_id,
+                    None => {
+                        return Err(JsonResponse::error(
+                            StatusCode::BAD_REQUEST,
+                            "missing compute_id in token claims",
+                        ));
+                    }
+                };
+
+                if *claimed_compute_id != compute_id {
+                    return Err(JsonResponse::error(
+                        StatusCode::UNAUTHORIZED,
+                        "invalid compute ID in authorization token claims",
+                    ));
+                }
             }
 
             // Make claims available to any subsequent middleware or request
