@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from fixtures.workload import Workload
+
 if TYPE_CHECKING:
     from fixtures.neon_fixtures import NeonEnvBuilder
 
@@ -72,3 +74,12 @@ def test_pageserver_catchup_while_compute_down(neon_env_builder: NeonEnvBuilder)
 
     cur.execute("SELECT count(*) FROM foo")
     assert cur.fetchone() == (20000,)
+
+
+def test_workload_stuck(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+
+    workload = Workload(env, env.initial_tenant, env.initial_timeline)
+    workload.init()
+    workload.write_rows(10)
+    workload.validate()
