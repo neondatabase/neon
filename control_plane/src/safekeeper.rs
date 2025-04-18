@@ -87,7 +87,7 @@ impl SafekeeperNode {
             conf: conf.clone(),
             pg_connection_config: Self::safekeeper_connection_config(&listen_addr, conf.pg_port),
             env: env.clone(),
-            http_client: reqwest::Client::new(),
+            http_client: env.create_http_client(),
             http_base_url: format!("http://{}:{}/v1", listen_addr, conf.http_port),
             listen_addr,
         }

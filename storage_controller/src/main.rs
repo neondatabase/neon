@@ -196,7 +196,7 @@ struct Cli {
     ssl_cert_reload_period: humantime::Duration,
     /// Trusted root CA certificates to use in https APIs.
     #[arg(long)]
-    ssl_ca_file: Option<PathBuf>,
+    ssl_ca_file: Option<Utf8PathBuf>,
 
     /// Neon local specific flag. When set, ignore [`Cli::control_plane_url`] and deliver
     /// the compute notification directly (instead of via control plane).

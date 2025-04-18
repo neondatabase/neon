@@ -11,6 +11,7 @@ bench = []
 anyhow.workspace = true
 async-stream.workspace = true
 bytes.workspace = true
+camino.workspace = true
 clap = { workspace = true, features = ["derive"] }
 const_format.workspace = true
 futures.workspace = true
@@ -19,12 +20,14 @@ futures-util.workspace = true
 humantime.workspace = true
 hyper = { workspace = true, features = ["full"] }
 http-body-util.workspace = true
+http-utils.workspace = true
 hyper-util = "0.1"
 once_cell.workspace = true
 parking_lot.workspace = true
 prost.workspace = true
 tonic.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio-rustls.workspace = true
 tracing.workspace = true
 metrics.workspace = true
 utils.workspace = true

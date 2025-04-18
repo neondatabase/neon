@@ -17,16 +17,22 @@ pub async fn start_broker_process(
     retry_timeout: &Duration,
 ) -> anyhow::Result<()> {
     let broker = &env.broker;
-    let listen_addr = &broker.listen_addr;
 
-    print!("Starting neon broker at {}", listen_addr);
+    print!("Starting neon broker at {}", broker.client_url());
 
-    let args = [format!("--listen-addr={listen_addr}")];
+    let mut args = Vec::new();
 
-    let client = reqwest::Client::new();
+    if let Some(addr) = &broker.listen_addr {
+        args.push(format!("--listen-addr={addr}"));
+    }
+    if let Some(addr) = &broker.listen_https_addr {
+        args.push(format!("--listen-https-addr={addr}"));
+    }
+
+    let client = env.create_http_client();
     background_process::start_process(
         "storage_broker",
-        &env.base_data_dir,
+        &env.storage_broker_data_dir(),
         &env.storage_broker_bin(),
         args,
         [],
