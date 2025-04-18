@@ -157,7 +157,6 @@ pub(crate) async fn serve_websocket(
 
     match res {
         Err(e) => {
-            // todo: log and push to ctx the error kind
             ctx.set_error_kind(e.get_error_kind());
             Err(e.into())
         }
@@ -178,7 +177,6 @@ pub(crate) async fn serve_websocket(
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used)]
 mod tests {
     use std::pin::pin;
 

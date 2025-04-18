@@ -1,7 +1,7 @@
-use std::{collections::HashSet, net::SocketAddr};
+use std::collections::HashSet;
 
 use anyhow::{Result, anyhow};
-use axum::{RequestExt, body::Body, extract::ConnectInfo};
+use axum::{RequestExt, body::Body};
 use axum_extra::{
     TypedHeader,
     headers::{Authorization, authorization::Bearer},
@@ -11,9 +11,9 @@ use futures::future::BoxFuture;
 use http::{Request, Response, StatusCode};
 use jsonwebtoken::{Algorithm, DecodingKey, TokenData, Validation, jwk::JwkSet};
 use tower_http::auth::AsyncAuthorizeRequest;
-use tracing::warn;
+use tracing::{debug, warn};
 
-use crate::http::{JsonResponse, extract::RequestId};
+use crate::http::JsonResponse;
 
 #[derive(Clone, Debug)]
 pub(in crate::http) struct Authorize {
@@ -52,31 +52,6 @@ impl AsyncAuthorizeRequest<Body> for Authorize {
         let validation = self.validation.clone();
 
         Box::pin(async move {
-            let request_id = request.extract_parts::<RequestId>().await.unwrap();
-
-            // TODO: Remove this stanza after teaching neon_local and the
-            // regression tests to use a JWT + JWKS.
-            //
-            // https://github.com/neondatabase/neon/issues/11316
-            if cfg!(feature = "testing") {
-                warn!(%request_id, "Skipping compute_ctl authorization check");
-
-                return Ok(request);
-            }
-
-            let connect_info = request
-                .extract_parts::<ConnectInfo<SocketAddr>>()
-                .await
-                .unwrap();
-
-            // In the event the request is coming from the loopback interface,
-            // allow all requests
-            if connect_info.ip().is_loopback() {
-                warn!(%request_id, "Bypassed authorization because request is coming from the loopback interface");
-
-                return Ok(request);
-            }
-
             let TypedHeader(Authorization(bearer)) = request
                 .extract_parts::<TypedHeader<Authorization<Bearer>>>()
                 .await
@@ -92,7 +67,7 @@ impl AsyncAuthorizeRequest<Body> for Authorize {
             if data.claims.compute_id != compute_id {
                 return Err(JsonResponse::error(
                     StatusCode::UNAUTHORIZED,
-                    "invalid claims in authorization token",
+                    "invalid compute ID in authorization token claims",
                 ));
             }
 
@@ -112,12 +87,16 @@ impl Authorize {
         token: &str,
         validation: &Validation,
     ) -> Result<TokenData<ComputeClaims>> {
+        debug_assert!(!jwks.keys.is_empty());
+
+        debug!("verifying token {}", token);
+
         for jwk in jwks.keys.iter() {
             let decoding_key = match DecodingKey::from_jwk(jwk) {
                 Ok(key) => key,
                 Err(e) => {
                     warn!(
-                        "Failed to construct decoding key from {}: {}",
+                        "failed to construct decoding key from {}: {}",
                         jwk.common.key_id.as_ref().unwrap(),
                         e
                     );
@@ -130,7 +109,7 @@ impl Authorize {
                 Ok(data) => return Ok(data),
                 Err(e) => {
                     warn!(
-                        "Failed to decode authorization token using {}: {}",
+                        "failed to decode authorization token using {}: {}",
                         jwk.common.key_id.as_ref().unwrap(),
                         e
                     );
@@ -140,6 +119,6 @@ impl Authorize {
             }
         }
 
-        Err(anyhow!("Failed to verify authorization token"))
+        Err(anyhow!("failed to verify authorization token"))
     }
 }

@@ -16,7 +16,6 @@ use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
 use metrics::set_build_info_metric;
 use remote_storage::RemoteStorageConfig;
-use reqwest::Certificate;
 use safekeeper::defaults::{
     DEFAULT_CONTROL_FILE_SAVE_INTERVAL, DEFAULT_EVICTION_MIN_RESIDENT, DEFAULT_HEARTBEAT_TIMEOUT,
     DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_MAX_OFFLOADER_LAG_BYTES, DEFAULT_PARTIAL_BACKUP_CONCURRENCY,
@@ -373,7 +372,10 @@ async fn main() -> anyhow::Result<()> {
         Some(ssl_ca_file) => {
             tracing::info!("Using ssl root CA file: {ssl_ca_file:?}");
             let buf = tokio::fs::read(ssl_ca_file).await?;
-            Certificate::from_pem_bundle(&buf)?
+            pem::parse_many(&buf)?
+                .into_iter()
+                .filter(|pem| pem.tag() == "CERTIFICATE")
+                .collect()
         }
         None => Vec::new(),
     };

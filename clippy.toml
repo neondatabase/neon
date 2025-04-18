@@ -12,3 +12,5 @@ disallowed-macros = [
     # cannot disallow this, because clippy finds used from tokio macros
     #"tokio::pin",
 ]
+
+allow-unwrap-in-tests = true

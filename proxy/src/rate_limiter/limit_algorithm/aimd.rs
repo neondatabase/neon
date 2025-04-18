@@ -63,7 +63,6 @@ impl LimitAlgorithm for Aimd {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used)]
 mod tests {
     use std::time::Duration;
 

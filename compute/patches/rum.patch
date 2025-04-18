@@ -1,5 +1,5 @@
 diff --git a/src/ruminsert.c b/src/ruminsert.c
-index 255e616..7a2240f 100644
+index 255e616..1c6edb7 100644
 --- a/src/ruminsert.c
 +++ b/src/ruminsert.c
 @@ -628,6 +628,10 @@ rumbuild(Relation heap, Relation index, struct IndexInfo *indexInfo)
@@ -24,24 +24,12 @@ index 255e616..7a2240f 100644
  	/*
  	 * Write index to xlog
  	 */
-@@ -713,6 +721,22 @@ rumbuild(Relation heap, Relation index, struct IndexInfo *indexInfo)
+@@ -713,6 +721,10 @@ rumbuild(Relation heap, Relation index, struct IndexInfo *indexInfo)
  		UnlockReleaseBuffer(buffer);
  	}
  
 +#ifdef NEON_SMGR
-+	{
-+#if PG_VERSION_NUM >= 160000
-+		RelFileLocator rlocator = RelationGetSmgr(index)->smgr_rlocator.locator;
-+#else
-+		RelFileNode rlocator = RelationGetSmgr(index)->smgr_rnode.node;
-+#endif
-+		if (set_lwlsn_block_range_hook)
-+			set_lwlsn_block_range_hook(XactLastRecEnd, rlocator, MAIN_FORKNUM, 0, RelationGetNumberOfBlocks(index));
-+		if (set_lwlsn_relation_hook)
-+			set_lwlsn_relation_hook(XactLastRecEnd, rlocator, MAIN_FORKNUM);
-+
-+		smgr_end_unlogged_build(index->rd_smgr);
-+	}
++	smgr_end_unlogged_build(index->rd_smgr);
 +#endif
 +
  	/*

@@ -27,15 +27,17 @@ jobs:
       - name: Fast forwarding
         uses: sequoia-pgp/fast-forward@ea7628bedcb0b0b96e94383ada458d812fca4979
         # See https://docs.github.com/en/graphql/reference/enums#mergestatestatus
-        if: ${{ github.event.pull_request.mergeable_state  == 'clean' }}
+        if: ${{ contains(fromJSON('["clean", "unstable"]'), github.event.pull_request.mergeable_state) }}
         with:
           merge: true
           comment: on-error
           github_token: ${{ secrets.CI_ACCESS_TOKEN }}
 
       - name: Comment if mergeable_state is not clean
-        if: ${{ github.event.pull_request.mergeable_state  != 'clean' }}
+        if: ${{ !contains(fromJSON('["clean", "unstable"]'), github.event.pull_request.mergeable_state) }}
+        env:
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
         run: |
           gh pr comment ${{ github.event.pull_request.number }} \
             --repo "${GITHUB_REPOSITORY}" \
-            --body "Not trying to forward pull-request, because \`mergeable_state\` is \`${{ github.event.pull_request.mergeable_state }}\`, not \`clean\`."
+            --body "Not trying to forward pull-request, because \`mergeable_state\` is \`${{ github.event.pull_request.mergeable_state }}\`, not \`clean\` or \`unstable\`."

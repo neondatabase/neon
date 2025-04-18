@@ -14,6 +14,7 @@ use http_utils::json::{json_request, json_response};
 use http_utils::request::{ensure_no_body, parse_query_param, parse_request_param};
 use http_utils::{RequestExt, RouterBuilder};
 use hyper::{Body, Request, Response, StatusCode};
+use pem::Pem;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use safekeeper_api::models::{
     AcceptorStateStatus, PullTimelineRequest, SafekeeperStatus, SkTimelineInfo, TenantDeleteResult,
@@ -230,14 +231,20 @@ async fn timeline_pull_handler(mut request: Request<Body>) -> Result<Response<Bo
     let conf = get_conf(&request);
     let global_timelines = get_global_timelines(&request);
 
-    let resp = pull_timeline::handle_request(
-        data,
-        conf.sk_auth_token.clone(),
-        conf.ssl_ca_certs.clone(),
-        global_timelines,
-    )
-    .await
-    .map_err(ApiError::InternalServerError)?;
+    let ca_certs = conf
+        .ssl_ca_certs
+        .iter()
+        .map(Pem::contents)
+        .map(reqwest::Certificate::from_der)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            ApiError::InternalServerError(anyhow::anyhow!("failed to parse CA certs: {e}"))
+        })?;
+
+    let resp =
+        pull_timeline::handle_request(data, conf.sk_auth_token.clone(), ca_certs, global_timelines)
+            .await
+            .map_err(ApiError::InternalServerError)?;
     json_response(StatusCode::OK, resp)
 }
 

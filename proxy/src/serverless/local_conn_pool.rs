@@ -367,7 +367,6 @@ fn sign_jwt(sk: &SigningKey, payload: &[u8]) -> String {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used)]
 mod tests {
     use ed25519_dalek::SigningKey;
     use typed_json::json;

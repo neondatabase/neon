@@ -1416,6 +1416,7 @@ name = "control_plane"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.13.1",
  "camino",
  "clap",
  "comfy-table",
@@ -1425,10 +1426,12 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "hyper 0.14.30",
+ "jsonwebtoken",
  "nix 0.27.1",
  "once_cell",
  "pageserver_api",
  "pageserver_client",
+ "pem",
  "postgres_backend",
  "postgres_connection",
  "regex",
@@ -1437,6 +1440,8 @@ dependencies = [
  "scopeguard",
  "serde",
  "serde_json",
+ "sha2",
+ "spki 0.7.3",
  "storage_broker",
  "thiserror 1.0.69",
  "tokio",
@@ -2817,6 +2822,7 @@ dependencies = [
  "hyper 0.14.30",
  "itertools 0.10.5",
  "jemalloc_pprof",
+ "jsonwebtoken",
  "metrics",
  "once_cell",
  "pprof",
@@ -4269,6 +4275,7 @@ dependencies = [
  "hyper 0.14.30",
  "indoc",
  "itertools 0.10.5",
+ "jsonwebtoken",
  "md5",
  "metrics",
  "nix 0.27.1",
@@ -4278,6 +4285,7 @@ dependencies = [
  "pageserver_api",
  "pageserver_client",
  "pageserver_compaction",
+ "pem",
  "pin-project-lite",
  "postgres-protocol",
  "postgres-types",
@@ -4345,6 +4353,7 @@ dependencies = [
  "humantime-serde",
  "itertools 0.10.5",
  "nix 0.27.1",
+ "once_cell",
  "postgres_backend",
  "postgres_ffi",
  "rand 0.8.5",
@@ -5685,9 +5694,9 @@ dependencies = [
 
 [[package]]
 name = "ring"
-version = "0.17.13"
+version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70ac5d832aa16abd7d1def883a8545280c20a60f523a370aa3a9617c2b8550ee"
+checksum = "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7"
 dependencies = [
  "cc",
  "cfg-if",
@@ -5988,10 +5997,12 @@ dependencies = [
  "humantime",
  "hyper 0.14.30",
  "itertools 0.10.5",
+ "jsonwebtoken",
  "metrics",
  "once_cell",
  "pageserver_api",
  "parking_lot 0.12.1",
+ "pem",
  "postgres-protocol",
  "postgres_backend",
  "postgres_ffi",
@@ -7872,6 +7883,7 @@ dependencies = [
  "metrics",
  "nix 0.27.1",
  "once_cell",
+ "pem",
  "pin-project-lite",
  "postgres_connection",
  "pprof",

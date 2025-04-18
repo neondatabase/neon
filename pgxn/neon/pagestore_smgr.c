@@ -2040,7 +2040,7 @@ neon_finish_unlogged_build_phase_1(SMgrRelation reln)
 /*
  * neon_end_unlogged_build() -- Finish an unlogged rel build.
  *
- * Call this after you have finished WAL-logging an relation that was
+ * Call this after you have finished WAL-logging a relation that was
  * first populated without WAL-logging.
  *
  * This removes the local copy of the rel, since it's now been fully
@@ -2059,14 +2059,35 @@ neon_end_unlogged_build(SMgrRelation reln)
 
 	if (unlogged_build_phase != UNLOGGED_BUILD_NOT_PERMANENT)
 	{
+		XLogRecPtr recptr;
+		BlockNumber nblocks;
+
 		Assert(unlogged_build_phase == UNLOGGED_BUILD_PHASE_2);
 		Assert(reln->smgr_relpersistence == RELPERSISTENCE_UNLOGGED);
+
+		/*
+		 * Update the last-written LSN cache.
+		 *
+		 * The relation is still on local disk so we can get the size by
+		 * calling mdnblocks() directly. For the LSN, GetXLogInsertRecPtr() is
+		 * very conservative. If we could assume that this function is called
+		 * from the same backend that WAL-logged the contents, we could use
+		 * XactLastRecEnd here. But better safe than sorry.
+		 */
+		nblocks = mdnblocks(reln, MAIN_FORKNUM);
+		recptr = GetXLogInsertRecPtr();
+
+		neon_set_lwlsn_block_range(recptr,
+								   InfoFromNInfoB(rinfob),
+								   MAIN_FORKNUM, 0, nblocks);
+		neon_set_lwlsn_relation(recptr,
+								InfoFromNInfoB(rinfob),
+								MAIN_FORKNUM);
 
 		/* Make the relation look permanent again */
 		reln->smgr_relpersistence = RELPERSISTENCE_PERMANENT;
 
 		/* Remove local copy */
-		rinfob = InfoBFromSMgrRel(reln);
 		for (int forknum = 0; forknum <= MAX_FORKNUM; forknum++)
 		{
 			neon_log(SmgrTrace, "forgetting cached relsize for %u/%u/%u.%u",

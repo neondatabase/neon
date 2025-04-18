@@ -12,6 +12,7 @@ use std::{env, fs};
 
 use anyhow::{Context, bail};
 use clap::ValueEnum;
+use pem::Pem;
 use postgres_backend::AuthType;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -22,7 +23,7 @@ use crate::object_storage::{OBJECT_STORAGE_REMOTE_STORAGE_DIR, ObjectStorage};
 use crate::pageserver::{PAGESERVER_REMOTE_STORAGE_DIR, PageServerNode};
 use crate::safekeeper::SafekeeperNode;
 
-pub const DEFAULT_PG_VERSION: u32 = 16;
+pub const DEFAULT_PG_VERSION: u32 = 17;
 
 //
 // This data structures represents neon_local CLI config
@@ -56,6 +57,7 @@ pub struct LocalEnv {
 
     // used to issue tokens during e.g pg start
     pub private_key_path: PathBuf,
+    /// Path to environment's public key
     pub public_key_path: PathBuf,
 
     pub broker: NeonBroker,
@@ -758,17 +760,40 @@ impl LocalEnv {
 
     // this function is used only for testing purposes in CLI e g generate tokens during init
     pub fn generate_auth_token<S: Serialize>(&self, claims: &S) -> anyhow::Result<String> {
-        let private_key_path = self.get_private_key_path();
-        let key_data = fs::read(private_key_path)?;
-        encode_from_key_file(claims, &key_data)
+        let key = self.read_private_key()?;
+        encode_from_key_file(claims, &key)
     }
 
+    /// Get the path to the private key.
     pub fn get_private_key_path(&self) -> PathBuf {
         if self.private_key_path.is_absolute() {
             self.private_key_path.to_path_buf()
         } else {
             self.base_data_dir.join(&self.private_key_path)
         }
+    }
+
+    /// Get the path to the public key.
+    pub fn get_public_key_path(&self) -> PathBuf {
+        if self.public_key_path.is_absolute() {
+            self.public_key_path.to_path_buf()
+        } else {
+            self.base_data_dir.join(&self.public_key_path)
+        }
+    }
+
+    /// Read the contents of the private key file.
+    pub fn read_private_key(&self) -> anyhow::Result<Pem> {
+        let private_key_path = self.get_private_key_path();
+        let pem = pem::parse(fs::read(private_key_path)?)?;
+        Ok(pem)
+    }
+
+    /// Read the contents of the public key file.
+    pub fn read_public_key(&self) -> anyhow::Result<Pem> {
+        let public_key_path = self.get_public_key_path();
+        let pem = pem::parse(fs::read(public_key_path)?)?;
+        Ok(pem)
     }
 
     /// Materialize the [`NeonLocalInitConf`] to disk. Called during [`neon_local init`].
@@ -956,6 +981,7 @@ fn generate_auth_keys(private_key_path: &Path, public_key_path: &Path) -> anyhow
             String::from_utf8_lossy(&keygen_output.stderr)
         );
     }
+
     // Extract the public key from the private key file
     //
     // openssl pkey -in auth_private_key.pem -pubout -out auth_public_key.pem
@@ -972,6 +998,7 @@ fn generate_auth_keys(private_key_path: &Path, public_key_path: &Path) -> anyhow
             String::from_utf8_lossy(&keygen_output.stderr)
         );
     }
+
     Ok(())
 }
 
@@ -980,7 +1007,7 @@ fn generate_ssl_ca_cert(cert_path: &Path, key_path: &Path) -> anyhow::Result<()>
     // -out rootCA.crt -keyout rootCA.key
     let keygen_output = Command::new("openssl")
         .args([
-            "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "36500",
+            "req", "-x509", "-newkey", "ed25519", "-nodes", "-days", "36500",
         ])
         .args(["-subj", "/CN=Neon Local CA"])
         .args(["-out", cert_path.to_str().unwrap()])
@@ -1010,7 +1037,7 @@ fn generate_ssl_cert(
     // -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
     let keygen_output = Command::new("openssl")
         .args(["req", "-new", "-nodes"])
-        .args(["-newkey", "rsa:2048"])
+        .args(["-newkey", "ed25519"])
         .args(["-subj", "/CN=localhost"])
         .args(["-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"])
         .args(["-keyout", key_path.to_str().unwrap()])

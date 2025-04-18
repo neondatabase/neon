@@ -1873,7 +1873,7 @@ async fn update_tenant_config_handler(
         &ShardParameters::default(),
     );
 
-    crate::tenant::Tenant::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
+    crate::tenant::TenantShard::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
         .await
         .map_err(|e| ApiError::InternalServerError(anyhow::anyhow!(e)))?;
 
@@ -1917,7 +1917,7 @@ async fn patch_tenant_config_handler(
         &ShardParameters::default(),
     );
 
-    crate::tenant::Tenant::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
+    crate::tenant::TenantShard::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
         .await
         .map_err(|e| ApiError::InternalServerError(anyhow::anyhow!(e)))?;
 
@@ -3253,7 +3253,7 @@ async fn ingest_aux_files(
         modification
             .put_file(&fname, content.as_bytes(), &ctx)
             .await
-            .map_err(ApiError::InternalServerError)?;
+            .map_err(|e| ApiError::InternalServerError(e.into()))?;
     }
     modification
         .commit(&ctx)

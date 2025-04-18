@@ -452,7 +452,7 @@ async fn do_download_index_part(
 /// generation (normal case when migrating/restarting).  Only if both of these return 404 do we fall back
 /// to listing objects.
 ///
-/// * `my_generation`: the value of `[crate::tenant::Tenant::generation]`
+/// * `my_generation`: the value of `[crate::tenant::TenantShard::generation]`
 /// * `what`: for logging, what object are we downloading
 /// * `prefix`: when listing objects, use this prefix (i.e. the part of the object path before the generation)
 /// * `do_download`: a GET of the object in a particular generation, which should **retry indefinitely** unless

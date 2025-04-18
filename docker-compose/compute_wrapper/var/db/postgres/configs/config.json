@@ -142,7 +142,19 @@
     },
     "compute_ctl_config": {
         "jwks": {
-            "keys": []
+            "keys": [
+                {
+                    "use": "sig",
+                    "key_ops": [
+                        "verify"
+                    ],
+                    "alg": "EdDSA",
+                    "kid": "ZGIxMzAzOGY0YWQwODk2ODU1MTk1NzMxMDFkYmUyOWU2NzZkOWNjNjMyMGRkZGJjOWY0MjdjYWVmNzE1MjUyOAo=",
+                    "kty": "OKP",
+                    "crv": "Ed25519",
+                    "x": "MGQ4ZDFhOTdmNTM0NmUwMDc3ZmJkN2Q0MWE0ZmI3M2NhNWE3YjFjOTNkM2IyYzRkZTQzOGM3MjBkZTk3N2E5ZAo="
+                }
+            ]
         }
     }
 }

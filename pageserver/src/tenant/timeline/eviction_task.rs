@@ -33,7 +33,7 @@ use crate::tenant::size::CalculateSyntheticSizeError;
 use crate::tenant::storage_layer::LayerVisibilityHint;
 use crate::tenant::tasks::{BackgroundLoopKind, BackgroundLoopSemaphorePermit, sleep_random};
 use crate::tenant::timeline::EvictionError;
-use crate::tenant::{LogicalSizeCalculationCause, Tenant};
+use crate::tenant::{LogicalSizeCalculationCause, TenantShard};
 
 #[derive(Default)]
 pub struct EvictionTaskTimelineState {
@@ -48,7 +48,7 @@ pub struct EvictionTaskTenantState {
 impl Timeline {
     pub(super) fn launch_eviction_task(
         self: &Arc<Self>,
-        parent: Arc<Tenant>,
+        parent: Arc<TenantShard>,
         background_tasks_can_start: Option<&completion::Barrier>,
     ) {
         let self_clone = Arc::clone(self);
@@ -75,7 +75,7 @@ impl Timeline {
     }
 
     #[instrument(skip_all, fields(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id))]
-    async fn eviction_task(self: Arc<Self>, tenant: Arc<Tenant>) {
+    async fn eviction_task(self: Arc<Self>, tenant: Arc<TenantShard>) {
         // acquire the gate guard only once within a useful span
         let Ok(guard) = self.gate.enter() else {
             return;
@@ -118,7 +118,7 @@ impl Timeline {
     #[instrument(skip_all, fields(policy_kind = policy.discriminant_str()))]
     async fn eviction_iteration(
         self: &Arc<Self>,
-        tenant: &Tenant,
+        tenant: &TenantShard,
         policy: &EvictionPolicy,
         cancel: &CancellationToken,
         gate: &GateGuard,
@@ -175,7 +175,7 @@ impl Timeline {
 
     async fn eviction_iteration_threshold(
         self: &Arc<Self>,
-        tenant: &Tenant,
+        tenant: &TenantShard,
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
         gate: &GateGuard,
@@ -309,7 +309,7 @@ impl Timeline {
     /// disk usage based eviction task.
     async fn imitiate_only(
         self: &Arc<Self>,
-        tenant: &Tenant,
+        tenant: &TenantShard,
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
         gate: &GateGuard,
@@ -363,7 +363,7 @@ impl Timeline {
     #[instrument(skip_all)]
     async fn imitate_layer_accesses(
         &self,
-        tenant: &Tenant,
+        tenant: &TenantShard,
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
         gate: &GateGuard,
@@ -499,7 +499,7 @@ impl Timeline {
     #[instrument(skip_all)]
     async fn imitate_synthetic_size_calculation_worker(
         &self,
-        tenant: &Tenant,
+        tenant: &TenantShard,
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) {

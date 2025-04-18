@@ -8,7 +8,7 @@ use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::remote_timeline_client::ShutdownIfArchivedError;
 use crate::tenant::timeline::delete::{TimelineDeleteGuardKind, make_timeline_delete_guard};
 use crate::tenant::{
-    DeleteTimelineError, OffloadedTimeline, Tenant, TenantManifestError, TimelineOrOffloaded,
+    DeleteTimelineError, OffloadedTimeline, TenantManifestError, TenantShard, TimelineOrOffloaded,
 };
 
 #[derive(thiserror::Error, Debug)]
@@ -33,7 +33,7 @@ impl From<TenantManifestError> for OffloadError {
 }
 
 pub(crate) async fn offload_timeline(
-    tenant: &Tenant,
+    tenant: &TenantShard,
     timeline: &Arc<Timeline>,
 ) -> Result<(), OffloadError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
@@ -123,7 +123,7 @@ pub(crate) async fn offload_timeline(
 ///
 /// Returns the strong count of the timeline `Arc`
 fn remove_timeline_from_tenant(
-    tenant: &Tenant,
+    tenant: &TenantShard,
     timeline: &Timeline,
     _: &DeletionGuard, // using it as a witness
 ) -> usize {

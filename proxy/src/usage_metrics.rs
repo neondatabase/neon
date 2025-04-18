@@ -497,7 +497,6 @@ async fn upload_backup_events(
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used)]
 mod tests {
     use std::fs;
     use std::io::BufReader;

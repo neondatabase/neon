@@ -21,7 +21,7 @@ use super::scheduler::{
 use super::{CommandRequest, SecondaryTenantError, UploadCommand};
 use crate::TEMP_FILE_SUFFIX;
 use crate::metrics::SECONDARY_MODE;
-use crate::tenant::Tenant;
+use crate::tenant::TenantShard;
 use crate::tenant::config::AttachmentMode;
 use crate::tenant::mgr::{GetTenantError, TenantManager};
 use crate::tenant::remote_timeline_client::remote_heatmap_path;
@@ -74,7 +74,7 @@ impl RunningJob for WriteInProgress {
 }
 
 struct UploadPending {
-    tenant: Arc<Tenant>,
+    tenant: Arc<TenantShard>,
     last_upload: Option<LastUploadState>,
     target_time: Option<Instant>,
     period: Option<Duration>,
@@ -106,7 +106,7 @@ impl scheduler::Completion for WriteComplete {
 struct UploaderTenantState {
     // This Weak only exists to enable culling idle instances of this type
     // when the Tenant has been deallocated.
-    tenant: Weak<Tenant>,
+    tenant: Weak<TenantShard>,
 
     /// Digest of the serialized heatmap that we last successfully uploaded
     last_upload_state: Option<LastUploadState>,
@@ -357,7 +357,7 @@ struct LastUploadState {
 /// of the object we would have uploaded.
 async fn upload_tenant_heatmap(
     remote_storage: GenericRemoteStorage,
-    tenant: &Arc<Tenant>,
+    tenant: &Arc<TenantShard>,
     last_upload: Option<LastUploadState>,
 ) -> Result<UploadHeatmapOutcome, UploadHeatmapError> {
     debug_assert_current_span_has_tenant_id();

@@ -256,7 +256,6 @@ fn pg_array_parse_inner(
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used)]
 mod tests {
     use serde_json::json;
 

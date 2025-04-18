@@ -1366,7 +1366,8 @@ pub(crate) type IoBuffer = AlignedBuffer<ConstAlign<{ get_io_buffer_alignment() 
 pub(crate) type IoPageSlice<'a> =
     AlignedSlice<'a, PAGE_SZ, ConstAlign<{ get_io_buffer_alignment() }>>;
 
-static IO_MODE: AtomicU8 = AtomicU8::new(IoMode::preferred() as u8);
+static IO_MODE: once_cell::sync::Lazy<AtomicU8> =
+    once_cell::sync::Lazy::new(|| AtomicU8::new(IoMode::preferred() as u8));
 
 pub(crate) fn set_io_mode(mode: IoMode) {
     IO_MODE.store(mode as u8, std::sync::atomic::Ordering::Relaxed);

@@ -258,7 +258,7 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 "unexpected startup packet, rejecting connection"
             );
             stream
-                .throw_error_str(ERR_INSECURE_CONNECTION, crate::error::ErrorKind::User)
+                .throw_error_str(ERR_INSECURE_CONNECTION, crate::error::ErrorKind::User, None)
                 .await?
         }
     }

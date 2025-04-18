@@ -81,19 +81,9 @@ sed -i "s/TIMELINE_ID/${timeline_id}/" ${CONFIG_FILE}
 
 cat ${CONFIG_FILE}
 
-# TODO(tristan957): Remove these workarounds for backwards compatibility after
-# the next compute release. That includes these next few lines and the
-# --spec-path in the compute_ctl invocation.
-if compute_ctl --help | grep --quiet -- '--config'; then
-  SPEC_PATH="$CONFIG_FILE"
-else
-  jq '.spec' < "$CONFIG_FILE" > /tmp/spec.json
-  SPEC_PATH=/tmp/spec.json
-fi
-
 echo "Start compute node"
 /usr/local/bin/compute_ctl --pgdata /var/db/postgres/compute \
      -C "postgresql://cloud_admin@localhost:55433/postgres"  \
      -b /usr/local/bin/postgres                              \
      --compute-id "compute-$RANDOM"                          \
-     --spec-path "$SPEC_PATH"
+     --config "$CONFIG_FILE"

@@ -87,7 +87,12 @@ fn tli_from_u64(i: u64) -> Vec<u8> {
 async fn subscribe(client: Option<BrokerClientChannel>, counter: Arc<AtomicU64>, i: u64) {
     let mut client = match client {
         Some(c) => c,
-        None => storage_broker::connect(DEFAULT_ENDPOINT, Duration::from_secs(5)).unwrap(),
+        None => storage_broker::connect(
+            DEFAULT_ENDPOINT,
+            Duration::from_secs(5),
+            storage_broker::ClientTlsConfig::new(),
+        )
+        .unwrap(),
     };
 
     let ttid = ProtoTenantTimelineId {
@@ -119,7 +124,12 @@ async fn subscribe(client: Option<BrokerClientChannel>, counter: Arc<AtomicU64>,
 async fn publish(client: Option<BrokerClientChannel>, n_keys: u64) {
     let mut client = match client {
         Some(c) => c,
-        None => storage_broker::connect(DEFAULT_ENDPOINT, Duration::from_secs(5)).unwrap(),
+        None => storage_broker::connect(
+            DEFAULT_ENDPOINT,
+            Duration::from_secs(5),
+            storage_broker::ClientTlsConfig::new(),
+        )
+        .unwrap(),
     };
     let mut counter: u64 = 0;
 
@@ -164,7 +174,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let h = tokio::spawn(progress_reporter(counters.clone()));
 
-    let c = storage_broker::connect(DEFAULT_ENDPOINT, Duration::from_secs(5)).unwrap();
+    let c = storage_broker::connect(
+        DEFAULT_ENDPOINT,
+        Duration::from_secs(5),
+        storage_broker::ClientTlsConfig::new(),
+    )
+    .unwrap();
 
     for i in 0..args.num_subs {
         let c = Some(c.clone());
