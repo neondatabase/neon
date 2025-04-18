@@ -190,6 +190,8 @@ pub struct DownloadOpts {
     /// timeouts: for something like an index/manifest/heatmap, we should time out faster than
     /// for layer files
     pub kind: DownloadKind,
+    /// The encryption key to use for the download.
+    pub encryption_key: Option<Vec<u8>>,
 }
 
 pub enum DownloadKind {
@@ -204,6 +206,7 @@ impl Default for DownloadOpts {
             byte_start: Bound::Unbounded,
             byte_end: Bound::Unbounded,
             kind: DownloadKind::Large,
+            encryption_key: None,
         }
     }
 }
@@ -240,6 +243,15 @@ impl DownloadOpts {
                 Some(end) => format!("bytes={start}-{end}"),
                 None => format!("bytes={start}-"),
             })
+    }
+
+    pub fn with_encryption_key(mut self, encryption_key: Option<impl AsRef<[u8]>>) -> Self {
+        self.encryption_key = encryption_key.map(|k| k.as_ref().to_vec());
+        self
+    }
+
+    pub fn encryption_key(&self) -> Option<&[u8]> {
+        self.encryption_key.as_deref()
     }
 }
 
@@ -330,6 +342,19 @@ pub trait RemoteStorage: Send + Sync + 'static {
         opts: &DownloadOpts,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError>;
+
+    /// Same as upload, but with remote encryption if the backend supports it (e.g. SSE-C on AWS).
+    async fn upload_with_encryption(
+        &self,
+        from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
+        // S3 PUT request requires the content length to be specified,
+        // otherwise it starts to fail with the concurrent connection count increasing.
+        data_size_bytes: usize,
+        to: &RemotePath,
+        metadata: Option<StorageMetadata>,
+        encryption_key: Option<&[u8]>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()>;
 
     /// Delete a single path from remote storage.
     ///
@@ -612,6 +637,63 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             Self::Unreliable(s) => {
                 s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
                     .await
+            }
+        }
+    }
+
+    pub async fn upload_with_encryption(
+        &self,
+        from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
+        data_size_bytes: usize,
+        to: &RemotePath,
+        metadata: Option<StorageMetadata>,
+        encryption_key: Option<&[u8]>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::LocalFs(s) => {
+                s.upload_with_encryption(
+                    from,
+                    data_size_bytes,
+                    to,
+                    metadata,
+                    encryption_key,
+                    cancel,
+                )
+                .await
+            }
+            Self::AwsS3(s) => {
+                s.upload_with_encryption(
+                    from,
+                    data_size_bytes,
+                    to,
+                    metadata,
+                    encryption_key,
+                    cancel,
+                )
+                .await
+            }
+            Self::AzureBlob(s) => {
+                s.upload_with_encryption(
+                    from,
+                    data_size_bytes,
+                    to,
+                    metadata,
+                    encryption_key,
+                    cancel,
+                )
+                .await
+            }
+            Self::Unreliable(s) => {
+                s.upload_with_encryption(
+                    from,
+                    data_size_bytes,
+                    to,
+                    metadata,
+                    encryption_key,
+                    cancel,
+                )
+                .await
             }
         }
     }

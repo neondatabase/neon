@@ -17,7 +17,7 @@ use utils::id::{TenantId, TimelineId};
 use utils::{backoff, pausable_failpoint};
 
 use super::Generation;
-use super::index::IndexPart;
+use super::index::{EncryptionKeyPair, IndexPart};
 use super::manifest::TenantManifest;
 use crate::tenant::remote_timeline_client::{
     remote_index_path, remote_initdb_archive_path, remote_initdb_preserved_archive_path,
@@ -101,6 +101,7 @@ pub(super) async fn upload_timeline_layer<'a>(
     local_path: &'a Utf8Path,
     remote_path: &'a RemotePath,
     metadata_size: u64,
+    encryption_key_pair: Option<EncryptionKeyPair>,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     fail_point!("before-upload-layer", |_| {
@@ -144,7 +145,14 @@ pub(super) async fn upload_timeline_layer<'a>(
     let reader = tokio_util::io::ReaderStream::with_capacity(source_file, super::BUFFER_SIZE);
 
     storage
-        .upload(reader, fs_size, remote_path, None, cancel)
+        .upload_with_encryption(
+            reader,
+            fs_size,
+            remote_path,
+            None,
+            encryption_key_pair.as_ref().map(|k| k.plain_key.as_slice()),
+            cancel,
+        )
         .await
         .with_context(|| format!("upload layer from local path '{local_path}'"))
 }
