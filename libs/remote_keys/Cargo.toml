@@ -1,0 +1,13 @@
+[package]
+name = "remote_keys"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+utils.workspace = true
+workspace_hack.workspace = true
+
+[dev-dependencies]
+rand.workspace = true

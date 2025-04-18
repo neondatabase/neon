@@ -244,7 +244,8 @@ impl RemoteStorageWrapper {
                             kind: DownloadKind::Large,
                             etag: None,
                             byte_start: Bound::Included(start_inclusive),
-                            byte_end: Bound::Excluded(end_exclusive)
+                            byte_end: Bound::Excluded(end_exclusive),
+                            encryption_key: None,
                         },
                         &self.cancel)
                     .await?;
