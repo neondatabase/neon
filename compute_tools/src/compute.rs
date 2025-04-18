@@ -11,7 +11,9 @@ use std::{env, fs};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
-use compute_api::responses::{ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus};
+use compute_api::responses::{
+    ActivityKind, ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus,
+};
 use compute_api::spec::{
     ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PgIdent,
 };
@@ -132,6 +134,10 @@ pub struct ComputeState {
     /// Timestamp of the last Postgres activity. It could be `None` if
     /// compute wasn't used since start.
     pub last_active: Option<DateTime<Utc>>,
+    /// Timestamp of the last client's activity. Unlike `last_active` it doesn't take into account
+    /// baclkground activity: autovacuum, LR,...
+    pub last_active_query: Option<DateTime<Utc>>,
+    pub last_activity_kind: Option<ActivityKind>,
     pub error: Option<String>,
 
     /// Compute spec. This can be received from the CLI or - more likely -
@@ -159,6 +165,8 @@ impl ComputeState {
             start_time: Utc::now(),
             status: ComputeStatus::Empty,
             last_active: None,
+            last_active_query: None,
+            last_activity_kind: None,
             error: None,
             pspec: None,
             startup_span: None,
@@ -1707,13 +1715,22 @@ impl ComputeNode {
     }
 
     /// Update the `last_active` in the shared state, but ensure that it's a more recent one.
-    pub fn update_last_active(&self, last_active: Option<DateTime<Utc>>) {
+    pub fn update_last_active(
+        &self,
+        last_active: Option<DateTime<Utc>>,
+        activity_kind: ActivityKind,
+    ) {
         let mut state = self.state.lock().unwrap();
         // NB: `Some(<DateTime>)` is always greater than `None`.
         if last_active > state.last_active {
             state.last_active = last_active;
             debug!("set the last compute activity time to: {:?}", last_active);
         }
+        if activity_kind == ActivityKind::Query && last_active > state.last_active_query {
+            state.last_active_query = last_active;
+            debug!("set the last user's activity time to: {:?}", last_active);
+        }
+        state.last_activity_kind = Some(activity_kind);
     }
 
     // Look for core dumps and collect backtraces.
