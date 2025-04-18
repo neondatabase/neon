@@ -196,7 +196,11 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 // OR we didn't provide it at all (for dev purposes).
                 if tls.is_some() {
                     return stream
-                        .throw_error_str(ERR_INSECURE_CONNECTION, crate::error::ErrorKind::User)
+                        .throw_error_str(
+                            ERR_INSECURE_CONNECTION,
+                            crate::error::ErrorKind::User,
+                            None,
+                        )
                         .await?;
                 }
 

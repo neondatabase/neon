@@ -29,6 +29,7 @@ futures = { workspace = true }
 jsonwebtoken.workspace = true
 nix = { workspace = true, features = ["ioctl"] }
 once_cell.workspace = true
+pem.workspace = true
 pin-project-lite.workspace = true
 regex.workspace = true
 serde.workspace = true

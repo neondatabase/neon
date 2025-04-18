@@ -63,7 +63,7 @@ const DEFAULT_PAGESERVER_ID: NodeId = NodeId(1);
 const DEFAULT_BRANCH_NAME: &str = "main";
 project_git_version!(GIT_VERSION);
 
-const DEFAULT_PG_VERSION: u32 = 16;
+const DEFAULT_PG_VERSION: u32 = 17;
 
 const DEFAULT_PAGESERVER_CONTROL_PLANE_API: &str = "http://127.0.0.1:1234/upcall/v1/";
 
@@ -552,6 +552,7 @@ enum EndpointCmd {
     Start(EndpointStartCmdArgs),
     Reconfigure(EndpointReconfigureCmdArgs),
     Stop(EndpointStopCmdArgs),
+    GenerateJwt(EndpointGenerateJwtCmdArgs),
 }
 
 #[derive(clap::Args)]
@@ -697,6 +698,13 @@ struct EndpointStopCmdArgs {
     #[arg(value_parser(["smart", "fast", "immediate"]))]
     #[arg(default_value = "fast")]
     mode: String,
+}
+
+#[derive(clap::Args)]
+#[clap(about = "Generate a JWT for an endpoint")]
+struct EndpointGenerateJwtCmdArgs {
+    #[clap(help = "Postgres endpoint id")]
+    endpoint_id: String,
 }
 
 #[derive(clap::Subcommand)]
@@ -1528,6 +1536,16 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 .get(endpoint_id)
                 .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
             endpoint.stop(&args.mode, args.destroy)?;
+        }
+        EndpointCmd::GenerateJwt(args) => {
+            let endpoint_id = &args.endpoint_id;
+            let endpoint = cplane
+                .endpoints
+                .get(endpoint_id)
+                .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
+            let jwt = endpoint.generate_jwt()?;
+
+            print!("{jwt}");
         }
     }
 

@@ -15,6 +15,7 @@ use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
 use futures::FutureExt;
 use itertools::Itertools;
+use jsonwebtoken::TokenData;
 use once_cell::sync::OnceCell;
 use pageserver_api::config::{
     PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
@@ -75,7 +76,7 @@ use crate::tenant::timeline::{self, WaitLsnError};
 use crate::tenant::{GetTimelineError, PageReconstructError, Timeline};
 use crate::{basebackup, timed_after_cancellation};
 
-/// How long we may wait for a [`crate::tenant::mgr::TenantSlot::InProgress`]` and/or a [`crate::tenant::Tenant`] which
+/// How long we may wait for a [`crate::tenant::mgr::TenantSlot::InProgress`]` and/or a [`crate::tenant::TenantShard`] which
 /// is not yet in state [`TenantState::Active`].
 ///
 /// NB: this is a different value than [`crate::http::routes::ACTIVE_TENANT_TIMEOUT`].
@@ -2837,7 +2838,7 @@ where
     ) -> Result<(), QueryError> {
         // this unwrap is never triggered, because check_auth_jwt only called when auth_type is NeonJWT
         // which requires auth to be present
-        let data = self
+        let data: TokenData<Claims> = self
             .auth
             .as_ref()
             .unwrap()

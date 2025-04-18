@@ -824,9 +824,13 @@ impl Service {
             let mut locked = self.inner.write().unwrap();
             locked.become_leader();
 
+            for (sk_id, _sk) in locked.safekeepers.clone().iter() {
+                locked.safekeeper_reconcilers.start_reconciler(*sk_id, self);
+            }
+
             locked
                 .safekeeper_reconcilers
-                .schedule_request_vec(self, sk_schedule_requests);
+                .schedule_request_vec(sk_schedule_requests);
         }
 
         // TODO: if any tenant's intent now differs from its loaded generation_pageserver, we should clear that
