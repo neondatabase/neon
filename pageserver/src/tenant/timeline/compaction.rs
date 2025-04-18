@@ -7,7 +7,7 @@
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::ops::{Deref, Range};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use super::layer_manager::LayerManager;
 use super::{
@@ -119,25 +119,32 @@ pub struct GcCompactionMetaStatistics {
     /// The layer size after compaction.
     pub after_compaction_layer_size: u64,
     /// The start time of the meta job.
-    pub start_time: Option<SystemTime>,
+    pub start_time: Option<chrono::DateTime<chrono::Utc>>,
     /// The end time of the meta job.
-    pub end_time: Option<SystemTime>,
+    pub end_time: Option<chrono::DateTime<chrono::Utc>>,
     /// The duration of the meta job.
     pub duration_secs: f64,
     /// The id of the meta job.
     pub meta_job_id: GcCompactionJobId,
     /// The LSN below which the layers are compacted, used to compute the statistics.
     pub below_lsn: Lsn,
+    /// The retention ratio of the meta job (after_compaction_layer_size / before_compaction_layer_size)
+    pub retention_ratio: f64,
 }
 
 impl GcCompactionMetaStatistics {
     fn finalize(&mut self) {
-        let end_time = SystemTime::now();
+        let end_time = chrono::Utc::now();
         if let Some(start_time) = self.start_time {
-            if let Ok(duration) = end_time.duration_since(start_time) {
-                self.duration_secs = duration.as_secs_f64();
+            if end_time > start_time {
+                let delta = end_time - start_time;
+                if let Ok(std_dur) = delta.to_std() {
+                    self.duration_secs = std_dur.as_secs_f64();
+                }
             }
         }
+        self.retention_ratio = self.after_compaction_layer_size as f64
+            / (self.before_compaction_layer_size as f64 + 1.0);
         self.end_time = Some(end_time);
     }
 }
@@ -520,7 +527,7 @@ impl GcCompactionQueue {
                 }
                 guard.meta_statistics = Some(GcCompactionMetaStatistics {
                     meta_job_id: id,
-                    start_time: Some(SystemTime::now()),
+                    start_time: Some(chrono::Utc::now()),
                     before_compaction_layer_size: layer_size,
                     below_lsn: expected_l2_lsn,
                     total_sub_compaction_jobs: jobs_len,
