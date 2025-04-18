@@ -11,7 +11,9 @@ use std::{env, fs};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
-use compute_api::responses::{ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus};
+use compute_api::responses::{
+    ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus, PrewarmState,
+};
 use compute_api::spec::{
     ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PgIdent,
 };
@@ -150,7 +152,7 @@ pub struct ComputeState {
     /// set up the span relationship ourselves.
     pub startup_span: Option<tracing::span::Span>,
 
-    pub prewarm_state: compute_api::responses::PrewarmState,
+    pub prewarm_state: PrewarmState,
 
     pub metrics: ComputeMetrics,
 }
@@ -165,7 +167,7 @@ impl ComputeState {
             pspec: None,
             startup_span: None,
             metrics: ComputeMetrics::default(),
-            prewarm_state: compute_api::responses::PrewarmState::default(),
+            prewarm_state: PrewarmState::default(),
         }
     }
 
@@ -201,8 +203,6 @@ pub struct ParsedSpec {
     pub pageserver_connstr: String,
     pub safekeeper_connstrings: Vec<String>,
     pub storage_auth_token: Option<String>,
-
-    // Address and token for accessing src/endpoint_storage service
     pub endpoint_storage_addr: String,
     pub endpoint_storage_token: String,
 }
@@ -258,7 +258,6 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
                 .or(Err("invalid timeline id"))?
         };
 
-        // TODO do we need backward compatibility on new fields?
         let endpoint_storage_addr: String = if let Some(ref addr) = spec.endpoint_storage_addr {
             addr.clone()
         } else {
@@ -365,7 +364,6 @@ impl ComputeNode {
         // available for binding. Prewarming helps Postgres start quicker later,
         // because QEMU will already have its memory allocated from the host, and
         // the necessary binaries will already be cached.
-        // TODO(myrrc): name clash, so prewarm_lfc / prewarm_lfc_offload
         if cli_spec.is_none() {
             this.prewarm_postgres()?;
         }
@@ -590,10 +588,6 @@ impl ComputeNode {
             pre_tasks.spawn_blocking_child(move || this.prepare_pgdata(&cs));
         }
 
-        // TODO(myrrc): download LFC cache files from s3 proxy if compute flag is set
-        // see download_preload_extensions / prepare_preload_libraries
-        // download_tasks.push / download_extension
-
         // Resize swap to the desired size if the compute spec says so
         if let (Some(size_bytes), true) =
             (pspec.spec.swap_size_bytes, self.params.resize_swap_on_bind)
@@ -768,7 +762,25 @@ impl ComputeNode {
         // Log metrics so that we can search for slow operations in logs
         info!(?metrics, postmaster_pid = %postmaster_pid, "compute start finished");
 
+        if pspec
+            .spec
+            .features
+            .contains(&ComputeFeature::PrewarmOnStartup)
+        {
+            let cloned = self.clone();
+            rt.spawn(async move { cloned.prewarm_lfc().await });
+        }
+
         Ok(())
+    }
+
+    async fn prewarm_lfc(self: &Arc<Self>) {
+        // Errors not propagated as compute prewarming doesn't impact its ability to start
+        // They will be logged anyway
+        let Ok(parts) = self.try_into() else {
+            return;
+        };
+        let _ = crate::http::prewarm_lfc(parts, axum::extract::State(self.clone())).await;
     }
 
     #[instrument(skip_all)]

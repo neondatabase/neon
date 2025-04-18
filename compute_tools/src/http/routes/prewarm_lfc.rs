@@ -6,6 +6,7 @@ use axum::response::{IntoResponse, Response};
 use compute_api::responses::PrewarmStatus::{self, *};
 use reqwest::Client;
 use serde::Serialize;
+use std::result::Result as StdResult;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tracing::{error, info};
@@ -20,22 +21,17 @@ pub struct Parts {
     token: String,
 }
 
-impl axum::extract::FromRequestParts<Arc<ComputeNode>> for Parts {
-    type Rejection = Response;
-    async fn from_request_parts(
-        _: &mut http::request::Parts,
-        state: &Arc<ComputeNode>,
-    ) -> core::result::Result<Self, Self::Rejection> {
+impl TryFrom<&Arc<ComputeNode>> for Parts {
+    type Error = &'static str;
+    fn try_from(state: &Arc<ComputeNode>) -> StdResult<Self, Self::Error> {
         let state = state.state.lock().unwrap();
         let Some(pspec) = state.pspec.as_ref() else {
-            error!("pspec is not present");
-            return Err(StatusCode::BAD_REQUEST.into_response());
+            return Err("pspec is not present");
         };
 
         let endpoint_id = pspec.spec.endpoint_id.as_ref();
         let Some(endpoint_id) = endpoint_id else {
-            error!("pspec.endpoint_id missing");
-            return Err(StatusCode::BAD_REQUEST.into_response());
+            return Err("pspec.endpoint_id missing");
         };
         let endpoint_id = endpoint_id.clone();
 
@@ -46,6 +42,19 @@ impl axum::extract::FromRequestParts<Arc<ComputeNode>> for Parts {
         let uri = format!("{base_uri}/{tenant_id}/{timeline_id}/{endpoint_id}/{KEY}",);
         let token = pspec.endpoint_storage_token.clone();
         Ok(Parts { uri, token })
+    }
+}
+
+impl axum::extract::FromRequestParts<Arc<ComputeNode>> for Parts {
+    type Rejection = Response;
+    async fn from_request_parts(
+        _: &mut http::request::Parts,
+        state: &Arc<ComputeNode>,
+    ) -> StdResult<Self, Self::Rejection> {
+        state.try_into().map_err(|e| {
+            error!("{e}");
+            StatusCode::BAD_REQUEST.into_response()
+        })
     }
 }
 
@@ -91,7 +100,7 @@ fn prewarm_err(state: &ComputeNode, err: impl std::fmt::Display, msg: &str) -> R
     StatusCode::INTERNAL_SERVER_ERROR.into_response()
 }
 
-pub(in crate::http) async fn prewarm_lfc(parts: Parts, AxumState(state): State) -> Result {
+pub async fn prewarm_lfc(parts: Parts, AxumState(state): State) -> Result {
     {
         let status = &mut state.state.lock().unwrap().prewarm_state.status;
         if *status == Prewarming {

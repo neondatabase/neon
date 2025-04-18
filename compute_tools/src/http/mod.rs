@@ -10,6 +10,7 @@ mod extract;
 mod headers;
 mod middleware;
 mod routes;
+pub use routes::prewarm_lfc::prewarm_lfc;
 pub mod server;
 
 /// Convenience response builder for JSON responses

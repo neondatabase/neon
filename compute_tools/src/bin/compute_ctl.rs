@@ -9,7 +9,7 @@
 //!   and download `shared_preload_libraries` from the remote storage.
 //! - Next it will put configuration files into the `PGDATA` directory.
 //! - Sync safekeepers and get commit LSN.
-//! - Get `basebackup` from pageserver using LSN returned by the previous step.
+//! - Get `basebackup` from pageserver using the returned on the previous step LSN.
 //! - Try to start `postgres` and wait until it is ready to accept connections.
 //! - Check and alter/drop/create roles and databases.
 //! - Hang waiting on the `postmaster` process to exit.
