@@ -4934,7 +4934,7 @@ class NeonBroker(LogUtils):
     """An object managing storage_broker instance"""
 
     def __init__(self, env: NeonEnv, use_https: bool):
-        super().__init__(logfile=env.repo_dir / "storage_broker.log")
+        super().__init__(logfile=env.repo_dir / "storage_broker" / "storage_broker.log")
         self.env = env
         self.scheme = "https" if use_https else "http"
         self.port: int = self.env.port_distributor.get_port()

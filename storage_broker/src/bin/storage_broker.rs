@@ -717,9 +717,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?;
 
-            let tls_config = rustls::ServerConfig::builder()
+            let mut tls_config = rustls::ServerConfig::builder()
                 .with_no_client_auth()
                 .with_cert_resolver(cert_resolver);
+
+            // Tonic is HTTP/2 only and it negotiates it with ALPN.
+            tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
             let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls_config));
 
