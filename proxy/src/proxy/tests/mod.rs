@@ -36,7 +36,7 @@ use crate::types::{BranchId, EndpointId, ProjectId};
 use crate::{sasl, scram};
 
 /// Generate a set of TLS certificates: CA + server.
-fn generate_certs(
+pub(crate) fn generate_certs(
     hostname: &str,
     common_name: &str,
 ) -> anyhow::Result<(
