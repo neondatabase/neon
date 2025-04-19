@@ -1,0 +1,117 @@
+name: Build and Run Selected Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-selection:
+        description: 'Specification of selected test(s), as accepted by pytest -k'
+        required: true
+        type: string
+      run-count:
+        description: 'Number of test runs to perform'
+        required: true
+        type: number
+      archs:
+        description: 'Archs to run tests on, e. g.: ["x64", "arm64"]'
+        default: '["x64"]'
+        required: true
+        type: string
+      build-types:
+        description: 'Build types to run tests on, e. g.: ["debug", "release"]'
+        default: '["release"]'
+        required: true
+        type: string
+      pg-versions:
+        description: 'Postgres versions to use for testing,  e.g,: [{"pg_version":"v16"}, {"pg_version":"v17"}])'
+        default: '[{"pg_version":"v17"}]'
+        required: true
+        type: string
+  pull_request:
+
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}
+
+env:
+  RUST_BACKTRACE: 1
+  COPT: '-Werror'
+
+jobs:
+  meta:
+    uses: ./.github/workflows/_meta.yml
+    with:
+      github-event-name: ${{ github.event_name }}
+
+  build-and-test-locally:
+    needs: [ meta ]
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJson(inputs.archs) }}
+        build-type: ${{ fromJson(inputs.build-types) }}
+    uses: ./.github/workflows/_build-and-test-locally.yml
+    with:
+      arch: ${{ matrix.arch }}
+      build-tools-image: neondatabase/build-tools:pinned-bookworm
+      build-tag: ${{ needs.meta.outputs.build-tag }}
+      build-type: ${{ matrix.build-type }}
+      test-cfg: ${{ inputs.pg-versions }}
+      test-selection: ${{ inputs.test-selection }}
+      test-run-count: ${{ fromJson(inputs.run-count) }} 
+
+    secrets: inherit
+
+
+  create-test-report:
+    needs: [ build-and-test-locally ]
+    if: ${{ !cancelled() }}
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
+      pull-requests: write
+    outputs:
+      report-url: ${{ steps.create-allure-report.outputs.report-url }}
+
+    runs-on: [ self-hosted, small ]
+    container:
+      image: neondatabase/build-tools:pinned-bookworm
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+      options: --init
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create Allure report
+        if: ${{ !cancelled() }}
+        id: create-allure-report
+        uses: ./.github/actions/allure-report-generate
+        with:
+          store-test-results-into-db: true
+          aws-oicd-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        env:
+          REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
+
+      - uses: actions/github-script@v7
+        if: ${{ !cancelled() }}
+        with:
+          # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
+          retries: 5
+          script: |
+            const report = {
+              reportUrl:     "${{ steps.create-allure-report.outputs.report-url }}",
+              reportJsonUrl: "${{ steps.create-allure-report.outputs.report-json-url }}",
+            }
+
+            const coverage = {}
+
+            const script = require("./scripts/comment-test-report.js")
+            await script({
+              github,
+              context,
+              fetch,
+              report,
+              coverage,
+            })
