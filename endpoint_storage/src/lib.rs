@@ -169,10 +169,19 @@ impl FromRequestParts<Arc<Storage>> for S3Path {
             .auth
             .decode(bearer.token())
             .map_err(|e| bad_request(e, "decoding token"))?;
+
+        // Read paths may have different endpoint ids. For readonly -> readwrite replica
+        // prewarming, endpoint must read other endpoint's data.
+        let endpoint_id = if parts.method == axum::http::Method::GET {
+            claims.endpoint_id.clone()
+        } else {
+            path.endpoint_id.clone()
+        };
+
         let route = Claims {
             tenant_id: path.tenant_id,
             timeline_id: path.timeline_id,
-            endpoint_id: path.endpoint_id.clone(),
+            endpoint_id,
             exp: claims.exp,
         };
         if route != claims {

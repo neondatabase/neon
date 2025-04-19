@@ -1284,6 +1284,7 @@ name = "compute_tools"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-compression",
  "aws-config",
  "aws-sdk-kms",
  "aws-sdk-s3",
@@ -2035,6 +2036,33 @@ dependencies = [
  "serdect",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "endpoint_storage"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "axum",
+ "axum-extra",
+ "camino",
+ "camino-tempfile",
+ "futures",
+ "http-body-util",
+ "itertools 0.10.5",
+ "jsonwebtoken",
+ "prometheus",
+ "rand 0.8.5",
+ "remote_storage",
+ "serde",
+ "serde_json",
+ "test-log",
+ "tokio",
+ "tokio-util",
+ "tower 0.5.2",
+ "tracing",
+ "utils",
+ "workspace_hack",
 ]
 
 [[package]]
@@ -3996,33 +4024,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aedf0a2d09c573ed1d8d85b30c119153926a2b36dce0ab28322c09a117a4683e"
 dependencies = [
  "memchr",
-]
-
-[[package]]
-name = "object_storage"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "axum",
- "axum-extra",
- "camino",
- "camino-tempfile",
- "futures",
- "http-body-util",
- "itertools 0.10.5",
- "jsonwebtoken",
- "prometheus",
- "rand 0.8.5",
- "remote_storage",
- "serde",
- "serde_json",
- "test-log",
- "tokio",
- "tokio-util",
- "tower 0.5.2",
- "tracing",
- "utils",
- "workspace_hack",
 ]
 
 [[package]]
