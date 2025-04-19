@@ -3,8 +3,13 @@ MODULE_big = rag_jina_reranker_v1_tiny_en
 OBJS = $(patsubst %.rs,%.o,$(wildcard src/*.rs))
 
 REGRESS = reranking_functions reranking_functions_enhanced
-REGRESS_OPTS = --load-extension=vector --load-extension=rag_jina_reranker_v1_tiny_en
 
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
-include $(PGXS)
+PG_REGRESS := $(dir $(PGXS))../../src/test/regress/pg_regress
+.PHONY installcheck:
+installcheck:
+	dropdb --if-exists contrib_regression
+	createdb contrib_regression
+	psql -d contrib_regression -c "CREATE EXTENSION vector" -c "CREATE EXTENSION rag_jina_reranker_v1_tiny_en"
+	$(PG_REGRESS) --use-existing --dbname=contrib_regression $(REGRESS)
