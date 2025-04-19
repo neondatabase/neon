@@ -146,7 +146,6 @@ jobs:
         with:
           file: build-tools.Dockerfile
           context: .
-          provenance: false
           push: true
           pull: true
           build-args: |
@@ -155,6 +154,8 @@ jobs:
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/build-tools:cache-{0}-{1},mode=max', matrix.debian, matrix.arch) || '' }}
           tags: |
             ghcr.io/neondatabase/build-tools:${{ needs.check-image.outputs.tag }}-${{ matrix.debian }}-${{ matrix.arch }}
+          provenance: mode=max
+          sbom: true
 
   merge-images:
     needs: [ check-image, build-image ]
