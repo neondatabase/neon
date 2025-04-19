@@ -1,6 +1,6 @@
 #! /usr/bin/env node
 
-import {Connection} from 'postgresql-client';
+import {Connection} from 'postgrejs';
 
 const params = {
     "host": process.env.NEON_HOST,
