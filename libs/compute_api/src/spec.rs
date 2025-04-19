@@ -242,13 +242,22 @@ impl RemoteExtSpec {
 
         match self.extension_data.get(real_ext_name) {
             Some(_ext_data) => {
+                // We have decided to use the Go naming convention due to Kubernetes.
+
+                let arch = match std::env::consts::ARCH {
+                    "x86_64" => "amd64",
+                    "aarch64" => "arm64",
+                    arch => arch,
+                };
+
                 // Construct the path to the extension archive
                 // BUILD_TAG/PG_MAJOR_VERSION/extensions/EXTENSION_NAME.tar.zst
                 //
                 // Keep it in sync with path generation in
                 // https://github.com/neondatabase/build-custom-extensions/tree/main
-                let archive_path_str =
-                    format!("{build_tag}/{pg_major_version}/extensions/{real_ext_name}.tar.zst");
+                let archive_path_str = format!(
+                    "{build_tag}/{arch}/{pg_major_version}/extensions/{real_ext_name}.tar.zst"
+                );
                 Ok((
                     real_ext_name.to_string(),
                     RemotePath::from_string(&archive_path_str)?,
