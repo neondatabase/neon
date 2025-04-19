@@ -40,6 +40,10 @@ inputs:
     description: 'Whether to rerun failed tests'
     required: false
     default: 'false'
+  special_kind:
+    description: 'Special type of testing, e. g. test_stability, to distinguish a specific test run from regular runs'
+    required: false
+    default: ''
   pg_version:
     description: 'Postgres version to use for tests'
     required: false
@@ -114,6 +118,7 @@ runs:
         BUILD_TYPE: ${{ inputs.build_type }}
         COMPATIBILITY_SNAPSHOT_DIR: /tmp/compatibility_snapshot_pg${{ inputs.pg_version }}
         RERUN_FAILED: ${{ inputs.rerun_failed }}
+        SPECIAL_KIND: ${{ inputs.special_kind }}
         PG_VERSION: ${{ inputs.pg_version }}
         SANITIZERS: ${{ inputs.sanitizers }}
       shell: bash -euxo pipefail {0}
@@ -135,11 +140,14 @@ runs:
         PERF_REPORT_DIR="$(realpath test_runner/perf-report-local)"
         rm -rf $PERF_REPORT_DIR
 
-        TEST_SELECTION="test_runner/${{ inputs.test_selection }}"
         EXTRA_PARAMS="${{ inputs.extra_params }}"
+        TEST_SELECTION="${{ inputs.test_selection }}"
         if [ -z "$TEST_SELECTION" ]; then
           echo "test_selection must be set"
           exit 1
+        fi
+        if [[ $TEST_SELECTION != test_runner/* ]]; then
+          TEST_SELECTION="test_runner/$TEST_SELECTION"
         fi
         if [[ "${{ inputs.run_in_parallel }}" == "true" ]]; then
           # -n sets the number of parallel processes that pytest-xdist will run
