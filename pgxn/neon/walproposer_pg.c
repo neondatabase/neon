@@ -64,6 +64,10 @@ char	   *wal_acceptors_list = "";
 int			wal_acceptor_reconnect_timeout = 1000;
 int			wal_acceptor_connection_timeout = 10000;
 int			safekeeper_proto_version = 2;
+static char *safekeeper_sslcert = NULL;
+static char	*safekeeper_sslkey = NULL;
+static char	*safekeeper_sslmode = "prefer";
+static char	*safekeeper_sslpassword = NULL;
 
 /* Set to true in the walproposer bgw. */
 static bool am_walproposer;
@@ -232,6 +236,42 @@ nwp_register_gucs(void)
 							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.safekeeper_sslcert",
+							   "SSL certificate path",
+							   "Path to a client certificate for connecting to the safekeepers with a TLS connection.",
+							   &safekeeper_sslcert,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.safekeeper_sslkey",
+							   "SSL key path",
+							   "Path to a private key for connecting to the safekeepers with a TLS connection.",
+							   &safekeeper_sslkey,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.safekeeper_sslmode",
+							   "SSL mode",
+							   "SSL mode to use when connecting to the safekeepers with a TLS connection. Refer to the Postgres documentation for the various options.",
+							   &safekeeper_sslmode,
+							   "prefer",
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable(
+							   "neon.safekeeper_sslpassword",
+							   "SSL passphrase",
+							   "Passphrase for decrypting a private key for connecting to the safekeepers with a TLS connection.",
+							   &safekeeper_sslpassword,
+							   NULL,
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
 }
 
 
@@ -846,8 +886,8 @@ libpqwp_connect_start(char *conninfo)
 
 	PGconn	   *pg_conn;
 	WalProposerConn *conn;
-	const char *keywords[3];
-	const char *values[3];
+	const char *keywords[6];
+	const char *values[6];
 	int			n;
 	char	   *password = neon_auth_token;
 
@@ -871,6 +911,27 @@ libpqwp_connect_start(char *conninfo)
 	keywords[n] = "dbname";
 	values[n] = conninfo;
 	n++;
+	if (safekeeper_sslcert)
+	{
+		keywords[n] = "sslcert";
+		values[n] = safekeeper_sslcert;
+		n++;
+	}
+	if (safekeeper_sslkey)
+	{
+		keywords[n] = "sslkey";
+		values[n] = safekeeper_sslkey;
+		n++;
+	}
+	keywords[n] = "sslmode";
+	values[n] = safekeeper_sslmode;
+	n++;
+	if (safekeeper_sslpassword)
+	{
+		keywords[n] = "sslpassword";
+		values[n] = safekeeper_sslpassword;
+		n++;
+	}
 	keywords[n] = NULL;
 	values[n] = NULL;
 	n++;
