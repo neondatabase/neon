@@ -122,7 +122,7 @@ pub struct IndexPart {
     pub(crate) keys: Vec<EncryptionKey>,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Ord, PartialOrd)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Ord, PartialOrd, Hash)]
 pub struct KeyVersion(pub u32);
 
 impl KeyVersion {
@@ -132,7 +132,7 @@ impl KeyVersion {
 }
 
 /// An identifier for an encryption key. The scope of the key is the timeline (TBD).
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Ord, PartialOrd)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Ord, PartialOrd, Hash)]
 pub struct EncryptionKeyId {
     pub version: KeyVersion,
     pub generation: Generation,

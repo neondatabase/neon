@@ -1291,6 +1291,7 @@ impl Timeline {
                     .parts
                     .extend(sparse_partitioning.into_dense().parts);
 
+
                 // 3. Create new image layers for partitions that have been modified "enough".
                 let (image_layers, outcome) = self
                     .create_image_layers(

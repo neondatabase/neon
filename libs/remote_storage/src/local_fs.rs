@@ -198,6 +198,10 @@ impl LocalFs {
             let mut entries = cur_folder.read_dir_utf8()?;
             while let Some(Ok(entry)) = entries.next() {
                 let file_name = entry.file_name();
+                if file_name.ends_with(".metadata") || file_name.ends_with(".enc") {
+                    // ignore metadata and encryption key files
+                    continue;
+                }
                 let full_file_name = cur_folder.join(file_name);
                 if full_file_name.as_str().starts_with(prefix) {
                     let file_remote_path = self.local_file_to_relative_path(full_file_name.clone());

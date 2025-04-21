@@ -4864,6 +4864,7 @@ impl Timeline {
             else {
                 panic!("delta layer cannot be empty if no filter is applied");
             };
+            
             (
                 // FIXME: even though we have a single image and single delta layer assumption
                 // we push them to vec
@@ -6932,9 +6933,7 @@ impl Timeline {
         }
 
         // Update remote_timeline_client state to reflect existence of this layer
-        self.remote_client
-            .schedule_layer_file_upload(image_layer)
-            .unwrap();
+        self.remote_client.schedule_layer_file_upload(image_layer)?;
 
         Ok(())
     }
@@ -6995,9 +6994,7 @@ impl Timeline {
         }
 
         // Update remote_timeline_client state to reflect existence of this layer
-        self.remote_client
-            .schedule_layer_file_upload(delta_layer)
-            .unwrap();
+        self.remote_client.schedule_layer_file_upload(delta_layer)?;
 
         Ok(())
     }

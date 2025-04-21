@@ -370,6 +370,8 @@ pub(crate) struct RemoteTimelineClient {
     cancel: CancellationToken,
 
     kms_impl: Option<NaiveKms>,
+
+    key_repo: std::sync::Mutex<HashMap<EncryptionKeyId, EncryptionKeyPair>>,
 }
 
 impl Drop for RemoteTimelineClient {
@@ -416,6 +418,7 @@ impl RemoteTimelineClient {
             cancel: CancellationToken::new(),
             // TODO: make this configurable
             kms_impl: Some(NaiveKms::new(tenant_shard_id.tenant_id.to_string())),
+            key_repo: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -1276,12 +1279,10 @@ impl RemoteTimelineClient {
         self: &Arc<Self>,
         layer: ResidentLayer,
     ) -> Result<(), NotInitialized> {
-        let key_pair = self.schedule_generate_encryption_key()?;
-
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
-        self.schedule_layer_file_upload0(upload_queue, layer, key_pair);
+        self.schedule_layer_file_upload0(upload_queue, layer);
         self.launch_queued_tasks(upload_queue);
         Ok(())
     }
@@ -1290,16 +1291,16 @@ impl RemoteTimelineClient {
         self: &Arc<Self>,
         upload_queue: &mut UploadQueueInitialized,
         layer: ResidentLayer,
-        key_pair: Option<EncryptionKeyPair>,
     ) {
-        let mut metadata = layer.metadata();
-        assert!(
-            metadata.encryption_key.is_none(),
-            "layer key is set automatically in schedule_layer_file_upload, should not be set manually"
-        );
-        if let Some(ref key_pair) = key_pair {
-            metadata.encryption_key = Some(key_pair.id.clone());
-        }
+        let key_pair = {
+            if let Some(key_id) = layer.metadata().encryption_key {
+                let guard = self.key_repo.lock().unwrap();
+                Some(guard.get(&key_id).cloned().unwrap())
+            } else {
+                None
+            }
+        };
+        let metadata = layer.metadata();
 
         upload_queue
             .dirty
@@ -1540,6 +1541,8 @@ impl RemoteTimelineClient {
             created_at: Utc::now().naive_utc(),
         });
 
+        self.key_repo.lock().unwrap().insert(this_key_version, key_pair);
+
         self.schedule_index_upload(upload_queue);
 
         Ok(Some(key_pair))
@@ -1554,13 +1557,11 @@ impl RemoteTimelineClient {
         compacted_to: &[ResidentLayer],
     ) -> Result<(), NotInitialized> {
         // Use the same key for all layers in a single compaction job
-        let key_pair = self.schedule_generate_encryption_key()?;
-
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
         for layer in compacted_to {
-            self.schedule_layer_file_upload0(upload_queue, layer.clone(), key_pair.clone());
+            self.schedule_layer_file_upload0(upload_queue, layer.clone());
         }
 
         let names = compacted_from.iter().map(|x| x.layer_desc().layer_name());
@@ -2893,6 +2894,10 @@ mod tests {
         for entry in std::fs::read_dir(remote_path).unwrap().flatten() {
             let entry_name = entry.file_name();
             let fname = entry_name.to_str().unwrap();
+            if fname.ends_with(".metadata") || fname.ends_with(".enc") {
+                // ignore metadata and encryption key files; should use local_fs APIs instead in the future
+                continue;
+            }
             found.push(String::from(fname));
         }
         found.sort();
@@ -2947,6 +2952,7 @@ mod tests {
                 config: std::sync::RwLock::new(RemoteTimelineClientConfig::from(&location_conf)),
                 cancel: CancellationToken::new(),
                 kms_impl: None,
+                key_repo: std::sync::Mutex::new(HashMap::new()),
             })
         }
 
