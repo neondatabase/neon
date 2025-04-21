@@ -1,12 +1,71 @@
-#![allow(dead_code, reason = "TODO: work in progress")]
-
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
+use std::time::SystemTime;
 use std::{fmt, io};
 
 use pin_project_lite::pin_project;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ConnId(usize);
+
+#[derive(Default)]
+pub struct ConnectionTracking {
+    conns: clashmap::ClashMap<ConnId, (ConnectionState, SystemTime)>,
+}
+
+impl ConnectionTracking {
+    pub fn new_tracker(self: &Arc<Self>) -> ConnectionTracker<Arc<Self>> {
+        let conn_id = self.new_conn_id();
+        ConnectionTracker::new(conn_id, Arc::clone(self))
+    }
+
+    fn new_conn_id(&self) -> ConnId {
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+        let id = ConnId(NEXT_ID.fetch_add(1, Ordering::Relaxed));
+        self.conns
+            .insert(id, (ConnectionState::Idle, SystemTime::now()));
+        id
+    }
+
+    fn update(&self, conn_id: ConnId, new_state: ConnectionState) {
+        let new_timestamp = SystemTime::now();
+        let old_state = self.conns.insert(conn_id, (new_state, new_timestamp));
+
+        if let Some((old_state, _old_timestamp)) = old_state {
+            tracing::debug!(?conn_id, %old_state, %new_state, "conntrack: update");
+        } else {
+            tracing::debug!(?conn_id, %new_state, "conntrack: update");
+        }
+    }
+
+    fn remove(&self, conn_id: ConnId) {
+        if let Some((_, (old_state, _old_timestamp))) = self.conns.remove(&conn_id) {
+            tracing::debug!(?conn_id, %old_state, "conntrack: remove");
+        }
+    }
+}
+
+impl StateChangeObserver for Arc<ConnectionTracking> {
+    type ConnId = ConnId;
+    fn change(
+        &self,
+        conn_id: Self::ConnId,
+        _old_state: ConnectionState,
+        new_state: ConnectionState,
+    ) {
+        match new_state {
+            ConnectionState::Init
+            | ConnectionState::Idle
+            | ConnectionState::Transaction
+            | ConnectionState::Busy
+            | ConnectionState::Unknown => self.update(conn_id, new_state),
+            ConnectionState::Closed => self.remove(conn_id),
+        }
+    }
+}
 
 /// Called by `ConnectionTracker` whenever the `ConnectionState` changed.
 pub trait StateChangeObserver {

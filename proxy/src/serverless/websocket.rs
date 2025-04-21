@@ -17,6 +17,7 @@ use crate::config::ProxyConfig;
 use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::metrics::Metrics;
+use crate::proxy::conntrack::ConnectionTracking;
 use crate::proxy::{ClientMode, ErrorSource, handle_client};
 use crate::rate_limiter::EndpointRateLimiter;
 
@@ -133,6 +134,7 @@ pub(crate) async fn serve_websocket(
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     hostname: Option<String>,
     cancellations: tokio_util::task::task_tracker::TaskTracker,
+    conntracking: Arc<ConnectionTracking>,
 ) -> anyhow::Result<()> {
     let websocket = websocket.await?;
     let websocket = WebSocketServer::after_handshake(TokioIo::new(websocket));
@@ -152,6 +154,7 @@ pub(crate) async fn serve_websocket(
         endpoint_rate_limiter,
         conn_gauge,
         cancellations,
+        conntracking,
     ))
     .await;
 

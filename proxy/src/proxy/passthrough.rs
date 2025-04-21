@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use smol_str::SmolStr;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::debug;
@@ -9,6 +11,7 @@ use crate::compute::PostgresConnection;
 use crate::config::ComputeConfig;
 use crate::control_plane::messages::MetricsAuxInfo;
 use crate::metrics::{Direction, Metrics, NumClientConnectionsGuard, NumConnectionRequestsGuard};
+use crate::proxy::conntrack::{ConnectionTracking, TrackedStream};
 use crate::stream::Stream;
 use crate::usage_metrics::{Ids, MetricCounterRecorder, USAGE_METRICS};
 
@@ -19,6 +22,7 @@ pub(crate) async fn proxy_pass(
     compute: impl AsyncRead + AsyncWrite + Unpin,
     aux: MetricsAuxInfo,
     private_link_id: Option<SmolStr>,
+    conntracking: &Arc<ConnectionTracking>,
 ) -> Result<(), ErrorSource> {
     // we will report ingress at a later date
     let usage_tx = USAGE_METRICS.register(Ids {
@@ -27,9 +31,11 @@ pub(crate) async fn proxy_pass(
         private_link_id,
     });
 
+    let conn_tracker = conntracking.new_tracker();
+
     let metrics = &Metrics::get().proxy.io_bytes;
     let m_sent = metrics.with_labels(Direction::Tx);
-    let mut client = MeasuredStream::new(
+    let client = MeasuredStream::new(
         client,
         |_| {},
         |cnt| {
@@ -38,9 +44,10 @@ pub(crate) async fn proxy_pass(
             usage_tx.record_egress(cnt as u64);
         },
     );
+    let mut client = TrackedStream::new(client, true, |tag| conn_tracker.frontend_message_tag(tag));
 
     let m_recv = metrics.with_labels(Direction::Rx);
-    let mut compute = MeasuredStream::new(
+    let compute = MeasuredStream::new(
         compute,
         |_| {},
         |cnt| {
@@ -49,6 +56,8 @@ pub(crate) async fn proxy_pass(
             usage_tx.record_ingress(cnt as u64);
         },
     );
+    let mut compute =
+        TrackedStream::new(compute, true, |tag| conn_tracker.backend_message_tag(tag));
 
     // Starting from here we only proxy the client's traffic.
     debug!("performing the proxy pass...");
@@ -68,6 +77,7 @@ pub(crate) struct ProxyPassthrough<S> {
     pub(crate) session_id: uuid::Uuid,
     pub(crate) private_link_id: Option<SmolStr>,
     pub(crate) cancel: cancellation::Session,
+    pub(crate) conntracking: Arc<ConnectionTracking>,
 
     pub(crate) _req: NumConnectionRequestsGuard<'static>,
     pub(crate) _conn: NumClientConnectionsGuard<'static>,
@@ -83,6 +93,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
             self.compute.stream,
             self.aux,
             self.private_link_id,
+            &self.conntracking,
         )
         .await;
         if let Err(err) = self
