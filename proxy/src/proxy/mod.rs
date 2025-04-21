@@ -2,6 +2,7 @@
 mod tests;
 
 pub(crate) mod connect_compute;
+pub mod conntrack;
 mod copy_bidirectional;
 pub(crate) mod handshake;
 pub(crate) mod passthrough;
