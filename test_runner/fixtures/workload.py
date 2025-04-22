@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import TYPE_CHECKING
 
 from fixtures.log_helper import log
@@ -122,7 +123,11 @@ class Workload:
         if allow_recreate:
             endpoint.safe_psql(f"DROP TABLE IF EXISTS {self.table};")
         endpoint.safe_psql(f"CREATE TABLE {self.table} (id INTEGER PRIMARY KEY, val text);")
+        log.info("XXX LSN 1: %s", str(endpoint.safe_psql("SELECT pg_current_wal_insert_lsn(), pg_current_wal_lsn(), pg_current_wal_flush_lsn();")[0]))
         endpoint.safe_psql("CREATE EXTENSION IF NOT EXISTS neon_test_utils;")
+        log.info("XXX LSN 2: %s", str(endpoint.safe_psql("SELECT pg_current_wal_insert_lsn(), pg_current_wal_lsn(), pg_current_wal_flush_lsn();")[0]))
+        time.sleep(1)
+        log.info("XXX LSN 3: %s", str(endpoint.safe_psql("SELECT pg_current_wal_insert_lsn(), pg_current_wal_lsn(), pg_current_wal_flush_lsn();")[0]))
         last_flush_lsn_upload(
             self.env, endpoint, self.tenant_id, self.timeline_id, pageserver_id=pageserver_id
         )
