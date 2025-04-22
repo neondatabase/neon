@@ -3868,32 +3868,30 @@ impl Service {
         tracing::info!("Finalizing timeline import");
 
         let import_failed = import.completion_error().is_some();
-        if import_failed {
-            let client = UpcallClient::new(self.get_config(), self.cancel.child_token());
-            client.notify_import_complete(&import).await?;
-        }
 
-        loop {
-            if self.cancel.is_cancelled() {
-                anyhow::bail!("Shut down requested while finalizing import");
-            }
-
-            let active = self.timeline_active_on_all_shards(&import).await?;
-
-            match active {
-                true => {
-                    tracing::info!("Timeline became active on all shards");
-                    break;
+        if !import_failed {
+            loop {
+                if self.cancel.is_cancelled() {
+                    anyhow::bail!("Shut down requested while finalizing import");
                 }
-                false => {
-                    tracing::info!("Timeline not active on all shards yet");
 
-                    tokio::select! {
-                        _ = self.cancel.cancelled() => {
-                            anyhow::bail!("Shut down requested while finalizing import");
-                        },
-                        _ = tokio::time::sleep(Duration::from_secs(5)) => {}
-                    };
+                let active = self.timeline_active_on_all_shards(&import).await?;
+
+                match active {
+                    true => {
+                        tracing::info!("Timeline became active on all shards");
+                        break;
+                    }
+                    false => {
+                        tracing::info!("Timeline not active on all shards yet");
+
+                        tokio::select! {
+                            _ = self.cancel.cancelled() => {
+                                anyhow::bail!("Shut down requested while finalizing import");
+                            },
+                            _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                        };
+                    }
                 }
             }
         }
