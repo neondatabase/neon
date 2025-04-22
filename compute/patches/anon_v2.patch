@@ -1,5 +1,5 @@
 diff --git a/sql/anon.sql b/sql/anon.sql
-index 0cdc769..c004139 100644
+index 0cdc769..ed7c1d9 100644
 --- a/sql/anon.sql
 +++ b/sql/anon.sql
 @@ -1141,3 +1141,9 @@ $$
@@ -9,9 +9,9 @@ index 0cdc769..c004139 100644
 +
 +-- NEON Patches
 +
++GRANT EXECUTE ON FUNCTION pg_config to neon_superuser;
 +GRANT ALL ON SCHEMA anon to neon_superuser;
 +GRANT ALL ON ALL TABLES IN SCHEMA anon TO neon_superuser;
-+
 diff --git a/sql/init.sql b/sql/init.sql
 index 7da6553..12859d6 100644
 --- a/sql/init.sql
