@@ -160,6 +160,8 @@ pub async fn doit(
 
         //
         // Communicate that shard is done.
+        // Ensure at-least-once delivery of the upcall to storage controller
+        // before we mark the task as done and never come here again.
         //
         let storcon_client = StorageControllerUpcallClient::new(timeline.conf, &cancel)?
             .expect("storcon configured");

@@ -281,6 +281,11 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
         Ok(result.into_iter().collect())
     }
 
+    /// Send a shard import status to the storage controller
+    ///
+    /// The implementation must have at-least-once delivery semantics.
+    /// To this end, we retry the request until it succeeds. If the pageserver
+    /// restarts or crashes, the shard import will start again from the beggining.
     #[tracing::instrument(skip_all)] // so that warning logs from retry_http_forever have context
     async fn put_timeline_import_status(
         &self,
