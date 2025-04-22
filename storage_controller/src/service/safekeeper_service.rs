@@ -153,6 +153,11 @@ impl Service {
         );
         let target_sk_count = timeline_persistence.sk_set.len();
         let quorum_size = match target_sk_count {
+            0 => {
+                return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                    "timeline configured without any safekeepers",
+                )));
+            }
             1 | 2 => {
                 #[cfg(feature = "testing")]
                 {
@@ -560,8 +565,8 @@ impl Service {
                     "couldn't find any active safekeeper for new timeline",
                 )));
             }
-            1 => 1,
-            2 => 2,
+            #[cfg(feature = "testing")]
+            1 | 2 => all_safekeepers.len(),
             _ => 3,
         };
         let mut sks = Vec::new();
