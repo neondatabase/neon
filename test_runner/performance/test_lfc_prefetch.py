@@ -126,11 +126,19 @@ def test_lfc_async_prefetch_performance(neon_simple_env: NeonEnv, zenbenchmark):
     with zenbenchmark.record_duration("do_not_store_store_prefetch_results"):
         cur.execute("set neon.store_prefetch_result_in_lfc=off")
         for _ in range(n_iterations):
-            cur.execute("select sum(balance) from (select balance from account where id between 1000 and 2000 limit 100) s")
-            cur.execute("select sum(balance) from (select balance from account where id between 6000 and 7000 limit 100) s")
+            cur.execute(
+                "select sum(balance) from (select balance from account where id between 1000 and 2000 limit 100) s"
+            )
+            cur.execute(
+                "select sum(balance) from (select balance from account where id between 6000 and 7000 limit 100) s"
+            )
 
     with zenbenchmark.record_duration("store_prefetch_results"):
         cur.execute("set neon.store_prefetch_result_in_lfc=on")
         for _ in range(n_iterations):
-            cur.execute("select sum(balance) from (select balance from account where id between 1000 and 2000 limit 100) s")
-            cur.execute("select sum(balance) from (select balance from account where id between 6000 and 7000 limit 100) s")
+            cur.execute(
+                "select sum(balance) from (select balance from account where id between 1000 and 2000 limit 100) s"
+            )
+            cur.execute(
+                "select sum(balance) from (select balance from account where id between 6000 and 7000 limit 100) s"
+            )
