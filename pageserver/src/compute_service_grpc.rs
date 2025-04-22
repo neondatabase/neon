@@ -44,9 +44,9 @@ use pageserver_data_api::proto::page_service_server::PageServiceServer;
 
 use anyhow::Context;
 use bytes::BytesMut;
-use tracing::{Instrument};
+use tracing::Instrument;
 use tracing::{debug, error};
-use utils::auth::SwappableJwtAuth;
+use utils::auth::{Claims, SwappableJwtAuth};
 
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
@@ -57,8 +57,8 @@ use crate::tenant::PageReconstructError;
 use postgres_ffi::BLCKSZ;
 
 use tonic;
-use tonic::service::interceptor::InterceptedService;
 use tonic::codec::CompressionEncoding;
+use tonic::service::interceptor::InterceptedService;
 
 use pageserver_api::key::rel_block_to_key;
 
@@ -76,7 +76,7 @@ pub(super) fn launch_compute_service_grpc_server(
     auth: Option<Arc<SwappableJwtAuth>>,
     auth_type: AuthType,
     connections_cancel: CancellationToken,
-    listener_ctx: &RequestContext
+    listener_ctx: &RequestContext,
 ) {
     // Set up the gRPC service
     let service_ctx = RequestContextBuilder::from(listener_ctx)
@@ -94,9 +94,8 @@ pub(super) fn launch_compute_service_grpc_server(
     };
 
     let server = InterceptedService::new(
-        PageServiceServer::new(service)
-            .send_compressed(CompressionEncoding::Gzip),
-        authenticator
+        PageServiceServer::new(service).send_compressed(CompressionEncoding::Gzip),
+        authenticator,
     );
 
     let cc = connections_cancel.clone();
@@ -258,9 +257,7 @@ impl PageService for PageServiceService {
                 )
                 .await?;
 
-            Ok(tonic::Response::new(proto::GetPageResponse {
-                page_image: page_image,
-            }))
+            Ok(tonic::Response::new(proto::GetPageResponse { page_image }))
         }
         .instrument(span)
         .await
@@ -359,13 +356,16 @@ impl PageService for PageServiceService {
                             let _ = simplex_write.write_all(&zerosbuf[0..s]).await;
                             bytes_written += s;
                         }
-                        simplex_write.shutdown().await.context("shutdown of basebackup pipe")?;
+                        simplex_write
+                            .shutdown()
+                            .await
+                            .context("shutdown of basebackup pipe")?;
 
                         Ok(())
-                    }.
-                        instrument(span)
+                    }
+                    .instrument(span),
                 )
-            },
+            }
             TestMode::DummyMaterialize => {
                 let zerosbuf: [u8; 1024] = [0; 1024];
                 let nbytes = 16900000;
@@ -375,12 +375,15 @@ impl PageService for PageServiceService {
                     let _ = simplex_write.write_all(&zerosbuf[0..s]).await;
                     bytes_written += s;
                 }
-                simplex_write.shutdown().await.expect("shutdown of basebackup pipe");
+                simplex_write
+                    .shutdown()
+                    .await
+                    .expect("shutdown of basebackup pipe");
                 tracing::info!("basebackup (dummy) materialized");
                 let result = Ok(());
 
                 tokio::spawn(std::future::ready(result))
-            },
+            }
             TestMode::Materialize => {
                 let result = basebackup::send_basebackup_tarball(
                     &mut simplex_write,
@@ -391,13 +394,16 @@ impl PageService for PageServiceService {
                     req.replica,
                     &ctx,
                 )
-                    .await;
-                simplex_write.shutdown().await.expect("shutdown of basebackup pipe");
+                .await;
+                simplex_write
+                    .shutdown()
+                    .await
+                    .expect("shutdown of basebackup pipe");
                 tracing::info!("basebackup materialized");
 
                 // Launch a task that writes the basebackup tarball to the simplex pipe
                 tokio::spawn(std::future::ready(result))
-            },
+            }
             TestMode::Streaming => {
                 tokio::spawn(
                     async move {
@@ -413,13 +419,16 @@ impl PageService for PageServiceService {
                             req.replica,
                             &ctx,
                         )
-                            .await;
-                        simplex_write.shutdown().await.context("shutdown of basebackup pipe")?;
+                        .await;
+                        simplex_write
+                            .shutdown()
+                            .await
+                            .context("shutdown of basebackup pipe")?;
                         result
-                    }.
-                        instrument(span)
+                    }
+                    .instrument(span),
                 )
-            },
+            }
         };
 
         let response = new_basebackup_response_stream(simplex_read, basebackup_task);
@@ -629,7 +638,7 @@ impl tonic::service::Interceptor for PageServiceAuthenticator {
         let jwt = auth
             .decode(jwt)
             .map_err(|err| tonic::Status::unauthenticated(format!("invalid JWT token: {}", err)))?;
-        let claims = jwt.claims;
+        let claims: Claims = jwt.claims;
 
         if matches!(claims.scope, utils::auth::Scope::Tenant) && claims.tenant_id.is_none() {
             return Err(tonic::Status::unauthenticated(
@@ -657,26 +666,27 @@ impl tonic::service::Interceptor for PageServiceAuthenticator {
 ///
 /// The first part of the Chain chunks the tarball. The second part checks the return value
 /// of the send_basebackup_tarball Future that created the tarball.
-
 type GetBaseBackupStream = futures::stream::Chain<BasebackupChunkedStream, CheckResultStream>;
 
-fn new_basebackup_response_stream(simplex_read: ReadHalf<SimplexStream>, basebackup_task: JoinHandle<Result<(), BasebackupError>>) -> GetBaseBackupStream {
-
+fn new_basebackup_response_stream(
+    simplex_read: ReadHalf<SimplexStream>,
+    basebackup_task: JoinHandle<Result<(), BasebackupError>>,
+) -> GetBaseBackupStream {
     let framed = FramedRead::new(simplex_read, GetBaseBackupResponseDecoder {});
 
     framed.chain(CheckResultStream { basebackup_task })
 }
 
 /// Stream that uses GetBaseBackupResponseDecoder
-type BasebackupChunkedStream = tokio_util::codec::FramedRead<ReadHalf<SimplexStream>, GetBaseBackupResponseDecoder>;
+type BasebackupChunkedStream =
+    tokio_util::codec::FramedRead<ReadHalf<SimplexStream>, GetBaseBackupResponseDecoder>;
 
 struct GetBaseBackupResponseDecoder;
 impl Decoder for GetBaseBackupResponseDecoder {
     type Item = proto::GetBaseBackupResponseChunk;
     type Error = tonic::Status;
 
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error>
-    {
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         if src.len() < 64 * 1024 {
             return Ok(None);
         }
@@ -688,8 +698,7 @@ impl Decoder for GetBaseBackupResponseDecoder {
         Ok(Some(item))
     }
 
-    fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error>
-    {
+    fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         if src.is_empty() {
             return Ok(None);
         }
@@ -708,21 +717,26 @@ struct CheckResultStream {
 impl futures::Stream for CheckResultStream {
     type Item = Result<proto::GetBaseBackupResponseChunk, tonic::Status>;
 
-    fn poll_next(mut self: Pin<&mut Self>, ctx: &mut std::task::Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        ctx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
         let task = Pin::new(&mut self.basebackup_task);
         match task.poll(ctx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Ok(Ok(()))) => {
-                Poll::Ready(None)
-            },
+            Poll::Ready(Ok(Ok(()))) => Poll::Ready(None),
             Poll::Ready(Ok(Err(basebackup_err))) => {
                 error!(error=%basebackup_err, "error getting basebackup");
-                Poll::Ready(Some(Err(tonic::Status::internal("could not get basebackup"))))
-            },
+                Poll::Ready(Some(Err(tonic::Status::internal(
+                    "could not get basebackup",
+                ))))
+            }
             Poll::Ready(Err(join_err)) => {
                 error!(error=%join_err, "JoinError getting basebackup");
-                Poll::Ready(Some(Err(tonic::Status::internal("could not get basebackup"))))
-            },
+                Poll::Ready(Some(Err(tonic::Status::internal(
+                    "could not get basebackup",
+                ))))
+            }
         }
     }
 }

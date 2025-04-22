@@ -50,7 +50,7 @@ pub extern "C" fn bcomm_start_io_request(
     // Tell the communicator about it
     bs.submit_request(request_idx);
 
-    return request_idx;
+    request_idx
 }
 
 /// Check if a request has completed. Returns:

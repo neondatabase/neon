@@ -7,9 +7,7 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 
 use bytes::Bytes;
-use http;
 use thiserror::Error;
-use tonic;
 use tonic::metadata::AsciiMetadataValue;
 use tonic::transport::Channel;
 
@@ -96,10 +94,7 @@ impl PageserverClient {
         Ok(response.get_ref().num_blocks)
     }
 
-    pub async fn get_page(
-        &self,
-        request: &GetPageRequest,
-    ) -> Result<Bytes, PageserverClientError> {
+    pub async fn get_page(&self, request: &GetPageRequest) -> Result<Bytes, PageserverClientError> {
         // FIXME: calculate the shard number correctly
         let shard_no = 0;
 
@@ -133,10 +128,9 @@ impl PageserverClient {
         request: &GetBaseBackupRequest,
         gzip: bool,
     ) -> std::result::Result<
-            tonic::Response<tonic::codec::Streaming<proto::GetBaseBackupResponseChunk>>,
-            PageserverClientError,
-        >
-    {
+        tonic::Response<tonic::codec::Streaming<proto::GetBaseBackupResponseChunk>>,
+        PageserverClientError,
+    > {
         // Current sharding model assumes that all metadata is present only at shard 0.
         let shard_no = 0;
 
@@ -155,7 +149,10 @@ impl PageserverClient {
     ///
     /// This implements very basic caching. If we already have a client for the given shard,
     /// reuse it. If not, create a new client and put it to the cache.
-    async fn get_client(&self, shard_no: u16) -> Result<MyPageServiceClient, PageserverClientError> {
+    async fn get_client(
+        &self,
+        shard_no: u16,
+    ) -> Result<MyPageServiceClient, PageserverClientError> {
         let reused_channel: Option<Channel> = {
             let channels = self.channels.read().unwrap();
 

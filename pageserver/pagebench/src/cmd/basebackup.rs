@@ -9,7 +9,6 @@ use anyhow::Context;
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api::ForceAwaitLogicalSize;
 use pageserver_client::page_service::BasebackupRequest;
-use pageserver_client_grpc;
 use pageserver_data_api::model::{GetBaseBackupRequest, RequestCommon};
 
 use rand::prelude::*;
@@ -289,7 +288,6 @@ async fn client(
     all_work_done_barrier.wait().await;
 }
 
-
 #[instrument(skip_all)]
 async fn client_grpc(
     args: &'static Args,
@@ -315,14 +313,17 @@ async fn client_grpc(
         //tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
         info!("starting get_base_backup");
-        let mut basebackup_stream = client.get_base_backup(
-            &GetBaseBackupRequest {
-                common: RequestCommon {
-                    request_lsn: lsn,
-                    not_modified_since_lsn: lsn,
+        let mut basebackup_stream = client
+            .get_base_backup(
+                &GetBaseBackupRequest {
+                    common: RequestCommon {
+                        request_lsn: lsn,
+                        not_modified_since_lsn: lsn,
+                    },
+                    replica: false,
                 },
-                replica: false,
-            }, gzip)
+                gzip,
+            )
             .await
             .with_context(|| format!("start basebackup for {timeline}"))
             .unwrap()
@@ -333,12 +334,18 @@ async fn client_grpc(
         let mut size = 0;
         let mut nchunks = 0;
         while let Some(chunk) = basebackup_stream.next().await {
-            let chunk = chunk.with_context(|| format!("error during basebackup")).unwrap();
+            let chunk = chunk
+                .with_context(|| "error during basebackup".to_string())
+                .unwrap();
             size += chunk.chunk.len();
             nchunks += 1;
         }
 
-        info!("basebackup size is {} bytes, avg chunk size {} bytes", size, size as f32 / nchunks as f32);
+        info!(
+            "basebackup size is {} bytes, avg chunk size {} bytes",
+            size,
+            size as f32 / nchunks as f32
+        );
         let elapsed = start.elapsed();
         live_stats.inc();
         STATS.with(|stats| {

@@ -56,6 +56,7 @@ pub enum NeonIOHandleState {
 
 impl CommunicatorInitStruct {
     // safety:: fixme: it's possible to get two mutable referneces to same slot
+    #[allow(clippy::mut_from_ref)] // TODO: remove allow
     pub fn get_request_slot(&self, request_idx: u32) -> &mut NeonIOHandle {
         assert!(request_idx < self.num_neon_request_slots);
 
@@ -117,7 +118,7 @@ impl CommunicatorBackendStruct {
         slot.state
             .store(NeonIOHandleState::Submitted, Ordering::Release);
 
-        return idx as i32;
+        idx as i32
     }
 
     pub fn poll_request_completion(

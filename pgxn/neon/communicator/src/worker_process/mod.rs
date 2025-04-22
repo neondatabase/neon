@@ -51,13 +51,7 @@ pub extern "C" fn communicator_worker_process_launch(
         let c_str = unsafe { CStr::from_ptr(timeline_id) };
         c_str.to_str().unwrap()
     };
-    let auth_token = {
-        if let Some(c_str) = unsafe { auth_token.as_ref() } {
-            Some(c_str.to_string())
-        } else {
-            None
-        }
-    };
+    let auth_token = unsafe { auth_token.as_ref() }.map(|s| s.to_string());
 
     let shard_map = parse_shard_map(nshards, shard_map);
 
@@ -136,7 +130,7 @@ async fn communicator_process_main_loop(
         // TODO: possible to have a guard object for that? That would protect from
         // dropped futures.
 
-        let request = slot.request.clone();
+        let request = slot.request;
 
         info!("processing request {request_idx}: {request:?}");
         match request {
@@ -145,7 +139,10 @@ async fn communicator_process_main_loop(
                 slot.result = NeonIOResult::Error(-1);
             }
             NeonIORequest::RelExists(ref req) => {
-                match pageserver_client.process_rel_exists_request(&req.into()).await {
+                match pageserver_client
+                    .process_rel_exists_request(&req.into())
+                    .await
+                {
                     Ok(exists) => {
                         slot.result = NeonIOResult::RelExists(exists);
                     }
@@ -156,7 +153,10 @@ async fn communicator_process_main_loop(
                 }
             }
             NeonIORequest::RelSize(ref req) => {
-                match pageserver_client.process_rel_size_request(&req.into()).await {
+                match pageserver_client
+                    .process_rel_size_request(&req.into())
+                    .await
+                {
                     Ok(nblocks) => {
                         slot.result = NeonIOResult::RelSize(nblocks);
                     }

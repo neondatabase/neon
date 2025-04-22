@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use camino::Utf8PathBuf;
-use futures::stream::FuturesOrdered;
 use futures::StreamExt;
+use futures::stream::FuturesOrdered;
 use pageserver_api::key::Key;
 use pageserver_api::keyspace::KeySpaceAccum;
 use pageserver_api::models::{PagestreamGetPageRequest, PagestreamRequest};
@@ -294,9 +294,29 @@ async fn main_impl(
         let cancel = cancel.clone();
         Box::pin(async move {
             if args.grpc {
-                client_grpc(args, worker_id, start_work_barrier, cancel, rps_period, live_stats, ranges, weights).await
+                client_grpc(
+                    args,
+                    worker_id,
+                    start_work_barrier,
+                    cancel,
+                    rps_period,
+                    live_stats,
+                    ranges,
+                    weights,
+                )
+                .await
             } else {
-                client_libpq(args, worker_id, start_work_barrier, cancel, rps_period, live_stats, ranges, weights).await
+                client_libpq(
+                    args,
+                    worker_id,
+                    start_work_barrier,
+                    cancel,
+                    rps_period,
+                    live_stats,
+                    ranges,
+                    weights,
+                )
+                .await
             }
         })
     };
@@ -349,7 +369,7 @@ async fn main_impl(
     anyhow::Ok(())
 }
 
-
+#[allow(clippy::too_many_arguments)]
 async fn client_libpq(
     args: &Args,
     worker_id: WorkerId,
@@ -359,10 +379,8 @@ async fn client_libpq(
     live_stats: Arc<LiveStats>,
     ranges: Vec<KeyRange>,
     weights: rand::distributions::weighted::WeightedIndex<i128>,
-)
-{
-    let client =
-        pageserver_client::page_service::Client::new(args.page_service_connstring.clone())
+) {
+    let client = pageserver_client::page_service::Client::new(args.page_service_connstring.clone())
         .await
         .unwrap();
     let mut client = client
@@ -378,8 +396,7 @@ async fn client_libpq(
         // Detect if a request took longer than the RPS rate
         if let Some(period) = &rps_period {
             let periods_passed_until_now =
-                usize::try_from(client_start.elapsed().as_micros() / period.as_micros())
-                .unwrap();
+                usize::try_from(client_start.elapsed().as_micros() / period.as_micros()).unwrap();
 
             if periods_passed_until_now > ticks_processed {
                 live_stats.missed((periods_passed_until_now - ticks_processed) as u64);
@@ -440,6 +457,7 @@ async fn client_libpq(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn client_grpc(
     args: &Args,
     worker_id: WorkerId,
@@ -449,8 +467,7 @@ async fn client_grpc(
     live_stats: Arc<LiveStats>,
     ranges: Vec<KeyRange>,
     weights: rand::distributions::weighted::WeightedIndex<i128>,
-)
-{
+) {
     let shard_map = HashMap::from([(0, args.page_service_connstring.clone())]);
     let client = pageserver_client_grpc::PageserverClient::new(
         &worker_id.timeline.tenant_id.to_string(),
@@ -468,8 +485,7 @@ async fn client_grpc(
         // Detect if a request took longer than the RPS rate
         if let Some(period) = &rps_period {
             let periods_passed_until_now =
-                usize::try_from(client_start.elapsed().as_micros() / period.as_micros())
-                .unwrap();
+                usize::try_from(client_start.elapsed().as_micros() / period.as_micros()).unwrap();
 
             if periods_passed_until_now > ticks_processed {
                 live_stats.missed((periods_passed_until_now - ticks_processed) as u64);
