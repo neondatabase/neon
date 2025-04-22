@@ -532,7 +532,12 @@ impl RemoteStorage for AzureBlobStorage {
         let mut builder = blob_client.get();
 
         if let Some(ref etag) = opts.etag {
-            builder = builder.if_match(IfMatchCondition::NotMatch(etag.to_string()))
+            builder = builder.if_match(IfMatchCondition::NotMatch(etag.to_string()));
+        }
+
+        if let Some(ref version_id) = opts.version_id {
+            let version_id = azure_storage_blobs::prelude::VersionId::new(version_id.0.clone());
+            builder = builder.blob_versioning(version_id);
         }
 
         if let Some((start, end)) = opts.byte_range() {

@@ -186,6 +186,8 @@ pub struct DownloadOpts {
     /// The end of the byte range to download, or unbounded. Must be after the
     /// start bound.
     pub byte_end: Bound<u64>,
+    /// Optionally request a specific version of a key
+    pub version_id: Option<VersionId>,
     /// Indicate whether we're downloading something small or large: this indirectly controls
     /// timeouts: for something like an index/manifest/heatmap, we should time out faster than
     /// for layer files
@@ -197,12 +199,16 @@ pub enum DownloadKind {
     Small,
 }
 
+#[derive(Debug, Clone)]
+pub struct VersionId(pub String);
+
 impl Default for DownloadOpts {
     fn default() -> Self {
         Self {
             etag: Default::default(),
             byte_start: Bound::Unbounded,
             byte_end: Bound::Unbounded,
+            version_id: None,
             kind: DownloadKind::Large,
         }
     }

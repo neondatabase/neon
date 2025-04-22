@@ -66,6 +66,7 @@ struct GetObjectRequest {
     key: String,
     etag: Option<String>,
     range: Option<String>,
+    version_id: Option<String>,
 }
 impl S3Bucket {
     /// Creates the S3 storage, errors if incorrect AWS S3 configuration provided.
@@ -251,6 +252,7 @@ impl S3Bucket {
             .get_object()
             .bucket(request.bucket)
             .key(request.key)
+            .set_version_id(request.version_id)
             .set_range(request.range);
 
         if let Some(etag) = request.etag {
@@ -801,6 +803,7 @@ impl RemoteStorage for S3Bucket {
                 key: self.relative_path_to_s3_object(from),
                 etag: opts.etag.as_ref().map(|e| e.to_string()),
                 range: opts.byte_range_header(),
+                version_id: opts.version_id.as_ref().map(|v| v.0.to_owned()),
             },
             cancel,
         )
