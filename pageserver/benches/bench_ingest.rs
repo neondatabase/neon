@@ -307,3 +307,51 @@ fn criterion_benchmark(c: &mut Criterion) {
 
 criterion_group!(benches, criterion_benchmark);
 criterion_main!(benches);
+
+/*
+cargo bench --bench bench_ingest
+
+im4gn.2xlarge:
+
+
+
+
+Hetzner AX102:
+
+ingest/io_mode=Buffered volume_mib=128 key_size_bytes=100 key_layout=Sequential write_delta=Yes
+                        time:   [1.0683 s 1.1006 s 1.1386 s]
+                        thrpt:  [112.42 MiB/s 116.30 MiB/s 119.82 MiB/s]
+ingest/io_mode=Buffered volume_mib=128 key_size_bytes=100 key_layout=Random write_delta=Yes
+                        time:   [1.5719 s 1.6012 s 1.6228 s]
+                        thrpt:  [78.877 MiB/s 79.938 MiB/s 81.430 MiB/s]
+ingest/io_mode=Buffered volume_mib=128 key_size_bytes=100 key_layout=RandomReuse(1023) write_delta=Y...
+                        time:   [1.1095 s 1.1331 s 1.1580 s]
+                        thrpt:  [110.53 MiB/s 112.97 MiB/s 115.37 MiB/s]
+ingest/io_mode=Buffered volume_mib=128 key_size_bytes=100 key_layout=Sequential write_delta=No
+                        time:   [303.20 ms 307.83 ms 311.90 ms]
+                        thrpt:  [410.39 MiB/s 415.81 MiB/s 422.16 MiB/s]
+ingest/io_mode=Buffered volume_mib=128 key_size_bytes=8192 key_layout=Sequential write_delta=Yes
+                        time:   [406.34 ms 429.37 ms 451.63 ms]
+                        thrpt:  [283.42 MiB/s 298.11 MiB/s 315.00 MiB/s]
+ingest/io_mode=Buffered volume_mib=128 key_size_bytes=8192 key_layout=Sequential write_delta=No
+                        time:   [134.01 ms 135.78 ms 137.48 ms]
+                        thrpt:  [931.03 MiB/s 942.68 MiB/s 955.12 MiB/s]
+ingest/io_mode=Direct volume_mib=128 key_size_bytes=100 key_layout=Sequential write_delta=Yes
+                        time:   [1.0406 s 1.0580 s 1.0772 s]
+                        thrpt:  [118.83 MiB/s 120.98 MiB/s 123.00 MiB/s]
+ingest/io_mode=Direct volume_mib=128 key_size_bytes=100 key_layout=Random write_delta=Yes
+                        time:   [1.5059 s 1.5339 s 1.5625 s]
+                        thrpt:  [81.920 MiB/s 83.448 MiB/s 84.999 MiB/s]
+ingest/io_mode=Direct volume_mib=128 key_size_bytes=100 key_layout=RandomReuse(1023) write_delta=Yes
+                        time:   [1.0714 s 1.0934 s 1.1161 s]
+                        thrpt:  [114.69 MiB/s 117.06 MiB/s 119.47 MiB/s]
+ingest/io_mode=Direct volume_mib=128 key_size_bytes=100 key_layout=Sequential write_delta=No
+                        time:   [262.68 ms 265.14 ms 267.71 ms]
+                        thrpt:  [478.13 MiB/s 482.76 MiB/s 487.29 MiB/s]
+ingest/io_mode=Direct volume_mib=128 key_size_bytes=8192 key_layout=Sequential write_delta=Yes
+                        time:   [375.19 ms 393.80 ms 411.40 ms]
+                        thrpt:  [311.14 MiB/s 325.04 MiB/s 341.16 MiB/s]
+ingest/io_mode=Direct volume_mib=128 key_size_bytes=8192 key_layout=Sequential write_delta=No
+                        time:   [123.02 ms 123.85 ms 124.66 ms]
+                        thrpt:  [1.0027 GiB/s 1.0093 GiB/s 1.0161 GiB/s]
+*/
