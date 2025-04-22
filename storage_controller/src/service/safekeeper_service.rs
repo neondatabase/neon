@@ -565,6 +565,8 @@ impl Service {
                     "couldn't find any active safekeeper for new timeline",
                 )));
             }
+            // Have laxer requirements on testig mode as we don't want to
+            // spin up three safekeepers for every single test
             #[cfg(feature = "testing")]
             1 | 2 => all_safekeepers.len(),
             _ => 3,
