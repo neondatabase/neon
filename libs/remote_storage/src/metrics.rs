@@ -14,6 +14,7 @@ pub(crate) enum RequestKind {
     Copy = 4,
     TimeTravel = 5,
     Head = 6,
+    ListVersions = 7,
 }
 
 use RequestKind::*;
@@ -29,6 +30,7 @@ impl RequestKind {
             Copy => "copy_object",
             TimeTravel => "time_travel_recover",
             Head => "head_object",
+            ListVersions => "list_versions",
         }
     }
     const fn as_index(&self) -> usize {

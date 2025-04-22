@@ -623,6 +623,16 @@ impl RemoteStorage for S3Bucket {
         }
     }
 
+    async fn list_versions(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> Result<crate::VersionListing, DownloadError> {
+        unimplemented!()
+    }
+
     async fn head_object(
         &self,
         key: &RemotePath,

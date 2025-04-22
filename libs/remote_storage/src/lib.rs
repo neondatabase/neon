@@ -176,6 +176,20 @@ pub struct Listing {
     pub keys: Vec<ListingObject>,
 }
 
+pub struct VersionListing {
+    pub versions: Vec<Version>,
+}
+
+pub struct Version {
+    pub key: RemotePath,
+    pub kind: VersionKind,
+}
+
+pub enum VersionKind {
+    DeletionMarker,
+    Version(VersionId),
+}
+
 /// Options for downloads. The default value is a plain GET.
 pub struct DownloadOpts {
     /// If given, returns [`DownloadError::Unmodified`] if the object still has
@@ -300,6 +314,14 @@ pub trait RemoteStorage: Send + Sync + 'static {
         }
         Ok(combined)
     }
+
+    async fn list_versions(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> Result<VersionListing, DownloadError>;
 
     /// Obtain metadata information about an object.
     async fn head_object(
@@ -478,6 +500,22 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             Self::AwsS3(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
             Self::AzureBlob(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
             Self::Unreliable(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
+        }
+    }
+
+    // See [`RemoteStorage::list_versions`].
+    pub async fn list_versions<'a>(
+        &'a self,
+        prefix: Option<&'a RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &'a CancellationToken,
+    ) -> Result<VersionListing, DownloadError> {
+        match self {
+            Self::LocalFs(s) => s.list_versions(prefix, mode, max_keys, cancel).await,
+            Self::AwsS3(s) => s.list_versions(prefix, mode, max_keys, cancel).await,
+            Self::AzureBlob(s) => s.list_versions(prefix, mode, max_keys, cancel).await,
+            Self::Unreliable(s) => s.list_versions(prefix, mode, max_keys, cancel).await,
         }
     }
 
@@ -733,6 +771,7 @@ impl ConcurrencyLimiter {
             RequestKind::Copy => &self.write,
             RequestKind::TimeTravel => &self.write,
             RequestKind::Head => &self.read,
+            RequestKind::ListVersions => &self.read,
         }
     }
 

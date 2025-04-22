@@ -423,6 +423,16 @@ impl RemoteStorage for AzureBlobStorage {
         }
     }
 
+    async fn list_versions(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> std::result::Result<crate::VersionListing, DownloadError> {
+        unimplemented!()
+    }
+
     async fn head_object(
         &self,
         key: &RemotePath,
