@@ -4240,11 +4240,6 @@ def test_storcon_create_delete_sk_down(
     wait_until(timeline_deleted_on_sk)
 
 
-class DeletionSubject(Enum):
-    TIMELINE = "timeline"
-    TENANT = "tenant"
-
-
 @run_only_on_default_postgres("PG version is not interesting here")
 @pytest.mark.parametrize("num_safekeepers", [1, 2, 3])
 @pytest.mark.parametrize("deletetion_subject", [DeletionSubject.TENANT, DeletionSubject.TIMELINE])
