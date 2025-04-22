@@ -24,7 +24,7 @@ use crate::task_mgr::{self, BACKGROUND_RUNTIME, TaskKind};
 use crate::tenant::mgr::TenantManager;
 use crate::tenant::size::CalculateSyntheticSizeError;
 use crate::tenant::tasks::BackgroundLoopKind;
-use crate::tenant::{LogicalSizeCalculationCause, Tenant};
+use crate::tenant::{LogicalSizeCalculationCause, TenantShard};
 
 mod disk_cache;
 mod metrics;
@@ -428,7 +428,7 @@ async fn calculate_synthetic_size_worker(
     }
 }
 
-async fn calculate_and_log(tenant: &Tenant, cancel: &CancellationToken, ctx: &RequestContext) {
+async fn calculate_and_log(tenant: &TenantShard, cancel: &CancellationToken, ctx: &RequestContext) {
     const CAUSE: LogicalSizeCalculationCause =
         LogicalSizeCalculationCause::ConsumptionMetricsSyntheticSize;
 

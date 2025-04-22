@@ -26,7 +26,7 @@ use utils::{completion, serde_system_time};
 use crate::config::Ratio;
 use crate::key::{CompactKey, Key};
 use crate::reltag::RelTag;
-use crate::shard::{ShardCount, ShardStripeSize, TenantShardId};
+use crate::shard::{DEFAULT_STRIPE_SIZE, ShardCount, ShardStripeSize, TenantShardId};
 
 /// The state of a tenant in this pageserver.
 ///
@@ -438,8 +438,6 @@ pub struct ShardParameters {
 }
 
 impl ShardParameters {
-    pub const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
-
     pub fn is_unsharded(&self) -> bool {
         self.count.is_unsharded()
     }
@@ -449,7 +447,7 @@ impl Default for ShardParameters {
     fn default() -> Self {
         Self {
             count: ShardCount::new(0),
-            stripe_size: Self::DEFAULT_STRIPE_SIZE,
+            stripe_size: DEFAULT_STRIPE_SIZE,
         }
     }
 }
@@ -528,6 +526,8 @@ pub struct TenantConfigPatch {
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub compaction_algorithm: FieldPatch<CompactionAlgorithmSettings>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub compaction_shard_ancestor: FieldPatch<bool>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub compaction_l0_first: FieldPatch<bool>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub compaction_l0_semaphore: FieldPatch<bool>,
@@ -578,6 +578,8 @@ pub struct TenantConfigPatch {
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_compaction_enabled: FieldPatch<bool>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub gc_compaction_verification: FieldPatch<bool>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_compaction_initial_threshold_kb: FieldPatch<u64>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub gc_compaction_ratio_percent: FieldPatch<u64>,
@@ -614,6 +616,9 @@ pub struct TenantConfig {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction_algorithm: Option<CompactionAlgorithmSettings>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compaction_shard_ancestor: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction_l0_first: Option<bool>,
@@ -699,6 +704,9 @@ pub struct TenantConfig {
     pub gc_compaction_enabled: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub gc_compaction_verification: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub gc_compaction_initial_threshold_kb: Option<u64>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -721,6 +729,7 @@ impl TenantConfig {
             mut compaction_threshold,
             mut compaction_upper_limit,
             mut compaction_algorithm,
+            mut compaction_shard_ancestor,
             mut compaction_l0_first,
             mut compaction_l0_semaphore,
             mut l0_flush_delay_threshold,
@@ -746,6 +755,7 @@ impl TenantConfig {
             mut wal_receiver_protocol_override,
             mut rel_size_v2_enabled,
             mut gc_compaction_enabled,
+            mut gc_compaction_verification,
             mut gc_compaction_initial_threshold_kb,
             mut gc_compaction_ratio_percent,
             mut sampling_ratio,
@@ -768,6 +778,9 @@ impl TenantConfig {
             .compaction_upper_limit
             .apply(&mut compaction_upper_limit);
         patch.compaction_algorithm.apply(&mut compaction_algorithm);
+        patch
+            .compaction_shard_ancestor
+            .apply(&mut compaction_shard_ancestor);
         patch.compaction_l0_first.apply(&mut compaction_l0_first);
         patch
             .compaction_l0_semaphore
@@ -838,6 +851,9 @@ impl TenantConfig {
             .gc_compaction_enabled
             .apply(&mut gc_compaction_enabled);
         patch
+            .gc_compaction_verification
+            .apply(&mut gc_compaction_verification);
+        patch
             .gc_compaction_initial_threshold_kb
             .apply(&mut gc_compaction_initial_threshold_kb);
         patch
@@ -853,6 +869,7 @@ impl TenantConfig {
             compaction_threshold,
             compaction_upper_limit,
             compaction_algorithm,
+            compaction_shard_ancestor,
             compaction_l0_first,
             compaction_l0_semaphore,
             l0_flush_delay_threshold,
@@ -878,6 +895,7 @@ impl TenantConfig {
             wal_receiver_protocol_override,
             rel_size_v2_enabled,
             gc_compaction_enabled,
+            gc_compaction_verification,
             gc_compaction_initial_threshold_kb,
             gc_compaction_ratio_percent,
             sampling_ratio,
@@ -912,6 +930,9 @@ impl TenantConfig {
                 .as_ref()
                 .unwrap_or(&global_conf.compaction_algorithm)
                 .clone(),
+            compaction_shard_ancestor: self
+                .compaction_shard_ancestor
+                .unwrap_or(global_conf.compaction_shard_ancestor),
             compaction_l0_first: self
                 .compaction_l0_first
                 .unwrap_or(global_conf.compaction_l0_first),
@@ -976,6 +997,9 @@ impl TenantConfig {
             gc_compaction_enabled: self
                 .gc_compaction_enabled
                 .unwrap_or(global_conf.gc_compaction_enabled),
+            gc_compaction_verification: self
+                .gc_compaction_verification
+                .unwrap_or(global_conf.gc_compaction_verification),
             gc_compaction_initial_threshold_kb: self
                 .gc_compaction_initial_threshold_kb
                 .unwrap_or(global_conf.gc_compaction_initial_threshold_kb),
@@ -1680,6 +1704,7 @@ pub struct SecondaryProgress {
 pub struct TenantScanRemoteStorageShard {
     pub tenant_shard_id: TenantShardId,
     pub generation: Option<u32>,
+    pub stripe_size: Option<ShardStripeSize>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -1792,8 +1817,34 @@ pub mod virtual_file {
     }
 
     impl IoMode {
-        pub const fn preferred() -> Self {
-            Self::Buffered
+        pub fn preferred() -> Self {
+            // The default behavior when running Rust unit tests without any further
+            // flags is to use the newest behavior if available on the platform (Direct).
+            // The CI uses the following environment variable to unit tests for all
+            // different modes.
+            // NB: the Python regression & perf tests have their own defaults management
+            // that writes pageserver.toml; they do not use this variable.
+            if cfg!(test) {
+                use once_cell::sync::Lazy;
+                static CACHED: Lazy<IoMode> = Lazy::new(|| {
+                    utils::env::var_serde_json_string(
+                        "NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IO_MODE",
+                    )
+                    .unwrap_or({
+                        #[cfg(target_os = "linux")]
+                        {
+                            IoMode::Direct
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            IoMode::Buffered
+                        }
+                    })
+                });
+                *CACHED
+            } else {
+                IoMode::Buffered
+            }
         }
     }
 

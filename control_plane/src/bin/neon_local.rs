@@ -20,8 +20,10 @@ use compute_api::spec::ComputeMode;
 use control_plane::endpoint::ComputeControlPlane;
 use control_plane::local_env::{
     InitForceMode, LocalEnv, NeonBroker, NeonLocalInitConf, NeonLocalInitPageserverConf,
-    SafekeeperConf,
+    ObjectStorageConf, SafekeeperConf,
 };
+use control_plane::object_storage::OBJECT_STORAGE_DEFAULT_PORT;
+use control_plane::object_storage::ObjectStorage;
 use control_plane::pageserver::PageServerNode;
 use control_plane::safekeeper::SafekeeperNode;
 use control_plane::storage_controller::{
@@ -39,7 +41,7 @@ use pageserver_api::controller_api::{
 use pageserver_api::models::{
     ShardParameters, TenantConfigRequest, TimelineCreateRequest, TimelineInfo,
 };
-use pageserver_api::shard::{ShardCount, ShardStripeSize, TenantShardId};
+use pageserver_api::shard::{DEFAULT_STRIPE_SIZE, ShardCount, ShardStripeSize, TenantShardId};
 use postgres_backend::AuthType;
 use postgres_connection::parse_host_port;
 use safekeeper_api::membership::SafekeeperGeneration;
@@ -61,7 +63,7 @@ const DEFAULT_PAGESERVER_ID: NodeId = NodeId(1);
 const DEFAULT_BRANCH_NAME: &str = "main";
 project_git_version!(GIT_VERSION);
 
-const DEFAULT_PG_VERSION: u32 = 16;
+const DEFAULT_PG_VERSION: u32 = 17;
 
 const DEFAULT_PAGESERVER_CONTROL_PLANE_API: &str = "http://127.0.0.1:1234/upcall/v1/";
 
@@ -90,6 +92,8 @@ enum NeonLocalCmd {
     StorageBroker(StorageBrokerCmd),
     #[command(subcommand)]
     Safekeeper(SafekeeperCmd),
+    #[command(subcommand)]
+    ObjectStorage(ObjectStorageCmd),
     #[command(subcommand)]
     Endpoint(EndpointCmd),
     #[command(subcommand)]
@@ -454,6 +458,32 @@ enum SafekeeperCmd {
     Restart(SafekeeperRestartCmdArgs),
 }
 
+#[derive(clap::Subcommand)]
+#[clap(about = "Manage object storage")]
+enum ObjectStorageCmd {
+    Start(ObjectStorageStartCmd),
+    Stop(ObjectStorageStopCmd),
+}
+
+#[derive(clap::Args)]
+#[clap(about = "Start object storage")]
+struct ObjectStorageStartCmd {
+    #[clap(short = 't', long, help = "timeout until we fail the command")]
+    #[arg(default_value = "10s")]
+    start_timeout: humantime::Duration,
+}
+
+#[derive(clap::Args)]
+#[clap(about = "Stop object storage")]
+struct ObjectStorageStopCmd {
+    #[arg(value_enum, default_value = "fast")]
+    #[clap(
+        short = 'm',
+        help = "If 'immediate', don't flush repository data at shutdown"
+    )]
+    stop_mode: StopMode,
+}
+
 #[derive(clap::Args)]
 #[clap(about = "Start local safekeeper")]
 struct SafekeeperStartCmdArgs {
@@ -522,6 +552,7 @@ enum EndpointCmd {
     Start(EndpointStartCmdArgs),
     Reconfigure(EndpointReconfigureCmdArgs),
     Stop(EndpointStopCmdArgs),
+    GenerateJwt(EndpointGenerateJwtCmdArgs),
 }
 
 #[derive(clap::Args)]
@@ -669,6 +700,13 @@ struct EndpointStopCmdArgs {
     mode: String,
 }
 
+#[derive(clap::Args)]
+#[clap(about = "Generate a JWT for an endpoint")]
+struct EndpointGenerateJwtCmdArgs {
+    #[clap(help = "Postgres endpoint id")]
+    endpoint_id: String,
+}
+
 #[derive(clap::Subcommand)]
 #[clap(about = "Manage neon_local branch name mappings")]
 enum MappingsCmd {
@@ -759,6 +797,7 @@ fn main() -> Result<()> {
             }
             NeonLocalCmd::StorageBroker(subcmd) => rt.block_on(handle_storage_broker(&subcmd, env)),
             NeonLocalCmd::Safekeeper(subcmd) => rt.block_on(handle_safekeeper(&subcmd, env)),
+            NeonLocalCmd::ObjectStorage(subcmd) => rt.block_on(handle_object_storage(&subcmd, env)),
             NeonLocalCmd::Endpoint(subcmd) => rt.block_on(handle_endpoint(&subcmd, env)),
             NeonLocalCmd::Mappings(subcmd) => handle_mappings(&subcmd, env),
         };
@@ -975,6 +1014,9 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
                     }
                 })
                 .collect(),
+            object_storage: ObjectStorageConf {
+                port: OBJECT_STORAGE_DEFAULT_PORT,
+            },
             pg_distrib_dir: None,
             neon_distrib_dir: None,
             default_tenant_id: TenantId::from_array(std::array::from_fn(|_| 0)),
@@ -1083,7 +1125,7 @@ async fn handle_tenant(subcmd: &TenantCmd, env: &mut local_env::LocalEnv) -> any
                         stripe_size: args
                             .shard_stripe_size
                             .map(ShardStripeSize)
-                            .unwrap_or(ShardParameters::DEFAULT_STRIPE_SIZE),
+                            .unwrap_or(DEFAULT_STRIPE_SIZE),
                     },
                     placement_policy: args.placement_policy.clone(),
                     config: tenant_conf,
@@ -1396,7 +1438,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                     vec![(parsed.0, parsed.1.unwrap_or(5432))],
                     // If caller is telling us what pageserver to use, this is not a tenant which is
                     // full managed by storage controller, therefore not sharded.
-                    ShardParameters::DEFAULT_STRIPE_SIZE,
+                    DEFAULT_STRIPE_SIZE,
                 )
             } else {
                 // Look up the currently attached location of the tenant, and its striping metadata,
@@ -1493,6 +1535,16 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 .get(endpoint_id)
                 .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
             endpoint.stop(&args.mode, args.destroy)?;
+        }
+        EndpointCmd::GenerateJwt(args) => {
+            let endpoint_id = &args.endpoint_id;
+            let endpoint = cplane
+                .endpoints
+                .get(endpoint_id)
+                .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
+            let jwt = endpoint.generate_jwt()?;
+
+            print!("{jwt}");
         }
     }
 
@@ -1683,6 +1735,41 @@ async fn handle_safekeeper(subcmd: &SafekeeperCmd, env: &local_env::LocalEnv) ->
     Ok(())
 }
 
+async fn handle_object_storage(subcmd: &ObjectStorageCmd, env: &local_env::LocalEnv) -> Result<()> {
+    use ObjectStorageCmd::*;
+    let storage = ObjectStorage::from_env(env);
+
+    // In tests like test_forward_compatibility or test_graceful_cluster_restart
+    // old neon binaries (without object_storage) are present
+    if !storage.bin.exists() {
+        eprintln!(
+            "{} binary not found. Ignore if this is a compatibility test",
+            storage.bin
+        );
+        return Ok(());
+    }
+
+    match subcmd {
+        Start(ObjectStorageStartCmd { start_timeout }) => {
+            if let Err(e) = storage.start(start_timeout).await {
+                eprintln!("object_storage start failed: {e}");
+                exit(1);
+            }
+        }
+        Stop(ObjectStorageStopCmd { stop_mode }) => {
+            let immediate = match stop_mode {
+                StopMode::Fast => false,
+                StopMode::Immediate => true,
+            };
+            if let Err(e) = storage.stop(immediate) {
+                eprintln!("proxy stop failed: {e}");
+                exit(1);
+            }
+        }
+    };
+    Ok(())
+}
+
 async fn handle_storage_broker(subcmd: &StorageBrokerCmd, env: &local_env::LocalEnv) -> Result<()> {
     match subcmd {
         StorageBrokerCmd::Start(args) => {
@@ -1777,6 +1864,13 @@ async fn handle_start_all_impl(
                     .map_err(|e| e.context(format!("start safekeeper {}", safekeeper.id)))
             });
         }
+
+        js.spawn(async move {
+            ObjectStorage::from_env(env)
+                .start(&retry_timeout)
+                .await
+                .map_err(|e| e.context("start object_storage"))
+        });
     })();
 
     let mut errors = Vec::new();
@@ -1872,6 +1966,11 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
         Err(e) => {
             eprintln!("postgres stop failed, could not restore control plane data from env: {e:#}")
         }
+    }
+
+    let storage = ObjectStorage::from_env(env);
+    if let Err(e) = storage.stop(immediate) {
+        eprintln!("object_storage stop failed: {:#}", e);
     }
 
     for ps_conf in &env.pageservers {

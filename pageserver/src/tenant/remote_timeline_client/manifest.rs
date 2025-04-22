@@ -1,4 +1,5 @@
 use chrono::NaiveDateTime;
+use pageserver_api::shard::ShardStripeSize;
 use serde::{Deserialize, Serialize};
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
@@ -13,6 +14,12 @@ pub struct TenantManifest {
     /// Manifests must generally always be backwards and forwards compatible for one release, to
     /// allow release rollbacks.
     pub version: usize,
+
+    /// This tenant's stripe size. This is only advisory, and used to recover tenant data from
+    /// remote storage. The autoritative source is the storage controller. If None, assume the
+    /// original default value of 32768 blocks (256 MB).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stripe_size: Option<ShardStripeSize>,
 
     /// The list of offloaded timelines together with enough information
     /// to not have to actually load them.
@@ -42,7 +49,12 @@ pub struct OffloadedTimelineManifest {
 
 /// The newest manifest version. This should be incremented on changes, even non-breaking ones. We
 /// do not use deny_unknown_fields, so new fields are not breaking.
-pub const LATEST_TENANT_MANIFEST_VERSION: usize = 1;
+///
+/// 1: initial version
+/// 2: +stripe_size
+///
+/// When adding new versions, also add a parse_vX test case below.
+pub const LATEST_TENANT_MANIFEST_VERSION: usize = 2;
 
 impl TenantManifest {
     /// Returns true if the manifests are equal, ignoring the version number. This avoids
@@ -56,10 +68,11 @@ impl TenantManifest {
         // We could alternatively just clone and modify the version here.
         let Self {
             version: _, // ignore version
+            stripe_size,
             offloaded_timelines,
         } = self;
 
-        offloaded_timelines == &other.offloaded_timelines
+        stripe_size == &other.stripe_size && offloaded_timelines == &other.offloaded_timelines
     }
 
     /// Decodes a manifest from JSON.
@@ -89,6 +102,7 @@ mod tests {
          }"#;
         let expected = TenantManifest {
             version: 0,
+            stripe_size: None,
             offloaded_timelines: Vec::new(),
         };
         assert_eq!(expected, TenantManifest::from_json_bytes(json.as_bytes())?);
@@ -104,6 +118,7 @@ mod tests {
          }"#;
         let expected = TenantManifest {
             version: 1,
+            stripe_size: None,
             offloaded_timelines: Vec::new(),
         };
         assert_eq!(expected, TenantManifest::from_json_bytes(json.as_bytes())?);
@@ -130,6 +145,50 @@ mod tests {
          }"#;
         let expected = TenantManifest {
             version: 1,
+            stripe_size: None,
+            offloaded_timelines: vec![
+                OffloadedTimelineManifest {
+                    timeline_id: TimelineId::from_str("5c4df612fd159e63c1b7853fe94d97da")?,
+                    ancestor_timeline_id: None,
+                    ancestor_retain_lsn: None,
+                    archived_at: NaiveDateTime::from_str("2025-03-07T11:07:11.373105434")?,
+                },
+                OffloadedTimelineManifest {
+                    timeline_id: TimelineId::from_str("f3def5823ad7080d2ea538d8e12163fa")?,
+                    ancestor_timeline_id: Some(TimelineId::from_str(
+                        "5c4df612fd159e63c1b7853fe94d97da",
+                    )?),
+                    ancestor_retain_lsn: Some(Lsn::from_str("0/1F79038")?),
+                    archived_at: NaiveDateTime::from_str("2025-03-05T11:10:22.257901390")?,
+                },
+            ],
+        };
+        assert_eq!(expected, TenantManifest::from_json_bytes(json.as_bytes())?);
+        Ok(())
+    }
+
+    /// v2 manifests should be parsed, for backwards compatibility.
+    #[test]
+    fn parse_v2() -> anyhow::Result<()> {
+        let json = r#"{
+             "version": 2,
+             "stripe_size": 32768,
+             "offloaded_timelines": [
+                 {
+                     "timeline_id": "5c4df612fd159e63c1b7853fe94d97da",
+                     "archived_at": "2025-03-07T11:07:11.373105434"
+                 },
+                 {
+                     "timeline_id": "f3def5823ad7080d2ea538d8e12163fa",
+                     "ancestor_timeline_id": "5c4df612fd159e63c1b7853fe94d97da",
+                     "ancestor_retain_lsn": "0/1F79038",
+                     "archived_at": "2025-03-05T11:10:22.257901390"
+                 }
+             ]
+         }"#;
+        let expected = TenantManifest {
+            version: 2,
+            stripe_size: Some(ShardStripeSize(32768)),
             offloaded_timelines: vec![
                 OffloadedTimelineManifest {
                     timeline_id: TimelineId::from_str("5c4df612fd159e63c1b7853fe94d97da")?,

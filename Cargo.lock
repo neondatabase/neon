@@ -1416,6 +1416,7 @@ name = "control_plane"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.13.1",
  "camino",
  "clap",
  "comfy-table",
@@ -1425,10 +1426,12 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "hyper 0.14.30",
+ "jsonwebtoken",
  "nix 0.27.1",
  "once_cell",
  "pageserver_api",
  "pageserver_client",
+ "pem",
  "postgres_backend",
  "postgres_connection",
  "regex",
@@ -1437,6 +1440,8 @@ dependencies = [
  "scopeguard",
  "serde",
  "serde_json",
+ "sha2",
+ "spki 0.7.3",
  "storage_broker",
  "thiserror 1.0.69",
  "tokio",
@@ -2817,6 +2822,7 @@ dependencies = [
  "hyper 0.14.30",
  "itertools 0.10.5",
  "jemalloc_pprof",
+ "jsonwebtoken",
  "metrics",
  "once_cell",
  "pprof",
@@ -2837,6 +2843,7 @@ dependencies = [
  "utils",
  "uuid",
  "workspace_hack",
+ "x509-cert",
 ]
 
 [[package]]
@@ -3992,6 +3999,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "object_storage"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "axum",
+ "axum-extra",
+ "camino",
+ "camino-tempfile",
+ "futures",
+ "http-body-util",
+ "itertools 0.10.5",
+ "jsonwebtoken",
+ "prometheus",
+ "rand 0.8.5",
+ "remote_storage",
+ "serde",
+ "serde_json",
+ "test-log",
+ "tokio",
+ "tokio-util",
+ "tower 0.5.2",
+ "tracing",
+ "utils",
+ "workspace_hack",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4241,6 +4275,7 @@ dependencies = [
  "hyper 0.14.30",
  "indoc",
  "itertools 0.10.5",
+ "jsonwebtoken",
  "md5",
  "metrics",
  "nix 0.27.1",
@@ -4250,6 +4285,7 @@ dependencies = [
  "pageserver_api",
  "pageserver_client",
  "pageserver_compaction",
+ "pem",
  "pin-project-lite",
  "postgres-protocol",
  "postgres-types",
@@ -4317,6 +4353,7 @@ dependencies = [
  "humantime-serde",
  "itertools 0.10.5",
  "nix 0.27.1",
+ "once_cell",
  "postgres_backend",
  "postgres_ffi",
  "rand 0.8.5",
@@ -4693,7 +4730,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.6"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#1f21e7959a96a34dcfbfce1b14b73286cdadffe9"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#f3cf448febde5fd298071d54d568a9c875a7a62b"
 dependencies = [
  "base64 0.22.1",
  "byteorder",
@@ -4727,7 +4764,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.6"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#1f21e7959a96a34dcfbfce1b14b73286cdadffe9"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#f3cf448febde5fd298071d54d568a9c875a7a62b"
 dependencies = [
  "bytes",
  "chrono",
@@ -5657,9 +5694,9 @@ dependencies = [
 
 [[package]]
 name = "ring"
-version = "0.17.13"
+version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70ac5d832aa16abd7d1def883a8545280c20a60f523a370aa3a9617c2b8550ee"
+checksum = "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7"
 dependencies = [
  "cc",
  "cfg-if",
@@ -5960,10 +5997,12 @@ dependencies = [
  "humantime",
  "hyper 0.14.30",
  "itertools 0.10.5",
+ "jsonwebtoken",
  "metrics",
  "once_cell",
  "pageserver_api",
  "parking_lot 0.12.1",
+ "pem",
  "postgres-protocol",
  "postgres_backend",
  "postgres_ffi",
@@ -6926,6 +6965,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "test-log"
+version = "0.2.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7f46083d221181166e5b6f6b1e5f1d499f3a76888826e6cb1d057554157cd0f"
+dependencies = [
+ "env_logger",
+ "test-log-macros",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "test-log-macros"
+version = "0.2.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "888d0c3c6db53c0fdab160d2ed5e12ba745383d3e85813f2ea0f2b1475ab553f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.100",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7172,7 +7233,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.10"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#1f21e7959a96a34dcfbfce1b14b73286cdadffe9"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#f3cf448febde5fd298071d54d568a9c875a7a62b"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -7822,6 +7883,7 @@ dependencies = [
  "metrics",
  "nix 0.27.1",
  "once_cell",
+ "pem",
  "pin-project-lite",
  "postgres_connection",
  "pprof",

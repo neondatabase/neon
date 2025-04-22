@@ -719,6 +719,8 @@ impl InMemoryLayer {
         ctx: &RequestContext,
         key_range: Option<Range<Key>>,
         l0_flush_global_state: &l0_flush::Inner,
+        gate: &utils::sync::gate::Gate,
+        cancel: CancellationToken,
     ) -> Result<Option<(PersistentLayerDesc, Utf8PathBuf)>> {
         // Grab the lock in read-mode. We hold it over the I/O, but because this
         // layer is not writeable anymore, no one should be trying to acquire the
@@ -759,6 +761,8 @@ impl InMemoryLayer {
             self.tenant_shard_id,
             Key::MIN,
             self.start_lsn..end_lsn,
+            gate,
+            cancel,
             ctx,
         )
         .await?;

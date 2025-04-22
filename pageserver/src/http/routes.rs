@@ -67,7 +67,7 @@ use crate::tenant::mgr::{
 };
 use crate::tenant::remote_timeline_client::index::GcCompactionState;
 use crate::tenant::remote_timeline_client::{
-    download_index_part, list_remote_tenant_shards, list_remote_timelines,
+    download_index_part, download_tenant_manifest, list_remote_tenant_shards, list_remote_timelines,
 };
 use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
@@ -989,7 +989,7 @@ async fn get_lsn_by_timestamp_handler(
     if !tenant_shard_id.is_shard_zero() {
         // Requires SLRU contents, which are only stored on shard zero
         return Err(ApiError::BadRequest(anyhow!(
-            "Size calculations are only available on shard zero"
+            "Lsn calculations by timestamp are only available on shard zero"
         )));
     }
 
@@ -1064,7 +1064,7 @@ async fn get_timestamp_of_lsn_handler(
     if !tenant_shard_id.is_shard_zero() {
         // Requires SLRU contents, which are only stored on shard zero
         return Err(ApiError::BadRequest(anyhow!(
-            "Size calculations are only available on shard zero"
+            "Timestamp calculations by lsn are only available on shard zero"
         )));
     }
 
@@ -1090,8 +1090,8 @@ async fn get_timestamp_of_lsn_handler(
             .to_string();
             json_response(StatusCode::OK, time)
         }
-        None => Err(ApiError::NotFound(
-            anyhow::anyhow!("Timestamp for lsn {} not found", lsn).into(),
+        None => Err(ApiError::PreconditionFailed(
+            format!("Timestamp for lsn {} not found", lsn).into(),
         )),
     }
 }
@@ -1873,7 +1873,7 @@ async fn update_tenant_config_handler(
         &ShardParameters::default(),
     );
 
-    crate::tenant::Tenant::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
+    crate::tenant::TenantShard::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
         .await
         .map_err(|e| ApiError::InternalServerError(anyhow::anyhow!(e)))?;
 
@@ -1917,7 +1917,7 @@ async fn patch_tenant_config_handler(
         &ShardParameters::default(),
     );
 
-    crate::tenant::Tenant::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
+    crate::tenant::TenantShard::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
         .await
         .map_err(|e| ApiError::InternalServerError(anyhow::anyhow!(e)))?;
 
@@ -2274,6 +2274,7 @@ async fn timeline_compact_handler(
     if Some(true) == parse_query_param::<_, bool>(&request, "dry_run")? {
         flags |= CompactFlags::DryRun;
     }
+    // Manual compaction does not yield for L0.
 
     let wait_until_uploaded =
         parse_query_param::<_, bool>(&request, "wait_until_uploaded")?.unwrap_or(false);
@@ -2911,9 +2912,22 @@ async fn tenant_scan_remote_handler(
             };
         }
 
+        let result =
+            download_tenant_manifest(&state.remote_storage, &tenant_shard_id, generation, &cancel)
+                .instrument(info_span!("download_tenant_manifest",
+                            tenant_id=%tenant_shard_id.tenant_id,
+                            shard_id=%tenant_shard_id.shard_slug()))
+                .await;
+        let stripe_size = match result {
+            Ok((manifest, _, _)) => manifest.stripe_size,
+            Err(DownloadError::NotFound) => None,
+            Err(err) => return Err(ApiError::InternalServerError(anyhow!(err))),
+        };
+
         response.shards.push(TenantScanRemoteStorageShard {
             tenant_shard_id,
             generation: generation.into(),
+            stripe_size,
         });
     }
 
@@ -3239,7 +3253,7 @@ async fn ingest_aux_files(
         modification
             .put_file(&fname, content.as_bytes(), &ctx)
             .await
-            .map_err(ApiError::InternalServerError)?;
+            .map_err(|e| ApiError::InternalServerError(e.into()))?;
     }
     modification
         .commit(&ctx)
@@ -3368,11 +3382,11 @@ async fn put_tenant_timeline_import_basebackup(
 
         let broker_client = state.broker_client.clone();
 
-        let mut body = StreamReader::new(request.into_body().map(|res| {
-            res.map_err(|error| {
-                std::io::Error::new(std::io::ErrorKind::Other, anyhow::anyhow!(error))
-            })
-        }));
+        let mut body = StreamReader::new(
+            request
+                .into_body()
+                .map(|res| res.map_err(|error| std::io::Error::other(anyhow::anyhow!(error)))),
+        );
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
@@ -3446,7 +3460,7 @@ async fn put_tenant_timeline_import_wal(
 
         let mut body = StreamReader::new(request.into_body().map(|res| {
             res.map_err(|error| {
-                std::io::Error::new(std::io::ErrorKind::Other, anyhow::anyhow!(error))
+                std::io::Error::other( anyhow::anyhow!(error))
             })
         }));
 

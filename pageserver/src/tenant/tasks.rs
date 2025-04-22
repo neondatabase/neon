@@ -24,7 +24,7 @@ use crate::task_mgr::{self, BACKGROUND_RUNTIME, TOKIO_WORKER_THREADS, TaskKind};
 use crate::tenant::throttle::Stats;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::compaction::CompactionOutcome;
-use crate::tenant::{Tenant, TenantState};
+use crate::tenant::{TenantShard, TenantState};
 
 /// Semaphore limiting concurrent background tasks (across all tenants).
 ///
@@ -117,7 +117,7 @@ pub(crate) async fn acquire_concurrency_permit(
 }
 
 /// Start per tenant background loops: compaction, GC, and ingest housekeeping.
-pub fn start_background_loops(tenant: &Arc<Tenant>, can_start: Option<&Barrier>) {
+pub fn start_background_loops(tenant: &Arc<TenantShard>, can_start: Option<&Barrier>) {
     let tenant_shard_id = tenant.tenant_shard_id;
 
     task_mgr::spawn(
@@ -198,7 +198,7 @@ pub fn start_background_loops(tenant: &Arc<Tenant>, can_start: Option<&Barrier>)
 }
 
 /// Compaction task's main loop.
-async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
+async fn compaction_loop(tenant: Arc<TenantShard>, cancel: CancellationToken) {
     const BASE_BACKOFF_SECS: f64 = 1.0;
     const MAX_BACKOFF_SECS: f64 = 300.0;
     const RECHECK_CONFIG_INTERVAL: Duration = Duration::from_secs(10);
@@ -268,7 +268,12 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 error_run += 1;
                 let backoff =
                     exponential_backoff_duration(error_run, BASE_BACKOFF_SECS, MAX_BACKOFF_SECS);
-                log_compaction_error(&err, Some((error_run, backoff)), cancel.is_cancelled());
+                log_compaction_error(
+                    &err,
+                    Some((error_run, backoff)),
+                    cancel.is_cancelled(),
+                    false,
+                );
                 continue;
             }
         }
@@ -285,6 +290,7 @@ pub(crate) fn log_compaction_error(
     err: &CompactionError,
     retry_info: Option<(u32, Duration)>,
     task_cancelled: bool,
+    degrade_to_warning: bool,
 ) {
     use CompactionError::*;
 
@@ -333,6 +339,7 @@ pub(crate) fn log_compaction_error(
         }
     } else {
         match level {
+            Level::ERROR if degrade_to_warning => warn!("Compaction failed and discarded: {err:#}"),
             Level::ERROR => error!("Compaction failed: {err:#}"),
             Level::INFO => info!("Compaction failed: {err:#}"),
             level => unimplemented!("unexpected level {level:?}"),
@@ -341,7 +348,7 @@ pub(crate) fn log_compaction_error(
 }
 
 /// GC task's main loop.
-async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
+async fn gc_loop(tenant: Arc<TenantShard>, cancel: CancellationToken) {
     const MAX_BACKOFF_SECS: f64 = 300.0;
     let mut error_run = 0; // consecutive errors
 
@@ -425,7 +432,7 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
 }
 
 /// Tenant housekeeping's main loop.
-async fn tenant_housekeeping_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
+async fn tenant_housekeeping_loop(tenant: Arc<TenantShard>, cancel: CancellationToken) {
     let mut last_throttle_flag_reset_at = Instant::now();
     loop {
         if wait_for_active_tenant(&tenant, &cancel).await.is_break() {
@@ -476,7 +483,7 @@ async fn tenant_housekeeping_loop(tenant: Arc<Tenant>, cancel: CancellationToken
 
 /// Waits until the tenant becomes active, or returns `ControlFlow::Break()` to shut down.
 async fn wait_for_active_tenant(
-    tenant: &Arc<Tenant>,
+    tenant: &Arc<TenantShard>,
     cancel: &CancellationToken,
 ) -> ControlFlow<()> {
     if tenant.current_state() == TenantState::Active {

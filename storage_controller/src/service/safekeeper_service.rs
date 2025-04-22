@@ -5,19 +5,23 @@ use std::time::Duration;
 
 use super::safekeeper_reconciler::ScheduleRequest;
 use crate::heartbeater::SafekeeperState;
+use crate::metrics;
 use crate::persistence::{
     DatabaseError, SafekeeperTimelineOpKind, TimelinePendingOpPersistence, TimelinePersistence,
 };
 use crate::safekeeper::Safekeeper;
 use anyhow::Context;
 use http_utils::error::ApiError;
-use pageserver_api::controller_api::{SafekeeperDescribeResponse, SkSchedulingPolicy};
+use pageserver_api::controller_api::{
+    SafekeeperDescribeResponse, SkSchedulingPolicy, TimelineImportRequest,
+};
 use pageserver_api::models::{self, SafekeeperInfo, SafekeepersInfo, TimelineInfo};
 use safekeeper_api::membership::{MemberSet, SafekeeperId};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::logging::SecretString;
+use utils::lsn::Lsn;
 
 use super::Service;
 
@@ -42,6 +46,7 @@ impl Service {
             .map(SecretString::from);
         let mut joinset = JoinSet::new();
 
+        // Prepare membership::Configuration from choosen safekeepers.
         let safekeepers = {
             let locked = self.inner.read().unwrap();
             locked.safekeepers.clone()
@@ -224,7 +229,7 @@ impl Service {
             tenant_id: tenant_id.to_string(),
             timeline_id: timeline_id.to_string(),
             start_lsn: start_lsn.into(),
-            generation: 0,
+            generation: 1,
             sk_set: sks_persistence.clone(),
             new_sk_set: None,
             cplane_notified_generation: 0,
@@ -273,7 +278,7 @@ impl Service {
             self.persistence.insert_pending_op(pending_op).await?;
         }
         if !remaining.is_empty() {
-            let mut locked = self.inner.write().unwrap();
+            let locked = self.inner.read().unwrap();
             for remaining_id in remaining {
                 let Some(sk) = locked.safekeepers.get(&remaining_id) else {
                     return Err(ApiError::InternalServerError(anyhow::anyhow!(
@@ -309,7 +314,7 @@ impl Service {
                     generation: timeline_persist.generation as u32,
                     kind: crate::persistence::SafekeeperTimelineOpKind::Pull,
                 };
-                locked.safekeeper_reconcilers.schedule_request(self, req);
+                locked.safekeeper_reconcilers.schedule_request(req);
             }
         }
 
@@ -320,6 +325,31 @@ impl Service {
             timeline_id,
         })
     }
+
+    /// Directly insert the timeline into the database without reconciling it with safekeepers.
+    ///
+    /// Useful if the timeline already exists on the specified safekeepers,
+    /// but we want to make it storage controller managed.
+    pub(crate) async fn timeline_import(&self, req: TimelineImportRequest) -> Result<(), ApiError> {
+        let persistence = TimelinePersistence {
+            tenant_id: req.tenant_id.to_string(),
+            timeline_id: req.timeline_id.to_string(),
+            start_lsn: Lsn::INVALID.into(),
+            generation: 1,
+            sk_set: req.sk_set.iter().map(|sk_id| sk_id.0 as i64).collect(),
+            new_sk_set: None,
+            cplane_notified_generation: 1,
+            deleted_at: None,
+        };
+        let inserted = self.persistence.insert_timeline(persistence).await?;
+        if inserted {
+            tracing::info!("imported timeline into db");
+        } else {
+            tracing::info!("didn't import timeline into db, as it is already present in db");
+        }
+        Ok(())
+    }
+
     /// Perform timeline deletion on safekeepers. Will return success: we persist the deletion into the reconciler.
     pub(super) async fn tenant_timeline_delete_safekeepers(
         self: &Arc<Self>,
@@ -351,7 +381,7 @@ impl Service {
             let pending_op = TimelinePendingOpPersistence {
                 tenant_id: tenant_id.to_string(),
                 timeline_id: timeline_id.to_string(),
-                generation: tl.generation,
+                generation: i32::MAX,
                 op_kind: SafekeeperTimelineOpKind::Delete,
                 sk_id: *sk_id,
             };
@@ -359,7 +389,7 @@ impl Service {
             self.persistence.insert_pending_op(pending_op).await?;
         }
         {
-            let mut locked = self.inner.write().unwrap();
+            let locked = self.inner.read().unwrap();
             for sk_id in all_sks {
                 let sk_id = NodeId(*sk_id as u64);
                 let Some(sk) = locked.safekeepers.get(&sk_id) else {
@@ -377,7 +407,7 @@ impl Service {
                     generation: tl.generation as u32,
                     kind: SafekeeperTimelineOpKind::Delete,
                 };
-                locked.safekeeper_reconcilers.schedule_request(self, req);
+                locked.safekeeper_reconcilers.schedule_request(req);
             }
         }
         Ok(())
@@ -476,7 +506,7 @@ impl Service {
                 tenant_id,
                 timeline_id: None,
             };
-            locked.safekeeper_reconcilers.schedule_request(self, req);
+            locked.safekeeper_reconcilers.schedule_request(req);
         }
         Ok(())
     }
@@ -582,7 +612,7 @@ impl Service {
     }
 
     pub(crate) async fn upsert_safekeeper(
-        &self,
+        self: &Arc<Service>,
         record: crate::persistence::SafekeeperUpsert,
     ) -> Result<(), ApiError> {
         let node_id = NodeId(record.id as u64);
@@ -621,13 +651,30 @@ impl Service {
                     );
                 }
             }
+            locked
+                .safekeeper_reconcilers
+                .start_reconciler(node_id, self);
             locked.safekeepers = Arc::new(safekeepers);
+            metrics::METRICS_REGISTRY
+                .metrics_group
+                .storage_controller_safekeeper_nodes
+                .set(locked.safekeepers.len() as i64);
+            metrics::METRICS_REGISTRY
+                .metrics_group
+                .storage_controller_https_safekeeper_nodes
+                .set(
+                    locked
+                        .safekeepers
+                        .values()
+                        .filter(|s| s.has_https_port())
+                        .count() as i64,
+                );
         }
         Ok(())
     }
 
     pub(crate) async fn set_safekeeper_scheduling_policy(
-        &self,
+        self: &Arc<Service>,
         id: i64,
         scheduling_policy: SkSchedulingPolicy,
     ) -> Result<(), DatabaseError> {
@@ -645,9 +692,13 @@ impl Service {
             sk.set_scheduling_policy(scheduling_policy);
 
             match scheduling_policy {
-                SkSchedulingPolicy::Active => (),
+                SkSchedulingPolicy::Active => {
+                    locked
+                        .safekeeper_reconcilers
+                        .start_reconciler(node_id, self);
+                }
                 SkSchedulingPolicy::Decomissioned | SkSchedulingPolicy::Pause => {
-                    locked.safekeeper_reconcilers.cancel_safekeeper(node_id);
+                    locked.safekeeper_reconcilers.stop_reconciler(node_id);
                 }
             }
 

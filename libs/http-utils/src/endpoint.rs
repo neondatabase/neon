@@ -8,6 +8,7 @@ use bytes::{Bytes, BytesMut};
 use hyper::header::{AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_TYPE, HeaderName};
 use hyper::http::HeaderValue;
 use hyper::{Body, Method, Request, Response};
+use jsonwebtoken::TokenData;
 use metrics::{Encoder, IntCounter, TextEncoder, register_int_counter};
 use once_cell::sync::Lazy;
 use pprof::ProfilerGuardBuilder;
@@ -618,7 +619,7 @@ pub fn auth_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
                     })?;
                     let token = parse_token(header_value)?;
 
-                    let data = auth.decode(token).map_err(|err| {
+                    let data: TokenData<Claims> = auth.decode(token).map_err(|err| {
                         warn!("Authentication error: {err}");
                         // Rely on From<AuthError> for ApiError impl
                         err

@@ -5,7 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = []
+default = ["rename_noreplace"]
+rename_noreplace = []
 # Enables test-only APIs, incuding failpoints. In particular, enables the `fail_point!` macro,
 # which adds some runtime cost to run tests on outage conditions
 testing = ["fail/failpoints"]
@@ -28,6 +29,7 @@ futures = { workspace = true }
 jsonwebtoken.workspace = true
 nix = { workspace = true, features = ["ioctl"] }
 once_cell.workspace = true
+pem.workspace = true
 pin-project-lite.workspace = true
 regex.workspace = true
 serde.workspace = true
@@ -35,7 +37,7 @@ serde_with.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["signal"] }
 tokio-tar.workspace = true
 tokio-util.workspace = true
 toml_edit = { workspace = true, features = ["serde"] }

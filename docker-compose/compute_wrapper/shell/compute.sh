@@ -11,8 +11,8 @@ generate_id() {
 
 PG_VERSION=${PG_VERSION:-14}
 
-SPEC_FILE_ORG=/var/db/postgres/specs/spec.json
-SPEC_FILE=/tmp/spec.json
+CONFIG_FILE_ORG=/var/db/postgres/configs/config.json
+CONFIG_FILE=/tmp/config.json
 
 echo "Waiting pageserver become ready."
 while ! nc -z pageserver 6400; do
@@ -20,7 +20,7 @@ while ! nc -z pageserver 6400; do
 done
 echo "Page server is ready."
 
-cp ${SPEC_FILE_ORG} ${SPEC_FILE}
+cp ${CONFIG_FILE_ORG} ${CONFIG_FILE}
 
  if [ -n "${TENANT_ID:-}" ] && [ -n "${TIMELINE_ID:-}" ]; then
    tenant_id=${TENANT_ID}
@@ -73,17 +73,17 @@ else
   ulid_extension=ulid
 fi
 echo "Adding pgx_ulid"
-shared_libraries=$(jq -r '.cluster.settings[] | select(.name=="shared_preload_libraries").value' ${SPEC_FILE})
-sed -i "s/${shared_libraries}/${shared_libraries},${ulid_extension}/" ${SPEC_FILE}
+shared_libraries=$(jq -r '.spec.cluster.settings[] | select(.name=="shared_preload_libraries").value' ${CONFIG_FILE})
+sed -i "s/${shared_libraries}/${shared_libraries},${ulid_extension}/" ${CONFIG_FILE}
 echo "Overwrite tenant id and timeline id in spec file"
-sed -i "s/TENANT_ID/${tenant_id}/" ${SPEC_FILE}
-sed -i "s/TIMELINE_ID/${timeline_id}/" ${SPEC_FILE}
+sed -i "s/TENANT_ID/${tenant_id}/" ${CONFIG_FILE}
+sed -i "s/TIMELINE_ID/${timeline_id}/" ${CONFIG_FILE}
 
-cat ${SPEC_FILE}
+cat ${CONFIG_FILE}
 
 echo "Start compute node"
 /usr/local/bin/compute_ctl --pgdata /var/db/postgres/compute \
      -C "postgresql://cloud_admin@localhost:55433/postgres"  \
      -b /usr/local/bin/postgres                              \
      --compute-id "compute-$RANDOM"                          \
-     -S ${SPEC_FILE}
+     --config "$CONFIG_FILE"

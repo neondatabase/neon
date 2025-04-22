@@ -509,7 +509,14 @@ pub async fn run() -> anyhow::Result<()> {
             if let Some(mut redis_kv_client) = redis_kv_client {
                 maintenance_tasks.spawn(async move {
                     redis_kv_client.try_connect().await?;
-                    handle_cancel_messages(&mut redis_kv_client, rx_cancel).await
+                    handle_cancel_messages(&mut redis_kv_client, rx_cancel).await?;
+
+                    drop(redis_kv_client);
+
+                    // `handle_cancel_messages` was terminated due to the tx_cancel
+                    // being dropped. this is not worthy of an error, and this task can only return `Err`,
+                    // so let's wait forever instead.
+                    std::future::pending().await
                 });
             }
 

@@ -17,9 +17,10 @@ use once_cell::sync::OnceCell;
 use pageserver_api::config::{DiskUsageEvictionTaskConfig, MaxVectoredReadBytes};
 use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
+use pem::Pem;
 use postgres_backend::AuthType;
 use remote_storage::{RemotePath, RemoteStorageConfig};
-use reqwest::{Certificate, Url};
+use reqwest::Url;
 use storage_broker::Uri;
 use utils::id::{NodeId, TimelineId};
 use utils::logging::{LogFormat, SecretString};
@@ -67,8 +68,8 @@ pub struct PageServerConf {
     /// Period to reload certificate and private key from files.
     /// Default: 60s.
     pub ssl_cert_reload_period: Duration,
-    /// Trusted root CA certificates to use in https APIs.
-    pub ssl_ca_certs: Vec<Certificate>,
+    /// Trusted root CA certificates to use in https APIs in PEM format.
+    pub ssl_ca_certs: Vec<Pem>,
 
     /// Current availability zone. Used for traffic metrics.
     pub availability_zone: Option<String>,
@@ -118,13 +119,13 @@ pub struct PageServerConf {
     /// A lower value implicitly deprioritizes loading such tenants, vs. other work in the system.
     pub concurrent_tenant_warmup: ConfigurableSemaphore,
 
-    /// Number of concurrent [`Tenant::gather_size_inputs`](crate::tenant::Tenant::gather_size_inputs) allowed.
+    /// Number of concurrent [`TenantShard::gather_size_inputs`](crate::tenant::TenantShard::gather_size_inputs) allowed.
     pub concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore,
-    /// Limit of concurrent [`Tenant::gather_size_inputs`] issued by module `eviction_task`.
+    /// Limit of concurrent [`TenantShard::gather_size_inputs`] issued by module `eviction_task`.
     /// The number of permits is the same as `concurrent_tenant_size_logical_size_queries`.
     /// See the comment in `eviction_task` for details.
     ///
-    /// [`Tenant::gather_size_inputs`]: crate::tenant::Tenant::gather_size_inputs
+    /// [`TenantShard::gather_size_inputs`]: crate::tenant::TenantShard::gather_size_inputs
     pub eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore,
 
     // How often to collect metrics and send them to the metrics endpoint.
@@ -219,6 +220,11 @@ pub struct PageServerConf {
     pub generate_unarchival_heatmap: bool,
 
     pub tracing: Option<pageserver_api::config::Tracing>,
+
+    /// Enable TLS in page service API.
+    /// Does not force TLS: the client negotiates TLS usage during the handshake.
+    /// Uses key and certificate from ssl_key_file/ssl_cert_file.
+    pub enable_tls_page_service_api: bool,
 }
 
 /// Token for authentication to safekeepers
@@ -391,6 +397,7 @@ impl PageServerConf {
             load_previous_heatmap,
             generate_unarchival_heatmap,
             tracing,
+            enable_tls_page_service_api,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -441,6 +448,7 @@ impl PageServerConf {
             page_service_pipelining,
             get_vectored_concurrent_io,
             tracing,
+            enable_tls_page_service_api,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling
@@ -490,7 +498,10 @@ impl PageServerConf {
             ssl_ca_certs: match ssl_ca_file {
                 Some(ssl_ca_file) => {
                     let buf = std::fs::read(ssl_ca_file)?;
-                    Certificate::from_pem_bundle(&buf)?
+                    pem::parse_many(&buf)?
+                        .into_iter()
+                        .filter(|pem| pem.tag() == "CERTIFICATE")
+                        .collect()
                 }
                 None => Vec::new(),
             },
@@ -581,10 +592,10 @@ impl ConfigurableSemaphore {
     /// Initializse using a non-zero amount of permits.
     ///
     /// Require a non-zero initial permits, because using permits == 0 is a crude way to disable a
-    /// feature such as [`Tenant::gather_size_inputs`]. Otherwise any semaphore using future will
+    /// feature such as [`TenantShard::gather_size_inputs`]. Otherwise any semaphore using future will
     /// behave like [`futures::future::pending`], just waiting until new permits are added.
     ///
-    /// [`Tenant::gather_size_inputs`]: crate::tenant::Tenant::gather_size_inputs
+    /// [`TenantShard::gather_size_inputs`]: crate::tenant::TenantShard::gather_size_inputs
     pub fn new(initial_permits: NonZeroUsize) -> Self {
         ConfigurableSemaphore {
             initial_permits,

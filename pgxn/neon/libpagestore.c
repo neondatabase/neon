@@ -65,6 +65,9 @@ static const struct config_enum_entry neon_compute_modes[] = {
 /* GUCs */
 char	   *neon_timeline;
 char	   *neon_tenant;
+char	   *neon_project_id;
+char	   *neon_branch_id;
+char	   *neon_endpoint_id;
 int32		max_cluster_size;
 char	   *page_server_connstring;
 char	   *neon_auth_token;
@@ -72,7 +75,7 @@ char	   *neon_auth_token;
 int			readahead_buffer_size = 128;
 int			flush_every_n_requests = 8;
 
-int         neon_protocol_version = 2;
+int         neon_protocol_version = 3;
 
 static int	neon_compute_mode = 0;
 static int	max_reconnect_attempts = 60;
@@ -1352,6 +1355,31 @@ pg_init_libpagestore(void)
 							   0,	/* no flags required */
 							   check_neon_id, NULL, NULL);
 
+	DefineCustomStringVariable("neon.project_id",
+							   "Neon project_id the server is running on",
+							   NULL,
+							   &neon_project_id,
+							   "",
+							   PGC_POSTMASTER,
+							   0,	/* no flags required */
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable("neon.branch_id",
+							   "Neon branch_id the server is running on",
+							   NULL,
+							   &neon_branch_id,
+							   "",
+							   PGC_POSTMASTER,
+							   0,	/* no flags required */
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable("neon.endpoint_id",
+							   "Neon endpoint_id the server is running on",
+							   NULL,
+							   &neon_endpoint_id,
+							   "",
+							   PGC_POSTMASTER,
+							   0,	/* no flags required */
+							   NULL, NULL, NULL);
+
 	DefineCustomIntVariable("neon.stripe_size",
 							"sharding stripe size",
 							NULL,
@@ -1404,7 +1432,7 @@ pg_init_libpagestore(void)
 							"PageStream connection when we have pages which "
 							"were read ahead but not yet received.",
 							&readahead_getpage_pull_timeout_ms,
-							0, 0, 5 * 60 * 1000,
+							50, 0, 5 * 60 * 1000,
 							PGC_USERSET,
 							GUC_UNIT_MS,
 							NULL, NULL, NULL);
@@ -1412,7 +1440,7 @@ pg_init_libpagestore(void)
 							"Version of compute<->page server protocol",
 							NULL,
 							&neon_protocol_version,
-							2,	/* use protocol version 2 */
+							3,	/* use protocol version 3 */
 							2,	/* min */
 							3,	/* max */
 							PGC_SU_BACKEND,
@@ -1475,6 +1503,4 @@ pg_init_libpagestore(void)
 	}
 
 	memset(page_servers, 0, sizeof(page_servers));
-
-	lfc_init();
 }

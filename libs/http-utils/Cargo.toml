@@ -14,6 +14,7 @@ futures.workspace = true
 hyper0.workspace = true
 itertools.workspace = true
 jemalloc_pprof.workspace = true
+jsonwebtoken.workspace = true
 once_cell.workspace = true
 pprof.workspace = true
 regex.workspace = true
@@ -30,6 +31,7 @@ tokio.workspace = true
 tracing.workspace = true
 url.workspace = true
 uuid.workspace = true
+x509-cert.workspace = true
 
 # to use tokio channels as streams, this is faster to compile than async_stream
 # why is it only here? no other crate should use it, streams are rarely needed.

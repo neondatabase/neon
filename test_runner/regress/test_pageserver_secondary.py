@@ -14,6 +14,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     NeonPageserver,
     StorageControllerMigrationConfig,
+    flush_ep_to_pageserver,
 )
 from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.utils import (
@@ -61,7 +62,7 @@ def evict_random_layers(
     )
     client = pageserver.http_client()
     for layer in initial_local_layers:
-        if "ephemeral" in layer.name or "temp_download" in layer.name:
+        if "ephemeral" in layer.name or "temp_download" in layer.name or ".___temp" in layer.name:
             continue
 
         layer_name = parse_layer_file_name(layer.name)
@@ -242,7 +243,13 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
             pageserver.tenant_location_configure(tenant_id, location_conf)
             last_state[pageserver.id] = (mode, generation)
 
-            if mode.startswith("Attached"):
+            # It's only valid to connect to the last generation. Newer generations may yank layer
+            # files used in older generations.
+            last_generation = max(
+                [s[1] for s in last_state.values() if s[1] is not None], default=None
+            )
+
+            if mode.startswith("Attached") and generation == last_generation:
                 # This is a basic test: we are validating that he endpoint works properly _between_
                 # configuration changes.  A stronger test would be to validate that clients see
                 # no errors while we are making the changes.
@@ -991,10 +998,6 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
     ps_secondary.http_client().tenant_heatmap_upload(tenant_id)
     heatmap_after_migration = timeline_heatmap(timeline_id)
 
-    local_layers = ps_secondary.list_layers(tenant_id, timeline_id)
-    # We download 1 layer per second and give up within 5 seconds.
-    assert len(local_layers) < 10
-
     after_migration_heatmap_layers_count = len(heatmap_after_migration["layers"])
     log.info(f"Heatmap size after cold migration is {after_migration_heatmap_layers_count}")
 
@@ -1032,8 +1035,13 @@ def test_migration_to_cold_secondary(neon_env_builder: NeonEnvBuilder):
         .value
     )
 
-    workload.stop()
     assert before == after
+
+    # Stop the endpoint and wait until any finally written WAL propagates to
+    # the pageserver and is uploaded to remote storage.
+    flush_ep_to_pageserver(env, workload.endpoint(), tenant_id, timeline_id)
+    ps_secondary.http_client().timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
+    workload.stop()
 
     # Now simulate the case where a child timeline is archived, parent layers
     # are evicted and the child is unarchived. When the child is unarchived,

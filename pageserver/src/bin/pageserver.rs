@@ -31,7 +31,6 @@ use pageserver::{
 };
 use postgres_backend::AuthType;
 use remote_storage::GenericRemoteStorage;
-use tokio::signal::unix::SignalKind;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -417,8 +416,18 @@ fn start_pageserver(
     // The storage_broker::connect call needs to happen inside a tokio runtime thread.
     let broker_client = WALRECEIVER_RUNTIME
         .block_on(async {
+            let tls_config = storage_broker::ClientTlsConfig::new().ca_certificates(
+                conf.ssl_ca_certs
+                    .iter()
+                    .map(pem::encode)
+                    .map(storage_broker::Certificate::from_pem),
+            );
             // Note: we do not attempt connecting here (but validate endpoints sanity).
-            storage_broker::connect(conf.broker_endpoint.clone(), conf.broker_keepalive_interval)
+            storage_broker::connect(
+                conf.broker_endpoint.clone(),
+                conf.broker_keepalive_interval,
+                tls_config,
+            )
         })
         .with_context(|| {
             format!(
@@ -452,6 +461,24 @@ fn start_pageserver(
     }
     info!("Using auth for http API: {:#?}", conf.http_auth_type);
     info!("Using auth for pg connections: {:#?}", conf.pg_auth_type);
+
+    let tls_server_config = if conf.listen_https_addr.is_some() || conf.enable_tls_page_service_api
+    {
+        let resolver = BACKGROUND_RUNTIME.block_on(ReloadingCertificateResolver::new(
+            "main",
+            &conf.ssl_key_file,
+            &conf.ssl_cert_file,
+            conf.ssl_cert_reload_period,
+        ))?;
+
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_cert_resolver(resolver);
+
+        Some(Arc::new(server_config))
+    } else {
+        None
+    };
 
     match var("NEON_AUTH_TOKEN") {
         Ok(v) => {
@@ -671,17 +698,11 @@ fn start_pageserver(
 
         let https_task = match https_listener {
             Some(https_listener) => {
-                let resolver = MGMT_REQUEST_RUNTIME.block_on(ReloadingCertificateResolver::new(
-                    &conf.ssl_key_file,
-                    &conf.ssl_cert_file,
-                    conf.ssl_cert_reload_period,
-                ))?;
+                let tls_server_config = tls_server_config
+                    .clone()
+                    .expect("tls_server_config is set earlier if https is enabled");
 
-                let server_config = rustls::ServerConfig::builder()
-                    .with_no_client_auth()
-                    .with_cert_resolver(resolver);
-
-                let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+                let tls_acceptor = tokio_rustls::TlsAcceptor::from(tls_server_config);
 
                 let server =
                     http_utils::server::Server::new(service, https_listener, Some(tls_acceptor))?;
@@ -737,6 +758,11 @@ fn start_pageserver(
             tokio::net::TcpListener::from_std(pageserver_listener)
                 .context("create tokio listener")?
         },
+        if conf.enable_tls_page_service_api {
+            tls_server_config
+        } else {
+            None
+        },
     );
 
     // All started up! Now just sit and wait for shutdown signal.
@@ -744,32 +770,7 @@ fn start_pageserver(
         let signal_token = CancellationToken::new();
         let signal_cancel = signal_token.child_token();
 
-        // Spawn signal handlers. Runs in a loop since we want to be responsive to multiple signals
-        // even after triggering shutdown (e.g. a SIGQUIT after a slow SIGTERM shutdown). See:
-        // https://github.com/neondatabase/neon/issues/9740.
-        tokio::spawn(async move {
-            let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt()).unwrap();
-            let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate()).unwrap();
-            let mut sigquit = tokio::signal::unix::signal(SignalKind::quit()).unwrap();
-
-            loop {
-                let signal = tokio::select! {
-                    _ = sigquit.recv() => {
-                        info!("Got signal SIGQUIT. Terminating in immediate shutdown mode.");
-                        std::process::exit(111);
-                    }
-                    _ = sigint.recv() => "SIGINT",
-                    _ = sigterm.recv() => "SIGTERM",
-                };
-
-                if !signal_token.is_cancelled() {
-                    info!("Got signal {signal}. Terminating gracefully in fast shutdown mode.");
-                    signal_token.cancel();
-                } else {
-                    info!("Got signal {signal}. Already shutting down.");
-                }
-            }
-        });
+        tokio::spawn(utils::signals::signal_handler(signal_token));
 
         // Wait for cancellation signal and shut down the pageserver.
         //

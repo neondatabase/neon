@@ -86,10 +86,6 @@ struct Cli {
     #[arg(long)]
     peer_jwt_token: Option<String>,
 
-    /// URL to control plane compute notification endpoint
-    #[arg(long)]
-    compute_hook_url: Option<String>,
-
     /// URL to control plane storage API prefix
     #[arg(long)]
     control_plane_url: Option<String>,
@@ -360,13 +356,11 @@ async fn async_main() -> anyhow::Result<()> {
                 "Insecure config!  One or more secrets is not set.  This is only permitted in `--dev` mode"
             );
         }
-        StrictMode::Strict
-            if args.compute_hook_url.is_none() && args.control_plane_url.is_none() =>
-        {
+        StrictMode::Strict if args.control_plane_url.is_none() => {
             // Production systems should always have a control plane URL set, to prevent falling
             // back to trying to use neon_local.
             anyhow::bail!(
-                "neither `--compute-hook-url` nor `--control-plane-url` are set: this is only permitted in `--dev` mode"
+                "`--control-plane-url` is not set: this is only permitted in `--dev` mode"
             );
         }
         StrictMode::Strict if args.use_local_compute_notifications => {
@@ -394,7 +388,6 @@ async fn async_main() -> anyhow::Result<()> {
         safekeeper_jwt_token: secrets.safekeeper_jwt_token,
         control_plane_jwt_token: secrets.control_plane_jwt_token,
         peer_jwt_token: secrets.peer_jwt_token,
-        compute_hook_url: args.compute_hook_url,
         control_plane_url: args.control_plane_url,
         max_offline_interval: args
             .max_offline_interval
@@ -472,6 +465,7 @@ async fn async_main() -> anyhow::Result<()> {
             let https_listener = tcp_listener::bind(https_addr)?;
 
             let resolver = ReloadingCertificateResolver::new(
+                "main",
                 &args.ssl_key_file,
                 &args.ssl_cert_file,
                 *args.ssl_cert_reload_period,
