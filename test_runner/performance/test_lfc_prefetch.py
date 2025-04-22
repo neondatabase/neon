@@ -92,3 +92,45 @@ def test_lfc_prefetch(neon_simple_env: NeonEnv, n_readers: int, n_writers: int):
         t.join()
     for t in writers:
         t.join()
+
+
+@pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
+def test_lfc_async_prefetch_performance(neon_simple_env: NeonEnv, zenbenchmark):
+    """
+    Test resizing the Local File Cache
+    """
+    env = neon_simple_env
+    endpoint = env.endpoints.create_start(
+        "main",
+        config_lines=[
+            "neon.max_file_cache_size=100MB",
+            "neon.file_cache_size_limit=100MB",
+            "effective_io_concurrency=100",
+            "shared_buffers=1MB",
+            "enable_bitmapscan=off",
+            "enable_seqscan=off",
+            "autovacuum=off",
+        ],
+    )
+    n_records = 100000  # 800Mb table
+    n_iterations = 1000
+
+    conn = endpoint.connect()
+    cur = conn.cursor()
+    cur.execute(
+        "create table account(id integer primary key, balance integer default 0, filler text default repeat('?',1000)) with (fillfactor=10)"
+    )
+    cur.execute(f"insert into account values (generate_series(1,{n_records}))")
+    cur.execute("vacuum account")
+
+    with zenbenchmark.record_duration("do_not_store_store_prefetch_results"):
+        cur.execute("set neon.store_prefetch_result_in_lfc=off")
+        for _ in range(n_iterations):
+            cur.execute("select sum(balance) from (select balance from account where id between 1000 and 2000 limit 100) s")
+            cur.execute("select sum(balance) from (select balance from account where id between 6000 and 7000 limit 100) s")
+
+    with zenbenchmark.record_duration("store_prefetch_results"):
+        cur.execute("set neon.store_prefetch_result_in_lfc=on")
+        for _ in range(n_iterations):
+            cur.execute("select sum(balance) from (select balance from account where id between 1000 and 2000 limit 100) s")
+            cur.execute("select sum(balance) from (select balance from account where id between 6000 and 7000 limit 100) s")
