@@ -146,18 +146,34 @@ impl Service {
             "Got {} non-successful responses from initial creation request of total {total_result_count} responses",
             remaining.len()
         );
-        let quorum_size = match timeline_persistence.sk_set.len() {
-            1 => 1,
-            2 => 2,
-            _ => (timeline_persistence.sk_set.len() * 2) / 3,
+        let target_sk_count = timeline_persistence.sk_set.len();
+        let quorum_size = match target_sk_count {
+            1 | 2 => {
+                #[cfg(feature = "testing")]
+                {
+                    // In test settings, it is allowed to have one or two safekeepers
+                    target_sk_count
+                }
+                #[cfg(not(feature = "testing"))]
+                {
+                    // The region is misconfigured: we need at least three safekeepers to be configured
+                    // in order to schedule work to them
+                    tracing::warn!(
+                        "couldn't find at least 3 safekeepers for timeline, found: {:?}",
+                        timeline_persistence.sk_set
+                    );
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                        "couldn't find at least 3 safekeepers to put timeline to"
+                    )));
+                }
+            }
+            _ => target_sk_count / 2 + 1,
         };
-        let success_count = timeline_persistence.sk_set.len() - remaining.len();
+        let success_count = target_sk_count - remaining.len();
         if success_count < quorum_size {
             // Failure
             return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                "not enough successful reconciliations to reach quorum size {}, please retry: {} errored",
-                quorum_size,
-                remaining.len()
+                "not enough successful reconciliations to reach quorum size: {success_count} of {quorum_size} of total {target_sk_count}"
             )));
         }
 
