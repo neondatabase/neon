@@ -293,6 +293,7 @@ neon_wallog_pagev(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 								blkno,
 								RelFileInfoFmt(InfoFromSMgrRel(reln)),
 								forknum)));
+				Assert(false);
 
 				lsn = GetXLogReplayRecPtr(NULL); /* in standby mode, soldier on */
 			}
