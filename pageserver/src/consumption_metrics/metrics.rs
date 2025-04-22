@@ -263,7 +263,9 @@ where
     while let Some((tenant_id, tenant)) = tenants.next().await {
         let mut tenant_resident_size = 0;
 
-        for timeline in tenant.list_timelines() {
+        let timelines = tenant.list_timelines();
+        let timelines_len = timelines.len();
+        for timeline in timelines {
             let timeline_id = timeline.timeline_id;
 
             match TimelineSnapshot::collect(&timeline, ctx) {
@@ -287,6 +289,11 @@ where
             }
 
             tenant_resident_size += timeline.resident_physical_size();
+        }
+
+        if timelines_len == 0 {
+            // Force set it to 1 byte to avoid not being reported -- all timelines are offloaded.
+            tenant_resident_size = 1;
         }
 
         let snap = TenantSnapshot::collect(&tenant, tenant_resident_size);
