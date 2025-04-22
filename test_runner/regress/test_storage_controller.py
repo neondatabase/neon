@@ -1612,16 +1612,18 @@ def test_storage_controller_heartbeats(
     env = neon_env_builder.init_configs()
     env.start()
 
-    # Default log allow list permits connection errors, but this test will use error responses on
-    # the utilization endpoint.
-    env.storage_controller.allowed_errors.append(
-        ".*Call to node.*management API.*failed.*failpoint.*"
-    )
-    # The server starts listening to the socket before sending re-attach request,
-    # but it starts serving HTTP only when re-attach is completed.
-    # If re-attach is slow (last scenario), storcon's heartbeat requests will time out.
-    env.storage_controller.allowed_errors.append(
-        ".*Call to node.*management API.*failed.* Timeout.*"
+    env.storage_controller.allowed_errors.extend(
+        [
+            # Default log allow list permits connection errors, but this test will use error responses on
+            # the utilization endpoint.
+            ".*Call to node.*management API.*failed.*failpoint.*",
+            # The server starts listening to the socket before sending re-attach request,
+            # but it starts serving HTTP only when re-attach is completed.
+            # If re-attach is slow (last scenario), storcon's heartbeat requests will time out.
+            ".*Call to node.*management API.*failed.* Timeout.*",
+            # We will intentionally cause reconcile errors
+            ".*Reconcile error.*",
+        ]
     )
 
     # Initially we have two online pageservers
