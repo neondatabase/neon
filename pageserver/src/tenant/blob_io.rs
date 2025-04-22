@@ -392,7 +392,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
 }
 
 impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
-    /// Finish this blob writer and return the underlying `VirtualFile`.
+    /// Finish this blob writer and return the underlying [`TempVirtualFile`].
     ///
     /// If there is an internal buffer (depends on `BUFFERED`), it will
     /// be flushed before this method returns.
