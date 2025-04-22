@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use camino::Utf8PathBuf;
 use once_cell::sync::Lazy;
+use pem::Pem;
 use remote_storage::RemoteStorageConfig;
-use reqwest::Certificate;
 use storage_broker::Uri;
 use tokio::runtime::Runtime;
 use utils::auth::SwappableJwtAuth;
@@ -120,7 +120,7 @@ pub struct SafeKeeperConf {
     pub ssl_key_file: Utf8PathBuf,
     pub ssl_cert_file: Utf8PathBuf,
     pub ssl_cert_reload_period: Duration,
-    pub ssl_ca_certs: Vec<Certificate>,
+    pub ssl_ca_certs: Vec<Pem>,
     pub use_https_safekeeper_api: bool,
     pub enable_tls_wal_service_api: bool,
 }

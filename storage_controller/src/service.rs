@@ -357,18 +357,10 @@ pub struct Config {
     // This JWT token will be used to authenticate with other storage controller instances
     pub peer_jwt_token: Option<String>,
 
-    /// Where the compute hook should send notifications of pageserver attachment locations
-    /// (this URL points to the control plane in prod). If this is None, the compute hook will
-    /// assume it is running in a test environment and try to update neon_local.
-    pub compute_hook_url: Option<String>,
-
     /// Prefix for storage API endpoints of the control plane. We use this prefix to compute
     /// URLs that we use to send pageserver and safekeeper attachment locations.
     /// If this is None, the compute hook will assume it is running in a test environment
     /// and try to invoke neon_local instead.
-    ///
-    /// For now, there is also `compute_hook_url` which allows configuration of the pageserver
-    /// specific endpoint, but it is in the process of being phased out.
     pub control_plane_url: Option<String>,
 
     /// Grace period within which a pageserver does not respond to heartbeats, but is still
@@ -832,9 +824,13 @@ impl Service {
             let mut locked = self.inner.write().unwrap();
             locked.become_leader();
 
+            for (sk_id, _sk) in locked.safekeepers.clone().iter() {
+                locked.safekeeper_reconcilers.start_reconciler(*sk_id, self);
+            }
+
             locked
                 .safekeeper_reconcilers
-                .schedule_request_vec(self, sk_schedule_requests);
+                .schedule_request_vec(sk_schedule_requests);
         }
 
         // TODO: if any tenant's intent now differs from its loaded generation_pageserver, we should clear that
@@ -1852,6 +1848,7 @@ impl Service {
         };
 
         if insert {
+            let config = attach_req.config.clone().unwrap_or_default();
             let tsp = TenantShardPersistence {
                 tenant_id: attach_req.tenant_shard_id.tenant_id.to_string(),
                 shard_number: attach_req.tenant_shard_id.shard_number.0 as i32,
@@ -1860,7 +1857,7 @@ impl Service {
                 generation: attach_req.generation_override.or(Some(0)),
                 generation_pageserver: None,
                 placement_policy: serde_json::to_string(&PlacementPolicy::Attached(0)).unwrap(),
-                config: serde_json::to_string(&TenantConfig::default()).unwrap(),
+                config: serde_json::to_string(&config).unwrap(),
                 splitting: SplitState::default(),
                 scheduling_policy: serde_json::to_string(&ShardSchedulingPolicy::default())
                     .unwrap(),
@@ -1883,16 +1880,16 @@ impl Service {
                 Ok(()) => {
                     tracing::info!("Inserted shard {} in database", attach_req.tenant_shard_id);
 
-                    let mut locked = self.inner.write().unwrap();
-                    locked.tenants.insert(
+                    let mut shard = TenantShard::new(
                         attach_req.tenant_shard_id,
-                        TenantShard::new(
-                            attach_req.tenant_shard_id,
-                            ShardIdentity::unsharded(),
-                            PlacementPolicy::Attached(0),
-                            None,
-                        ),
+                        ShardIdentity::unsharded(),
+                        PlacementPolicy::Attached(0),
+                        None,
                     );
+                    shard.config = config;
+
+                    let mut locked = self.inner.write().unwrap();
+                    locked.tenants.insert(attach_req.tenant_shard_id, shard);
                     tracing::info!("Inserted shard {} in memory", attach_req.tenant_shard_id);
                 }
             }
@@ -1977,11 +1974,12 @@ impl Service {
             .set_attached(scheduler, attach_req.node_id);
 
         tracing::info!(
-            "attach_hook: tenant {} set generation {:?}, pageserver {}",
+            "attach_hook: tenant {} set generation {:?}, pageserver {}, config {:?}",
             attach_req.tenant_shard_id,
             tenant_shard.generation,
             // TODO: this is an odd number of 0xf's
-            attach_req.node_id.unwrap_or(utils::id::NodeId(0xfffffff))
+            attach_req.node_id.unwrap_or(utils::id::NodeId(0xfffffff)),
+            attach_req.config,
         );
 
         // Trick the reconciler into not doing anything for this tenant: this helps

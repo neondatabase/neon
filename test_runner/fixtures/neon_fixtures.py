@@ -1255,6 +1255,7 @@ class NeonEnv:
                 "mode": "pipelined",
                 "execution": "concurrent-futures",
                 "max_batch_size": 32,
+                "batching": "scattered-lsn",
             }
 
             get_vectored_concurrent_io = self.pageserver_get_vectored_concurrent_io
@@ -1456,6 +1457,12 @@ class NeonEnv:
                 except Exception as e:
                     metric_errors.append(e)
                     log.error(f"metric validation failed on {pageserver.id}: {e}")
+
+            try:
+                pageserver.snapshot_final_metrics()
+            except Exception as e:
+                log.error(f"metric snapshot failed on {pageserver.id}: {e}")
+
             try:
                 pageserver.stop(immediate=immediate)
             except RuntimeError:
@@ -1986,10 +1993,13 @@ class NeonStorageController(MetricsGetter, LogUtils):
         tenant_shard_id: TenantId | TenantShardId,
         pageserver_id: int,
         generation_override: int | None = None,
+        config: None | dict[str, Any] = None,
     ) -> int:
         body = {"tenant_shard_id": str(tenant_shard_id), "node_id": pageserver_id}
         if generation_override is not None:
             body["generation_override"] = generation_override
+        if config is not None:
+            body["config"] = config
 
         response = self.request(
             "POST",
@@ -2884,13 +2894,14 @@ class NeonPageserver(PgProtocol, LogUtils):
         self,
         immediate: bool = False,
         timeout_in_seconds: int | None = None,
+        extra_env_vars: dict[str, str] | None = None,
     ):
         """
         High level wrapper for restart: restarts the process, and waits for
         tenant state to stabilize.
         """
         self.stop(immediate=immediate)
-        self.start(timeout_in_seconds=timeout_in_seconds)
+        self.start(timeout_in_seconds=timeout_in_seconds, extra_env_vars=extra_env_vars)
         self.quiesce_tenants()
 
     def quiesce_tenants(self):
@@ -2967,6 +2978,20 @@ class NeonPageserver(PgProtocol, LogUtils):
             value = self.http_client().get_metric_value(metric)
             assert value == 0, f"Nonzero {metric} == {value}"
 
+    def snapshot_final_metrics(self):
+        """
+        Take a snapshot of this pageserver's metrics and stash in its work directory.
+        """
+        if not self.running:
+            log.info(f"Skipping metrics snapshot on pageserver {self.id}, it is not running")
+            return
+
+        metrics = self.http_client().get_metrics_str()
+        metrics_snapshot_path = self.workdir / "final_metrics.txt"
+
+        with open(metrics_snapshot_path, "w") as f:
+            f.write(metrics)
+
     def tenant_attach(
         self,
         tenant_id: TenantId,
@@ -2979,11 +3004,12 @@ class NeonPageserver(PgProtocol, LogUtils):
         to call into the pageserver HTTP client.
         """
         client = self.http_client()
-        if generation is None:
-            generation = self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
-        elif override_storage_controller_generation:
+        if generation is None or override_storage_controller_generation:
             generation = self.env.storage_controller.attach_hook_issue(
-                tenant_id, self.id, generation
+                tenant_id,
+                self.id,
+                generation_override=generation if override_storage_controller_generation else None,
+                config=config,
             )
         return client.tenant_attach(
             tenant_id,
@@ -3159,6 +3185,7 @@ class PgBin:
         command: list[str],
         env: Env | None = None,
         cwd: str | Path | None = None,
+        stderr_pipe: Any | None = None,
     ) -> subprocess.Popen[Any]:
         """
         Run one of the postgres binaries, not waiting for it to finish
@@ -3176,7 +3203,9 @@ class PgBin:
         log.info(f"Running command '{' '.join(command)}'")
         env = self._build_env(env)
         self._log_env(env)
-        return subprocess.Popen(command, env=env, cwd=cwd, stdout=subprocess.PIPE, text=True)
+        return subprocess.Popen(
+            command, env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=stderr_pipe, text=True
+        )
 
     def run(
         self,
@@ -4084,13 +4113,14 @@ class Endpoint(PgProtocol, LogUtils):
         # try and stop the same process twice, as stop() is called by test teardown and
         # potentially by some __del__ chains in other threads.
         self._running = threading.Semaphore(0)
+        self.__jwt: str | None = None
 
-    def http_client(
-        self, auth_token: str | None = None, retries: Retry | None = None
-    ) -> EndpointHttpClient:
+    def http_client(self, retries: Retry | None = None) -> EndpointHttpClient:
+        assert self.__jwt is not None
         return EndpointHttpClient(
             external_port=self.external_http_port,
             internal_port=self.internal_http_port,
+            jwt=self.__jwt,
         )
 
     def create(
@@ -4173,6 +4203,8 @@ class Endpoint(PgProtocol, LogUtils):
                 )
 
         self.config(config_lines)
+
+        self.__jwt = self.env.neon_cli.endpoint_generate_jwt(self.endpoint_id)
 
         return self
 
@@ -4297,10 +4329,10 @@ class Endpoint(PgProtocol, LogUtils):
 
     def respec_deep(self, **kwargs: Any) -> None:
         """
-        Update the spec.json file taking into account nested keys.
-        Distinct method from respec() to not break existing functionality.
-        NOTE: This method also updates the spec.json file, not endpoint.json.
-        We need it because neon_local also writes to spec.json, so intended
+        Update the endpoint.json file taking into account nested keys.
+        Distinct method from respec() to do not break existing functionality.
+        NOTE: This method also updates the config.json file, not endpoint.json.
+        We need it because neon_local also writes to config.json, so intended
         use-case is i) start endpoint with some config, ii) respec_deep(),
         iii) call reconfigure() to apply the changes.
         """
@@ -4313,17 +4345,17 @@ class Endpoint(PgProtocol, LogUtils):
                     curr[k] = v
             return curr
 
-        config_path = os.path.join(self.endpoint_path(), "spec.json")
+        config_path = os.path.join(self.endpoint_path(), "config.json")
         with open(config_path) as f:
-            data_dict: dict[str, Any] = json.load(f)
+            config: dict[str, Any] = json.load(f)
 
-        log.debug("Current compute spec: %s", json.dumps(data_dict, indent=4))
+        log.debug("Current compute config: %s", json.dumps(config, indent=4))
 
-        update(data_dict, kwargs)
+        update(config, kwargs)
 
         with open(config_path, "w") as file:
-            log.debug("Updating compute spec to: %s", json.dumps(data_dict, indent=4))
-            json.dump(data_dict, file, indent=4)
+            log.debug("Updating compute config to: %s", json.dumps(config, indent=4))
+            json.dump(config, file, indent=4)
 
     def wait_for_migrations(self, wait_for: int = NUM_COMPUTE_MIGRATIONS) -> None:
         """
@@ -4340,7 +4372,7 @@ class Endpoint(PgProtocol, LogUtils):
             wait_until(check_migrations_done)
 
     # Mock the extension part of spec passed from control plane for local testing
-    # endpooint.rs adds content of this file as a part of the spec.json
+    # endpooint.rs adds content of this file as a part of the config.json
     def create_remote_extension_spec(self, spec: dict[str, Any]):
         """Create a remote extension spec file for the endpoint."""
         remote_extensions_spec_path = os.path.join(
@@ -5127,7 +5159,6 @@ def pytest_addoption(parser: Parser):
 SMALL_DB_FILE_NAME_REGEX: re.Pattern[str] = re.compile(
     r"config-v1|heatmap-v1|tenant-manifest|metadata|.+\.(?:toml|pid|json|sql|conf)"
 )
-
 
 SKIP_DIRS = frozenset(
     (

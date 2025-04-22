@@ -113,8 +113,6 @@ runs:
         TEST_OUTPUT: /tmp/test_output
         BUILD_TYPE: ${{ inputs.build_type }}
         COMPATIBILITY_SNAPSHOT_DIR: /tmp/compatibility_snapshot_pg${{ inputs.pg_version }}
-        ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE: contains(github.event.pull_request.labels.*.name, 'backward compatibility breakage')
-        ALLOW_FORWARD_COMPATIBILITY_BREAKAGE: contains(github.event.pull_request.labels.*.name, 'forward compatibility breakage')
         RERUN_FAILED: ${{ inputs.rerun_failed }}
         PG_VERSION: ${{ inputs.pg_version }}
         SANITIZERS: ${{ inputs.sanitizers }}
@@ -135,6 +133,7 @@ runs:
         fi
 
         PERF_REPORT_DIR="$(realpath test_runner/perf-report-local)"
+        echo "PERF_REPORT_DIR=${PERF_REPORT_DIR}" >> ${GITHUB_ENV}
         rm -rf $PERF_REPORT_DIR
 
         TEST_SELECTION="test_runner/${{ inputs.test_selection }}"
@@ -211,11 +210,12 @@ runs:
           --verbose \
           -rA $TEST_SELECTION $EXTRA_PARAMS
 
-        if [[ "${{ inputs.save_perf_report }}" == "true" ]]; then
-          export REPORT_FROM="$PERF_REPORT_DIR"
-          export REPORT_TO="$PLATFORM"
-          scripts/generate_and_push_perf_report.sh
-        fi
+    - name: Upload performance report
+      if: ${{ !cancelled() && inputs.save_perf_report == 'true' }}
+      shell: bash -euxo pipefail {0}
+      run: |
+        export REPORT_FROM="${PERF_REPORT_DIR}"
+        scripts/generate_and_push_perf_report.sh
 
     - name: Upload compatibility snapshot
       # Note, that we use `github.base_ref` which is a target branch for a PR

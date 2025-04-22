@@ -15,7 +15,7 @@ index 7a4b88c..56678af 100644
  HEADERS = src/halfvec.h src/sparsevec.h src/vector.h
  
 diff --git a/src/hnswbuild.c b/src/hnswbuild.c
-index b667478..dc95d89 100644
+index b667478..1298aa1 100644
 --- a/src/hnswbuild.c
 +++ b/src/hnswbuild.c
 @@ -843,9 +843,17 @@ HnswParallelBuildMain(dsm_segment *seg, shm_toc *toc)
@@ -36,7 +36,7 @@ index b667478..dc95d89 100644
  	/* Close relations within worker */
  	index_close(indexRel, indexLockmode);
  	table_close(heapRel, heapLockmode);
-@@ -1100,12 +1108,39 @@ BuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
+@@ -1100,13 +1108,25 @@ BuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
  	SeedRandom(42);
  #endif
  
@@ -48,32 +48,17 @@ index b667478..dc95d89 100644
  
  	BuildGraph(buildstate, forkNum);
  
--	if (RelationNeedsWAL(index) || forkNum == INIT_FORKNUM)
 +#ifdef NEON_SMGR
 +	smgr_finish_unlogged_build_phase_1(RelationGetSmgr(index));
 +#endif
 +
-+	if (RelationNeedsWAL(index) || forkNum == INIT_FORKNUM) {
+ 	if (RelationNeedsWAL(index) || forkNum == INIT_FORKNUM)
  		log_newpage_range(index, forkNum, 0, RelationGetNumberOfBlocksInFork(index, forkNum), true);
-+#ifdef NEON_SMGR
-+		{
-+#if PG_VERSION_NUM >= 160000
-+			RelFileLocator rlocator = RelationGetSmgr(index)->smgr_rlocator.locator;
-+#else
-+			RelFileNode rlocator = RelationGetSmgr(index)->smgr_rnode.node;
-+#endif
-+			if (set_lwlsn_block_range_hook)
-+				set_lwlsn_block_range_hook(XactLastRecEnd, rlocator,
-+										   MAIN_FORKNUM, 0, RelationGetNumberOfBlocks(index));
-+			if (set_lwlsn_relation_hook)
-+				set_lwlsn_relation_hook(XactLastRecEnd, rlocator, MAIN_FORKNUM);
-+		}
-+#endif
-+	}
-+
+ 
 +#ifdef NEON_SMGR
 +	smgr_end_unlogged_build(RelationGetSmgr(index));
 +#endif
- 
++
  	FreeBuildState(buildstate);
  }
+ 

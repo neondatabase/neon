@@ -413,6 +413,11 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("Failed to parse 'compaction_algorithm' json")?,
+            compaction_shard_ancestor: settings
+                .remove("compaction_shard_ancestor")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'compaction_shard_ancestor' as a bool")?,
             compaction_l0_first: settings
                 .remove("compaction_l0_first")
                 .map(|x| x.parse::<bool>())
@@ -535,6 +540,11 @@ impl PageServerNode {
                 .map(|x| x.parse::<bool>())
                 .transpose()
                 .context("Failed to parse 'gc_compaction_enabled' as bool")?,
+            gc_compaction_verification: settings
+                .remove("gc_compaction_verification")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'gc_compaction_verification' as bool")?,
             gc_compaction_initial_threshold_kb: settings
                 .remove("gc_compaction_initial_threshold_kb")
                 .map(|x| x.parse::<u64>())
