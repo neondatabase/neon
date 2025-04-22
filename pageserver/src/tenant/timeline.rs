@@ -96,7 +96,6 @@ use super::{
     AttachedTenantConf, GcError, HeatMapTimeline, MaybeOffloaded,
     debug_assert_current_span_has_tenant_and_timeline_id,
 };
-use crate::aux_file::AuxFileSizeEstimator;
 use crate::config::PageServerConf;
 use crate::context::{
     DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
@@ -414,8 +413,6 @@ pub struct Timeline {
     /// Cloned from [`super::Tenant::pagestream_throttle`] on construction.
     pub(crate) pagestream_throttle: Arc<crate::tenant::throttle::Throttle>,
 
-    /// Size estimator for aux file v2
-    pub(crate) aux_file_size_estimator: AuxFileSizeEstimator,
 
     /// Some test cases directly place keys into the timeline without actually modifying the directory
     /// keys (i.e., DB_DIR). The test cases creating such keys will put the keyspaces here, so that
@@ -2813,7 +2810,6 @@ impl Timeline {
                 &tenant_shard_id,
                 &timeline_id,
             ));
-            let aux_file_metrics = metrics.aux_file_size_gauge.clone();
 
             let mut result = Timeline {
                 conf,
@@ -2920,8 +2916,6 @@ impl Timeline {
                 standby_horizon: AtomicLsn::new(0),
 
                 pagestream_throttle: resources.pagestream_throttle,
-
-                aux_file_size_estimator: AuxFileSizeEstimator::new(aux_file_metrics),
 
                 #[cfg(test)]
                 extra_test_dense_keyspace: ArcSwap::new(Arc::new(KeySpace::default())),
@@ -3510,18 +3504,6 @@ impl Timeline {
             ControlFlow::Break(()) => return,
         };
 
-        // we cannot query current_logical_size.current_size() to know the current
-        // *negative* value, only truncated to u64.
-        let added = self
-            .current_logical_size
-            .size_added_after_initial
-            .load(AtomicOrdering::Relaxed);
-
-        let sum = calculated_size.saturating_add_signed(added);
-
-        // set the gauge value before it can be set in `update_current_logical_size`.
-        self.metrics.current_logical_size_gauge.set(sum);
-
         self.current_logical_size
             .initial_logical_size
             .set((calculated_size,))
@@ -3630,21 +3612,6 @@ impl Timeline {
         let logical_size = &self.current_logical_size;
         logical_size.increment_size(delta);
 
-        // Also set the value in the prometheus gauge. Note that
-        // there is a race condition here: if this is is called by two
-        // threads concurrently, the prometheus gauge might be set to
-        // one value while current_logical_size is set to the
-        // other.
-        match logical_size.current_size() {
-            CurrentLogicalSize::Exact(ref new_current_size) => self
-                .metrics
-                .current_logical_size_gauge
-                .set(new_current_size.into()),
-            CurrentLogicalSize::Approximate(_) => {
-                // don't update the gauge yet, this allows us not to update the gauge back and
-                // forth between the initial size calculation task.
-            }
-        }
     }
 
     pub(crate) fn update_directory_entries_count(&self, kind: DirectoryKind, count: MetricsUpdate) {
@@ -3682,26 +3649,8 @@ impl Timeline {
             }
         };
 
-        // TODO: remove this, there's no place in the code that updates this aux metrics.
-        let aux_metric =
-            self.directory_metrics[DirectoryKind::AuxFiles.offset()].load(AtomicOrdering::Relaxed);
-
-        let sum_of_entries = self
-            .directory_metrics
-            .iter()
-            .map(|v| v.load(AtomicOrdering::Relaxed))
-            .sum();
-        // Set a high general threshold and a lower threshold for the auxiliary files,
-        // as we can have large numbers of relations in the db directory.
-        const SUM_THRESHOLD: u64 = 5000;
-        const AUX_THRESHOLD: u64 = 1000;
-        if sum_of_entries >= SUM_THRESHOLD || aux_metric >= AUX_THRESHOLD {
-            self.metrics
-                .directory_entries_count_gauge
-                .set(sum_of_entries);
-        } else if let Some(metric) = Lazy::get(&self.metrics.directory_entries_count_gauge) {
-            metric.set(sum_of_entries);
-        }
+        
+        
     }
 
     async fn find_layer(
@@ -6247,9 +6196,7 @@ impl Timeline {
         // It is an easy way to unset it when standby disappears without adding
         // more conf options.
         self.standby_horizon.store(Lsn::INVALID);
-        self.metrics
-            .standby_horizon_gauge
-            .set(Lsn::INVALID.0 as i64);
+       
 
         let res = self
             .gc_timeline(

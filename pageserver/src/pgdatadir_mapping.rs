@@ -1032,19 +1032,16 @@ impl Timeline {
             )
             .await?;
         let mut result = HashMap::new();
-        let mut sz = 0;
+
         for (_, v) in kv {
             let v = v?;
             let v = aux_file::decode_file_value_bytes(&v)
                 .context("value decode")
                 .map_err(PageReconstructError::Other)?;
             for (fname, content) in v {
-                sz += fname.len();
-                sz += content.len();
                 result.insert(fname, content);
             }
         }
-        self.aux_file_size_estimator.on_initial(sz);
         Ok(result)
     }
 
@@ -2331,20 +2328,15 @@ impl DatadirModification<'_> {
         }
         let mut new_files = other_files;
         match (modifying_file, content.is_empty()) {
-            (Some(old_content), false) => {
-                self.tline
-                    .aux_file_size_estimator
-                    .on_update(old_content.len(), content.len());
+            (Some(_old_content), false) => {
+                
                 new_files.push((path, content));
             }
-            (Some(old_content), true) => {
-                self.tline
-                    .aux_file_size_estimator
-                    .on_remove(old_content.len());
+            (Some(_old_content), true) => {
+               
                 // not adding the file key to the final `new_files` vec.
             }
             (None, false) => {
-                self.tline.aux_file_size_estimator.on_add(content.len());
                 new_files.push((path, content));
             }
             // Compute may request delete of old version of pgstat AUX file if new one exceeds size limit.

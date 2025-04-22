@@ -421,13 +421,6 @@ pub(super) async fn handle_walreceiver_connection(
                     Ok(())
                 }
 
-                if !records.is_empty() {
-                    timeline
-                        .metrics
-                        .wal_records_received
-                        .inc_by(records.len() as u64);
-                }
-
                 for interpreted in records {
                     if matches!(interpreted.flush_uncommitted, FlushUncommittedRecords::Yes)
                         && uncommitted_records > 0

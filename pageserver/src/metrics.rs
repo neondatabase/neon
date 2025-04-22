@@ -1669,13 +1669,7 @@ pub(crate) struct TimelineMetrics {
     pub imitate_logical_size_histo: StorageTimeMetrics,
     pub garbage_collect_histo: StorageTimeMetrics,
     pub find_gc_cutoffs_histo: StorageTimeMetrics,
-    pub standby_horizon_gauge: IntGauge,
     /// copy of LayeredTimeline.current_logical_size
-    pub current_logical_size_gauge: UIntGauge,
-    pub aux_file_size_gauge: IntGauge,
-    pub directory_entries_count_gauge: Lazy<UIntGauge, Box<dyn Send + Fn() -> UIntGauge>>,
-    pub evictions: IntCounter, 
-    pub wal_records_received: IntCounter,
     pub storage_io_size: StorageIoSizeMetrics,
     shutdown: std::sync::atomic::AtomicBool,
 }
@@ -1732,41 +1726,6 @@ impl TimelineMetrics {
             &timeline_id,
         );
 
-        
-
-        let standby_horizon_gauge = STANDBY_HORIZON
-            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-            .unwrap();
-        // TODO: we shouldn't expose this metric
-        let current_logical_size_gauge = CURRENT_LOGICAL_SIZE
-            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-            .unwrap();
-        let aux_file_size_gauge = AUX_FILE_SIZE
-            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-            .unwrap();
-        // TODO use impl Trait syntax here once we have ability to use it: https://github.com/rust-lang/rust/issues/63065
-        let directory_entries_count_gauge_closure = {
-            let tenant_shard_id = *tenant_shard_id;
-            let timeline_id_raw = *timeline_id_raw;
-            move || {
-                let tenant_id = tenant_shard_id.tenant_id.to_string();
-                let shard_id = format!("{}", tenant_shard_id.shard_slug());
-                let timeline_id = timeline_id_raw.to_string();
-                let gauge: UIntGauge = DIRECTORY_ENTRIES_COUNT
-                    .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-                    .unwrap();
-                gauge
-            }
-        };
-        let directory_entries_count_gauge: Lazy<UIntGauge, Box<dyn Send + Fn() -> UIntGauge>> =
-            Lazy::new(Box::new(directory_entries_count_gauge_closure));
-        let evictions = EVICTIONS
-            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-            .unwrap();
-
-        let wal_records_received = PAGESERVER_TIMELINE_WAL_RECORDS_RECEIVED
-            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-            .unwrap();
 
         let storage_io_size = StorageIoSizeMetrics::new(&tenant_id, &shard_id, &timeline_id);
 
@@ -1781,13 +1740,7 @@ impl TimelineMetrics {
             imitate_logical_size_histo,
             garbage_collect_histo,
             find_gc_cutoffs_histo,
-            standby_horizon_gauge,
-            current_logical_size_gauge,
-            aux_file_size_gauge,
-            directory_entries_count_gauge,
-            evictions,
             storage_io_size,
-            wal_records_received,
             shutdown: std::sync::atomic::AtomicBool::default(),
         }
     }
