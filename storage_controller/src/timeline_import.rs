@@ -124,15 +124,24 @@ impl TimelineImport {
     pub(crate) fn completion_error(&self) -> Option<String> {
         assert!(self.is_complete());
 
-        // TODO: This only returns the first error. Would be nice to
-        // corroborate all errors in the response.
-        for (shard, status) in &self.shard_statuses.0 {
-            if let ShardImportStatus::Error(err) = status {
-                return Some(format!("{}: {}", shard, err.clone()));
-            }
-        }
+        let shard_errors: HashMap<_, _> = self
+            .shard_statuses
+            .0
+            .iter()
+            .filter_map(|(shard, status)| {
+                if let ShardImportStatus::Error(err) = status {
+                    Some((*shard, err.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
 
-        None
+        if shard_errors.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&shard_errors).unwrap())
+        }
     }
 }
 
