@@ -227,11 +227,11 @@ struct Args {
     /// Path to the JWT auth token used to authenticate with other safekeepers.
     #[arg(long)]
     auth_token_path: Option<Utf8PathBuf>,
-    /// Enable TLS in wall service API.
+    /// Enable TLS in WAL service API.
     /// Does not force TLS: the client negotiates TLS usage during the handshake.
     /// Uses key and certificate from ssl_key_file/ssl_cert_file.
     #[arg(long)]
-    enable_tls_wall_service_api: bool,
+    enable_tls_wal_service_api: bool,
 }
 
 // Like PathBufValueParser, but allows empty string.
@@ -422,7 +422,7 @@ async fn main() -> anyhow::Result<()> {
         ssl_cert_reload_period: args.ssl_cert_reload_period,
         ssl_ca_certs,
         use_https_safekeeper_api: args.use_https_safekeeper_api,
-        enable_tls_wall_service_api: args.enable_tls_wall_service_api,
+        enable_tls_wal_service_api: args.enable_tls_wal_service_api,
     });
 
     // initialize sentry if SENTRY_DSN is provided
@@ -522,8 +522,7 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
         info!("running in current thread runtime");
     }
 
-    let tls_server_config = if conf.listen_https_addr.is_some() || conf.enable_tls_wall_service_api
-    {
+    let tls_server_config = if conf.listen_https_addr.is_some() || conf.enable_tls_wal_service_api {
         let ssl_key_file = conf.ssl_key_file.clone();
         let ssl_cert_file = conf.ssl_cert_file.clone();
         let ssl_cert_reload_period = conf.ssl_cert_reload_period;
@@ -560,7 +559,7 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
             conf.clone(),
             pg_listener,
             Scope::SafekeeperData,
-            conf.enable_tls_wall_service_api
+            conf.enable_tls_wal_service_api
                 .then(|| tls_server_config.clone())
                 .flatten(),
             global_timelines.clone(),
@@ -591,7 +590,7 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
                 conf.clone(),
                 pg_listener_tenant_only,
                 Scope::Tenant,
-                conf.enable_tls_wall_service_api
+                conf.enable_tls_wal_service_api
                     .then(|| tls_server_config.clone())
                     .flatten(),
                 global_timelines.clone(),
