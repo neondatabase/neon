@@ -149,7 +149,7 @@ fn ingest_main(
 ) {
     pageserver::virtual_file::set_io_mode(io_mode);
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap();
