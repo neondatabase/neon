@@ -3830,6 +3830,7 @@ impl Service {
         let timeline_import = match res {
             Ok(Ok(Some(timeline_import))) => timeline_import,
             Ok(Ok(None)) => {
+                // Idempotency: we've already seen and handled this update.
                 return Ok(());
             }
             Ok(Err(logical_err)) => {
