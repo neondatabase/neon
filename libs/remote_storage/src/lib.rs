@@ -176,15 +176,27 @@ pub struct Listing {
     pub keys: Vec<ListingObject>,
 }
 
+#[derive(Default)]
 pub struct VersionListing {
     pub versions: Vec<Version>,
 }
 
 pub struct Version {
     pub key: RemotePath,
+    pub last_modified: SystemTime,
     pub kind: VersionKind,
 }
 
+impl Version {
+    pub fn version_id(&self) -> Option<&VersionId> {
+        match &self.kind {
+            VersionKind::Version(id) => Some(id),
+            VersionKind::DeletionMarker => None,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum VersionKind {
     DeletionMarker,
     Version(VersionId),
