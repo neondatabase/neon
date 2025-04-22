@@ -4,7 +4,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::metrics::{STORAGE_IO_SIZE, StorageIoSizeOperation};
 use camino::Utf8PathBuf;
 use chrono::format::{DelayedFormat, StrftimeItems};
 use futures::Future;
@@ -317,8 +316,8 @@ impl SecondaryDetail {
     }
 
     fn clear_timeline_metrics(
-        tenant_shard_id: &TenantShardId,
-        timeline_id: &TimelineId,
+        _tenant_shard_id: &TenantShardId,
+        _timeline_id: &TimelineId,
         detail: SecondaryDetailTimeline,
         resident_metric: &UIntGauge,
     ) {
@@ -330,17 +329,7 @@ impl SecondaryDetail {
                 .sum(),
         );
 
-        let shard_id = format!("{}", tenant_shard_id.shard_slug());
-        let tenant_id = tenant_shard_id.tenant_id.to_string();
-        let timeline_id = timeline_id.to_string();
-        for op in StorageIoSizeOperation::VARIANTS {
-            let _ = STORAGE_IO_SIZE.remove_label_values(&[
-                op,
-                tenant_id.as_str(),
-                shard_id.as_str(),
-                timeline_id.as_str(),
-            ]);
-        }
+        
     }
 
     /// Additionally returns the total number of layers, used for more stable relative access time

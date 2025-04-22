@@ -29,7 +29,6 @@ pub use pageserver_api::models::virtual_file as api;
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio_epoll_uring::{BoundedBuf, IoBuf, IoBufMut, Slice};
 
-use crate::assert_u64_eq_usize::UsizeIsU64;
 use crate::context::RequestContext;
 use crate::page_cache::{PAGE_SZ, PageWriteGuard};
 pub(crate) mod io_engine;
@@ -905,7 +904,7 @@ impl VirtualFileInner {
         &self,
         buf: tokio_epoll_uring::Slice<Buf>,
         offset: u64,
-        ctx: &RequestContext,
+        _ctx: &RequestContext,
     ) -> (tokio_epoll_uring::Slice<Buf>, Result<usize, Error>)
     where
         Buf: tokio_epoll_uring::IoBufMut + Send,
@@ -922,9 +921,7 @@ impl VirtualFileInner {
         observe_duration!(StorageIoOperation::Read, {
             let ((_file_guard, buf), res) = io_engine::get().read_at(file_guard, offset, buf).await;
             let res = res.maybe_fatal_err("io_engine read_at inside VirtualFileInner::read_at");
-            if let Ok(size) = res {
-                ctx.io_size_metrics().read.add(size.into_u64());
-            }
+            
             (buf, res)
         })
     }
@@ -945,7 +942,7 @@ impl VirtualFileInner {
         &self,
         buf: FullSlice<B>,
         offset: u64,
-        ctx: &RequestContext,
+        _ctx: &RequestContext,
     ) -> (FullSlice<B>, Result<usize, Error>) {
         let file_guard = match self.lock_file().await {
             Ok(file_guard) => file_guard,
@@ -954,9 +951,7 @@ impl VirtualFileInner {
         observe_duration!(StorageIoOperation::Write, {
             let ((_file_guard, buf), result) =
                 io_engine::get().write_at(file_guard, offset, buf).await;
-            if let Ok(size) = result {
-                ctx.io_size_metrics().write.add(size.into_u64());
-            }
+
             (buf, result)
         })
     }

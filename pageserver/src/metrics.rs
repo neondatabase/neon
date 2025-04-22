@@ -7,10 +7,10 @@ use enum_map::{Enum as _, EnumMap};
 use futures::Future;
 use metrics::{
     CounterVec, GaugeVec, Histogram, HistogramVec, IntCounter, 
-    IntCounterPairVec, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
+    IntCounterPairVec, IntCounterVec, IntGaugeVec, UIntGauge, UIntGaugeVec,
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
     register_int_counter, register_int_counter_pair_vec, register_int_counter_vec,
-    register_int_gauge, register_int_gauge_vec, register_uint_gauge, register_uint_gauge_vec,
+    register_int_gauge_vec, register_uint_gauge, register_uint_gauge_vec,
 };
 use once_cell::sync::Lazy;
 use pageserver_api::config::{
@@ -626,59 +626,6 @@ pub(crate) enum StorageIoOperation {
 }
 
 
-#[derive(Clone, Copy)]
-#[repr(usize)]
-pub(crate) enum StorageIoSizeOperation {
-    Read,
-    Write,
-}
-
-impl StorageIoSizeOperation {
-    pub(crate) const VARIANTS: &'static [&'static str] = &["read", "write"];
-
-    fn as_str(&self) -> &'static str {
-        Self::VARIANTS[*self as usize]
-    }
-}
-
-// Needed for the https://neonprod.grafana.net/d/5uK9tHL4k/picking-tenant-for-relocation?orgId=1
-pub(crate) static STORAGE_IO_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
-    register_uint_gauge_vec!(
-        "pageserver_io_operations_bytes_total",
-        "Total amount of bytes read/written in IO operations",
-        &["operation", "tenant_id", "shard_id", "timeline_id"]
-    )
-    .expect("failed to define a metric")
-});
-
-#[derive(Clone, Debug)]
-pub(crate) struct StorageIoSizeMetrics {
-    pub read: UIntGauge,
-    pub write: UIntGauge,
-}
-
-impl StorageIoSizeMetrics {
-    pub(crate) fn new(tenant_id: &str, shard_id: &str, timeline_id: &str) -> Self {
-        let read = STORAGE_IO_SIZE
-            .get_metric_with_label_values(&[
-                StorageIoSizeOperation::Read.as_str(),
-                tenant_id,
-                shard_id,
-                timeline_id,
-            ])
-            .unwrap();
-        let write = STORAGE_IO_SIZE
-            .get_metric_with_label_values(&[
-                StorageIoSizeOperation::Write.as_str(),
-                tenant_id,
-                shard_id,
-                timeline_id,
-            ])
-            .unwrap();
-        Self { read, write }
-    }
-}
-
 #[cfg(not(test))]
 pub(crate) mod virtual_file_descriptor_cache {
     use super::*;
@@ -941,19 +888,9 @@ static PAGE_SERVICE_BATCH_BREAK_REASON_PER_TENANT_TIMELINE: Lazy<IntCounterVec> 
     .expect("failed to define a metric")
 });
 
-pub(crate) static PAGE_SERVICE_CONFIG_MAX_BATCH_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
-    register_int_gauge_vec!(
-        "pageserver_page_service_config_max_batch_size",
-        "Configured maximum batch size for the server-side batching functionality of page_service. \
-         Labels expose more of the configuration parameters.",
-        &["mode", "execution", "batching"]
-    )
-    .expect("failed to define a metric")
-});
 
 fn set_page_service_config_max_batch_size(conf: &PageServicePipeliningConfig) {
-    PAGE_SERVICE_CONFIG_MAX_BATCH_SIZE.reset();
-    let (label_values, value) = match conf {
+    let (_label_values, _value) = match conf {
         PageServicePipeliningConfig::Serial => (["serial", "-", "-"], 1),
         PageServicePipeliningConfig::Pipelined(PageServicePipeliningConfigPipelined {
             max_batch_size,
@@ -975,9 +912,6 @@ fn set_page_service_config_max_batch_size(conf: &PageServicePipeliningConfig) {
             ([mode, execution, batching], max_batch_size.get())
         }
     };
-    PAGE_SERVICE_CONFIG_MAX_BATCH_SIZE
-        .with_label_values(&label_values)
-        .set(value.try_into().unwrap());
 }
 
 static PAGE_SERVICE_SMGR_FLUSH_INPROGRESS_MICROS: Lazy<IntCounterVec> = Lazy::new(|| {
@@ -1329,14 +1263,6 @@ pub(crate) static WALRECEIVER_STARTED_CONNECTIONS: Lazy<IntCounter> = Lazy::new(
     .expect("failed to define a metric")
 });
 
-pub(crate) static WALRECEIVER_ACTIVE_MANAGERS: Lazy<IntGauge> = Lazy::new(|| {
-    register_int_gauge!(
-        "pageserver_walreceiver_active_managers",
-        "Number of active walreceiver managers"
-    )
-    .expect("failed to define a metric")
-});
-
 
 pub(crate) static WALRECEIVER_BROKER_UPDATES: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
@@ -1345,21 +1271,6 @@ pub(crate) static WALRECEIVER_BROKER_UPDATES: Lazy<IntCounter> = Lazy::new(|| {
     )
     .expect("failed to define a metric")
 });
-
-pub(crate) static WALRECEIVER_CANDIDATES_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "pageserver_walreceiver_candidates_events_total",
-        "Number of walreceiver candidate events",
-        &["event"]
-    )
-    .expect("failed to define a metric")
-});
-
-pub(crate) static WALRECEIVER_CANDIDATES_ADDED: Lazy<IntCounter> =
-    Lazy::new(|| WALRECEIVER_CANDIDATES_EVENTS.with_label_values(&["add"]));
-
-pub(crate) static WALRECEIVER_CANDIDATES_REMOVED: Lazy<IntCounter> =
-    Lazy::new(|| WALRECEIVER_CANDIDATES_EVENTS.with_label_values(&["remove"]));
 
 // Metrics collected on WAL redo operations
 //
@@ -1670,7 +1581,6 @@ pub(crate) struct TimelineMetrics {
     pub garbage_collect_histo: StorageTimeMetrics,
     pub find_gc_cutoffs_histo: StorageTimeMetrics,
     /// copy of LayeredTimeline.current_logical_size
-    pub storage_io_size: StorageIoSizeMetrics,
     shutdown: std::sync::atomic::AtomicBool,
 }
 
@@ -1726,9 +1636,6 @@ impl TimelineMetrics {
             &timeline_id,
         );
 
-
-        let storage_io_size = StorageIoSizeMetrics::new(&tenant_id, &shard_id, &timeline_id);
-
         TimelineMetrics {
             tenant_id,
             shard_id,
@@ -1740,7 +1647,6 @@ impl TimelineMetrics {
             imitate_logical_size_histo,
             garbage_collect_histo,
             find_gc_cutoffs_histo,
-            storage_io_size,
             shutdown: std::sync::atomic::AtomicBool::default(),
         }
     }
@@ -1833,10 +1739,6 @@ impl TimelineMetrics {
                 shard_id,
                 timeline_id,
             ]);
-        }
-
-        for op in StorageIoSizeOperation::VARIANTS {
-            let _ = STORAGE_IO_SIZE.remove_label_values(&[op, tenant_id, shard_id, timeline_id]);
         }
 
         let _ =
@@ -2259,8 +2161,6 @@ pub fn preinitialize_metrics(
     [
         &WALRECEIVER_STARTED_CONNECTIONS,
         &WALRECEIVER_BROKER_UPDATES,
-        &WALRECEIVER_CANDIDATES_ADDED,
-        &WALRECEIVER_CANDIDATES_REMOVED,
         &tokio_epoll_uring::THREAD_LOCAL_LAUNCH_FAILURES,
         &tokio_epoll_uring::THREAD_LOCAL_LAUNCH_SUCCESSES,
         &REMOTE_ONDEMAND_DOWNLOADED_LAYERS,

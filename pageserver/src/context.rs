@@ -91,12 +91,12 @@
 
 use std::{sync::Arc, time::Duration};
 
-use once_cell::sync::Lazy;
+
 use tracing::warn;
 use utils::{id::TimelineId, shard::TenantShardId};
 
 use crate::{
-    metrics::{StorageIoSizeMetrics, TimelineMetrics},
+    metrics::TimelineMetrics,
     task_mgr::TaskKind,
     tenant::Timeline,
 };
@@ -122,38 +122,34 @@ pub struct RequestContext {
 #[derive(Clone)]
 pub(crate) enum Scope {
     Global {
-        io_size_metrics: &'static crate::metrics::StorageIoSizeMetrics,
+        
     },
     SecondaryTenant {
-        io_size_metrics: &'static crate::metrics::StorageIoSizeMetrics,
+       
     },
     SecondaryTimeline {
-        io_size_metrics: crate::metrics::StorageIoSizeMetrics,
+       
     },
     Timeline {
-        // We wrap the `Arc<TimelineMetrics>`s inside another Arc to avoid child
+       // We wrap the `Arc<TimelineMetrics>`s inside another Arc to avoid child
         // context creation contending for the ref counters of the Arc<TimelineMetrics>,
         // which are shared among all tasks that operate on the timeline, especially
         // concurrent page_service connections.
         #[allow(clippy::redundant_allocation)]
-        arc_arc: Arc<Arc<TimelineMetrics>>,
-    },
+        arc_arc: Arc<Arc<TimelineMetrics>>,    },
     #[cfg(test)]
     UnitTest {
-        io_size_metrics: &'static crate::metrics::StorageIoSizeMetrics,
+       
     },
     DebugTools {
-        io_size_metrics: &'static crate::metrics::StorageIoSizeMetrics,
+        
     },
 }
 
-static GLOBAL_IO_SIZE_METRICS: Lazy<crate::metrics::StorageIoSizeMetrics> =
-    Lazy::new(|| crate::metrics::StorageIoSizeMetrics::new("*", "*", "*"));
 
 impl Scope {
     pub(crate) fn new_global() -> Self {
         Scope::Global {
-            io_size_metrics: &GLOBAL_IO_SIZE_METRICS,
         }
     }
     /// NB: this allocates, so, use only at relatively long-lived roots, e.g., at start
@@ -173,18 +169,13 @@ impl Scope {
         }
     }
     pub(crate) fn new_secondary_timeline(
-        tenant_shard_id: &TenantShardId,
-        timeline_id: &TimelineId,
+        _tenant_shard_id: &TenantShardId,
+        _timeline_id: &TimelineId,
     ) -> Self {
         // TODO(https://github.com/neondatabase/neon/issues/11156): secondary timelines have no infrastructure for metrics lifecycle.
 
-        let tenant_id = tenant_shard_id.tenant_id.to_string();
-        let shard_id = tenant_shard_id.shard_slug().to_string();
-        let timeline_id = timeline_id.to_string();
 
-        let io_size_metrics =
-            crate::metrics::StorageIoSizeMetrics::new(&tenant_id, &shard_id, &timeline_id);
-        Scope::SecondaryTimeline { io_size_metrics }
+        Scope::SecondaryTimeline {  }
     }
     pub(crate) fn new_secondary_tenant(_tenant_shard_id: &TenantShardId) -> Self {
         // Before propagating metrics via RequestContext, the labels were inferred from file path.
@@ -197,19 +188,19 @@ impl Scope {
         // like we do for attached timelines. (We don't have attached-tenant-scoped usage of VirtualFile
         // at this point, so, we were able to completely side-step tenant-scoped stuff there).
         Scope::SecondaryTenant {
-            io_size_metrics: &GLOBAL_IO_SIZE_METRICS,
+           
         }
     }
     #[cfg(test)]
     pub(crate) fn new_unit_test() -> Self {
         Scope::UnitTest {
-            io_size_metrics: &GLOBAL_IO_SIZE_METRICS,
+          
         }
     }
 
     pub(crate) fn new_debug_tools() -> Self {
         Scope::DebugTools {
-            io_size_metrics: &GLOBAL_IO_SIZE_METRICS,
+          
         }
     }
 }
@@ -526,41 +517,6 @@ impl RequestContext {
 
     pub(crate) fn read_path_debug(&self) -> bool {
         self.read_path_debug
-    }
-
-    pub(crate) fn io_size_metrics(&self) -> &StorageIoSizeMetrics {
-        match &self.scope {
-            Scope::Global { io_size_metrics } => {
-                let is_unit_test = cfg!(test);
-                let is_regress_test_build = cfg!(feature = "testing");
-                if is_unit_test || is_regress_test_build {
-                    panic!("all VirtualFile instances are timeline-scoped");
-                } else {
-                    use once_cell::sync::Lazy;
-                    use std::sync::Mutex;
-                    use std::time::Duration;
-                    use utils::rate_limit::RateLimit;
-                    static LIMIT: Lazy<Mutex<RateLimit>> =
-                        Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(1))));
-                    let mut guard = LIMIT.lock().unwrap();
-                    guard.call2(|rate_limit_stats| {
-                        warn!(
-                            %rate_limit_stats,
-                            backtrace=%std::backtrace::Backtrace::force_capture(),
-                            "all VirtualFile instances are timeline-scoped",
-                        );
-                    });
-
-                    io_size_metrics
-                }
-            }
-            Scope::Timeline { arc_arc } => &arc_arc.storage_io_size,
-            Scope::SecondaryTimeline { io_size_metrics } => io_size_metrics,
-            Scope::SecondaryTenant { io_size_metrics } => io_size_metrics,
-            #[cfg(test)]
-            Scope::UnitTest { io_size_metrics } => io_size_metrics,
-            Scope::DebugTools { io_size_metrics } => io_size_metrics,
-        }
     }
 
     pub(crate) fn ondemand_download_wait_observe(&self, duration: Duration) {

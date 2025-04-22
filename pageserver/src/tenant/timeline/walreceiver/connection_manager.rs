@@ -39,10 +39,6 @@ use utils::postgres_client::{
 use super::walreceiver_connection::{WalConnectionStatus, WalReceiverError};
 use super::{TaskEvent, TaskHandle, TaskStateUpdate, WalReceiverConf};
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::metrics::{
-    WALRECEIVER_ACTIVE_MANAGERS, WALRECEIVER_BROKER_UPDATES, WALRECEIVER_CANDIDATES_ADDED,
-    WALRECEIVER_CANDIDATES_REMOVED, 
-};
 use crate::task_mgr::TaskKind;
 use crate::tenant::{Timeline, debug_assert_current_span_has_tenant_and_timeline_id};
 
@@ -74,11 +70,6 @@ pub(super) async fn connection_manager_loop_step(
             );
             return Err(Cancelled);
         }
-    }
-
-    WALRECEIVER_ACTIVE_MANAGERS.inc();
-    scopeguard::defer! {
-        WALRECEIVER_ACTIVE_MANAGERS.dec();
     }
 
     let id = TenantTimelineId {
@@ -728,8 +719,6 @@ impl ConnectionManagerState {
             }
         };
 
-        WALRECEIVER_BROKER_UPDATES.inc();
-
         trace!(
             "safekeeper info update: standby_horizon(cutoff)={}",
             timeline_update.standby_horizon
@@ -756,7 +745,6 @@ impl ConnectionManagerState {
                 %new_safekeeper_id,
                 "New SK node was added",
             );
-            WALRECEIVER_CANDIDATES_ADDED.inc();
         }
     }
 
@@ -1044,7 +1032,6 @@ impl ConnectionManagerState {
                     "Safekeeper node {node_id} did not send events for over {lagging_wal_timeout:?}, not retrying the connections"
                 );
                 self.wal_connection_retries.remove(&node_id);
-                WALRECEIVER_CANDIDATES_REMOVED.inc();
             }
         }
     }
