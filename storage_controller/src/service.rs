@@ -3800,6 +3800,10 @@ impl Service {
 
             None
         } else if safekeepers {
+            // Note that we do not support creating the timeline on the safekeepers
+            // for imported timelines. The `start_lsn` of the timeline is not known
+            // until the import finshes.
+            // https://github.com/neondatabase/neon/issues/11569
             let res = self
                 .tenant_timeline_create_safekeepers(tenant_id, &timeline_info)
                 .instrument(tracing::info_span!("timeline_create_safekeepers", %tenant_id, timeline_id=%timeline_info.timeline_id))
