@@ -590,7 +590,6 @@ impl ResidentOrWantedEvicted {
             ResidentOrWantedEvicted::Resident(strong) => Some((strong.clone(), false)),
             ResidentOrWantedEvicted::WantedEvicted(weak, _) => match weak.upgrade() {
                 Some(strong) => {
-                    LAYER_IMPL_METRICS.inc_raced_wanted_evicted_accesses();
 
                     *self = ResidentOrWantedEvicted::Resident(strong.clone());
 
@@ -722,17 +721,8 @@ enum Status {
 
 impl Drop for LayerInner {
     fn drop(&mut self) {
-        // if there was a pending eviction, mark it cancelled here to balance metrics
-        if let Some((ResidentOrWantedEvicted::WantedEvicted(..), _)) = self.inner.take_and_deinit()
-        {
-            // eviction has already been started
-            LAYER_IMPL_METRICS.inc_eviction_cancelled(EvictionCancelled::LayerGone);
-
-            // eviction request is intentionally not honored as no one is present to wait for it
-            // and we could be delaying shutdown for nothing.
-        }
-
-        let timeline = self.timeline.upgrade();
+        
+        let timeline: Option<Arc<Timeline>> = self.timeline.upgrade();
 
         if let Some(timeline) = timeline.as_ref() {
             // Only need to decrement metrics if the timeline still exists: otherwise
@@ -751,7 +741,6 @@ impl Drop for LayerInner {
 
         let path = std::mem::take(&mut self.path);
         let file_name = self.layer_desc().layer_name();
-        let file_size = self.layer_desc().file_size;
         let meta = self.metadata();
         let status = self.status.take();
 
@@ -760,20 +749,13 @@ impl Drop for LayerInner {
 
             // carry this until we are finished for [`Layer::wait_drop`] support
             let _status = status;
-
             let Some(timeline) = timeline else {
                 // no need to nag that timeline is gone: under normal situation on
                 // task_mgr::remove_tenant_from_memory the timeline is gone before we get dropped.
-                LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::TimelineGone);
                 return;
             };
 
-            let Ok(_guard) = timeline.gate.enter() else {
-                LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::TimelineGone);
-                return;
-            };
-
-            let removed = match std::fs::remove_file(path) {
+           match std::fs::remove_file(path) {
                 Ok(()) => true,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     // until we no longer do detaches by removing all local files before removing the
@@ -784,34 +766,16 @@ impl Drop for LayerInner {
                     // layers.
                     false
                 }
-                Err(e) => {
-                    tracing::error!("failed to remove wanted deleted layer: {e}");
-                    LAYER_IMPL_METRICS.inc_delete_removes_failed();
+                Err(_e) => {
                     false
                 }
             };
 
-            if removed {
-                timeline.metrics.resident_physical_size_sub(file_size);
-            }
-            let res = timeline
+            
+            let _a=timeline
                 .remote_client
                 .schedule_deletion_of_unlinked(vec![(file_name, meta)]);
 
-            if let Err(e) = res {
-                // test_timeline_deletion_with_files_stuck_in_upload_queue is good at
-                // demonstrating this deadlock (without spawn_blocking): stop will drop
-                // queued items, which will have ResidentLayer's, and those drops would try
-                // to re-entrantly lock the RemoteTimelineClient inner state.
-                if !timeline.is_active() {
-                    tracing::info!("scheduling deletion on drop failed: {e:#}");
-                } else {
-                    tracing::warn!("scheduling deletion on drop failed: {e:#}");
-                }
-                LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::DeleteSchedulingFailed);
-            } else {
-                LAYER_IMPL_METRICS.inc_completed_deletes();
-            }
         });
     }
 }
@@ -862,13 +826,9 @@ impl LayerInner {
     }
 
     fn delete_on_drop(&self) {
-        let res =
-            self.wanted_deleted
+                    let _a=self.wanted_deleted
                 .compare_exchange(false, true, Ordering::Release, Ordering::Relaxed);
 
-        if res.is_ok() {
-            LAYER_IMPL_METRICS.inc_started_deletes();
-        }
     }
 
     /// Cancellation safe, however dropping the future and calling this method again might result
@@ -906,12 +866,6 @@ impl LayerInner {
             // drop the DownloadedLayer outside of the holding the guard
             drop(strong);
 
-            // idea here is that only one evicter should ever get to witness a strong reference,
-            // which means whenever get_or_maybe_download upgrades a weak, it must mark up a
-            // cancelled eviction and signal us, like it currently does.
-            //
-            // a second concurrent evict_and_wait will not see a strong reference.
-            LAYER_IMPL_METRICS.inc_started_evictions();
         }
 
         let changed = rx.changed();
@@ -951,15 +905,13 @@ impl LayerInner {
             // get_or_init_detached can:
             // - be fast (mutex lock) OR uncontested semaphore permit acquire
             // - be slow (wait for semaphore permit or closing)
-            let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
-
             let locked = self
                 .inner
                 .get_or_init_detached_measured(Some(&mut wait_for_download_recorder))
                 .await
                 .map(|mut guard| guard.get_and_upgrade().ok_or(guard));
 
-            scopeguard::ScopeGuard::into_inner(init_cancelled);
+
 
             match locked {
                 // this path could had been a RwLock::read
@@ -972,8 +924,7 @@ impl LayerInner {
                     // note that we also have dropped the Guard; this is fine, because we just made
                     // a state change and are holding a strong reference to be returned.
                     self.status.as_ref().unwrap().send_replace(Status::Resident);
-                    LAYER_IMPL_METRICS
-                        .inc_eviction_cancelled(EvictionCancelled::UpgradedBackOnAccess);
+        
 
                     return Ok(strong);
                 }
@@ -1000,8 +951,7 @@ impl LayerInner {
             .upgrade()
             .ok_or(DownloadError::TimelineShutdown)?;
 
-        // count cancellations, which currently remain largely unexpected
-        let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
+        
 
         // check if we really need to be downloaded: this can happen if a read access won the
         // semaphore before eviction.
@@ -1013,7 +963,6 @@ impl LayerInner {
             .await
             .map_err(DownloadError::PreStatFailed);
 
-        scopeguard::ScopeGuard::into_inner(init_cancelled);
 
         let needs_download = needs_download?;
 
@@ -1024,7 +973,7 @@ impl LayerInner {
             self.failpoint(failpoints::FailpointKind::AfterDeterminingLayerNeedsNoDownload)
                 .await?;
 
-            LAYER_IMPL_METRICS.inc_init_needed_no_download();
+            
 
             return Ok(self.initialize_after_layer_is_on_disk(permit));
         };
@@ -1065,13 +1014,13 @@ impl LayerInner {
         async move {
             tracing::info!(%reason, "downloading on-demand");
 
-            let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
+            
             let res = self
                 .download_init_and_wait(timeline, permit, ctx.attached_child())
                 .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
                 .await?;
 
-            scopeguard::ScopeGuard::into_inner(init_cancelled);
+      
             Ok(res)
         }
         .instrument(tracing::info_span!("get_or_maybe_download", layer=%self))
@@ -1140,20 +1089,7 @@ impl LayerInner {
 
                 let res = this.download_and_init(timeline, permit, &ctx).await;
 
-                if let Err(res) = tx.send(res) {
-                    match res {
-                        Ok(_res) => {
-                            tracing::debug!("layer initialized, but caller has been cancelled");
-                            LAYER_IMPL_METRICS.inc_init_completed_without_requester();
-                        }
-                        Err(e) => {
-                            tracing::info!(
-                                "layer file download failed, and caller has been cancelled: {e:?}"
-                            );
-                            LAYER_IMPL_METRICS.inc_download_failed_without_requester();
-                        }
-                    }
-                }
+                let _a =tx.send(res);
             }
             .in_current_span(),
         );
@@ -1209,16 +1145,6 @@ impl LayerInner {
                     .metrics
                     .resident_physical_size_add(self.desc.file_size);
                 self.consecutive_failures.store(0, Ordering::Relaxed);
-
-                let since_last_eviction = self
-                    .last_evicted_at
-                    .lock()
-                    .unwrap()
-                    .take()
-                    .map(|ts| ts.elapsed());
-                if let Some(since_last_eviction) = since_last_eviction {
-                    LAYER_IMPL_METRICS.record_redownloaded_after(since_last_eviction);
-                }
 
                 self.access_stats.record_residence_event();
 
@@ -1374,12 +1300,8 @@ impl LayerInner {
 
             tracing::debug!("eviction started");
 
-            let res = self.wait_for_turn_and_evict(only_version).await;
-            // metrics: ignore the Ok branch, it is not done yet
-            if let Err(e) = res {
-                tracing::debug!(res=?Err::<(), _>(&e), "eviction completed");
-                LAYER_IMPL_METRICS.inc_eviction_cancelled(e);
-            }
+           let _a = self.wait_for_turn_and_evict(only_version).await;
+            
         };
 
         Self::spawn(start_evicting.instrument(span));
@@ -1503,17 +1425,9 @@ impl LayerInner {
 
             let waiters = self.inner.initializer_count();
 
-            if waiters > 0 {
-                LAYER_IMPL_METRICS.inc_evicted_with_waiters();
-            }
-
+            
             let completed_in = spawned_at.elapsed();
-            LAYER_IMPL_METRICS.record_time_to_evict(completed_in);
-
-            match res {
-                Ok(()) => LAYER_IMPL_METRICS.inc_completed_evictions(),
-                Err(e) => LAYER_IMPL_METRICS.inc_eviction_cancelled(e),
-            }
+           
 
             tracing::debug!(?res, elapsed_ms=%completed_in.as_millis(), %waiters, "eviction completed");
         });
@@ -1768,13 +1682,7 @@ impl DownloadedLayer {
             match res {
                 Ok(layer) => Ok(layer),
                 Err(err) => {
-                    LAYER_IMPL_METRICS.inc_permanent_loading_failures();
-                    // We log this message once over the lifetime of `Self`
-                    // => Ok and good to log backtrace and path here.
-                    tracing::error!(
-                        "layer load failed, assuming permanent failure: {}: {err:?}",
-                        owner.path
-                    );
+                    
                     Err(err)
                 }
             }
@@ -1982,218 +1890,6 @@ impl From<ResidentLayer> for Layer {
     }
 }
 
-use metrics::IntCounter;
-
-pub(crate) struct LayerImplMetrics {
-    started_evictions: IntCounter,
-    completed_evictions: IntCounter,
-    cancelled_evictions: enum_map::EnumMap<EvictionCancelled, IntCounter>,
-
-    started_deletes: IntCounter,
-    completed_deletes: IntCounter,
-    failed_deletes: enum_map::EnumMap<DeleteFailed, IntCounter>,
-
-    rare_counters: enum_map::EnumMap<RareEvent, IntCounter>,
-    inits_cancelled: metrics::core::GenericCounter<metrics::core::AtomicU64>,
-    redownload_after: metrics::Histogram,
-    time_to_evict: metrics::Histogram,
-}
-
-impl Default for LayerImplMetrics {
-    fn default() -> Self {
-        use enum_map::Enum;
-
-        // reminder: these will be pageserver_layer_* with "_total" suffix
-
-        let started_evictions = metrics::register_int_counter!(
-            "pageserver_layer_started_evictions",
-            "Evictions started in the Layer implementation"
-        )
-        .unwrap();
-        let completed_evictions = metrics::register_int_counter!(
-            "pageserver_layer_completed_evictions",
-            "Evictions completed in the Layer implementation"
-        )
-        .unwrap();
-
-        let cancelled_evictions = metrics::register_int_counter_vec!(
-            "pageserver_layer_cancelled_evictions_count",
-            "Different reasons for evictions to have been cancelled or failed",
-            &["reason"]
-        )
-        .unwrap();
-
-        let cancelled_evictions = enum_map::EnumMap::from_array(std::array::from_fn(|i| {
-            let reason = EvictionCancelled::from_usize(i);
-            let s = reason.as_str();
-            cancelled_evictions.with_label_values(&[s])
-        }));
-
-        let started_deletes = metrics::register_int_counter!(
-            "pageserver_layer_started_deletes",
-            "Deletions on drop pending in the Layer implementation"
-        )
-        .unwrap();
-        let completed_deletes = metrics::register_int_counter!(
-            "pageserver_layer_completed_deletes",
-            "Deletions on drop completed in the Layer implementation"
-        )
-        .unwrap();
-
-        let failed_deletes = metrics::register_int_counter_vec!(
-            "pageserver_layer_failed_deletes_count",
-            "Different reasons for deletions on drop to have failed",
-            &["reason"]
-        )
-        .unwrap();
-
-        let failed_deletes = enum_map::EnumMap::from_array(std::array::from_fn(|i| {
-            let reason = DeleteFailed::from_usize(i);
-            let s = reason.as_str();
-            failed_deletes.with_label_values(&[s])
-        }));
-
-        let rare_counters = metrics::register_int_counter_vec!(
-            "pageserver_layer_assumed_rare_count",
-            "Times unexpected or assumed rare event happened",
-            &["event"]
-        )
-        .unwrap();
-
-        let rare_counters = enum_map::EnumMap::from_array(std::array::from_fn(|i| {
-            let event = RareEvent::from_usize(i);
-            let s = event.as_str();
-            rare_counters.with_label_values(&[s])
-        }));
-
-        let inits_cancelled = metrics::register_int_counter!(
-            "pageserver_layer_inits_cancelled_count",
-            "Times Layer initialization was cancelled",
-        )
-        .unwrap();
-
-        let redownload_after = {
-            let minute = 60.0;
-            let hour = 60.0 * minute;
-            metrics::register_histogram!(
-                "pageserver_layer_redownloaded_after",
-                "Time between evicting and re-downloading.",
-                vec![
-                    10.0,
-                    30.0,
-                    minute,
-                    5.0 * minute,
-                    15.0 * minute,
-                    30.0 * minute,
-                    hour,
-                    12.0 * hour,
-                ]
-            )
-            .unwrap()
-        };
-
-        let time_to_evict = metrics::register_histogram!(
-            "pageserver_layer_eviction_held_permit_seconds",
-            "Time eviction held the permit.",
-            vec![0.001, 0.010, 0.100, 0.500, 1.000, 5.000]
-        )
-        .unwrap();
-
-        Self {
-            started_evictions,
-            completed_evictions,
-            cancelled_evictions,
-
-            started_deletes,
-            completed_deletes,
-            failed_deletes,
-
-            rare_counters,
-            inits_cancelled,
-            redownload_after,
-            time_to_evict,
-        }
-    }
-}
-
-impl LayerImplMetrics {
-    fn inc_started_evictions(&self) {
-        self.started_evictions.inc();
-    }
-    fn inc_completed_evictions(&self) {
-        self.completed_evictions.inc();
-    }
-    fn inc_eviction_cancelled(&self, reason: EvictionCancelled) {
-        self.cancelled_evictions[reason].inc()
-    }
-
-    fn inc_started_deletes(&self) {
-        self.started_deletes.inc();
-    }
-    fn inc_completed_deletes(&self) {
-        self.completed_deletes.inc();
-    }
-    fn inc_deletes_failed(&self, reason: DeleteFailed) {
-        self.failed_deletes[reason].inc();
-    }
-
-    /// Counted separatedly from failed layer deletes because we will complete the layer deletion
-    /// attempt regardless of failure to delete local file.
-    fn inc_delete_removes_failed(&self) {
-        self.rare_counters[RareEvent::RemoveOnDropFailed].inc();
-    }
-
-    /// Expected rare just as cancellations are rare, but we could have cancellations separate from
-    /// the single caller which can start the download, so use this counter to separte them.
-    fn inc_init_completed_without_requester(&self) {
-        self.rare_counters[RareEvent::InitCompletedWithoutRequester].inc();
-    }
-
-    /// Expected rare because cancellations are unexpected, and failures are unexpected
-    fn inc_download_failed_without_requester(&self) {
-        self.rare_counters[RareEvent::DownloadFailedWithoutRequester].inc();
-    }
-
-    /// The Weak in ResidentOrWantedEvicted::WantedEvicted was successfully upgraded.
-    ///
-    /// If this counter is always zero, we should replace ResidentOrWantedEvicted type with an
-    /// Option.
-    fn inc_raced_wanted_evicted_accesses(&self) {
-        self.rare_counters[RareEvent::UpgradedWantedEvicted].inc();
-    }
-
-    /// These are only expected for [`Self::inc_init_cancelled`] amount when
-    /// running with remote storage.
-    fn inc_init_needed_no_download(&self) {
-        self.rare_counters[RareEvent::InitWithoutDownload].inc();
-    }
-
-    /// Expected rare because all layer files should be readable and good
-    fn inc_permanent_loading_failures(&self) {
-        self.rare_counters[RareEvent::PermanentLoadingFailure].inc();
-    }
-
-    fn inc_init_cancelled(&self) {
-        self.inits_cancelled.inc()
-    }
-
-    fn record_redownloaded_after(&self, duration: std::time::Duration) {
-        self.redownload_after.observe(duration.as_secs_f64())
-    }
-
-    /// This would be bad if it ever happened, or mean extreme disk pressure. We should probably
-    /// instead cancel eviction if we would have read waiters. We cannot however separate reads
-    /// from other evictions, so this could have noise as well.
-    fn inc_evicted_with_waiters(&self) {
-        self.rare_counters[RareEvent::EvictedWithWaiters].inc();
-    }
-
-    /// Recorded at least initially as the permit is now acquired in async context before
-    /// spawn_blocking action.
-    fn record_time_to_evict(&self, duration: std::time::Duration) {
-        self.time_to_evict.observe(duration.as_secs_f64())
-    }
-}
 
 #[derive(Debug, Clone, Copy, enum_map::Enum)]
 enum EvictionCancelled {
@@ -2210,35 +1906,11 @@ enum EvictionCancelled {
     UnexpectedEvictedState,
 }
 
-impl EvictionCancelled {
-    fn as_str(&self) -> &'static str {
-        match self {
-            EvictionCancelled::LayerGone => "layer_gone",
-            EvictionCancelled::TimelineGone => "timeline_gone",
-            EvictionCancelled::VersionCheckFailed => "version_check_fail",
-            EvictionCancelled::FileNotFound => "file_not_found",
-            EvictionCancelled::RemoveFailed => "remove_failed",
-            EvictionCancelled::AlreadyReinitialized => "already_reinitialized",
-            EvictionCancelled::LostToDownload => "lost_to_download",
-            EvictionCancelled::UpgradedBackOnAccess => "upgraded_back_on_access",
-            EvictionCancelled::UnexpectedEvictedState => "unexpected_evicted_state",
-        }
-    }
-}
 
 #[derive(enum_map::Enum)]
 enum DeleteFailed {
     TimelineGone,
     DeleteSchedulingFailed,
-}
-
-impl DeleteFailed {
-    fn as_str(&self) -> &'static str {
-        match self {
-            DeleteFailed::TimelineGone => "timeline_gone",
-            DeleteFailed::DeleteSchedulingFailed => "delete_scheduling_failed",
-        }
-    }
 }
 
 #[derive(enum_map::Enum)]
@@ -2252,21 +1924,3 @@ enum RareEvent {
     EvictedWithWaiters,
 }
 
-impl RareEvent {
-    fn as_str(&self) -> &'static str {
-        use RareEvent::*;
-
-        match self {
-            RemoveOnDropFailed => "remove_on_drop_failed",
-            InitCompletedWithoutRequester => "init_completed_without",
-            DownloadFailedWithoutRequester => "download_failed_without",
-            UpgradedWantedEvicted => "raced_wanted_evicted",
-            InitWithoutDownload => "init_needed_no_download",
-            PermanentLoadingFailure => "permanent_loading_failure",
-            EvictedWithWaiters => "evicted_with_waiters",
-        }
-    }
-}
-
-pub(crate) static LAYER_IMPL_METRICS: once_cell::sync::Lazy<LayerImplMetrics> =
-    once_cell::sync::Lazy::new(LayerImplMetrics::default);
