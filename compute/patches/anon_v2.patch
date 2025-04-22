@@ -13,7 +13,7 @@ index 0cdc769..c004139 100644
 +GRANT ALL ON ALL TABLES IN SCHEMA anon TO neon_superuser;
 +
 diff --git a/sql/init.sql b/sql/init.sql
-index 7da6553..0c5f6c9 100644
+index 7da6553..12859d6 100644
 --- a/sql/init.sql
 +++ b/sql/init.sql
 @@ -74,6 +74,26 @@ $$
@@ -43,3 +43,36 @@ index 7da6553..0c5f6c9 100644
  -- load fake data from a given path
  CREATE OR REPLACE FUNCTION anon.init(
    datapath TEXT
+@@ -92,19 +112,19 @@ BEGIN
+ 
+   SELECT bool_or(results) INTO success
+   FROM unnest(array[
+-    anon.load_csv('anon.identifiers_category',datapath||'/identifiers_category.csv'),
+-    anon.load_csv('anon.identifier',datapath ||'/identifier.csv'),
+-    anon.load_csv('anon.address',datapath ||'/address.csv'),
+-    anon.load_csv('anon.city',datapath ||'/city.csv'),
+-    anon.load_csv('anon.company',datapath ||'/company.csv'),
+-    anon.load_csv('anon.country',datapath ||'/country.csv'),
+-    anon.load_csv('anon.email', datapath ||'/email.csv'),
+-    anon.load_csv('anon.first_name',datapath ||'/first_name.csv'),
+-    anon.load_csv('anon.iban',datapath ||'/iban.csv'),
+-    anon.load_csv('anon.last_name',datapath ||'/last_name.csv'),
+-    anon.load_csv('anon.postcode',datapath ||'/postcode.csv'),
+-    anon.load_csv('anon.siret',datapath ||'/siret.csv'),
+-    anon.load_csv('anon.lorem_ipsum',datapath ||'/lorem_ipsum.csv')
++    anon.load_csv_superuser('anon.identifiers_category',datapath||'/identifiers_category.csv'),
++    anon.load_csv_superuser('anon.identifier',datapath ||'/identifier.csv'),
++    anon.load_csv_superuser('anon.address',datapath ||'/address.csv'),
++    anon.load_csv_superuser('anon.city',datapath ||'/city.csv'),
++    anon.load_csv_superuser('anon.company',datapath ||'/company.csv'),
++    anon.load_csv_superuser('anon.country',datapath ||'/country.csv'),
++    anon.load_csv_superuser('anon.email', datapath ||'/email.csv'),
++    anon.load_csv_superuser('anon.first_name',datapath ||'/first_name.csv'),
++    anon.load_csv_superuser('anon.iban',datapath ||'/iban.csv'),
++    anon.load_csv_superuser('anon.last_name',datapath ||'/last_name.csv'),
++    anon.load_csv_superuser('anon.postcode',datapath ||'/postcode.csv'),
++    anon.load_csv_superuser('anon.siret',datapath ||'/siret.csv'),
++    anon.load_csv_superuser('anon.lorem_ipsum',datapath ||'/lorem_ipsum.csv')
+   ]) results;
+   RETURN success;
+ 
