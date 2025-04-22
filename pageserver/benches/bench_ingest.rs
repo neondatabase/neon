@@ -11,6 +11,7 @@ use pageserver::task_mgr::TaskKind;
 use pageserver::tenant::storage_layer::InMemoryLayer;
 use pageserver::{page_cache, virtual_file};
 use pageserver_api::key::Key;
+use pageserver_api::models::virtual_file::IoMode;
 use pageserver_api::shard::TenantShardId;
 use pageserver_api::value::Value;
 use tokio_util::sync::CancellationToken;
@@ -28,6 +29,7 @@ fn murmurhash32(mut h: u32) -> u32 {
     h
 }
 
+#[derive(serde::Serialize, Clone, Copy, Debug)]
 enum KeyLayout {
     /// Sequential unique keys
     Sequential,
@@ -37,6 +39,7 @@ enum KeyLayout {
     RandomReuse(u32),
 }
 
+#[derive(serde::Serialize, Clone, Copy, Debug)]
 enum WriteDelta {
     Yes,
     No,
@@ -138,12 +141,15 @@ async fn ingest(
 /// Wrapper to instantiate a tokio runtime
 fn ingest_main(
     conf: &'static PageServerConf,
+    io_mode: IoMode,
     put_size: usize,
     put_count: usize,
     key_layout: KeyLayout,
     write_delta: WriteDelta,
 ) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    pageserver::virtual_file::set_io_mode(io_mode);
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap();
@@ -173,91 +179,128 @@ fn criterion_benchmark(c: &mut Criterion) {
     ));
     virtual_file::init(
         16384,
-        virtual_file::io_engine_for_bench(),
+        {
+            #[cfg(not(target_os = "linux"))]
+            const _: () = {
+                panic!(
+                    "This benchmark does I/O and can only give a representative result on Linux"
+                );
+            };
+            #[cfg(target_os = "linux")]
+            pageserver_api::models::virtual_file::IoEngineKind::TokioEpollUring
+        },
+        // immaterial, each `ingest_main` invocation below overrides this
         conf.virtual_file_io_mode,
+        // without actually doing syncs, buffered writes have an unfair advantage over direct IO writes
         virtual_file::SyncMode::Sync,
     );
     page_cache::init(conf.page_cache_size);
 
-    {
-        let mut group = c.benchmark_group("ingest-small-values");
-        let put_size = 100usize;
-        let put_count = 128 * 1024 * 1024 / put_size;
-        group.throughput(criterion::Throughput::Bytes((put_size * put_count) as u64));
-        group.sample_size(10);
-        group.bench_function("ingest 128MB/100b seq", |b| {
-            b.iter(|| {
-                ingest_main(
-                    conf,
-                    put_size,
-                    put_count,
-                    KeyLayout::Sequential,
-                    WriteDelta::Yes,
-                )
-            })
-        });
-        group.bench_function("ingest 128MB/100b rand", |b| {
-            b.iter(|| {
-                ingest_main(
-                    conf,
-                    put_size,
-                    put_count,
-                    KeyLayout::Random,
-                    WriteDelta::Yes,
-                )
-            })
-        });
-        group.bench_function("ingest 128MB/100b rand-1024keys", |b| {
-            b.iter(|| {
-                ingest_main(
-                    conf,
-                    put_size,
-                    put_count,
-                    KeyLayout::RandomReuse(0x3ff),
-                    WriteDelta::Yes,
-                )
-            })
-        });
-        group.bench_function("ingest 128MB/100b seq, no delta", |b| {
-            b.iter(|| {
-                ingest_main(
-                    conf,
-                    put_size,
-                    put_count,
-                    KeyLayout::Sequential,
-                    WriteDelta::No,
-                )
-            })
-        });
+    #[derive(serde::Serialize)]
+    struct ExplodedParameters {
+        io_mode: IoMode,
+        volume_mib: usize,
+        key_size: usize,
+        key_layout: KeyLayout,
+        write_delta: WriteDelta,
     }
-
-    {
-        let mut group = c.benchmark_group("ingest-big-values");
-        let put_size = 8192usize;
-        let put_count = 128 * 1024 * 1024 / put_size;
-        group.throughput(criterion::Throughput::Bytes((put_size * put_count) as u64));
+    #[derive(Clone)]
+    struct HandPickedParameters {
+        volume_mib: usize,
+        key_size: usize,
+        key_layout: KeyLayout,
+        write_delta: WriteDelta,
+    }
+    let expect = vec![
+        // Small values (100b) tests
+        HandPickedParameters {
+            volume_mib: 128,
+            key_size: 100,
+            key_layout: KeyLayout::Sequential,
+            write_delta: WriteDelta::Yes,
+        },
+        HandPickedParameters {
+            volume_mib: 128,
+            key_size: 100,
+            key_layout: KeyLayout::Random,
+            write_delta: WriteDelta::Yes,
+        },
+        HandPickedParameters {
+            volume_mib: 128,
+            key_size: 100,
+            key_layout: KeyLayout::RandomReuse(0x3ff),
+            write_delta: WriteDelta::Yes,
+        },
+        HandPickedParameters {
+            volume_mib: 128,
+            key_size: 100,
+            key_layout: KeyLayout::Sequential,
+            write_delta: WriteDelta::No,
+        },
+        // Large values (8k) tests
+        HandPickedParameters {
+            volume_mib: 128,
+            key_size: 8192,
+            key_layout: KeyLayout::Sequential,
+            write_delta: WriteDelta::Yes,
+        },
+        HandPickedParameters {
+            volume_mib: 128,
+            key_size: 8192,
+            key_layout: KeyLayout::Sequential,
+            write_delta: WriteDelta::No,
+        },
+    ];
+    let exploded_parameters = {
+        let mut out = Vec::new();
+        for io_mode in [IoMode::Buffered, IoMode::Direct] {
+            for param in expect.clone() {
+                let HandPickedParameters {
+                    volume_mib,
+                    key_size,
+                    key_layout,
+                    write_delta,
+                } = param;
+                out.push(ExplodedParameters {
+                    io_mode,
+                    volume_mib,
+                    key_size,
+                    key_layout,
+                    write_delta,
+                });
+            }
+        }
+        out
+    };
+    impl ExplodedParameters {
+        fn benchmark_id(&self) -> String {
+            let ExplodedParameters {
+                io_mode,
+                volume_mib,
+                key_size,
+                key_layout,
+                write_delta,
+            } = self;
+            format!(
+                "io_mode={io_mode:?} volume_mib={volume_mib:?} key_size_bytes={key_size:?} key_layout={key_layout:?} write_delta={write_delta:?}"
+            )
+        }
+    }
+    let mut group = c.benchmark_group("ingest");
+    for params in exploded_parameters {
+        let id = params.benchmark_id();
+        let ExplodedParameters {
+            io_mode,
+            volume_mib,
+            key_size,
+            key_layout,
+            write_delta,
+        } = params;
+        let put_count = volume_mib * 1024 * 1024 / key_size;
+        group.throughput(criterion::Throughput::Bytes((key_size * put_count) as u64));
         group.sample_size(10);
-        group.bench_function("ingest 128MB/8k seq", |b| {
-            b.iter(|| {
-                ingest_main(
-                    conf,
-                    put_size,
-                    put_count,
-                    KeyLayout::Sequential,
-                    WriteDelta::Yes,
-                )
-            })
-        });
-        group.bench_function("ingest 128MB/8k seq, no delta", |b| {
-            b.iter(|| {
-                ingest_main(
-                    conf,
-                    put_size,
-                    put_count,
-                    KeyLayout::Sequential,
-                    WriteDelta::No,
-                )
-            })
+        group.bench_function(id, |b| {
+            b.iter(|| ingest_main(conf, io_mode, key_size, put_count, key_layout, write_delta))
         });
     }
 }

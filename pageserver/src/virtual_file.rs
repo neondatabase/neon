@@ -1368,7 +1368,7 @@ pub(crate) type IoPageSlice<'a> =
 
 static IO_MODE: AtomicU8 = AtomicU8::new(IoMode::preferred() as u8);
 
-pub(crate) fn set_io_mode(mode: IoMode) {
+pub fn set_io_mode(mode: IoMode) {
     IO_MODE.store(mode as u8, std::sync::atomic::Ordering::Relaxed);
 }
 
