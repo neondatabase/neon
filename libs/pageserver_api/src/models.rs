@@ -1824,14 +1824,7 @@ pub mod virtual_file {
                 });
                 *CACHED
             } else {
-                use once_cell::sync::Lazy;
-                static CACHED: Lazy<IoMode> = Lazy::new(|| {
-                    utils::env::var_serde_json_string(
-                        "NEON_PAGESERVER_DEFAULT_VIRTUAL_FILE_IO_MODE",
-                    )
-                    .unwrap_or(IoMode::Buffered)
-                });
-                *CACHED
+                IoMode::Buffered
             }
         }
     }

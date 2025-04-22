@@ -11,6 +11,7 @@ use pageserver::task_mgr::TaskKind;
 use pageserver::tenant::storage_layer::InMemoryLayer;
 use pageserver::{page_cache, virtual_file};
 use pageserver_api::key::Key;
+use pageserver_api::models::virtual_file::IoMode;
 use pageserver_api::shard::TenantShardId;
 use pageserver_api::value::Value;
 use tokio_util::sync::CancellationToken;
@@ -138,11 +139,14 @@ async fn ingest(
 /// Wrapper to instantiate a tokio runtime
 fn ingest_main(
     conf: &'static PageServerConf,
+    io_mode: IoMode,
     put_size: usize,
     put_count: usize,
     key_layout: KeyLayout,
     write_delta: WriteDelta,
 ) {
+    pageserver::virtual_file::set_io_mode(io_mode);
+
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -173,92 +177,118 @@ fn criterion_benchmark(c: &mut Criterion) {
     ));
     virtual_file::init(
         16384,
-        virtual_file::io_engine_for_bench(),
+        {
+            #[cfg(not(target_os = "linux"))]
+            const _: () = {
+                panic!(
+                    "This benchmark does I/O and can only give a representative result on Linux"
+                );
+            };
+            #[cfg(target_os = "linux")]
+            pageserver_api::models::virtual_file::IoEngineKind::TokioEpollUring
+        },
+        // immaterial, each `ingest_main` invocation below overrides this
         conf.virtual_file_io_mode,
+        // without actually doing syncs, buffered writes have an unfair advantage over direct IO writes
         virtual_file::SyncMode::Sync,
     );
     page_cache::init(conf.page_cache_size);
 
-    {
-        let mut group = c.benchmark_group("ingest-small-values");
-        let put_size = 100usize;
-        let put_count = 128 * 1024 * 1024 / put_size;
-        group.throughput(criterion::Throughput::Bytes((put_size * put_count) as u64));
-        group.sample_size(10);
-        group.bench_function("ingest 128MB/100b seq", |b| {
-            b.iter(|| {
-                ingest_main(
-                    conf,
-                    put_size,
-                    put_count,
-                    KeyLayout::Sequential,
-                    WriteDelta::Yes,
-                )
-            })
-        });
-        group.bench_function("ingest 128MB/100b rand", |b| {
-            b.iter(|| {
-                ingest_main(
-                    conf,
-                    put_size,
-                    put_count,
-                    KeyLayout::Random,
-                    WriteDelta::Yes,
-                )
-            })
-        });
-        group.bench_function("ingest 128MB/100b rand-1024keys", |b| {
-            b.iter(|| {
-                ingest_main(
-                    conf,
-                    put_size,
-                    put_count,
-                    KeyLayout::RandomReuse(0x3ff),
-                    WriteDelta::Yes,
-                )
-            })
-        });
-        group.bench_function("ingest 128MB/100b seq, no delta", |b| {
-            b.iter(|| {
-                ingest_main(
-                    conf,
-                    put_size,
-                    put_count,
-                    KeyLayout::Sequential,
-                    WriteDelta::No,
-                )
-            })
-        });
-    }
+    let io_modes = [IoMode::Buffered, IoMode::Direct, IoMode::DirectRw];
+    for io_mode in io_modes {
+        {
+            let mut group = c.benchmark_group("ingest-small-values");
+            let put_size = 100usize;
+            let put_count = 128 * 1024 * 1024 / put_size;
+            group.throughput(criterion::Throughput::Bytes((put_size * put_count) as u64));
+            group.sample_size(10);
+            group.bench_function(format!("io_mode={io_mode:?} 128MB/100b seq"), |b| {
+                b.iter(|| {
+                    ingest_main(
+                        conf,
+                        io_mode,
+                        put_size,
+                        put_count,
+                        KeyLayout::Sequential,
+                        WriteDelta::Yes,
+                    )
+                })
+            });
+            group.bench_function(format!("io_mode={io_mode:?} 128MB/100b rand"), |b| {
+                b.iter(|| {
+                    ingest_main(
+                        conf,
+                        io_mode,
+                        put_size,
+                        put_count,
+                        KeyLayout::Random,
+                        WriteDelta::Yes,
+                    )
+                })
+            });
+            group.bench_function(
+                format!("io_mode={io_mode:?} 128MB/100b rand-1024keys"),
+                |b| {
+                    b.iter(|| {
+                        ingest_main(
+                            conf,
+                            io_mode,
+                            put_size,
+                            put_count,
+                            KeyLayout::RandomReuse(0x3ff),
+                            WriteDelta::Yes,
+                        )
+                    })
+                },
+            );
+            group.bench_function(
+                format!("io_mode={io_mode:?} 128MB/100b seq no delta"),
+                |b| {
+                    b.iter(|| {
+                        ingest_main(
+                            conf,
+                            io_mode,
+                            put_size,
+                            put_count,
+                            KeyLayout::Sequential,
+                            WriteDelta::No,
+                        )
+                    })
+                },
+            );
+        }
 
-    {
-        let mut group = c.benchmark_group("ingest-big-values");
-        let put_size = 8192usize;
-        let put_count = 128 * 1024 * 1024 / put_size;
-        group.throughput(criterion::Throughput::Bytes((put_size * put_count) as u64));
-        group.sample_size(10);
-        group.bench_function("ingest 128MB/8k seq", |b| {
-            b.iter(|| {
-                ingest_main(
-                    conf,
-                    put_size,
-                    put_count,
-                    KeyLayout::Sequential,
-                    WriteDelta::Yes,
-                )
-            })
-        });
-        group.bench_function("ingest 128MB/8k seq, no delta", |b| {
-            b.iter(|| {
-                ingest_main(
-                    conf,
-                    put_size,
-                    put_count,
-                    KeyLayout::Sequential,
-                    WriteDelta::No,
-                )
-            })
-        });
+        {
+            let mut group = c.benchmark_group("ingest-big-values");
+            let put_size = 8192usize;
+            let put_count = 128 * 1024 * 1024 / put_size;
+            group.throughput(criterion::Throughput::Bytes((put_size * put_count) as u64));
+            group.sample_size(10);
+            group.bench_function(format!("io_mode={io_mode:?} 128MB/8k seq"), |b| {
+                b.iter(|| {
+                    ingest_main(
+                        conf,
+                        io_mode,
+                        put_size,
+                        put_count,
+                        KeyLayout::Sequential,
+                        WriteDelta::Yes,
+                    )
+                })
+            });
+            group.bench_function(format!("io_mode={io_mode:?} 128MB/8k seq) no delta"), |b| {
+                b.iter(|| {
+                    ingest_main(
+                        conf,
+                        io_mode,
+                        put_size,
+                        put_count,
+                        KeyLayout::Sequential,
+                        WriteDelta::No,
+                    )
+                })
+            });
+        }
     }
 }
 
