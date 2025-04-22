@@ -1,12 +1,12 @@
-use std::collections::HashMap;
+
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use enum_map::{Enum as _, EnumMap};
 use futures::Future;
 use metrics::{
-    CounterVec, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPair,
+    CounterVec, GaugeVec, Histogram, HistogramVec, IntCounter, 
     IntCounterPairVec, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
     register_int_counter, register_int_counter_pair_vec, register_int_counter_vec,
@@ -258,15 +258,6 @@ static DISK_CONSISTENT_LSN: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static PROJECTED_REMOTE_CONSISTENT_LSN: Lazy<UIntGaugeVec> = Lazy::new(|| {
-    register_uint_gauge_vec!(
-        "pageserver_projected_remote_consistent_lsn",
-        "Projected remote consistent LSN grouped by timeline",
-        &["tenant_id", "shard_id", "timeline_id"]
-    )
-    .expect("failed to define a metric")
-});
-
 static PITR_HISTORY_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_pitr_history_size",
@@ -357,15 +348,6 @@ static VISIBLE_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-static REMOTE_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
-    register_uint_gauge_vec!(
-        "pageserver_remote_physical_size",
-        "The size of the layer files present in the remote storage that are listed in the remote index_part.json.",
-        // Corollary: If any files are missing from the index part, they won't be included here.
-        &["tenant_id", "shard_id", "timeline_id"]
-    )
-    .expect("failed to define a metric")
-});
 
 pub(crate) static REMOTE_ONDEMAND_DOWNLOADED_LAYERS: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
@@ -1130,45 +1112,8 @@ pub(crate) enum ComputeCommandKind {
 }
 
 
-// remote storage metrics
 
-static REMOTE_TIMELINE_CLIENT_CALLS: Lazy<IntCounterPairVec> = Lazy::new(|| {
-    register_int_counter_pair_vec!(
-        "pageserver_remote_timeline_client_calls_started",
-        "Number of started calls to remote timeline client.",
-        "pageserver_remote_timeline_client_calls_finished",
-        "Number of finshed calls to remote timeline client.",
-        &[
-            "tenant_id",
-            "shard_id",
-            "timeline_id",
-            "file_kind",
-            "op_kind"
-        ],
-    )
-    .unwrap()
-});
 
-static REMOTE_TIMELINE_CLIENT_BYTES_STARTED_COUNTER: Lazy<IntCounterVec> =
-    Lazy::new(|| {
-        register_int_counter_vec!(
-        "pageserver_remote_timeline_client_bytes_started",
-        "Incremented by the number of bytes associated with a remote timeline client operation. \
-         The increment happens when the operation is scheduled.",
-        &["tenant_id", "shard_id", "timeline_id", "file_kind", "op_kind"],
-    )
-        .expect("failed to define a metric")
-    });
-
-static REMOTE_TIMELINE_CLIENT_BYTES_FINISHED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "pageserver_remote_timeline_client_bytes_finished",
-        "Incremented by the number of bytes associated with a remote timeline client operation. \
-         The increment happens when the operation finishes (regardless of success/failure/shutdown).",
-        &["tenant_id", "shard_id", "timeline_id", "file_kind", "op_kind"],
-    )
-    .expect("failed to define a metric")
-});
 
 pub(crate) struct TenantManagerMetrics {
     pub(crate) tenant_slot_writes: IntCounter,
@@ -1355,22 +1300,6 @@ impl RemoteOpFileKind {
         }
     }
 }
-
-pub(crate) static REMOTE_TIMELINE_CLIENT_COMPLETION_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "pageserver_remote_timeline_client_seconds_global",
-        "Time spent on remote timeline client operations. \
-        Grouped by task_kind, file_kind, operation_kind and status. \
-        The task_kind is \
-          - for layer downloads, populated from RequestContext (primary objective of having the label) \
-          - for index downloads, set to 'unknown' \
-          - for any upload operation, set to 'RemoteUploadTask' \
-        This keeps dimensionality at bay. \
-        Does not account for time spent waiting in remote timeline client's queues.",
-        &["task_kind", "file_kind", "op_kind", "status"]
-    )
-    .expect("failed to define a metric")
-});
 
 pub(crate) static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
@@ -2019,301 +1948,19 @@ pub(crate) fn remove_tenant_metrics(tenant_shard_id: &TenantShardId) {
     // we leave the BROKEN_TENANTS_SET entry if any
 }
 
-/// Maintain a per timeline gauge in addition to the global gauge.
-pub(crate) struct PerTimelineRemotePhysicalSizeGauge {
-}
-
-impl PerTimelineRemotePhysicalSizeGauge {
-    fn new(_per_timeline_gauge: UIntGauge) -> Self {
-        Self {
-        }
-    }
-    pub(crate) fn set(&self,_sz: u64) {
-    
-    }
-    pub(crate) fn get(&self) -> u64 {
-        
-        0 
-    }
-}
-
-impl Drop for PerTimelineRemotePhysicalSizeGauge {
-    fn drop(&mut self) {
-        
-    }
-}
-
-pub(crate) struct RemoteTimelineClientMetrics {
-    tenant_id: String,
-    shard_id: String,
-    timeline_id: String,
-    pub(crate) remote_physical_size_gauge: PerTimelineRemotePhysicalSizeGauge,
-    calls: Mutex<HashMap<(&'static str, &'static str), IntCounterPair>>,
-    bytes_started_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,
-    bytes_finished_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,
-    pub(crate) projected_remote_consistent_lsn_gauge: UIntGauge,
-}
-
-impl RemoteTimelineClientMetrics {
-    pub fn new(tenant_shard_id: &TenantShardId, timeline_id: &TimelineId) -> Self {
-        let tenant_id_str = tenant_shard_id.tenant_id.to_string();
-        let shard_id_str = format!("{}", tenant_shard_id.shard_slug());
-        let timeline_id_str = timeline_id.to_string();
-
-        let remote_physical_size_gauge = PerTimelineRemotePhysicalSizeGauge::new(
-            REMOTE_PHYSICAL_SIZE
-                .get_metric_with_label_values(&[&tenant_id_str, &shard_id_str, &timeline_id_str])
-                .unwrap(),
-        );
-
-        let projected_remote_consistent_lsn_gauge = PROJECTED_REMOTE_CONSISTENT_LSN
-            .get_metric_with_label_values(&[&tenant_id_str, &shard_id_str, &timeline_id_str])
-            .unwrap();
-
-        RemoteTimelineClientMetrics {
-            tenant_id: tenant_id_str,
-            shard_id: shard_id_str,
-            timeline_id: timeline_id_str,
-            calls: Mutex::new(HashMap::default()),
-            bytes_started_counter: Mutex::new(HashMap::default()),
-            bytes_finished_counter: Mutex::new(HashMap::default()),
-            remote_physical_size_gauge,
-            projected_remote_consistent_lsn_gauge,
-        }
-    }
-
-    pub fn remote_operation_time(
-        &self,
-        task_kind: Option<TaskKind>,
-        file_kind: &RemoteOpFileKind,
-        op_kind: &RemoteOpKind,
-        status: &'static str,
-    ) -> Histogram {
-        REMOTE_TIMELINE_CLIENT_COMPLETION_LATENCY
-            .get_metric_with_label_values(&[
-                task_kind.as_ref().map(|tk| tk.into()).unwrap_or("unknown"),
-                file_kind.as_str(),
-                op_kind.as_str(),
-                status,
-            ])
-            .unwrap()
-    }
-
-    fn calls_counter_pair(
-        &self,
-        file_kind: &RemoteOpFileKind,
-        op_kind: &RemoteOpKind,
-    ) -> IntCounterPair {
-        let mut guard = self.calls.lock().unwrap();
-        let key = (file_kind.as_str(), op_kind.as_str());
-        let metric = guard.entry(key).or_insert_with(move || {
-            REMOTE_TIMELINE_CLIENT_CALLS
-                .get_metric_with_label_values(&[
-                    &self.tenant_id,
-                    &self.shard_id,
-                    &self.timeline_id,
-                    key.0,
-                    key.1,
-                ])
-                .unwrap()
-        });
-        metric.clone()
-    }
-
-    fn bytes_finished_counter(
-        &self,
-        file_kind: &RemoteOpFileKind,
-        op_kind: &RemoteOpKind,
-    ) -> IntCounter {
-        let mut guard = self.bytes_finished_counter.lock().unwrap();
-        let key = (file_kind.as_str(), op_kind.as_str());
-        let metric = guard.entry(key).or_insert_with(move || {
-            REMOTE_TIMELINE_CLIENT_BYTES_FINISHED_COUNTER
-                .get_metric_with_label_values(&[
-                    &self.tenant_id,
-                    &self.shard_id,
-                    &self.timeline_id,
-                    key.0,
-                    key.1,
-                ])
-                .unwrap()
-        });
-        metric.clone()
-    }
-}
-
-#[cfg(test)]
-impl RemoteTimelineClientMetrics {
-    pub fn get_bytes_started_counter_value(
-        &self,
-        _file_kind: &RemoteOpFileKind,
-        _op_kind: &RemoteOpKind,
-    ) -> Option<u64> {
-        None // FIXME: Return dummy value as counter access is commented out
-    }
-
-    pub fn get_bytes_finished_counter_value(
-        &self,
-        _file_kind: &RemoteOpFileKind,
-        _op_kind: &RemoteOpKind,
-    ) -> Option<u64> {
-        None // FIXME: Return dummy value as counter access is commented out
-    }
-}
-
-/// See [`RemoteTimelineClientMetrics::call_begin`].
-#[must_use]
-pub(crate) struct RemoteTimelineClientCallMetricGuard {
-    /// Decremented on drop.
-    calls_counter_pair: Option<IntCounterPair>,
-    /// If Some(), this references the bytes_finished metric, and we increment it by the given `u64` on drop.
-    bytes_finished: Option<(IntCounter, u64)>,
-}
-
-impl RemoteTimelineClientCallMetricGuard {
-    /// Consume this guard object without performing the metric updates it would do on `drop()`.
-    /// The caller vouches to do the metric updates manually.
-    pub fn will_decrement_manually(mut self) {
-        let RemoteTimelineClientCallMetricGuard {
-            calls_counter_pair,
-            bytes_finished,
-        } = &mut self;
-        calls_counter_pair.take();
-        bytes_finished.take();
-    }
-}
-
-impl Drop for RemoteTimelineClientCallMetricGuard {
-    fn drop(&mut self) {
-    }
-}
-
-/// The enum variants communicate to the [`RemoteTimelineClientMetrics`] whether to
-/// track the byte size of this call in applicable metric(s).
-pub(crate) enum RemoteTimelineClientMetricsCallTrackSize {
-    /// Do not account for this call's byte size in any metrics.
-    /// The `reason` field is there to make the call sites self-documenting
-    /// about why they don't need the metric.
-    DontTrackSize { reason: &'static str },
-    /// Track the byte size of the call in applicable metric(s).
-    Bytes(u64),
-}
-
-impl RemoteTimelineClientMetrics {
-    /// Update the metrics that change when a call to the remote timeline client instance starts.
-    ///
-    /// Drop the returned guard object once the operation is finished to updates corresponding metrics that track completions.
-    /// Or, use [`RemoteTimelineClientCallMetricGuard::will_decrement_manually`] and [`call_end`](Self::call_end) if that
-    /// is more suitable.
-    /// Never do both.
-    pub(crate) fn call_begin(
-        &self,
-        file_kind: &RemoteOpFileKind,
-        op_kind: &RemoteOpKind,
-        size: RemoteTimelineClientMetricsCallTrackSize,
-    ) -> RemoteTimelineClientCallMetricGuard {
-        let calls_counter_pair = self.calls_counter_pair(file_kind, op_kind);
-        // calls_counter_pair.inc();
-
-        let bytes_finished = match size {
-            RemoteTimelineClientMetricsCallTrackSize::DontTrackSize { reason: _reason } => {
-                // nothing to do
-                None
-            }
-            RemoteTimelineClientMetricsCallTrackSize::Bytes(size) => {
-                // self.bytes_started_counter(file_kind, op_kind).inc_by(size);
-                let finished_counter = self.bytes_finished_counter(file_kind, op_kind);
-                Some((finished_counter, size))
-            }
-        };
-        RemoteTimelineClientCallMetricGuard {
-            calls_counter_pair: Some(calls_counter_pair),
-            bytes_finished,
-        }
-    }
-
-    /// Manually udpate the metrics that track completions, instead of using the guard object.
-    /// Using the guard object is generally preferable.
-    /// See [`call_begin`](Self::call_begin) for more context.
-    pub(crate) fn call_end(
-        &self,
-        _file_kind: &RemoteOpFileKind,
-        _op_kind: &RemoteOpKind,
-        _size: RemoteTimelineClientMetricsCallTrackSize,
-    ) {
-        
-    }
-}
-
-impl Drop for RemoteTimelineClientMetrics {
-    fn drop(&mut self) {
-        let RemoteTimelineClientMetrics {
-            tenant_id,
-            shard_id,
-            timeline_id,
-            remote_physical_size_gauge,
-            calls,
-            bytes_started_counter,
-            bytes_finished_counter,
-            projected_remote_consistent_lsn_gauge,
-        } = self;
-        for ((a, b), _) in calls.get_mut().unwrap().drain() {
-            let mut res = [Ok(()), Ok(())];
-            REMOTE_TIMELINE_CLIENT_CALLS
-                .remove_label_values(&mut res, &[tenant_id, shard_id, timeline_id, a, b]);
-            // don't care about results
-        }
-        for ((a, b), _) in bytes_started_counter.get_mut().unwrap().drain() {
-            let _ = REMOTE_TIMELINE_CLIENT_BYTES_STARTED_COUNTER.remove_label_values(&[
-                tenant_id,
-                shard_id,
-                timeline_id,
-                a,
-                b,
-            ]);
-        }
-        for ((a, b), _) in bytes_finished_counter.get_mut().unwrap().drain() {
-            let _ = REMOTE_TIMELINE_CLIENT_BYTES_FINISHED_COUNTER.remove_label_values(&[
-                tenant_id,
-                shard_id,
-                timeline_id,
-                a,
-                b,
-            ]);
-        }
-        {
-            let _ = remote_physical_size_gauge; // use to avoid 'unused' warning in desctructuring above
-            let _ = REMOTE_PHYSICAL_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
-        }
-        {
-            let _ = projected_remote_consistent_lsn_gauge;
-            let _ = PROJECTED_REMOTE_CONSISTENT_LSN.remove_label_values(&[
-                tenant_id,
-                shard_id,
-                timeline_id,
-            ]);
-        }
-    }
-}
 
 /// Wrapper future that measures the time spent by a remote storage operation,
 /// and records the time and success/failure as a prometheus metric.
 pub(crate) trait MeasureRemoteOp<O, E>: Sized + Future<Output = Result<O, E>> {
     async fn measure_remote_op(
         self,
-        task_kind: Option<TaskKind>, // not all caller contexts have a RequestContext / TaskKind handy
-        file_kind: RemoteOpFileKind,
-        op: RemoteOpKind,
-        metrics: Arc<RemoteTimelineClientMetrics>,
+        _task_kind: Option<TaskKind>, // not all caller contexts have a RequestContext / TaskKind handy
+        _file_kind: RemoteOpFileKind,
+        _op: RemoteOpKind,
     ) -> Result<O, E> {
-        let start = Instant::now();
-        let res = self.await;
-        let duration = start.elapsed();
-        let status = if res.is_ok() { &"success" } else { &"failure" };
-        metrics
-            .remote_operation_time(task_kind, &file_kind, &op, status)
-            .observe(duration.as_secs_f64());
-        res
+        
+        self.await
+        
     }
 }
 
@@ -2645,24 +2292,8 @@ pub(crate) mod disk_usage_based_eviction {
     pub(crate) static METRICS: Lazy<Metrics> = Lazy::new(Metrics::default);
 }
 
-static TOKIO_EXECUTOR_THREAD_COUNT: Lazy<UIntGaugeVec> = Lazy::new(|| {
-    register_uint_gauge_vec!(
-        "pageserver_tokio_executor_thread_configured_count",
-        "Total number of configued tokio executor threads in the process.
-         The `setup` label denotes whether we're running with multiple runtimes or a single runtime.",
-        &["setup"],
-    )
-    .unwrap()
-});
 
-pub(crate) fn set_tokio_runtime_setup(setup: &str, num_threads: NonZeroUsize) {
-    static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = SERIALIZE.lock().unwrap();
-    TOKIO_EXECUTOR_THREAD_COUNT.reset();
-    TOKIO_EXECUTOR_THREAD_COUNT
-        .get_metric_with_label_values(&[setup])
-        .unwrap()
-        .set(u64::try_from(num_threads.get()).unwrap());
+pub(crate) fn set_tokio_runtime_setup(_setup: &str, _num_threads: NonZeroUsize) {
 }
 
 pub fn preinitialize_metrics(

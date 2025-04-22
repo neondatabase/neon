@@ -224,8 +224,7 @@ use crate::context::RequestContext;
 use crate::deletion_queue::{DeletionQueueClient, DeletionQueueError};
 use crate::metrics::{
     MeasureRemoteOp, REMOTE_ONDEMAND_DOWNLOADED_BYTES, REMOTE_ONDEMAND_DOWNLOADED_LAYERS,
-    RemoteOpFileKind, RemoteOpKind, RemoteTimelineClientMetrics,
-    RemoteTimelineClientMetricsCallTrackSize,
+    RemoteOpFileKind, RemoteOpKind, 
 };
 use crate::task_mgr::{BACKGROUND_RUNTIME, TaskKind, shutdown_token};
 use crate::tenant::metadata::TimelineMetadata;
@@ -357,8 +356,6 @@ pub(crate) struct RemoteTimelineClient {
 
     upload_queue: Mutex<UploadQueue>,
 
-    pub(crate) metrics: Arc<RemoteTimelineClientMetrics>,
-
     storage_impl: GenericRemoteStorage,
 
     deletion_queue_client: DeletionQueueClient,
@@ -405,10 +402,6 @@ impl RemoteTimelineClient {
             storage_impl: remote_storage,
             deletion_queue_client,
             upload_queue: Mutex::new(UploadQueue::Uninitialized),
-            metrics: Arc::new(RemoteTimelineClientMetrics::new(
-                &tenant_shard_id,
-                &timeline_id,
-            )),
             config: std::sync::RwLock::new(RemoteTimelineClientConfig::from(location_conf)),
             cancel: CancellationToken::new(),
         }
@@ -597,21 +590,13 @@ impl RemoteTimelineClient {
             .map_err(|_| UploadQueueNotReadyError)
     }
 
-    fn update_remote_physical_size_gauge(&self, current_remote_index_part: Option<&IndexPart>) {
-        let size: u64 = if let Some(current_remote_index_part) = current_remote_index_part {
-            current_remote_index_part
-                .layer_metadata
-                .values()
-                .map(|ilmd| ilmd.file_size)
-                .sum()
-        } else {
-            0
-        };
-        self.metrics.remote_physical_size_gauge.set(size);
+    fn update_remote_physical_size_gauge(&self, _current_remote_index_part: Option<&IndexPart>) {
+
+        
     }
 
     pub fn get_remote_physical_size(&self) -> u64 {
-        self.metrics.remote_physical_size_gauge.get()
+  0
     }
 
     //
@@ -626,13 +611,6 @@ impl RemoteTimelineClient {
         &self,
         cancel: &CancellationToken,
     ) -> Result<MaybeDeletedIndexPart, DownloadError> {
-        let _unfinished_gauge_guard = self.metrics.call_begin(
-            &RemoteOpFileKind::Index,
-            &RemoteOpKind::Download,
-            crate::metrics::RemoteTimelineClientMetricsCallTrackSize::DontTrackSize {
-                reason: "no need for a downloads gauge",
-            },
-        );
 
         let (index_part, index_generation, index_last_modified) = download::download_index_part(
             &self.storage_impl,
@@ -645,7 +623,7 @@ impl RemoteTimelineClient {
             Option::<TaskKind>::None,
             RemoteOpFileKind::Index,
             RemoteOpKind::Download,
-            Arc::clone(&self.metrics),
+        
         )
         .await?;
 
@@ -720,13 +698,7 @@ impl RemoteTimelineClient {
         ctx: &RequestContext,
     ) -> Result<u64, DownloadError> {
         let downloaded_size = {
-            let _unfinished_gauge_guard = self.metrics.call_begin(
-                &RemoteOpFileKind::Layer,
-                &RemoteOpKind::Download,
-                crate::metrics::RemoteTimelineClientMetricsCallTrackSize::DontTrackSize {
-                    reason: "no need for a downloads gauge",
-                },
-            );
+        
             download::download_layer_file(
                 self.conf,
                 &self.storage_impl,
@@ -743,7 +715,7 @@ impl RemoteTimelineClient {
                 Some(ctx.task_kind()),
                 RemoteOpFileKind::Layer,
                 RemoteOpKind::Download,
-                Arc::clone(&self.metrics),
+          
             )
             .await?
         };
@@ -1027,7 +999,6 @@ impl RemoteTimelineClient {
         let op = UploadOp::UploadMetadata {
             uploaded: Box::new(index_part.clone()),
         };
-        self.metric_begin(&op);
         upload_queue.queued_operations.push_back(op);
         upload_queue.latest_files_changes_since_metadata_upload_scheduled = 0;
 
@@ -1265,7 +1236,6 @@ impl RemoteTimelineClient {
         );
 
         let op = UploadOp::UploadLayer(layer, metadata, None);
-        self.metric_begin(&op);
         upload_queue.queued_operations.push_back(op);
     }
 
@@ -1442,7 +1412,6 @@ impl RemoteTimelineClient {
         let op = UploadOp::Delete(Delete {
             layers: with_metadata,
         });
-        self.metric_begin(&op);
         upload_queue.queued_operations.push_back(op);
     }
 
@@ -2180,7 +2149,7 @@ impl RemoteTimelineClient {
                         Some(TaskKind::RemoteUploadTask),
                         RemoteOpFileKind::Layer,
                         RemoteOpKind::Upload,
-                        Arc::clone(&self.metrics),
+                      
                     )
                     .await
                 }
@@ -2197,7 +2166,7 @@ impl RemoteTimelineClient {
                         Some(TaskKind::RemoteUploadTask),
                         RemoteOpFileKind::Index,
                         RemoteOpKind::Upload,
-                        Arc::clone(&self.metrics),
+                    
                     )
                     .await;
                     if res.is_ok() {
@@ -2343,10 +2312,7 @@ impl RemoteTimelineClient {
                     upload_queue.clean.1 = Some(task.task_id);
 
                     let lsn = upload_queue.clean.0.metadata.disk_consistent_lsn();
-                    self.metrics
-                        .projected_remote_consistent_lsn_gauge
-                        .set(lsn.0);
-
+                   
                     if self.generation.is_none() {
                         // Legacy mode: skip validating generation
                         upload_queue.visible_remote_consistent_lsn.store(lsn);
@@ -2387,64 +2353,6 @@ impl RemoteTimelineClient {
                 .await;
         }
 
-        self.metric_end(&task.op);
-        for coalesced_op in &task.coalesced_ops {
-            self.metric_end(coalesced_op);
-        }
-    }
-
-    fn metric_impl(
-        &self,
-        op: &UploadOp,
-    ) -> Option<(
-        RemoteOpFileKind,
-        RemoteOpKind,
-        RemoteTimelineClientMetricsCallTrackSize,
-    )> {
-        use RemoteTimelineClientMetricsCallTrackSize::DontTrackSize;
-        let res = match op {
-            UploadOp::UploadLayer(_, m, _) => (
-                RemoteOpFileKind::Layer,
-                RemoteOpKind::Upload,
-                RemoteTimelineClientMetricsCallTrackSize::Bytes(m.file_size),
-            ),
-            UploadOp::UploadMetadata { .. } => (
-                RemoteOpFileKind::Index,
-                RemoteOpKind::Upload,
-                DontTrackSize {
-                    reason: "metadata uploads are tiny",
-                },
-            ),
-            UploadOp::Delete(_delete) => (
-                RemoteOpFileKind::Layer,
-                RemoteOpKind::Delete,
-                DontTrackSize {
-                    reason: "should we track deletes? positive or negative sign?",
-                },
-            ),
-            UploadOp::Barrier(..) | UploadOp::Shutdown => {
-                // we do not account these
-                return None;
-            }
-        };
-        Some(res)
-    }
-
-    fn metric_begin(&self, op: &UploadOp) {
-        let (file_kind, op_kind, track_bytes) = match self.metric_impl(op) {
-            Some(x) => x,
-            None => return,
-        };
-        let guard = self.metrics.call_begin(&file_kind, &op_kind, track_bytes);
-        guard.will_decrement_manually(); // in metric_end(), see right below
-    }
-
-    fn metric_end(&self, op: &UploadOp) {
-        let (file_kind, op_kind, track_bytes) = match self.metric_impl(op) {
-            Some(x) => x,
-            None => return,
-        };
-        self.metrics.call_end(&file_kind, &op_kind, track_bytes);
     }
 
     /// Close the upload queue for new operations and cancel queued operations.
@@ -2524,7 +2432,6 @@ impl RemoteTimelineClient {
 
                 // Tear down queued ops
                 for op in qi.queued_operations.into_iter() {
-                    self.metric_end(&op);
                     // Dropping UploadOp::Barrier() here will make wait_completion() return with an Err()
                     // which is exactly what we want to happen.
                     drop(op);
@@ -2834,10 +2741,6 @@ mod tests {
                 storage_impl: self.harness.remote_storage.clone(),
                 deletion_queue_client: self.harness.deletion_queue.new_client(),
                 upload_queue: Mutex::new(UploadQueue::Uninitialized),
-                metrics: Arc::new(RemoteTimelineClientMetrics::new(
-                    &self.harness.tenant_shard_id,
-                    &TIMELINE_ID,
-                )),
                 config: std::sync::RwLock::new(RemoteTimelineClientConfig::from(&location_conf)),
                 cancel: CancellationToken::new(),
             })
@@ -3064,99 +2967,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn bytes_unfinished_gauge_for_layer_file_uploads() {
-        // Setup
-
-        let TestSetup {
-            harness,
-            tenant: _tenant,
-            timeline,
-            ..
-        } = TestSetup::new("metrics").await.unwrap();
-        let client = &timeline.remote_client;
-
-        let layer_file_name_1: LayerName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
-        let local_path = local_layer_path(
-            harness.conf,
-            &timeline.tenant_shard_id,
-            &timeline.timeline_id,
-            &layer_file_name_1,
-            &harness.generation,
-        );
-        let content_1 = dummy_contents("foo");
-        std::fs::write(&local_path, &content_1).unwrap();
-
-        let layer_file_1 = Layer::for_resident(
-            harness.conf,
-            &timeline,
-            local_path,
-            layer_file_name_1.clone(),
-            LayerFileMetadata::new(content_1.len() as u64, harness.generation, harness.shard),
-        );
-
-        #[derive(Debug, PartialEq, Clone, Copy)]
-        struct BytesStartedFinished {
-            started: Option<usize>,
-            finished: Option<usize>,
-        }
-        impl std::ops::Add for BytesStartedFinished {
-            type Output = Self;
-            fn add(self, rhs: Self) -> Self::Output {
-                Self {
-                    started: self.started.map(|v| v + rhs.started.unwrap_or(0)),
-                    finished: self.finished.map(|v| v + rhs.finished.unwrap_or(0)),
-                }
-            }
-        }
-        let get_bytes_started_stopped = || {
-            let started = client
-                .metrics
-                .get_bytes_started_counter_value(&RemoteOpFileKind::Layer, &RemoteOpKind::Upload)
-                .map(|v| v.try_into().unwrap());
-            let stopped = client
-                .metrics
-                .get_bytes_finished_counter_value(&RemoteOpFileKind::Layer, &RemoteOpKind::Upload)
-                .map(|v| v.try_into().unwrap());
-            BytesStartedFinished {
-                started,
-                finished: stopped,
-            }
-        };
-
-        // Test
-        tracing::info!("now doing actual test");
-
-        let actual_a = get_bytes_started_stopped();
-
-        client
-            .schedule_layer_file_upload(layer_file_1.clone())
-            .unwrap();
-
-        let actual_b = get_bytes_started_stopped();
-
-        client.wait_completion().await.unwrap();
-
-        let actual_c = get_bytes_started_stopped();
-
-        // Validate
-
-        let expected_b = actual_a
-            + BytesStartedFinished {
-                started: Some(content_1.len()),
-                // assert that the _finished metric is created eagerly so that subtractions work on first sample
-                finished: Some(0),
-            };
-        assert_eq!(actual_b, expected_b);
-
-        let expected_c = actual_a
-            + BytesStartedFinished {
-                started: Some(content_1.len()),
-                finished: Some(content_1.len()),
-            };
-        assert_eq!(actual_c, expected_c);
-    }
-
+    
     async fn inject_index_part(test_state: &TestSetup, generation: Generation) -> IndexPart {
         // An empty IndexPart, just sufficient to ensure deserialization will succeed
         let example_index_part = IndexPart::example();
