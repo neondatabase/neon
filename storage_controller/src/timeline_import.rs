@@ -58,9 +58,11 @@ impl From<TimelineImportUpdateError> for ApiError {
             } => ApiError::NotFound(
                 anyhow::anyhow!("Import for {tenant_id}/{timeline_id} not found").into(),
             ),
-            TimelineImportUpdateError::MismatchedShards => ApiError::InternalServerError(
-                anyhow::anyhow!("Import shards do not match update request"),
-            ),
+            TimelineImportUpdateError::MismatchedShards => {
+                ApiError::InternalServerError(anyhow::anyhow!(
+                    "Import shards do not match update request, likely a shard split happened during import, this is a bug"
+                ))
+            }
             TimelineImportUpdateError::UnexpectedUpdate => {
                 ApiError::InternalServerError(anyhow::anyhow!("Update request is unexpected"))
             }
