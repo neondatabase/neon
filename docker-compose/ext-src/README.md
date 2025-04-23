@@ -83,3 +83,11 @@ To add a new extension for testing:
    - If neither exists, it will try to run `make installcheck`
    - `test-upgrade.sh` is only needed if you want to test upgrade scenarios
 3. Update the list of extensions in the `test_extensions_upgrade.sh` script if needed for upgrade testing
+
+### Patching Extension Sources
+
+If you need to patch the extension sources:
+
+1. Place the patch file in the extension's directory
+2. Apply the patch in the appropriate script (`test-upgrade.sh`, `neon-test.sh`, `regular-test.sh`, or `Makefile`)
+3. The patch will be applied during the testing process
