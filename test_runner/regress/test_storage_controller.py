@@ -4520,3 +4520,63 @@ def test_storage_controller_migrate_with_pageserver_restart(
         "shards": [{"node_id": int(secondary.id), "shard_number": 0}],
         "preferred_az": DEFAULT_AZ_ID,
     }
+
+
+def test_storage_controller_shard_scheduling_policy_essential(neon_env_builder: NeonEnvBuilder):
+    """
+    Check if essential scheduling policy works as expected.
+    """
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    env.storage_controller.tenant_create(env.initial_tenant)
+    env.storage_controller.tenant_policy_update(
+        env.initial_tenant,
+        {
+            "placement": {"Attached": 1},
+            "scheduling": "Essential",
+        },
+    )
+    env.storage_controller.reconcile_until_idle()
+
+    # Ensure that the tenant is attached to both: one is primary, the other is secondary
+    pageserver_1_attachments = (
+        env.pageservers[0].http_client().tenant_list_locations()["tenant_shards"]
+    )
+    pageserver_2_attachments = (
+        env.pageservers[1].http_client().tenant_list_locations()["tenant_shards"]
+    )
+    assert len(pageserver_1_attachments) == 1
+    assert len(pageserver_2_attachments) == 1
+    primary_pageserver = None
+    if pageserver_1_attachments[0][1]["mode"] == "AttachedSingle":
+        primary_pageserver = 0
+        assert pageserver_2_attachments[0][1]["mode"] == "Secondary"
+    elif pageserver_1_attachments[0][1]["mode"] == "Secondary":
+        primary_pageserver = 1
+        assert pageserver_2_attachments[0][1]["mode"] == "AttachedSingle"
+    else:
+        assert False, "unreachable"
+    secondary_pageserver = 1 - primary_pageserver
+
+    # Ensure the tenant gets attached to the secondary pageserver
+    env.pageservers[primary_pageserver].stop()
+    env.storage_controller.node_configure(
+        env.pageservers[primary_pageserver].id, {"availability": "Offline"}
+    )
+    env.storage_controller.reconcile_until_idle()
+    assert (
+        len(
+            env.pageservers[secondary_pageserver]
+            .http_client()
+            .tenant_list_locations()["tenant_shards"]
+        )
+        == 1
+    )
+    assert (
+        env.pageservers[secondary_pageserver]
+        .http_client()
+        .tenant_list_locations()["tenant_shards"][0][1]["mode"]
+        == "AttachedSingle"
+    )
