@@ -1761,6 +1761,8 @@ pub struct TopTenantShardsResponse {
 }
 
 pub mod virtual_file {
+    use std::sync::LazyLock;
+
     #[derive(
         Copy,
         Clone,
@@ -1815,8 +1817,7 @@ pub mod virtual_file {
             // NB: the Python regression & perf tests have their own defaults management
             // that writes pageserver.toml; they do not use this variable.
             if cfg!(test) {
-                use once_cell::sync::Lazy;
-                static CACHED: Lazy<IoMode> = Lazy::new(|| {
+                static CACHED: LazyLock<IoMode> = LazyLock::new(|| {
                     utils::env::var_serde_json_string(
                         "NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IO_MODE",
                     )
