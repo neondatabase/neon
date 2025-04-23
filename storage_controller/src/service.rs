@@ -3819,7 +3819,7 @@ impl Service {
         })
     }
 
-    pub(crate) async fn put_timeline_import_status(
+    pub(crate) async fn handle_timeline_shard_import_progress_upcall(
         self: &Arc<Self>,
         req: PutTimelineImportStatusRequest,
     ) -> Result<(), ApiError> {

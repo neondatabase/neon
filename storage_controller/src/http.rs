@@ -171,7 +171,10 @@ async fn handle_put_timeline_import_status(req: Request<Body>) -> Result<Respons
     let state = get_state(&req);
     json_response(
         StatusCode::OK,
-        state.service.put_timeline_import_status(put_req).await?,
+        state
+            .service
+            .handle_timeline_shard_import_progress_upcall(put_req)
+            .await?,
     )
 }
 
