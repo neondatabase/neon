@@ -36,7 +36,6 @@ use wal_decoder::wire_format::FromWireFormat;
 
 use super::TaskStateUpdate;
 use crate::context::RequestContext;
-use crate::metrics::{WAL_INGEST, WALRECEIVER_STARTED_CONNECTIONS};
 use crate::pgdatadir_mapping::DatadirModification;
 use crate::task_mgr::{TaskKind, WALRECEIVER_RUNTIME};
 use crate::tenant::{
@@ -137,7 +136,7 @@ pub(super) async fn handle_walreceiver_connection(
         GateError::GateClosed => WalReceiverError::ClosedGate,
     })?;
 
-    WALRECEIVER_STARTED_CONNECTIONS.inc();
+  
 
     // Connect to the database in replication mode.
     info!("connecting to {wal_source_connconf:?}");
@@ -340,7 +339,7 @@ pub(super) async fn handle_walreceiver_connection(
 
         let status_update = match replication_message {
             ReplicationMessage::RawInterpretedWalRecords(raw) => {
-                WAL_INGEST.bytes_received.inc_by(raw.data().len() as u64);
+               
 
                 let mut uncommitted_records = 0;
 
@@ -413,10 +412,9 @@ pub(super) async fn handle_walreceiver_connection(
                     ctx: &RequestContext,
                     uncommitted: &mut u64,
                 ) -> anyhow::Result<()> {
-                    let stats = modification.stats();
+                  
                     modification.commit(ctx).await?;
-                    WAL_INGEST.records_committed.inc_by(*uncommitted);
-                    WAL_INGEST.inc_values_committed(&stats);
+                  
                     *uncommitted = 0;
                     Ok(())
                 }
@@ -430,9 +428,6 @@ pub(super) async fn handle_walreceiver_connection(
 
                     let local_next_record_lsn = interpreted.next_record_lsn;
 
-                    if interpreted.is_observed() {
-                        WAL_INGEST.records_observed.inc();
-                    }
 
                     walingest
                         .ingest_record(interpreted, &mut modification, &ctx)
@@ -504,12 +499,9 @@ pub(super) async fn handle_walreceiver_connection(
                     filtered: &mut u64,
                     ctx: &RequestContext,
                 ) -> anyhow::Result<()> {
-                    let stats = modification.stats();
+                   
                     modification.commit(ctx).await?;
-                    WAL_INGEST
-                        .records_committed
-                        .inc_by(*uncommitted - *filtered);
-                    WAL_INGEST.inc_values_committed(&stats);
+                   
                     *uncommitted = 0;
                     *filtered = 0;
                     Ok(())
@@ -523,7 +515,7 @@ pub(super) async fn handle_walreceiver_connection(
 
                 trace!("received XLogData between {startlsn} and {endlsn}");
 
-                WAL_INGEST.bytes_received.inc_by(data.len() as u64);
+            
                 waldecoder.feed_bytes(data);
 
                 {
@@ -580,7 +572,7 @@ pub(super) async fn handle_walreceiver_connection(
                             })?;
                         if !ingested {
                             tracing::debug!("ingest: filtered out record @ LSN {next_record_lsn}");
-                            WAL_INGEST.records_filtered.inc();
+                          
                             filtered_records += 1;
                         }
 

@@ -32,7 +32,6 @@ use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 // avoid binding to Write (conflicts with std::io::Write)
 // while being able to use std::fmt::Write's methods
-use crate::metrics::TIMELINE_EPHEMERAL_BYTES;
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::{OnDiskValue, OnDiskValueIo};
 use crate::tenant::timeline::GetVectoredError;
@@ -307,11 +306,7 @@ impl GlobalResourceUnits {
             }
         };
 
-        // This is a sloppy update: concurrent updates to the counter will race, and the exact
-        // value of the metric might not be the exact latest value of GLOBAL_RESOURCES::dirty_bytes.
-        // That's okay: as long as the metric contains some recent value, it doesn't have to always
-        // be literally the last update.
-        TIMELINE_EPHEMERAL_BYTES.set(new_global_dirty_bytes);
+       
 
         self.dirty_bytes = size;
 

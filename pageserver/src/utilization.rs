@@ -10,7 +10,7 @@ use pageserver_api::models::PageserverUtilization;
 use utils::serde_percent::Percent;
 
 use crate::config::PageServerConf;
-use crate::metrics::NODE_UTILIZATION_SCORE;
+
 use crate::tenant::mgr::TenantManager;
 
 pub(crate) fn regenerate(
@@ -53,7 +53,7 @@ pub(crate) fn regenerate(
     // Express a static value for how many shards we may schedule on one node
     const MAX_SHARDS: u32 = 5000;
 
-    let mut doc = PageserverUtilization {
+    let doc = PageserverUtilization {
         disk_usage_bytes: used,
         free_space_bytes: free,
         disk_wanted_bytes,
@@ -63,10 +63,7 @@ pub(crate) fn regenerate(
         utilization_score: None,
         captured_at: utils::serde_system_time::SystemTime(captured_at),
     };
-
-    // Initialize `PageserverUtilization::utilization_score`
-    let score = doc.cached_score();
-    NODE_UTILIZATION_SCORE.set(score);
+    
 
     Ok(doc)
 }

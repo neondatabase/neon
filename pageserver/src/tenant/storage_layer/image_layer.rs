@@ -882,14 +882,6 @@ impl ImageLayerWriterInner {
     ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
         let index_start_blk = self.blob_writer.size().div_ceil(PAGE_SZ as u64) as u32;
 
-        // Calculate compression ratio
-        let compressed_size = self.blob_writer.size() - PAGE_SZ as u64; // Subtract PAGE_SZ for header
-        crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES.inc_by(self.uncompressed_bytes);
-        crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES_CONSIDERED
-            .inc_by(self.uncompressed_bytes_eligible);
-        crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES_CHOSEN.inc_by(self.uncompressed_bytes_chosen);
-        crate::metrics::COMPRESSION_IMAGE_OUTPUT_BYTES.inc_by(compressed_size);
-
         let mut file = self.blob_writer.into_inner();
 
         // Write out the index

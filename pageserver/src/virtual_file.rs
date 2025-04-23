@@ -1319,7 +1319,6 @@ pub fn init(num_slots: usize, engine: IoEngineKind, mode: IoMode, sync_mode: Syn
     set_io_mode(mode);
     io_engine::init(engine);
     SYNC_MODE.store(sync_mode as u8, std::sync::atomic::Ordering::Relaxed);
-    crate::metrics::virtual_file_descriptor_cache::SIZE_MAX.set(num_slots as u64);
 }
 
 const TEST_MAX_FILE_DESCRIPTORS: usize = 10;

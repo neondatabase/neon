@@ -56,7 +56,6 @@ use utils::completion;
 use utils::id::TimelineId;
 
 use crate::config::PageServerConf;
-use crate::metrics::disk_usage_based_eviction::METRICS;
 use crate::task_mgr::{self, BACKGROUND_RUNTIME};
 use crate::tenant::mgr::TenantManager;
 use crate::tenant::remote_timeline_client::LayerFileMetadata;
@@ -388,7 +387,7 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
         }
     };
 
-    METRICS.layers_collected.inc_by(candidates.len() as u64);
+
 
     tracing::info!(
         elapsed_ms = collection_time.as_millis(),
@@ -428,7 +427,7 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     let (evicted_amount, usage_planned) =
         select_victims(&candidates, usage_pre).into_amount_and_planned();
 
-    METRICS.layers_selected.inc_by(evicted_amount as u64);
+ 
 
     // phase2: evict layers
 

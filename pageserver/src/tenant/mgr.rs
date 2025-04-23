@@ -44,7 +44,7 @@ use crate::controller_upcall_client::{
 };
 use crate::deletion_queue::DeletionQueueClient;
 use crate::http::routes::ACTIVE_TENANT_TIMEOUT;
-use crate::metrics::{TENANT, TENANT_MANAGER as METRICS};
+use crate::metrics::TENANT_MANAGER as METRICS;
 use crate::task_mgr::{BACKGROUND_RUNTIME, TaskKind};
 use crate::tenant::config::{
     AttachedLocationConfig, AttachmentMode, LocationConf, LocationMode, SecondaryLocationConfig,
@@ -519,7 +519,7 @@ pub async fn init_tenant_mgr(
         tenant_configs.len(),
         conf.concurrent_tenant_warmup.initial_permits()
     );
-    TENANT.startup_scheduled.inc_by(tenant_configs.len() as u64);
+
 
     // Accumulate futures for writing tenant configs, so that we can execute in parallel
     let mut config_write_futs = Vec::new();
@@ -2528,7 +2528,7 @@ impl SlotGuard {
                 Ok(())
             }
             None => {
-                METRICS.unexpected_errors.inc();
+              
                 error!(
                     tenant_shard_id = %self.tenant_shard_id,
                     "Missing InProgress marker during tenant upsert, this is a bug."
@@ -2538,7 +2538,7 @@ impl SlotGuard {
                 ))
             }
             Some(slot) => {
-                METRICS.unexpected_errors.inc();
+               
                 error!(tenant_shard_id=%self.tenant_shard_id, "Unexpected contents of TenantSlot during upsert, this is a bug.  Contents: {:?}", slot);
                 Err(TenantSlotUpsertError::InternalError(
                     "Unexpected contents of TenantSlot".into(),
@@ -2619,7 +2619,7 @@ impl Drop for SlotGuard {
         match m.entry(self.tenant_shard_id) {
             Entry::Occupied(mut entry) => {
                 if !matches!(entry.get(), TenantSlot::InProgress(_)) {
-                    METRICS.unexpected_errors.inc();
+                    
                     error!(tenant_shard_id=%self.tenant_shard_id, "Unexpected contents of TenantSlot during drop, this is a bug.  Contents: {:?}", entry.get());
                 }
 
@@ -2634,7 +2634,7 @@ impl Drop for SlotGuard {
                 }
             }
             Entry::Vacant(_) => {
-                METRICS.unexpected_errors.inc();
+                
                 error!(
                     tenant_shard_id = %self.tenant_shard_id,
                     "Missing InProgress marker during SlotGuard drop, this is a bug."
@@ -2694,7 +2694,7 @@ fn tenant_map_acquire_slot_impl(
     mode: TenantSlotAcquireMode,
 ) -> Result<SlotGuard, TenantSlotError> {
     use TenantSlotAcquireMode::*;
-    METRICS.tenant_slot_writes.inc();
+  
 
     let mut locked = tenants.write().unwrap();
     let span = tracing::info_span!("acquire_slot", tenant_id=%tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug());

@@ -46,7 +46,6 @@ use wal_decoder::models::*;
 
 use crate::ZERO_PAGE;
 use crate::context::RequestContext;
-use crate::metrics::WAL_INGEST;
 use crate::pgdatadir_mapping::{DatadirModification, Version};
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::{PageReconstructError, Timeline};
@@ -235,7 +234,7 @@ impl WalIngest {
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
     ) -> Result<bool, WalIngestError> {
-        WAL_INGEST.records_received.inc();
+      
         let prev_len = modification.len();
 
         modification.set_lsn(interpreted.next_record_lsn)?;
@@ -1443,9 +1442,6 @@ impl WalIngest {
                 gap_blocks_filled += 1;
             }
 
-            WAL_INGEST
-                .gap_blocks_zeroed_on_rel_extend
-                .inc_by(gap_blocks_filled);
 
             // Log something when relation extends cause use to fill gaps
             // with zero pages. Logging is rate limited per pg version to

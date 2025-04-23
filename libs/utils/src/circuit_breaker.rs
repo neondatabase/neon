@@ -1,7 +1,6 @@
 use std::fmt::Display;
 use std::time::{Duration, Instant};
 
-use metrics::IntCounter;
 
 /// Circuit breakers are for operations that are expensive and fallible.
 ///
@@ -54,7 +53,7 @@ impl CircuitBreaker {
         }
     }
 
-    pub fn fail<E>(&mut self, metric: &IntCounter, error: E)
+    pub fn fail<E>(&mut self,  error: E)
     where
         E: Display,
     {
@@ -64,18 +63,18 @@ impl CircuitBreaker {
 
         self.fail_count += 1;
         if self.broken_at.is_none() && self.fail_count >= self.fail_threshold {
-            self.break_circuit(metric, error);
+            self.break_circuit( error);
         }
     }
 
     /// Call this after successfully executing an operation
-    pub fn success(&mut self, metric: &IntCounter) {
+    pub fn success(&mut self) {
         self.fail_count = 0;
         if let Some(broken_at) = &self.broken_at {
             tracing::info!(breaker=%self.name, "Circuit breaker failure ended (was broken for {})",
                 humantime::format_duration(broken_at.elapsed()));
             self.broken_at = None;
-            metric.inc();
+          
         }
     }
 
@@ -98,13 +97,13 @@ impl CircuitBreaker {
         }
     }
 
-    fn break_circuit<E>(&mut self, metric: &IntCounter, error: E)
+    fn break_circuit<E>(&mut self,  error: E)
     where
         E: Display,
     {
         self.broken_at = Some(Instant::now());
         tracing::error!(breaker=%self.name, "Circuit breaker broken!  Last error: {error}");
-        metric.inc();
+        
     }
 
     fn reset_circuit(&mut self) {

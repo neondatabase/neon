@@ -3,15 +3,9 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Instant;
 
-use enum_map::EnumMap;
+
 use futures::Future;
-use metrics::{
-     Histogram,  IntCounter, 
-       UIntGauge, 
-     register_histogram, 
-    register_int_counter,  
-     register_uint_gauge, 
-};
+
 use once_cell::sync::Lazy;
 use pageserver_api::config::{
     PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
@@ -24,25 +18,14 @@ use utils::id::TimelineId;
 
 use crate::config;
 use crate::config::PageServerConf;
-use crate::pgdatadir_mapping::DatadirModificationStats;
+
 use crate::task_mgr::TaskKind;
 
 use crate::tenant::mgr::TenantSlot;
 use crate::tenant::storage_layer::PersistentLayerDesc;
 use crate::tenant::throttle::ThrottleResult;
 
-/// Prometheus histogram buckets (in seconds) for operations in the critical
-/// path. In other words, operations that directly affect that latency of user
-/// queries.
-///
-/// The buckets capture the majority of latencies in the microsecond and
-/// millisecond range but also extend far enough up to distinguish "bad" from
-/// "really bad".
-const CRITICAL_OP_BUCKETS: &[f64] = &[
-    0.000_001, 0.000_010, 0.000_100, // 1 us, 10 us, 100 us
-    0.001_000, 0.010_000, 0.100_000, // 1 ms, 10 ms, 100 ms
-    1.0, 10.0, 100.0, // 1 s, 10 s, 100 s
-];
+
 
 // Metrics collected on operations on the storage repository.
 #[derive(Debug, VariantNames, IntoStaticStr)]
@@ -59,10 +42,6 @@ pub(crate) enum StorageTimeOperation {
 
 
 
-#[allow(dead_code)]
-pub(crate) struct ScanLatency {
-    map: EnumMap<TaskKind, Option<Histogram>>,
-}
 
 #[derive(IntoStaticStr)]
 #[strum(serialize_all = "kebab_case")]
@@ -124,82 +103,9 @@ pub(crate) enum LayerLevel {
 
 
 
-pub(crate) static CIRCUIT_BREAKERS_BROKEN: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "pageserver_circuit_breaker_broken",
-        "How many times a circuit breaker has broken"
-    )
-    .expect("failed to define a metric")
-});
 
-pub(crate) static CIRCUIT_BREAKERS_UNBROKEN: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "pageserver_circuit_breaker_unbroken",
-        "How many times a circuit breaker has been un-broken (recovered)"
-    )
-    .expect("failed to define a metric")
-});
 
-pub(crate) static COMPRESSION_IMAGE_INPUT_BYTES: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "pageserver_compression_image_in_bytes_total",
-        "Size of data written into image layers before compression"
-    )
-    .expect("failed to define a metric")
-});
 
-pub(crate) static COMPRESSION_IMAGE_INPUT_BYTES_CONSIDERED: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "pageserver_compression_image_in_bytes_considered",
-        "Size of potentially compressible data written into image layers before compression"
-    )
-    .expect("failed to define a metric")
-});
-
-pub(crate) static COMPRESSION_IMAGE_INPUT_BYTES_CHOSEN: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "pageserver_compression_image_in_bytes_chosen",
-        "Size of data whose compressed form was written into image layers"
-    )
-    .expect("failed to define a metric")
-});
-
-pub(crate) static COMPRESSION_IMAGE_OUTPUT_BYTES: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "pageserver_compression_image_out_bytes_total",
-        "Size of compressed image layer written"
-    )
-    .expect("failed to define a metric")
-});
-
-pub(crate) static RELSIZE_CACHE_ENTRIES: Lazy<UIntGauge> = Lazy::new(|| {
-    register_uint_gauge!(
-        "pageserver_relsize_cache_entries",
-        "Number of entries in the relation size cache",
-    )
-    .expect("failed to define a metric")
-});
-
-pub(crate) static RELSIZE_CACHE_HITS: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!("pageserver_relsize_cache_hits", "Relation size cache hits",)
-        .expect("failed to define a metric")
-});
-
-pub(crate) static RELSIZE_CACHE_MISSES: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "pageserver_relsize_cache_misses",
-        "Relation size cache misses",
-    )
-    .expect("failed to define a metric")
-});
-
-pub(crate) static RELSIZE_CACHE_MISSES_OLD: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "pageserver_relsize_cache_misses_old",
-        "Relation size cache misses where the lookup LSN is older than the last relation update"
-    )
-    .expect("failed to define a metric")
-});
 
 pub(crate) mod initial_logical_size {
     use metrics::{IntCounter, register_int_counter};
@@ -226,21 +132,6 @@ pub(crate) mod initial_logical_size {
 
 
 
-pub static STARTUP_IS_LOADING: Lazy<UIntGauge> = Lazy::new(|| {
-    register_uint_gauge!(
-        "pageserver_startup_is_loading",
-        "1 while in initial startup load of tenants, 0 at other times"
-    )
-    .expect("Failed to register pageserver_startup_is_loading")
-});
-
-pub(crate) static TIMELINE_EPHEMERAL_BYTES: Lazy<UIntGauge> = Lazy::new(|| {
-    register_uint_gauge!(
-        "pageserver_timeline_ephemeral_bytes",
-        "Total number of bytes in ephemeral layers, summed for all timelines.  Approximate, lazily updated."
-    )
-    .expect("Failed to register metric")
-});
 
 /// Metrics related to the lifecycle of a [`crate::tenant::Tenant`] object: things
 /// like how long it took to load.
@@ -249,34 +140,18 @@ pub(crate) static TIMELINE_EPHEMERAL_BYTES: Lazy<UIntGauge> = Lazy::new(|| {
 /// metrics are rather expensive, and usually fine grained stuff makes more sense
 /// at a timeline level than tenant level.
 pub(crate) struct TenantMetrics {
-    /// How long did tenants take to go from construction to active state?
-    pub(crate) attach: Histogram,
-
-    /// How many tenants are included in the initial startup of the pagesrever?
-    pub(crate) startup_scheduled: IntCounter,
-    pub(crate) startup_complete: IntCounter,
+   
+   
+   
+   
 }
 
 pub(crate) static TENANT: Lazy<TenantMetrics> = Lazy::new(|| {
     TenantMetrics {
    
     
-    attach: register_histogram!(
-        "pageserver_tenant_attach_seconds",
-        "Time taken by tenants to intialize, after remote metadata is already loaded",
-        CRITICAL_OP_BUCKETS.into()
-    )
-    .expect("Failed to register metric"),
-    startup_scheduled: register_int_counter!(
-        "pageserver_tenant_startup_scheduled",
-        "Number of tenants included in pageserver startup (doesn't count tenants attached later)"
-    ).expect("Failed to register metric"),
-    startup_complete: register_int_counter!(
-        "pageserver_tenant_startup_complete",
-        "Number of tenants that have completed warm-up, or activated on-demand during initial startup: \
-         should eventually reach `pageserver_tenant_startup_scheduled_total`.  Does not include broken \
-         tenants: such cases will lead to this metric never reaching the scheduled count."
-    ).expect("Failed to register metric"),
+    
+   
 }
 });
 
@@ -310,15 +185,8 @@ pub(crate) enum StorageIoOperation {
 
 #[cfg(not(test))]
 pub(crate) mod virtual_file_descriptor_cache {
-    use super::*;
+  
 
-    pub(crate) static SIZE_MAX: Lazy<UIntGauge> = Lazy::new(|| {
-        register_uint_gauge!(
-            "pageserver_virtual_file_descriptor_cache_size_max",
-            "Maximum number of open file descriptors in the cache."
-        )
-        .unwrap()
-    });
 
     // SIZE_CURRENT: derive it like so:
     // ```
@@ -514,8 +382,7 @@ pub(crate) enum ComputeCommandKind {
 
 
 pub(crate) struct TenantManagerMetrics {
-    pub(crate) tenant_slot_writes: IntCounter,
-    pub(crate) unexpected_errors: IntCounter,
+   
 }
 
 impl TenantManagerMetrics {
@@ -538,27 +405,10 @@ impl TenantManagerMetrics {
 
 pub(crate) static TENANT_MANAGER: Lazy<TenantManagerMetrics> = Lazy::new(|| {
     TenantManagerMetrics {
-        tenant_slot_writes: register_int_counter!(
-            "pageserver_tenant_manager_slot_writes",
-            "Writes to a tenant slot, including all of create/attach/detach/delete"
-        )
-        .expect("failed to define a metric"),
-        unexpected_errors: register_int_counter!(
-            "pageserver_tenant_manager_unexpected_errors_total",
-            "Number of unexpected conditions encountered: nonzero value indicates a non-fatal bug."
-        )
-        .expect("failed to define a metric"),
+        
     }
 });
 
-
-pub(crate) static NODE_UTILIZATION_SCORE: Lazy<UIntGauge> = Lazy::new(|| {
-    register_uint_gauge!(
-        "pageserver_utilization_score",
-        "The utilization score we report to the storage controller for scheduling, where 0 is empty, 1000000 is full, and anything above is considered overloaded",
-    )
-    .expect("failed to define a metric")
-});
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -595,13 +445,6 @@ impl RemoteOpFileKind {
 
 // walreceiver metrics
 
-pub(crate) static WALRECEIVER_STARTED_CONNECTIONS: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "pageserver_walreceiver_started_connections_total",
-        "Number of started walreceiver connections"
-    )
-    .expect("failed to define a metric")
-});
 
 
 
@@ -610,68 +453,8 @@ pub(crate) static WALRECEIVER_STARTED_CONNECTIONS: Lazy<IntCounter> = Lazy::new(
 
 
 
-pub(crate) struct WalIngestMetrics {
-    pub(crate) bytes_received: IntCounter,
-    pub(crate) records_received: IntCounter,
-    pub(crate) records_observed: IntCounter,
-    pub(crate) records_committed: IntCounter,
-    pub(crate) records_filtered: IntCounter,
-    pub(crate) gap_blocks_zeroed_on_rel_extend: IntCounter,
-}
 
-impl WalIngestMetrics {
-    pub(crate) fn inc_values_committed(&self, stats: &DatadirModificationStats) {
-        if stats.metadata_images > 0 {
-            // self.values_committed_metadata_images
-                // .inc_by(stats.metadata_images);
-        }
-        if stats.metadata_deltas > 0 {
-            // self.values_committed_metadata_deltas
-                // .inc_by(stats.metadata_deltas);
-        }
-        if stats.data_images > 0 {
-            // self.values_committed_data_images.inc_by(stats.data_images);
-        }
-        if stats.data_deltas > 0 {
-            // self.values_committed_data_deltas.inc_by(stats.data_deltas);
-        }
-    }
-}
 
-pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| {
-    WalIngestMetrics {
-    bytes_received: register_int_counter!(
-        "pageserver_wal_ingest_bytes_received",
-        "Bytes of WAL ingested from safekeepers",
-    )
-    .unwrap(),
-    records_received: register_int_counter!(
-        "pageserver_wal_ingest_records_received",
-        "Number of WAL records received from safekeepers"
-    )
-    .expect("failed to define a metric"),
-    records_observed: register_int_counter!(
-        "pageserver_wal_ingest_records_observed",
-        "Number of WAL records observed from safekeepers. These are metadata only records for shard 0."
-    )
-    .expect("failed to define a metric"),
-    records_committed: register_int_counter!(
-        "pageserver_wal_ingest_records_committed",
-        "Number of WAL records which resulted in writes to pageserver storage"
-    )
-    .expect("failed to define a metric"),
-    records_filtered: register_int_counter!(
-        "pageserver_wal_ingest_records_filtered",
-        "Number of WAL records filtered out due to sharding"
-    )
-    .expect("failed to define a metric"),
-    gap_blocks_zeroed_on_rel_extend: register_int_counter!(
-        "pageserver_gap_blocks_zeroed_on_rel_extend",
-        "Total number of zero gap blocks written on relation extends"
-    )
-    .expect("failed to define a metric"),
-}
-});
 
 
 
@@ -788,36 +571,8 @@ pub(crate) trait MeasureRemoteOp<O, E>: Sized + Future<Output = Result<O, E>> {
 impl<Fut, O, E> MeasureRemoteOp<O, E> for Fut where Fut: Sized + Future<Output = Result<O, E>> {}
 
 pub mod tokio_epoll_uring {
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
 
-    use metrics::{Histogram, LocalHistogram, UIntGauge, register_histogram};
-    use once_cell::sync::Lazy;
-
-    /// Shared storage for tokio-epoll-uring thread local metrics.
-    pub(crate) static THREAD_LOCAL_METRICS_STORAGE: Lazy<ThreadLocalMetricsStorage> =
-        Lazy::new(|| {
-            let slots_submission_queue_depth = register_histogram!(
-                "pageserver_tokio_epoll_uring_slots_submission_queue_depth",
-                "The slots waiters queue depth of each tokio_epoll_uring system",
-                vec![
-                    1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0
-                ],
-            )
-            .expect("failed to define a metric");
-            ThreadLocalMetricsStorage {
-                observers: Mutex::new(HashMap::new()),
-                slots_submission_queue_depth,
-            }
-        });
-
-    pub struct ThreadLocalMetricsStorage {
-        /// List of thread local metrics observers.
-        observers: Mutex<HashMap<u64, Arc<ThreadLocalMetrics>>>,
-        /// A histogram shared between all thread local systems
-        /// for collecting slots submission queue depth.
-        slots_submission_queue_depth: Histogram,
-    }
+    
 
     /// Each thread-local [`tokio_epoll_uring::System`] gets one of these as its
     /// [`tokio_epoll_uring::metrics::PerSystemMetrics`] generic.
@@ -829,107 +584,12 @@ pub mod tokio_epoll_uring {
     /// But except for the periodic flush, the lock is uncontended so there's no waiting
     /// for cache coherence protocol to get an exclusive cache line.
     pub struct ThreadLocalMetrics {
-        /// Local observer of thread local tokio-epoll-uring system's slots waiters queue depth.
-        slots_submission_queue_depth: Mutex<LocalHistogram>,
+        
     }
 
-    impl ThreadLocalMetricsStorage {
-        /// Registers a new thread local system. Returns a thread local metrics observer.
-        pub fn register_system(&self, id: u64) -> Arc<ThreadLocalMetrics> {
-            let per_system_metrics = Arc::new(ThreadLocalMetrics::new(
-                self.slots_submission_queue_depth.local(),
-            ));
-            let mut g = self.observers.lock().unwrap();
-            g.insert(id, Arc::clone(&per_system_metrics));
-            per_system_metrics
-        }
+    
 
-        /// Removes metrics observer for a thread local system.
-        /// This should be called before dropping a thread local system.
-        pub fn remove_system(&self, id: u64) {
-            let mut g = self.observers.lock().unwrap();
-            g.remove(&id);
-        }
-
-        /// Flush all thread local metrics to the shared storage.
-        pub fn flush_thread_local_metrics(&self) {
-            let g = self.observers.lock().unwrap();
-            g.values().for_each(|local| {
-                local.flush();
-            });
-        }
-    }
-
-    impl ThreadLocalMetrics {
-        pub fn new(slots_submission_queue_depth: LocalHistogram) -> Self {
-            ThreadLocalMetrics {
-                slots_submission_queue_depth: Mutex::new(slots_submission_queue_depth),
-            }
-        }
-
-        /// Flushes the thread local metrics to shared aggregator.
-        pub fn flush(&self) {
-            let Self {
-                slots_submission_queue_depth,
-            } = self;
-            slots_submission_queue_depth.lock().unwrap().flush();
-        }
-    }
-
-    impl tokio_epoll_uring::metrics::PerSystemMetrics for ThreadLocalMetrics {
-        fn observe_slots_submission_queue_depth(&self, _queue_depth: u64) {
-        }
-    }
-
-    pub struct Collector {
-        descs: Vec<metrics::core::Desc>,
-    }
-
-    impl metrics::core::Collector for Collector {
-        fn desc(&self) -> Vec<&metrics::core::Desc> {
-            self.descs.iter().collect()
-        }
-
-        fn collect(&self) -> Vec<metrics::proto::MetricFamily> {
-            Vec::with_capacity(Self::NMETRICS)
-        }
-    }
-
-    impl Collector {
-        const NMETRICS: usize = 3;
-
-        #[allow(clippy::new_without_default)]
-        pub fn new() -> Self {
-            let mut descs = Vec::new();
-
-            let systems_created = UIntGauge::new(
-                "pageserver_tokio_epoll_uring_systems_created",
-                "counter of tokio-epoll-uring systems that were created",
-            )
-            .unwrap();
-            descs.extend(
-                metrics::core::Collector::desc(&systems_created)
-                    .into_iter()
-                    .cloned(),
-            );
-
-            let systems_destroyed = UIntGauge::new(
-                "pageserver_tokio_epoll_uring_systems_destroyed",
-                "counter of tokio-epoll-uring systems that were destroyed",
-            )
-            .unwrap();
-            descs.extend(
-                metrics::core::Collector::desc(&systems_destroyed)
-                    .into_iter()
-                    .cloned(),
-            );
-
-            Self {
-                descs,
-            }
-        }
-    }
-
+   
    
 }
 pub(crate) mod tenant_throttling {
@@ -998,41 +658,10 @@ pub(crate) mod tenant_throttling {
 }
 
 pub(crate) mod disk_usage_based_eviction {
-    use super::*;
 
-    pub(crate) struct Metrics {
+   
+    
 
-        pub(crate) layers_collected: IntCounter,
-        pub(crate) layers_selected: IntCounter,
-    }
-
-    impl Default for Metrics {
-        fn default() -> Self {
-           
-
-            let layers_collected = register_int_counter!(
-                "pageserver_disk_usage_based_eviction_collected_layers_total",
-                "Amount of layers collected"
-            )
-            .unwrap();
-
-            let layers_selected = register_int_counter!(
-                "pageserver_disk_usage_based_eviction_select_layers_total",
-                "Amount of layers selected"
-            )
-            .unwrap();
-
-
-            Self {
-                
-                layers_collected,
-                layers_selected,
-                
-            }
-        }
-    }
-
-    pub(crate) static METRICS: Lazy<Metrics> = Lazy::new(Metrics::default);
 }
 
 
@@ -1055,7 +684,6 @@ pub fn preinitialize_metrics(
     // Tenant manager stats
     Lazy::force(&TENANT_MANAGER);
 
-    Lazy::force(&disk_usage_based_eviction::METRICS);
 
 
 
@@ -1066,7 +694,7 @@ pub fn preinitialize_metrics(
     
 
     // Custom
-    Lazy::force(&tokio_epoll_uring::THREAD_LOCAL_METRICS_STORAGE);
+  
 
     tenant_throttling::preinitialize_global_metrics();
     wait_ondemand_download_time::preinitialize_global_metrics();

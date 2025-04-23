@@ -83,11 +83,6 @@ use crate::context::RequestContextBuilder;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::{DeletionQueueClient, DeletionQueueError};
 use crate::l0_flush::L0FlushGlobalState;
-use crate::metrics::{
-    CIRCUIT_BREAKERS_BROKEN, CIRCUIT_BREAKERS_UNBROKEN, 
-    TENANT, 
-    
-};
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::LocationMode;
 use crate::tenant::gc_result::GcResult;
@@ -1358,7 +1353,7 @@ impl Tenant {
                 let starting_up = init_order.is_some();
                 scopeguard::defer! {
                     if starting_up {
-                        TENANT.startup_complete.inc();
+                       
                     }
                 }
 
@@ -1483,7 +1478,7 @@ impl Tenant {
                 // We will time the duration of the attach phase unless this is a creation (attach will do no work)
                 let attach_start = std::time::Instant::now();
                 let attached = {
-                    let _attach_timer = Some(TENANT.attach.start_timer());
+                
                     tenant_clone.attach(preload, &ctx).await
                 };
                 let attach_duration = attach_start.elapsed();
@@ -3185,7 +3180,7 @@ impl Tenant {
         self.compaction_circuit_breaker
             .lock()
             .unwrap()
-            .success(&CIRCUIT_BREAKERS_UNBROKEN);
+            .success();
 
         match has_pending {
             true => Ok(CompactionOutcome::Pending),
@@ -3206,13 +3201,13 @@ impl Tenant {
                 self.compaction_circuit_breaker
                     .lock()
                     .unwrap()
-                    .fail(&CIRCUIT_BREAKERS_BROKEN, err);
+                    .fail( err);
             }
             CompactionError::Other(err) => {
                 self.compaction_circuit_breaker
                     .lock()
                     .unwrap()
-                    .fail(&CIRCUIT_BREAKERS_BROKEN, err);
+                    .fail( err);
             }
             CompactionError::AlreadyRunning(_) => {}
         }
