@@ -75,14 +75,8 @@ Two main workflows use these extensions:
 These workflows are integrated into the build-and-test pipeline through shell scripts:
 
 - `docker_compose_test.sh` - Tests extensions in a Docker Compose environment
-  - Builds and starts containers for testing
-  - Runs tests for each extension
-  - Verifies extension functionality in isolated environments
-
+       
 - `test_extensions_upgrade.sh` - Tests extension upgrades between different Compute versions
-  - Creates timelines for each extension
-  - Tests upgrading from old to new Compute versions
-  - Verifies extension functionality after upgrade
 
 ## Adding New Extensions
 
