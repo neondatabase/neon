@@ -433,7 +433,10 @@ pub(crate) mod tests {
         // Write part (in block to drop the file)
         let mut offsets = Vec::new();
         {
-            let file = TempVirtualFile::new(VirtualFile::create(pathbuf.as_path(), ctx).await?);
+            let file = TempVirtualFile::new(
+                VirtualFile::create(pathbuf.as_path(), ctx).await?,
+                gate.enter().unwrap(),
+            );
             let mut wtr = BlobWriter::<BUFFERED>::new(file, 0, &gate, cancel.clone(), ctx);
             for blob in blobs.iter() {
                 let (_, res) = if compression {

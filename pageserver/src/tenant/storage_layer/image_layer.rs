@@ -783,6 +783,7 @@ impl ImageLayerWriterInner {
                 ctx,
             )
             .await?,
+            gate.enter()?,
         );
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;

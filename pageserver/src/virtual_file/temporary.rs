@@ -1,4 +1,5 @@
 use tracing::error;
+use utils::sync::gate::GateGuard;
 
 use crate::context::RequestContext;
 
@@ -12,7 +13,16 @@ use super::{
 /// A wrapper around [`super::VirtualFile`] that deletes the file on drop.
 /// For use as a [`OwnedAsyncWriter`] in [`super::owned_buffers_io::write::BufferedWriter`].
 #[derive(Debug)]
-pub struct TempVirtualFile(Option<VirtualFile>);
+pub struct TempVirtualFile {
+    inner: Option<Inner>,
+}
+
+#[derive(Debug)]
+struct Inner {
+    file: VirtualFile,
+    /// Gate guard is held on as long as we need to do operations in the path (delete on drop)
+    _gate_guard: GateGuard,
+}
 
 impl OwnedAsyncWriter for TempVirtualFile {
     fn write_all_at<Buf: IoBufAligned + Send>(
@@ -27,7 +37,7 @@ impl OwnedAsyncWriter for TempVirtualFile {
 
 impl Drop for TempVirtualFile {
     fn drop(&mut self) {
-        let Some(file) = self.0.take() else {
+        let Some(Inner { file, _gate_guard }) = self.inner.take() else {
             return;
         };
         let path = file.path();
@@ -36,6 +46,7 @@ impl Drop for TempVirtualFile {
         {
             error!(err=%e, path=%path, "failed to remove");
         }
+        drop(_gate_guard);
     }
 }
 
@@ -43,23 +54,38 @@ impl std::ops::Deref for TempVirtualFile {
     type Target = VirtualFile;
 
     fn deref(&self) -> &Self::Target {
-        self.0.as_ref().expect("only None after into_inner or drop")
+        &self
+            .inner
+            .as_ref()
+            .expect("only None after into_inner or drop")
+            .file
     }
 }
 
 impl std::ops::DerefMut for TempVirtualFile {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0.as_mut().expect("only None after into_inner or drop")
+        &mut self
+            .inner
+            .as_mut()
+            .expect("only None after into_inner or drop")
+            .file
     }
 }
 
 impl TempVirtualFile {
-    pub fn new(virtual_file: VirtualFile) -> Self {
-        Self(Some(virtual_file))
+    pub fn new(virtual_file: VirtualFile, gate_guard: GateGuard) -> Self {
+        Self {
+            inner: Some(Inner {
+                file: virtual_file,
+                _gate_guard: gate_guard,
+            }),
+        }
     }
+    /// XXX better name for this API, nb we're also dropping the gate guard as part of .take().expect().file
     pub fn disarm_into_inner(mut self) -> VirtualFile {
-        self.0
+        self.inner
             .take()
             .expect("only None after into_inner or drop, and we are into_inner, and we consume")
+            .file
     }
 }
