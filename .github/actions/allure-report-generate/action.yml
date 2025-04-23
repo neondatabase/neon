@@ -70,6 +70,7 @@ runs:
 
     - name: Install Allure
       shell: bash -euxo pipefail {0}
+      working-directory: /tmp
       run: |
         if ! which allure; then
           ALLURE_ZIP=allure-${ALLURE_VERSION}.zip

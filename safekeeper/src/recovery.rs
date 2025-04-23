@@ -8,6 +8,7 @@ use std::time::SystemTime;
 use anyhow::{Context, bail};
 use futures::StreamExt;
 use postgres_protocol::message::backend::ReplicationMessage;
+use reqwest::Certificate;
 use safekeeper_api::Term;
 use safekeeper_api::membership::INVALID_GENERATION;
 use safekeeper_api::models::{PeerInfo, TimelineStatus};
@@ -241,7 +242,7 @@ async fn recover(
 
     let mut client = reqwest::Client::builder();
     for cert in &conf.ssl_ca_certs {
-        client = client.add_root_certificate(cert.clone());
+        client = client.add_root_certificate(Certificate::from_der(cert.contents())?);
     }
     let client = client
         .build()

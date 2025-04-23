@@ -158,7 +158,7 @@ pub struct TenantSharedResources {
     pub l0_flush_global_state: L0FlushGlobalState,
 }
 
-/// A [`Tenant`] is really an _attached_ tenant.  The configuration
+/// A [`TenantShard`] is really an _attached_ tenant.  The configuration
 /// for an attached tenant is a subset of the [`LocationConf`], represented
 /// in this struct.
 #[derive(Clone)]
@@ -245,7 +245,7 @@ pub(crate) enum SpawnMode {
 ///
 /// Tenant consists of multiple timelines. Keep them in a hash table.
 ///
-pub struct Tenant {
+pub struct TenantShard {
     // Global pageserver config parameters
     pub conf: &'static PageServerConf,
 
@@ -267,7 +267,7 @@ pub struct Tenant {
     shard_identity: ShardIdentity,
 
     /// The remote storage generation, used to protect S3 objects from split-brain.
-    /// Does not change over the lifetime of the [`Tenant`] object.
+    /// Does not change over the lifetime of the [`TenantShard`] object.
     ///
     /// This duplicates the generation stored in LocationConf, but that structure is mutable:
     /// this copy enforces the invariant that generatio doesn't change during a Tenant's lifetime.
@@ -309,7 +309,7 @@ pub struct Tenant {
     // Access to global deletion queue for when this tenant wants to schedule a deletion
     deletion_queue_client: DeletionQueueClient,
 
-    /// Cached logical sizes updated updated on each [`Tenant::gather_size_inputs`].
+    /// Cached logical sizes updated updated on each [`TenantShard::gather_size_inputs`].
     cached_logical_sizes: tokio::sync::Mutex<HashMap<(TimelineId, Lsn), u64>>,
     cached_synthetic_tenant_size: Arc<AtomicU64>,
 
@@ -337,12 +337,12 @@ pub struct Tenant {
     // Timelines' cancellation token.
     pub(crate) cancel: CancellationToken,
 
-    // Users of the Tenant such as the page service must take this Gate to avoid
-    // trying to use a Tenant which is shutting down.
+    // Users of the TenantShard such as the page service must take this Gate to avoid
+    // trying to use a TenantShard which is shutting down.
     pub(crate) gate: Gate,
 
     /// Throttle applied at the top of [`Timeline::get`].
-    /// All [`Tenant::timelines`] of a given [`Tenant`] instance share the same [`throttle::Throttle`] instance.
+    /// All [`TenantShard::timelines`] of a given [`TenantShard`] instance share the same [`throttle::Throttle`] instance.
     pub(crate) pagestream_throttle: Arc<throttle::Throttle>,
 
     pub(crate) pagestream_throttle_metrics: Arc<crate::metrics::tenant_throttling::Pagestream>,
@@ -362,7 +362,7 @@ pub struct Tenant {
 
     l0_flush_global_state: L0FlushGlobalState,
 }
-impl std::fmt::Debug for Tenant {
+impl std::fmt::Debug for TenantShard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} ({})", self.tenant_shard_id, self.current_state())
     }
@@ -841,7 +841,7 @@ impl Debug for SetStoppingError {
     }
 }
 
-/// Arguments to [`Tenant::create_timeline`].
+/// Arguments to [`TenantShard::create_timeline`].
 ///
 /// Not usable as an idempotency key for timeline creation because if [`CreateTimelineParamsBranch::ancestor_start_lsn`]
 /// is `None`, the result of the timeline create call is not deterministic.
@@ -876,7 +876,7 @@ pub(crate) struct CreateTimelineParamsImportPgdata {
     pub(crate) idempotency_key: import_pgdata::index_part_format::IdempotencyKey,
 }
 
-/// What is used to determine idempotency of a [`Tenant::create_timeline`] call in  [`Tenant::start_creating_timeline`] in  [`Tenant::start_creating_timeline`].
+/// What is used to determine idempotency of a [`TenantShard::create_timeline`] call in  [`TenantShard::start_creating_timeline`] in  [`TenantShard::start_creating_timeline`].
 ///
 /// Each [`Timeline`] object holds [`Self`] as an immutable property in [`Timeline::create_idempotency`].
 ///
@@ -914,7 +914,7 @@ pub(crate) struct CreatingTimelineIdempotencyImportPgdata {
     idempotency_key: import_pgdata::index_part_format::IdempotencyKey,
 }
 
-/// What is returned by [`Tenant::start_creating_timeline`].
+/// What is returned by [`TenantShard::start_creating_timeline`].
 #[must_use]
 enum StartCreatingTimelineResult {
     CreateGuard(TimelineCreateGuard),
@@ -943,13 +943,13 @@ struct TimelineInitAndSyncNeedsSpawnImportPgdata {
     guard: TimelineCreateGuard,
 }
 
-/// What is returned by [`Tenant::create_timeline`].
+/// What is returned by [`TenantShard::create_timeline`].
 enum CreateTimelineResult {
     Created(Arc<Timeline>),
     Idempotent(Arc<Timeline>),
-    /// IMPORTANT: This [`Arc<Timeline>`] object is not in [`Tenant::timelines`] when
+    /// IMPORTANT: This [`Arc<Timeline>`] object is not in [`TenantShard::timelines`] when
     /// we return this result, nor will this concrete object ever be added there.
-    /// Cf method comment on [`Tenant::create_timeline_import_pgdata`].
+    /// Cf method comment on [`TenantShard::create_timeline_import_pgdata`].
     ImportSpawned(Arc<Timeline>),
 }
 
@@ -1082,7 +1082,7 @@ pub(crate) enum LoadConfigError {
     NotFound(Utf8PathBuf),
 }
 
-impl Tenant {
+impl TenantShard {
     /// Yet another helper for timeline initialization.
     ///
     /// - Initializes the Timeline struct and inserts it into the tenant's hash map
@@ -1303,7 +1303,7 @@ impl Tenant {
         init_order: Option<InitializationOrder>,
         mode: SpawnMode,
         ctx: &RequestContext,
-    ) -> Result<Arc<Tenant>, GlobalShutDown> {
+    ) -> Result<Arc<TenantShard>, GlobalShutDown> {
         let wal_redo_manager =
             WalRedoManager::new(PostgresRedoManager::new(conf, tenant_shard_id))?;
 
@@ -1317,7 +1317,7 @@ impl Tenant {
         let attach_mode = attached_conf.location.attach_mode;
         let generation = attached_conf.location.generation;
 
-        let tenant = Arc::new(Tenant::new(
+        let tenant = Arc::new(TenantShard::new(
             TenantState::Attaching,
             conf,
             attached_conf,
@@ -1334,7 +1334,7 @@ impl Tenant {
         let attach_gate_guard = tenant
             .gate
             .enter()
-            .expect("We just created the Tenant: nothing else can have shut it down yet");
+            .expect("We just created the TenantShard: nothing else can have shut it down yet");
 
         // Do all the hard work in the background
         let tenant_clone = Arc::clone(&tenant);
@@ -1362,7 +1362,7 @@ impl Tenant {
                     }
                 }
 
-                fn make_broken_or_stopping(t: &Tenant, err: anyhow::Error) {
+                fn make_broken_or_stopping(t: &TenantShard, err: anyhow::Error) {
                     t.state.send_modify(|state| match state {
                         // TODO: the old code alluded to DeleteTenantFlow sometimes setting
                         // TenantState::Stopping before we get here, but this may be outdated.
@@ -1627,7 +1627,7 @@ impl Tenant {
     /// No background tasks are started as part of this routine.
     ///
     async fn attach(
-        self: &Arc<Tenant>,
+        self: &Arc<TenantShard>,
         preload: Option<TenantPreload>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
@@ -1957,7 +1957,7 @@ impl Tenant {
     }
 
     async fn load_timelines_metadata(
-        self: &Arc<Tenant>,
+        self: &Arc<TenantShard>,
         timeline_ids: HashSet<TimelineId>,
         remote_storage: &GenericRemoteStorage,
         heatmap: Option<(HeatMapTenant, std::time::Instant)>,
@@ -2028,7 +2028,7 @@ impl Tenant {
     }
 
     fn load_timeline_metadata(
-        self: &Arc<Tenant>,
+        self: &Arc<TenantShard>,
         timeline_id: TimelineId,
         remote_storage: GenericRemoteStorage,
         previous_heatmap: Option<PreviousHeatmap>,
@@ -2429,14 +2429,14 @@ impl Tenant {
     /// This is used by tests & import-from-basebackup.
     ///
     /// The returned [`UninitializedTimeline`] contains no data nor metadata and it is in
-    /// a state that will fail [`Tenant::load_remote_timeline`] because `disk_consistent_lsn=Lsn(0)`.
+    /// a state that will fail [`TenantShard::load_remote_timeline`] because `disk_consistent_lsn=Lsn(0)`.
     ///
     /// The caller is responsible for getting the timeline into a state that will be accepted
-    /// by [`Tenant::load_remote_timeline`] / [`Tenant::attach`].
+    /// by [`TenantShard::load_remote_timeline`] / [`TenantShard::attach`].
     /// Then they may call [`UninitializedTimeline::finish_creation`] to add the timeline
-    /// to the [`Tenant::timelines`].
+    /// to the [`TenantShard::timelines`].
     ///
-    /// Tests should use `Tenant::create_test_timeline` to set up the minimum required metadata keys.
+    /// Tests should use `TenantShard::create_test_timeline` to set up the minimum required metadata keys.
     pub(crate) async fn create_empty_timeline(
         self: &Arc<Self>,
         new_timeline_id: TimelineId,
@@ -2584,7 +2584,7 @@ impl Tenant {
     /// the same timeline ID already exists, returns CreateTimelineError::AlreadyExists.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn create_timeline(
-        self: &Arc<Tenant>,
+        self: &Arc<TenantShard>,
         params: CreateTimelineParams,
         broker_client: storage_broker::BrokerClientChannel,
         ctx: &RequestContext,
@@ -2751,13 +2751,13 @@ impl Tenant {
         Ok(activated_timeline)
     }
 
-    /// The returned [`Arc<Timeline>`] is NOT in the [`Tenant::timelines`] map until the import
+    /// The returned [`Arc<Timeline>`] is NOT in the [`TenantShard::timelines`] map until the import
     /// completes in the background. A DIFFERENT [`Arc<Timeline>`] will be inserted into the
-    /// [`Tenant::timelines`] map when the import completes.
+    /// [`TenantShard::timelines`] map when the import completes.
     /// We only return an [`Arc<Timeline>`] here so the API handler can create a [`pageserver_api::models::TimelineInfo`]
     /// for the response.
     async fn create_timeline_import_pgdata(
-        self: &Arc<Tenant>,
+        self: &Arc<Self>,
         params: CreateTimelineParamsImportPgdata,
         activate: ActivateTimelineArgs,
         ctx: &RequestContext,
@@ -2854,7 +2854,7 @@ impl Tenant {
 
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%timeline.timeline_id))]
     async fn create_timeline_import_pgdata_task(
-        self: Arc<Tenant>,
+        self: Arc<TenantShard>,
         timeline: Arc<Timeline>,
         index_part: import_pgdata::index_part_format::Root,
         activate: ActivateTimelineArgs,
@@ -2882,7 +2882,7 @@ impl Tenant {
     }
 
     async fn create_timeline_import_pgdata_task_impl(
-        self: Arc<Tenant>,
+        self: Arc<TenantShard>,
         timeline: Arc<Timeline>,
         index_part: import_pgdata::index_part_format::Root,
         activate: ActivateTimelineArgs,
@@ -2899,10 +2899,10 @@ impl Tenant {
         // Reload timeline from remote.
         // This proves that the remote state is attachable, and it reuses the code.
         //
-        // TODO: think about whether this is safe to do with concurrent Tenant::shutdown.
+        // TODO: think about whether this is safe to do with concurrent TenantShard::shutdown.
         // timeline_create_guard hols the tenant gate open, so, shutdown cannot _complete_ until we exit.
-        // But our activate() call might launch new background tasks after Tenant::shutdown
-        // already went past shutting down the Tenant::timelines, which this timeline here is no part of.
+        // But our activate() call might launch new background tasks after TenantShard::shutdown
+        // already went past shutting down the TenantShard::timelines, which this timeline here is no part of.
         // I think the same problem exists with the bootstrap & branch mgmt API tasks (tenant shutting
         // down while bootstrapping/branching + activating), but, the race condition is much more likely
         // to manifest because of the long runtime of this import task.
@@ -2917,7 +2917,7 @@ impl Tenant {
         // };
         let timeline_id = timeline.timeline_id;
 
-        // load from object storage like Tenant::attach does
+        // load from object storage like TenantShard::attach does
         let resources = self.build_timeline_resources(timeline_id);
         let index_part = resources
             .remote_client
@@ -3938,7 +3938,7 @@ enum ActivateTimelineArgs {
     No,
 }
 
-impl Tenant {
+impl TenantShard {
     pub fn tenant_specific_overrides(&self) -> pageserver_api::models::TenantConfig {
         self.tenant_conf.load().tenant_conf.clone()
     }
@@ -4096,7 +4096,7 @@ impl Tenant {
         update: F,
     ) -> anyhow::Result<pageserver_api::models::TenantConfig> {
         // Use read-copy-update in order to avoid overwriting the location config
-        // state if this races with [`Tenant::set_new_location_config`]. Note that
+        // state if this races with [`TenantShard::set_new_location_config`]. Note that
         // this race is not possible if both request types come from the storage
         // controller (as they should!) because an exclusive op lock is required
         // on the storage controller side.
@@ -4219,7 +4219,7 @@ impl Tenant {
         Ok((timeline, timeline_ctx))
     }
 
-    /// [`Tenant::shutdown`] must be called before dropping the returned [`Tenant`] object
+    /// [`TenantShard::shutdown`] must be called before dropping the returned [`TenantShard`] object
     /// to ensure proper cleanup of background tasks and metrics.
     //
     // Allow too_many_arguments because a constructor's argument list naturally grows with the
@@ -4235,7 +4235,7 @@ impl Tenant {
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
         l0_flush_global_state: L0FlushGlobalState,
-    ) -> Tenant {
+    ) -> TenantShard {
         debug_assert!(
             !attached_conf.location.generation.is_none() || conf.control_plane_api.is_none()
         );
@@ -4295,7 +4295,7 @@ impl Tenant {
             }
         });
 
-        Tenant {
+        TenantShard {
             tenant_shard_id,
             shard_identity,
             generation: attached_conf.location.generation,
@@ -4330,7 +4330,7 @@ impl Tenant {
             cancel: CancellationToken::default(),
             gate: Gate::default(),
             pagestream_throttle: Arc::new(throttle::Throttle::new(
-                Tenant::get_pagestream_throttle_config(conf, &attached_conf.tenant_conf),
+                TenantShard::get_pagestream_throttle_config(conf, &attached_conf.tenant_conf),
             )),
             pagestream_throttle_metrics: Arc::new(
                 crate::metrics::tenant_throttling::Pagestream::new(&tenant_shard_id),
@@ -4466,11 +4466,11 @@ impl Tenant {
 
         // Perform GC for each timeline.
         //
-        // Note that we don't hold the `Tenant::gc_cs` lock here because we don't want to delay the
+        // Note that we don't hold the `TenantShard::gc_cs` lock here because we don't want to delay the
         // branch creation task, which requires the GC lock. A GC iteration can run concurrently
         // with branch creation.
         //
-        // See comments in [`Tenant::branch_timeline`] for more information about why branch
+        // See comments in [`TenantShard::branch_timeline`] for more information about why branch
         // creation task can run concurrently with timeline's GC iteration.
         for timeline in gc_timelines {
             if cancel.is_cancelled() {
@@ -4500,7 +4500,7 @@ impl Tenant {
 
     /// Refreshes the Timeline::gc_info for all timelines, returning the
     /// vector of timelines which have [`Timeline::get_last_record_lsn`] past
-    /// [`Tenant::get_gc_horizon`].
+    /// [`TenantShard::get_gc_horizon`].
     ///
     /// This is usually executed as part of periodic gc, but can now be triggered more often.
     pub(crate) async fn refresh_gc_info(
@@ -5499,7 +5499,7 @@ impl Tenant {
             }
         }
 
-        // The flushes we did above were just writes, but the Tenant might have had
+        // The flushes we did above were just writes, but the TenantShard might have had
         // pending deletions as well from recent compaction/gc: we want to flush those
         // as well.  This requires flushing the global delete queue.  This is cheap
         // because it's typically a no-op.
@@ -5517,7 +5517,7 @@ impl Tenant {
 
     /// How much local storage would this tenant like to have?  It can cope with
     /// less than this (via eviction and on-demand downloads), but this function enables
-    /// the Tenant to advertise how much storage it would prefer to have to provide fast I/O
+    /// the TenantShard to advertise how much storage it would prefer to have to provide fast I/O
     /// by keeping important things on local disk.
     ///
     /// This is a heuristic, not a guarantee: tenants that are long-idle will actually use less
@@ -5540,11 +5540,11 @@ impl Tenant {
     /// manifest in `Self::remote_tenant_manifest`.
     ///
     /// TODO: instead of requiring callers to remember to call `maybe_upload_tenant_manifest` after
-    /// changing any `Tenant` state that's included in the manifest, consider making the manifest
+    /// changing any `TenantShard` state that's included in the manifest, consider making the manifest
     /// the authoritative source of data with an API that automatically uploads on changes. Revisit
     /// this when the manifest is more widely used and we have a better idea of the data model.
     pub(crate) async fn maybe_upload_tenant_manifest(&self) -> Result<(), TenantManifestError> {
-        // Multiple tasks may call this function concurrently after mutating the Tenant runtime
+        // Multiple tasks may call this function concurrently after mutating the TenantShard runtime
         // state, affecting the manifest generated by `build_tenant_manifest`. We use an async mutex
         // to serialize these callers. `eq_ignoring_version` acts as a slightly inefficient but
         // simple coalescing mechanism.
@@ -5812,7 +5812,7 @@ pub(crate) mod harness {
             info_span!("TenantHarness", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug())
         }
 
-        pub(crate) async fn load(&self) -> (Arc<Tenant>, RequestContext) {
+        pub(crate) async fn load(&self) -> (Arc<TenantShard>, RequestContext) {
             let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error)
                 .with_scope_unit_test();
             (
@@ -5827,10 +5827,10 @@ pub(crate) mod harness {
         pub(crate) async fn do_try_load(
             &self,
             ctx: &RequestContext,
-        ) -> anyhow::Result<Arc<Tenant>> {
+        ) -> anyhow::Result<Arc<TenantShard>> {
             let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
 
-            let tenant = Arc::new(Tenant::new(
+            let tenant = Arc::new(TenantShard::new(
                 TenantState::Attaching,
                 self.conf,
                 AttachedTenantConf::try_from(LocationConf::attached_single(
@@ -5933,12 +5933,20 @@ mod tests {
     use models::CompactLsnRange;
     use pageserver_api::key::{AUX_KEY_PREFIX, Key, NON_INHERITED_RANGE, RELATION_SIZE_PREFIX};
     use pageserver_api::keyspace::KeySpace;
+    #[cfg(feature = "testing")]
+    use pageserver_api::keyspace::KeySpaceRandomAccum;
     use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
     #[cfg(feature = "testing")]
     use pageserver_api::record::NeonWalRecord;
     use pageserver_api::value::Value;
     use pageserver_compaction::helpers::overlaps_with;
+    #[cfg(feature = "testing")]
+    use rand::SeedableRng;
+    #[cfg(feature = "testing")]
+    use rand::rngs::StdRng;
     use rand::{Rng, thread_rng};
+    #[cfg(feature = "testing")]
+    use std::ops::Range;
     use storage_layer::{IoConcurrency, PersistentLayerKey};
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
@@ -5959,6 +5967,318 @@ mod tests {
 
     static TEST_KEY: Lazy<Key> =
         Lazy::new(|| Key::from_slice(&hex!("010000000033333333444444445500000001")));
+
+    #[cfg(feature = "testing")]
+    struct TestTimelineSpecification {
+        start_lsn: Lsn,
+        last_record_lsn: Lsn,
+
+        in_memory_layers_shape: Vec<(Range<Key>, Range<Lsn>)>,
+        delta_layers_shape: Vec<(Range<Key>, Range<Lsn>)>,
+        image_layers_shape: Vec<(Range<Key>, Lsn)>,
+
+        gap_chance: u8,
+        will_init_chance: u8,
+    }
+
+    #[cfg(feature = "testing")]
+    struct Storage {
+        storage: HashMap<(Key, Lsn), Value>,
+        start_lsn: Lsn,
+    }
+
+    #[cfg(feature = "testing")]
+    impl Storage {
+        fn get(&self, key: Key, lsn: Lsn) -> Bytes {
+            use bytes::BufMut;
+
+            let mut crnt_lsn = lsn;
+            let mut got_base = false;
+
+            let mut acc = Vec::new();
+
+            while crnt_lsn >= self.start_lsn {
+                if let Some(value) = self.storage.get(&(key, crnt_lsn)) {
+                    acc.push(value.clone());
+
+                    match value {
+                        Value::WalRecord(NeonWalRecord::Test { will_init, .. }) => {
+                            if *will_init {
+                                got_base = true;
+                                break;
+                            }
+                        }
+                        Value::Image(_) => {
+                            got_base = true;
+                            break;
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+
+                crnt_lsn = crnt_lsn.checked_sub(1u64).unwrap();
+            }
+
+            assert!(
+                got_base,
+                "Input data was incorrect. No base image for {key}@{lsn}"
+            );
+
+            tracing::debug!("Wal redo depth for {key}@{lsn} is {}", acc.len());
+
+            let mut blob = BytesMut::new();
+            for value in acc.into_iter().rev() {
+                match value {
+                    Value::WalRecord(NeonWalRecord::Test { append, .. }) => {
+                        blob.extend_from_slice(append.as_bytes());
+                    }
+                    Value::Image(img) => {
+                        blob.put(img);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+
+            blob.into()
+        }
+    }
+
+    #[cfg(feature = "testing")]
+    #[allow(clippy::too_many_arguments)]
+    async fn randomize_timeline(
+        tenant: &Arc<TenantShard>,
+        new_timeline_id: TimelineId,
+        pg_version: u32,
+        spec: TestTimelineSpecification,
+        random: &mut rand::rngs::StdRng,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<(Arc<Timeline>, Storage, Vec<Lsn>)> {
+        let mut storage: HashMap<(Key, Lsn), Value> = HashMap::default();
+        let mut interesting_lsns = vec![spec.last_record_lsn];
+
+        for (key_range, lsn_range) in spec.in_memory_layers_shape.iter() {
+            let mut lsn = lsn_range.start;
+            while lsn < lsn_range.end {
+                let mut key = key_range.start;
+                while key < key_range.end {
+                    let gap = random.gen_range(1..=100) <= spec.gap_chance;
+                    let will_init = random.gen_range(1..=100) <= spec.will_init_chance;
+
+                    if gap {
+                        continue;
+                    }
+
+                    let record = if will_init {
+                        Value::WalRecord(NeonWalRecord::wal_init(format!("[wil_init {key}@{lsn}]")))
+                    } else {
+                        Value::WalRecord(NeonWalRecord::wal_append(format!("[delta {key}@{lsn}]")))
+                    };
+
+                    storage.insert((key, lsn), record);
+
+                    key = key.next();
+                }
+                lsn = Lsn(lsn.0 + 1);
+            }
+
+            // Stash some interesting LSN for future use
+            for offset in [0, 5, 100].iter() {
+                if *offset == 0 {
+                    interesting_lsns.push(lsn_range.start);
+                } else {
+                    let below = lsn_range.start.checked_sub(*offset);
+                    match below {
+                        Some(v) if v >= spec.start_lsn => {
+                            interesting_lsns.push(v);
+                        }
+                        _ => {}
+                    }
+
+                    let above = Lsn(lsn_range.start.0 + offset);
+                    interesting_lsns.push(above);
+                }
+            }
+        }
+
+        for (key_range, lsn_range) in spec.delta_layers_shape.iter() {
+            let mut lsn = lsn_range.start;
+            while lsn < lsn_range.end {
+                let mut key = key_range.start;
+                while key < key_range.end {
+                    let gap = random.gen_range(1..=100) <= spec.gap_chance;
+                    let will_init = random.gen_range(1..=100) <= spec.will_init_chance;
+
+                    if gap {
+                        continue;
+                    }
+
+                    let record = if will_init {
+                        Value::WalRecord(NeonWalRecord::wal_init(format!("[wil_init {key}@{lsn}]")))
+                    } else {
+                        Value::WalRecord(NeonWalRecord::wal_append(format!("[delta {key}@{lsn}]")))
+                    };
+
+                    storage.insert((key, lsn), record);
+
+                    key = key.next();
+                }
+                lsn = Lsn(lsn.0 + 1);
+            }
+
+            // Stash some interesting LSN for future use
+            for offset in [0, 5, 100].iter() {
+                if *offset == 0 {
+                    interesting_lsns.push(lsn_range.start);
+                } else {
+                    let below = lsn_range.start.checked_sub(*offset);
+                    match below {
+                        Some(v) if v >= spec.start_lsn => {
+                            interesting_lsns.push(v);
+                        }
+                        _ => {}
+                    }
+
+                    let above = Lsn(lsn_range.start.0 + offset);
+                    interesting_lsns.push(above);
+                }
+            }
+        }
+
+        for (key_range, lsn) in spec.image_layers_shape.iter() {
+            let mut key = key_range.start;
+            while key < key_range.end {
+                let blob = Bytes::from(format!("[image {key}@{lsn}]"));
+                let record = Value::Image(blob.clone());
+                storage.insert((key, *lsn), record);
+
+                key = key.next();
+            }
+
+            // Stash some interesting LSN for future use
+            for offset in [0, 5, 100].iter() {
+                if *offset == 0 {
+                    interesting_lsns.push(*lsn);
+                } else {
+                    let below = lsn.checked_sub(*offset);
+                    match below {
+                        Some(v) if v >= spec.start_lsn => {
+                            interesting_lsns.push(v);
+                        }
+                        _ => {}
+                    }
+
+                    let above = Lsn(lsn.0 + offset);
+                    interesting_lsns.push(above);
+                }
+            }
+        }
+
+        let in_memory_test_layers = {
+            let mut acc = Vec::new();
+
+            for (key_range, lsn_range) in spec.in_memory_layers_shape.iter() {
+                let mut data = Vec::new();
+
+                let mut lsn = lsn_range.start;
+                while lsn < lsn_range.end {
+                    let mut key = key_range.start;
+                    while key < key_range.end {
+                        if let Some(record) = storage.get(&(key, lsn)) {
+                            data.push((key, lsn, record.clone()));
+                        }
+
+                        key = key.next();
+                    }
+                    lsn = Lsn(lsn.0 + 1);
+                }
+
+                acc.push(InMemoryLayerTestDesc {
+                    data,
+                    lsn_range: lsn_range.clone(),
+                    is_open: false,
+                })
+            }
+
+            acc
+        };
+
+        let delta_test_layers = {
+            let mut acc = Vec::new();
+
+            for (key_range, lsn_range) in spec.delta_layers_shape.iter() {
+                let mut data = Vec::new();
+
+                let mut lsn = lsn_range.start;
+                while lsn < lsn_range.end {
+                    let mut key = key_range.start;
+                    while key < key_range.end {
+                        if let Some(record) = storage.get(&(key, lsn)) {
+                            data.push((key, lsn, record.clone()));
+                        }
+
+                        key = key.next();
+                    }
+                    lsn = Lsn(lsn.0 + 1);
+                }
+
+                acc.push(DeltaLayerTestDesc {
+                    data,
+                    lsn_range: lsn_range.clone(),
+                    key_range: key_range.clone(),
+                })
+            }
+
+            acc
+        };
+
+        let image_test_layers = {
+            let mut acc = Vec::new();
+
+            for (key_range, lsn) in spec.image_layers_shape.iter() {
+                let mut data = Vec::new();
+
+                let mut key = key_range.start;
+                while key < key_range.end {
+                    if let Some(record) = storage.get(&(key, *lsn)) {
+                        let blob = match record {
+                            Value::Image(blob) => blob.clone(),
+                            _ => unreachable!(),
+                        };
+
+                        data.push((key, blob));
+                    }
+
+                    key = key.next();
+                }
+
+                acc.push((*lsn, data));
+            }
+
+            acc
+        };
+
+        let tline = tenant
+            .create_test_timeline_with_layers(
+                new_timeline_id,
+                spec.start_lsn,
+                pg_version,
+                ctx,
+                in_memory_test_layers,
+                delta_test_layers,
+                image_test_layers,
+                spec.last_record_lsn,
+            )
+            .await?;
+
+        Ok((
+            tline,
+            Storage {
+                storage,
+                start_lsn: spec.start_lsn,
+            },
+            interesting_lsns,
+        ))
+    }
 
     #[tokio::test]
     async fn test_basic() -> anyhow::Result<()> {
@@ -6616,7 +6936,7 @@ mod tests {
     }
 
     async fn bulk_insert_compact_gc(
-        tenant: &Tenant,
+        tenant: &TenantShard,
         timeline: &Arc<Timeline>,
         ctx: &RequestContext,
         lsn: Lsn,
@@ -6628,7 +6948,7 @@ mod tests {
     }
 
     async fn bulk_insert_maybe_compact_gc(
-        tenant: &Tenant,
+        tenant: &TenantShard,
         timeline: &Arc<Timeline>,
         ctx: &RequestContext,
         mut lsn: Lsn,
@@ -7538,7 +7858,7 @@ mod tests {
             let (tline, _ctx) = tenant
                 .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
                 .await?;
-            // Leave the timeline ID in [`Tenant::timelines_creating`] to exclude attempting to create it again
+            // Leave the timeline ID in [`TenantShard::timelines_creating`] to exclude attempting to create it again
             let raw_tline = tline.raw_timeline().unwrap();
             raw_tline
                 .shutdown(super::timeline::ShutdownMode::Hard)
@@ -10538,6 +10858,214 @@ mod tests {
             assert_eq!(value, Bytes::from(expected_value.clone()));
 
             tracing::info!("key={key} value={expected_value}");
+        }
+
+        Ok(())
+    }
+
+    // A randomized read path test. Generates a layer map according to a deterministic
+    // specification. Fills the (key, LSN) space in random manner and then performs
+    // random scattered queries validating the results against in-memory storage.
+    //
+    // See this internal Notion page for a diagram of the layer map:
+    // https://www.notion.so/neondatabase/Read-Path-Unit-Testing-Fuzzing-1d1f189e0047806c8e5cd37781b0a350?pvs=4
+    //
+    // A fuzzing mode is also supported. In this mode, the test will use a random
+    // seed instead of a hardcoded one. Use it in conjunction with `cargo stress`
+    // to run multiple instances in parallel:
+    //
+    // $ RUST_BACKTRACE=1 RUST_LOG=INFO \
+    //   cargo stress --package=pageserver --features=testing,fuzz-read-path --release -- test_read_path
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn test_read_path() -> anyhow::Result<()> {
+        use rand::seq::SliceRandom;
+
+        let seed = if cfg!(feature = "fuzz-read-path") {
+            let seed: u64 = thread_rng().r#gen();
+            seed
+        } else {
+            // Use a hard-coded seed when not in fuzzing mode.
+            // Note that with the current approach results are not reproducible
+            // accross platforms and Rust releases.
+            const SEED: u64 = 0;
+            SEED
+        };
+
+        let mut random = StdRng::seed_from_u64(seed);
+
+        let (queries, will_init_chance, gap_chance) = if cfg!(feature = "fuzz-read-path") {
+            const QUERIES: u64 = 5000;
+            let will_init_chance: u8 = random.gen_range(0..=10);
+            let gap_chance: u8 = random.gen_range(0..=50);
+
+            (QUERIES, will_init_chance, gap_chance)
+        } else {
+            const QUERIES: u64 = 1000;
+            const WILL_INIT_CHANCE: u8 = 1;
+            const GAP_CHANCE: u8 = 5;
+
+            (QUERIES, WILL_INIT_CHANCE, GAP_CHANCE)
+        };
+
+        let harness = TenantHarness::create("test_read_path").await?;
+        let (tenant, ctx) = harness.load().await;
+
+        tracing::info!("Using random seed: {seed}");
+        tracing::info!(%will_init_chance, %gap_chance, "Fill params");
+
+        // Define the layer map shape. Note that this part is not randomized.
+
+        const KEY_DIMENSION_SIZE: u32 = 99;
+        let start_key = Key::from_hex("110000000033333333444444445500000000").unwrap();
+        let end_key = start_key.add(KEY_DIMENSION_SIZE);
+        let total_key_range = start_key..end_key;
+        let total_key_range_size = end_key.to_i128() - start_key.to_i128();
+        let total_start_lsn = Lsn(104);
+        let last_record_lsn = Lsn(504);
+
+        assert!(total_key_range_size % 3 == 0);
+
+        let in_memory_layers_shape = vec![
+            (total_key_range.clone(), Lsn(304)..Lsn(400)),
+            (total_key_range.clone(), Lsn(400)..last_record_lsn),
+        ];
+
+        let delta_layers_shape = vec![
+            (
+                start_key..(start_key.add((total_key_range_size / 3) as u32)),
+                Lsn(200)..Lsn(304),
+            ),
+            (
+                (start_key.add((total_key_range_size / 3) as u32))
+                    ..(start_key.add((total_key_range_size * 2 / 3) as u32)),
+                Lsn(200)..Lsn(304),
+            ),
+            (
+                (start_key.add((total_key_range_size * 2 / 3) as u32))
+                    ..(start_key.add(total_key_range_size as u32)),
+                Lsn(200)..Lsn(304),
+            ),
+        ];
+
+        let image_layers_shape = vec![
+            (
+                start_key.add((total_key_range_size * 2 / 3 - 10) as u32)
+                    ..start_key.add((total_key_range_size * 2 / 3 + 10) as u32),
+                Lsn(456),
+            ),
+            (
+                start_key.add((total_key_range_size / 3 - 10) as u32)
+                    ..start_key.add((total_key_range_size / 3 + 10) as u32),
+                Lsn(256),
+            ),
+            (total_key_range.clone(), total_start_lsn),
+        ];
+
+        let specification = TestTimelineSpecification {
+            start_lsn: total_start_lsn,
+            last_record_lsn,
+            in_memory_layers_shape,
+            delta_layers_shape,
+            image_layers_shape,
+            gap_chance,
+            will_init_chance,
+        };
+
+        // Create and randomly fill in the layers according to the specification
+        let (tline, storage, interesting_lsns) = randomize_timeline(
+            &tenant,
+            TIMELINE_ID,
+            DEFAULT_PG_VERSION,
+            specification,
+            &mut random,
+            &ctx,
+        )
+        .await?;
+
+        // Now generate queries based on the interesting lsns that we've collected.
+        //
+        // While there's still room in the query, pick and interesting LSN and a random
+        // key. Then roll the dice to see if the next key should also be included in
+        // the query. When the roll fails, break the "batch" and pick another point in the
+        // (key, LSN) space.
+
+        const PICK_NEXT_CHANCE: u8 = 50;
+        for _ in 0..queries {
+            let query = {
+                let mut keyspaces_at_lsn: HashMap<Lsn, KeySpaceRandomAccum> = HashMap::default();
+                let mut used_keys: HashSet<Key> = HashSet::default();
+
+                while used_keys.len() < Timeline::MAX_GET_VECTORED_KEYS as usize {
+                    let selected_lsn = interesting_lsns.choose(&mut random).expect("not empty");
+                    let mut selected_key = start_key.add(random.gen_range(0..KEY_DIMENSION_SIZE));
+
+                    while used_keys.len() < Timeline::MAX_GET_VECTORED_KEYS as usize {
+                        if used_keys.contains(&selected_key)
+                            || selected_key >= start_key.add(KEY_DIMENSION_SIZE)
+                        {
+                            break;
+                        }
+
+                        keyspaces_at_lsn
+                            .entry(*selected_lsn)
+                            .or_default()
+                            .add_key(selected_key);
+                        used_keys.insert(selected_key);
+
+                        let pick_next = random.gen_range(0..=100) <= PICK_NEXT_CHANCE;
+                        if pick_next {
+                            selected_key = selected_key.next();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+
+                VersionedKeySpaceQuery::scattered(
+                    keyspaces_at_lsn
+                        .into_iter()
+                        .map(|(lsn, acc)| (lsn, acc.to_keyspace()))
+                        .collect(),
+                )
+            };
+
+            // Run the query and validate the results
+
+            let results = tline
+                .get_vectored(query.clone(), IoConcurrency::Sequential, &ctx)
+                .await;
+
+            let blobs = match results {
+                Ok(ok) => ok,
+                Err(err) => {
+                    panic!("seed={seed} Error returned for query {query}: {err}");
+                }
+            };
+
+            for (key, key_res) in blobs.into_iter() {
+                match key_res {
+                    Ok(blob) => {
+                        let requested_at_lsn = query.map_key_to_lsn(&key);
+                        let expected = storage.get(key, requested_at_lsn);
+
+                        if blob != expected {
+                            tracing::error!(
+                                "seed={seed} Mismatch for {key}@{requested_at_lsn} from query: {query}"
+                            );
+                        }
+
+                        assert_eq!(blob, expected);
+                    }
+                    Err(err) => {
+                        let requested_at_lsn = query.map_key_to_lsn(&key);
+
+                        panic!(
+                            "seed={seed} Error returned for {key}@{requested_at_lsn} from query {query}: {err}"
+                        );
+                    }
+                }
+            }
         }
 
         Ok(())

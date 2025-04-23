@@ -50,13 +50,13 @@ fn restart_rsyslog() -> Result<()> {
 
 pub fn configure_audit_rsyslog(
     log_directory: String,
-    tag: &str,
+    tag: Option<String>,
     remote_endpoint: &str,
 ) -> Result<()> {
     let config_content: String = format!(
         include_str!("config_template/compute_audit_rsyslog_template.conf"),
         log_directory = log_directory,
-        tag = tag,
+        tag = tag.unwrap_or("".to_string()),
         remote_endpoint = remote_endpoint
     );
 

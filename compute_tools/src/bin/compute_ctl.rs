@@ -57,24 +57,13 @@ use tracing::{error, info};
 use url::Url;
 use utils::failpoint_support;
 
-// Compatibility hack: if the control plane specified any remote-ext-config
-// use the default value for extension storage proxy gateway.
-// Remove this once the control plane is updated to pass the gateway URL
-fn parse_remote_ext_config(arg: &str) -> Result<String> {
-    if arg.starts_with("http") {
-        Ok(arg.trim_end_matches('/').to_string())
-    } else {
-        Ok("http://pg-ext-s3-gateway".to_string())
-    }
-}
-
 #[derive(Parser)]
 #[command(rename_all = "kebab-case")]
 struct Cli {
     #[arg(short = 'b', long, default_value = "postgres", env = "POSTGRES_PATH")]
     pub pgbin: String,
 
-    #[arg(short = 'r', long, value_parser = parse_remote_ext_config)]
+    #[arg(short = 'r', long)]
     pub remote_ext_config: Option<String>,
 
     /// The port to bind the external listening HTTP server to. Clients running
@@ -116,9 +105,7 @@ struct Cli {
     #[arg(long)]
     pub set_disk_quota_for_fs: Option<String>,
 
-    // TODO(tristan957): remove alias after compatibility tests are no longer
-    // an issue
-    #[arg(short = 'c', long, alias = "spec-path")]
+    #[arg(short = 'c', long)]
     pub config: Option<OsString>,
 
     #[arg(short = 'i', long, group = "compute-id")]
@@ -139,7 +126,7 @@ fn main() -> Result<()> {
 
     let scenario = failpoint_support::init();
 
-    // For historical reasons, the main thread that processes the spec and launches postgres
+    // For historical reasons, the main thread that processes the config and launches postgres
     // is synchronous, but we always have this tokio runtime available and we "enter" it so
     // that you can use tokio::spawn() and tokio::runtime::Handle::current().block_on(...)
     // from all parts of compute_ctl.
@@ -155,7 +142,7 @@ fn main() -> Result<()> {
 
     let connstr = Url::parse(&cli.connstr).context("cannot parse connstr as a URL")?;
 
-    let cli_spec = get_config(&cli)?;
+    let config = get_config(&cli)?;
 
     let compute_node = ComputeNode::new(
         ComputeNodeParams {
@@ -176,8 +163,7 @@ fn main() -> Result<()> {
             #[cfg(target_os = "linux")]
             vm_monitor_addr: cli.vm_monitor_addr,
         },
-        cli_spec.spec,
-        cli_spec.compute_ctl_config,
+        config,
     )?;
 
     let exit_code = compute_node.run()?;
