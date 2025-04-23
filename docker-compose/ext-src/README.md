@@ -58,9 +58,10 @@ The extensions in this directory are used by the `test_extensions_upgrade.sh` sc
 
 For testing with regular users (particularly for cloud instances), each extension directory typically contains a `regular-test.sh` script that:
 
-1. Creates a test database
-2. Installs the extension
-3. Runs regression tests
+1. Drops the database if it exists
+2. Creates a fresh test database
+3. Installs the extension
+4. Runs regression tests
 
 A note about pg_regress: Since pg_regress attempts to set `lc_messages` for the database by default (which can cause issues), we create databases manually and use the `--use-existing` option to bypass this limitation.
 
