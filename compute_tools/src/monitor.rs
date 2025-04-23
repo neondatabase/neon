@@ -9,7 +9,7 @@ use postgres::{Client, NoTls};
 use tracing::{Level, error, info, instrument, span};
 
 use crate::compute::ComputeNode;
-use crate::metrics::{PG_DOWNTIME_MS, PG_TOTAL_DOWNTIME_MS};
+use crate::metrics::{PG_CURR_DOWNTIME_MS, PG_TOTAL_DOWNTIME_MS};
 
 const MONITOR_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -30,6 +30,10 @@ struct ComputeMonitor {
     active_time: Option<f64>,
     sessions: Option<i64>,
 
+    // Use experimental statistics-based activity monitor. It's no longer
+    // 'experimental' per se, as it's enabled for everyone, but we still
+    // keep the flag as an option to turn it off in some cases if it will
+    // misbehave.
     experimental: bool,
 }
 
@@ -38,9 +42,9 @@ impl ComputeMonitor {
         let now = Utc::now();
 
         // Calculate and report current downtime
-        // (since the last time Postgres was up )
+        // (since the last time Postgres was up)
         let downtime = now.signed_duration_since(self.last_up);
-        PG_DOWNTIME_MS.set(downtime.num_milliseconds() as f64);
+        PG_CURR_DOWNTIME_MS.set(downtime.num_milliseconds() as f64);
 
         // Calculate and update total downtime
         // (cumulative duration of Postgres downtime in ms)
@@ -52,14 +56,14 @@ impl ComputeMonitor {
 
     fn report_up(&mut self) {
         self.last_up = Utc::now();
-        PG_DOWNTIME_MS.set(0.0);
+        PG_CURR_DOWNTIME_MS.set(0.0);
     }
 
     fn downtime_info(&self) -> String {
         format!(
             "total_ms: {}, current_ms: {}, last_up: {}",
             PG_TOTAL_DOWNTIME_MS.get(),
-            PG_DOWNTIME_MS.get(),
+            PG_CURR_DOWNTIME_MS.get(),
             self.last_up
         )
     }
@@ -117,7 +121,9 @@ impl ComputeMonitor {
 
                                 // Reconnect to Postgres just in case. During tests, I noticed
                                 // that queries in `check()` can fail with `connection closed`,
-                                // but `cli.is_closed()` above doesn't detect it.
+                                // but `cli.is_closed()` above doesn't detect it. Even if old
+                                // connection is still alive, it will be dropped when we reassign
+                                // `client` to a new connection.
                                 client = conf.connect(NoTls);
                             }
                         }
@@ -148,29 +154,24 @@ impl ComputeMonitor {
         if self.experimental {
             // Check if the total active time or sessions across all databases has changed.
             // If it did, it means that user executed some queries. In theory, it can even go down if
-            // some databases were dropped, but it's still a user activity.
+            // some databases were dropped, but it's still user activity.
             match get_database_stats(cli) {
                 Ok((active_time, sessions)) => {
                     let mut detected_activity = false;
 
-                    self.active_time = match self.active_time {
-                        Some(prev_active_time) => {
-                            if active_time != prev_active_time {
-                                detected_activity = true;
-                            }
-                            Some(active_time)
+                    if let Some(prev_active_time) = self.active_time {
+                        if active_time != prev_active_time {
+                            detected_activity = true;
                         }
-                        None => Some(active_time),
-                    };
-                    self.sessions = match self.sessions {
-                        Some(prev_sessions) => {
-                            if sessions != prev_sessions {
-                                detected_activity = true;
-                            }
-                            Some(sessions)
+                    }
+                    self.active_time = Some(active_time);
+
+                    if let Some(prev_sessions) = self.sessions {
+                        if sessions != prev_sessions {
+                            detected_activity = true;
                         }
-                        None => Some(sessions),
-                    };
+                    }
+                    self.sessions = Some(sessions);
 
                     if detected_activity {
                         // Update the last active time and continue, we don't need to
@@ -185,11 +186,11 @@ impl ComputeMonitor {
             }
         }
 
-        // If database statistics is the same, check all backends state change,
-        // maybe there is some with more recent activity. `get_backends_state_change()`
+        // If database statistics are the same, check all backends for state changes.
+        // Maybe there are some with more recent activity. `get_backends_state_change()`
         // can return None or stale timestamp, so it's `compute.update_last_active()`
         // responsibility to check if the new timestamp is more recent than the current one.
-        // This helps us to discover new sessions, that did nothing yet.
+        // This helps us to discover new sessions that have not done anything yet.
         match get_backends_state_change(cli) {
             Ok(last_active) => match (last_active, self.last_active) {
                 (Some(last_active), Some(prev_last_active)) => {
