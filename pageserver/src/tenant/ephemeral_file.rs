@@ -12,6 +12,7 @@ use tokio_epoll_uring::{BoundedBuf, Slice};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info_span};
 use utils::id::TimelineId;
+use utils::sync::gate::GateGuard;
 
 use crate::assert_u64_eq_usize::{U64IsUsize, UsizeIsU64};
 use crate::config::PageServerConf;
@@ -32,8 +33,6 @@ pub struct EphemeralFile {
     bytes_written: u64,
     file: TempVirtualFileCoOwnedByEphemeralFileAndBufferedWriter,
     buffered_writer: BufferedWriter,
-    /// Gate guard is held on as long as we need to do operations in the path (delete on drop)
-    _gate_guard: utils::sync::gate::GateGuard,
 }
 
 type BufferedWriter = owned_buffers_io::write::BufferedWriter<
@@ -83,6 +82,7 @@ impl EphemeralFile {
                 ctx,
             )
             .await?,
+            gate.enter()?,
         );
 
         let page_cache_file_id = page_cache::next_file_id(); // XXX get rid, we're not page-caching anymore
@@ -102,15 +102,14 @@ impl EphemeralFile {
                 ctx,
                 info_span!(parent: None, "ephemeral_file_buffered_writer", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), timeline_id=%timeline_id, path = %filename),
             ),
-            _gate_guard: gate.enter()?,
         })
     }
 }
 
 impl TempVirtualFileCoOwnedByEphemeralFileAndBufferedWriter {
-    fn new(file: VirtualFile) -> Self {
+    fn new(file: VirtualFile, gate_guard: GateGuard) -> Self {
         Self {
-            inner: Arc::new(TempVirtualFile::new(file)),
+            inner: Arc::new(TempVirtualFile::new(file, gate_guard)),
         }
     }
 }

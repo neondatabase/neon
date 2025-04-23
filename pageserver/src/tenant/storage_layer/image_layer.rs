@@ -790,6 +790,7 @@ impl ImageLayerWriterInner {
                 ctx,
             )
             .await?,
+            gate.enter()?,
         );
 
         // Start at `PAGE_SZ` to make room for the header block.

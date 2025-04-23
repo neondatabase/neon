@@ -382,6 +382,7 @@ pub(crate) mod tests {
                     ctx,
                 )
                 .await?,
+                gate.enter()?,
             );
             let mut wtr =
                 BlobWriter::new(file, 0, &gate, cancel.clone(), ctx, info_span!("test")).unwrap();

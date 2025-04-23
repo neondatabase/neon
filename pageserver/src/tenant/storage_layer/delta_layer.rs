@@ -435,6 +435,7 @@ impl DeltaLayerWriterInner {
                 ctx,
             )
             .await?,
+            gate.enter()?,
         );
 
         // Start at PAGE_SZ, make room for the header block

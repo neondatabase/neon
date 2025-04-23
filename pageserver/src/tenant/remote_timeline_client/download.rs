@@ -168,6 +168,7 @@ async fn download_object(
         .await
         .with_context(|| format!("create a destination file for layer '{dst_path}'"))
         .map_err(DownloadError::Other)?,
+        gate.enter().map_err(|_| DownloadError::Cancelled)?,
     );
 
     let mut download = storage
