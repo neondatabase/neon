@@ -1,19 +1,18 @@
-use crate::{compute::ComputeNode, http::JsonResponse};
+use crate::compute::ComputeNode;
 use async_compression::tokio::bufread::{ZstdDecoder, ZstdEncoder};
+use axum::Json;
 use axum::extract::State as AxumState;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use compute_api::responses::PrewarmStatus::{self, *};
 use reqwest::Client;
 use serde::Serialize;
-use std::result::Result as StdResult;
 use std::sync::Arc;
-use tokio::io::AsyncReadExt;
+use tokio::{io::AsyncReadExt, spawn};
 use tracing::{error, info};
 
 type State = AxumState<Arc<ComputeNode>>;
-type Result = anyhow::Result<Response, Response>;
-
+type UnitResult = Result<(), ()>;
 const KEY: &str = "lfc_state";
 
 pub struct Parts {
@@ -23,7 +22,7 @@ pub struct Parts {
 
 impl TryFrom<&Arc<ComputeNode>> for Parts {
     type Error = &'static str;
-    fn try_from(state: &Arc<ComputeNode>) -> StdResult<Self, Self::Error> {
+    fn try_from(state: &Arc<ComputeNode>) -> Result<Self, Self::Error> {
         let state = state.state.lock().unwrap();
         let Some(pspec) = state.pspec.as_ref() else {
             return Err("pspec is not present");
@@ -50,7 +49,7 @@ impl axum::extract::FromRequestParts<Arc<ComputeNode>> for Parts {
     async fn from_request_parts(
         _: &mut http::request::Parts,
         state: &Arc<ComputeNode>,
-    ) -> StdResult<Self, Self::Rejection> {
+    ) -> Result<Self, Self::Rejection> {
         state.try_into().map_err(|e| {
             error!("{e}");
             StatusCode::BAD_REQUEST.into_response()
@@ -58,56 +57,63 @@ impl axum::extract::FromRequestParts<Arc<ComputeNode>> for Parts {
     }
 }
 
-pub(in crate::http) async fn prewarm_lfc_offload(parts: Parts, AxumState(state): State) -> Result {
+pub(in crate::http) async fn prewarm_lfc_offload(parts: Parts, state: State) {
+    spawn(async move { prewarm_lfc_offload_impl(parts, state).await });
+}
+
+async fn prewarm_lfc_offload_impl(parts: Parts, AxumState(state): State) -> UnitResult {
     let Parts { uri, token } = parts;
     crate::metrics::LFC_PREWARM_OFFLOAD_REQUESTS.inc();
     info!(%uri, "requesting LFC state from postgres");
 
-    fn internal_err(err: impl std::fmt::Display, msg: &str) -> Response {
+    fn internal_err(err: impl std::fmt::Display, msg: &str) {
         error!(%err, msg);
-        StatusCode::INTERNAL_SERVER_ERROR.into_response()
     }
 
     let mut compressed = Vec::new();
     ComputeNode::get_maintenance_client(&state.tokio_conn_conf)
         .await
-        .map_err(|e| internal_err(e, "connecting to postgres"))?
+        .map_err(|err| error!(%err, "connecting to postgres"))?
         .query_one("select get_local_cache_state()", &[])
         .await
-        .map_err(|e| internal_err(e, "querying LFC state"))?
+        .map_err(|err| error!(%err, "querying LFC state"))?
         .try_get::<usize, &[u8]>(0)
-        .map_err(|e| internal_err(e, "deserializing LFC state"))
+        .map_err(|err| error!(%err, "deserializing LFC state"))
         .map(ZstdEncoder::new)?
         .read_to_end(&mut compressed)
         .await
-        .map_err(|e| internal_err(e, "compressing LFC state"))?;
+        .map_err(|err| error!(%err, "compressing LFC state"))?;
     let compressed_len = compressed.len();
     info!(%uri, "downloaded LFC state, compressed size {compressed_len}, writing to endpoint storage");
 
     let request = Client::new().put(uri).bearer_auth(token).body(compressed);
     match request.send().await {
-        Ok(res) if res.status() == StatusCode::OK => Ok(res.status().into_response()),
+        Ok(res) if res.status() == StatusCode::OK => Ok(()),
         Ok(res) => Err(internal_err(res.status(), "writing to endpoint storage")),
-        Err(e) => Err(internal_err(e, "writing to endpoint storage")),
+        Err(err) => Err(error!(%err, "writing to endpoint storage")),
     }
 }
 
-fn prewarm_err(state: &ComputeNode, err: impl std::fmt::Display, msg: &str) -> Response {
+pub async fn prewarm_lfc(parts: Parts, state: State) -> Response {
+    {
+        let status = &mut state.state.lock().unwrap().prewarm_state.status;
+        if *status == Prewarming {
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
+        }
+        *status = Prewarming;
+    }
+    spawn(async move { prewarm_lfc_impl(parts, state).await });
+    StatusCode::OK.into_response()
+}
+
+fn prewarm_err(state: &ComputeNode, err: impl std::fmt::Display, msg: &str) {
     error!(%err, msg);
     let state = &mut state.state.lock().unwrap().prewarm_state;
     state.status = Failed;
     state.error = err.to_string();
-    StatusCode::INTERNAL_SERVER_ERROR.into_response()
 }
 
-pub async fn prewarm_lfc(parts: Parts, AxumState(state): State) -> Result {
-    {
-        let status = &mut state.state.lock().unwrap().prewarm_state.status;
-        if *status == Prewarming {
-            return Err(StatusCode::TOO_MANY_REQUESTS.into_response());
-        }
-        *status = Prewarming;
-    }
+async fn prewarm_lfc_impl(parts: Parts, AxumState(state): State) -> UnitResult {
     crate::metrics::LFC_PREWARM_REQUESTS.inc();
     let Parts { uri, token } = parts;
     info!(%uri, "requesting LFC state from endpoint storage");
@@ -143,18 +149,20 @@ pub async fn prewarm_lfc(parts: Parts, AxumState(state): State) -> Result {
         .map_err(|e| prewarm_err(&state, e, "loading LFC state into postgres"))?;
 
     state.state.lock().unwrap().prewarm_state.status = Completed;
-    Ok(StatusCode::OK.into_response())
+    Ok(())
 }
 
 #[derive(Serialize)]
-struct PrewarmState {
+pub(in crate::http) struct PrewarmState {
     status: PrewarmStatus,
     error: String,
     segments: i32,
     done: i32,
 }
 
-pub(in crate::http) async fn prewarm_lfc_status(AxumState(state): State) -> Result {
+pub(in crate::http) async fn prewarm_lfc_status(
+    state: State,
+) -> Result<Json<PrewarmState>, StatusCode> {
     info!("requesting LFC prewarm status from postgres");
     let (status, error);
     {
@@ -163,9 +171,9 @@ pub(in crate::http) async fn prewarm_lfc_status(AxumState(state): State) -> Resu
         error = prewarm_state.error.clone();
     }
 
-    fn internal_err(err: impl std::fmt::Display, msg: &str) -> Response {
+    fn internal_err(err: impl std::fmt::Display, msg: &str) -> StatusCode {
         error!(%err, msg);
-        JsonResponse::error(StatusCode::INTERNAL_SERVER_ERROR, msg)
+        StatusCode::INTERNAL_SERVER_ERROR
     }
 
     let row = ComputeNode::get_maintenance_client(&state.tokio_conn_conf)
@@ -187,5 +195,5 @@ pub(in crate::http) async fn prewarm_lfc_status(AxumState(state): State) -> Resu
         segments,
         done,
     };
-    Ok(JsonResponse::success(StatusCode::OK, prewarm_state))
+    Ok(Json(prewarm_state))
 }
