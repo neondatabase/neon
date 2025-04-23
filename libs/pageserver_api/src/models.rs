@@ -1821,7 +1821,12 @@ pub mod virtual_file {
                     utils::env::var_serde_json_string(
                         "NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IO_MODE",
                     )
-                    .unwrap_or(IoMode::DirectRw)
+                    .unwrap_or(
+                        #[cfg(target_os = "linux")]
+                        IoMode::DirectRw,
+                        #[cfg(not(target_os = "linux"))]
+                        IoMode::Buffered,
+                    )
                 });
                 *CACHED
             } else {
@@ -1838,6 +1843,7 @@ pub mod virtual_file {
                 v if v == (IoMode::Buffered as u8) => IoMode::Buffered,
                 #[cfg(target_os = "linux")]
                 v if v == (IoMode::Direct as u8) => IoMode::Direct,
+                #[cfg(target_os = "linux")]
                 v if v == (IoMode::DirectRw as u8) => IoMode::DirectRw,
                 x => return Err(x),
             })

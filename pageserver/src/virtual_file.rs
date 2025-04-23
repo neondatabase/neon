@@ -112,10 +112,21 @@ impl VirtualFile {
             #[cfg(target_os = "linux")]
             (IoMode::DirectRw, _) => true,
         };
-        let mut open_options = open_options.clone();
-        if set_o_direct {
-            open_options.custom_flags(nix::libc::O_DIRECT);
-        }
+        let open_options = open_options.clone();
+        let open_options = if set_o_direct {
+            #[cfg(target_os = "linux")]
+            {
+                let mut open_options = open_options;
+                open_options.custom_flags(nix::libc::O_DIRECT);
+                open_options
+            }
+            #[cfg(not(target_os = "linux"))]
+            unreachable!(
+                "O_DIRECT is not supported on this platform, IoMode's that result in set_o_direct=true shouldn't even be defined"
+            );
+        } else {
+            open_options
+        };
         let inner = VirtualFileInner::open_with_options(path, open_options, ctx).await?;
         Ok(VirtualFile { inner, _mode: mode })
     }
