@@ -8,6 +8,17 @@ from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import USE_LFC
 
 
+def check_pinned_entries(cur):
+    # some LFC buffer can be temporary locked by autovacuum or background writer
+    for _ in range(10):
+        cur.execute("select lfc_value from neon_lfc_stats where lfc_key='file_cache_pinned'")
+        n_pinned = cur.fetchall()[0][0]
+        if n_pinned == 0:
+            break
+        time.sleep(1)
+    assert n_pinned == 0
+
+
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 def test_lfc_prewarm(neon_simple_env: NeonEnv):
     env = neon_simple_env
@@ -55,6 +66,8 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv):
     assert cur.fetchall()[0][0] == n_records * (n_records + 1) / 2
 
     assert prewarm_info[1] > 0
+
+    check_pinned_entries(cur)
 
 
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
@@ -128,3 +141,5 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv):
     cur.execute("select sum(balance) from accounts")
     total_balance = cur.fetchall()[0][0]
     assert total_balance == 0
+
+    check_pinned_entries(cur)
