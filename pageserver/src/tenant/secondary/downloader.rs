@@ -7,7 +7,6 @@ use std::time::{Duration, Instant, SystemTime};
 use camino::Utf8PathBuf;
 use chrono::format::{DelayedFormat, StrftimeItems};
 use futures::Future;
-use metrics::UIntGauge;
 use pageserver_api::models::SecondaryProgress;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::{DownloadError, DownloadKind, DownloadOpts, Etag, GenericRemoteStorage};
@@ -32,7 +31,6 @@ use crate::context::RequestContext;
 use crate::disk_usage_eviction_task::{
     DiskUsageEvictionInfo, EvictionCandidate, EvictionLayer, EvictionSecondaryLayer, finite_f32,
 };
-use crate::metrics::SECONDARY_MODE;
 use crate::tenant::config::SecondaryLocationConfig;
 use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::ephemeral_file::is_ephemeral_file;
@@ -119,9 +117,6 @@ impl OnDiskState {
             .fatal_err("Deleting secondary layer")
     }
 
-    pub(crate) fn file_size(&self) -> u64 {
-        self.metadata.file_size
-    }
 }
 
 pub(super) struct SecondaryDetailTimeline {
@@ -174,13 +169,9 @@ impl SecondaryDetailTimeline {
     pub(super) fn remove_layer(
         &mut self,
         name: &LayerName,
-        resident_metric: &UIntGauge,
     ) -> Option<OnDiskState> {
-        let removed = self.on_disk_layers.remove(name);
-        if let Some(removed) = &removed {
-            resident_metric.sub(removed.file_size());
-        }
-        removed
+        self.on_disk_layers.remove(name)
+        
     }
 
     /// `local_path`
@@ -190,7 +181,6 @@ impl SecondaryDetailTimeline {
         tenant_shard_id: &TenantShardId,
         timeline_id: &TimelineId,
         touched: &HeatMapLayer,
-        _resident_metric: &UIntGauge,
         local_path: F,
     ) where
         F: FnOnce() -> Utf8PathBuf,
@@ -265,28 +255,16 @@ impl SecondaryDetail {
         }
     }
 
-    #[cfg(feature = "testing")]
-    pub(crate) fn total_resident_size(&self) -> u64 {
-        self.timelines
-            .values()
-            .map(|tl| {
-                tl.on_disk_layers
-                    .values()
-                    .map(|v| v.metadata.file_size)
-                    .sum::<u64>()
-            })
-            .sum::<u64>()
-    }
 
     pub(super) fn evict_layer(
         &mut self,
         name: LayerName,
         timeline_id: &TimelineId,
         now: SystemTime,
-        resident_metric: &UIntGauge,
+
     ) -> Option<OnDiskState> {
         let timeline = self.timelines.get_mut(timeline_id)?;
-        let removed = timeline.remove_layer(&name, resident_metric);
+        let removed = timeline.remove_layer(&name);
         if removed.is_some() {
             timeline.evicted_at.insert(name, now);
         }
@@ -295,42 +273,21 @@ impl SecondaryDetail {
 
     pub(super) fn remove_timeline(
         &mut self,
-        tenant_shard_id: &TenantShardId,
+        _tenant_shard_id: &TenantShardId,
         timeline_id: &TimelineId,
-        resident_metric: &UIntGauge,
     ) {
-        let removed = self.timelines.remove(timeline_id);
-        if let Some(removed) = removed {
-            Self::clear_timeline_metrics(tenant_shard_id, timeline_id, removed, resident_metric);
-        }
+        self.timelines.remove(timeline_id);
+        
     }
 
     pub(super) fn drain_timelines(
         &mut self,
-        tenant_shard_id: &TenantShardId,
-        resident_metric: &UIntGauge,
-    ) {
-        for (timeline_id, removed) in self.timelines.drain() {
-            Self::clear_timeline_metrics(tenant_shard_id, &timeline_id, removed, resident_metric);
-        }
-    }
-
-    fn clear_timeline_metrics(
         _tenant_shard_id: &TenantShardId,
-        _timeline_id: &TimelineId,
-        detail: SecondaryDetailTimeline,
-        resident_metric: &UIntGauge,
-    ) {
-        resident_metric.sub(
-            detail
-                .on_disk_layers
-                .values()
-                .map(|l| l.metadata.file_size)
-                .sum(),
-        );
 
+    ) {
         
     }
+
 
     /// Additionally returns the total number of layers, used for more stable relative access time
     /// based eviction.
@@ -785,7 +742,6 @@ impl<'a> TenantDownloader<'a> {
                         tenant_shard_id,
                         last_heatmap,
                         timeline,
-                        &self.secondary_state.resident_size_metric,
                         ctx,
                     )
                     .await;
@@ -908,11 +864,7 @@ impl<'a> TenantDownloader<'a> {
             bytes_downloaded: 0,
         };
 
-        // Also expose heatmap bytes_total as a metric
-        self.secondary_state
-            .heatmap_total_size_metric
-            .set(heatmap_stats.bytes);
-
+       
         // Accumulate list of things to delete while holding the detail lock, for execution after dropping the lock
         let mut delete_layers = Vec::new();
         let mut delete_timelines = Vec::new();
@@ -979,7 +931,6 @@ impl<'a> TenantDownloader<'a> {
                 detail.remove_timeline(
                     self.secondary_state.get_tenant_shard_id(),
                     delete_timeline,
-                    &self.secondary_state.resident_size_metric,
                 );
             }
         }
@@ -998,7 +949,7 @@ impl<'a> TenantDownloader<'a> {
             let Some(timeline_state) = detail.timelines.get_mut(&timeline_id) else {
                 continue;
             };
-            timeline_state.remove_layer(&layer_name, &self.secondary_state.resident_size_metric);
+            timeline_state.remove_layer(&layer_name);
         }
 
         for timeline_id in delete_timelines {
@@ -1065,7 +1016,7 @@ impl<'a> TenantDownloader<'a> {
         .await
         .ok_or_else(|| UpdateError::Cancelled)
         .and_then(|x| x)
-        .inspect(|_| SECONDARY_MODE.download_heatmap.inc())
+        .inspect(|_|{} )
     }
 
     /// Download heatmap layers that are not present on local disk, or update their
@@ -1240,7 +1191,6 @@ impl<'a> TenantDownloader<'a> {
                     tenant_shard_id,
                     &timeline_id,
                     &t,
-                    &self.secondary_state.resident_size_metric,
                     || {
                         local_layer_path(
                             self.conf,
@@ -1352,7 +1302,6 @@ impl<'a> TenantDownloader<'a> {
             progress.layers_downloaded += 1;
         }
 
-        SECONDARY_MODE.download_layer.inc();
 
         Ok(Some(layer))
     }
@@ -1364,7 +1313,6 @@ async fn init_timeline_state(
     tenant_shard_id: &TenantShardId,
     last_heatmap: Option<&HeatMapTimeline>,
     heatmap: &HeatMapTimeline,
-    resident_metric: &UIntGauge,
     ctx: &RequestContext,
 ) -> SecondaryDetailTimeline {
     let ctx = ctx.with_scope_secondary_timeline(tenant_shard_id, &heatmap.timeline_id);
@@ -1468,7 +1416,6 @@ async fn init_timeline_state(
                                 tenant_shard_id,
                                 &heatmap.timeline_id,
                                 remote_meta,
-                                resident_metric,
                                 || file_path,
                             );
                         }

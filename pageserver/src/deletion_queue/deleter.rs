@@ -14,7 +14,6 @@ use tracing::{info, warn};
 use utils::{backoff, pausable_failpoint};
 
 use super::{DeletionQueueError, FlushOp};
-use crate::metrics;
 
 const AUTOFLUSH_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -60,10 +59,6 @@ impl Deleter {
                 fail::fail_point!("deletion-queue-before-execute", |_| {
                     info!("Skipping execution, failpoint set");
 
-                    metrics::DELETION_QUEUE
-                        .remote_errors
-                        .with_label_values(&["failpoint"])
-                        .inc();
                     Err(anyhow::anyhow!("failpoint: deletion-queue-before-execute"))
                 });
 
@@ -90,9 +85,6 @@ impl Deleter {
                 Ok(()) => {
                     // Note: we assume that the remote storage layer returns Ok(()) if some
                     // or all of the deleted objects were already gone.
-                    metrics::DELETION_QUEUE
-                        .keys_executed
-                        .inc_by(self.accumulator.len() as u64);
                     info!(
                         "Executed deletion batch {}..{}",
                         self.accumulator
@@ -109,10 +101,6 @@ impl Deleter {
                         return Err(DeletionQueueError::ShuttingDown);
                     }
                     warn!("DeleteObjects request failed: {e:#}, will continue trying");
-                    metrics::DELETION_QUEUE
-                        .remote_errors
-                        .with_label_values(&["execute"])
-                        .inc();
                 }
             };
         }

@@ -5,7 +5,7 @@ use std::process::{Child, Command};
 use pageserver_api::shard::TenantShardId;
 use tracing::{error, info, instrument};
 
-use crate::metrics::{WAL_REDO_PROCESS_COUNTERS, WalRedoKillCause};
+use crate::metrics::WalRedoKillCause;
 
 /// Wrapper type around `std::process::Child` which guarantees that the child
 /// will be killed and waited-for by this process before being dropped.
@@ -47,9 +47,6 @@ impl NoLeakChild {
 
     #[instrument(skip_all, fields(pid=child.id(), ?cause))]
     pub(crate) fn kill_and_wait_impl(mut child: Child, cause: WalRedoKillCause) {
-        scopeguard::defer! {
-            WAL_REDO_PROCESS_COUNTERS.killed_by_cause[cause].inc();
-        }
         let res = child.kill();
         if let Err(e) = res {
             // This branch is very unlikely because:

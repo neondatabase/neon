@@ -126,7 +126,7 @@ impl Timeline {
     ) -> ControlFlow<(), Instant> {
         debug!("eviction iteration: {policy:?}");
         let start = Instant::now();
-        let (period, threshold) = match policy {
+        let (period, _) = match policy {
             EvictionPolicy::NoEviction => {
                 // check again in 10 seconds; XXX config watch mechanism
                 return ControlFlow::Continue(Instant::now() + Duration::from_secs(10));
@@ -159,16 +159,6 @@ impl Timeline {
             period,
             BackgroundLoopKind::Eviction,
         );
-        // FIXME: if we were to mix policies on a pageserver, we would have no way to sense this. I
-        // don't think that is a relevant fear however, and regardless the imitation should be the
-        // most costly part.
-        crate::metrics::EVICTION_ITERATION_DURATION
-            .get_metric_with_label_values(&[
-                &format!("{}", period.as_secs()),
-                &format!("{}", threshold.as_secs()),
-            ])
-            .unwrap()
-            .observe(elapsed.as_secs_f64());
 
         ControlFlow::Continue(start + period)
     }

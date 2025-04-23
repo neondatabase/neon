@@ -20,7 +20,6 @@ use super::scheduler::{
 };
 use super::{CommandRequest, SecondaryTenantError, UploadCommand};
 use crate::TEMP_FILE_SUFFIX;
-use crate::metrics::SECONDARY_MODE;
 use crate::tenant::Tenant;
 use crate::tenant::config::AttachmentMode;
 use crate::tenant::mgr::{GetTenantError, TenantManager};
@@ -221,14 +220,10 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
             // Guard for the barrier in [`WriteInProgress`]
             let _completion = completion;
 
-            let started_at = Instant::now();
+            
             let uploaded = match upload_tenant_heatmap(remote_storage, &tenant, last_upload.clone()).await {
                 Ok(UploadHeatmapOutcome::Uploaded(uploaded)) => {
-                    let duration = Instant::now().duration_since(started_at);
-                    SECONDARY_MODE
-                        .upload_heatmap_duration
-                        .observe(duration.as_secs_f64());
-                    SECONDARY_MODE.upload_heatmap.inc();
+                    
                     Some(uploaded)
                 }
                 Ok(UploadHeatmapOutcome::NoChange | UploadHeatmapOutcome::Skipped) => last_upload,
@@ -237,11 +232,8 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
                         "Failed to upload heatmap for tenant {}: {e:#}",
                         tenant.get_tenant_shard_id(),
                     );
-                    let duration = Instant::now().duration_since(started_at);
-                    SECONDARY_MODE
-                        .upload_heatmap_duration
-                        .observe(duration.as_secs_f64());
-                    SECONDARY_MODE.upload_heatmap_errors.inc();
+                   
+
                     last_upload
                 }
                 Err(UploadHeatmapError::Cancelled) => {

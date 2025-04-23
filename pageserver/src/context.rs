@@ -136,6 +136,7 @@ pub(crate) enum Scope {
         // which are shared among all tasks that operate on the timeline, especially
         // concurrent page_service connections.
         #[allow(clippy::redundant_allocation)]
+        #[allow(dead_code)]
         arc_arc: Arc<Arc<TimelineMetrics>>,    },
     #[cfg(test)]
     UnitTest {

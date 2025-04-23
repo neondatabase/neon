@@ -40,10 +40,7 @@ use utils::sync::gate::GateError;
 use utils::sync::heavier_once_cell;
 
 use crate::config::PageServerConf;
-use crate::metrics::{
-    WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM,
-    WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_TIME,
-};
+
 
 /// The real implementation that uses a Postgres process to
 /// perform WAL replay.
@@ -353,7 +350,7 @@ impl PostgresRedoManager {
                 }
             },
             Err(permit) => {
-                let start = Instant::now();
+                
                 // acquire guard before spawning process, so that we don't spawn new processes
                 // if the gate is already closed.
                 let _launched_processes_guard = match self.launched_processes.enter() {
@@ -371,13 +368,9 @@ impl PostgresRedoManager {
                     .context("launch walredo process")?,
                     _launched_processes_guard,
                 });
-                let duration = start.elapsed();
-                WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
-                info!(
-                    elapsed_ms = duration.as_millis(),
-                    pid = proc.id(),
-                    "launched walredo process"
-                );
+                
+               
+                
                 self.redo_process
                     .set(ProcessOnceCell::Spawned(Arc::clone(&proc)), permit);
                 proc
@@ -471,9 +464,7 @@ impl PostgresRedoManager {
                         }
                 });
 
-                WAL_REDO_TIME.observe(duration.as_secs_f64());
-                WAL_REDO_RECORDS_HISTOGRAM.observe(len as f64);
-                WAL_REDO_BYTES_HISTOGRAM.observe(nbytes as f64);
+               
 
                 debug!(
                     "postgres applied {} WAL records ({} bytes) in {} us to reconstruct page image at LSN {}",
@@ -538,9 +529,7 @@ impl PostgresRedoManager {
         }
         // Success!
         let duration = start_time.elapsed();
-        // FIXME: using the same metric here creates a bimodal distribution by default, and because
-        // there could be multiple batch sizes this would be N+1 modal.
-        WAL_REDO_TIME.observe(duration.as_secs_f64());
+       
 
         debug!(
             "neon applied {} WAL records in {} us to reconstruct page image at LSN {}",

@@ -23,7 +23,6 @@ use futures::future::Either;
 use futures::stream::Stream;
 use futures_util::{StreamExt, TryStreamExt};
 use http_types::{StatusCode, Url};
-use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use utils::backoff;
@@ -32,7 +31,7 @@ use utils::backoff::exponential_backoff_duration_seconds;
 use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
 use crate::config::AzureConfig;
 use crate::error::Cancelled;
-use crate::metrics::{AttemptOutcome, RequestKind, start_measuring_requests};
+use crate::metrics::RequestKind;
 use crate::{
     ConcurrencyLimiter, Download, DownloadError, DownloadKind, DownloadOpts, Listing, ListingMode,
     ListingObject, RemotePath, RemoteStorage, StorageMetadata, TimeTravelError, TimeoutOrCancel,
@@ -165,7 +164,7 @@ impl AzureBlobStorage {
         let mut last_modified = None;
         let mut metadata = HashMap::new();
 
-        let started_at = start_measuring_requests(kind);
+      
 
         let download = async {
             let response = builder
@@ -237,19 +236,8 @@ impl AzureBlobStorage {
                 TimeoutOrCancel::Cancel => return Err(DownloadError::Cancelled),
             },
         };
-        let started_at = ScopeGuard::into_inner(started_at);
-        let outcome = match &download {
-            Ok(_) => AttemptOutcome::Ok,
-            // At this level in the stack 404 and 304 responses do not indicate an error.
-            // There's expected cases when a blob may not exist or hasn't been modified since
-            // the last get (e.g. probing for timeline indices and heatmap downloads).
-            // Callers should handle errors if they are unexpected.
-            Err(DownloadError::NotFound | DownloadError::Unmodified) => AttemptOutcome::Ok,
-            Err(_) => AttemptOutcome::Err,
-        };
-        crate::metrics::BUCKET_METRICS
-            .req_seconds
-            .observe_elapsed(kind, outcome, started_at);
+        
+      
         download
     }
 
@@ -431,7 +419,7 @@ impl RemoteStorage for AzureBlobStorage {
         let kind = RequestKind::Head;
         let _permit = self.permit(kind, cancel).await?;
 
-        let started_at = start_measuring_requests(kind);
+      
 
         let blob_client = self.client.blob_client(self.relative_path_to_name(key));
         let properties_future = blob_client.get_properties().into_future();
@@ -443,12 +431,9 @@ impl RemoteStorage for AzureBlobStorage {
             _ = cancel.cancelled() => return Err(TimeoutOrCancel::Cancel.into()),
         };
 
-        if let Ok(inner) = &res {
-            // do not incl. timeouts as errors in metrics but cancellations
-            let started_at = ScopeGuard::into_inner(started_at);
-            crate::metrics::BUCKET_METRICS
-                .req_seconds
-                .observe_elapsed(kind, inner, started_at);
+        if let Ok(_inner) = &res {
+            
+         
         }
 
         let data = match res {
@@ -476,7 +461,7 @@ impl RemoteStorage for AzureBlobStorage {
         let kind = RequestKind::Put;
         let _permit = self.permit(kind, cancel).await?;
 
-        let started_at = start_measuring_requests(kind);
+      
 
         let op = async {
             let blob_client = self.client.blob_client(self.relative_path_to_name(to));
@@ -509,14 +494,7 @@ impl RemoteStorage for AzureBlobStorage {
             _ = cancel.cancelled() => return Err(TimeoutOrCancel::Cancel.into()),
         };
 
-        let outcome = match res {
-            Ok(_) => AttemptOutcome::Ok,
-            Err(_) => AttemptOutcome::Err,
-        };
-        let started_at = ScopeGuard::into_inner(started_at);
-        crate::metrics::BUCKET_METRICS
-            .req_seconds
-            .observe_elapsed(kind, outcome, started_at);
+      
 
         res
     }
@@ -562,7 +540,7 @@ impl RemoteStorage for AzureBlobStorage {
     ) -> anyhow::Result<()> {
         let kind = RequestKind::Delete;
         let _permit = self.permit(kind, cancel).await?;
-        let started_at = start_measuring_requests(kind);
+    
 
         let op = async {
             // TODO batch requests are not supported by the SDK
@@ -628,10 +606,8 @@ impl RemoteStorage for AzureBlobStorage {
             _ = cancel.cancelled() => return Err(TimeoutOrCancel::Cancel.into()),
         };
 
-        let started_at = ScopeGuard::into_inner(started_at);
-        crate::metrics::BUCKET_METRICS
-            .req_seconds
-            .observe_elapsed(kind, &res, started_at);
+       
+        
         res
     }
 
@@ -647,7 +623,7 @@ impl RemoteStorage for AzureBlobStorage {
     ) -> anyhow::Result<()> {
         let kind = RequestKind::Copy;
         let _permit = self.permit(kind, cancel).await?;
-        let started_at = start_measuring_requests(kind);
+  
 
         let timeout = tokio::time::sleep(self.timeout);
 
@@ -701,10 +677,8 @@ impl RemoteStorage for AzureBlobStorage {
             },
         };
 
-        let started_at = ScopeGuard::into_inner(started_at);
-        crate::metrics::BUCKET_METRICS
-            .req_seconds
-            .observe_elapsed(kind, &res, started_at);
+        
+      
         res
     }
 

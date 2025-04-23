@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use once_cell::sync::Lazy;
 use pageserver_api::config::tenant_conf_defaults::DEFAULT_COMPACTION_PERIOD;
 use rand::Rng;
-use scopeguard::defer;
+
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -19,7 +19,6 @@ use utils::completion::Barrier;
 use utils::pausable_failpoint;
 
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::metrics::{self, TENANT_TASK_EVENTS};
 use crate::task_mgr::{self, BACKGROUND_RUNTIME, TOKIO_WORKER_THREADS, TaskKind};
 use crate::tenant::throttle::Stats;
 use crate::tenant::timeline::CompactionError;
@@ -131,8 +130,7 @@ pub fn start_background_loops(tenant: &Arc<Tenant>, can_start: Option<&Barrier>)
                     _ = cancel.cancelled() => return Ok(()),
                     _ = Barrier::maybe_wait(can_start) => {}
                 };
-                TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
-                defer!(TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc());
+
                 compaction_loop(tenant, cancel)
                     // If you rename this span, change the RUST_LOG env variable in test_runner/performance/test_branch_creation.py
                     .instrument(info_span!("compaction_loop", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
@@ -157,8 +155,6 @@ pub fn start_background_loops(tenant: &Arc<Tenant>, can_start: Option<&Barrier>)
                     _ = cancel.cancelled() => return Ok(()),
                     _ = Barrier::maybe_wait(can_start) => {}
                 };
-                TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
-                defer!(TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc());
                 gc_loop(tenant, cancel)
                     .instrument(info_span!("gc_loop", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
                     .await;
@@ -182,8 +178,7 @@ pub fn start_background_loops(tenant: &Arc<Tenant>, can_start: Option<&Barrier>)
                     _ = cancel.cancelled() => return Ok(()),
                     _ = Barrier::maybe_wait(can_start) => {}
                 };
-                TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
-                defer!(TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc());
+
                 tenant_housekeeping_loop(tenant, cancel)
                     .instrument(info_span!("tenant_housekeeping_loop", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
                     .await;
@@ -588,8 +583,5 @@ pub(crate) fn warn_when_period_overrun(
             ?task,
             "task iteration took longer than the configured period"
         );
-        metrics::BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT
-            .with_label_values(&[task.into(), &format!("{}", period.as_secs())])
-            .inc();
     }
 }

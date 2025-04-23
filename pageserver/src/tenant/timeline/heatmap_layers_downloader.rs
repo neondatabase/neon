@@ -59,11 +59,7 @@ impl HeatmapLayersDownloader {
                     return;
                 };
 
-                tracing::info!(
-                    resident_size=%timeline.resident_physical_size(),
-                    heatmap_layers=%heatmap.all_layers().count(),
-                    "Starting heatmap layers download"
-                );
+                
 
                 let stream = futures::stream::iter(heatmap.all_layers().cloned().filter_map(
                     |layer| {
@@ -93,7 +89,7 @@ impl HeatmapLayersDownloader {
                 tokio::select! {
                     _ = stream.collect::<()>() => {
                         tracing::info!(
-                            resident_size=%timeline.resident_physical_size(),
+                            
                             "Heatmap layers download completed"
                         );
                     },

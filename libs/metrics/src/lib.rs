@@ -76,14 +76,7 @@ pub fn gather() -> Vec<prometheus::proto::MetricFamily> {
     mfs
 }
 
-static DISK_IO_BYTES: Lazy<IntGaugeVec> = Lazy::new(|| {
-    register_int_gauge_vec!(
-        "libmetrics_disk_io_bytes_total",
-        "Bytes written and read from disk, grouped by the operation (read|write)",
-        &["io_operation"]
-    )
-    .expect("Failed to register disk i/o bytes int gauge vec")
-});
+
 
 static MAXRSS_KB: Lazy<IntGauge> = Lazy::new(|| {
     register_int_gauge!(
@@ -261,12 +254,7 @@ const BYTES_IN_BLOCK: i64 = 512;
 fn update_rusage_metrics() {
     let rusage_stats = get_rusage_stats();
 
-    DISK_IO_BYTES
-        .with_label_values(&["read"])
-        .set(rusage_stats.ru_inblock * BYTES_IN_BLOCK);
-    DISK_IO_BYTES
-        .with_label_values(&["write"])
-        .set(rusage_stats.ru_oublock * BYTES_IN_BLOCK);
+    
 
     // On macOS, the unit of maxrss is bytes; on Linux, it's kilobytes. https://stackoverflow.com/a/59915669
     #[cfg(target_os = "macos")]
@@ -357,10 +345,7 @@ impl<P: Atomic> GenericCounterPairVec<P> {
         self.get_metric_with_label_values(vals).unwrap()
     }
 
-    pub fn remove_label_values(&self, res: &mut [prometheus::Result<()>; 2], vals: &[&str]) {
-        res[0] = self.inc.remove_label_values(vals);
-        res[1] = self.dec.remove_label_values(vals);
-    }
+    
 }
 
 impl<P: Atomic> GenericCounterPair<P> {

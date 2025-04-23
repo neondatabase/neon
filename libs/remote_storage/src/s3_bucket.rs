@@ -41,7 +41,7 @@ use super::StorageMetadata;
 use crate::config::S3Config;
 use crate::error::Cancelled;
 pub(super) use crate::metrics::RequestKind;
-use crate::metrics::{AttemptOutcome, start_counting_cancelled_wait, start_measuring_requests};
+use crate::metrics::{AttemptOutcome, start_measuring_requests};
 use crate::support::PermitCarrying;
 use crate::{
     ConcurrencyLimiter, Download, DownloadError, DownloadOpts, Listing, ListingMode, ListingObject,
@@ -199,7 +199,7 @@ impl S3Bucket {
         kind: RequestKind,
         cancel: &CancellationToken,
     ) -> Result<tokio::sync::SemaphorePermit<'_>, Cancelled> {
-        let started_at = start_counting_cancelled_wait(kind);
+       
         let acquire = self.concurrency_limiter.acquire(kind);
 
         let permit = tokio::select! {
@@ -207,10 +207,8 @@ impl S3Bucket {
             _ = cancel.cancelled() => return Err(Cancelled),
         };
 
-        let started_at = ScopeGuard::into_inner(started_at);
-        crate::metrics::BUCKET_METRICS
-            .wait_seconds
-            .observe_elapsed(kind, started_at);
+       
+        
 
         Ok(permit)
     }
@@ -220,7 +218,7 @@ impl S3Bucket {
         kind: RequestKind,
         cancel: &CancellationToken,
     ) -> Result<tokio::sync::OwnedSemaphorePermit, Cancelled> {
-        let started_at = start_counting_cancelled_wait(kind);
+       
         let acquire = self.concurrency_limiter.acquire_owned(kind);
 
         let permit = tokio::select! {
@@ -228,10 +226,8 @@ impl S3Bucket {
             _ = cancel.cancelled() => return Err(Cancelled),
         };
 
-        let started_at = ScopeGuard::into_inner(started_at);
-        crate::metrics::BUCKET_METRICS
-            .wait_seconds
-            .observe_elapsed(kind, started_at);
+       
+        
         Ok(permit)
     }
 
@@ -273,11 +269,7 @@ impl S3Bucket {
                 // Count this in the AttemptOutcome::Ok bucket, because 404 is not
                 // an error: we expect to sometimes fetch an object and find it missing,
                 // e.g. when probing for timeline indices.
-                crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
-                    kind,
-                    AttemptOutcome::Ok,
-                    started_at,
-                );
+                
                 return Err(DownloadError::NotFound);
             }
             Err(SdkError::ServiceError(e))
@@ -287,19 +279,11 @@ impl S3Bucket {
                 if e.raw().status().as_u16() == StatusCode::NotModified =>
             {
                 // Count an unmodified file as a success.
-                crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
-                    kind,
-                    AttemptOutcome::Ok,
-                    started_at,
-                );
+               
                 return Err(DownloadError::Unmodified);
             }
             Err(e) => {
-                crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
-                    kind,
-                    AttemptOutcome::Err,
-                    started_at,
-                );
+                
 
                 return Err(DownloadError::Other(
                     anyhow::Error::new(e).context("download s3 object"),
@@ -346,11 +330,11 @@ impl S3Bucket {
         delete_objects: &[ObjectIdentifier],
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
-        let kind = RequestKind::Delete;
+   
         let mut cancel = std::pin::pin!(cancel.cancelled());
 
         for chunk in delete_objects.chunks(MAX_KEYS_PER_DELETE_S3) {
-            let started_at = start_measuring_requests(kind);
+           
 
             let req = self
                 .client
@@ -370,15 +354,10 @@ impl S3Bucket {
                 _ = &mut cancel => return Err(TimeoutOrCancel::Cancel.into()),
             };
 
-            let started_at = ScopeGuard::into_inner(started_at);
-            crate::metrics::BUCKET_METRICS
-                .req_seconds
-                .observe_elapsed(kind, &resp, started_at);
-
+          
+            
             let resp = resp.context("request deletion")?;
-            crate::metrics::BUCKET_METRICS
-                .deleted_objects_total
-                .inc_by(chunk.len() as u64);
+            
 
             if let Some(errors) = resp.errors {
                 // Log a bounded number of the errors within the response:
@@ -445,8 +424,8 @@ pin_project_lite::pin_project! {
     }
 
     impl<S> PinnedDrop for TimedDownload<S> {
-        fn drop(mut this: Pin<&mut Self>) {
-            crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(RequestKind::Get, this.outcome, this.started_at);
+        fn drop(mut _this: Pin<&mut Self>) {
+           
         }
     }
 }
@@ -511,7 +490,7 @@ impl RemoteStorage for S3Bucket {
 
             let mut continuation_token = None;
             'outer: loop {
-                let started_at = start_measuring_requests(kind);
+           
 
                 // min of two Options, returning Some if one is value and another is
                 // None (None is smaller than anything, so plain min doesn't work).
@@ -544,11 +523,9 @@ impl RemoteStorage for S3Bucket {
                     .context("Failed to list S3 prefixes")
                     .map_err(DownloadError::Other);
 
-                let started_at = ScopeGuard::into_inner(started_at);
+               
 
-                crate::metrics::BUCKET_METRICS
-                    .req_seconds
-                    .observe_elapsed(kind, &response, started_at);
+                
 
                 let response = match response {
                     Ok(response) => response,
@@ -629,7 +606,7 @@ impl RemoteStorage for S3Bucket {
         let kind = RequestKind::Head;
         let _permit = self.permit(kind, cancel).await?;
 
-        let started_at = start_measuring_requests(kind);
+     
 
         let head_future = self
             .client
@@ -648,30 +625,18 @@ impl RemoteStorage for S3Bucket {
         let res = res.map_err(|_e| DownloadError::Timeout)?;
 
         // do not incl. timeouts as errors in metrics but cancellations
-        let started_at = ScopeGuard::into_inner(started_at);
-        crate::metrics::BUCKET_METRICS
-            .req_seconds
-            .observe_elapsed(kind, &res, started_at);
-
+  
+        
         let data = match res {
             Ok(object_output) => object_output,
             Err(SdkError::ServiceError(e)) if matches!(e.err(), HeadObjectError::NotFound(_)) => {
                 // Count this in the AttemptOutcome::Ok bucket, because 404 is not
                 // an error: we expect to sometimes fetch an object and find it missing,
                 // e.g. when probing for timeline indices.
-                crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
-                    kind,
-                    AttemptOutcome::Ok,
-                    started_at,
-                );
                 return Err(DownloadError::NotFound);
             }
             Err(e) => {
-                crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
-                    kind,
-                    AttemptOutcome::Err,
-                    started_at,
-                );
+                
 
                 return Err(DownloadError::Other(
                     anyhow::Error::new(e).context("s3 head object"),
@@ -704,7 +669,7 @@ impl RemoteStorage for S3Bucket {
         let kind = RequestKind::Put;
         let _permit = self.permit(kind, cancel).await?;
 
-        let started_at = start_measuring_requests(kind);
+      
 
         let body = StreamBody::new(from.map(|x| x.map(Frame::data)));
         let bytes_stream = ByteStream::new(SdkBody::from_body_1_x(body));
@@ -727,12 +692,10 @@ impl RemoteStorage for S3Bucket {
             _ = cancel.cancelled() => return Err(TimeoutOrCancel::Cancel.into()),
         };
 
-        if let Ok(inner) = &res {
+        if let Ok(_inner) = &res {
             // do not incl. timeouts as errors in metrics but cancellations
-            let started_at = ScopeGuard::into_inner(started_at);
-            crate::metrics::BUCKET_METRICS
-                .req_seconds
-                .observe_elapsed(kind, inner, started_at);
+       
+            
         }
 
         match res {
@@ -753,7 +716,7 @@ impl RemoteStorage for S3Bucket {
 
         let timeout = tokio::time::sleep(self.timeout);
 
-        let started_at = start_measuring_requests(kind);
+       
 
         // we need to specify bucket_name as a prefix
         let copy_source = format!(
@@ -777,10 +740,8 @@ impl RemoteStorage for S3Bucket {
             _ = cancel.cancelled() => return Err(TimeoutOrCancel::Cancel.into()),
         };
 
-        let started_at = ScopeGuard::into_inner(started_at);
-        crate::metrics::BUCKET_METRICS
-            .req_seconds
-            .observe_elapsed(kind, &res, started_at);
+       
+        
 
         res?;
 

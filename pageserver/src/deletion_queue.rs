@@ -27,7 +27,6 @@ use self::list_writer::{DeletionOp, ListWriter, RecoverOp};
 use self::validator::Validator;
 use crate::config::PageServerConf;
 use crate::controller_upcall_client::StorageControllerUpcallApi;
-use crate::metrics;
 use crate::tenant::remote_timeline_client::{LayerFileMetadata, remote_timeline_path};
 use crate::tenant::storage_layer::LayerName;
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
@@ -163,11 +162,6 @@ struct TenantDeletionList {
     generation: Generation,
 }
 
-impl TenantDeletionList {
-    pub(crate) fn len(&self) -> usize {
-        self.timelines.values().map(|v| v.len()).sum()
-    }
-}
 
 /// Files ending with this suffix will be ignored and erased
 /// during recovery as startup.
@@ -467,9 +461,6 @@ impl DeletionQueueClient {
         // they may be historical.
         assert!(!current_generation.is_none());
 
-        metrics::DELETION_QUEUE
-            .keys_submitted
-            .inc_by(layers.len() as u64);
         self.do_push(
             &self.tx,
             ListWriterQueueMessage::Delete(DeletionOp {
@@ -553,9 +544,6 @@ impl DeletionQueueClient {
         &self,
         objects: Vec<RemotePath>,
     ) -> Result<(), DeletionQueueError> {
-        metrics::DELETION_QUEUE
-            .keys_submitted
-            .inc_by(objects.len() as u64);
         self.executor_tx
             .send(DeleterMessage::Delete(objects))
             .await

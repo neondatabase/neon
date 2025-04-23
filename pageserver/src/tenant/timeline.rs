@@ -103,9 +103,7 @@ use crate::context::{
 use crate::disk_usage_eviction_task::{DiskUsageEvictionInfo, EvictionCandidate, finite_f32};
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::l0_flush::{self, L0FlushGlobalState};
-use crate::metrics::{
-    DELTAS_PER_READ_GLOBAL, TimelineMetrics,
-};
+use crate::metrics::TimelineMetrics;
 use crate::page_service::TenantManagerTypes;
 use crate::pgdatadir_mapping::{
     CalculateLogicalSizeError, CollectKeySpaceError, DirectoryKind, LsnForTimestamp,
@@ -1381,7 +1379,7 @@ impl Timeline {
                             return (key, Err(err));
                         }
                     };
-                    DELTAS_PER_READ_GLOBAL.observe(converted.num_deltas() as f64);
+                   
 
                     // The walredo module expects the records to be descending in terms of Lsn.
                     // And we submit the IOs in that order, so, there shuold be no need to sort here.
@@ -1485,9 +1483,6 @@ impl Timeline {
         guard.layer_size_sum()
     }
 
-    pub(crate) fn resident_physical_size(&self) -> u64 {
-        self.metrics.resident_physical_size_get()
-    }
 
     pub(crate) fn get_directory_metrics(&self) -> [u64; DirectoryKind::KINDS_NUM] {
         array::from_fn(|idx| self.directory_metrics[idx].load(AtomicOrdering::Relaxed))
@@ -1550,7 +1545,7 @@ impl Timeline {
             WaitLsnTimeout::Default => self.conf.wait_lsn_timeout,
         };
 
-        let timer = crate::metrics::WAIT_LSN_TIME.start_timer();
+
         let wait_for_timeout = self.last_record_lsn.wait_for_timeout(lsn, timeout);
         let wait_for_timeout = std::pin::pin!(wait_for_timeout);
         // Use threshold of 1 because even 1 second of wait for ingest is very much abnormal.
@@ -1597,7 +1592,6 @@ impl Timeline {
         let res = wait_for_timeout.await;
         // don't count the time spent waiting for lock below, and also in walreceiver.status(), towards the wait_lsn_time_histo
         drop(logging_permit);
-        drop(timer);
         match res {
             Ok(()) => Ok(()),
             Err(e) => {
@@ -3571,7 +3565,7 @@ impl Timeline {
     async fn calculate_logical_size(
         &self,
         up_to_lsn: Lsn,
-        cause: LogicalSizeCalculationCause,
+        _cause: LogicalSizeCalculationCause,
         _guard: &GateGuard,
         ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
@@ -3590,20 +3584,13 @@ impl Timeline {
         if let Some(size) = self.current_logical_size.initialized_size(up_to_lsn) {
             return Ok(size);
         }
-        let storage_time_metrics = match cause {
-            LogicalSizeCalculationCause::Initial
-            | LogicalSizeCalculationCause::ConsumptionMetricsSyntheticSize
-            | LogicalSizeCalculationCause::TenantSizeHandler => &self.metrics.logical_size_histo,
-            LogicalSizeCalculationCause::EvictionTaskImitation => {
-                &self.metrics.imitate_logical_size_histo
-            }
-        };
-        let timer = storage_time_metrics.start_timer();
+        
+       
         let logical_size = self
             .get_current_logical_size_non_incremental(up_to_lsn, ctx)
             .await?;
         debug!("calculated logical size: {logical_size}");
-        timer.stop_and_record();
+      
         Ok(logical_size)
     }
 
@@ -4489,17 +4476,10 @@ impl Timeline {
                             "stalling layer flushes for compaction backpressure at {l0_count} \
                             L0 layers ({frozen_count} frozen layers with {frozen_size} bytes)"
                         );
-                        let stall_timer = self
-                            .metrics
-                            .flush_delay_histo
-                            .start_timer()
-                            .record_on_drop();
+                        
                         tokio::select! {
-                            result = watch_l0.wait_for(|l0| *l0 < stall_threshold) => {
-                                if let Ok(l0) = result.as_deref() {
-                                    let delay = stall_timer.elapsed().as_secs_f64();
-                                    info!("resuming layer flushes at {l0} L0 layers after {delay:.3}s");
-                                }
+                            _result = watch_l0.wait_for(|l0| *l0 < stall_threshold) => {
+                               
                             },
                             _ = self.cancel.cancelled() => {},
                         }
@@ -4542,11 +4522,7 @@ impl Timeline {
                             "delaying layer flush by {delay:.3}s for compaction backpressure at \
                             {l0_count} L0 layers ({frozen_count} frozen layers with {frozen_size} bytes)"
                         );
-                        let _delay_timer = self
-                            .metrics
-                            .flush_delay_histo
-                            .start_timer()
-                            .record_on_drop();
+                        
                         tokio::select! {
                             _ = tokio::time::sleep(flush_duration) => {},
                             _ = watch_l0.wait_for(|l0| *l0 < delay_threshold) => {},
@@ -5273,7 +5249,7 @@ impl Timeline {
         last_status: LastImageLayerCreationStatus,
         yield_for_l0: bool,
     ) -> Result<(Vec<ResidentLayer>, LastImageLayerCreationStatus), CreateImageLayersError> {
-        let timer = self.metrics.create_images_time_histo.start_timer();
+        
 
         if partitioning.parts.is_empty() {
             warn!("no partitions to create image layers for");
@@ -5306,8 +5282,8 @@ impl Timeline {
 
         let mut all_generated = true;
 
-        let mut partition_processed = 0;
-        let mut total_partitions = partitioning.parts.len();
+        
+        let total_partitions = partitioning.parts.len();
         let mut last_partition_processed = None;
         let mut partition_parts = partitioning.parts.clone();
 
@@ -5332,7 +5308,7 @@ impl Timeline {
                         break; // with found=false
                     }
                     partition_parts = partition_parts.split_off(i + 1); // Remove the first i + 1 elements
-                    total_partitions = partition_parts.len();
+                
                     // Update the start key to the partition start.
                     start = partition_parts[0].start().unwrap();
                     found = true;
@@ -5349,7 +5325,6 @@ impl Timeline {
             if self.cancel.is_cancelled() {
                 return Err(CreateImageLayersError::Cancelled);
             }
-            partition_processed += 1;
             let img_range = start..partition.ranges.last().unwrap().end;
             let compact_metadata = partition.overlaps(&Key::metadata_key_range());
             if compact_metadata {
@@ -5512,28 +5487,16 @@ impl Timeline {
             .open_mut()?
             .track_new_image_layers(&image_layers, &self.metrics);
         drop_wlock(guard);
-        let duration = timer.stop_and_record();
+        
 
         // Creating image layers may have caused some previously visible layers to be covered
         if !image_layers.is_empty() {
             self.update_layer_visibility().await?;
         }
 
-        let total_layer_size = image_layers
-            .iter()
-            .map(|l| l.metadata().file_size)
-            .sum::<u64>();
+   
 
-        if !image_layers.is_empty() {
-            info!(
-                "created {} image layers ({} bytes) in {}s, processed {} out of {} partitions",
-                image_layers.len(),
-                total_layer_size,
-                duration.as_secs_f64(),
-                partition_processed,
-                total_partitions
-            );
-        }
+        
 
         Ok((
             image_layers,
@@ -6068,11 +6031,7 @@ impl Timeline {
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<GcCutoffs, PageReconstructError> {
-        let _timer = self
-            .metrics
-            .find_gc_cutoffs_histo
-            .start_timer()
-            .record_on_drop();
+        
 
         pausable_failpoint!("Timeline::find_gc_cutoffs-pausable");
 
@@ -6139,7 +6098,7 @@ impl Timeline {
             guard = self.gc_lock.lock() => guard,
             _ = self.cancel.cancelled() => return Ok(GcResult::default()),
         };
-        let timer = self.metrics.garbage_collect_histo.start_timer();
+        
 
         fail_point!("before-timeline-gc");
 
@@ -6211,8 +6170,7 @@ impl Timeline {
             )
             .await?;
 
-        // only record successes
-        timer.stop_and_record();
+       
 
         Ok(res)
     }

@@ -21,7 +21,7 @@ use utils::poison::Poison;
 
 use self::no_leak_child::NoLeakChild;
 use crate::config::PageServerConf;
-use crate::metrics::{WAL_REDO_PROCESS_COUNTERS, WAL_REDO_RECORD_COUNTER, WalRedoKillCause};
+use crate::metrics:: WalRedoKillCause;
 use crate::page_cache::PAGE_SZ;
 use crate::span::debug_assert_current_span_has_tenant_id;
 
@@ -97,7 +97,6 @@ impl WalRedoProcess {
             //    walredo request.
             .spawn_no_leak_child(tenant_shard_id)
             .context("spawn process")?;
-        WAL_REDO_PROCESS_COUNTERS.started.inc();
         let mut child = scopeguard::guard(child, |child| {
             error!("killing wal-redo-postgres process due to a problem during launch");
             child.kill_and_wait(WalRedoKillCause::Startup);
@@ -118,12 +117,7 @@ impl WalRedoProcess {
 
         tokio::spawn(
             async move {
-                scopeguard::defer! {
-                    debug!("wal-redo-postgres stderr_logger_task finished");
-                    crate::metrics::WAL_REDO_PROCESS_COUNTERS.active_stderr_logger_tasks_finished.inc();
-                }
                 debug!("wal-redo-postgres stderr_logger_task started");
-                crate::metrics::WAL_REDO_PROCESS_COUNTERS.active_stderr_logger_tasks_started.inc();
 
                 use tokio::io::AsyncBufReadExt;
                 let mut stderr_lines = tokio::io::BufReader::new(stderr);
@@ -231,7 +225,7 @@ impl WalRedoProcess {
             }
         }
         protocol::build_get_page_msg(tag, &mut writebuf);
-        WAL_REDO_RECORD_COUNTER.inc_by(records.len() as u64);
+        
 
         let Ok(res) =
             tokio::time::timeout(wal_redo_timeout, self.apply_wal_records0(&writebuf)).await

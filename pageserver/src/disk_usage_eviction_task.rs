@@ -457,7 +457,6 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
             if let Some(next) = next {
                 match next {
                     Ok(Ok(file_size)) => {
-                        METRICS.layers_evicted.inc();
                         usage_assumed.add_available_bytes(file_size);
                     }
                     Ok(Err((
@@ -788,7 +787,6 @@ async fn collect_eviction_candidates(
     eviction_order: EvictionOrder,
     cancel: &CancellationToken,
 ) -> anyhow::Result<EvictionCandidates> {
-    const LOG_DURATION_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(10);
 
     // get a snapshot of the list of tenants
     let tenants = tenant_manager
@@ -822,7 +820,7 @@ async fn collect_eviction_candidates(
             continue;
         }
 
-        let started_at = std::time::Instant::now();
+        
 
         // collect layers from all timelines in this tenant
         //
@@ -917,25 +915,11 @@ async fn collect_eviction_candidates(
                     (partition, candidate)
                 });
 
-        METRICS
-            .tenant_layer_count
-            .observe(tenant_candidates.len() as f64);
 
         candidates.extend(tenant_candidates);
 
-        let elapsed = started_at.elapsed();
-        METRICS
-            .tenant_collection_time
-            .observe(elapsed.as_secs_f64());
+       
 
-        if elapsed > LOG_DURATION_THRESHOLD {
-            tracing::info!(
-                tenant_id=%tenant.tenant_shard_id().tenant_id,
-                shard_id=%tenant.tenant_shard_id().shard_slug(),
-                elapsed_ms = elapsed.as_millis(),
-                "collection took longer than threshold"
-            );
-        }
     }
 
     // Note: the same tenant ID might be hit twice, if it transitions from attached to
@@ -962,7 +946,7 @@ async fn collect_eviction_candidates(
             layer_info.resident_layers.len()
         );
 
-        let started_at = std::time::Instant::now();
+       
 
         layer_info
             .resident_layers
@@ -984,28 +968,13 @@ async fn collect_eviction_candidates(
                         candidate,
                     )
                 });
-
-        METRICS
-            .tenant_layer_count
-            .observe(tenant_candidates.len() as f64);
         candidates.extend(tenant_candidates);
 
         tokio::task::yield_now().await;
 
-        let elapsed = started_at.elapsed();
+    
 
-        METRICS
-            .tenant_collection_time
-            .observe(elapsed.as_secs_f64());
-
-        if elapsed > LOG_DURATION_THRESHOLD {
-            tracing::info!(
-                tenant_id=%tenant.tenant_shard_id().tenant_id,
-                shard_id=%tenant.tenant_shard_id().shard_slug(),
-                elapsed_ms = elapsed.as_millis(),
-                "collection took longer than threshold"
-            );
-        }
+        
     }
 
     debug_assert!(

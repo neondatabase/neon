@@ -24,7 +24,6 @@ use wal_decoder::models::InterpretedWalRecord;
 use walkdir::WalkDir;
 
 use crate::context::RequestContext;
-use crate::metrics::WAL_INGEST;
 use crate::pgdatadir_mapping::*;
 use crate::tenant::Timeline;
 use crate::walingest::{WalIngest, WalIngestErrorKind};
@@ -324,7 +323,6 @@ async fn import_wal(
                 walingest
                     .ingest_record(interpreted, &mut modification, ctx)
                     .await?;
-                WAL_INGEST.records_committed.inc();
 
                 modification.commit(ctx).await?;
                 last_lsn = lsn;

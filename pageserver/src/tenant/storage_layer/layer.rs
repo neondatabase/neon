@@ -231,9 +231,7 @@ impl Layer {
 
         debug_assert!(owner.0.needs_download_blocking().unwrap().is_none());
 
-        timeline
-            .metrics
-            .resident_physical_size_add(metadata.file_size);
+        
 
         ResidentLayer { downloaded, owner }
     }
@@ -1141,9 +1139,7 @@ impl LayerInner {
                     }
                 };
                 tracing::info!(size=%self.desc.file_size, %latency_millis, "on-demand download successful");
-                timeline
-                    .metrics
-                    .resident_physical_size_add(self.desc.file_size);
+    
                 self.consecutive_failures.store(0, Ordering::Relaxed);
 
                 self.access_stats.record_residence_event();
@@ -1421,7 +1417,7 @@ impl LayerInner {
         Self::spawn_blocking(move || {
             let _span = span.entered();
 
-            let res = self.evict_blocking(&timeline, &gate, &permit);
+            let res = self.evict_blocking( &gate, &permit);
 
             let waiters = self.inner.initializer_count();
 
@@ -1438,7 +1434,6 @@ impl LayerInner {
     /// This is blocking only to do just one spawn_blocking hop compared to multiple via tokio::fs.
     fn evict_blocking(
         &self,
-        timeline: &Timeline,
         _gate: &gate::GateGuard,
         _permit: &heavier_once_cell::InitPermit,
     ) -> Result<(), EvictionCancelled> {
@@ -1463,9 +1458,6 @@ impl LayerInner {
                         tracing::info!("evicted layer after unknown residence period");
                     }
                 }
-                timeline
-                    .metrics
-                    .resident_physical_size_sub(self.desc.file_size);
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 tracing::error!(

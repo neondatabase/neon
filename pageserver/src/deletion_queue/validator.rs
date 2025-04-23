@@ -26,7 +26,6 @@ use super::deleter::DeleterMessage;
 use super::{DeletionHeader, DeletionList, DeletionQueueError, FlushOp, VisibleLsnUpdates};
 use crate::config::PageServerConf;
 use crate::controller_upcall_client::{RetryForeverError, StorageControllerUpcallApi};
-use crate::metrics;
 use crate::virtual_file::MaybeFatalIo;
 
 // After this length of time, do any validation work that is pending,
@@ -186,7 +185,6 @@ where
                     "Dropped remote consistent LSN updates for tenant {tenant_id} in stale generation {:?}",
                     tenant_lsn_state.generation
                 );
-                metrics::DELETION_QUEUE.dropped_lsn_updates.inc();
             }
         }
 
@@ -221,11 +219,8 @@ where
 
                 if !this_list_valid {
                     info!("Dropping stale deletions for tenant {tenant_id} in generation {:?}, objects may be leaked", tenant.generation);
-                    metrics::DELETION_QUEUE.keys_dropped.inc_by(tenant.len() as u64);
                     mutated = true;
-                } else {
-                    metrics::DELETION_QUEUE.keys_validated.inc_by(tenant.len() as u64);
-                }
+                } 
                 this_list_valid
             });
             list.validated = true;
@@ -237,7 +232,7 @@ where
                     // Highly unexpected.  Could happen if e.g. disk full.
                     // If we didn't save the trimmed list, it is _not_ valid to execute.
                     warn!("Failed to save modified deletion list {list}: {e:#}");
-                    metrics::DELETION_QUEUE.unexpected_errors.inc();
+                    
 
                     // Rather than have a complex retry process, just drop it and leak the objects,
                     // scrubber will clean up eventually.
@@ -276,7 +271,7 @@ where
                 // The save() function logs a warning on error.
                 if let Err(e) = header.save(self.conf).await {
                     warn!("Failed to write deletion queue header: {e:#}");
-                    metrics::DELETION_QUEUE.unexpected_errors.inc();
+                    
                 }
             }
         }

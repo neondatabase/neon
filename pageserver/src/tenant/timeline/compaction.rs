@@ -1133,16 +1133,15 @@ impl Timeline {
 
         // 1. L0 Compact
         let l0_outcome = {
-            let timer = self.metrics.compact_time_histo.start_timer();
-            let l0_outcome = self
+            
+            self
                 .compact_level0(
                     target_file_size,
                     options.flags.contains(CompactFlags::ForceL0Compaction),
                     ctx,
                 )
-                .await?;
-            timer.stop_and_record();
-            l0_outcome
+                .await?
+        
         };
 
         if options.flags.contains(CompactFlags::OnlyL0Compaction) {
@@ -4041,7 +4040,7 @@ impl TimelineAdaptor {
         key_range: &Range<Key>,
         ctx: &RequestContext,
     ) -> Result<(), CreateImageLayersError> {
-        let timer = self.timeline.metrics.create_images_time_histo.start_timer();
+       
 
         let image_layer_writer = ImageLayerWriter::new(
             self.timeline.conf,
@@ -4087,7 +4086,7 @@ impl TimelineAdaptor {
             self.new_images.push(image_layer);
         }
 
-        timer.stop_and_record();
+        
 
         Ok(())
     }

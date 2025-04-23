@@ -223,7 +223,7 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::deletion_queue::{DeletionQueueClient, DeletionQueueError};
 use crate::metrics::{
-    MeasureRemoteOp, REMOTE_ONDEMAND_DOWNLOADED_BYTES, REMOTE_ONDEMAND_DOWNLOADED_LAYERS,
+    MeasureRemoteOp, 
     RemoteOpFileKind, RemoteOpKind, 
 };
 use crate::task_mgr::{BACKGROUND_RUNTIME, TaskKind, shutdown_token};
@@ -720,8 +720,6 @@ impl RemoteTimelineClient {
             .await?
         };
 
-        REMOTE_ONDEMAND_DOWNLOADED_LAYERS.inc();
-        REMOTE_ONDEMAND_DOWNLOADED_BYTES.inc_by(downloaded_size);
 
         Ok(downloaded_size)
     }

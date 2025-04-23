@@ -6,7 +6,6 @@ mod scheduler;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use metrics::UIntGauge;
 use pageserver_api::models;
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use remote_storage::GenericRemoteStorage;
@@ -26,7 +25,6 @@ use super::span::debug_assert_current_span_has_tenant_id;
 use super::storage_layer::LayerName;
 use crate::context::RequestContext;
 use crate::disk_usage_eviction_task::DiskUsageEvictionInfo;
-use crate::metrics::{SECONDARY_HEATMAP_TOTAL_SIZE, SECONDARY_RESIDENT_PHYSICAL_SIZE};
 use crate::task_mgr::{self, BACKGROUND_RUNTIME, TaskKind};
 
 enum DownloadCommand {
@@ -109,12 +107,7 @@ pub(crate) struct SecondaryTenant {
 
     // Public state indicating overall progress of downloads relative to the last heatmap seen
     pub(crate) progress: std::sync::Mutex<models::SecondaryProgress>,
-
-    // Sum of layer sizes on local disk
-    pub(super) resident_size_metric: UIntGauge,
-
-    // Sum of layer sizes in the most recently downloaded heatmap
-    pub(super) heatmap_total_size_metric: UIntGauge,
+   
 }
 
 impl SecondaryTenant {
@@ -124,16 +117,8 @@ impl SecondaryTenant {
         tenant_conf: pageserver_api::models::TenantConfig,
         config: &SecondaryLocationConfig,
     ) -> Arc<Self> {
-        let tenant_id = tenant_shard_id.tenant_id.to_string();
-        let shard_id = format!("{}", tenant_shard_id.shard_slug());
-        let resident_size_metric = SECONDARY_RESIDENT_PHYSICAL_SIZE
-            .get_metric_with_label_values(&[&tenant_id, &shard_id])
-            .unwrap();
-
-        let heatmap_total_size_metric = SECONDARY_HEATMAP_TOTAL_SIZE
-            .get_metric_with_label_values(&[&tenant_id, &shard_id])
-            .unwrap();
-
+    
+    
         Arc::new(Self {
             tenant_shard_id,
             // todo: shall we make this a descendent of the
@@ -150,14 +135,10 @@ impl SecondaryTenant {
 
             progress: std::sync::Mutex::default(),
 
-            resident_size_metric,
-            heatmap_total_size_metric,
         })
     }
 
-    pub(crate) fn tenant_shard_id(&self) -> TenantShardId {
-        self.tenant_shard_id
-    }
+    
 
     pub(crate) async fn shutdown(&self) {
         self.cancel.cancel();
@@ -169,15 +150,10 @@ impl SecondaryTenant {
 
         // Metrics are subtracted from and/or removed eagerly.
         // Deletions are done in the background via [`BackgroundPurges::spawn`].
-        let tenant_id = self.tenant_shard_id.tenant_id.to_string();
-        let shard_id = format!("{}", self.tenant_shard_id.shard_slug());
-        let _ = SECONDARY_RESIDENT_PHYSICAL_SIZE.remove_label_values(&[&tenant_id, &shard_id]);
-        let _ = SECONDARY_HEATMAP_TOTAL_SIZE.remove_label_values(&[&tenant_id, &shard_id]);
-
         self.detail
             .lock()
             .unwrap()
-            .drain_timelines(&self.tenant_shard_id, &self.resident_size_metric);
+            .drain_timelines(&self.tenant_shard_id);
     }
 
     pub(crate) fn set_config(&self, config: &SecondaryLocationConfig) {
@@ -255,7 +231,7 @@ impl SecondaryTenant {
             // of the cache.
             let mut detail = this.detail.lock().unwrap();
             if let Some(removed) =
-                detail.evict_layer(name, &timeline_id, now, &this.resident_size_metric)
+                detail.evict_layer(name, &timeline_id, now)
             {
                 // We might race with removal of the same layer during downloads, so finding the layer we
                 // were trying to remove is optional.  Only issue the disk I/O to remove it if we found it.
@@ -269,10 +245,9 @@ impl SecondaryTenant {
     /// Exhaustive check that incrementally updated metrics match the actual state.
     #[cfg(feature = "testing")]
     fn validate_metrics(&self) {
-        let detail = self.detail.lock().unwrap();
-        let resident_size = detail.total_resident_size();
+        
 
-        assert_eq!(resident_size, self.resident_size_metric.get());
+        
     }
 
     #[cfg(not(feature = "testing"))]

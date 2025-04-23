@@ -84,9 +84,9 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::{DeletionQueueClient, DeletionQueueError};
 use crate::l0_flush::L0FlushGlobalState;
 use crate::metrics::{
-    CIRCUIT_BREAKERS_BROKEN, CIRCUIT_BREAKERS_UNBROKEN, CONCURRENT_INITDBS,
-    INITDB_RUN_TIME, INITDB_SEMAPHORE_ACQUISITION_TIME, TENANT, 
-    remove_tenant_metrics,
+    CIRCUIT_BREAKERS_BROKEN, CIRCUIT_BREAKERS_UNBROKEN, 
+    TENANT, 
+    
 };
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::LocationMode;
@@ -1461,7 +1461,7 @@ impl Tenant {
 
                 let preload = match &mode {
                     SpawnMode::Eager | SpawnMode::Lazy => {
-                        let _preload_timer = TENANT.preload.start_timer();
+                      
                         let res = tenant_clone
                             .preload(&remote_storage, task_mgr::shutdown_token())
                             .await;
@@ -3392,7 +3392,7 @@ impl Tenant {
                     "activation attempt finished"
                 );
 
-                TENANT.activation.observe(elapsed.as_secs_f64());
+              
             });
         }
     }
@@ -3517,7 +3517,6 @@ impl Tenant {
         // Wait for any in-flight operations to complete
         self.gate.close().await;
 
-        remove_tenant_metrics(&self.tenant_shard_id);
 
         Ok(())
     }
@@ -5524,16 +5523,11 @@ async fn run_initdb(
     );
 
     let _permit = {
-        let _timer = INITDB_SEMAPHORE_ACQUISITION_TIME.start_timer();
+       
         INIT_DB_SEMAPHORE.acquire().await
     };
 
-    CONCURRENT_INITDBS.inc();
-    scopeguard::defer! {
-        CONCURRENT_INITDBS.dec();
-    }
 
-    let _timer = INITDB_RUN_TIME.start_timer();
     let res = postgres_initdb::do_run_initdb(postgres_initdb::RunInitdbArgs {
         superuser: &conf.superuser,
         locale: &conf.locale,

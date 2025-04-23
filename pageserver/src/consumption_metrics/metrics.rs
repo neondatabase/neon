@@ -261,7 +261,7 @@ where
     let mut tenants = std::pin::pin!(tenants);
 
     while let Some((tenant_id, tenant)) = tenants.next().await {
-        let mut tenant_resident_size = 0;
+        let tenant_resident_size = 0;
 
         for timeline in tenant.list_timelines() {
             let timeline_id = timeline.timeline_id;
@@ -286,7 +286,6 @@ where
                 }
             }
 
-            tenant_resident_size += timeline.resident_physical_size();
         }
 
         let snap = TenantSnapshot::collect(&tenant, tenant_resident_size);

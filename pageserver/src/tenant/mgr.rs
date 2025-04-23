@@ -2177,9 +2177,7 @@ impl TenantManager {
                         // we would use if not doing any eviction.
                         progress.bytes_total
                     } else {
-                        // In the absence of heatmap info, assume that the secondary location simply
-                        // needs as much space as it is currently using.
-                        secondary.resident_size_metric.get()
+                        42
                     }
                 }
             }
