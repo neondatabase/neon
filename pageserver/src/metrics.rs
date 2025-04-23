@@ -1772,8 +1772,13 @@ static SMGR_QUERY_STARTED_PER_TENANT_TIMELINE: Lazy<IntCounterVec> = Lazy::new(|
     .expect("failed to define a metric")
 });
 
-// Alias so all histograms recording per-timeline smgr timings use the same buckets.
-static SMGR_QUERY_TIME_PER_TENANT_TIMELINE_BUCKETS: &[f64] = CRITICAL_OP_BUCKETS;
+/// Per-timeline smgr histogram buckets should be equivalent to the compute buckets, so the metrics
+/// are comparable across compute and Pageserver. We extend them a bit further down, to 0.3 ms,
+/// since local latencies are expected to be smaller. See also:
+/// https://github.com/neondatabase/neon/blob/1a87975d956a8ad17ec8b85da32a137ec4893fcc/pgxn/neon/neon_perf_counters.h#L18-L27
+/// https://github.com/neondatabase/flux-fleet/blob/9c895740101981b12b3b306f495857db7ea8a335/apps/base/compute-metrics/scrape-compute-sql-exporter.yaml#L29-L35
+static SMGR_QUERY_TIME_PER_TENANT_TIMELINE_BUCKETS: &[f64] =
+    &[0.0003, 0.0006, 0.001, 0.003, 0.006, 0.01, 0.03, 0.1, 1.0];
 
 static SMGR_QUERY_TIME_PER_TENANT_TIMELINE: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
