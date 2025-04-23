@@ -179,16 +179,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     ));
     virtual_file::init(
         16384,
-        {
-            #[cfg(not(target_os = "linux"))]
-            const _: () = {
-                panic!(
-                    "This benchmark does I/O and can only give a representative result on Linux"
-                );
-            };
-            #[cfg(target_os = "linux")]
-            pageserver_api::models::virtual_file::IoEngineKind::TokioEpollUring
-        },
+        virtual_file::io_engine_for_bench(),
         // immaterial, each `ingest_main` invocation below overrides this
         conf.virtual_file_io_mode,
         // without actually doing syncs, buffered writes have an unfair advantage over direct IO writes
@@ -253,7 +244,11 @@ fn criterion_benchmark(c: &mut Criterion) {
     ];
     let exploded_parameters = {
         let mut out = Vec::new();
-        for io_mode in [IoMode::Buffered, IoMode::Direct] {
+        for io_mode in [
+            IoMode::Buffered,
+            #[cfg(target_os = "linux")]
+            IoMode::Direct,
+        ] {
             for param in expect.clone() {
                 let HandPickedParameters {
                     volume_mib,
