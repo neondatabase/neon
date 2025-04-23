@@ -133,7 +133,7 @@
 //! - Initiate upload queue with that [`IndexPart`].
 //! - Reschedule all lost operations by comparing the local filesystem state
 //!   and remote state as per [`IndexPart`]. This is done in
-//!   [`Tenant::timeline_init_and_sync`].
+//!   [`TenantShard::timeline_init_and_sync`].
 //!
 //! Note that if we crash during file deletion between the index update
 //! that removes the file from the list of files, and deleting the remote file,
@@ -171,7 +171,7 @@
 //! If no remote storage configuration is provided, the [`RemoteTimelineClient`] is
 //! not created and the uploads are skipped.
 //!
-//! [`Tenant::timeline_init_and_sync`]: super::Tenant::timeline_init_and_sync
+//! [`TenantShard::timeline_init_and_sync`]: super::TenantShard::timeline_init_and_sync
 //! [`Timeline::load_layer_map`]: super::Timeline::load_layer_map
 
 pub(crate) mod download;
@@ -2743,7 +2743,7 @@ mod tests {
     use crate::tenant::config::AttachmentMode;
     use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
     use crate::tenant::storage_layer::layer::local_layer_path;
-    use crate::tenant::{Tenant, Timeline};
+    use crate::tenant::{TenantShard, Timeline};
 
     pub(super) fn dummy_contents(name: &str) -> Vec<u8> {
         format!("contents for {name}").into()
@@ -2796,7 +2796,7 @@ mod tests {
 
     struct TestSetup {
         harness: TenantHarness,
-        tenant: Arc<Tenant>,
+        tenant: Arc<TenantShard>,
         timeline: Arc<Timeline>,
         tenant_ctx: RequestContext,
     }

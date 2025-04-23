@@ -1677,7 +1677,7 @@ RUN set -e \
     && apt clean && rm -rf /var/lib/apt/lists/*
 
 # Use `dist_man_MANS=` to skip manpage generation (which requires python3/pandoc)
-ENV PGBOUNCER_TAG=pgbouncer_1_22_1
+ENV PGBOUNCER_TAG=pgbouncer_1_24_1
 RUN set -e \
     && git clone --recurse-submodules --depth 1 --branch ${PGBOUNCER_TAG} https://github.com/pgbouncer/pgbouncer.git pgbouncer \
     && cd pgbouncer \

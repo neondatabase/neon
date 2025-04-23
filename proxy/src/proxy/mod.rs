@@ -329,7 +329,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     let user_info = match result {
         Ok(user_info) => user_info,
-        Err(e) => stream.throw_error(e).await?,
+        Err(e) => stream.throw_error(e, Some(ctx)).await?,
     };
 
     let user = user_info.get_user().to_owned();
@@ -349,7 +349,10 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
             let app = params.get("application_name");
             let params_span = tracing::info_span!("", ?user, ?db, ?app);
 
-            return stream.throw_error(e).instrument(params_span).await?;
+            return stream
+                .throw_error(e, Some(ctx))
+                .instrument(params_span)
+                .await?;
         }
     };
 
@@ -374,7 +377,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         config.wake_compute_retry_config,
         &config.connect_to_compute,
     )
-    .or_else(|e| stream.throw_error(e))
+    .or_else(|e| stream.throw_error(e, Some(ctx)))
     .await?;
 
     let cancellation_handler_clone = Arc::clone(&cancellation_handler);

@@ -1,6 +1,6 @@
 //! FIXME: most of this is copy-paste from mgmt_api.rs ; dedupe into a `reqwest_utils::Client` crate.
 use pageserver_client::mgmt_api::{Error, ResponseErrorMessageExt};
-use reqwest::Method;
+use reqwest::{Certificate, Method};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::error;
@@ -34,7 +34,7 @@ impl Client {
         };
         let mut http_client = reqwest::Client::builder();
         for cert in &conf.ssl_ca_certs {
-            http_client = http_client.add_root_certificate(cert.clone());
+            http_client = http_client.add_root_certificate(Certificate::from_der(cert.contents())?);
         }
         let http_client = http_client.build()?;
 

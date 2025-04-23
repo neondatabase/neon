@@ -947,8 +947,6 @@ class NeonEnvBuilder:
                     continue
                 if SMALL_DB_FILE_NAME_REGEX.fullmatch(test_file.name):
                     continue
-                if FINAL_METRICS_FILE_NAME == test_file.name:
-                    continue
                 log.debug(f"Removing large database {test_file} file")
                 test_file.unlink()
             elif test_entry.is_dir():
@@ -2989,7 +2987,7 @@ class NeonPageserver(PgProtocol, LogUtils):
             return
 
         metrics = self.http_client().get_metrics_str()
-        metrics_snapshot_path = self.workdir / FINAL_METRICS_FILE_NAME
+        metrics_snapshot_path = self.workdir / "final_metrics.txt"
 
         with open(metrics_snapshot_path, "w") as f:
             f.write(metrics)
@@ -3187,6 +3185,7 @@ class PgBin:
         command: list[str],
         env: Env | None = None,
         cwd: str | Path | None = None,
+        stderr_pipe: Any | None = None,
     ) -> subprocess.Popen[Any]:
         """
         Run one of the postgres binaries, not waiting for it to finish
@@ -3204,7 +3203,9 @@ class PgBin:
         log.info(f"Running command '{' '.join(command)}'")
         env = self._build_env(env)
         self._log_env(env)
-        return subprocess.Popen(command, env=env, cwd=cwd, stdout=subprocess.PIPE, text=True)
+        return subprocess.Popen(
+            command, env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=stderr_pipe, text=True
+        )
 
     def run(
         self,
@@ -4112,13 +4113,14 @@ class Endpoint(PgProtocol, LogUtils):
         # try and stop the same process twice, as stop() is called by test teardown and
         # potentially by some __del__ chains in other threads.
         self._running = threading.Semaphore(0)
+        self.__jwt: str | None = None
 
-    def http_client(
-        self, auth_token: str | None = None, retries: Retry | None = None
-    ) -> EndpointHttpClient:
+    def http_client(self, retries: Retry | None = None) -> EndpointHttpClient:
+        assert self.__jwt is not None
         return EndpointHttpClient(
             external_port=self.external_http_port,
             internal_port=self.internal_http_port,
+            jwt=self.__jwt,
         )
 
     def create(
@@ -4201,6 +4203,8 @@ class Endpoint(PgProtocol, LogUtils):
                 )
 
         self.config(config_lines)
+
+        self.__jwt = self.env.neon_cli.endpoint_generate_jwt(self.endpoint_id)
 
         return self
 
@@ -5155,9 +5159,6 @@ def pytest_addoption(parser: Parser):
 SMALL_DB_FILE_NAME_REGEX: re.Pattern[str] = re.compile(
     r"config-v1|heatmap-v1|tenant-manifest|metadata|.+\.(?:toml|pid|json|sql|conf)"
 )
-
-FINAL_METRICS_FILE_NAME: str = "final_metrics.txt"
-
 
 SKIP_DIRS = frozenset(
     (

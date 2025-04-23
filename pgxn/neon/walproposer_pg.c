@@ -890,7 +890,7 @@ libpqwp_connect_start(char *conninfo)
 	 * palloc will exit on failure though, so there's not much we could do if
 	 * it *did* fail.
 	 */
-	conn = palloc(sizeof(WalProposerConn));
+	conn = (WalProposerConn*)MemoryContextAllocZero(TopMemoryContext, sizeof(WalProposerConn));
 	conn->pg_conn = pg_conn;
 	conn->is_nonblocking = false;	/* connections always start in blocking
 									 * mode */

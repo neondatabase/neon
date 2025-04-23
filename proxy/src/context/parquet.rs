@@ -416,7 +416,6 @@ async fn upload_parquet(
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used)]
 mod tests {
     use std::net::Ipv4Addr;
     use std::num::NonZeroUsize;

@@ -29,6 +29,7 @@ pub async fn task_main(
     conf: Arc<SafeKeeperConf>,
     pg_listener: std::net::TcpListener,
     allowed_auth_scope: Scope,
+    tls_config: Option<Arc<rustls::ServerConfig>>,
     global_timelines: Arc<GlobalTimelines>,
 ) -> anyhow::Result<()> {
     // Tokio's from_std won't do this for us, per its comment.
@@ -43,9 +44,10 @@ pub async fn task_main(
         let conf = conf.clone();
         let conn_id = issue_connection_id(&mut connection_count);
         let global_timelines = global_timelines.clone();
+        let tls_config = tls_config.clone();
         tokio::spawn(
             async move {
-                if let Err(err) = handle_socket(socket, conf, conn_id, allowed_auth_scope, global_timelines).await {
+                if let Err(err) = handle_socket(socket, conf, conn_id, allowed_auth_scope, tls_config, global_timelines).await {
                     error!("connection handler exited: {}", err);
                 }
             }
@@ -61,6 +63,7 @@ async fn handle_socket(
     conf: Arc<SafeKeeperConf>,
     conn_id: ConnectionId,
     allowed_auth_scope: Scope,
+    tls_config: Option<Arc<rustls::ServerConfig>>,
     global_timelines: Arc<GlobalTimelines>,
 ) -> Result<(), QueryError> {
     socket.set_nodelay(true)?;
@@ -110,7 +113,8 @@ async fn handle_socket(
         auth_pair,
         global_timelines,
     );
-    let pgbackend = PostgresBackend::new_from_io(socket_fd, socket, peer_addr, auth_type, None)?;
+    let pgbackend =
+        PostgresBackend::new_from_io(socket_fd, socket, peer_addr, auth_type, tls_config)?;
     // libpq protocol between safekeeper and walproposer / pageserver
     // We don't use shutdown.
     pgbackend
