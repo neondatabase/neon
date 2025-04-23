@@ -31,6 +31,8 @@ use crate::tenant::mgr::ShardResolveResult;
 use crate::tenant::mgr::ShardSelector;
 use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::timeline::WaitLsnTimeout;
+use async_stream::try_stream;
+use futures::Stream;
 use tokio::io::{AsyncWriteExt, ReadHalf, SimplexStream};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{Decoder, FramedRead};
@@ -50,6 +52,7 @@ use utils::auth::{Claims, SwappableJwtAuth};
 
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
+use utils::shard::ShardIndex;
 use utils::simple_rcu::RcuReadGuard;
 
 use crate::tenant::PageReconstructError;
@@ -143,6 +146,8 @@ fn convert_reltag(value: &model::RelTag) -> pageserver_api::reltag::RelTag {
 #[tonic::async_trait]
 impl PageService for PageServiceService {
     type GetBaseBackupStream = GetBaseBackupStream;
+    type GetPagesStream =
+        Pin<Box<dyn Stream<Item = Result<proto::GetPageResponse, tonic::Status>> + Send>>;
 
     async fn rel_exists(
         &self,
@@ -261,6 +266,58 @@ impl PageService for PageServiceService {
         }
         .instrument(span)
         .await
+    }
+
+    async fn get_pages(
+        &self,
+        request: tonic::Request<tonic::Streaming<proto::GetPageRequest>>,
+    ) -> Result<tonic::Response<Self::GetPagesStream>, tonic::Status> {
+        // TODO: pass the shard index in the request metadata.
+        let ttid = self.extract_ttid(request.metadata())?;
+        let timeline = self
+            .get_timeline(ttid, ShardSelector::Known(ShardIndex::unsharded()))
+            .await?;
+        let ctx = self.ctx.with_scope_timeline(&timeline);
+        let conf = self.conf;
+
+        let mut request_stream = request.into_inner();
+
+        let response_stream = try_stream! {
+            while let Some(request) = request_stream.message().await? {
+                let guard = timeline
+                    .gate
+                    .enter()
+                    .or(Err(tonic::Status::unavailable("timeline is shutting down")))?;
+
+                let request: model::GetPageRequest = (&request).try_into()?;
+                let rel = convert_reltag(&request.rel);
+                let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
+                let lsn = Self::wait_or_get_last_lsn(
+                    &timeline,
+                    request.common.request_lsn,
+                    request.common.not_modified_since_lsn,
+                    &latest_gc_cutoff_lsn,
+                    &ctx,
+                )
+                .await?;
+
+                let page_image = timeline
+                    .get_rel_page_at_lsn(
+                        rel,
+                        request.block_number,
+                        Version::Lsn(lsn),
+                        &ctx,
+                        IoConcurrency::spawn_from_conf(conf, guard),
+                    )
+                    .await?;
+
+                yield proto::GetPageResponse { page_image };
+            }
+        };
+
+        Ok(tonic::Response::new(
+            Box::pin(response_stream) as Self::GetPagesStream
+        ))
     }
 
     async fn db_size(

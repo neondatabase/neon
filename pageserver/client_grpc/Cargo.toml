@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 bytes.workspace = true
+futures.workspace = true
 http.workspace = true
 thiserror.workspace = true
 tonic.workspace = true

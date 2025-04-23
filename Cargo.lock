@@ -4325,6 +4325,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tracing",
  "utils",
@@ -4508,6 +4509,7 @@ name = "pageserver_client_grpc"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "futures",
  "http 1.1.0",
  "pageserver_data_api",
  "thiserror 1.0.69",
