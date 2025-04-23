@@ -47,7 +47,7 @@ This directory includes the following extensions:
 
 ### Extension Upgrade Testing
 
-The extensions in this directory are used by the `test_extensions_upgrade.sh` script to test upgrading extensions between different versions of Neon Compute nodes. The script:
+The extensions in this directory are used by the `test-upgrade.sh` script to test upgrading extensions between different versions of Neon Compute nodes. The script:
 
 1. Creates a database with extensions installed on an old Compute version
 2. Creates timelines for each extension
