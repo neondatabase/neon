@@ -63,7 +63,7 @@ For testing with regular users (particularly for cloud instances), each extensio
 3. Installs the extension
 4. Runs regression tests
 
-A note about pg_regress: Since pg_regress attempts to set `lc_messages` for the database by default (which can cause issues), we create databases manually and use the `--use-existing` option to bypass this limitation.
+A note about pg_regress: Since pg_regress attempts to set `lc_messages` for the database by default, which is forbidden for regular users, we create databases manually and use the `--use-existing` option to bypass this limitation.
 
 ### CI Workflows
 
