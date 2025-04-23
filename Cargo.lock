@@ -8476,6 +8476,8 @@ dependencies = [
  "regex-syntax 0.8.2",
  "reqwest",
  "rustls 0.23.18",
+ "rustls-pki-types",
+ "rustls-webpki 0.102.8",
  "scopeguard",
  "sec1 0.7.3",
  "serde",
