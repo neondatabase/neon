@@ -16,29 +16,31 @@ const MONITOR_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 struct ComputeMonitor {
     compute: Arc<ComputeNode>,
 
-    // The moment when Postgres had some activity,
-    // that should prevent compute from being suspended.
+    /// The moment when Postgres had some activity,
+    /// that should prevent compute from being suspended.
     last_active: Option<DateTime<Utc>>,
 
-    // The moment when we last tried to check Postgres.
+    /// The moment when we last tried to check Postgres.
     last_checked: DateTime<Utc>,
-    // The last moment we did a successful Postgres check.
+    /// The last moment we did a successful Postgres check.
     last_up: DateTime<Utc>,
 
-    // These two attributes are purely for statistics change tracking,
-    // they can be outdated.
+    /// Only used for internal statistics change tracking
+    /// between monitor runs and can be outdated.
     active_time: Option<f64>,
+    /// Only used for internal statistics change tracking
+    /// between monitor runs and can be outdated.
     sessions: Option<i64>,
 
-    // Use experimental statistics-based activity monitor. It's no longer
-    // 'experimental' per se, as it's enabled for everyone, but we still
-    // keep the flag as an option to turn it off in some cases if it will
-    // misbehave.
+    /// Use experimental statistics-based activity monitor. It's no longer
+    /// 'experimental' per se, as it's enabled for everyone, but we still
+    /// keep the flag as an option to turn it off in some cases if it will
+    /// misbehave.
     experimental: bool,
 }
 
 impl ComputeMonitor {
-    fn report_down(&mut self) {
+    fn report_down(&self) {
         let now = Utc::now();
 
         // Calculate and report current downtime
@@ -217,9 +219,9 @@ impl ComputeMonitor {
         //
         // N.B. walproposer doesn't currently show up in pg_stat_replication,
         // but protect if it will.
-        let ws_count_query =
+        const WS_COUNT_QUERY: &str =
             "select count(*) from pg_stat_replication where application_name != 'walproposer';";
-        match cli.query_one(ws_count_query, &[]) {
+        match cli.query_one(WS_COUNT_QUERY, &[]) {
             Ok(r) => match r.try_get::<&str, i64>("count") {
                 Ok(num_ws) => {
                     if num_ws > 0 {
@@ -237,14 +239,12 @@ impl ComputeMonitor {
             }
         }
 
-        //
         // Don't suspend compute if there is an active logical replication subscription
         //
         // `where pid is not null` – to filter out read only computes and subscription on branches
-        //
-        let logical_subscriptions_query =
+        const LOGICAL_SUBSCRIPTIONS_QUERY: &str =
             "select count(*) from pg_stat_subscription where pid is not null;";
-        match cli.query_one(logical_subscriptions_query, &[]) {
+        match cli.query_one(LOGICAL_SUBSCRIPTIONS_QUERY, &[]) {
             Ok(row) => match row.try_get::<&str, i64>("count") {
                 Ok(num_subscribers) => {
                     if num_subscribers > 0 {
@@ -267,12 +267,10 @@ impl ComputeMonitor {
             }
         }
 
-        //
         // Do not suspend compute if autovacuum is running
-        //
-        let autovacuum_count_query =
+        const AUTOVACUUM_COUNT_QUERY: &str =
             "select count(*) from pg_stat_activity where backend_type = 'autovacuum worker'";
-        match cli.query_one(autovacuum_count_query, &[]) {
+        match cli.query_one(AUTOVACUUM_COUNT_QUERY, &[]) {
             Ok(r) => match r.try_get::<&str, i64>("count") {
                 Ok(num_workers) => {
                     if num_workers > 0 {
