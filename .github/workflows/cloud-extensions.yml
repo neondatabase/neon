@@ -63,7 +63,6 @@ jobs:
           settings=$(jq -c -n --arg libs $LIBS '{preload_libraries:{use_defaults:false,enabled_libraries:($libs| split(":"))}}')
           echo settings=$settings >> $GITHUB_OUTPUT
           
-
       - name: Create Neon Project
         id: create-neon-project
         uses: ./.github/actions/neon-project-create
