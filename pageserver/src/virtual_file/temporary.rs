@@ -85,7 +85,16 @@ impl TempVirtualFile {
             }),
         }
     }
-    /// XXX better name for this API, nb we're also dropping the gate guard as part of .take().expect().file
+
+    /// Dismantle this wrapper and return the underlying [`VirtualFile`].
+    /// This disables auto-unlinking functionality that is the essence of this wrapper.
+    ///
+    /// The gate guard is dropped as well; it is the callers responsibility to ensure filesystem
+    /// operations after calls to this functions are still gated by some other gate guard.
+    ///
+    /// TODO:
+    /// - centralize the common usage pattern of callers (sync_all(self), rename(self, dst), sync_all(dst.parent))
+    ///   => <https://github.com/neondatabase/neon/pull/11549#issuecomment-2824592831>
     pub fn disarm_into_inner(mut self) -> VirtualFile {
         self.inner
             .take()

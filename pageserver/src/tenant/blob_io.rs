@@ -327,7 +327,7 @@ where
         (srcbuf, res.map(|_| (offset, compression_info)))
     }
 
-    /// Finish this blob writer and return the underlying `VirtualFile`.
+    /// Finish this blob writer and return the underlying `W`.
     ///
     /// The caller can use the `handle_tail` function to change the tail of the buffer before flushing it to disk.
     /// The buffer will not be flushed to disk if handle_tail returns `None`.

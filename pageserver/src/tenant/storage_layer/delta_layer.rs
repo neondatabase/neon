@@ -611,6 +611,8 @@ impl DeltaLayerWriterInner {
 
         trace!("created delta layer {}", self.path);
 
+        // The gate guard stored in `destination_file` is dropped. Callers (e.g.. flush loop or compaction)
+        // keep the gate open also, so that it's safe for them to rename the file to its final destination.
         file.disarm_into_inner();
 
         Ok((desc, self.path))

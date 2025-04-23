@@ -222,6 +222,11 @@ async fn download_object(
         .with_context(|| format!("failed to fsync source file at {dst_path}"))
         .map_err(DownloadError::Other)?;
 
+    // The gate guard stored in `destination_file` is dropped but the callers continues
+    // to operate on it and on the parent timeline directory.
+    // Those operations are safe because higher-level code is holding another gate guard:
+    // - attached mode: the download task spawned by struct Layer is holding the gate guard
+    // - secondary mode: The TenantDownloader::download holds the gate open
     let _: VirtualFile = destination_file.disarm_into_inner();
 
     Ok(bytes_amount)
