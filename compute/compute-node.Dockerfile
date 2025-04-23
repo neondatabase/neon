@@ -1760,7 +1760,7 @@ ARG PG_VERSION
 COPY docker-compose/ext-src/ /ext-src/
 
 COPY --from=pg-build /postgres /postgres
-COPY --from=postgis-build /ext-src/ /ext-src/
+COPY --from=postgis-build /ext-src/  /ext-src/
 COPY --from=postgis-build /sfcgal/* /usr
 COPY --from=plv8-src /ext-src/ /ext-src/
 #COPY --from=h3-pg-src /ext-src/ /ext-src/
