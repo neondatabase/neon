@@ -77,6 +77,8 @@ To add a new extension for testing:
 
 1. Create a directory named `extension-name-src` in this directory
 2. Add at minimum:
-   - `test-upgrade.sh` for upgrade testing
-   - `regular-test.sh` for regular user testing
-3. Update the list of extensions in the `test_extensions_upgrade.sh` script if needed
+   - `regular-test.sh` for testing with regular users
+   - If `regular-test.sh` doesn't exist, the system will look for `neon-test.sh`
+   - If neither exists, it will try to run `make installcheck`
+   - `test-upgrade.sh` is only needed if you want to test upgrade scenarios
+3. Update the list of extensions in the `test_extensions_upgrade.sh` script if needed for upgrade testing
