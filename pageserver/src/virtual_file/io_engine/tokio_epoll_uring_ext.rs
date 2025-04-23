@@ -82,7 +82,7 @@ pub async fn thread_local_system() -> Handle {
                     match res {
                         Ok(system) => {
                             info!("successfully launched system");
-                            metrics::THREAD_LOCAL_LAUNCH_SUCCESSES.inc();
+                          
                             Ok(system)
                         }
                         Err(tokio_epoll_uring::LaunchResult::IoUringBuild(e)) if e.kind() == std::io::ErrorKind::OutOfMemory => {
@@ -90,7 +90,7 @@ pub async fn thread_local_system() -> Handle {
                             info_span!("stats").in_scope(|| {
                                 emit_launch_failure_process_stats();
                             });
-                            metrics::THREAD_LOCAL_LAUNCH_FAILURES.inc();
+                            
                             metrics::THREAD_LOCAL_METRICS_STORAGE.remove_system(inner.thread_local_state_id);
                             Err(())
                         }

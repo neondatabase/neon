@@ -571,8 +571,36 @@ pub(crate) trait MeasureRemoteOp<O, E>: Sized + Future<Output = Result<O, E>> {
 impl<Fut, O, E> MeasureRemoteOp<O, E> for Fut where Fut: Sized + Future<Output = Result<O, E>> {}
 
 pub mod tokio_epoll_uring {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
-    
+    use metrics::{Histogram, LocalHistogram, UIntGauge, register_histogram};
+    use once_cell::sync::Lazy;
+
+    /// Shared storage for tokio-epoll-uring thread local metrics.
+    pub(crate) static THREAD_LOCAL_METRICS_STORAGE: Lazy<ThreadLocalMetricsStorage> =
+        Lazy::new(|| {
+            let slots_submission_queue_depth = register_histogram!(
+                "pageserver_tokio_epoll_uring_slots_submission_queue_depth",
+                "The slots waiters queue depth of each tokio_epoll_uring system",
+                vec![
+                    1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0
+                ],
+            )
+            .expect("failed to define a metric");
+            ThreadLocalMetricsStorage {
+                observers: Mutex::new(HashMap::new()),
+                slots_submission_queue_depth,
+            }
+        });
+
+    pub struct ThreadLocalMetricsStorage {
+        /// List of thread local metrics observers.
+        observers: Mutex<HashMap<u64, Arc<ThreadLocalMetrics>>>,
+        /// A histogram shared between all thread local systems
+        /// for collecting slots submission queue depth.
+        slots_submission_queue_depth: Histogram,
+    }
 
     /// Each thread-local [`tokio_epoll_uring::System`] gets one of these as its
     /// [`tokio_epoll_uring::metrics::PerSystemMetrics`] generic.
@@ -584,12 +612,107 @@ pub mod tokio_epoll_uring {
     /// But except for the periodic flush, the lock is uncontended so there's no waiting
     /// for cache coherence protocol to get an exclusive cache line.
     pub struct ThreadLocalMetrics {
-        
+        /// Local observer of thread local tokio-epoll-uring system's slots waiters queue depth.
+        slots_submission_queue_depth: Mutex<LocalHistogram>,
     }
 
-    
+    impl ThreadLocalMetricsStorage {
+        /// Registers a new thread local system. Returns a thread local metrics observer.
+        pub fn register_system(&self, id: u64) -> Arc<ThreadLocalMetrics> {
+            let per_system_metrics = Arc::new(ThreadLocalMetrics::new(
+                self.slots_submission_queue_depth.local(),
+            ));
+            let mut g = self.observers.lock().unwrap();
+            g.insert(id, Arc::clone(&per_system_metrics));
+            per_system_metrics
+        }
 
-   
+        /// Removes metrics observer for a thread local system.
+        /// This should be called before dropping a thread local system.
+        pub fn remove_system(&self, id: u64) {
+            let mut g = self.observers.lock().unwrap();
+            g.remove(&id);
+        }
+
+        /// Flush all thread local metrics to the shared storage.
+        pub fn flush_thread_local_metrics(&self) {
+            let g = self.observers.lock().unwrap();
+            g.values().for_each(|local| {
+                local.flush();
+            });
+        }
+    }
+
+    impl ThreadLocalMetrics {
+        pub fn new(slots_submission_queue_depth: LocalHistogram) -> Self {
+            ThreadLocalMetrics {
+                slots_submission_queue_depth: Mutex::new(slots_submission_queue_depth),
+            }
+        }
+
+        /// Flushes the thread local metrics to shared aggregator.
+        pub fn flush(&self) {
+            let Self {
+                slots_submission_queue_depth,
+            } = self;
+            slots_submission_queue_depth.lock().unwrap().flush();
+        }
+    }
+
+    impl tokio_epoll_uring::metrics::PerSystemMetrics for ThreadLocalMetrics {
+        fn observe_slots_submission_queue_depth(&self, _queue_depth: u64) {
+        }
+    }
+
+    pub struct Collector {
+        descs: Vec<metrics::core::Desc>,
+    }
+
+    impl metrics::core::Collector for Collector {
+        fn desc(&self) -> Vec<&metrics::core::Desc> {
+            self.descs.iter().collect()
+        }
+
+        fn collect(&self) -> Vec<metrics::proto::MetricFamily> {
+            Vec::with_capacity(Self::NMETRICS)
+        }
+    }
+
+    impl Collector {
+        const NMETRICS: usize = 3;
+
+        #[allow(clippy::new_without_default)]
+        pub fn new() -> Self {
+            let mut descs = Vec::new();
+
+            let systems_created = UIntGauge::new(
+                "pageserver_tokio_epoll_uring_systems_created",
+                "counter of tokio-epoll-uring systems that were created",
+            )
+            .unwrap();
+            descs.extend(
+                metrics::core::Collector::desc(&systems_created)
+                    .into_iter()
+                    .cloned(),
+            );
+
+            let systems_destroyed = UIntGauge::new(
+                "pageserver_tokio_epoll_uring_systems_destroyed",
+                "counter of tokio-epoll-uring systems that were destroyed",
+            )
+            .unwrap();
+            descs.extend(
+                metrics::core::Collector::desc(&systems_destroyed)
+                    .into_iter()
+                    .cloned(),
+            );
+
+            Self {
+                descs,
+            }
+        }
+    }
+
    
 }
 pub(crate) mod tenant_throttling {
