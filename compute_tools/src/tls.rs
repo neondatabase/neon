@@ -3,7 +3,6 @@ use std::{io::Write, os::unix::fs::OpenOptionsExt, path::Path, time::Duration};
 use anyhow::{Context, Result, bail};
 use compute_api::responses::TlsConfig;
 use ring::digest;
-use spki::der::{Decode, PemReader};
 use x509_cert::Certificate;
 
 #[derive(Clone, Copy)]
@@ -52,7 +51,7 @@ pub fn update_key_path_blocking(pg_data: &Path, tls_config: &TlsConfig) {
         match try_update_key_path_blocking(pg_data, tls_config) {
             Ok(()) => break,
             Err(e) => {
-                tracing::error!("could not create key file {e:?}");
+                tracing::error!(error = ?e, "could not create key file");
                 std::thread::sleep(Duration::from_secs(1))
             }
         }
@@ -92,8 +91,14 @@ fn try_update_key_path_blocking(pg_data: &Path, tls_config: &TlsConfig) -> Resul
 fn verify_key_cert(key: &str, cert: &str) -> Result<()> {
     use x509_cert::der::oid::db::rfc5912::ECDSA_WITH_SHA_256;
 
-    let cert = Certificate::decode(&mut PemReader::new(cert.as_bytes()).context("pem reader")?)
-        .context("decode cert")?;
+    let certs = Certificate::load_pem_chain(cert.as_bytes())
+        .context("decoding PEM encoded certificates")?;
+
+    // First certificate is our server-cert,
+    // all the rest of the certs are the CA cert chain.
+    let Some(cert) = certs.first() else {
+        bail!("no certificates found");
+    };
 
     match cert.signature_algorithm.oid {
         ECDSA_WITH_SHA_256 => {
