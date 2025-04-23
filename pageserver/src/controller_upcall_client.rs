@@ -8,6 +8,7 @@ use pageserver_api::upcall_api::{
     ReAttachRequest, ReAttachResponse, ReAttachResponseTenant, ValidateRequest,
     ValidateRequestTenant, ValidateResponse,
 };
+use reqwest::Certificate;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio_util::sync::CancellationToken;
@@ -76,8 +77,8 @@ impl StorageControllerUpcallClient {
             client = client.default_headers(headers);
         }
 
-        for ssl_ca_cert in &conf.ssl_ca_certs {
-            client = client.add_root_certificate(ssl_ca_cert.clone());
+        for cert in &conf.ssl_ca_certs {
+            client = client.add_root_certificate(Certificate::from_der(cert.contents())?);
         }
 
         Ok(Some(Self {

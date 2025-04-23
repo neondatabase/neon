@@ -11,7 +11,7 @@ use std::{env, fs};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
-use compute_api::responses::{ComputeCtlConfig, ComputeMetrics, ComputeStatus};
+use compute_api::responses::{ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus};
 use compute_api::spec::{
     ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PgIdent,
 };
@@ -303,11 +303,7 @@ struct StartVmMonitorResult {
 }
 
 impl ComputeNode {
-    pub fn new(
-        params: ComputeNodeParams,
-        cli_spec: Option<ComputeSpec>,
-        compute_ctl_config: ComputeCtlConfig,
-    ) -> Result<Self> {
+    pub fn new(params: ComputeNodeParams, config: ComputeConfig) -> Result<Self> {
         let connstr = params.connstr.as_str();
         let conn_conf = postgres::config::Config::from_str(connstr)
             .context("cannot build postgres config from connstr")?;
@@ -315,8 +311,8 @@ impl ComputeNode {
             .context("cannot build tokio postgres config from connstr")?;
 
         let mut new_state = ComputeState::new();
-        if let Some(cli_spec) = cli_spec {
-            let pspec = ParsedSpec::try_from(cli_spec).map_err(|msg| anyhow::anyhow!(msg))?;
+        if let Some(spec) = config.spec {
+            let pspec = ParsedSpec::try_from(spec).map_err(|msg| anyhow::anyhow!(msg))?;
             new_state.pspec = Some(pspec);
         }
 
@@ -327,7 +323,7 @@ impl ComputeNode {
             state: Mutex::new(new_state),
             state_changed: Condvar::new(),
             ext_download_progress: RwLock::new(HashMap::new()),
-            compute_ctl_config,
+            compute_ctl_config: config.compute_ctl_config,
         })
     }
 
@@ -634,19 +630,42 @@ impl ComputeNode {
             });
         }
 
-        // Configure and start rsyslog for HIPAA if necessary
-        if let ComputeAudit::Hipaa = pspec.spec.audit_log_level {
-            let remote_endpoint = std::env::var("AUDIT_LOGGING_ENDPOINT").unwrap_or("".to_string());
-            if remote_endpoint.is_empty() {
-                anyhow::bail!("AUDIT_LOGGING_ENDPOINT is empty");
+        // Configure and start rsyslog for compliance audit logging
+        match pspec.spec.audit_log_level {
+            ComputeAudit::Hipaa | ComputeAudit::Extended | ComputeAudit::Full => {
+                let remote_endpoint =
+                    std::env::var("AUDIT_LOGGING_ENDPOINT").unwrap_or("".to_string());
+                if remote_endpoint.is_empty() {
+                    anyhow::bail!("AUDIT_LOGGING_ENDPOINT is empty");
+                }
+
+                let log_directory_path = Path::new(&self.params.pgdata).join("log");
+                let log_directory_path = log_directory_path.to_string_lossy().to_string();
+
+                // Add project_id,endpoint_id tag to identify the logs.
+                //
+                // These ids are passed from cplane,
+                // for backwards compatibility (old computes that don't have them),
+                // we set them to None.
+                // TODO: Clean up this code when all computes have them.
+                let tag: Option<String> = match (
+                    pspec.spec.project_id.as_deref(),
+                    pspec.spec.endpoint_id.as_deref(),
+                ) {
+                    (Some(project_id), Some(endpoint_id)) => {
+                        Some(format!("{project_id}/{endpoint_id}"))
+                    }
+                    (Some(project_id), None) => Some(format!("{project_id}/None")),
+                    (None, Some(endpoint_id)) => Some(format!("None,{endpoint_id}")),
+                    (None, None) => None,
+                };
+
+                configure_audit_rsyslog(log_directory_path.clone(), tag, &remote_endpoint)?;
+
+                // Launch a background task to clean up the audit logs
+                launch_pgaudit_gc(log_directory_path);
             }
-
-            let log_directory_path = Path::new(&self.params.pgdata).join("log");
-            let log_directory_path = log_directory_path.to_string_lossy().to_string();
-            configure_audit_rsyslog(log_directory_path.clone(), "hipaa", &remote_endpoint)?;
-
-            // Launch a background task to clean up the audit logs
-            launch_pgaudit_gc(log_directory_path);
+            _ => {}
         }
 
         // Configure and start rsyslog for Postgres logs export

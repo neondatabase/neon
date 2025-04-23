@@ -12,7 +12,7 @@ use tracing::*;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
 
-use super::{GcError, LogicalSizeCalculationCause, Tenant};
+use super::{GcError, LogicalSizeCalculationCause, TenantShard};
 use crate::context::RequestContext;
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 use crate::tenant::{MaybeOffloaded, Timeline};
@@ -156,7 +156,7 @@ pub struct TimelineInputs {
 ///   initdb_lsn  branchpoints*  next_pitr_cutoff  latest
 /// ```
 pub(super) async fn gather_inputs(
-    tenant: &Tenant,
+    tenant: &TenantShard,
     limit: &Arc<Semaphore>,
     max_retention_period: Option<u64>,
     logical_size_cache: &mut HashMap<(TimelineId, Lsn), u64>,

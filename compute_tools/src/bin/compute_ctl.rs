@@ -29,13 +29,12 @@
 //! ```sh
 //! compute_ctl -D /var/db/postgres/compute \
 //!             -C 'postgresql://cloud_admin@localhost/postgres' \
-//!             -S /var/db/postgres/specs/current.json \
+//!             -c /var/db/postgres/configs/config.json \
 //!             -b /usr/local/bin/postgres \
 //!             -r http://pg-ext-s3-gateway \
 //! ```
 use std::ffi::OsString;
 use std::fs::File;
-use std::path::Path;
 use std::process::exit;
 use std::sync::mpsc;
 use std::thread;
@@ -43,8 +42,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use compute_api::responses::ComputeCtlConfig;
-use compute_api::spec::ComputeSpec;
+use compute_api::responses::ComputeConfig;
 use compute_tools::compute::{
     BUILD_TAG, ComputeNode, ComputeNodeParams, forward_termination_signal,
 };
@@ -59,24 +57,13 @@ use tracing::{error, info};
 use url::Url;
 use utils::failpoint_support;
 
-// Compatibility hack: if the control plane specified any remote-ext-config
-// use the default value for extension storage proxy gateway.
-// Remove this once the control plane is updated to pass the gateway URL
-fn parse_remote_ext_config(arg: &str) -> Result<String> {
-    if arg.starts_with("http") {
-        Ok(arg.trim_end_matches('/').to_string())
-    } else {
-        Ok("http://pg-ext-s3-gateway".to_string())
-    }
-}
-
 #[derive(Parser)]
 #[command(rename_all = "kebab-case")]
 struct Cli {
     #[arg(short = 'b', long, default_value = "postgres", env = "POSTGRES_PATH")]
     pub pgbin: String,
 
-    #[arg(short = 'r', long, value_parser = parse_remote_ext_config)]
+    #[arg(short = 'r', long)]
     pub remote_ext_config: Option<String>,
 
     /// The port to bind the external listening HTTP server to. Clients running
@@ -118,8 +105,8 @@ struct Cli {
     #[arg(long)]
     pub set_disk_quota_for_fs: Option<String>,
 
-    #[arg(short = 'S', long, group = "spec-path")]
-    pub spec_path: Option<OsString>,
+    #[arg(short = 'c', long)]
+    pub config: Option<OsString>,
 
     #[arg(short = 'i', long, group = "compute-id")]
     pub compute_id: String,
@@ -127,8 +114,9 @@ struct Cli {
     #[arg(
         short = 'p',
         long,
-        conflicts_with = "spec-path",
-        value_name = "CONTROL_PLANE_API_BASE_URL"
+        conflicts_with = "config",
+        value_name = "CONTROL_PLANE_API_BASE_URL",
+        requires = "compute-id"
     )]
     pub control_plane_uri: Option<String>,
 }
@@ -138,7 +126,7 @@ fn main() -> Result<()> {
 
     let scenario = failpoint_support::init();
 
-    // For historical reasons, the main thread that processes the spec and launches postgres
+    // For historical reasons, the main thread that processes the config and launches postgres
     // is synchronous, but we always have this tokio runtime available and we "enter" it so
     // that you can use tokio::spawn() and tokio::runtime::Handle::current().block_on(...)
     // from all parts of compute_ctl.
@@ -154,7 +142,7 @@ fn main() -> Result<()> {
 
     let connstr = Url::parse(&cli.connstr).context("cannot parse connstr as a URL")?;
 
-    let cli_spec = try_spec_from_cli(&cli)?;
+    let config = get_config(&cli)?;
 
     let compute_node = ComputeNode::new(
         ComputeNodeParams {
@@ -175,8 +163,7 @@ fn main() -> Result<()> {
             #[cfg(target_os = "linux")]
             vm_monitor_addr: cli.vm_monitor_addr,
         },
-        cli_spec.spec,
-        cli_spec.compute_ctl_config,
+        config,
     )?;
 
     let exit_code = compute_node.run()?;
@@ -201,27 +188,17 @@ async fn init() -> Result<()> {
     Ok(())
 }
 
-fn try_spec_from_cli(cli: &Cli) -> Result<CliSpecParams> {
-    // First, read spec from the path if provided
-    if let Some(ref spec_path) = cli.spec_path {
-        let file = File::open(Path::new(spec_path))?;
-        return Ok(CliSpecParams {
-            spec: Some(serde_json::from_reader(file)?),
-            compute_ctl_config: ComputeCtlConfig::default(),
-        });
+fn get_config(cli: &Cli) -> Result<ComputeConfig> {
+    // First, read the config from the path if provided
+    if let Some(ref config) = cli.config {
+        let file = File::open(config)?;
+        return Ok(serde_json::from_reader(&file)?);
     }
 
-    if cli.control_plane_uri.is_none() {
-        panic!("must specify --control-plane-uri");
-    };
-
-    // If the spec wasn't provided in the CLI arguments, then retrieve it from
+    // If the config wasn't provided in the CLI arguments, then retrieve it from
     // the control plane
-    match get_spec_from_control_plane(cli.control_plane_uri.as_ref().unwrap(), &cli.compute_id) {
-        Ok(resp) => Ok(CliSpecParams {
-            spec: resp.0,
-            compute_ctl_config: resp.1,
-        }),
+    match get_config_from_control_plane(cli.control_plane_uri.as_ref().unwrap(), &cli.compute_id) {
+        Ok(config) => Ok(config),
         Err(e) => {
             error!(
                 "cannot get response from control plane: {}\n\
@@ -231,13 +208,6 @@ fn try_spec_from_cli(cli: &Cli) -> Result<CliSpecParams> {
             Err(e)
         }
     }
-}
-
-struct CliSpecParams {
-    /// If a spec was provided via CLI or file, the [`ComputeSpec`]
-    spec: Option<ComputeSpec>,
-    #[allow(dead_code)]
-    compute_ctl_config: ComputeCtlConfig,
 }
 
 fn deinit_and_exit(exit_code: Option<i32>) -> ! {

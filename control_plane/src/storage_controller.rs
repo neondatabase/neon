@@ -13,9 +13,12 @@ use pageserver_api::controller_api::{
     NodeConfigureRequest, NodeDescribeResponse, NodeRegisterRequest, TenantCreateRequest,
     TenantCreateResponse, TenantLocateResponse,
 };
-use pageserver_api::models::{TenantConfigRequest, TimelineCreateRequest, TimelineInfo};
+use pageserver_api::models::{
+    TenantConfig, TenantConfigRequest, TimelineCreateRequest, TimelineInfo,
+};
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
+use pem::Pem;
 use postgres_backend::AuthType;
 use reqwest::{Certificate, Method};
 use serde::de::DeserializeOwned;
@@ -32,8 +35,8 @@ use crate::local_env::{LocalEnv, NeonStorageControllerConf};
 
 pub struct StorageController {
     env: LocalEnv,
-    private_key: Option<Vec<u8>>,
-    public_key: Option<String>,
+    private_key: Option<Pem>,
+    public_key: Option<Pem>,
     client: reqwest::Client,
     config: NeonStorageControllerConf,
 
@@ -82,7 +85,8 @@ impl NeonStorageControllerStopArgs {
 pub struct AttachHookRequest {
     pub tenant_shard_id: TenantShardId,
     pub node_id: Option<NodeId>,
-    pub generation_override: Option<i32>,
+    pub generation_override: Option<i32>, // only new tenants
+    pub config: Option<TenantConfig>,     // only new tenants
 }
 
 #[derive(Serialize, Deserialize)]
@@ -113,7 +117,9 @@ impl StorageController {
             AuthType::Trust => (None, None),
             AuthType::NeonJWT => {
                 let private_key_path = env.get_private_key_path();
-                let private_key = fs::read(private_key_path).expect("failed to read private key");
+                let private_key =
+                    pem::parse(fs::read(private_key_path).expect("failed to read private key"))
+                        .expect("failed to parse PEM file");
 
                 // If pageserver auth is enabled, this implicitly enables auth for this service,
                 // using the same credentials.
@@ -135,9 +141,13 @@ impl StorageController {
                         .expect("Empty key dir")
                         .expect("Error reading key dir");
 
-                    std::fs::read_to_string(dent.path()).expect("Can't read public key")
+                    pem::parse(std::fs::read_to_string(dent.path()).expect("Can't read public key"))
+                        .expect("Failed to parse PEM file")
                 } else {
-                    std::fs::read_to_string(&public_key_path).expect("Can't read public key")
+                    pem::parse(
+                        std::fs::read_to_string(&public_key_path).expect("Can't read public key"),
+                    )
+                    .expect("Failed to parse PEM file")
                 };
                 (Some(private_key), Some(public_key))
             }
@@ -805,6 +815,7 @@ impl StorageController {
             tenant_shard_id,
             node_id: Some(pageserver_id),
             generation_override: None,
+            config: None,
         };
 
         let response = self

@@ -23,13 +23,14 @@ use super::layer_manager::LayerManager;
 use super::{FlushLayerError, Timeline};
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::TaskKind;
-use crate::tenant::Tenant;
+use crate::tenant::TenantShard;
 use crate::tenant::remote_timeline_client::index::GcBlockingReason::DetachAncestor;
 use crate::tenant::storage_layer::layer::local_layer_path;
 use crate::tenant::storage_layer::{
     AsLayerDesc as _, DeltaLayerWriter, ImageLayerWriter, IoConcurrency, Layer, ResidentLayer,
     ValuesReconstructState,
 };
+use crate::tenant::timeline::VersionedKeySpaceQuery;
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 
 #[derive(Debug, thiserror::Error)]
@@ -212,13 +213,9 @@ async fn generate_tombstone_image_layer(
         }
     }
 
+    let query = VersionedKeySpaceQuery::uniform(KeySpace::single(key_range.clone()), image_lsn);
     let data = ancestor
-        .get_vectored_impl(
-            KeySpace::single(key_range.clone()),
-            image_lsn,
-            &mut reconstruct_state,
-            ctx,
-        )
+        .get_vectored_impl(query, &mut reconstruct_state, ctx)
         .await
         .context("failed to retrieve aux keys")
         .map_err(|e| Error::launder(e, Error::Prepare))?;
@@ -231,6 +228,8 @@ async fn generate_tombstone_image_layer(
             detached.tenant_shard_id,
             &key_range,
             image_lsn,
+            &detached.gate,
+            detached.cancel.clone(),
             ctx,
         )
         .await
@@ -266,7 +265,7 @@ async fn generate_tombstone_image_layer(
 /// See [`Timeline::prepare_to_detach_from_ancestor`]
 pub(super) async fn prepare(
     detached: &Arc<Timeline>,
-    tenant: &Tenant,
+    tenant: &TenantShard,
     behavior: DetachBehavior,
     options: Options,
     ctx: &RequestContext,
@@ -591,7 +590,7 @@ pub(super) async fn prepare(
 
 async fn start_new_attempt(
     detached: &Timeline,
-    tenant: &Tenant,
+    tenant: &TenantShard,
     ancestor_timeline_id: TimelineId,
     ancestor_lsn: Lsn,
 ) -> Result<Attempt, Error> {
@@ -612,7 +611,7 @@ async fn start_new_attempt(
 
 async fn continue_with_blocked_gc(
     detached: &Timeline,
-    tenant: &Tenant,
+    tenant: &TenantShard,
     ancestor_timeline_id: TimelineId,
     ancestor_lsn: Lsn,
 ) -> Result<Attempt, Error> {
@@ -623,7 +622,7 @@ async fn continue_with_blocked_gc(
 
 fn obtain_exclusive_attempt(
     detached: &Timeline,
-    tenant: &Tenant,
+    tenant: &TenantShard,
     ancestor_timeline_id: TimelineId,
     ancestor_lsn: Lsn,
 ) -> Result<Attempt, Error> {
@@ -656,7 +655,7 @@ fn obtain_exclusive_attempt(
 
 fn reparented_direct_children(
     detached: &Arc<Timeline>,
-    tenant: &Tenant,
+    tenant: &TenantShard,
 ) -> Result<HashSet<TimelineId>, Error> {
     let mut all_direct_children = tenant
         .timelines
@@ -779,6 +778,8 @@ async fn copy_lsn_prefix(
         target_timeline.tenant_shard_id,
         layer.layer_desc().key_range.start,
         layer.layer_desc().lsn_range.start..end_lsn,
+        &target_timeline.gate,
+        target_timeline.cancel.clone(),
         ctx,
     )
     .await
@@ -949,7 +950,7 @@ impl DetachingAndReparenting {
 /// See [`Timeline::detach_from_ancestor_and_reparent`].
 pub(super) async fn detach_and_reparent(
     detached: &Arc<Timeline>,
-    tenant: &Tenant,
+    tenant: &TenantShard,
     prepared: PreparedTimelineDetach,
     ancestor_timeline_id: TimelineId,
     ancestor_lsn: Lsn,
@@ -1183,7 +1184,7 @@ pub(super) async fn detach_and_reparent(
 
 pub(super) async fn complete(
     detached: &Arc<Timeline>,
-    tenant: &Tenant,
+    tenant: &TenantShard,
     mut attempt: Attempt,
     _ctx: &RequestContext,
 ) -> Result<(), Error> {
@@ -1257,7 +1258,7 @@ where
 }
 
 fn check_no_archived_children_of_ancestor(
-    tenant: &Tenant,
+    tenant: &TenantShard,
     detached: &Arc<Timeline>,
     ancestor: &Arc<Timeline>,
     ancestor_lsn: Lsn,

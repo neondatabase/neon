@@ -17,7 +17,7 @@ use metrics::{
 use once_cell::sync::Lazy;
 use pageserver_api::config::{
     PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
-    PageServiceProtocolPipelinedExecutionStrategy,
+    PageServiceProtocolPipelinedBatchingStrategy, PageServiceProtocolPipelinedExecutionStrategy,
 };
 use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
@@ -1086,7 +1086,7 @@ pub(crate) static TIMELINE_EPHEMERAL_BYTES: Lazy<UIntGauge> = Lazy::new(|| {
     .expect("Failed to register metric")
 });
 
-/// Metrics related to the lifecycle of a [`crate::tenant::Tenant`] object: things
+/// Metrics related to the lifecycle of a [`crate::tenant::TenantShard`] object: things
 /// like how long it took to load.
 ///
 /// Note that these are process-global metrics, _not_ per-tenant metrics.  Per-tenant
@@ -1714,6 +1714,28 @@ pub enum SmgrQueryType {
     Test,
 }
 
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    IntoStaticStr,
+    strum_macros::EnumCount,
+    strum_macros::EnumIter,
+    strum_macros::FromRepr,
+    enum_map::Enum,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum GetPageBatchBreakReason {
+    BatchFull,
+    NonBatchableRequest,
+    NonUniformLsn,
+    SamePageAtDifferentLsn,
+    NonUniformTimeline,
+    ExecutorSteal,
+    #[cfg(feature = "testing")]
+    NonUniformKey,
+}
+
 pub(crate) struct SmgrQueryTimePerTimeline {
     global_started: [IntCounter; SmgrQueryType::COUNT],
     global_latency: [Histogram; SmgrQueryType::COUNT],
@@ -1725,6 +1747,8 @@ pub(crate) struct SmgrQueryTimePerTimeline {
     per_timeline_flush_in_progress_micros: IntCounter,
     global_batch_wait_time: Histogram,
     per_timeline_batch_wait_time: Histogram,
+    global_batch_break_reason: [IntCounter; GetPageBatchBreakReason::COUNT],
+    per_timeline_batch_break_reason: GetPageBatchBreakReasonTimelineMetrics,
     throttling: Arc<tenant_throttling::Pagestream>,
 }
 
@@ -1858,12 +1882,55 @@ static PAGE_SERVICE_BATCH_SIZE_PER_TENANT_TIMELINE: Lazy<HistogramVec> = Lazy::n
     .expect("failed to define a metric")
 });
 
+static PAGE_SERVICE_BATCH_BREAK_REASON_GLOBAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        // it's a counter, but, name is prepared to extend it to a histogram of queue depth
+        "pageserver_page_service_batch_break_reason_global",
+        "Reason for breaking batches of get page requests",
+        &["reason"],
+    )
+    .expect("failed to define a metric")
+});
+
+struct GetPageBatchBreakReasonTimelineMetrics {
+    map: EnumMap<GetPageBatchBreakReason, IntCounter>,
+}
+
+impl GetPageBatchBreakReasonTimelineMetrics {
+    fn new(tenant_id: &str, shard_slug: &str, timeline_id: &str) -> Self {
+        GetPageBatchBreakReasonTimelineMetrics {
+            map: EnumMap::from_array(std::array::from_fn(|reason_idx| {
+                let reason = GetPageBatchBreakReason::from_usize(reason_idx);
+                PAGE_SERVICE_BATCH_BREAK_REASON_PER_TENANT_TIMELINE.with_label_values(&[
+                    tenant_id,
+                    shard_slug,
+                    timeline_id,
+                    reason.into(),
+                ])
+            })),
+        }
+    }
+
+    fn inc(&self, reason: GetPageBatchBreakReason) {
+        self.map[reason].inc()
+    }
+}
+
+static PAGE_SERVICE_BATCH_BREAK_REASON_PER_TENANT_TIMELINE: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_page_service_batch_break_reason",
+        "Reason for breaking batches of get page requests",
+        &["tenant_id", "shard_id", "timeline_id", "reason"],
+    )
+    .expect("failed to define a metric")
+});
+
 pub(crate) static PAGE_SERVICE_CONFIG_MAX_BATCH_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
         "pageserver_page_service_config_max_batch_size",
         "Configured maximum batch size for the server-side batching functionality of page_service. \
          Labels expose more of the configuration parameters.",
-        &["mode", "execution"]
+        &["mode", "execution", "batching"]
     )
     .expect("failed to define a metric")
 });
@@ -1871,10 +1938,11 @@ pub(crate) static PAGE_SERVICE_CONFIG_MAX_BATCH_SIZE: Lazy<IntGaugeVec> = Lazy::
 fn set_page_service_config_max_batch_size(conf: &PageServicePipeliningConfig) {
     PAGE_SERVICE_CONFIG_MAX_BATCH_SIZE.reset();
     let (label_values, value) = match conf {
-        PageServicePipeliningConfig::Serial => (["serial", "-"], 1),
+        PageServicePipeliningConfig::Serial => (["serial", "-", "-"], 1),
         PageServicePipeliningConfig::Pipelined(PageServicePipeliningConfigPipelined {
             max_batch_size,
             execution,
+            batching,
         }) => {
             let mode = "pipelined";
             let execution = match execution {
@@ -1883,7 +1951,12 @@ fn set_page_service_config_max_batch_size(conf: &PageServicePipeliningConfig) {
                 }
                 PageServiceProtocolPipelinedExecutionStrategy::Tasks => "tasks",
             };
-            ([mode, execution], max_batch_size.get())
+            let batching = match batching {
+                PageServiceProtocolPipelinedBatchingStrategy::UniformLsn => "uniform-lsn",
+                PageServiceProtocolPipelinedBatchingStrategy::ScatteredLsn => "scattered-lsn",
+            };
+
+            ([mode, execution, batching], max_batch_size.get())
         }
     };
     PAGE_SERVICE_CONFIG_MAX_BATCH_SIZE
@@ -1979,6 +2052,15 @@ impl SmgrQueryTimePerTimeline {
             .get_metric_with_label_values(&[&tenant_id, &shard_slug, &timeline_id])
             .unwrap();
 
+        let global_batch_break_reason = std::array::from_fn(|i| {
+            let reason = GetPageBatchBreakReason::from_usize(i);
+            PAGE_SERVICE_BATCH_BREAK_REASON_GLOBAL
+                .get_metric_with_label_values(&[reason.into()])
+                .unwrap()
+        });
+        let per_timeline_batch_break_reason =
+            GetPageBatchBreakReasonTimelineMetrics::new(&tenant_id, &shard_slug, &timeline_id);
+
         let global_flush_in_progress_micros =
             PAGE_SERVICE_SMGR_FLUSH_INPROGRESS_MICROS_GLOBAL.clone();
         let per_timeline_flush_in_progress_micros = PAGE_SERVICE_SMGR_FLUSH_INPROGRESS_MICROS
@@ -1996,6 +2078,8 @@ impl SmgrQueryTimePerTimeline {
             per_timeline_flush_in_progress_micros,
             global_batch_wait_time,
             per_timeline_batch_wait_time,
+            global_batch_break_reason,
+            per_timeline_batch_break_reason,
             throttling: pagestream_throttle_metrics,
         }
     }
@@ -2024,9 +2108,16 @@ impl SmgrQueryTimePerTimeline {
     }
 
     /// TODO: do something about this? seems odd, we have a similar call on SmgrOpTimer
-    pub(crate) fn observe_getpage_batch_start(&self, batch_size: usize) {
+    pub(crate) fn observe_getpage_batch_start(
+        &self,
+        batch_size: usize,
+        break_reason: GetPageBatchBreakReason,
+    ) {
         self.global_batch_size.observe(batch_size as f64);
         self.per_timeline_batch_size.observe(batch_size as f64);
+
+        self.global_batch_break_reason[break_reason.into_usize()].inc();
+        self.per_timeline_batch_break_reason.inc(break_reason);
     }
 }
 
@@ -3392,6 +3483,15 @@ impl TimelineMetrics {
             shard_id,
             timeline_id,
         ]);
+
+        for reason in GetPageBatchBreakReason::iter() {
+            let _ = PAGE_SERVICE_BATCH_BREAK_REASON_PER_TENANT_TIMELINE.remove_label_values(&[
+                tenant_id,
+                shard_id,
+                timeline_id,
+                reason.into(),
+            ]);
+        }
     }
 }
 
@@ -4270,6 +4370,7 @@ pub fn preinitialize_metrics(
     [
         &BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT,
         &SMGR_QUERY_STARTED_GLOBAL,
+        &PAGE_SERVICE_BATCH_BREAK_REASON_GLOBAL,
     ]
     .into_iter()
     .for_each(|c| {

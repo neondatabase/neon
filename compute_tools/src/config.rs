@@ -178,7 +178,7 @@ pub fn write_postgres_conf(
     // and don't allow the user or the control plane admin to change them.
     match spec.audit_log_level {
         ComputeAudit::Disabled => {}
-        ComputeAudit::Log => {
+        ComputeAudit::Log | ComputeAudit::Base => {
             writeln!(file, "# Managed by compute_ctl base audit settings: start")?;
             writeln!(file, "pgaudit.log='ddl,role'")?;
             // Disable logging of catalog queries to reduce the noise
@@ -202,16 +202,20 @@ pub fn write_postgres_conf(
             }
             writeln!(file, "# Managed by compute_ctl base audit settings: end")?;
         }
-        ComputeAudit::Hipaa => {
+        ComputeAudit::Hipaa | ComputeAudit::Extended | ComputeAudit::Full => {
             writeln!(
                 file,
                 "# Managed by compute_ctl compliance audit settings: begin"
             )?;
-            // This log level is very verbose
-            // but this is necessary for HIPAA compliance.
-            // Exclude 'misc' category, because it doesn't contain anythig relevant.
-            writeln!(file, "pgaudit.log='all, -misc'")?;
-            writeln!(file, "pgaudit.log_parameter=on")?;
+            // Enable logging of parameters.
+            // This is very verbose and may contain sensitive data.
+            if spec.audit_log_level == ComputeAudit::Full {
+                writeln!(file, "pgaudit.log_parameter=on")?;
+                writeln!(file, "pgaudit.log='all'")?;
+            } else {
+                writeln!(file, "pgaudit.log_parameter=off")?;
+                writeln!(file, "pgaudit.log='all, -misc'")?;
+            }
             // Disable logging of catalog queries
             // The catalog doesn't contain sensitive data, so we don't need to audit it.
             writeln!(file, "pgaudit.log_catalog=off")?;

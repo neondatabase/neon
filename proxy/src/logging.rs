@@ -1032,7 +1032,6 @@ impl<const F: usize> serde::ser::Serialize for ExtractedSpanFields<'_, F> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use std::marker::PhantomData;
     use std::sync::{Arc, Mutex, MutexGuard};

@@ -95,7 +95,7 @@ static uint32 local_request_counter;
  * Various settings related to prompt (fast) handling of PageStream responses
  * at any CHECK_FOR_INTERRUPTS point.
  */
-int				readahead_getpage_pull_timeout_ms = 0;
+int				readahead_getpage_pull_timeout_ms = 50;
 static int		PS_TIMEOUT_ID = 0;
 static bool		timeout_set = false;
 static bool		timeout_signaled = false;

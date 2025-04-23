@@ -416,8 +416,18 @@ fn start_pageserver(
     // The storage_broker::connect call needs to happen inside a tokio runtime thread.
     let broker_client = WALRECEIVER_RUNTIME
         .block_on(async {
+            let tls_config = storage_broker::ClientTlsConfig::new().ca_certificates(
+                conf.ssl_ca_certs
+                    .iter()
+                    .map(pem::encode)
+                    .map(storage_broker::Certificate::from_pem),
+            );
             // Note: we do not attempt connecting here (but validate endpoints sanity).
-            storage_broker::connect(conf.broker_endpoint.clone(), conf.broker_keepalive_interval)
+            storage_broker::connect(
+                conf.broker_endpoint.clone(),
+                conf.broker_keepalive_interval,
+                tls_config,
+            )
         })
         .with_context(|| {
             format!(
@@ -455,6 +465,7 @@ fn start_pageserver(
     let tls_server_config = if conf.listen_https_addr.is_some() || conf.enable_tls_page_service_api
     {
         let resolver = BACKGROUND_RUNTIME.block_on(ReloadingCertificateResolver::new(
+            "main",
             &conf.ssl_key_file,
             &conf.ssl_cert_file,
             conf.ssl_cert_reload_period,
