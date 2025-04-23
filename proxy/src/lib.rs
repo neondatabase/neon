@@ -91,6 +91,7 @@ mod jemalloc;
 mod logging;
 mod metrics;
 mod parse;
+mod pglb;
 mod protocol2;
 mod proxy;
 mod rate_limiter;
