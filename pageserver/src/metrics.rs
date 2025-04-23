@@ -108,8 +108,6 @@ pub(crate) enum LayerLevel {
 
 
 pub(crate) mod initial_logical_size {
-    use metrics::{IntCounter, register_int_counter};
-    use once_cell::sync::Lazy;
 
     #[derive(strum_macros::IntoStaticStr)]
     pub(crate) enum StartCircumstances {
@@ -117,17 +115,6 @@ pub(crate) mod initial_logical_size {
         AfterBackgroundTasksRateLimit,
     }
 
-
-    // context: https://github.com/neondatabase/neon/issues/5963
-    pub(crate) static TIMELINES_WHERE_WALRECEIVER_GOT_APPROXIMATE_SIZE: Lazy<IntCounter> =
-        Lazy::new(|| {
-            register_int_counter!(
-                "pageserver_initial_logical_size_timelines_where_walreceiver_got_approximate_size",
-                "Counter for the following event: walreceiver calls\
-                 Timeline::get_current_logical_size() and it returns `Approximate` for the first time."
-            )
-            .unwrap()
-        });
 }
 
 
@@ -574,32 +561,22 @@ pub mod tokio_epoll_uring {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
-    use metrics::{Histogram, LocalHistogram, UIntGauge, register_histogram};
     use once_cell::sync::Lazy;
 
     /// Shared storage for tokio-epoll-uring thread local metrics.
     pub(crate) static THREAD_LOCAL_METRICS_STORAGE: Lazy<ThreadLocalMetricsStorage> =
         Lazy::new(|| {
-            let slots_submission_queue_depth = register_histogram!(
-                "pageserver_tokio_epoll_uring_slots_submission_queue_depth",
-                "The slots waiters queue depth of each tokio_epoll_uring system",
-                vec![
-                    1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0
-                ],
-            )
-            .expect("failed to define a metric");
+            
             ThreadLocalMetricsStorage {
                 observers: Mutex::new(HashMap::new()),
-                slots_submission_queue_depth,
+                
             }
         });
 
     pub struct ThreadLocalMetricsStorage {
         /// List of thread local metrics observers.
         observers: Mutex<HashMap<u64, Arc<ThreadLocalMetrics>>>,
-        /// A histogram shared between all thread local systems
-        /// for collecting slots submission queue depth.
-        slots_submission_queue_depth: Histogram,
+        
     }
 
     /// Each thread-local [`tokio_epoll_uring::System`] gets one of these as its
@@ -612,15 +589,14 @@ pub mod tokio_epoll_uring {
     /// But except for the periodic flush, the lock is uncontended so there's no waiting
     /// for cache coherence protocol to get an exclusive cache line.
     pub struct ThreadLocalMetrics {
-        /// Local observer of thread local tokio-epoll-uring system's slots waiters queue depth.
-        slots_submission_queue_depth: Mutex<LocalHistogram>,
+       
     }
 
     impl ThreadLocalMetricsStorage {
         /// Registers a new thread local system. Returns a thread local metrics observer.
         pub fn register_system(&self, id: u64) -> Arc<ThreadLocalMetrics> {
             let per_system_metrics = Arc::new(ThreadLocalMetrics::new(
-                self.slots_submission_queue_depth.local(),
+            
             ));
             let mut g = self.observers.lock().unwrap();
             g.insert(id, Arc::clone(&per_system_metrics));
@@ -644,20 +620,23 @@ pub mod tokio_epoll_uring {
     }
 
     impl ThreadLocalMetrics {
-        pub fn new(slots_submission_queue_depth: LocalHistogram) -> Self {
+        pub fn new() -> Self {
             ThreadLocalMetrics {
-                slots_submission_queue_depth: Mutex::new(slots_submission_queue_depth),
+               
             }
         }
 
         /// Flushes the thread local metrics to shared aggregator.
         pub fn flush(&self) {
-            let Self {
-                slots_submission_queue_depth,
-            } = self;
-            slots_submission_queue_depth.lock().unwrap().flush();
+            
         }
     }
+
+    impl Default for ThreadLocalMetrics {
+        fn default() -> Self {
+        Self::new()
+        }
+        }
 
     impl tokio_epoll_uring::metrics::PerSystemMetrics for ThreadLocalMetrics {
         fn observe_slots_submission_queue_depth(&self, _queue_depth: u64) {
@@ -683,29 +662,8 @@ pub mod tokio_epoll_uring {
 
         #[allow(clippy::new_without_default)]
         pub fn new() -> Self {
-            let mut descs = Vec::new();
+            let descs = Vec::new();
 
-            let systems_created = UIntGauge::new(
-                "pageserver_tokio_epoll_uring_systems_created",
-                "counter of tokio-epoll-uring systems that were created",
-            )
-            .unwrap();
-            descs.extend(
-                metrics::core::Collector::desc(&systems_created)
-                    .into_iter()
-                    .cloned(),
-            );
-
-            let systems_destroyed = UIntGauge::new(
-                "pageserver_tokio_epoll_uring_systems_destroyed",
-                "counter of tokio-epoll-uring systems that were destroyed",
-            )
-            .unwrap();
-            descs.extend(
-                metrics::core::Collector::desc(&systems_destroyed)
-                    .into_iter()
-                    .cloned(),
-            );
 
             Self {
                 descs,
@@ -716,49 +674,11 @@ pub mod tokio_epoll_uring {
    
 }
 pub(crate) mod tenant_throttling {
-    use metrics::register_int_counter_vec;
-    use once_cell::sync::Lazy;
     use utils::shard::TenantShardId;
 
     pub(crate) struct Metrics<const KIND: usize> {
     }
 
-    static COUNT_ACCOUNTED_START: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
-        register_int_counter_vec!(
-            "pageserver_tenant_throttling_count_accounted_start_global",
-            "Count of tenant throttling starts, by kind of throttle.",
-            &["kind"]
-        )
-        .unwrap()
-    });
-  
-    static COUNT_ACCOUNTED_FINISH: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
-        register_int_counter_vec!(
-            "pageserver_tenant_throttling_count_accounted_finish_global",
-            "Count of tenant throttling finishes, by kind of throttle.",
-            &["kind"]
-        )
-        .unwrap()
-    });
-  
-    static WAIT_USECS: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
-        register_int_counter_vec!(
-            "pageserver_tenant_throttling_wait_usecs_sum_global",
-            "Sum of microseconds that spent waiting throttle by kind of throttle.",
-            &["kind"]
-        )
-        .unwrap()
-    });
-   
-
-    static WAIT_COUNT: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
-        register_int_counter_vec!(
-            "pageserver_tenant_throttling_count_global",
-            "Count of tenant throttlings, by kind of throttle.",
-            &["kind"]
-        )
-        .unwrap()
-    });
     
 
     
@@ -772,10 +692,7 @@ pub(crate) mod tenant_throttling {
     }
 
     pub(crate) fn preinitialize_global_metrics() {
-        Lazy::force(&COUNT_ACCOUNTED_START);
-        Lazy::force(&COUNT_ACCOUNTED_FINISH);
-        Lazy::force(&WAIT_USECS);
-        Lazy::force(&WAIT_COUNT);
+        
     }
 
 }

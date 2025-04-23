@@ -3318,7 +3318,7 @@ impl Timeline {
 
         if let CurrentLogicalSize::Approximate(_) = &current_size {
             if ctx.task_kind() == TaskKind::WalReceiverConnectionHandler {
-                let first = self
+                let _= self
                     .current_logical_size
                     .did_return_approximate_to_walreceiver
                     .compare_exchange(
@@ -3326,11 +3326,8 @@ impl Timeline {
                         true,
                         AtomicOrdering::Relaxed,
                         AtomicOrdering::Relaxed,
-                    )
-                    .is_ok();
-                if first {
-                    crate::metrics::initial_logical_size::TIMELINES_WHERE_WALRECEIVER_GOT_APPROXIMATE_SIZE.inc();
-                }
+                    ).is_ok();
+                
             }
         }
 
