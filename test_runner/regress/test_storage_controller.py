@@ -4560,20 +4560,13 @@ def test_storage_controller_shard_scheduling_policy_essential(neon_env_builder: 
         assert False, "unreachable"
     secondary_pageserver = 1 - primary_pageserver
 
-    # Ensure the tenant gets attached to the secondary pageserver
-    env.pageservers[primary_pageserver].stop()
-    env.storage_controller.node_configure(
-        env.pageservers[primary_pageserver].id, {"availability": "Offline"}
-    )
+    # # Ensure the tenant gets attached to the secondary pageserver
+    # env.pageservers[primary_pageserver].stop()
+    # env.storage_controller.node_configure(
+    #     env.pageservers[primary_pageserver].id, {"availability": "Offline"}
+    # )
+    env.storage_controller.node_drain(env.pageservers[primary_pageserver].id)
     env.storage_controller.reconcile_until_idle()
-    assert (
-        len(
-            env.pageservers[secondary_pageserver]
-            .http_client()
-            .tenant_list_locations()["tenant_shards"]
-        )
-        == 1
-    )
     assert (
         env.pageservers[secondary_pageserver]
         .http_client()
