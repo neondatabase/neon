@@ -1522,7 +1522,7 @@ async fn load_heatmap(
     ctx: &RequestContext,
 ) -> Result<Option<HeatMapTenant>, anyhow::Error> {
     let st = match VirtualFile::read_to_string(path, ctx).await {
-        Ok(file) => file,
+        Ok(st) => st,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => Err(e)?,
     };
