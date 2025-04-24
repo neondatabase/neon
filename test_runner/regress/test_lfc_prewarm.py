@@ -31,6 +31,21 @@ def prom_parse(client: EndpointHttpClient) -> dict[str, float]:
     }
 
 
+def prewarm_lfc_blocking(client: EndpointHttpClient):
+    client.prewarm_lfc()
+    for _ in range(20):
+        match client.prewarm_lfc_status()["status"]:
+            case "prewarming":
+                time.sleep(1)
+            case "completed":
+                break
+            case _:
+                assert False
+    else:
+        assert False, "failed to prewarm within 20 seconds"
+    pass
+
+
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 def test_lfc_prewarm(neon_simple_env: NeonEnv):
     env = neon_simple_env
@@ -75,8 +90,7 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv):
     cur.execute("alter extension neon update to '1.6'")
 
     if with_compute_ctl:
-        http_client.prewarm_lfc()
-        assert http_client.prewarm_lfc_status()["status"] == "completed"
+        prewarm_lfc_blocking(http_client)
     else:
         cur.execute("select prewarm_local_cache(%s)", (lfc_state,))
 
@@ -171,7 +185,7 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv):
 =======
 
             if with_compute_ctl:
-                endpoint.http_client().prewarm_lfc()
+                prewarm_lfc_blocking(http_client)
             else:
                 cur.execute("select prewarm_local_cache(%s)", (lfc_state,))
 

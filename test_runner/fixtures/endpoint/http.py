@@ -63,7 +63,7 @@ class EndpointHttpClient(requests.Session):
         return res.json()
 
     def prewarm_lfc_offload(self):
-        self.head(f"http://localhost:{self.external_port}/prewarm_lfc_offload").raise_for_status()
+        self.post(f"http://localhost:{self.external_port}/prewarm_lfc_offload").raise_for_status()
 
     def prewarm_lfc_status(self) -> dict[str, str]:
         res = self.get(f"http://localhost:{self.external_port}/prewarm_lfc_status")
@@ -71,7 +71,7 @@ class EndpointHttpClient(requests.Session):
         return res.json()
 
     def prewarm_lfc(self):
-        self.head(f"http://localhost:{self.external_port}/prewarm_lfc").raise_for_status()
+        self.post(f"http://localhost:{self.external_port}/prewarm_lfc").raise_for_status()
 
     def database_schema(self, database: str):
         res = self.get(
