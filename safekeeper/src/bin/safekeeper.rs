@@ -226,11 +226,16 @@ struct Args {
     /// Path to the JWT auth token used to authenticate with other safekeepers.
     #[arg(long)]
     auth_token_path: Option<Utf8PathBuf>,
+
     /// Enable TLS in WAL service API.
     /// Does not force TLS: the client negotiates TLS usage during the handshake.
     /// Uses key and certificate from ssl_key_file/ssl_cert_file.
     #[arg(long)]
     enable_tls_wal_service_api: bool,
+
+    /// Run in development mode (disables security checks)
+    #[arg(long, help = "Run in development mode (disables security checks)")]
+    dev: bool,
 }
 
 // Like PathBufValueParser, but allows empty string.
