@@ -60,7 +60,11 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv):
     log.info(f"Prewarm progress: {(prewarm_info[1] + prewarm_info[2]) * 100 // prewarm_info[0]}%")
 
     assert lfc_used_pages > 10000
-    assert prewarm_info[0] > 0 and prewarm_info[1] > 0 and prewarm_info[0] == prewarm_info[1] + prewarm_info[2]
+    assert (
+        prewarm_info[0] > 0
+        and prewarm_info[1] > 0
+        and prewarm_info[0] == prewarm_info[1] + prewarm_info[2]
+    )
 
     cur.execute("select sum(pk) from t")
     assert cur.fetchall()[0][0] == n_records * (n_records + 1) / 2
