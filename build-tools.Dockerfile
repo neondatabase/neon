@@ -206,7 +206,7 @@ RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "aws
     && rm awscliv2.zip
 
 # Mold: A Modern Linker
-ENV MOLD_VERSION=v2.34.1
+ENV MOLD_VERSION=v2.37.1
 RUN set -e \
     && git clone https://github.com/rui314/mold.git \
     && mkdir mold/build \
