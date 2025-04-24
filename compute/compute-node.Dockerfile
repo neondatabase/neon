@@ -258,6 +258,7 @@ RUN case "${DEBIAN_VERSION}" in \
 
 # Postgis 3.5.0 supports v17
 WORKDIR /ext-src
+COPY compute/patches/postgis_pg${PG_VERSION}.patc? /ext-src
 RUN case "${PG_VERSION:?}" in \
     "v17") \
         export POSTGIS_VERSION=3.5.0 \
@@ -273,7 +274,7 @@ RUN case "${PG_VERSION:?}" in \
     esac && \
     wget https://download.osgeo.org/postgis/source/postgis-${POSTGIS_VERSION}.tar.gz -O postgis.tar.gz && \
     echo "${POSTGIS_CHECKSUM} postgis.tar.gz" | sha256sum --check && \
-    mkdir postgis-src && cd postgis-src && tar xzf ../postgis.tar.gz --strip-components=1 -C .
+    mkdir postgis-src && cd postgis-src && tar xzf ../postgis.tar.gz --strip-components=1 -C . && [ -f ../postgis_pg${PG_VERSION}.patch ] && patch -p1 <../postgis_pg${PG_VERSION}.patch
 
 # This is reused for pgrouting
 FROM pg-build AS postgis-build-deps

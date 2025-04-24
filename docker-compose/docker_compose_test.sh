@@ -55,6 +55,15 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         # It cannot be moved to Dockerfile now because the database directory is created after the start of the container
         echo Adding dummy config
         docker exec $COMPUTE_CONTAINER_NAME touch /var/db/postgres/compute/compute_ctl_temp_override.conf
+        # Prepare for the PostGIS test
+        docker exec $COMPUTE_CONTAINER_NAME mkdir -p /tmp/pgis_reg/pgis_reg_tmp
+        TMPDIR=$(mktemp -d)
+        docker cp $TEST_CONTAINER_NAME:/ext-src/postgis-src/raster/test $TMPDIR
+        docker cp $TEST_CONTAINER_NAME:/ext-src/postgis-src/regress/00-regress-install $TMPDIR
+        docker exec $COMPUTE_CONTAINER_NAME mkdir -p /ext-src/postgis-src/raster /ext-src/postgis-src/regress /ext-src/postgis-src/regress/00-regress-install
+        docker cp $TMPDIR/test $COMPUTE_CONTAINER_NAME:/ext-src/postgis-src/raster/test
+        docker cp $TMPDIR/00-regress-install $COMPUTE_CONTAINER_NAME:/ext-src/postgis-src/regress
+        rm -rf $TMPDIR
         # The following block copies the files for the pg_hintplan test to the compute node for the extension test in an isolated docker-compose environment
         TMPDIR=$(mktemp -d)
         docker cp $TEST_CONTAINER_NAME:/ext-src/pg_hint_plan-src/data $TMPDIR/data
