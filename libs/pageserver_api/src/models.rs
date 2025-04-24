@@ -1803,6 +1803,8 @@ pub struct TopTenantShardsResponse {
 }
 
 pub mod virtual_file {
+    use std::sync::LazyLock;
+
     #[derive(
         Copy,
         Clone,
@@ -1840,35 +1842,33 @@ pub mod virtual_file {
     pub enum IoMode {
         /// Uses buffered IO.
         Buffered,
-        /// Uses direct IO, error out if the operation fails.
+        /// Uses direct IO for reads only.
         #[cfg(target_os = "linux")]
         Direct,
+        /// Use direct IO for reads and writes.
+        #[cfg(target_os = "linux")]
+        DirectRw,
     }
 
     impl IoMode {
         pub fn preferred() -> Self {
             // The default behavior when running Rust unit tests without any further
-            // flags is to use the newest behavior if available on the platform (Direct).
+            // flags is to use the newest behavior (DirectRw).
             // The CI uses the following environment variable to unit tests for all
             // different modes.
             // NB: the Python regression & perf tests have their own defaults management
             // that writes pageserver.toml; they do not use this variable.
             if cfg!(test) {
-                use once_cell::sync::Lazy;
-                static CACHED: Lazy<IoMode> = Lazy::new(|| {
+                static CACHED: LazyLock<IoMode> = LazyLock::new(|| {
                     utils::env::var_serde_json_string(
                         "NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IO_MODE",
                     )
-                    .unwrap_or({
+                    .unwrap_or(
                         #[cfg(target_os = "linux")]
-                        {
-                            IoMode::Direct
-                        }
+                        IoMode::DirectRw,
                         #[cfg(not(target_os = "linux"))]
-                        {
-                            IoMode::Buffered
-                        }
-                    })
+                        IoMode::Buffered,
+                    )
                 });
                 *CACHED
             } else {
@@ -1885,6 +1885,8 @@ pub mod virtual_file {
                 v if v == (IoMode::Buffered as u8) => IoMode::Buffered,
                 #[cfg(target_os = "linux")]
                 v if v == (IoMode::Direct as u8) => IoMode::Direct,
+                #[cfg(target_os = "linux")]
+                v if v == (IoMode::DirectRw as u8) => IoMode::DirectRw,
                 x => return Err(x),
             })
         }
