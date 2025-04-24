@@ -34,11 +34,10 @@ permissions:
 jobs:
   build-pgxn:
     if: |
-      (inputs.pg_versions != '[]' || inputs.rebuild_everything) && (
-        contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
-        contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
-        github.ref_name == 'main'
-      )
+      inputs.pg_versions != '[]' || inputs.rebuild_everything ||
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
+      github.ref_name == 'main'
     timeout-minutes: 30
     runs-on: macos-15
     strategy:
@@ -102,11 +101,10 @@ jobs:
 
   build-walproposer-lib:
     if: |
-      (inputs.pg_versions != '[]' || inputs.rebuild_everything) && (
-        contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
-        contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
-        github.ref_name == 'main'
-      )
+      inputs.pg_versions != '[]' || inputs.rebuild_everything ||
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
+      github.ref_name == 'main'
     timeout-minutes: 30
     runs-on: macos-15
     needs: [build-pgxn]
@@ -165,11 +163,10 @@ jobs:
 
   cargo-build:
     if: |
-      (inputs.pg_versions != '[]' || inputs.rebuild_rust_code || inputs.rebuild_everything) && (
-        contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
-        contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
-        github.ref_name == 'main'
-      )
+      inputs.pg_versions != '[]' || inputs.rebuild_rust_code || inputs.rebuild_everything ||
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos') ||
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
+      github.ref_name == 'main'
     timeout-minutes: 30
     runs-on: macos-15
     needs: [build-pgxn, build-walproposer-lib]
