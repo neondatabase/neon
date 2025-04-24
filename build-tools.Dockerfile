@@ -268,7 +268,7 @@ WORKDIR /home/nonroot
 RUN echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /home/nonroot/.curlrc
 
 # Python
-ENV PYTHON_VERSION=3.11.10 \
+ENV PYTHON_VERSION=3.11.12 \
     PYENV_ROOT=/home/nonroot/.pyenv \
     PATH=/home/nonroot/.pyenv/shims:/home/nonroot/.pyenv/bin:/home/nonroot/.poetry/bin:$PATH
 RUN set -e \
