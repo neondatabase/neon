@@ -43,6 +43,19 @@ impl Leadership {
         &self,
     ) -> Result<(Option<ControllerPersistence>, Option<GlobalObservedState>)> {
         let leader = self.current_leader().await?;
+
+        if leader.as_ref().map(|l| &l.address)
+            == self
+                .config
+                .address_for_peers
+                .as_ref()
+                .map(Uri::to_string)
+                .as_ref()
+        {
+            // We already are the current leader. This is a restart.
+            return Ok((leader, None));
+        }
+
         let leader_step_down_state = if let Some(ref leader) = leader {
             if self.config.start_as_candidate {
                 self.request_step_down(leader).await

@@ -324,7 +324,7 @@ jobs:
           TEST_RESULT_CONNSTR: "${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}"
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
           PAGESERVER_GET_VECTORED_CONCURRENT_IO: sidecar-task
-          PAGESERVER_VIRTUAL_FILE_IO_MODE: direct
+          PAGESERVER_VIRTUAL_FILE_IO_MODE: direct-rw
           SYNC_BETWEEN_TESTS: true
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
@@ -1238,7 +1238,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
         run: |
-          TIMEOUT=1800 # 30 minutes, usually it takes ~2-3 minutes, but if runners are busy, it might take longer
+          TIMEOUT=5400 # 90 minutes, usually it takes ~2-3 minutes, but if runners are busy, it might take longer
           INTERVAL=15 # try each N seconds
 
           last_status="" # a variable to carry the last status of the "build-and-upload-extensions" context

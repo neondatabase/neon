@@ -106,6 +106,7 @@ hex-literal.workspace = true
 tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time", "test-util"] }
 indoc.workspace = true
 uuid.workspace = true
+rstest.workspace = true
 
 [[bench]]
 name = "bench_layer_map"

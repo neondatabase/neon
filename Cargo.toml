@@ -164,7 +164,7 @@ scopeguard = "1.1"
 sysinfo = "0.29.2"
 sd-notify = "0.4.1"
 send-future = "0.1.0"
-sentry = { version = "0.32", default-features = false, features = ["backtrace", "contexts", "panic", "rustls", "reqwest" ] }
+sentry = { version = "0.37", default-features = false, features = ["backtrace", "contexts", "panic", "rustls", "reqwest" ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"
@@ -220,7 +220,7 @@ uuid = { version = "1.6.1", features = ["v4", "v7", "serde"] }
 walkdir = "2.3.2"
 rustls-native-certs = "0.8"
 whoami = "1.5.1"
-zerocopy = { version = "0.7", features = ["derive"] }
+zerocopy = { version = "0.8", features = ["derive", "simd"] }
 json-structural-diff = { version = "0.2.0" }
 x509-cert = { version = "0.2.5" }
 
