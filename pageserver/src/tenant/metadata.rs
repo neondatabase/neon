@@ -564,8 +564,9 @@ mod tests {
             Lsn(0),
             Lsn(0),
             Lsn(0),
-            // Any version will do here, so use the default
-            crate::DEFAULT_PG_VERSION,
+            // Updating this version to 17 will cause the test to fail at the
+            // next assert_eq!().
+            16,
         );
         let expected_bytes = vec![
             /* TimelineMetadataHeader */

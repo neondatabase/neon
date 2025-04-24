@@ -15,7 +15,7 @@ use http_utils::error::ApiError;
 use pageserver_api::controller_api::{
     SafekeeperDescribeResponse, SkSchedulingPolicy, TimelineImportRequest,
 };
-use pageserver_api::models::{self, SafekeeperInfo, SafekeepersInfo, TimelineInfo};
+use pageserver_api::models::{SafekeeperInfo, SafekeepersInfo, TimelineInfo};
 use safekeeper_api::membership::{MemberSet, SafekeeperId};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -46,6 +46,7 @@ impl Service {
             .map(SecretString::from);
         let mut joinset = JoinSet::new();
 
+        // Prepare membership::Configuration from choosen safekeepers.
         let safekeepers = {
             let locked = self.inner.read().unwrap();
             locked.safekeepers.clone()
@@ -150,11 +151,39 @@ impl Service {
             "Got {} non-successful responses from initial creation request of total {total_result_count} responses",
             remaining.len()
         );
-        if remaining.len() >= 2 {
+        let target_sk_count = timeline_persistence.sk_set.len();
+        let quorum_size = match target_sk_count {
+            0 => {
+                return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                    "timeline configured without any safekeepers",
+                )));
+            }
+            1 | 2 => {
+                #[cfg(feature = "testing")]
+                {
+                    // In test settings, it is allowed to have one or two safekeepers
+                    target_sk_count
+                }
+                #[cfg(not(feature = "testing"))]
+                {
+                    // The region is misconfigured: we need at least three safekeepers to be configured
+                    // in order to schedule work to them
+                    tracing::warn!(
+                        "couldn't find at least 3 safekeepers for timeline, found: {:?}",
+                        timeline_persistence.sk_set
+                    );
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                        "couldn't find at least 3 safekeepers to put timeline to"
+                    )));
+                }
+            }
+            _ => target_sk_count / 2 + 1,
+        };
+        let success_count = target_sk_count - remaining.len();
+        if success_count < quorum_size {
             // Failure
             return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                "not enough successful reconciliations to reach quorum, please retry: {} errored",
-                remaining.len()
+                "not enough successful reconciliations to reach quorum size: {success_count} of {quorum_size} of total {target_sk_count}"
             )));
         }
 
@@ -178,7 +207,6 @@ impl Service {
         self: &Arc<Self>,
         tenant_id: TenantId,
         timeline_info: &TimelineInfo,
-        create_mode: models::TimelineCreateRequestMode,
     ) -> Result<SafekeepersInfo, ApiError> {
         let timeline_id = timeline_info.timeline_id;
         let pg_version = timeline_info.pg_version * 10000;
@@ -188,15 +216,8 @@ impl Service {
         // previously existed as on retries in theory endpoint might have
         // already written some data and advanced last_record_lsn, while we want
         // safekeepers to have consistent start_lsn.
-        let start_lsn = match create_mode {
-            models::TimelineCreateRequestMode::Bootstrap { .. } => timeline_info.last_record_lsn,
-            models::TimelineCreateRequestMode::Branch { .. } => timeline_info.last_record_lsn,
-            models::TimelineCreateRequestMode::ImportPgdata { .. } => {
-                return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                    "import pgdata doesn't specify the start lsn, aborting creation on safekeepers"
-                )))?;
-            }
-        };
+        let start_lsn = timeline_info.last_record_lsn;
+
         // Choose initial set of safekeepers respecting affinity
         let sks = self.safekeepers_for_new_timeline().await?;
         let sks_persistence = sks.iter().map(|sk| sk.id.0 as i64).collect::<Vec<_>>();
@@ -205,7 +226,7 @@ impl Service {
             tenant_id: tenant_id.to_string(),
             timeline_id: timeline_id.to_string(),
             start_lsn: start_lsn.into(),
-            generation: 0,
+            generation: 1,
             sk_set: sks_persistence.clone(),
             new_sk_set: None,
             cplane_notified_generation: 0,
@@ -254,7 +275,7 @@ impl Service {
             self.persistence.insert_pending_op(pending_op).await?;
         }
         if !remaining.is_empty() {
-            let mut locked = self.inner.write().unwrap();
+            let locked = self.inner.read().unwrap();
             for remaining_id in remaining {
                 let Some(sk) = locked.safekeepers.get(&remaining_id) else {
                     return Err(ApiError::InternalServerError(anyhow::anyhow!(
@@ -290,7 +311,7 @@ impl Service {
                     generation: timeline_persist.generation as u32,
                     kind: crate::persistence::SafekeeperTimelineOpKind::Pull,
                 };
-                locked.safekeeper_reconcilers.schedule_request(self, req);
+                locked.safekeeper_reconcilers.schedule_request(req);
             }
         }
 
@@ -357,7 +378,7 @@ impl Service {
             let pending_op = TimelinePendingOpPersistence {
                 tenant_id: tenant_id.to_string(),
                 timeline_id: timeline_id.to_string(),
-                generation: tl.generation,
+                generation: i32::MAX,
                 op_kind: SafekeeperTimelineOpKind::Delete,
                 sk_id: *sk_id,
             };
@@ -365,7 +386,7 @@ impl Service {
             self.persistence.insert_pending_op(pending_op).await?;
         }
         {
-            let mut locked = self.inner.write().unwrap();
+            let locked = self.inner.read().unwrap();
             for sk_id in all_sks {
                 let sk_id = NodeId(*sk_id as u64);
                 let Some(sk) = locked.safekeepers.get(&sk_id) else {
@@ -383,7 +404,7 @@ impl Service {
                     generation: tl.generation as u32,
                     kind: SafekeeperTimelineOpKind::Delete,
                 };
-                locked.safekeeper_reconcilers.schedule_request(self, req);
+                locked.safekeeper_reconcilers.schedule_request(req);
             }
         }
         Ok(())
@@ -482,7 +503,7 @@ impl Service {
                 tenant_id,
                 timeline_id: None,
             };
-            locked.safekeeper_reconcilers.schedule_request(self, req);
+            locked.safekeeper_reconcilers.schedule_request(req);
         }
         Ok(())
     }
@@ -491,8 +512,6 @@ impl Service {
     pub(crate) async fn safekeepers_for_new_timeline(
         &self,
     ) -> Result<Vec<SafekeeperInfo>, ApiError> {
-        // Number of safekeepers in different AZs we are looking for
-        let wanted_count = 3;
         let mut all_safekeepers = {
             let locked = self.inner.read().unwrap();
             locked
@@ -531,6 +550,19 @@ impl Service {
                 sk.1.id.0,
             )
         });
+        // Number of safekeepers in different AZs we are looking for
+        let wanted_count = match all_safekeepers.len() {
+            0 => {
+                return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                    "couldn't find any active safekeeper for new timeline",
+                )));
+            }
+            // Have laxer requirements on testig mode as we don't want to
+            // spin up three safekeepers for every single test
+            #[cfg(feature = "testing")]
+            1 | 2 => all_safekeepers.len(),
+            _ => 3,
+        };
         let mut sks = Vec::new();
         let mut azs = HashSet::new();
         for (_sk_util, sk_info, az_id) in all_safekeepers.iter() {
@@ -579,7 +611,7 @@ impl Service {
     }
 
     pub(crate) async fn upsert_safekeeper(
-        &self,
+        self: &Arc<Service>,
         record: crate::persistence::SafekeeperUpsert,
     ) -> Result<(), ApiError> {
         let node_id = NodeId(record.id as u64);
@@ -618,6 +650,9 @@ impl Service {
                     );
                 }
             }
+            locked
+                .safekeeper_reconcilers
+                .start_reconciler(node_id, self);
             locked.safekeepers = Arc::new(safekeepers);
             metrics::METRICS_REGISTRY
                 .metrics_group
@@ -638,7 +673,7 @@ impl Service {
     }
 
     pub(crate) async fn set_safekeeper_scheduling_policy(
-        &self,
+        self: &Arc<Service>,
         id: i64,
         scheduling_policy: SkSchedulingPolicy,
     ) -> Result<(), DatabaseError> {
@@ -656,9 +691,13 @@ impl Service {
             sk.set_scheduling_policy(scheduling_policy);
 
             match scheduling_policy {
-                SkSchedulingPolicy::Active => (),
+                SkSchedulingPolicy::Active => {
+                    locked
+                        .safekeeper_reconcilers
+                        .start_reconciler(node_id, self);
+                }
                 SkSchedulingPolicy::Decomissioned | SkSchedulingPolicy::Pause => {
-                    locked.safekeeper_reconcilers.cancel_safekeeper(node_id);
+                    locked.safekeeper_reconcilers.stop_reconciler(node_id);
                 }
             }
 

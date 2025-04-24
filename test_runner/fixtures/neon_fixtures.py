@@ -1029,7 +1029,7 @@ class NeonEnvBuilder:
 
             self.env.broker.assert_no_errors()
 
-            self.env.object_storage.assert_no_errors()
+            self.env.endpoint_storage.assert_no_errors()
 
         try:
             self.overlay_cleanup_teardown()
@@ -1126,7 +1126,7 @@ class NeonEnv:
             pagectl_env_vars["RUST_LOG"] = self.rust_log_override
         self.pagectl = Pagectl(extra_env=pagectl_env_vars, binpath=self.neon_binpath)
 
-        self.object_storage = ObjectStorage(self)
+        self.endpoint_storage = EndpointStorage(self)
 
         # The URL for the pageserver to use as its control_plane_api config
         if config.storage_controller_port_override is not None:
@@ -1183,7 +1183,7 @@ class NeonEnv:
             },
             "safekeepers": [],
             "pageservers": [],
-            "object_storage": {"port": self.port_distributor.get_port()},
+            "endpoint_storage": {"port": self.port_distributor.get_port()},
             "generate_local_ssl_certs": self.generate_local_ssl_certs,
         }
 
@@ -1420,7 +1420,7 @@ class NeonEnv:
                 self.storage_controller.on_safekeeper_deploy(sk_id, body)
                 self.storage_controller.safekeeper_scheduling_policy(sk_id, "Active")
 
-        self.object_storage.start(timeout_in_seconds=timeout_in_seconds)
+        self.endpoint_storage.start(timeout_in_seconds=timeout_in_seconds)
 
     def stop(self, immediate=False, ps_assert_metric_no_errors=False, fail_on_endpoint_errors=True):
         """
@@ -1439,7 +1439,7 @@ class NeonEnv:
         except Exception as e:
             raise_later = e
 
-        self.object_storage.stop(immediate=immediate)
+        self.endpoint_storage.stop(immediate=immediate)
 
         # Stop storage controller before pageservers: we don't want it to spuriously
         # detect a pageserver "failure" during test teardown
@@ -1457,6 +1457,12 @@ class NeonEnv:
                 except Exception as e:
                     metric_errors.append(e)
                     log.error(f"metric validation failed on {pageserver.id}: {e}")
+
+            try:
+                pageserver.snapshot_final_metrics()
+            except Exception as e:
+                log.error(f"metric snapshot failed on {pageserver.id}: {e}")
+
             try:
                 pageserver.stop(immediate=immediate)
             except RuntimeError:
@@ -2654,24 +2660,24 @@ class NeonStorageController(MetricsGetter, LogUtils):
         self.stop(immediate=True)
 
 
-class ObjectStorage(LogUtils):
+class EndpointStorage(LogUtils):
     def __init__(self, env: NeonEnv):
-        service_dir = env.repo_dir / "object_storage"
-        super().__init__(logfile=service_dir / "object_storage.log")
-        self.conf_path = service_dir / "object_storage.json"
+        service_dir = env.repo_dir / "endpoint_storage"
+        super().__init__(logfile=service_dir / "endpoint_storage.log")
+        self.conf_path = service_dir / "endpoint_storage.json"
         self.env = env
 
     def base_url(self):
         return json.loads(self.conf_path.read_text())["listen"]
 
     def start(self, timeout_in_seconds: int | None = None):
-        self.env.neon_cli.object_storage_start(timeout_in_seconds)
+        self.env.neon_cli.endpoint_storage_start(timeout_in_seconds)
 
     def stop(self, immediate: bool = False):
-        self.env.neon_cli.object_storage_stop(immediate)
+        self.env.neon_cli.endpoint_storage_stop(immediate)
 
     def assert_no_errors(self):
-        assert_no_errors(self.logfile, "object_storage", [])
+        assert_no_errors(self.logfile, "endpoint_storage", [])
 
 
 class NeonProxiedStorageController(NeonStorageController):
@@ -2972,6 +2978,20 @@ class NeonPageserver(PgProtocol, LogUtils):
             value = self.http_client().get_metric_value(metric)
             assert value == 0, f"Nonzero {metric} == {value}"
 
+    def snapshot_final_metrics(self):
+        """
+        Take a snapshot of this pageserver's metrics and stash in its work directory.
+        """
+        if not self.running:
+            log.info(f"Skipping metrics snapshot on pageserver {self.id}, it is not running")
+            return
+
+        metrics = self.http_client().get_metrics_str()
+        metrics_snapshot_path = self.workdir / "final_metrics.txt"
+
+        with open(metrics_snapshot_path, "w") as f:
+            f.write(metrics)
+
     def tenant_attach(
         self,
         tenant_id: TenantId,
@@ -3165,6 +3185,7 @@ class PgBin:
         command: list[str],
         env: Env | None = None,
         cwd: str | Path | None = None,
+        stderr_pipe: Any | None = None,
     ) -> subprocess.Popen[Any]:
         """
         Run one of the postgres binaries, not waiting for it to finish
@@ -3182,7 +3203,9 @@ class PgBin:
         log.info(f"Running command '{' '.join(command)}'")
         env = self._build_env(env)
         self._log_env(env)
-        return subprocess.Popen(command, env=env, cwd=cwd, stdout=subprocess.PIPE, text=True)
+        return subprocess.Popen(
+            command, env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=stderr_pipe, text=True
+        )
 
     def run(
         self,
@@ -4090,13 +4113,14 @@ class Endpoint(PgProtocol, LogUtils):
         # try and stop the same process twice, as stop() is called by test teardown and
         # potentially by some __del__ chains in other threads.
         self._running = threading.Semaphore(0)
+        self.__jwt: str | None = None
 
-    def http_client(
-        self, auth_token: str | None = None, retries: Retry | None = None
-    ) -> EndpointHttpClient:
+    def http_client(self, retries: Retry | None = None) -> EndpointHttpClient:
+        assert self.__jwt is not None
         return EndpointHttpClient(
             external_port=self.external_http_port,
             internal_port=self.internal_http_port,
+            jwt=self.__jwt,
         )
 
     def create(
@@ -4179,6 +4203,8 @@ class Endpoint(PgProtocol, LogUtils):
                 )
 
         self.config(config_lines)
+
+        self.__jwt = self.env.neon_cli.endpoint_generate_jwt(self.endpoint_id)
 
         return self
 
@@ -5133,7 +5159,6 @@ def pytest_addoption(parser: Parser):
 SMALL_DB_FILE_NAME_REGEX: re.Pattern[str] = re.compile(
     r"config-v1|heatmap-v1|tenant-manifest|metadata|.+\.(?:toml|pid|json|sql|conf)"
 )
-
 
 SKIP_DIRS = frozenset(
     (

@@ -40,7 +40,7 @@ members = [
     "libs/proxy/postgres-protocol2",
     "libs/proxy/postgres-types2",
     "libs/proxy/tokio-postgres2",
-    "object_storage",
+    "endpoint_storage",
 ]
 
 [workspace.package]
@@ -141,6 +141,7 @@ parking_lot = "0.12"
 parquet = { version = "53", default-features = false, features = ["zstd"] }
 parquet_derive = "53"
 pbkdf2 = { version = "0.12.1", features = ["simple", "std"] }
+pem = "3.0.3"
 pin-project-lite = "0.2"
 pprof = { version = "0.14", features = ["criterion", "flamegraph", "frame-pointer", "prost-codec"] }
 procfs = "0.16"
@@ -163,7 +164,7 @@ scopeguard = "1.1"
 sysinfo = "0.29.2"
 sd-notify = "0.4.1"
 send-future = "0.1.0"
-sentry = { version = "0.32", default-features = false, features = ["backtrace", "contexts", "panic", "rustls", "reqwest" ] }
+sentry = { version = "0.37", default-features = false, features = ["backtrace", "contexts", "panic", "rustls", "reqwest" ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"
@@ -174,6 +175,7 @@ signal-hook = "0.3"
 smallvec = "1.11"
 smol_str = { version = "0.2.0", features = ["serde"] }
 socket2 = "0.5"
+spki = "0.7.3"
 strum = "0.26"
 strum_macros = "0.26"
 "subtle"  = "2.5.0"
@@ -218,7 +220,7 @@ uuid = { version = "1.6.1", features = ["v4", "v7", "serde"] }
 walkdir = "2.3.2"
 rustls-native-certs = "0.8"
 whoami = "1.5.1"
-zerocopy = { version = "0.7", features = ["derive"] }
+zerocopy = { version = "0.8", features = ["derive", "simd"] }
 json-structural-diff = { version = "0.2.0" }
 x509-cert = { version = "0.2.5" }
 

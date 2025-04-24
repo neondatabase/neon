@@ -11,6 +11,14 @@ index bf6edcb..89b4c7f 100644
  
  USE_PGXS = 1	# use pgxs if not in contrib directory
  PGXS := $(shell $(PG_CONFIG) --pgxs)
+diff --git a/regress/expected/init-extension.out b/regress/expected/init-extension.out
+index 9f2e171..f6e4f8d 100644
+--- a/regress/expected/init-extension.out
++++ b/regress/expected/init-extension.out
+@@ -1,3 +1,2 @@
+ SET client_min_messages = warning;
+ CREATE EXTENSION pg_repack;
+-RESET client_min_messages;
 diff --git a/regress/expected/nosuper.out b/regress/expected/nosuper.out
 index 8d0a94e..63b68bf 100644
 --- a/regress/expected/nosuper.out
@@ -42,6 +50,14 @@ index 8d0a94e..63b68bf 100644
  INFO: repacking table "public.tbl_cluster"
  ERROR: query failed: ERROR:  current transaction is aborted, commands ignored until end of transaction block
  DETAIL: query was: RESET lock_timeout
+diff --git a/regress/sql/init-extension.sql b/regress/sql/init-extension.sql
+index 9f2e171..f6e4f8d 100644
+--- a/regress/sql/init-extension.sql
++++ b/regress/sql/init-extension.sql
+@@ -1,3 +1,2 @@
+ SET client_min_messages = warning;
+ CREATE EXTENSION pg_repack;
+-RESET client_min_messages;
 diff --git a/regress/sql/nosuper.sql b/regress/sql/nosuper.sql
 index 072f0fa..dbe60f8 100644
 --- a/regress/sql/nosuper.sql

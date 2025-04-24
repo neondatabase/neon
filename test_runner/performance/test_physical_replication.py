@@ -65,7 +65,7 @@ def test_ro_replica_lag(
     project = neon_api.create_project(pg_version)
     project_id = project["project"]["id"]
     log.info("Project ID: %s", project_id)
-    log.info("Primary endpoint ID: %s", project["project"]["endpoints"][0]["id"])
+    log.info("Primary endpoint ID: %s", project["endpoints"][0]["id"])
     neon_api.wait_for_operation_to_finish(project_id)
     error_occurred = False
     try:
@@ -198,7 +198,7 @@ def test_replication_start_stop(
     project = neon_api.create_project(pg_version)
     project_id = project["project"]["id"]
     log.info("Project ID: %s", project_id)
-    log.info("Primary endpoint ID: %s", project["project"]["endpoints"][0]["id"])
+    log.info("Primary endpoint ID: %s", project["endpoints"][0]["id"])
     neon_api.wait_for_operation_to_finish(project_id)
     try:
         branch_id = project["branch"]["id"]

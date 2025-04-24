@@ -25,29 +25,31 @@ use owned_buffers_io::aligned_buffer::{AlignedBufferMut, AlignedSlice, ConstAlig
 use owned_buffers_io::io_buf_aligned::{IoBufAligned, IoBufAlignedMut};
 use owned_buffers_io::io_buf_ext::FullSlice;
 use pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
-pub use pageserver_api::models::virtual_file as api;
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::time::Instant;
 use tokio_epoll_uring::{BoundedBuf, IoBuf, IoBufMut, Slice};
 
+use self::owned_buffers_io::write::OwnedAsyncWriter;
 use crate::assert_u64_eq_usize::UsizeIsU64;
 use crate::context::RequestContext;
 use crate::metrics::{STORAGE_IO_TIME_METRIC, StorageIoOperation};
 use crate::page_cache::{PAGE_SZ, PageWriteGuard};
-pub(crate) mod io_engine;
+
+pub(crate) use api::IoMode;
+pub(crate) use io_engine::IoEngineKind;
 pub use io_engine::{
     FeatureTestResult as IoEngineFeatureTestResult, feature_test as io_engine_feature_test,
     io_engine_for_bench,
 };
-mod metadata;
-mod open_options;
-pub(crate) use api::IoMode;
-pub(crate) use io_engine::IoEngineKind;
 pub(crate) use metadata::Metadata;
 pub(crate) use open_options::*;
+pub use pageserver_api::models::virtual_file as api;
+pub use temporary::TempVirtualFile;
 
-use self::owned_buffers_io::write::OwnedAsyncWriter;
-
+pub(crate) mod io_engine;
+mod metadata;
+mod open_options;
+mod temporary;
 pub(crate) mod owned_buffers_io {
     //! Abstractions for IO with owned buffers.
     //!
@@ -1366,9 +1368,10 @@ pub(crate) type IoBuffer = AlignedBuffer<ConstAlign<{ get_io_buffer_alignment() 
 pub(crate) type IoPageSlice<'a> =
     AlignedSlice<'a, PAGE_SZ, ConstAlign<{ get_io_buffer_alignment() }>>;
 
-static IO_MODE: AtomicU8 = AtomicU8::new(IoMode::preferred() as u8);
+static IO_MODE: once_cell::sync::Lazy<AtomicU8> =
+    once_cell::sync::Lazy::new(|| AtomicU8::new(IoMode::preferred() as u8));
 
-pub(crate) fn set_io_mode(mode: IoMode) {
+pub fn set_io_mode(mode: IoMode) {
     IO_MODE.store(mode as u8, std::sync::atomic::Ordering::Relaxed);
 }
 

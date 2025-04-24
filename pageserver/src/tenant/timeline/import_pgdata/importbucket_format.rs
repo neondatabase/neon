@@ -11,10 +11,3 @@ pub struct ShardStatus {
     pub done: bool,
     // TODO: remaining fields
 }
-
-// TODO: dedupe with fast_import code
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
-pub struct Spec {
-    pub project_id: String,
-    pub branch_id: String,
-}

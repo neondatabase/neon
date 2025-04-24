@@ -2,7 +2,7 @@ use anyhow::anyhow;
 use axum::body::{Body, Bytes};
 use axum::response::{IntoResponse, Response};
 use axum::{Router, http::StatusCode};
-use object_storage::{PrefixS3Path, S3Path, Storage, bad_request, internal_error, not_found, ok};
+use endpoint_storage::{PrefixS3Path, S3Path, Storage, bad_request, internal_error, not_found, ok};
 use remote_storage::TimeoutOrCancel;
 use remote_storage::{DownloadError, DownloadOpts, GenericRemoteStorage, RemotePath};
 use std::{sync::Arc, time::SystemTime, time::UNIX_EPOCH};
@@ -46,12 +46,12 @@ async fn metrics() -> Result {
 
 async fn get(S3Path { path }: S3Path, state: State) -> Result {
     info!(%path, "downloading");
-    let download_err = |e| {
-        if let DownloadError::NotFound = e {
-            info!(%path, %e, "downloading"); // 404 is not an issue of _this_ service
+    let download_err = |err| {
+        if let DownloadError::NotFound = err {
+            info!(%path, %err, "downloading"); // 404 is not an issue of _this_ service
             return not_found(&path);
         }
-        internal_error(e, &path, "downloading")
+        internal_error(err, &path, "downloading")
     };
     let cancel = state.cancel.clone();
     let opts = &DownloadOpts::default();
@@ -249,7 +249,7 @@ mod tests {
         };
 
         let proxy = Storage {
-            auth: object_storage::JwtAuth::new(TEST_PUB_KEY_ED25519).unwrap(),
+            auth: endpoint_storage::JwtAuth::new(TEST_PUB_KEY_ED25519).unwrap(),
             storage,
             cancel: cancel.clone(),
             max_upload_file_limit: usize::MAX,
@@ -343,14 +343,14 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
         TimelineId::from_array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 1, 2, 3, 4, 5, 7]);
     const ENDPOINT_ID: &str = "ep-winter-frost-a662z3vg";
     fn token() -> String {
-        let claims = object_storage::Claims {
+        let claims = endpoint_storage::Claims {
             tenant_id: TENANT_ID,
             timeline_id: TIMELINE_ID,
             endpoint_id: ENDPOINT_ID.into(),
             exp: u64::MAX,
         };
         let key = jsonwebtoken::EncodingKey::from_ed_pem(TEST_PRIV_KEY_ED25519).unwrap();
-        let header = jsonwebtoken::Header::new(object_storage::VALIDATION_ALGO);
+        let header = jsonwebtoken::Header::new(endpoint_storage::VALIDATION_ALGO);
         jsonwebtoken::encode(&header, &claims, &key).unwrap()
     }
 
@@ -364,7 +364,10 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
             vec![TIMELINE_ID.to_string(), TimelineId::generate().to_string()],
             vec![ENDPOINT_ID, "ep-ololo"]
         )
-        .skip(1);
+        // first one is fully valid path, second path is valid for GET as
+        // read paths may have different endpoint if tenant and timeline matches
+        // (needed for prewarming RO->RW replica)
+        .skip(2);
 
         for ((uri, method), (tenant, timeline, endpoint)) in iproduct!(routes(), args) {
             info!(%uri, %method, %tenant, %timeline, %endpoint);
@@ -475,6 +478,16 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
         requests_chain(chain.into_iter(), |_| token()).await;
     }
 
+    #[testlog(tokio::test)]
+    async fn read_other_endpoint_data() {
+        let uri = format!("/{TENANT_ID}/{TIMELINE_ID}/other_endpoint/key");
+        let chain = vec![
+            (uri.clone(), "GET", "", StatusCode::NOT_FOUND, false),
+            (uri.clone(), "PUT", "", StatusCode::UNAUTHORIZED, false),
+        ];
+        requests_chain(chain.into_iter(), |_| token()).await;
+    }
+
     fn delete_prefix_token(uri: &str) -> String {
         use serde::Serialize;
         let parts = uri.split("/").collect::<Vec<&str>>();
@@ -482,7 +495,7 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
         struct PrefixClaims {
             tenant_id: TenantId,
             timeline_id: Option<TimelineId>,
-            endpoint_id: Option<object_storage::EndpointId>,
+            endpoint_id: Option<endpoint_storage::EndpointId>,
             exp: u64,
         }
         let claims = PrefixClaims {
@@ -492,7 +505,7 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
             exp: u64::MAX,
         };
         let key = jsonwebtoken::EncodingKey::from_ed_pem(TEST_PRIV_KEY_ED25519).unwrap();
-        let header = jsonwebtoken::Header::new(object_storage::VALIDATION_ALGO);
+        let header = jsonwebtoken::Header::new(endpoint_storage::VALIDATION_ALGO);
         jsonwebtoken::encode(&header, &claims, &key).unwrap()
     }
 

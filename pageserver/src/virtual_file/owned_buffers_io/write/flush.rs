@@ -1,5 +1,4 @@
 use std::ops::ControlFlow;
-use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info, info_span, warn};
@@ -21,7 +20,7 @@ pub struct FlushHandleInner<Buf, W> {
     /// and receives recyled buffer.
     channel: duplex::mpsc::Duplex<FlushRequest<Buf>, FullSlice<Buf>>,
     /// Join handle for the background flush task.
-    join_handle: tokio::task::JoinHandle<Result<Arc<W>, FlushTaskError>>,
+    join_handle: tokio::task::JoinHandle<Result<W, FlushTaskError>>,
 }
 
 struct FlushRequest<Buf> {
@@ -120,7 +119,7 @@ where
     /// The queue depth is 1, and the passed-in `buf` seeds the queue depth.
     /// I.e., the passed-in buf is immediately available to the handle as a recycled buffer.
     pub fn spawn_new<B>(
-        file: Arc<W>,
+        file: W,
         buf: B,
         gate_guard: utils::sync::gate::GateGuard,
         cancel: CancellationToken,
@@ -183,7 +182,7 @@ where
     }
 
     /// Cleans up the channel, join the flush task.
-    pub async fn shutdown(&mut self) -> Result<Arc<W>, FlushTaskError> {
+    pub async fn shutdown(&mut self) -> Result<W, FlushTaskError> {
         let handle = self
             .inner
             .take()
@@ -207,7 +206,7 @@ pub struct FlushBackgroundTask<Buf, W> {
     /// and send back recycled buffer.
     channel: duplex::mpsc::Duplex<FullSlice<Buf>, FlushRequest<Buf>>,
     /// A writter for persisting data to disk.
-    writer: Arc<W>,
+    writer: W,
     ctx: RequestContext,
     cancel: CancellationToken,
     /// Prevent timeline from shuting down until the flush background task finishes flushing all remaining buffers to disk.
@@ -228,7 +227,7 @@ where
     /// Creates a new background flush task.
     fn new(
         channel: duplex::mpsc::Duplex<FullSlice<Buf>, FlushRequest<Buf>>,
-        file: Arc<W>,
+        file: W,
         gate_guard: utils::sync::gate::GateGuard,
         cancel: CancellationToken,
         ctx: RequestContext,
@@ -243,7 +242,7 @@ where
     }
 
     /// Runs the background flush task.
-    async fn run(mut self) -> Result<Arc<W>, FlushTaskError> {
+    async fn run(mut self) -> Result<W, FlushTaskError> {
         //  Exit condition: channel is closed and there is no remaining buffer to be flushed
         while let Some(request) = self.channel.recv().await {
             #[cfg(test)]

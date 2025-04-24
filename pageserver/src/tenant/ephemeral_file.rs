@@ -12,6 +12,7 @@ use tokio_epoll_uring::{BoundedBuf, Slice};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info_span};
 use utils::id::TimelineId;
+use utils::sync::gate::GateGuard;
 
 use crate::assert_u64_eq_usize::{U64IsUsize, UsizeIsU64};
 use crate::config::PageServerConf;
@@ -21,16 +22,33 @@ use crate::tenant::storage_layer::inmemory_layer::vectored_dio_read::File;
 use crate::virtual_file::owned_buffers_io::io_buf_aligned::IoBufAlignedMut;
 use crate::virtual_file::owned_buffers_io::slice::SliceMutExt;
 use crate::virtual_file::owned_buffers_io::write::{Buffer, FlushTaskError};
-use crate::virtual_file::{self, IoBufferMut, VirtualFile, owned_buffers_io};
+use crate::virtual_file::{self, IoBufferMut, TempVirtualFile, VirtualFile, owned_buffers_io};
+
+use self::owned_buffers_io::write::OwnedAsyncWriter;
 
 pub struct EphemeralFile {
     _tenant_shard_id: TenantShardId,
     _timeline_id: TimelineId,
     page_cache_file_id: page_cache::FileId,
     bytes_written: u64,
-    buffered_writer: owned_buffers_io::write::BufferedWriter<IoBufferMut, VirtualFile>,
-    /// Gate guard is held on as long as we need to do operations in the path (delete on drop)
-    _gate_guard: utils::sync::gate::GateGuard,
+    file: TempVirtualFileCoOwnedByEphemeralFileAndBufferedWriter,
+    buffered_writer: BufferedWriter,
+}
+
+type BufferedWriter = owned_buffers_io::write::BufferedWriter<
+    IoBufferMut,
+    TempVirtualFileCoOwnedByEphemeralFileAndBufferedWriter,
+>;
+
+/// A TempVirtualFile that is co-owned by the [`EphemeralFile`]` and [`BufferedWriter`].
+///
+/// (Actually [`BufferedWriter`] internally is just a client to a background flush task.
+/// The co-ownership is between [`EphemeralFile`] and that flush task.)
+///
+/// Co-ownership allows us to serve reads for data that has already been flushed by the [`BufferedWriter`].
+#[derive(Debug, Clone)]
+struct TempVirtualFileCoOwnedByEphemeralFileAndBufferedWriter {
+    inner: Arc<TempVirtualFile>,
 }
 
 const TAIL_SZ: usize = 64 * 1024;
@@ -44,9 +62,12 @@ impl EphemeralFile {
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<EphemeralFile> {
-        static NEXT_FILENAME: AtomicU64 = AtomicU64::new(1);
+        // TempVirtualFile requires us to never reuse a filename while an old
+        // instance of TempVirtualFile created with that filename is not done dropping yet.
+        // So, we use a monotonic counter to disambiguate the filenames.
+        static NEXT_TEMP_DISAMBIGUATOR: AtomicU64 = AtomicU64::new(1);
         let filename_disambiguator =
-            NEXT_FILENAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            NEXT_TEMP_DISAMBIGUATOR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let filename = conf
             .timeline_path(&tenant_shard_id, &timeline_id)
@@ -54,7 +75,7 @@ impl EphemeralFile {
                 "ephemeral-{filename_disambiguator}"
             )));
 
-        let file = Arc::new(
+        let file = TempVirtualFileCoOwnedByEphemeralFileAndBufferedWriter::new(
             VirtualFile::open_with_options_v2(
                 &filename,
                 virtual_file::OpenOptions::new()
@@ -64,6 +85,7 @@ impl EphemeralFile {
                 ctx,
             )
             .await?,
+            gate.enter()?,
         );
 
         let page_cache_file_id = page_cache::next_file_id(); // XXX get rid, we're not page-caching anymore
@@ -73,7 +95,8 @@ impl EphemeralFile {
             _timeline_id: timeline_id,
             page_cache_file_id,
             bytes_written: 0,
-            buffered_writer: owned_buffers_io::write::BufferedWriter::new(
+            file: file.clone(),
+            buffered_writer: BufferedWriter::new(
                 file,
                 || IoBufferMut::with_capacity(TAIL_SZ),
                 gate.enter()?,
@@ -81,26 +104,39 @@ impl EphemeralFile {
                 ctx,
                 info_span!(parent: None, "ephemeral_file_buffered_writer", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), timeline_id=%timeline_id, path = %filename),
             ),
-            _gate_guard: gate.enter()?,
         })
     }
 }
 
-impl Drop for EphemeralFile {
-    fn drop(&mut self) {
-        // unlink the file
-        // we are clear to do this, because we have entered a gate
-        let path = self.buffered_writer.as_inner().path();
-        let res = std::fs::remove_file(path);
-        if let Err(e) = res {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                // just never log the not found errors, we cannot do anything for them; on detach
-                // the tenant directory is already gone.
-                //
-                // not found files might also be related to https://github.com/neondatabase/neon/issues/2442
-                error!("could not remove ephemeral file '{path}': {e}");
-            }
+impl TempVirtualFileCoOwnedByEphemeralFileAndBufferedWriter {
+    fn new(file: VirtualFile, gate_guard: GateGuard) -> Self {
+        Self {
+            inner: Arc::new(TempVirtualFile::new(file, gate_guard)),
         }
+    }
+}
+
+impl OwnedAsyncWriter for TempVirtualFileCoOwnedByEphemeralFileAndBufferedWriter {
+    fn write_all_at<Buf: owned_buffers_io::io_buf_aligned::IoBufAligned + Send>(
+        &self,
+        buf: owned_buffers_io::io_buf_ext::FullSlice<Buf>,
+        offset: u64,
+        ctx: &RequestContext,
+    ) -> impl std::future::Future<
+        Output = (
+            owned_buffers_io::io_buf_ext::FullSlice<Buf>,
+            std::io::Result<()>,
+        ),
+    > + Send {
+        self.inner.write_all_at(buf, offset, ctx)
+    }
+}
+
+impl std::ops::Deref for TempVirtualFileCoOwnedByEphemeralFileAndBufferedWriter {
+    type Target = VirtualFile;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
@@ -262,9 +298,9 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
         let mutable_range = Range(std::cmp::max(start, submitted_offset), end);
 
         let dst = if written_range.len() > 0 {
-            let file: &VirtualFile = self.buffered_writer.as_inner();
             let bounds = dst.bounds();
-            let slice = file
+            let slice = self
+                .file
                 .read_exact_at(dst.slice(0..written_range.len().into_usize()), start, ctx)
                 .await?;
             Slice::from_buf_bounds(Slice::into_inner(slice), bounds)
@@ -456,7 +492,7 @@ mod tests {
             assert_eq!(&buf, &content[range]);
         }
 
-        let file_contents = std::fs::read(file.buffered_writer.as_inner().path()).unwrap();
+        let file_contents = std::fs::read(file.file.path()).unwrap();
         assert!(file_contents == content[0..cap * 2]);
 
         let maybe_flushed_buffer_contents = file.buffered_writer.inspect_maybe_flushed().unwrap();
@@ -489,7 +525,7 @@ mod tests {
         // assert the state is as this test expects it to be
         let load_io_buf_res = file.load_to_io_buf(&ctx).await.unwrap();
         assert_eq!(&load_io_buf_res[..], &content[0..cap * 2 + cap / 2]);
-        let md = file.buffered_writer.as_inner().path().metadata().unwrap();
+        let md = file.file.path().metadata().unwrap();
         assert_eq!(
             md.len(),
             2 * cap.into_u64(),

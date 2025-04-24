@@ -28,13 +28,70 @@ use tracing::warn;
 use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::tenant::block_io::BlockCursor;
-use crate::virtual_file::VirtualFile;
+use crate::virtual_file::TempVirtualFile;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
 
 #[derive(Copy, Clone, Debug)]
 pub struct CompressionInfo {
     pub written_compressed: bool,
     pub compressed_size: Option<usize>,
+}
+
+/// A blob header, with header+data length and compression info.
+///
+/// TODO: use this more widely, and add an encode() method too.
+/// TODO: document the header format.
+#[derive(Clone, Copy, Default)]
+pub struct Header {
+    pub header_len: usize,
+    pub data_len: usize,
+    pub compression_bits: u8,
+}
+
+impl Header {
+    /// Decodes a header from a byte slice.
+    pub fn decode(bytes: &[u8]) -> Result<Self, std::io::Error> {
+        let Some(&first_header_byte) = bytes.first() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "zero-length blob header",
+            ));
+        };
+
+        // If the first bit is 0, this is just a 1-byte length prefix up to 128 bytes.
+        if first_header_byte < 0x80 {
+            return Ok(Self {
+                header_len: 1, // by definition
+                data_len: first_header_byte as usize,
+                compression_bits: BYTE_UNCOMPRESSED,
+            });
+        }
+
+        // Otherwise, this is a 4-byte header containing compression information and length.
+        const HEADER_LEN: usize = 4;
+        let mut header_buf: [u8; HEADER_LEN] = bytes[0..HEADER_LEN].try_into().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("blob header too short: {bytes:?}"),
+            )
+        })?;
+
+        // TODO: verify the compression bits and convert to an enum.
+        let compression_bits = header_buf[0] & LEN_COMPRESSION_BIT_MASK;
+        header_buf[0] &= !LEN_COMPRESSION_BIT_MASK;
+        let data_len = u32::from_be_bytes(header_buf) as usize;
+
+        Ok(Self {
+            header_len: HEADER_LEN,
+            data_len,
+            compression_bits,
+        })
+    }
+
+    /// Returns the total header+data length.
+    pub fn total_len(&self) -> usize {
+        self.header_len + self.data_len
+    }
 }
 
 impl BlockCursor<'_> {
@@ -161,7 +218,7 @@ pub(super) const BYTE_ZSTD: u8 = BYTE_UNCOMPRESSED | 0x10;
 /// discarded. You need to call [`flush_buffer`](Self::flush_buffer)
 /// manually before dropping.
 pub struct BlobWriter<const BUFFERED: bool> {
-    inner: VirtualFile,
+    inner: TempVirtualFile,
     offset: u64,
     /// A buffer to save on write calls, only used if BUFFERED=true
     buf: Vec<u8>,
@@ -171,7 +228,7 @@ pub struct BlobWriter<const BUFFERED: bool> {
 
 impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     pub fn new(
-        inner: VirtualFile,
+        inner: TempVirtualFile,
         start_offset: u64,
         _gate: &utils::sync::gate::Gate,
         _cancel: CancellationToken,
@@ -389,31 +446,46 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         };
         (srcbuf, res.map(|_| (offset, compression_info)))
     }
+
+    /// Writes a raw blob containing both header and data, returning its offset.
+    pub(crate) async fn write_blob_raw<Buf: IoBuf + Send>(
+        &mut self,
+        raw_with_header: FullSlice<Buf>,
+        ctx: &RequestContext,
+    ) -> (FullSlice<Buf>, Result<u64, Error>) {
+        // Verify the header, to ensure we don't write invalid/corrupt data.
+        let header = match Header::decode(&raw_with_header) {
+            Ok(header) => header,
+            Err(err) => return (raw_with_header, Err(err)),
+        };
+        if raw_with_header.len() != header.total_len() {
+            let header_total_len = header.total_len();
+            let raw_len = raw_with_header.len();
+            return (
+                raw_with_header,
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("header length mismatch: {header_total_len} != {raw_len}"),
+                )),
+            );
+        }
+
+        let offset = self.offset;
+        let (raw_with_header, result) = self.write_all(raw_with_header, ctx).await;
+        (raw_with_header, result.map(|_| offset))
+    }
 }
 
-impl BlobWriter<true> {
-    /// Access the underlying `VirtualFile`.
+impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
+    /// Finish this blob writer and return the underlying [`TempVirtualFile`].
     ///
-    /// This function flushes the internal buffer before giving access
-    /// to the underlying `VirtualFile`.
-    pub async fn into_inner(mut self, ctx: &RequestContext) -> Result<VirtualFile, Error> {
-        self.flush_buffer(ctx).await?;
+    /// If there is an internal buffer (depends on `BUFFERED`), it will
+    /// be flushed before this method returns.
+    pub async fn into_inner(mut self, ctx: &RequestContext) -> Result<TempVirtualFile, Error> {
+        if BUFFERED {
+            self.flush_buffer(ctx).await?;
+        }
         Ok(self.inner)
-    }
-
-    /// Access the underlying `VirtualFile`.
-    ///
-    /// Unlike [`into_inner`](Self::into_inner), this doesn't flush
-    /// the internal buffer before giving access.
-    pub fn into_inner_no_flush(self) -> VirtualFile {
-        self.inner
-    }
-}
-
-impl BlobWriter<false> {
-    /// Access the underlying `VirtualFile`.
-    pub fn into_inner(self) -> VirtualFile {
-        self.inner
     }
 }
 
@@ -427,6 +499,7 @@ pub(crate) mod tests {
     use crate::context::DownloadBehavior;
     use crate::task_mgr::TaskKind;
     use crate::tenant::block_io::BlockReaderRef;
+    use crate::virtual_file::VirtualFile;
 
     async fn round_trip_test<const BUFFERED: bool>(blobs: &[Vec<u8>]) -> Result<(), Error> {
         round_trip_test_compressed::<BUFFERED>(blobs, false).await
@@ -445,7 +518,10 @@ pub(crate) mod tests {
         // Write part (in block to drop the file)
         let mut offsets = Vec::new();
         {
-            let file = VirtualFile::create(pathbuf.as_path(), ctx).await?;
+            let file = TempVirtualFile::new(
+                VirtualFile::create(pathbuf.as_path(), ctx).await?,
+                gate.enter().unwrap(),
+            );
             let mut wtr = BlobWriter::<BUFFERED>::new(file, 0, &gate, cancel.clone(), ctx);
             for blob in blobs.iter() {
                 let (_, res) = if compression {
@@ -468,7 +544,9 @@ pub(crate) mod tests {
             let (_, res) = wtr.write_blob(vec![0; PAGE_SZ].slice_len(), ctx).await;
             let offs = res?;
             println!("Writing final blob at offs={offs}");
-            wtr.flush_buffer(ctx).await?;
+
+            let file = wtr.into_inner(ctx).await?;
+            file.disarm_into_inner();
         }
         Ok((temp_dir, pathbuf, offsets))
     }

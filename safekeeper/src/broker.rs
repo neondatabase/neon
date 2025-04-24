@@ -24,6 +24,15 @@ use crate::{GlobalTimelines, SafeKeeperConf};
 const RETRY_INTERVAL_MSEC: u64 = 1000;
 const PUSH_INTERVAL_MSEC: u64 = 1000;
 
+fn make_tls_config(conf: &SafeKeeperConf) -> storage_broker::ClientTlsConfig {
+    storage_broker::ClientTlsConfig::new().ca_certificates(
+        conf.ssl_ca_certs
+            .iter()
+            .map(pem::encode)
+            .map(storage_broker::Certificate::from_pem),
+    )
+}
+
 /// Push once in a while data about all active timelines to the broker.
 async fn push_loop(
     conf: Arc<SafeKeeperConf>,
@@ -37,8 +46,11 @@ async fn push_loop(
 
     let active_timelines_set = global_timelines.get_global_broker_active_set();
 
-    let mut client =
-        storage_broker::connect(conf.broker_endpoint.clone(), conf.broker_keepalive_interval)?;
+    let mut client = storage_broker::connect(
+        conf.broker_endpoint.clone(),
+        conf.broker_keepalive_interval,
+        make_tls_config(&conf),
+    )?;
     let push_interval = Duration::from_millis(PUSH_INTERVAL_MSEC);
 
     let outbound = async_stream::stream! {
@@ -81,8 +93,11 @@ async fn pull_loop(
     global_timelines: Arc<GlobalTimelines>,
     stats: Arc<BrokerStats>,
 ) -> Result<()> {
-    let mut client =
-        storage_broker::connect(conf.broker_endpoint.clone(), conf.broker_keepalive_interval)?;
+    let mut client = storage_broker::connect(
+        conf.broker_endpoint.clone(),
+        conf.broker_keepalive_interval,
+        make_tls_config(&conf),
+    )?;
 
     // TODO: subscribe only to local timelines instead of all
     let request = SubscribeSafekeeperInfoRequest {
@@ -134,8 +149,11 @@ async fn discover_loop(
     global_timelines: Arc<GlobalTimelines>,
     stats: Arc<BrokerStats>,
 ) -> Result<()> {
-    let mut client =
-        storage_broker::connect(conf.broker_endpoint.clone(), conf.broker_keepalive_interval)?;
+    let mut client = storage_broker::connect(
+        conf.broker_endpoint.clone(),
+        conf.broker_keepalive_interval,
+        make_tls_config(&conf),
+    )?;
 
     let request = SubscribeByFilterRequest {
         types: vec![TypeSubscription {

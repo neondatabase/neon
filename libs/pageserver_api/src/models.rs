@@ -320,6 +320,35 @@ pub struct TimelineCreateRequest {
     pub mode: TimelineCreateRequestMode,
 }
 
+impl TimelineCreateRequest {
+    pub fn mode_tag(&self) -> &'static str {
+        match &self.mode {
+            TimelineCreateRequestMode::Branch { .. } => "branch",
+            TimelineCreateRequestMode::ImportPgdata { .. } => "import",
+            TimelineCreateRequestMode::Bootstrap { .. } => "bootstrap",
+        }
+    }
+
+    pub fn is_import(&self) -> bool {
+        matches!(self.mode, TimelineCreateRequestMode::ImportPgdata { .. })
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ShardImportStatus {
+    InProgress,
+    Done,
+    Error(String),
+}
+impl ShardImportStatus {
+    pub fn is_terminal(&self) -> bool {
+        match self {
+            ShardImportStatus::InProgress => false,
+            ShardImportStatus::Done | ShardImportStatus::Error(_) => true,
+        }
+    }
+}
+
 /// Storage controller specific extensions to [`TimelineInfo`].
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TimelineCreateResponseStorcon {
@@ -526,6 +555,8 @@ pub struct TenantConfigPatch {
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub compaction_algorithm: FieldPatch<CompactionAlgorithmSettings>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub compaction_shard_ancestor: FieldPatch<bool>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub compaction_l0_first: FieldPatch<bool>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub compaction_l0_semaphore: FieldPatch<bool>,
@@ -614,6 +645,9 @@ pub struct TenantConfig {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction_algorithm: Option<CompactionAlgorithmSettings>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compaction_shard_ancestor: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction_l0_first: Option<bool>,
@@ -724,6 +758,7 @@ impl TenantConfig {
             mut compaction_threshold,
             mut compaction_upper_limit,
             mut compaction_algorithm,
+            mut compaction_shard_ancestor,
             mut compaction_l0_first,
             mut compaction_l0_semaphore,
             mut l0_flush_delay_threshold,
@@ -772,6 +807,9 @@ impl TenantConfig {
             .compaction_upper_limit
             .apply(&mut compaction_upper_limit);
         patch.compaction_algorithm.apply(&mut compaction_algorithm);
+        patch
+            .compaction_shard_ancestor
+            .apply(&mut compaction_shard_ancestor);
         patch.compaction_l0_first.apply(&mut compaction_l0_first);
         patch
             .compaction_l0_semaphore
@@ -860,6 +898,7 @@ impl TenantConfig {
             compaction_threshold,
             compaction_upper_limit,
             compaction_algorithm,
+            compaction_shard_ancestor,
             compaction_l0_first,
             compaction_l0_semaphore,
             l0_flush_delay_threshold,
@@ -920,6 +959,9 @@ impl TenantConfig {
                 .as_ref()
                 .unwrap_or(&global_conf.compaction_algorithm)
                 .clone(),
+            compaction_shard_ancestor: self
+                .compaction_shard_ancestor
+                .unwrap_or(global_conf.compaction_shard_ancestor),
             compaction_l0_first: self
                 .compaction_l0_first
                 .unwrap_or(global_conf.compaction_l0_first),
@@ -1804,8 +1846,34 @@ pub mod virtual_file {
     }
 
     impl IoMode {
-        pub const fn preferred() -> Self {
-            Self::Buffered
+        pub fn preferred() -> Self {
+            // The default behavior when running Rust unit tests without any further
+            // flags is to use the newest behavior if available on the platform (Direct).
+            // The CI uses the following environment variable to unit tests for all
+            // different modes.
+            // NB: the Python regression & perf tests have their own defaults management
+            // that writes pageserver.toml; they do not use this variable.
+            if cfg!(test) {
+                use once_cell::sync::Lazy;
+                static CACHED: Lazy<IoMode> = Lazy::new(|| {
+                    utils::env::var_serde_json_string(
+                        "NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IO_MODE",
+                    )
+                    .unwrap_or({
+                        #[cfg(target_os = "linux")]
+                        {
+                            IoMode::Direct
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            IoMode::Buffered
+                        }
+                    })
+                });
+                *CACHED
+            } else {
+                IoMode::Buffered
+            }
         }
     }
 
