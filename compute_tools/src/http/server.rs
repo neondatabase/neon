@@ -7,7 +7,7 @@ use anyhow::Result;
 use axum::Router;
 use axum::middleware::{self};
 use axum::response::IntoResponse;
-use axum::routing::{get, head, post};
+use axum::routing::{get, post};
 use compute_api::responses::ComputeCtlConfig;
 use http::StatusCode;
 use tokio::net::TcpListener;
@@ -84,13 +84,11 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                 let unauthenticated_router =
                     Router::<Arc<ComputeNode>>::new().route("/metrics", get(metrics::get_metrics));
 
+                use prewarm_lfc::*;
                 let authenticated_router = Router::<Arc<ComputeNode>>::new()
-                    .route("/prewarm_lfc", head(prewarm_lfc::prewarm_lfc))
-                    .route("/prewarm_lfc_status", get(prewarm_lfc::prewarm_lfc_status))
-                    .route(
-                        "/prewarm_lfc_offload",
-                        head(prewarm_lfc::prewarm_lfc_offload),
-                    )
+                    .route("/prewarm_lfc", post(prewarm_lfc))
+                    .route("/prewarm_lfc_status", get(prewarm_lfc_status))
+                    .route("/prewarm_lfc_offload", post(prewarm_lfc_offload))
                     .route("/check_writability", post(check_writability::is_writable))
                     .route("/configure", post(configure::configure))
                     .route("/database_schema", get(database_schema::get_schema_dump))

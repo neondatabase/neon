@@ -203,8 +203,8 @@ pub struct ParsedSpec {
     pub pageserver_connstr: String,
     pub safekeeper_connstrings: Vec<String>,
     pub storage_auth_token: Option<String>,
-    pub endpoint_storage_addr: String,
-    pub endpoint_storage_token: String,
+    pub endpoint_storage_addr: Option<String>,
+    pub endpoint_storage_token: Option<String>,
 }
 
 impl TryFrom<ComputeSpec> for ParsedSpec {
@@ -258,22 +258,14 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
                 .or(Err("invalid timeline id"))?
         };
 
-        let endpoint_storage_addr: String = if let Some(ref addr) = spec.endpoint_storage_addr {
-            addr.clone()
-        } else {
-            spec.cluster
-                .settings
-                .find("neon.endpoint_storage_addr")
-                .ok_or("endpoint_storage_addr should be provided")?
-        };
-        let endpoint_storage_token: String = if let Some(ref token) = spec.endpoint_storage_token {
-            token.clone()
-        } else {
-            spec.cluster
-                .settings
-                .find("neon.endpoint_storage_token")
-                .ok_or("endpoint_storage_token should be provided")?
-        };
+        let endpoint_storage_addr = spec
+            .endpoint_storage_addr
+            .clone()
+            .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_addr"));
+        let endpoint_storage_token = spec
+            .endpoint_storage_token
+            .clone()
+            .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_token"));
 
         Ok(ParsedSpec {
             spec,
@@ -762,11 +754,8 @@ impl ComputeNode {
         // Log metrics so that we can search for slow operations in logs
         info!(?metrics, postmaster_pid = %postmaster_pid, "compute start finished");
 
-        if pspec
-            .spec
-            .features
-            .contains(&ComputeFeature::PrewarmOnStartup)
-        {
+        let features = &pspec.spec.features;
+        if features.contains(&ComputeFeature::PrewarmLfcOnStartup) {
             let cloned = self.clone();
             rt.spawn(async move { cloned.prewarm_lfc().await });
         }
@@ -775,11 +764,14 @@ impl ComputeNode {
     }
 
     async fn prewarm_lfc(self: &Arc<Self>) {
-        // Errors not propagated as compute prewarming doesn't impact its ability to start
-        // They will be logged anyway
-        let Ok(parts) = self.try_into() else {
-            return;
+        let parts = match self.try_into() {
+            Ok(parts) => parts,
+            Err(err) => {
+                error!("{err}");
+                return;
+            }
         };
+        // Error logged inside. Compute prewarming doesn't impact its ability to start
         let _ = crate::http::prewarm_lfc(parts, axum::extract::State(self.clone())).await;
     }
 
