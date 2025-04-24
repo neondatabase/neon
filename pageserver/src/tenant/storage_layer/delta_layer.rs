@@ -34,6 +34,7 @@ use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use anyhow::{Context, Result, bail, ensure};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -45,8 +46,6 @@ use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
 use pageserver_api::value::Value;
-use rand::Rng;
-use rand::distributions::Alphanumeric;
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 use tokio_epoll_uring::IoBuf;
@@ -74,6 +73,7 @@ use crate::tenant::vectored_blob_io::{
     BlobFlag, BufView, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadPlanner,
 };
+use crate::virtual_file::TempVirtualFile;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
 use crate::virtual_file::{self, IoBufferMut, MaybeFatalIo, VirtualFile};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
@@ -288,19 +288,20 @@ impl DeltaLayer {
         key_start: Key,
         lsn_range: &Range<Lsn>,
     ) -> Utf8PathBuf {
-        let rand_string: String = rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(8)
-            .map(char::from)
-            .collect();
+        // TempVirtualFile requires us to never reuse a filename while an old
+        // instance of TempVirtualFile created with that filename is not done dropping yet.
+        // So, we use a monotonic counter to disambiguate the filenames.
+        static NEXT_TEMP_DISAMBIGUATOR: AtomicU64 = AtomicU64::new(1);
+        let filename_disambiguator =
+            NEXT_TEMP_DISAMBIGUATOR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         conf.timeline_path(tenant_shard_id, timeline_id)
             .join(format!(
-                "{}-XXX__{:016X}-{:016X}.{}.{}",
+                "{}-XXX__{:016X}-{:016X}.{:x}.{}",
                 key_start,
                 u64::from(lsn_range.start),
                 u64::from(lsn_range.end),
-                rand_string,
+                filename_disambiguator,
                 TEMP_FILE_SUFFIX,
             ))
     }
@@ -421,7 +422,7 @@ impl DeltaLayerWriterInner {
         let path =
             DeltaLayer::temp_path_for(conf, &tenant_shard_id, &timeline_id, key_start, &lsn_range);
 
-        let mut file = VirtualFile::create(&path, ctx).await?;
+        let mut file = TempVirtualFile::new(VirtualFile::create(&path, ctx).await?, gate.enter()?);
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
         let blob_writer = BlobWriter::new(file, PAGE_SZ as u64, gate, cancel, ctx);
@@ -516,22 +517,6 @@ impl DeltaLayerWriterInner {
         key_end: Key,
         ctx: &RequestContext,
     ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
-        let temp_path = self.path.clone();
-        let result = self.finish0(key_end, ctx).await;
-        if let Err(ref e) = result {
-            tracing::info!(%temp_path, "cleaning up temporary file after error during writing: {e}");
-            if let Err(e) = std::fs::remove_file(&temp_path) {
-                tracing::warn!(error=%e, %temp_path, "error cleaning up temporary layer file after error during writing");
-            }
-        }
-        result
-    }
-
-    async fn finish0(
-        self,
-        key_end: Key,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
         let index_start_blk = self.blob_writer.size().div_ceil(PAGE_SZ as u64) as u32;
 
         let mut file = self.blob_writer.into_inner(ctx).await?;
@@ -597,6 +582,10 @@ impl DeltaLayerWriterInner {
             .maybe_fatal_err("delta_layer sync_all")?;
 
         trace!("created delta layer {}", self.path);
+
+        // The gate guard stored in `destination_file` is dropped. Callers (e.g.. flush loop or compaction)
+        // keep the gate open also, so that it's safe for them to rename the file to its final destination.
+        file.disarm_into_inner();
 
         Ok((desc, self.path))
     }
@@ -723,17 +712,6 @@ impl DeltaLayerWriter {
     pub(crate) fn estimated_size(&self) -> u64 {
         let inner = self.inner.as_ref().unwrap();
         inner.blob_writer.size() + inner.tree.borrow_writer().size() + PAGE_SZ as u64
-    }
-}
-
-impl Drop for DeltaLayerWriter {
-    fn drop(&mut self) {
-        if let Some(inner) = self.inner.take() {
-            // We want to remove the virtual file here, so it's fine to not
-            // having completely flushed unwritten data.
-            let vfile = inner.blob_writer.into_inner_no_flush();
-            vfile.remove();
-        }
     }
 }
 
@@ -1609,8 +1587,8 @@ pub(crate) mod test {
     use bytes::Bytes;
     use itertools::MinMaxResult;
     use pageserver_api::value::Value;
-    use rand::RngCore;
     use rand::prelude::{SeedableRng, SliceRandom, StdRng};
+    use rand::{Rng, RngCore};
 
     use super::*;
     use crate::DEFAULT_PG_VERSION;

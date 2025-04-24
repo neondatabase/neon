@@ -32,6 +32,7 @@ use std::ops::Range;
 use std::os::unix::prelude::FileExt;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
@@ -43,8 +44,6 @@ use pageserver_api::key::{DBDIR_KEY, KEY_SIZE, Key};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use pageserver_api::value::Value;
-use rand::Rng;
-use rand::distributions::Alphanumeric;
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
@@ -72,6 +71,7 @@ use crate::tenant::vectored_blob_io::{
     BlobFlag, BufView, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadPlanner,
 };
+use crate::virtual_file::TempVirtualFile;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::virtual_file::{self, IoBufferMut, MaybeFatalIo, VirtualFile};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
@@ -252,14 +252,18 @@ impl ImageLayer {
         tenant_shard_id: TenantShardId,
         fname: &ImageLayerName,
     ) -> Utf8PathBuf {
-        let rand_string: String = rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(8)
-            .map(char::from)
-            .collect();
+        // TempVirtualFile requires us to never reuse a filename while an old
+        // instance of TempVirtualFile created with that filename is not done dropping yet.
+        // So, we use a monotonic counter to disambiguate the filenames.
+        static NEXT_TEMP_DISAMBIGUATOR: AtomicU64 = AtomicU64::new(1);
+        let filename_disambiguator =
+            NEXT_TEMP_DISAMBIGUATOR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         conf.timeline_path(&tenant_shard_id, &timeline_id)
-            .join(format!("{fname}.{rand_string}.{TEMP_FILE_SUFFIX}"))
+            .join(format!(
+                "{fname}.{:x}.{TEMP_FILE_SUFFIX}",
+                filename_disambiguator
+            ))
     }
 
     ///
@@ -773,7 +777,7 @@ impl ImageLayerWriterInner {
             },
         );
         trace!("creating image layer {}", path);
-        let mut file = {
+        let mut file = TempVirtualFile::new(
             VirtualFile::open_with_options(
                 &path,
                 virtual_file::OpenOptions::new()
@@ -781,8 +785,9 @@ impl ImageLayerWriterInner {
                     .create_new(true),
                 ctx,
             )
-            .await?
-        };
+            .await?,
+            gate.enter()?,
+        );
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
         let blob_writer = BlobWriter::new(file, PAGE_SZ as u64, gate, cancel, ctx);
@@ -897,25 +902,6 @@ impl ImageLayerWriterInner {
         ctx: &RequestContext,
         end_key: Option<Key>,
     ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
-        let temp_path = self.path.clone();
-        let result = self.finish0(ctx, end_key).await;
-        if let Err(ref e) = result {
-            tracing::info!(%temp_path, "cleaning up temporary file after error during writing: {e}");
-            if let Err(e) = std::fs::remove_file(&temp_path) {
-                tracing::warn!(error=%e, %temp_path, "error cleaning up temporary layer file after error during writing");
-            }
-        }
-        result
-    }
-
-    ///
-    /// Finish writing the image layer.
-    ///
-    async fn finish0(
-        self,
-        ctx: &RequestContext,
-        end_key: Option<Key>,
-    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
         let index_start_blk = self.blob_writer.size().div_ceil(PAGE_SZ as u64) as u32;
 
         // Calculate compression ratio
@@ -932,7 +918,7 @@ impl ImageLayerWriterInner {
             crate::metrics::COMPRESSION_IMAGE_OUTPUT_BYTES.inc_by(compressed_size);
         };
 
-        let mut file = self.blob_writer.into_inner();
+        let mut file = self.blob_writer.into_inner(ctx).await?;
 
         // Write out the index
         file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
@@ -999,6 +985,10 @@ impl ImageLayerWriterInner {
             .maybe_fatal_err("image_layer sync_all")?;
 
         trace!("created image layer {}", self.path);
+
+        // The gate guard stored in `destination_file` is dropped. Callers (e.g.. flush loop or compaction)
+        // keep the gate open also, so that it's safe for them to rename the file to its final destination.
+        file.disarm_into_inner();
 
         Ok((desc, self.path))
     }
@@ -1122,14 +1112,6 @@ impl ImageLayerWriter {
         ctx: &RequestContext,
     ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
         self.inner.take().unwrap().finish(ctx, Some(end_key)).await
-    }
-}
-
-impl Drop for ImageLayerWriter {
-    fn drop(&mut self) {
-        if let Some(inner) = self.inner.take() {
-            inner.blob_writer.into_inner().remove();
-        }
     }
 }
 

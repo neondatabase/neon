@@ -1,5 +1,4 @@
 mod flush;
-use std::sync::Arc;
 
 pub(crate) use flush::FlushControl;
 use flush::FlushHandle;
@@ -41,7 +40,6 @@ pub trait OwnedAsyncWriter {
 // TODO(yuchen): For large write, implementing buffer bypass for aligned parts of the write could be beneficial to throughput,
 // since we would avoid copying majority of the data into the internal buffer.
 pub struct BufferedWriter<B: Buffer, W> {
-    writer: Arc<W>,
     /// Clone of the buffer that was last submitted to the flush loop.
     /// `None` if no flush request has been submitted, Some forever after.
     pub(super) maybe_flushed: Option<FullSlice<B::IoBuf>>,
@@ -72,7 +70,7 @@ where
     ///
     /// The `buf_new` function provides a way to initialize the owned buffers used by this writer.
     pub fn new(
-        writer: Arc<W>,
+        writer: W,
         buf_new: impl Fn() -> B,
         gate_guard: utils::sync::gate::GateGuard,
         cancel: CancellationToken,
@@ -80,7 +78,6 @@ where
         flush_task_span: tracing::Span,
     ) -> Self {
         Self {
-            writer: writer.clone(),
             mutable: Some(buf_new()),
             maybe_flushed: None,
             flush_handle: FlushHandle::spawn_new(
@@ -93,10 +90,6 @@ where
             ),
             bytes_submitted: 0,
         }
-    }
-
-    pub fn as_inner(&self) -> &W {
-        &self.writer
     }
 
     /// Returns the number of bytes submitted to the background flush task.
@@ -116,20 +109,16 @@ where
     }
 
     #[cfg_attr(target_os = "macos", allow(dead_code))]
-    pub async fn flush_and_into_inner(
-        mut self,
-        ctx: &RequestContext,
-    ) -> Result<(u64, Arc<W>), FlushTaskError> {
+    pub async fn shutdown(mut self, ctx: &RequestContext) -> Result<(u64, W), FlushTaskError> {
         self.flush(ctx).await?;
 
         let Self {
             mutable: buf,
             maybe_flushed: _,
-            writer,
             mut flush_handle,
             bytes_submitted: bytes_amount,
         } = self;
-        flush_handle.shutdown().await?;
+        let writer = flush_handle.shutdown().await?;
         assert!(buf.is_some());
         Ok((bytes_amount, writer))
     }
@@ -329,7 +318,7 @@ mod tests {
     async fn test_write_all_borrowed_always_goes_through_buffer() -> anyhow::Result<()> {
         let ctx = test_ctx();
         let ctx = &ctx;
-        let recorder = Arc::new(RecorderWriter::default());
+        let recorder = RecorderWriter::default();
         let gate = utils::sync::gate::Gate::default();
         let cancel = CancellationToken::new();
         let mut writer = BufferedWriter::<_, RecorderWriter>::new(
@@ -350,7 +339,7 @@ mod tests {
         writer.write_buffered_borrowed(b"j", ctx).await?;
         writer.write_buffered_borrowed(b"klmno", ctx).await?;
 
-        let (_, recorder) = writer.flush_and_into_inner(ctx).await?;
+        let (_, recorder) = writer.shutdown(ctx).await?;
         assert_eq!(
             recorder.get_writes(),
             {
