@@ -1,33 +1,55 @@
 diff --git a/sql/anon.sql b/sql/anon.sql
-index 0cdc769..ed7c1d9 100644
+index 0cdc769..f6cc950 100644
 --- a/sql/anon.sql
 +++ b/sql/anon.sql
-@@ -1141,3 +1141,9 @@ $$
+@@ -1141,3 +1141,8 @@ $$
  -- TODO : https://en.wikipedia.org/wiki/L-diversity
  
  -- TODO : https://en.wikipedia.org/wiki/T-closeness
 +
 +-- NEON Patches
 +
-+GRANT EXECUTE ON FUNCTION pg_config to neon_superuser;
 +GRANT ALL ON SCHEMA anon to neon_superuser;
 +GRANT ALL ON ALL TABLES IN SCHEMA anon TO neon_superuser;
 diff --git a/sql/init.sql b/sql/init.sql
-index 7da6553..12859d6 100644
+index 7da6553..23561c1 100644
 --- a/sql/init.sql
 +++ b/sql/init.sql
-@@ -74,6 +74,26 @@ $$
+@@ -74,6 +74,49 @@ $$
  
  SECURITY LABEL FOR anon ON FUNCTION anon.load_csv IS 'UNTRUSTED';
  
 +CREATE OR REPLACE FUNCTION anon.load_csv_superuser(
-+  dest_table REGCLASS,
-+  csv_file TEXT
++  datapath TEXT
 +)
-+RETURNS BOOLEAN AS
-+$$
++RETURNS BOOLEAN
++AS $$
++DECLARE
++  success BOOLEAN;
++  sharedir TEXT;
 +BEGIN
-+  RETURN anon.load_csv(dest_table, csv_file);
++  -- find the local extension directory
++  SELECT setting INTO sharedir
++  FROM pg_catalog.pg_config
++  WHERE name = 'SHAREDIR';
++
++  SELECT bool_or(results) INTO success
++  FROM unnest(array[
++    anon.load_csv('anon.identifiers_category',sharedir || datapath || '/identifiers_category.csv'),
++    anon.load_csv('anon.identifier',sharedir || datapath || '/identifier.csv'),
++    anon.load_csv('anon.address',sharedir || datapath || '/address.csv'),
++    anon.load_csv('anon.city',sharedir || datapath || '/city.csv'),
++    anon.load_csv('anon.company',sharedir || datapath || '/company.csv'),
++    anon.load_csv('anon.country',sharedir || datapath || '/country.csv'),
++    anon.load_csv('anon.email', sharedir || datapath || '/email.csv'),
++    anon.load_csv('anon.first_name',sharedir || datapath || '/first_name.csv'),
++    anon.load_csv('anon.iban',sharedir || datapath || '/iban.csv'),
++    anon.load_csv('anon.last_name',sharedir || datapath || '/last_name.csv'),
++    anon.load_csv('anon.postcode',sharedir || datapath || '/postcode.csv'),
++    anon.load_csv('anon.siret',sharedir || datapath || '/siret.csv'),
++    anon.load_csv('anon.lorem_ipsum',sharedir || datapath || '/lorem_ipsum.csv')
++  ]) results;
++  RETURN success;
 +END;
 +$$
 +  LANGUAGE plpgsql
@@ -43,10 +65,12 @@ index 7da6553..12859d6 100644
  -- load fake data from a given path
  CREATE OR REPLACE FUNCTION anon.init(
    datapath TEXT
-@@ -92,19 +112,19 @@ BEGIN
+@@ -90,23 +133,7 @@ BEGIN
+     RETURN TRUE;
+   END IF;
  
-   SELECT bool_or(results) INTO success
-   FROM unnest(array[
+-  SELECT bool_or(results) INTO success
+-  FROM unnest(array[
 -    anon.load_csv('anon.identifiers_category',datapath||'/identifiers_category.csv'),
 -    anon.load_csv('anon.identifier',datapath ||'/identifier.csv'),
 -    anon.load_csv('anon.address',datapath ||'/address.csv'),
@@ -60,19 +84,25 @@ index 7da6553..12859d6 100644
 -    anon.load_csv('anon.postcode',datapath ||'/postcode.csv'),
 -    anon.load_csv('anon.siret',datapath ||'/siret.csv'),
 -    anon.load_csv('anon.lorem_ipsum',datapath ||'/lorem_ipsum.csv')
-+    anon.load_csv_superuser('anon.identifiers_category',datapath||'/identifiers_category.csv'),
-+    anon.load_csv_superuser('anon.identifier',datapath ||'/identifier.csv'),
-+    anon.load_csv_superuser('anon.address',datapath ||'/address.csv'),
-+    anon.load_csv_superuser('anon.city',datapath ||'/city.csv'),
-+    anon.load_csv_superuser('anon.company',datapath ||'/company.csv'),
-+    anon.load_csv_superuser('anon.country',datapath ||'/country.csv'),
-+    anon.load_csv_superuser('anon.email', datapath ||'/email.csv'),
-+    anon.load_csv_superuser('anon.first_name',datapath ||'/first_name.csv'),
-+    anon.load_csv_superuser('anon.iban',datapath ||'/iban.csv'),
-+    anon.load_csv_superuser('anon.last_name',datapath ||'/last_name.csv'),
-+    anon.load_csv_superuser('anon.postcode',datapath ||'/postcode.csv'),
-+    anon.load_csv_superuser('anon.siret',datapath ||'/siret.csv'),
-+    anon.load_csv_superuser('anon.lorem_ipsum',datapath ||'/lorem_ipsum.csv')
-   ]) results;
-   RETURN success;
+-  ]) results;
+-  RETURN success;
++  RETURN anon.load_csv_superuser(datapath);
  
+ END;
+ $$
+@@ -159,14 +186,7 @@ SECURITY LABEL FOR anon ON FUNCTION anon.load(TEXT) IS 'UNTRUSTED';
+ CREATE OR REPLACE FUNCTION anon.init()
+ RETURNS BOOLEAN
+ AS $$
+-  WITH conf AS (
+-        -- find the local extension directory
+-        SELECT setting AS sharedir
+-        FROM pg_catalog.pg_config
+-        WHERE name = 'SHAREDIR'
+-    )
+-  SELECT anon.init(conf.sharedir || '/extension/anon/')
+-  FROM conf;
++  SELECT anon.init('/extension/anon/'::TEXT)
+ $$
+   LANGUAGE SQL
+   VOLATILE
