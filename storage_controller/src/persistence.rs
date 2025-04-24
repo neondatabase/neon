@@ -133,6 +133,7 @@ pub(crate) enum DatabaseOperation {
     InsertTimelineImport,
     UpdateTimelineImport,
     DeleteTimelineImport,
+    ListTimelineImports,
 }
 
 #[must_use]
@@ -1638,6 +1639,35 @@ impl Persistence {
             })
         })
         .await
+    }
+
+    pub(crate) async fn list_complete_timeline_imports(
+        &self,
+    ) -> DatabaseResult<Vec<TimelineImport>> {
+        use crate::schema::timeline_imports::dsl;
+        let persistent = self
+            .with_measured_conn(DatabaseOperation::ListTimelineImports, move |conn| {
+                Box::pin(async move {
+                    let from_db: Vec<TimelineImportPersistence> =
+                        dsl::timeline_imports.load(conn).await?;
+                    Ok(from_db)
+                })
+            })
+            .await?;
+
+        let imports: Result<Vec<TimelineImport>, _> = persistent
+            .into_iter()
+            .map(TimelineImport::from_persistent)
+            .collect();
+        match imports {
+            Ok(ok) => Ok(ok
+                .into_iter()
+                .filter(|import| import.is_complete())
+                .collect()),
+            Err(err) => Err(DatabaseError::Logical(format!(
+                "failed to deserialize import: {err}"
+            ))),
+        }
     }
 
     pub(crate) async fn delete_timeline_import(

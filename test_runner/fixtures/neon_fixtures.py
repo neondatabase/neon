@@ -3384,6 +3384,9 @@ class VanillaPostgres(PgProtocol):
         """Return size of pgdatadir subdirectory in bytes."""
         return get_dir_size(self.pgdatadir / subdir)
 
+    def is_running(self) -> bool:
+        return self.running
+
     def __enter__(self) -> Self:
         return self
 
