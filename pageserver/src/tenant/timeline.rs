@@ -3145,7 +3145,7 @@ impl Timeline {
                 wal_connect_timeout,
                 lagging_wal_timeout,
                 max_lsn_wal_lag,
-                auth_token: crate::config::SAFEKEEPER_AUTH_TOKEN.get().cloned().filter(|s| !s.is_empty()),
+                auth_token: crate::config::SAFEKEEPER_AUTH_TOKEN.get().cloned(),
                 availability_zone: self.conf.availability_zone.clone(),
                 ingest_batch_size: self.conf.ingest_batch_size,
                 validate_wal_contiguity: self.conf.validate_wal_contiguity,
