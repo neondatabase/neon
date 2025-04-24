@@ -52,7 +52,6 @@ rand.workspace = true
 range-set-blaze = { version = "0.1.16", features = ["alloc"] }
 regex.workspace = true
 rustls.workspace = true
-scc.workspace = true
 scopeguard.workspace = true
 send-future.workspace = true
 serde.workspace = true

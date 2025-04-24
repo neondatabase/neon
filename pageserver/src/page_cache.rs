@@ -67,8 +67,8 @@
 //! mapping is automatically removed and the slot is marked free.
 //!
 
-use scc::HashMap;
-use scc::hash_map::Entry;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -194,7 +194,7 @@ impl SlotInner {
 }
 
 pub struct PageCache {
-    immutable_page_map: std::sync::Arc::<HashMap<(FileId, u32), usize>>,
+    immutable_page_maps: [std::sync::RwLock<HashMap<(FileId, u32), usize>>; 16],
 
     /// The actual buffers with their metadata.
     slots: Box<[Slot]>,
@@ -204,7 +204,103 @@ pub struct PageCache {
     /// Index of the next candidate to evict, for the Clock replacement algorithm.
     /// This is interpreted modulo the page cache size.
     next_evict_slot: AtomicUsize,
+}
 
+impl PageCache {
+    /// Helper function to determine the shard index based on the low 4 bits of the u32 in the key tuple.
+    fn shard_index(_file_id: &FileId, blkno: u32) -> usize {
+        (blkno & 0xF) as usize
+    }
+
+    /// Search for a page in the cache using the given search key.
+    ///
+    /// Returns the slot index, if any.
+    ///
+    /// NOTE: We don't hold any lock on the mapping on return, so the slot might
+    /// get recycled for an unrelated page immediately after this function
+    /// returns. The caller is responsible for re-checking that the slot still
+    /// contains the page with the same key before using it.
+    ///
+    fn search_mapping(&self, cache_key: &CacheKey) -> Option<usize> {
+        match cache_key {
+            CacheKey::ImmutableFilePage { file_id, blkno } => {
+                let shard_idx = Self::shard_index(file_id, *blkno);
+                let map = self.immutable_page_maps[shard_idx].read().unwrap();
+                Some(*map.get(&(*file_id, *blkno))?)
+            }
+        }
+    }
+
+    ///
+    /// Remove mapping for given key.
+    ///
+    fn remove_mapping(&self, old_key: &CacheKey) {
+        match old_key {
+            CacheKey::ImmutableFilePage { file_id, blkno } => {
+                let shard_idx = Self::shard_index(file_id, *blkno);
+                let mut map = self.immutable_page_maps[shard_idx].write().unwrap();
+                map.remove(&(*file_id, *blkno))
+                    .expect("could not find old key in mapping");
+            }
+        }
+    }
+
+    ///
+    /// Insert mapping for given key.
+    ///
+    /// If a mapping already existed for the given key, returns the slot index
+    /// of the existing mapping and leaves it untouched.
+    fn try_insert_mapping(&self, new_key: &CacheKey, slot_idx: usize) -> Option<usize> {
+        match new_key {
+            CacheKey::ImmutableFilePage { file_id, blkno } => {
+                let shard_idx = Self::shard_index(file_id, *blkno);
+                let mut map = self.immutable_page_maps[shard_idx].write().unwrap();
+                match map.entry((*file_id, *blkno)) {
+                    Entry::Occupied(entry) => Some(*entry.get()),
+                    Entry::Vacant(entry) => {
+                        entry.insert(slot_idx);
+                        None
+                    }
+                }
+            }
+        }
+    }
+
+    /// Initialize a new page cache
+    ///
+    /// This should be called only once at page server startup.
+    fn new(num_pages: usize) -> Self {
+        assert!(num_pages > 0, "page cache size must be > 0");
+
+        // We could use Vec::leak here, but that potentially also leaks
+        // uninitialized reserved capacity. With into_boxed_slice and Box::leak
+        // this is avoided.
+        let page_buffer = IoBufferMut::with_capacity_zeroed(num_pages * PAGE_SZ).leak();
+
+        let slots = page_buffer
+            .chunks_exact_mut(PAGE_SZ)
+            .map(|chunk| {
+                // SAFETY: Each chunk has `PAGE_SZ` (8192) bytes, greater than 512, still aligned.
+                let buf = unsafe { IoPageSlice::new_unchecked(chunk.try_into().unwrap()) };
+
+                Slot {
+                    inner: tokio::sync::RwLock::new(SlotInner {
+                        key: None,
+                        buf,
+                        permit: std::sync::Mutex::new(Weak::new()),
+                    }),
+                    usage_count: AtomicU8::new(0),
+                }
+            })
+            .collect();
+
+        Self {
+            immutable_page_maps: Default::default(),
+            slots,
+            next_evict_slot: AtomicUsize::new(0),
+            pinned_slots: Arc::new(tokio::sync::Semaphore::new(num_pages)),
+        }
+    }
 }
 
 struct PinnedSlotsPermit {
@@ -468,58 +564,6 @@ impl PageCache {
     }
 
     //
-    // Section 3: Mapping functions
-    //
-
-    /// Search for a page in the cache using the given search key.
-    ///
-    /// Returns the slot index, if any.
-    ///
-    /// NOTE: We don't hold any lock on the mapping on return, so the slot might
-    /// get recycled for an unrelated page immediately after this function
-    /// returns.  The caller is responsible for re-checking that the slot still
-    /// contains the page with the same key before using it.
-    ///
-    fn search_mapping(&self, cache_key: &CacheKey) -> Option<usize> {
-        match cache_key {
-            CacheKey::ImmutableFilePage { file_id, blkno } => {
-                Some(*self.immutable_page_map.get(&(*file_id, *blkno))?)
-            }
-        }
-    }
-
-    ///
-    /// Remove mapping for given key.
-    ///
-    fn remove_mapping(&self, old_key: &CacheKey) {
-        match old_key {
-            CacheKey::ImmutableFilePage { file_id, blkno } => {
-                self.immutable_page_map.remove(&(*file_id, *blkno))
-                    .expect("could not find old key in mapping");
-            }
-        }
-    }
-
-    ///
-    /// Insert mapping for given key.
-    ///
-    /// If a mapping already existed for the given key, returns the slot index
-    /// of the existing mapping and leaves it untouched.
-    fn try_insert_mapping(&self, new_key: &CacheKey, slot_idx: usize) -> Option<usize> {
-        match new_key {
-            CacheKey::ImmutableFilePage { file_id, blkno } => {
-                match self.immutable_page_map.entry((*file_id, *blkno)) {
-                    Entry::Occupied(entry) => Some(*entry.get()),
-                    Entry::Vacant(entry) => {
-                        entry.insert_entry(slot_idx);
-                        None
-                    }
-                }
-            }
-        }
-    }
-
-    //
     // Section 4: Misc internal helpers
     //
 
@@ -590,40 +634,5 @@ impl PageCache {
         }
     }
 
-    /// Initialize a new page cache
-    ///
-    /// This should be called only once at page server startup.
-    fn new(num_pages: usize) -> Self {
-        assert!(num_pages > 0, "page cache size must be > 0");
-
-        // We could use Vec::leak here, but that potentially also leaks
-        // uninitialized reserved capacity. With into_boxed_slice and Box::leak
-        // this is avoided.
-        let page_buffer = IoBufferMut::with_capacity_zeroed(num_pages * PAGE_SZ).leak();
-
-        let slots = page_buffer
-            .chunks_exact_mut(PAGE_SZ)
-            .map(|chunk| {
-                // SAFETY: Each chunk has `PAGE_SZ` (8192) bytes, greater than 512, still aligned.
-                let buf = unsafe { IoPageSlice::new_unchecked(chunk.try_into().unwrap()) };
-
-                Slot {
-                    inner: tokio::sync::RwLock::new(SlotInner {
-                        key: None,
-                        buf,
-                        permit: std::sync::Mutex::new(Weak::new()),
-                    }),
-                    usage_count: AtomicU8::new(0),
-                }
-            })
-            .collect();
-
-        Self {
-            immutable_page_map: Default::default(),
-            slots,
-            next_evict_slot: AtomicUsize::new(0),
-            pinned_slots: Arc::new(tokio::sync::Semaphore::new(num_pages)),
-        }
-    }
 }
 
