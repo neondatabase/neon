@@ -242,12 +242,13 @@ impl SafekeeperNode {
 
         args.extend_from_slice(extra_opts);
 
+        let env_variables = Vec::new();
         background_process::start_process(
             &format!("safekeeper-{id}"),
             &datadir,
             &self.env.safekeeper_bin(),
             &args,
-            Vec::new(), // No environment variables needed anymore
+            env_variables,
             background_process::InitialPidFile::Expect(self.pid_file()),
             retry_timeout,
             || async {
