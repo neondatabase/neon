@@ -236,7 +236,7 @@ impl Default for NeonStorageControllerConf {
             heartbeat_interval: Self::DEFAULT_HEARTBEAT_INTERVAL,
             long_reconcile_threshold: None,
             use_https_pageserver_api: false,
-            timelines_onto_safekeepers: false,
+            timelines_onto_safekeepers: true,
             use_https_safekeeper_api: false,
             use_local_compute_notifications: true,
         }
