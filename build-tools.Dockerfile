@@ -173,7 +173,7 @@ RUN curl -fsSL "https://github.com/protocolbuffers/protobuf/releases/download/v$
     && rm -rf protoc.zip protoc
 
 # s5cmd
-ENV S5CMD_VERSION=2.2.2
+ENV S5CMD_VERSION=2.3.0
 RUN curl -sL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/s5cmd_${S5CMD_VERSION}_Linux-$(uname -m | sed 's/x86_64/64bit/g' | sed 's/aarch64/arm64/g').tar.gz" | tar zxvf - s5cmd \
     && chmod +x s5cmd \
     && mv s5cmd /usr/local/bin/s5cmd
