@@ -25,7 +25,7 @@ use tokio_postgres::replication::ReplicationStream;
 use tokio_postgres::{Client, SimpleQueryMessage, SimpleQueryRow};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, trace, warn};
-use utils::critical;
+use utils::critical_timeline;
 use utils::id::NodeId;
 use utils::lsn::Lsn;
 use utils::pageserver_feedback::PageserverFeedback;
@@ -368,9 +368,13 @@ pub(super) async fn handle_walreceiver_connection(
                         match raw_wal_start_lsn.cmp(&expected_wal_start) {
                             std::cmp::Ordering::Greater => {
                                 let msg = format!(
-                                    "Gap in streamed WAL: [{expected_wal_start}, {raw_wal_start_lsn})"
+                                    "Gap in streamed WAL: [{expected_wal_start}, {raw_wal_start_lsn}"
                                 );
-                                critical!("{msg}");
+                                critical_timeline!(
+                                    timeline.tenant_shard_id,
+                                    timeline.timeline_id,
+                                    "{msg}"
+                                );
                                 return Err(WalReceiverError::Other(anyhow!(msg)));
                             }
                             std::cmp::Ordering::Less => {
@@ -383,7 +387,9 @@ pub(super) async fn handle_walreceiver_connection(
                                             "Received record with next_record_lsn multiple times ({} < {})",
                                             first_rec.next_record_lsn, expected_wal_start
                                         );
-                                        critical!("{msg}");
+                                        critical_timeline!(
+                                            timeline.tenant_shard_id,
+                                            timeline.timeline_id,"{msg}");
                                         return Err(WalReceiverError::Other(anyhow!(msg)));
                                     }
                                 }
@@ -452,7 +458,11 @@ pub(super) async fn handle_walreceiver_connection(
                             // TODO: we can't differentiate cancellation errors with
                             // anyhow::Error, so just ignore it if we're cancelled.
                             if !cancellation.is_cancelled() && !timeline.is_stopping() {
-                                critical!("{err:?}")
+                                critical_timeline!(
+                                    timeline.tenant_shard_id,
+                                    timeline.timeline_id,
+                                    "{err:?}"
+                                );
                             }
                         })?;
 
