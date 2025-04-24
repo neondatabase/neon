@@ -68,7 +68,8 @@ class EndpointHttpClient(requests.Session):
     def prewarm_lfc_status(self) -> dict[str, str]:
         res = self.get(f"http://localhost:{self.external_port}/prewarm_lfc_status")
         res.raise_for_status()
-        return res.json()
+        json: dict[str, str] = res.json()
+        return json
 
     def prewarm_lfc(self):
         self.post(f"http://localhost:{self.external_port}/prewarm_lfc").raise_for_status()

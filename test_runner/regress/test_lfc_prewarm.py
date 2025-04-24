@@ -2,8 +2,9 @@ import random
 import threading
 import time
 import pytest
+from fixtures.endpoint.http import EndpointHttpClient
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import EndpointHttpClient, NeonEnv
+from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import USE_LFC
 from prometheus_client.parser import text_string_to_metric_families as prom_parse_impl
 
@@ -39,10 +40,10 @@ def prewarm_lfc_blocking(client: EndpointHttpClient):
                 time.sleep(1)
             case "completed":
                 break
-            case _:
-                assert False
+            case status:
+                raise AssertionError(f"Invalid status {status}")
     else:
-        assert False, "failed to prewarm within 20 seconds"
+        raise AssertionError("failed to prewarm within 20 seconds")
     pass
 
 
