@@ -52,6 +52,8 @@ def mock_import_bucket(vanilla_pg: VanillaPostgres, path: Path):
     """
     Mock the import S3 bucket into a local directory for a provided vanilla PG instance.
     """
+    assert not vanilla_pg.is_running()
+
     path.mkdir()
     # what cplane writes before scheduling fast_import
     specpath = path / "spec.json"
