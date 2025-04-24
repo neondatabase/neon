@@ -55,7 +55,7 @@ impl ResponseErrorMessageExt for reqwest::Response {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub(crate) struct GlobalObservedState(pub(crate) HashMap<TenantShardId, ObservedState>);
 
 impl PeerClient {

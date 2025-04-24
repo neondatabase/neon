@@ -11,7 +11,7 @@ use std::num::NonZeroU32;
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
@@ -523,6 +523,9 @@ pub struct Service {
 
     /// HTTP client with proper CA certs.
     http_client: reqwest::Client,
+
+    /// Handle for the step down background task if one was ever requested
+    step_down_barrier: OnceLock<tokio::sync::watch::Receiver<Option<GlobalObservedState>>>,
 }
 
 impl From<ReconcileWaitError> for ApiError {
@@ -1744,6 +1747,7 @@ impl Service {
             tenant_op_locks: Default::default(),
             node_op_locks: Default::default(),
             http_client,
+            step_down_barrier: Default::default(),
         });
 
         let result_task_this = this.clone();
@@ -8677,7 +8681,35 @@ impl Service {
         self.inner.read().unwrap().get_leadership_status()
     }
 
-    pub(crate) async fn step_down(&self) -> GlobalObservedState {
+    /// Handler for step down requests
+    ///
+    /// Step down runs in separate task since once it's called it should
+    /// be driven to completion. Subsequent requests will wait on the same
+    /// step down task.
+    pub(crate) async fn step_down(self: &Arc<Self>) -> GlobalObservedState {
+        let handle = self.step_down_barrier.get_or_init(|| {
+            let step_down_self = self.clone();
+            let (tx, rx) = tokio::sync::watch::channel::<Option<GlobalObservedState>>(None);
+            tokio::spawn(async move {
+                let state = step_down_self.step_down_task().await;
+                tx.send(Some(state))
+                    .expect("Task Arc<Service> keeps receiver alive");
+            });
+
+            rx
+        });
+
+        handle
+            .clone()
+            .wait_for(|observed_state| observed_state.is_some())
+            .await
+            .expect("Task Arc<Service> keeps sender alive")
+            .deref()
+            .clone()
+            .expect("Checked above")
+    }
+
+    async fn step_down_task(&self) -> GlobalObservedState {
         tracing::info!("Received step down request from peer");
         failpoint_support::sleep_millis_async!("sleep-on-step-down-handling");
 
