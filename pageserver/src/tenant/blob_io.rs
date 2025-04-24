@@ -230,6 +230,7 @@ impl<W> BlobWriter<W>
 where
     W: OwnedAsyncWriter + std::fmt::Debug + Send + Sync + 'static,
 {
+    /// See [`BufferedWriter`] struct-level doc comment for semantics of `start_offset`.
     pub fn new(
         file: W,
         start_offset: u64,

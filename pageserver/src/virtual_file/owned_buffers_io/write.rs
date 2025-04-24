@@ -64,6 +64,9 @@ pub trait OwnedAsyncWriter {
 /// ways of dealing with the special case that the buffer is not full by the time
 /// we are done writing.
 ///
+/// The first flush to the underlying `W` happens at offset `start_offset` (arg of [`BufferedWriter::new`]).
+/// The next flush is to offset `start_offset + Buffer::cap`. The one after at `start_offset + 2 * Buffer::cap` and so on.
+///
 /// TODO: decouple buffer capacity from alignment requirement.
 /// Right now we assume [`Buffer::cap`] is the alignment requirement,
 /// but actually [`Buffer::cap`] should only determine how often we flush
@@ -77,6 +80,7 @@ pub trait OwnedAsyncWriter {
 ///
 // TODO(yuchen): For large write, implementing buffer bypass for aligned parts of the write could be beneficial to throughput,
 // since we would avoid copying majority of the data into the internal buffer.
+// https://github.com/neondatabase/neon/issues/10101
 pub struct BufferedWriter<B: Buffer, W> {
     /// Clone of the buffer that was last submitted to the flush loop.
     /// `None` if no flush request has been submitted, Some forever after.
