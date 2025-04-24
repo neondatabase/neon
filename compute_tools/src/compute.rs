@@ -767,7 +767,7 @@ impl ComputeNode {
         let parts = match self.try_into() {
             Ok(parts) => parts,
             Err(err) => {
-                error!("{err}");
+                error!(%err, "prewarming LFC on endpoint startup failed");
                 return;
             }
         };

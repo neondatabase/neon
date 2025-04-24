@@ -51,8 +51,6 @@ pub struct ExtensionInstallResponse {
 pub enum PrewarmStatus {
     #[default]
     NotPrewarmed,
-    // TODO wait for comment on RFC -- we may need Downloading status
-    // (ends when we invoke postgres function)
     Prewarming,
     Completed,
     Failed,

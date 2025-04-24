@@ -83,13 +83,14 @@ async fn prewarm_lfc_offload_impl(parts: Parts, state: State) -> Result<(), ()> 
 
     let request = Client::new().put(uri).bearer_auth(token).body(compressed);
     match request.send().await {
-        Ok(res) if res.status() == StatusCode::OK => Ok(()),
+        Ok(res) if res.status() == StatusCode::OK => return Ok(()),
         Ok(res) => {
             let err = res.status().to_string();
-            Err(error!(%err, "writing to endpoint storage"))
+            error!(%err, "writing to endpoint storage");
         }
-        Err(err) => Err(error!(%err, "writing to endpoint storage")),
+        Err(err) => error!(%err, "writing to endpoint storage"),
     }
+    Err(())
 }
 
 pub async fn prewarm_lfc(parts: Parts, state: State) -> Response {
