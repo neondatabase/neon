@@ -4791,7 +4791,8 @@ class Safekeeper(LogUtils):
         pull_timeline from srcs to self.
         """
         src_https = [f"http://localhost:{sk.port.http}" for sk in srcs]
-        res = self.http_client().pull_timeline(
+        auth_token = self.env.auth_keys.generate_tenant_token(tenant_id)
+        res = self.http_client(auth_token=auth_token).pull_timeline(
             {"tenant_id": str(tenant_id), "timeline_id": str(timeline_id), "http_hosts": src_https}
         )
         src_ids = [sk.id for sk in srcs]
