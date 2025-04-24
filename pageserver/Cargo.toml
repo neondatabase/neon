@@ -27,6 +27,7 @@ chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["string"] }
 consumption_metrics.workspace = true
 crc32c.workspace = true
+dashmap.workspace = true
 either.workspace = true
 fail.workspace = true
 futures.workspace = true

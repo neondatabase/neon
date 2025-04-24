@@ -67,8 +67,8 @@
 //! mapping is automatically removed and the slot is marked free.
 //!
 
-use std::collections::HashMap;
-use std::collections::hash_map::Entry;
+use dashmap::DashMap;
+use dashmap::Entry;
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -194,7 +194,7 @@ impl SlotInner {
 }
 
 pub struct PageCache {
-    immutable_page_map: std::sync::RwLock<HashMap<(FileId, u32), usize>>,
+    immutable_page_map: std::sync::Arc::<DashMap<(FileId, u32), usize>>,
 
     /// The actual buffers with their metadata.
     slots: Box<[Slot]>,
@@ -483,8 +483,7 @@ impl PageCache {
     fn search_mapping(&self, cache_key: &CacheKey) -> Option<usize> {
         match cache_key {
             CacheKey::ImmutableFilePage { file_id, blkno } => {
-                let map = self.immutable_page_map.read().unwrap();
-                Some(*map.get(&(*file_id, *blkno))?)
+                Some(*self.immutable_page_map.get(&(*file_id, *blkno))?)
             }
         }
     }
@@ -495,8 +494,7 @@ impl PageCache {
     fn remove_mapping(&self, old_key: &CacheKey) {
         match old_key {
             CacheKey::ImmutableFilePage { file_id, blkno } => {
-                let mut map = self.immutable_page_map.write().unwrap();
-                map.remove(&(*file_id, *blkno))
+                self.immutable_page_map.remove(&(*file_id, *blkno))
                     .expect("could not find old key in mapping");
             }
         }
@@ -510,8 +508,7 @@ impl PageCache {
     fn try_insert_mapping(&self, new_key: &CacheKey, slot_idx: usize) -> Option<usize> {
         match new_key {
             CacheKey::ImmutableFilePage { file_id, blkno } => {
-                let mut map = self.immutable_page_map.write().unwrap();
-                match map.entry((*file_id, *blkno)) {
+                match self.immutable_page_map.entry((*file_id, *blkno)) {
                     Entry::Occupied(entry) => Some(*entry.get()),
                     Entry::Vacant(entry) => {
                         entry.insert(slot_idx);

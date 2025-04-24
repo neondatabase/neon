@@ -4262,6 +4262,7 @@ dependencies = [
  "consumption_metrics",
  "crc32c",
  "criterion",
+ "dashmap 6.1.0",
  "either",
  "enum-map",
  "enumset",
