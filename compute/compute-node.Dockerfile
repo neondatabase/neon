@@ -1111,8 +1111,8 @@ RUN wget https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.18.1.tar.
     mkdir onnxruntime-src && cd onnxruntime-src && tar xzf ../onnxruntime.tar.gz --strip-components=1 -C . && \
     echo "#nothing to test here" > neon-test.sh
 
-RUN wget https://github.com/neondatabase-labs/pgrag/archive/refs/tags/v0.1.0.zip -O pgrag.tar.gz &&  \
-    echo "d3c776018ecf99efb83953fe432ba2e49285916298de9b672291c75af0bb69f3 pgrag.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/neondatabase-labs/pgrag/archive/refs/tags/v0.1.0.tar.gz -O pgrag.tar.gz &&  \
+    echo "d7f42e6413b4f44ab2b6b087f1ac350085989c8675187ae608412f605102744b pgrag.tar.gz" | sha256sum --check && \
     mkdir pgrag-src && cd pgrag-src && tar xzf ../pgrag.tar.gz --strip-components=1 -C .
 
 FROM rust-extensions-build-pgrx14 AS pgrag-build
