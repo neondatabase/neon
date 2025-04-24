@@ -3295,6 +3295,15 @@ impl Timeline {
             .await?;
 
         self.check_memory_usage(&job_desc.selected_layers).await?;
+        if job_desc.selected_layers.len() > 100
+            && job_desc.rewrite_layers.len() as f64 >= job_desc.selected_layers.len() as f64 * 0.7
+        {
+            return Err(CompactionError::Other(anyhow!(
+                "too many layers to rewrite: {} / {}, giving up compaction",
+                job_desc.rewrite_layers.len(),
+                job_desc.selected_layers.len()
+            )));
+        }
 
         // Generate statistics for the compaction
         for layer in &job_desc.selected_layers {
