@@ -4262,7 +4262,6 @@ dependencies = [
  "consumption_metrics",
  "crc32c",
  "criterion",
- "dashmap 6.1.0",
  "either",
  "enum-map",
  "enumset",
@@ -4303,6 +4302,7 @@ dependencies = [
  "reqwest",
  "rpds",
  "rustls 0.23.18",
+ "scc",
  "scopeguard",
  "send-future",
  "serde",
@@ -6078,6 +6078,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "scc"
+version = "2.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22b2d775fb28f245817589471dd49c5edf64237f4a19d10ce9a92ff4651a27f4"
+dependencies = [
+ "sdd",
+]
+
+[[package]]
 name = "schannel"
 version = "0.1.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6116,6 +6125,12 @@ name = "sd-notify"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "621e3680f3e07db4c9c2c3fb07c6223ab2fab2e54bd3c04c3ae037990f428c32"
+
+[[package]]
+name = "sdd"
+version = "3.0.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "584e070911c7017da6cb2eb0788d09f43d789029b5877d3e5ecc8acf86ceee21"
 
 [[package]]
 name = "sec1"

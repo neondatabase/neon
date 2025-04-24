@@ -27,7 +27,6 @@ chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["string"] }
 consumption_metrics.workspace = true
 crc32c.workspace = true
-dashmap.workspace = true
 either.workspace = true
 fail.workspace = true
 futures.workspace = true
@@ -53,6 +52,7 @@ rand.workspace = true
 range-set-blaze = { version = "0.1.16", features = ["alloc"] }
 regex.workspace = true
 rustls.workspace = true
+scc.workspace = true
 scopeguard.workspace = true
 send-future.workspace = true
 serde.workspace = true

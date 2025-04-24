@@ -67,8 +67,8 @@
 //! mapping is automatically removed and the slot is marked free.
 //!
 
-use dashmap::DashMap;
-use dashmap::Entry;
+use scc::HashMap;
+use scc::hash_map::Entry;
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -194,7 +194,7 @@ impl SlotInner {
 }
 
 pub struct PageCache {
-    immutable_page_map: std::sync::Arc::<DashMap<(FileId, u32), usize>>,
+    immutable_page_map: std::sync::Arc::<HashMap<(FileId, u32), usize>>,
 
     /// The actual buffers with their metadata.
     slots: Box<[Slot]>,
@@ -511,7 +511,7 @@ impl PageCache {
                 match self.immutable_page_map.entry((*file_id, *blkno)) {
                     Entry::Occupied(entry) => Some(*entry.get()),
                     Entry::Vacant(entry) => {
-                        entry.insert(slot_idx);
+                        entry.insert_entry(slot_idx);
                         None
                     }
                 }
