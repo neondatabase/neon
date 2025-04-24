@@ -111,7 +111,7 @@ impl ComputeMonitor {
                                 self.compute.update_last_active(self.last_active);
                             }
                             Err(e) => {
-                                // Although we have many places where we can return errors in `refresh()`,
+                                // Although we have many places where we can return errors in `check()`,
                                 // normally it shouldn't happen. I.e., we will likely return error if
                                 // connection got broken, query timed out, Postgres returned invalid data, etc.
                                 // In all such cases it's suspicious, so let's report this as downtime.
