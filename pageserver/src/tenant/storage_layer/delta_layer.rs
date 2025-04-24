@@ -288,7 +288,9 @@ impl DeltaLayer {
         key_start: Key,
         lsn_range: &Range<Lsn>,
     ) -> Utf8PathBuf {
-        // For robustness, never reuse a filename in the lifetime of a pageserver process.
+        // TempVirtualFile requires us to never reuse a filename while an old
+        // instance of TempVirtualFile created with that filename is not done dropping yet.
+        // So, we use a monotonic counter to disambiguate the filenames.
         static NEXT_TEMP_DISAMBIGUATOR: AtomicU64 = AtomicU64::new(1);
         let filename_disambiguator =
             NEXT_TEMP_DISAMBIGUATOR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

@@ -73,6 +73,12 @@ impl std::ops::DerefMut for TempVirtualFile {
 }
 
 impl TempVirtualFile {
+    /// The caller is responsible for ensuring that the path of `virtual_file` is not reused
+    /// until after this TempVirtualFile's `Drop` impl has completed.
+    /// Failure to do so will result in unlinking of the reused path by the original instance's Drop impl.
+    /// The best way to do so is by using a monotonic counter as a disambiguator.
+    /// TODO: centralize this disambiguator pattern inside this struct.
+    ///   => <https://github.com/neondatabase/neon/pull/11549#issuecomment-2824592831>
     pub fn new(virtual_file: VirtualFile, gate_guard: GateGuard) -> Self {
         Self {
             inner: Some(Inner {

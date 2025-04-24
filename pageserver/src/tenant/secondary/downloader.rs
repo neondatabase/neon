@@ -646,7 +646,7 @@ enum UpdateError {
     NoData,
     #[error("Insufficient local storage space")]
     NoSpace,
-    #[error("Failed to download")]
+    #[error("Failed to download: {0}")]
     DownloadError(DownloadError),
     #[error(transparent)]
     Deserialize(#[from] serde_json::Error),
