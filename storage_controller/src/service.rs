@@ -8715,21 +8715,25 @@ impl Service {
 
         self.inner.write().unwrap().step_down();
 
-        // Wait for reconciliations to stop, or terminate this process if they
-        // fail to stop in time (this indicates a bug in shutdown)
-        tokio::select! {
-            _ = self.stop_reconciliations(StopReconciliationsReason::SteppingDown) => {
-                tracing::info!("Reconciliations stopped, proceeding with step down");
-            }
-            _ = async {
-                failpoint_support::sleep_millis_async!("step-down-delay-timeout");
-                tokio::time::sleep(Duration::from_secs(10)).await
-            } => {
-                tracing::warn!("Step down timed out while waiting for reconciliation gate, terminating process");
+        let stop_reconciliations =
+            self.stop_reconciliations(StopReconciliationsReason::SteppingDown);
+        let mut stop_reconciliations = std::pin::pin!(stop_reconciliations);
 
-                // The caller may proceed to act as leader when it sees this request fail: reduce the chance
-                // of a split-brain situation by terminating this controller instead of leaving it up in a partially-shut-down state.
-                std::process::exit(1);
+        let started_at = Instant::now();
+
+        // Wait for reconciliations to stop and warn if that's taking a long time
+        loop {
+            tokio::select! {
+                _ = &mut stop_reconciliations => {
+                    tracing::info!("Reconciliations stopped, proceeding with step down");
+                    break;
+                }
+                _ = tokio::time::sleep(Duration::from_secs(10)) => {
+                    tracing::warn!(
+                        elapsed_sec=%started_at.elapsed().as_secs(),
+                        "Stopping reconciliations during step down is taking too long"
+                    );
+                }
             }
         }
 
