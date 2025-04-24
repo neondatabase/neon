@@ -320,6 +320,35 @@ pub struct TimelineCreateRequest {
     pub mode: TimelineCreateRequestMode,
 }
 
+impl TimelineCreateRequest {
+    pub fn mode_tag(&self) -> &'static str {
+        match &self.mode {
+            TimelineCreateRequestMode::Branch { .. } => "branch",
+            TimelineCreateRequestMode::ImportPgdata { .. } => "import",
+            TimelineCreateRequestMode::Bootstrap { .. } => "bootstrap",
+        }
+    }
+
+    pub fn is_import(&self) -> bool {
+        matches!(self.mode, TimelineCreateRequestMode::ImportPgdata { .. })
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ShardImportStatus {
+    InProgress,
+    Done,
+    Error(String),
+}
+impl ShardImportStatus {
+    pub fn is_terminal(&self) -> bool {
+        match self {
+            ShardImportStatus::InProgress => false,
+            ShardImportStatus::Done | ShardImportStatus::Error(_) => true,
+        }
+    }
+}
+
 /// Storage controller specific extensions to [`TimelineInfo`].
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TimelineCreateResponseStorcon {
