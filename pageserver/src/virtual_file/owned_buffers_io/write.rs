@@ -225,8 +225,7 @@ where
         };
         let padded_pending = self.mutable.as_ref().map(|b| b.pending());
         trace!(unpadded_pending, padded_pending, "padding done");
-        if let Some(mutable) = self.mutable {
-            self.mutable = Some(mutable);
+        if self.mutable.is_some() {
             self.flush(ctx).await?;
         }
         let Self {
