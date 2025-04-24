@@ -74,7 +74,6 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
       github.ref_name == 'main'
     uses: ./.github/workflows/build-macos.yml
-    secrets: inherit
     with:
       pg_versions: ${{ needs.files-changed.outputs.postgres_changes }}
       rebuild_rust_code: ${{ fromJSON(needs.files-changed.outputs.rebuild_rust_code) }}
