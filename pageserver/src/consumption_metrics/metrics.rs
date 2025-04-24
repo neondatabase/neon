@@ -175,9 +175,9 @@ impl MetricsKey {
         .absolute_values()
     }
 
-    /// [`Tenant::remote_size`]
+    /// [`TenantShard::remote_size`]
     ///
-    /// [`Tenant::remote_size`]: crate::tenant::Tenant::remote_size
+    /// [`TenantShard::remote_size`]: crate::tenant::TenantShard::remote_size
     const fn remote_storage_size(tenant_id: TenantId) -> AbsoluteValueFactory {
         MetricsKey {
             tenant_id,
@@ -199,9 +199,9 @@ impl MetricsKey {
         .absolute_values()
     }
 
-    /// [`Tenant::cached_synthetic_size`] as refreshed by [`calculate_synthetic_size_worker`].
+    /// [`TenantShard::cached_synthetic_size`] as refreshed by [`calculate_synthetic_size_worker`].
     ///
-    /// [`Tenant::cached_synthetic_size`]: crate::tenant::Tenant::cached_synthetic_size
+    /// [`TenantShard::cached_synthetic_size`]: crate::tenant::TenantShard::cached_synthetic_size
     /// [`calculate_synthetic_size_worker`]: super::calculate_synthetic_size_worker
     const fn synthetic_size(tenant_id: TenantId) -> AbsoluteValueFactory {
         MetricsKey {
@@ -254,7 +254,7 @@ pub(super) async fn collect_all_metrics(
 
 async fn collect<S>(tenants: S, cache: &Cache, ctx: &RequestContext) -> Vec<NewRawMetric>
 where
-    S: futures::stream::Stream<Item = (TenantId, Arc<crate::tenant::Tenant>)>,
+    S: futures::stream::Stream<Item = (TenantId, Arc<crate::tenant::TenantShard>)>,
 {
     let mut current_metrics: Vec<NewRawMetric> = Vec::new();
 
@@ -263,7 +263,9 @@ where
     while let Some((tenant_id, tenant)) = tenants.next().await {
         let mut tenant_resident_size = 0;
 
-        for timeline in tenant.list_timelines() {
+        let timelines = tenant.list_timelines();
+        let timelines_len = timelines.len();
+        for timeline in timelines {
             let timeline_id = timeline.timeline_id;
 
             match TimelineSnapshot::collect(&timeline, ctx) {
@@ -289,6 +291,11 @@ where
             tenant_resident_size += timeline.resident_physical_size();
         }
 
+        if timelines_len == 0 {
+            // Force set it to 1 byte to avoid not being reported -- all timelines are offloaded.
+            tenant_resident_size = 1;
+        }
+
         let snap = TenantSnapshot::collect(&tenant, tenant_resident_size);
         snap.to_metrics(tenant_id, Utc::now(), cache, &mut current_metrics);
     }
@@ -308,7 +315,7 @@ impl TenantSnapshot {
     ///
     /// `resident_size` is calculated of the timelines we had access to for other metrics, so we
     /// cannot just list timelines here.
-    fn collect(t: &Arc<crate::tenant::Tenant>, resident_size: u64) -> Self {
+    fn collect(t: &Arc<crate::tenant::TenantShard>, resident_size: u64) -> Self {
         TenantSnapshot {
             resident_size,
             remote_size: t.remote_size(),

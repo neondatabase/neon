@@ -563,11 +563,12 @@ impl ImageLayerInner {
             let view = BufView::new_slice(&blobs_buf.buf);
 
             for meta in blobs_buf.blobs.iter() {
-                let img_buf = meta.read(&view).await?;
-
+                // Just read the raw header+data and pass it through to the target layer, without
+                // decoding and recompressing it.
+                let raw = meta.raw_with_header(&view);
                 key_count += 1;
                 writer
-                    .put_image(meta.meta.key, img_buf.into_bytes(), ctx)
+                    .put_image_raw(meta.meta.key, raw.into_bytes(), ctx)
                     .await
                     .context(format!("Storing key {}", meta.meta.key))?;
             }
@@ -859,6 +860,41 @@ impl ImageLayerWriterInner {
     }
 
     ///
+    /// Write the next image to the file, as a raw blob header and data.
+    ///
+    /// The page versions must be appended in blknum order.
+    ///
+    async fn put_image_raw(
+        &mut self,
+        key: Key,
+        raw_with_header: Bytes,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        ensure!(self.key_range.contains(&key));
+
+        // NB: we don't update the (un)compressed metrics, since we can't determine them without
+        // decompressing the image. This seems okay.
+        self.num_keys += 1;
+
+        let (_, res) = self
+            .blob_writer
+            .write_blob_raw(raw_with_header.slice_len(), ctx)
+            .await;
+        let offset = res?;
+
+        let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
+        key.write_to_byte_slice(&mut keybuf);
+        self.tree.append(&keybuf, offset)?;
+
+        #[cfg(feature = "testing")]
+        {
+            self.last_written_key = key;
+        }
+
+        Ok(())
+    }
+
+    ///
     /// Finish writing the image layer.
     ///
     async fn finish(
@@ -874,7 +910,13 @@ impl ImageLayerWriterInner {
         crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES_CONSIDERED
             .inc_by(self.uncompressed_bytes_eligible);
         crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES_CHOSEN.inc_by(self.uncompressed_bytes_chosen);
-        crate::metrics::COMPRESSION_IMAGE_OUTPUT_BYTES.inc_by(compressed_size);
+
+        // NB: filter() may pass through raw pages from a different layer, without looking at
+        // whether these are compressed or not. We don't track metrics for these, so avoid
+        // increasing `COMPRESSION_IMAGE_OUTPUT_BYTES` in this case too.
+        if self.uncompressed_bytes > 0 {
+            crate::metrics::COMPRESSION_IMAGE_OUTPUT_BYTES.inc_by(compressed_size);
+        };
 
         let mut file = self.blob_writer.into_inner(ctx).await?;
 
@@ -1024,6 +1066,25 @@ impl ImageLayerWriter {
         self.inner.as_mut().unwrap().put_image(key, img, ctx).await
     }
 
+    ///
+    /// Write the next value to the file, as a raw header and data. This allows passing through a
+    /// raw, potentially compressed image from a different layer file without recompressing it.
+    ///
+    /// The page versions must be appended in blknum order.
+    ///
+    pub async fn put_image_raw(
+        &mut self,
+        key: Key,
+        raw_with_header: Bytes,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .as_mut()
+            .unwrap()
+            .put_image_raw(key, raw_with_header, ctx)
+            .await
+    }
+
     /// Estimated size of the image layer.
     pub(crate) fn estimated_size(&self) -> u64 {
         let inner = self.inner.as_ref().unwrap();
@@ -1149,7 +1210,7 @@ mod test {
     use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
     use crate::tenant::storage_layer::{Layer, ResidentLayer};
     use crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner;
-    use crate::tenant::{Tenant, Timeline};
+    use crate::tenant::{TenantShard, Timeline};
 
     #[tokio::test]
     async fn image_layer_rewrite() {
@@ -1331,7 +1392,7 @@ mod test {
     }
 
     async fn produce_image_layer(
-        tenant: &Tenant,
+        tenant: &TenantShard,
         tline: &Arc<Timeline>,
         mut images: Vec<(Key, Bytes)>,
         lsn: Lsn,

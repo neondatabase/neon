@@ -155,6 +155,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "compaction_algorithm": {
             "kind": "tiered",
         },
+        "compaction_shard_ancestor": False,
         "eviction_policy": {
             "kind": "LayerAccessThreshold",
             "period": "20s",
