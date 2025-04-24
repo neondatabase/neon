@@ -4,12 +4,17 @@ import os
 import platform
 import shutil
 import tarfile
-from typing import TYPE_CHECKING
+from enum import StrEnum
+from pathlib import Path
+from typing import TYPE_CHECKING, cast, final
 
 import pytest
 import zstandard
 from fixtures.log_helper import log
 from fixtures.metrics import parse_metrics
+from fixtures.paths import BASE_DIR
+from fixtures.pg_config import PgConfigKey
+from fixtures.utils import subprocess_capture
 from werkzeug.wrappers.response import Response
 
 if TYPE_CHECKING:
@@ -20,6 +25,7 @@ if TYPE_CHECKING:
     from fixtures.neon_fixtures import (
         NeonEnvBuilder,
     )
+    from fixtures.pg_config import PgConfig
     from fixtures.pg_version import PgVersion
     from pytest_httpserver import HTTPServer
     from werkzeug.wrappers.request import Request
@@ -46,46 +52,108 @@ def neon_env_builder_local(
     return neon_env_builder
 
 
+@final
+class RemoteExtension(StrEnum):
+    SQL_ONLY = "test_extension_sql_only"
+    WITH_LIB = "test_extension_with_lib"
+
+    @property
+    def compressed_tarball_name(self) -> str:
+        return f"{self.tarball_name}.zst"
+
+    @property
+    def control_file_name(self) -> str:
+        return f"{self}.control"
+
+    @property
+    def directory(self) -> Path:
+        return BASE_DIR / "test_runner" / "regress" / "data" / "test_remote_extensions" / self
+
+    @property
+    def shared_library_name(self) -> str:
+        return f"{self}.so"
+
+    @property
+    def tarball_name(self) -> str:
+        return f"{self}.tar"
+
+    def archive_route(self, build_tag: str, arch: str, pg_version: PgVersion) -> str:
+        return f"{build_tag}/{arch}/v{pg_version}/extensions/{self.compressed_tarball_name}"
+
+    def build(self, pg_config: PgConfig, output_dir: Path) -> None:
+        if self is not RemoteExtension.WITH_LIB:
+            return
+
+        cmd: list[str] = [
+            *cast("list[str]", pg_config[PgConfigKey.CC]),
+            *cast("list[str]", pg_config[PgConfigKey.CPPFLAGS]),
+            *["-I", str(cast("Path", pg_config[PgConfigKey.INCLUDEDIR_SERVER]))],
+            *cast("list[str]", pg_config[PgConfigKey.CFLAGS]),
+            *cast("list[str]", pg_config[PgConfigKey.CFLAGS_SL]),
+            *cast("list[str]", pg_config[PgConfigKey.LDFLAGS_EX]),
+            *cast("list[str]", pg_config[PgConfigKey.LDFLAGS_SL]),
+            "-shared",
+            *["-o", str(output_dir / self.shared_library_name)],
+            str(self.directory / "src" / f"{self}.c"),
+        ]
+
+        subprocess_capture(output_dir, cmd, check=True)
+
+    def control_file_contents(self) -> str:
+        with open(self.directory / self.control_file_name, encoding="utf-8") as f:
+            return f.read()
+
+    def files(self, output_dir: Path) -> dict[Path, str]:
+        files = {
+            # self.directory / self.control_file_name: f"share/extension/{self.control_file_name}",
+            self.directory / "sql" / f"{self}--1.0.sql": f"share/extension/{self}--1.0.sql",
+            self.directory
+            / "sql"
+            / f"{self}--1.0--1.1.sql": f"share/extension/{self}--1.0--1.1.sql",
+        }
+
+        if self is RemoteExtension.WITH_LIB:
+            files[output_dir / self.shared_library_name] = f"lib/{self.shared_library_name}"
+
+        return files
+
+    def package(self, output_dir: Path) -> Path:
+        tarball = output_dir / self.tarball_name
+        with tarfile.open(tarball, "x") as tarf:
+            for file, arcname in self.files(output_dir).items():
+                tarf.add(file, arcname=arcname)
+
+        return tarball
+
+    def remove(self, output_dir: Path, pg_version: PgVersion) -> None:
+        for file in self.files(output_dir).values():
+            if file.startswith("share/extension"):
+                file = f"share/postgresql/extension/{os.path.basename(file)}"
+            if file.startswith("lib"):
+                file = f"lib/postgresql/{os.path.basename(file)}"
+            (output_dir / "pg_install" / f"v{pg_version}" / file).unlink()
+
+
+@pytest.mark.parametrize(
+    "extension",
+    (RemoteExtension.SQL_ONLY, RemoteExtension.WITH_LIB),
+    ids=["sql_only", "with_lib"],
+)
 def test_remote_extensions(
     httpserver: HTTPServer,
     neon_env_builder_local: NeonEnvBuilder,
     httpserver_listen_address: ListenAddress,
     test_output_dir: Path,
-    base_dir: Path,
     pg_version: PgVersion,
+    pg_config: PgConfig,
+    extension: RemoteExtension,
 ):
     # Setup a mock nginx S3 gateway which will return our test extension.
     (host, port) = httpserver_listen_address
     extensions_endpoint = f"http://{host}:{port}/pg-ext-s3-gateway"
 
-    build_tag = os.environ.get("BUILD_TAG", "latest")
-
-    # We have decided to use the Go naming convention due to Kubernetes.
-    arch = platform.machine()
-    match arch:
-        case "aarch64":
-            arch = "arm64"
-        case "x86_64":
-            arch = "amd64"
-        case _:
-            pass
-
-    archive_route = f"{build_tag}/{arch}/v{pg_version}/extensions/test_extension.tar.zst"
-    tarball = test_output_dir / "test_extension.tar"
-    extension_dir = (
-        base_dir / "test_runner" / "regress" / "data" / "test_remote_extensions" / "test_extension"
-    )
-
-    # Create tarball
-    with tarfile.open(tarball, "x") as tarf:
-        tarf.add(
-            extension_dir / "sql" / "test_extension--1.0.sql",
-            arcname="share/extension/test_extension--1.0.sql",
-        )
-        tarf.add(
-            extension_dir / "sql" / "test_extension--1.0--1.1.sql",
-            arcname="share/extension/test_extension--1.0--1.1.sql",
-        )
+    extension.build(pg_config, test_output_dir)
+    tarball = extension.package(test_output_dir)
 
     def handler(request: Request) -> Response:
         log.info(f"request: {request}")
@@ -104,8 +172,19 @@ def test_remote_extensions(
             direct_passthrough=True,
         )
 
+    # We have decided to use the Go naming convention due to Kubernetes.
+    arch = platform.machine()
+    match arch:
+        case "aarch64":
+            arch = "arm64"
+        case "x86_64":
+            arch = "amd64"
+        case _:
+            pass
+
     httpserver.expect_request(
-        f"/pg-ext-s3-gateway/{archive_route}", method="GET"
+        f"/pg-ext-s3-gateway/{extension.archive_route(build_tag=os.environ.get('BUILD_TAG', 'latest'), arch=arch, pg_version=pg_version)}",
+        method="GET",
     ).respond_with_handler(handler)
 
     # Start a compute node with remote_extension spec
@@ -114,21 +193,18 @@ def test_remote_extensions(
     env.create_branch("test_remote_extensions")
     endpoint = env.endpoints.create("test_remote_extensions")
 
-    with open(extension_dir / "test_extension.control", encoding="utf-8") as f:
-        control_data = f.read()
-
     # mock remote_extensions spec
     spec: dict[str, Any] = {
-        "public_extensions": ["test_extension"],
+        "public_extensions": [extension],
         "custom_extensions": None,
         "library_index": {
-            "test_extension": "test_extension",
+            extension: extension,
         },
         "extension_data": {
-            "test_extension": {
+            extension: {
                 "archive_path": "",
                 "control_data": {
-                    "test_extension.control": control_data,
+                    extension.control_file_name: extension.control_file_contents(),
                 },
             },
         },
@@ -141,8 +217,8 @@ def test_remote_extensions(
     with endpoint.connect() as conn:
         with conn.cursor() as cur:
             # Check that appropriate files were downloaded
-            cur.execute("CREATE EXTENSION test_extension VERSION '1.0'")
-            cur.execute("SELECT test_extension.motd()")
+            cur.execute(f"CREATE EXTENSION {extension} VERSION '1.0'")
+            cur.execute(f"SELECT {extension}.motd()")
 
     httpserver.check()
 
@@ -153,7 +229,7 @@ def test_remote_extensions(
     remote_ext_requests = metrics.query_all(
         "compute_ctl_remote_ext_requests_total",
         # Check that we properly report the filename in the metrics
-        {"filename": "test_extension.tar.zst"},
+        {"filename": extension.compressed_tarball_name},
     )
     assert len(remote_ext_requests) == 1
     for sample in remote_ext_requests:
@@ -162,20 +238,7 @@ def test_remote_extensions(
     endpoint.stop()
 
     # Remove the extension files to force a redownload of the extension.
-    for file in (
-        "test_extension.control",
-        "test_extension--1.0.sql",
-        "test_extension--1.0--1.1.sql",
-    ):
-        (
-            test_output_dir
-            / "pg_install"
-            / f"v{pg_version}"
-            / "share"
-            / "postgresql"
-            / "extension"
-            / file
-        ).unlink()
+    extension.remove(test_output_dir, pg_version)
 
     endpoint.start(remote_ext_config=extensions_endpoint)
 
@@ -183,8 +246,8 @@ def test_remote_extensions(
     with endpoint.connect() as conn:
         with conn.cursor() as cur:
             # Check that appropriate files were downloaded
-            cur.execute("ALTER EXTENSION test_extension UPDATE TO '1.1'")
-            cur.execute("SELECT test_extension.fun_fact()")
+            cur.execute(f"ALTER EXTENSION {extension} UPDATE TO '1.1'")
+            cur.execute(f"SELECT {extension}.fun_fact()")
 
     # Check that we properly recorded downloads in the metrics
     client = endpoint.http_client()
@@ -193,7 +256,7 @@ def test_remote_extensions(
     remote_ext_requests = metrics.query_all(
         "compute_ctl_remote_ext_requests_total",
         # Check that we properly report the filename in the metrics
-        {"filename": "test_extension.tar.zst"},
+        {"filename": extension.compressed_tarball_name},
     )
     assert len(remote_ext_requests) == 1
     for sample in remote_ext_requests:
