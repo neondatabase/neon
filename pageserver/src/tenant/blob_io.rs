@@ -414,9 +414,6 @@ where
     }
 
     /// Finish this blob writer and return the underlying `W`.
-    ///
-    /// The caller can use the `handle_tail` function to change the tail of the buffer before flushing it to disk.
-    /// The buffer will not be flushed to disk if handle_tail returns `None`.
     pub async fn shutdown(
         self,
         mode: BufferedWriterShutdownMode,
