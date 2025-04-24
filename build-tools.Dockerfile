@@ -301,7 +301,7 @@ ARG CARGO_DENY_VERSION=0.18.2
 ARG CARGO_HACK_VERSION=0.6.36
 ARG CARGO_NEXTEST_VERSION=0.9.94
 ARG CARGO_CHEF_VERSION=0.1.71
-ARG CARGO_DIESEL_CLI_VERSION=2.2.6
+ARG CARGO_DIESEL_CLI_VERSION=2.2.9
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && whoami && \
 	chmod +x rustup-init && \
 	./rustup-init -y --default-toolchain ${RUSTC_VERSION} && \
