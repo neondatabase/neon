@@ -6711,8 +6711,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
- "aws-config",
- "aws-sdk-s3",
  "camino",
  "chrono",
  "clap",
