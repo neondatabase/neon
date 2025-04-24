@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument};
 use utils::lsn::Lsn;
 
-use super::{importbucket_format, index_part_format};
+use super::index_part_format;
 use crate::assert_u64_eq_usize::U64IsUsize;
 use crate::config::PageServerConf;
 
@@ -171,12 +171,6 @@ impl RemoteStorageWrapper {
         .await;
         debug!(len = res.as_ref().ok().map(|buf| buf.len()), "done");
         res
-    }
-
-    pub async fn get_spec(&self) -> Result<Option<importbucket_format::Spec>, anyhow::Error> {
-        self.get_json(&RemotePath::from_string("spec.json").unwrap())
-            .await
-            .context("get spec")
     }
 
     #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]
