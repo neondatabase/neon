@@ -32,6 +32,7 @@ use super::{
     remote_initdb_preserved_archive_path, remote_tenant_manifest_path,
     remote_tenant_manifest_prefix, remote_tenant_path,
 };
+use crate::TEMP_FILE_SUFFIX;
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::span::{
@@ -40,10 +41,10 @@ use crate::span::{
 use crate::tenant::Generation;
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::LayerName;
+use crate::virtual_file;
 use crate::virtual_file::owned_buffers_io::write::FlushTaskError;
 use crate::virtual_file::{IoBufferMut, MaybeFatalIo, VirtualFile};
 use crate::virtual_file::{TempVirtualFile, owned_buffers_io};
-use crate::{TEMP_FILE_SUFFIX, virtual_file};
 
 ///
 /// If 'metadata' is given, we will validate that the downloaded file's size matches that
@@ -403,7 +404,7 @@ async fn do_download_index_part(
 /// generation (normal case when migrating/restarting).  Only if both of these return 404 do we fall back
 /// to listing objects.
 ///
-/// * `my_generation`: the value of `[crate::tenant::Tenant::generation]`
+/// * `my_generation`: the value of `[crate::tenant::TenantShard::generation]`
 /// * `what`: for logging, what object are we downloading
 /// * `prefix`: when listing objects, use this prefix (i.e. the part of the object path before the generation)
 /// * `do_download`: a GET of the object in a particular generation, which should **retry indefinitely** unless

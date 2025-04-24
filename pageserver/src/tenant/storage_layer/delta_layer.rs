@@ -1625,7 +1625,7 @@ pub(crate) mod test {
     use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
     use crate::tenant::storage_layer::{Layer, ResidentLayer};
     use crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner;
-    use crate::tenant::{Tenant, Timeline};
+    use crate::tenant::{TenantShard, Timeline};
 
     /// Construct an index for a fictional delta layer and and then
     /// traverse in order to plan vectored reads for a query. Finally,
@@ -2214,7 +2214,7 @@ pub(crate) mod test {
     }
 
     pub(crate) async fn produce_delta_layer(
-        tenant: &Tenant,
+        tenant: &TenantShard,
         tline: &Arc<Timeline>,
         mut deltas: Vec<(Key, Lsn, Value)>,
         ctx: &RequestContext,

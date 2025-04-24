@@ -30,30 +30,34 @@ impl SafekeeperReconcilers {
             reconcilers: HashMap::new(),
         }
     }
-    pub(crate) fn schedule_request_vec(
-        &mut self,
-        service: &Arc<Service>,
-        reqs: Vec<ScheduleRequest>,
-    ) {
+    /// Adds a safekeeper-specific reconciler.
+    /// Can be called multiple times, but it needs to be called at least once
+    /// for every new safekeeper added.
+    pub(crate) fn start_reconciler(&mut self, node_id: NodeId, service: &Arc<Service>) {
+        self.reconcilers.entry(node_id).or_insert_with(|| {
+            SafekeeperReconciler::spawn(self.cancel.child_token(), service.clone())
+        });
+    }
+    /// Stop a safekeeper-specific reconciler.
+    /// Stops the reconciler, cancelling all ongoing tasks.
+    pub(crate) fn stop_reconciler(&mut self, node_id: NodeId) {
+        if let Some(handle) = self.reconcilers.remove(&node_id) {
+            handle.cancel.cancel();
+        }
+    }
+    pub(crate) fn schedule_request_vec(&self, reqs: Vec<ScheduleRequest>) {
         tracing::info!(
             "Scheduling {} pending safekeeper ops loaded from db",
             reqs.len()
         );
         for req in reqs {
-            self.schedule_request(service, req);
+            self.schedule_request(req);
         }
     }
-    pub(crate) fn schedule_request(&mut self, service: &Arc<Service>, req: ScheduleRequest) {
+    pub(crate) fn schedule_request(&self, req: ScheduleRequest) {
         let node_id = req.safekeeper.get_id();
-        let reconciler_handle = self.reconcilers.entry(node_id).or_insert_with(|| {
-            SafekeeperReconciler::spawn(self.cancel.child_token(), service.clone())
-        });
+        let reconciler_handle = self.reconcilers.get(&node_id).unwrap();
         reconciler_handle.schedule_reconcile(req);
-    }
-    pub(crate) fn cancel_safekeeper(&mut self, node_id: NodeId) {
-        if let Some(handle) = self.reconcilers.remove(&node_id) {
-            handle.cancel.cancel();
-        }
     }
     /// Cancel ongoing reconciles for the given timeline
     ///
@@ -78,9 +82,12 @@ pub(crate) async fn load_schedule_requests(
     service: &Arc<Service>,
     safekeepers: &HashMap<NodeId, Safekeeper>,
 ) -> anyhow::Result<Vec<ScheduleRequest>> {
-    let pending_ops = service.persistence.list_pending_ops().await?;
-    let mut res = Vec::with_capacity(pending_ops.len());
-    for op_persist in pending_ops {
+    let pending_ops_timelines = service
+        .persistence
+        .list_pending_ops_with_timelines()
+        .await?;
+    let mut res = Vec::with_capacity(pending_ops_timelines.len());
+    for (op_persist, timeline_persist) in pending_ops_timelines {
         let node_id = NodeId(op_persist.sk_id as u64);
         let Some(sk) = safekeepers.get(&node_id) else {
             // This shouldn't happen, at least the safekeeper should exist as decomissioned.
@@ -102,16 +109,12 @@ pub(crate) async fn load_schedule_requests(
             SafekeeperTimelineOpKind::Delete => Vec::new(),
             SafekeeperTimelineOpKind::Exclude => Vec::new(),
             SafekeeperTimelineOpKind::Pull => {
-                // TODO this code is super hacky, it doesn't take migrations into account
-                let Some(timeline_id) = timeline_id else {
+                if timeline_id.is_none() {
+                    // We only do this extra check (outside of timeline_persist check) to give better error msgs
                     anyhow::bail!(
                         "timeline_id is empty for `pull` schedule request for {tenant_id}"
                     );
                 };
-                let timeline_persist = service
-                    .persistence
-                    .get_timeline(tenant_id, timeline_id)
-                    .await?;
                 let Some(timeline_persist) = timeline_persist else {
                     // This shouldn't happen, the timeline should still exist
                     tracing::warn!(
@@ -163,6 +166,7 @@ pub(crate) struct ScheduleRequest {
     pub(crate) kind: SafekeeperTimelineOpKind,
 }
 
+/// Handle to per safekeeper reconciler.
 struct ReconcilerHandle {
     tx: UnboundedSender<(ScheduleRequest, CancellationToken)>,
     ongoing_tokens: Arc<ClashMap<(TenantId, Option<TimelineId>), CancellationToken>>,
@@ -170,7 +174,10 @@ struct ReconcilerHandle {
 }
 
 impl ReconcilerHandle {
-    /// Obtain a new token slot, cancelling any existing reconciliations for that timeline
+    /// Obtain a new token slot, cancelling any existing reconciliations for
+    /// that timeline. It is not useful to have >1 operation per <tenant_id,
+    /// timeline_id, safekeeper>, hence scheduling op cancels current one if it
+    /// exists.
     fn new_token_slot(
         &self,
         tenant_id: TenantId,
@@ -305,15 +312,16 @@ impl SafekeeperReconciler {
             SafekeeperTimelineOpKind::Delete => {
                 let tenant_id = req.tenant_id;
                 if let Some(timeline_id) = req.timeline_id {
-                    let deleted = self.reconcile_inner(
-                        req,
-                        async |client| client.delete_timeline(tenant_id, timeline_id).await,
-                        |_resp| {
-                            tracing::info!(%tenant_id, %timeline_id, "deleted timeline from {req_host}");
-                        },
-                        req_cancel,
-                    )
-                    .await;
+                    let deleted = self
+                        .reconcile_inner(
+                            req,
+                            async |client| client.delete_timeline(tenant_id, timeline_id).await,
+                            |_resp| {
+                                tracing::info!("deleted timeline from {req_host}");
+                            },
+                            req_cancel,
+                        )
+                        .await;
                     if deleted {
                         self.delete_timeline_from_db(tenant_id, timeline_id).await;
                     }
@@ -344,12 +352,13 @@ impl SafekeeperReconciler {
         {
             Ok(list) => {
                 if !list.is_empty() {
-                    tracing::info!(%tenant_id, %timeline_id, "not deleting timeline from db as there is {} open reconciles", list.len());
+                    // duplicate the timeline_id here because it might be None in the reconcile context
+                    tracing::info!(%timeline_id, "not deleting timeline from db as there is {} open reconciles", list.len());
                     return;
                 }
             }
             Err(e) => {
-                tracing::warn!(%tenant_id, %timeline_id, "couldn't query pending ops: {e}");
+                tracing::warn!(%timeline_id, "couldn't query pending ops: {e}");
                 return;
             }
         }

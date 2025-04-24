@@ -526,6 +526,8 @@ pub struct TenantConfigPatch {
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub compaction_algorithm: FieldPatch<CompactionAlgorithmSettings>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub compaction_shard_ancestor: FieldPatch<bool>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub compaction_l0_first: FieldPatch<bool>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub compaction_l0_semaphore: FieldPatch<bool>,
@@ -614,6 +616,9 @@ pub struct TenantConfig {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction_algorithm: Option<CompactionAlgorithmSettings>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compaction_shard_ancestor: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction_l0_first: Option<bool>,
@@ -724,6 +729,7 @@ impl TenantConfig {
             mut compaction_threshold,
             mut compaction_upper_limit,
             mut compaction_algorithm,
+            mut compaction_shard_ancestor,
             mut compaction_l0_first,
             mut compaction_l0_semaphore,
             mut l0_flush_delay_threshold,
@@ -772,6 +778,9 @@ impl TenantConfig {
             .compaction_upper_limit
             .apply(&mut compaction_upper_limit);
         patch.compaction_algorithm.apply(&mut compaction_algorithm);
+        patch
+            .compaction_shard_ancestor
+            .apply(&mut compaction_shard_ancestor);
         patch.compaction_l0_first.apply(&mut compaction_l0_first);
         patch
             .compaction_l0_semaphore
@@ -860,6 +869,7 @@ impl TenantConfig {
             compaction_threshold,
             compaction_upper_limit,
             compaction_algorithm,
+            compaction_shard_ancestor,
             compaction_l0_first,
             compaction_l0_semaphore,
             l0_flush_delay_threshold,
@@ -920,6 +930,9 @@ impl TenantConfig {
                 .as_ref()
                 .unwrap_or(&global_conf.compaction_algorithm)
                 .clone(),
+            compaction_shard_ancestor: self
+                .compaction_shard_ancestor
+                .unwrap_or(global_conf.compaction_shard_ancestor),
             compaction_l0_first: self
                 .compaction_l0_first
                 .unwrap_or(global_conf.compaction_l0_first),

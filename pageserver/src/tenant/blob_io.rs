@@ -16,6 +16,7 @@
 //!
 use std::cmp::min;
 
+use anyhow::Context;
 use async_compression::Level;
 use bytes::{BufMut, BytesMut};
 use pageserver_api::models::ImageCompressionAlgorithm;
@@ -38,12 +39,65 @@ pub struct CompressionInfo {
     pub compressed_size: Option<usize>,
 }
 
+/// A blob header, with header+data length and compression info.
+///
+/// TODO: use this more widely, and add an encode() method too.
+/// TODO: document the header format.
+#[derive(Clone, Copy, Default)]
+pub struct Header {
+    pub header_len: usize,
+    pub data_len: usize,
+    pub compression_bits: u8,
+}
+
+impl Header {
+    /// Decodes a header from a byte slice.
+    pub fn decode(bytes: &[u8]) -> anyhow::Result<Self> {
+        let Some(&first_header_byte) = bytes.first() else {
+            anyhow::bail!("zero-length blob header");
+        };
+
+        // If the first bit is 0, this is just a 1-byte length prefix up to 128 bytes.
+        if first_header_byte < 0x80 {
+            return Ok(Self {
+                header_len: 1, // by definition
+                data_len: first_header_byte as usize,
+                compression_bits: BYTE_UNCOMPRESSED,
+            });
+        }
+
+        // Otherwise, this is a 4-byte header containing compression information and length.
+        const HEADER_LEN: usize = 4;
+        let mut header_buf: [u8; HEADER_LEN] = bytes[0..HEADER_LEN]
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("blob header too short: {bytes:?}"))?;
+
+        // TODO: verify the compression bits and convert to an enum.
+        let compression_bits = header_buf[0] & LEN_COMPRESSION_BIT_MASK;
+        header_buf[0] &= !LEN_COMPRESSION_BIT_MASK;
+        let data_len = u32::from_be_bytes(header_buf) as usize;
+
+        Ok(Self {
+            header_len: HEADER_LEN,
+            data_len,
+            compression_bits,
+        })
+    }
+
+    /// Returns the total header+data length.
+    pub fn total_len(&self) -> usize {
+        self.header_len + self.data_len
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum WriteBlobError {
     #[error(transparent)]
     Flush(FlushTaskError),
     #[error("blob too large ({len} bytes)")]
     BlobTooLarge { len: usize },
+    #[error(transparent)]
+    WriteBlobRaw(anyhow::Error),
 }
 
 impl BlockCursor<'_> {
@@ -325,6 +379,37 @@ where
         };
         let res = res.map_err(WriteBlobError::Flush);
         (srcbuf, res.map(|_| (offset, compression_info)))
+    }
+
+    /// Writes a raw blob containing both header and data, returning its offset.
+    pub(crate) async fn write_blob_raw<Buf: IoBuf + Send>(
+        &mut self,
+        raw_with_header: FullSlice<Buf>,
+        ctx: &RequestContext,
+    ) -> (FullSlice<Buf>, Result<u64, WriteBlobError>) {
+        // Verify the header, to ensure we don't write invalid/corrupt data.
+        let header = match Header::decode(&raw_with_header)
+            .context("decoding blob header")
+            .map_err(WriteBlobError::WriteBlobRaw)
+        {
+            Ok(header) => header,
+            Err(err) => return (raw_with_header, Err(err)),
+        };
+        if raw_with_header.len() != header.total_len() {
+            let header_total_len = header.total_len();
+            let raw_len = raw_with_header.len();
+            return (
+                raw_with_header,
+                Err(WriteBlobError::WriteBlobRaw(anyhow::anyhow!(
+                    "header length mismatch: {header_total_len} != {raw_len}"
+                ))),
+            );
+        }
+
+        let offset = self.offset;
+        let (raw_with_header, result) = self.write_all(raw_with_header, ctx).await;
+        let result = result.map_err(WriteBlobError::Flush);
+        (raw_with_header, result.map(|_| offset))
     }
 
     /// Finish this blob writer and return the underlying `W`.

@@ -1,5 +1,5 @@
 //! A group of high-level tests for connection establishing logic and auth.
-#![allow(clippy::unimplemented, clippy::unwrap_used)]
+#![allow(clippy::unimplemented)]
 
 mod mitm;
 
