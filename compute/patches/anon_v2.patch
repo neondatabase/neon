@@ -12,7 +12,7 @@ index 0cdc769..f6cc950 100644
 +GRANT ALL ON SCHEMA anon to neon_superuser;
 +GRANT ALL ON ALL TABLES IN SCHEMA anon TO neon_superuser;
 diff --git a/sql/init.sql b/sql/init.sql
-index 7da6553..23561c1 100644
+index 7da6553..051db6b 100644
 --- a/sql/init.sql
 +++ b/sql/init.sql
 @@ -74,6 +74,49 @@ $$
@@ -106,3 +106,25 @@ index 7da6553..23561c1 100644
  $$
    LANGUAGE SQL
    VOLATILE
+@@ -264,3 +284,21 @@ $$
+ ;
+ 
+ SECURITY LABEL FOR anon ON FUNCTION anon.unload IS 'UNTRUSTED';
++
++
++CREATE OR REPLACE FUNCTION anon.enable_transparent_masking_superuser(
++  dbname TEXT
++)
++RETURNS VOID AS
++$$
++BEGIN
++  EXECUTE format('ALTER DATABASE %I SET anon.transparent_dynamic_masking TO true', dbname);
++END;
++$$
++  LANGUAGE plpgsql
++  VOLATILE
++  SECURITY DEFINER
++  SET search_path=''
++;
++
++SECURITY LABEL FOR anon ON FUNCTION anon.enable_transparent_masking_superuser IS 'UNTRUSTED';
