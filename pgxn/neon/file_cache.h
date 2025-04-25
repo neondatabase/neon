@@ -33,6 +33,7 @@ extern void lfc_init(void);
 extern bool lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 						 const void* buffer, XLogRecPtr lsn);
 
+PGDLLEXPORT void lfc_prewarm_main(Datum main_arg);
 
 static inline bool
 lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
