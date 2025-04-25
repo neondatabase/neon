@@ -774,7 +774,7 @@ lfc_prewarm(FileCacheState* fcs, uint32 n_workers)
 		worker.bgw_restart_time = BGW_NEVER_RESTART;
 		strcpy(worker.bgw_library_name, "neon");
 		strcpy(worker.bgw_function_name, "lfc_prewarm_main");
-		sprintf(worker.bgw_name, "LFC prewarm worker %d", i+1);
+		snprintf(worker.bgw_name, BGW_MAXLEN, "LFC prewarm worker %d", i+1);
 		strcpy(worker.bgw_type, "LFC prewarm worker");
 		worker.bgw_main_arg = Int32GetDatum(i);
 		/* must set notify PID to wait for shutdown */
@@ -1860,7 +1860,7 @@ neon_get_lfc_stats(PG_FUNCTION_ARGS)
 			value = lfc_blocks_per_chunk;
 			break;
 		case 9:
-			key = "file_cache_pinned";
+			key = "file_cache_chunks_pinned";
 			if (lfc_ctl)
 				value = lfc_ctl->pinned;
 			break;
