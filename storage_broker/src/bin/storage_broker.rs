@@ -41,7 +41,7 @@ use storage_broker::proto::{
     FilterTenantTimelineId, MessageType, SafekeeperDiscoveryRequest, SafekeeperDiscoveryResponse,
     SafekeeperTimelineInfo, SubscribeByFilterRequest, SubscribeSafekeeperInfoRequest, TypedMessage,
 };
-use storage_broker::{DEFAULT_KEEPALIVE_INTERVAL, DEFAULT_LISTEN_ADDR, parse_proto_ttid};
+use storage_broker::{DEFAULT_KEEPALIVE_INTERVAL, parse_proto_ttid};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
@@ -68,6 +68,12 @@ const DEFAULT_SSL_CERT_RELOAD_PERIOD: &str = "60s";
 
 #[derive(Parser, Debug)]
 #[command(version = GIT_VERSION, about = "Broker for neon storage nodes communication", long_about = None)]
+#[clap(group(
+    clap::ArgGroup::new("listen-addresses")
+        .required(true)
+        .multiple(true)
+        .args(&["listen_addr", "listen_https_addr"]),
+))]
 struct Args {
     /// Endpoint to listen HTTP on.
     #[arg(short, long)]
@@ -698,10 +704,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             info!("listening HTTP on {}", addr);
             Some(TcpListener::bind(addr).await?)
         }
-        None if args.listen_https_addr.is_none() => {
-            info!("listening HTTP on default address {}", DEFAULT_LISTEN_ADDR);
-            Some(TcpListener::bind(DEFAULT_LISTEN_ADDR).await?)
-        }
         None => None,
     };
 
@@ -798,7 +800,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let tls_acceptor = tls_acceptor.clone();
 
         tokio::task::spawn(async move {
-            if is_https {
+            let res = if is_https {
                 let tls_acceptor =
                     tls_acceptor.expect("tls_acceptor is set together with https_listener");
 
@@ -810,21 +812,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
-                let res = builder
+                builder
                     .serve_connection(TokioIo::new(tls_stream), service_fn_)
-                    .await;
-
-                if let Err(e) = res {
-                    info!("error serving HTTPS connection from {addr}: {e}");
-                }
+                    .await
             } else {
-                let res = builder
+                builder
                     .serve_connection(TokioIo::new(tcp_stream), service_fn_)
-                    .await;
+                    .await
+            };
 
-                if let Err(e) = res {
-                    info!("error serving HTTP connection from {addr}: {e}");
-                }
+            if let Err(e) = res {
+                info!(%is_https, "error serving HTTP connection from {addr}: {e}");
             }
         });
     }

@@ -17,8 +17,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use compute_api::spec::ComputeMode;
+use control_plane::broker::StorageBroker;
 use control_plane::endpoint::ComputeControlPlane;
 use control_plane::endpoint_storage::{ENDPOINT_STORAGE_DEFAULT_PORT, EndpointStorage};
+use control_plane::local_env;
 use control_plane::local_env::{
     EndpointStorageConf, InitForceMode, LocalEnv, NeonBroker, NeonLocalInitConf,
     NeonLocalInitPageserverConf, SafekeeperConf,
@@ -28,7 +30,6 @@ use control_plane::safekeeper::SafekeeperNode;
 use control_plane::storage_controller::{
     NeonStorageControllerStartArgs, NeonStorageControllerStopArgs, StorageController,
 };
-use control_plane::{broker, local_env};
 use nix::fcntl::{FlockArg, flock};
 use pageserver_api::config::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
@@ -1778,15 +1779,16 @@ async fn handle_endpoint_storage(
 async fn handle_storage_broker(subcmd: &StorageBrokerCmd, env: &local_env::LocalEnv) -> Result<()> {
     match subcmd {
         StorageBrokerCmd::Start(args) => {
-            if let Err(e) = broker::start_broker_process(env, &args.start_timeout).await {
+            let storage_broker = StorageBroker::from_env(env);
+            if let Err(e) = storage_broker.start(&args.start_timeout).await {
                 eprintln!("broker start failed: {e}");
                 exit(1);
             }
         }
 
         StorageBrokerCmd::Stop(_args) => {
-            // FIXME: stop_mode unused
-            if let Err(e) = broker::stop_broker_process(env) {
+            let storage_broker = StorageBroker::from_env(env);
+            if let Err(e) = storage_broker.stop() {
                 eprintln!("broker stop failed: {e}");
                 exit(1);
             }
@@ -1836,8 +1838,11 @@ async fn handle_start_all_impl(
     #[allow(clippy::redundant_closure_call)]
     (|| {
         js.spawn(async move {
-            let retry_timeout = retry_timeout;
-            broker::start_broker_process(env, &retry_timeout).await
+            let storage_broker = StorageBroker::from_env(env);
+            storage_broker
+                .start(&retry_timeout)
+                .await
+                .map_err(|e| e.context("start storage_broker"))
         });
 
         js.spawn(async move {
@@ -1992,7 +1997,8 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
         }
     }
 
-    if let Err(e) = broker::stop_broker_process(env) {
+    let storage_broker = StorageBroker::from_env(env);
+    if let Err(e) = storage_broker.stop() {
         eprintln!("neon broker stop failed: {e:#}");
     }
 

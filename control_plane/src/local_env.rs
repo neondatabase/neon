@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use utils::auth::encode_from_key_file;
 use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 
+use crate::broker::StorageBroker;
 use crate::endpoint_storage::{ENDPOINT_STORAGE_REMOTE_STORAGE_DIR, EndpointStorage};
 use crate::pageserver::{PAGESERVER_REMOTE_STORAGE_DIR, PageServerNode};
 use crate::safekeeper::SafekeeperNode;
@@ -938,14 +939,11 @@ impl LocalEnv {
         // create endpoints dir
         fs::create_dir_all(env.endpoints_path())?;
 
-        // create storage controller dir
+        // create storage broker dir
         fs::create_dir_all(env.storage_broker_data_dir())?;
-        if generate_local_ssl_certs {
-            env.generate_ssl_cert(
-                &env.storage_broker_data_dir().join("server.crt"),
-                &env.storage_broker_data_dir().join("server.key"),
-            )?;
-        }
+        StorageBroker::from_env(&env)
+            .initialize()
+            .context("storage broker init failed")?;
 
         // create safekeeper dirs
         for safekeeper in &env.safekeepers {
