@@ -44,7 +44,7 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         if docker compose logs "compute_is_ready" | grep -q "accepting connections"; then
             echo "OK. The compute is ready to connect."
             echo "execute simple queries."
-            docker compose exec compute /bin/bash -c "psql ${PSQL_OPTION}"
+            docker compose exec compute /bin/bash -c "psql ${PSQL_OPTION} 'SELECT 1'"
             break
         fi
     done
