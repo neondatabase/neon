@@ -99,6 +99,12 @@ If data compression is enabled, the data is compressed first before being encryp
 This file format is used across both object storage and local storage. We do not decrypt when downloading
 the layer file to the disk. Decryption is done when reading the layer.
 
+### Layer File Format Migration
+
+We record the file format for each of the layer file in both the index_part and the layer file name (suffix v2?).
+The layer file format version will be passed into the layer readers. The re-keying operation (described below)
+will migrate all layer files automatically to v2.
+
 ### Safekeeper Segment Format
 
 TBD
@@ -113,6 +119,7 @@ exact timeline key being used to encrypt the layer file).
 ```
 # LayerFileMetadata
 {
+  "format": 2,
   "created_at": "<time>",
   "metadata_block_offset": u64,
 }
