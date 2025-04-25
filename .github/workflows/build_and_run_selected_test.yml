@@ -26,7 +26,6 @@ on:
         default: '[{"pg_version":"v17"}]'
         required: true
         type: string
-  pull_request:
 
 defaults:
   run:
