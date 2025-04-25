@@ -5459,6 +5459,13 @@ def wait_for_last_flush_lsn(
 
     if last_flush_lsn is None:
         last_flush_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+        # The last_flush_lsn may not correspond to a record boundary.
+        # For example, if the compute flushed WAL on a page boundary,
+        # the remaining part of the record might not be flushed for a long time.
+        # This would prevent the pageserver from reaching last_flush_lsn promptly.
+        # To ensure the rest of the record reaches the pageserver quickly,
+        # we forcibly flush the WAL by using pg_switch_wal().
+        endpoint.safe_psql("SELECT pg_switch_wal()")
 
     results = []
     for tenant_shard_id, pageserver in shards:
