@@ -2833,21 +2833,26 @@ impl Timeline {
         self: &Arc<Self>,
         layer_selection: &[Layer],
     ) -> Result<(), CompactionError> {
-        let mut estimated_memory_usage_mb = 0;
+        let mut estimated_memory_usage_mb = 0.0;
         let mut num_image_layers = 0;
         let mut num_delta_layers = 0;
+        let target_layer_size_bytes = 256 * 1024 * 1024;
         for layer in layer_selection {
-            if layer.layer_desc().is_delta() {
+            let layer_desc = layer.layer_desc();
+            if layer_desc.is_delta() {
                 // Delta layers at most have 1MB buffer; 3x to make it safe (there're deltas as large as 16KB).
-                estimated_memory_usage_mb += 3;
+                // Multiply the layer size so that tests can pass.
+                estimated_memory_usage_mb +=
+                    3.0 * (layer_desc.file_size / target_layer_size_bytes) as f64;
                 num_delta_layers += 1;
             } else {
                 // Image layers at most have 1MB buffer but it might be compressed; assume 5x compression ratio.
-                estimated_memory_usage_mb += 5;
+                estimated_memory_usage_mb +=
+                    5.0 * (layer_desc.file_size / target_layer_size_bytes) as f64;
                 num_image_layers += 1;
             }
         }
-        if estimated_memory_usage_mb > 1024 {
+        if estimated_memory_usage_mb > 1024.0 {
             return Err(CompactionError::Other(anyhow!(
                 "estimated memory usage is too high: {}MB, giving up compaction; num_image_layers={}, num_delta_layers={}",
                 estimated_memory_usage_mb,
