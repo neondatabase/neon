@@ -226,6 +226,7 @@ pub struct ConfigToml {
     pub synthetic_size_calculation_interval: Duration,
     pub disk_usage_based_eviction: DiskUsageEvictionTaskConfig,
     pub test_remote_failures: u64,
+    pub test_remote_failures_probability: u64,
     pub ondemand_download_behavior_treat_error_as_warn: bool,
     #[serde(with = "humantime_serde")]
     pub background_task_maximum_delay: Duration,
@@ -758,6 +759,7 @@ impl Default for ConfigToml {
             disk_usage_based_eviction: DiskUsageEvictionTaskConfig::default(),
 
             test_remote_failures: (0),
+            test_remote_failures_probability: (100),
 
             ondemand_download_behavior_treat_error_as_warn: (false),
 

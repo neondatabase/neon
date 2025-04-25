@@ -147,7 +147,11 @@ pub struct PageServerConf {
 
     pub disk_usage_based_eviction: DiskUsageEvictionTaskConfig,
 
+    // The number of allowed failures in remote storage operations.
     pub test_remote_failures: u64,
+    // The probability of failure in remote storage operations. Only works when test_remote_failures > 1.
+    // Use 100 for 100% failure, 0 for no failure.
+    pub test_remote_failures_probability: u64,
 
     pub ondemand_download_behavior_treat_error_as_warn: bool,
 
@@ -392,6 +396,7 @@ impl PageServerConf {
             synthetic_size_calculation_interval,
             disk_usage_based_eviction,
             test_remote_failures,
+            test_remote_failures_probability,
             ondemand_download_behavior_treat_error_as_warn,
             background_task_maximum_delay,
             control_plane_api,
@@ -461,6 +466,7 @@ impl PageServerConf {
             synthetic_size_calculation_interval,
             disk_usage_based_eviction,
             test_remote_failures,
+            test_remote_failures_probability,
             ondemand_download_behavior_treat_error_as_warn,
             background_task_maximum_delay,
             control_plane_api: control_plane_api
