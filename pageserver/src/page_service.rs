@@ -21,7 +21,7 @@ use pageserver_api::config::{
     PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
     PageServiceProtocolPipelinedBatchingStrategy, PageServiceProtocolPipelinedExecutionStrategy,
 };
-use pageserver_api::key::rel_block_to_key;
+use pageserver_api::key::{Key, rel_block_to_key};
 use pageserver_api::models::{
     self, PageTraceEvent, PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
     PagestreamErrorResponse, PagestreamExistsRequest, PagestreamExistsResponse,
@@ -29,7 +29,7 @@ use pageserver_api::models::{
     PagestreamGetSlruSegmentResponse, PagestreamNblocksRequest, PagestreamNblocksResponse,
     PagestreamProtocolVersion, PagestreamRequest, TenantState,
 };
-use pageserver_api::reltag::SlruKind;
+use pageserver_api::reltag::{RelTag, SlruKind};
 use pageserver_api::shard::TenantShardId;
 use postgres_backend::{
     AuthType, PostgresBackend, PostgresBackendReader, QueryError, is_expected_io_error,
@@ -1035,10 +1035,10 @@ impl PageServerHandler {
                 // avoid a somewhat costly Span::record() by constructing the entire span in one go.
                 macro_rules! mkspan {
                     (before shard routing) => {{
-                        tracing::info_span!(parent: &parent_span, "handle_get_page_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.hdr.request_lsn)
+                        tracing::info_span!(parent: &parent_span, "handle_get_page_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.hdr.request_lsn, not_modified_since_lsn = %req.hdr.not_modified_since)
                     }};
                     ($shard_id:expr) => {{
-                        tracing::info_span!(parent: &parent_span, "handle_get_page_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.hdr.request_lsn, shard_id = %$shard_id)
+                        tracing::info_span!(parent: &parent_span, "handle_get_page_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.hdr.request_lsn, not_modified_since_lsn = %req.hdr.not_modified_since, shard_id = %$shard_id)
                     }};
                 }
 
@@ -1140,9 +1140,10 @@ impl PageServerHandler {
                 .await?;
 
                 // We're holding the Handle
+                let last_record_lsn = shard.get_last_record_lsn();
                 let effective_request_lsn = match Self::effective_request_lsn(
                     &shard,
-                    shard.get_last_record_lsn(),
+                    last_record_lsn,
                     req.hdr.request_lsn,
                     req.hdr.not_modified_since,
                     &shard.get_applied_gc_cutoff_lsn(),
@@ -1152,6 +1153,22 @@ impl PageServerHandler {
                         return respond_error!(span, e);
                     }
                 };
+
+                let trouble_key = Key::from_hex("000000067F000040000000400600FFFFFFFF").unwrap();
+                let trouble_rel = RelTag {
+                    spcnode: trouble_key.field2,
+                    dbnode: trouble_key.field3,
+                    relnode: trouble_key.field4,
+                    forknum: trouble_key.field5,
+                };
+                if req.rel == trouble_rel {
+                    tracing::info!(
+                        request_lsn=%req.hdr.request_lsn,
+                        not_modified_since_lsn=%req.hdr.not_modified_since,
+                        %last_record_lsn,
+                        "effective_request_lsn for {} is {}", key, effective_request_lsn
+                    );
+                }
 
                 BatchedFeMessage::GetPage {
                     span,

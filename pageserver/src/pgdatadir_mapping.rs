@@ -185,6 +185,7 @@ impl Timeline {
             pending_directory_entries: Vec::new(),
             pending_metadata_bytes: 0,
             lsn,
+            extra_log: false,
         }
     }
 
@@ -265,6 +266,14 @@ impl Timeline {
         let mut req_keyspaces: HashMap<Lsn, KeySpaceRandomAccum> =
             HashMap::with_capacity(pages.len());
 
+        let trouble_key = Key::from_hex("000000067F000040000000400600FFFFFFFF").unwrap();
+        let trouble_rel = RelTag {
+            spcnode: trouble_key.field2,
+            dbnode: trouble_key.field3,
+            relnode: trouble_key.field4,
+            forknum: trouble_key.field5,
+        };
+
         for (response_slot_idx, (tag, blknum, lsn, ctx)) in pages.enumerate() {
             if tag.relnode == 0 {
                 result_slots[response_slot_idx].write(Err(PageReconstructError::Other(
@@ -273,6 +282,14 @@ impl Timeline {
 
                 slots_filled += 1;
                 continue;
+            }
+
+            if *tag == trouble_rel {
+                tracing::info!(
+                    "Getting rel size for {} at LSN {}",
+                    rel_block_to_key(*tag, *blknum),
+                    lsn
+                );
             }
 
             let nblocks = match self
@@ -1402,6 +1419,8 @@ pub struct DatadirModification<'a> {
 
     /// An **approximation** of how many metadata bytes will be written to the EphemeralFile.
     pending_metadata_bytes: usize,
+
+    extra_log: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1619,6 +1638,32 @@ impl DatadirModification<'_> {
         ctx: &RequestContext,
     ) -> Result<(), WalIngestError> {
         let mut gaps_at_lsns = Vec::default();
+
+        let trouble_key = Key::from_hex("000000067F000040000000400600FFFFFFFF").unwrap();
+        let trouble_rel = RelTag {
+            spcnode: trouble_key.field2,
+            dbnode: trouble_key.field3,
+            relnode: trouble_key.field4,
+            forknum: trouble_key.field5,
+        };
+
+        for meta in batch.metadata.iter().filter_map(|m| match m {
+            ValueMeta::Serialized(serialized_value_meta) => Some(serialized_value_meta),
+            ValueMeta::Observed(_) => None,
+        }) {
+            let key = Key::from_compact(meta.key);
+            let rel = RelTag {
+                spcnode: key.field2,
+                dbnode: key.field3,
+                relnode: key.field4,
+                forknum: key.field5,
+            };
+
+            if rel == trouble_rel {
+                tracing::info!("Put for {key} at LSN {}", meta.lsn);
+                self.extra_log = true;
+            }
+        }
 
         for meta in batch.metadata.iter() {
             let key = Key::from_compact(meta.key());
@@ -1950,6 +1995,19 @@ impl DatadirModification<'_> {
                 "invalid relnode"
             )))?;
         }
+
+        let trouble_key = Key::from_hex("000000067F000040000000400600FFFFFFFF").unwrap();
+        let trouble_rel = RelTag {
+            spcnode: trouble_key.field2,
+            dbnode: trouble_key.field3,
+            relnode: trouble_key.field4,
+            forknum: trouble_key.field5,
+        };
+
+        if rel == trouble_rel {
+            self.extra_log = true;
+        }
+
         // It's possible that this is the first rel for this db in this
         // tablespace.  Create the reldir entry for it if so.
         let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY, ctx).await?)?;
@@ -1968,6 +2026,10 @@ impl DatadirModification<'_> {
             } else {
                 true
             };
+
+        if rel == trouble_rel {
+            tracing::info!(%dbdir_exists, "Maybe created db dir for {} at LSN {}", trouble_key.to_compact(), self.lsn);
+        }
 
         let rel_dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
         let mut rel_dir = if !dbdir_exists {
@@ -2014,6 +2076,10 @@ impl DatadirModification<'_> {
             }
             self.pending_directory_entries
                 .push((DirectoryKind::RelV2, MetricsUpdate::Add(1)));
+
+            if rel == trouble_rel {
+                tracing::info!(%dbdir_exists, "Created v2 rel for {} at LSN {}", trouble_key.to_compact(), self.lsn);
+            }
         } else {
             // Add the new relation to the rel directory entry, and write it back
             if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
@@ -2029,6 +2095,10 @@ impl DatadirModification<'_> {
                 rel_dir_key,
                 Value::Image(Bytes::from(RelDirectory::ser(&rel_dir)?)),
             );
+
+            if rel == trouble_rel {
+                tracing::info!(%dbdir_exists, "Created v1 rel for {} at LSN {}", trouble_key.to_compact(), self.lsn);
+            }
         }
 
         // Put size
@@ -2463,11 +2533,19 @@ impl DatadirModification<'_> {
         };
 
         if let Some(batch) = maybe_batch {
-            tracing::debug!(
-                "Flushing batch with max_lsn={}. Last record LSN is {}",
-                batch.max_lsn,
-                self.tline.get_last_record_lsn()
-            );
+            if self.extra_log {
+                tracing::info!(
+                    "Flushing batch with max_lsn={}. Last record LSN is {}",
+                    batch.max_lsn,
+                    self.tline.get_last_record_lsn()
+                );
+            } else {
+                tracing::debug!(
+                    "Flushing batch with max_lsn={}. Last record LSN is {}",
+                    batch.max_lsn,
+                    self.tline.get_last_record_lsn()
+                );
+            }
 
             // This bails out on first error without modifying pending_updates.
             // That's Ok, cf this function's doc comment.
@@ -2500,6 +2578,14 @@ impl DatadirModification<'_> {
         }
 
         self.pending_metadata_bytes = 0;
+
+        if self.extra_log {
+            tracing::info!(
+                "Flushed batch. Last record LSN is {}",
+                self.tline.get_last_record_lsn()
+            );
+            self.extra_log = false;
+        }
 
         Ok(())
     }
@@ -2591,6 +2677,26 @@ impl DatadirModification<'_> {
             .pending_data_batch
             .get_or_insert_with(SerializedValueBatch::default);
         batch.put(key, val, self.lsn);
+
+        let trouble_key = Key::from_hex("000000067F000040000000400600FFFFFFFF").unwrap();
+        let trouble_rel = RelTag {
+            spcnode: trouble_key.field2,
+            dbnode: trouble_key.field3,
+            relnode: trouble_key.field4,
+            forknum: trouble_key.field5,
+        };
+        let key = Key::from_compact(key);
+        let rel = RelTag {
+            spcnode: key.field2,
+            dbnode: key.field3,
+            relnode: key.field4,
+            forknum: key.field5,
+        };
+
+        if rel == trouble_rel {
+            tracing::info!("Put for {key} at LSN {}", self.lsn);
+            self.extra_log = true;
+        }
     }
 
     fn put_metadata(&mut self, key: CompactKey, val: Value) {
@@ -2616,6 +2722,14 @@ impl DatadirModification<'_> {
 
         if key == CHECKPOINT_KEY.to_compact() {
             tracing::debug!("Checkpoint key added to pending with size {val_serialized_size}");
+        }
+
+        let trouble_key = Key::from_hex("000000067F000040000000400600FFFFFFFF")
+            .unwrap()
+            .to_compact();
+        if key == trouble_key {
+            tracing::info!("Put for {trouble_key} at LSN {}", self.lsn);
+            self.extra_log = true;
         }
     }
 
