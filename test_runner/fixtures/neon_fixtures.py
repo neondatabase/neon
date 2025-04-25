@@ -490,7 +490,9 @@ class NeonEnvBuilder:
         self.config_init_force: str | None = None
         self.top_output_dir = top_output_dir
         self.control_plane_hooks_api: str | None = None
-        self.storage_controller_config: dict[Any, Any] | None = None
+        self.storage_controller_config: dict[Any, Any] | None = {
+            "timelines_onto_safekeepers": True,
+        }
 
         # Flag to enable https listener in pageserver, generate local ssl certs,
         # and force storage controller to use https for pageserver api.
