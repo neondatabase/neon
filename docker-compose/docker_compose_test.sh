@@ -65,7 +65,7 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         docker compose cp "${TMPDIR}/data" compute:/postgres/contrib/file_fdw/data
         rm -rf "${TMPDIR}"
         # Apply patches
-        docker compose exec -i neon-test-extensions bash -c "(cd /postgres && patch -p1)" <"../compute/patches/contrib_pg${pg_version}.patch"
+        docker compose exec -T neon-test-extensions bash -c "(cd /postgres && patch -p1)" <"../compute/patches/contrib_pg${pg_version}.patch"
         # We are running tests now
         rm -f testout.txt testout_contrib.txt
         docker compose exec -e USE_PGXS=1 -e SKIP=timescaledb-src,rdkit-src,postgis-src,pg_jsonschema-src,kq_imcx-src,wal2json_2_5-src,rag_jina_reranker_v1_tiny_en-src,rag_bge_small_en_v15-src \
