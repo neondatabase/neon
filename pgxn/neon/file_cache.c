@@ -609,7 +609,7 @@ lfc_init(void)
 							1,
 							MAX_BLOCKS_PER_CHUNK,
 							PGC_POSTMASTER,
-							0,
+							GUC_UNIT_BLOCKS,
 							lfc_check_chunk_size,
 							lfc_change_chunk_size,
 							NULL);
