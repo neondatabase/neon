@@ -3720,6 +3720,10 @@ impl Service {
             // Because the caller might not provide an explicit LSN, we must do the creation first on a single shard, and then
             // use whatever LSN that shard picked when creating on subsequent shards.  We arbitrarily use shard zero as the shard
             // that will get the first creation request, and propagate the LSN to all the >0 shards.
+            //
+            // This also enables non-zero shards to use the initdb that shard 0 generated and uploaded to S3, rather than
+            // independently generating their own initdb.  This guarantees that shards cannot end up with different initial
+            // states if e.g. they have different postgres binary versions.
             let timeline_info = create_one(
                 shard_zero_tid,
                 shard_zero_locations,
@@ -3729,11 +3733,16 @@ impl Service {
             )
             .await?;
 
-            // Propagate the LSN that shard zero picked, if caller didn't provide one
+            // Update the create request for shards >= 0
             match &mut create_req.mode {
                 models::TimelineCreateRequestMode::Branch { ancestor_start_lsn, .. } if ancestor_start_lsn.is_none() => {
+                    // Propagate the LSN that shard zero picked, if caller didn't provide one
                     *ancestor_start_lsn = timeline_info.ancestor_lsn;
                 },
+                models::TimelineCreateRequestMode::Bootstrap { existing_initdb_timeline_id, .. } => {
+                    // For shards >= 0, do not run initdb: use the one that shard 0 uploaded to S3
+                    *existing_initdb_timeline_id = Some(create_req.new_timeline_id)
+                }
                 _ => {}
             }
 
