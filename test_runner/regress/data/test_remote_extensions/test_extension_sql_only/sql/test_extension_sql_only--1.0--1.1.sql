@@ -1,6 +1,6 @@
-\echo Use "ALTER EXTENSION test_extension UPDATE TO '1.1'" to load this file. \quit
+\echo Use "ALTER EXTENSION test_extension_sql_only UPDATE TO '1.1'" to load this file. \quit
 
-CREATE FUNCTION test_extension.fun_fact()
+CREATE FUNCTION test_extension_sql_only.fun_fact()
 RETURNS void
 IMMUTABLE LEAKPROOF PARALLEL SAFE
 AS $$

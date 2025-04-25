@@ -1029,7 +1029,7 @@ class NeonEnvBuilder:
 
             self.env.broker.assert_no_errors()
 
-            self.env.object_storage.assert_no_errors()
+            self.env.endpoint_storage.assert_no_errors()
 
         try:
             self.overlay_cleanup_teardown()
@@ -1126,7 +1126,7 @@ class NeonEnv:
             pagectl_env_vars["RUST_LOG"] = self.rust_log_override
         self.pagectl = Pagectl(extra_env=pagectl_env_vars, binpath=self.neon_binpath)
 
-        self.object_storage = ObjectStorage(self)
+        self.endpoint_storage = EndpointStorage(self)
 
         # The URL for the pageserver to use as its control_plane_api config
         if config.storage_controller_port_override is not None:
@@ -1183,7 +1183,7 @@ class NeonEnv:
             },
             "safekeepers": [],
             "pageservers": [],
-            "object_storage": {"port": self.port_distributor.get_port()},
+            "endpoint_storage": {"port": self.port_distributor.get_port()},
             "generate_local_ssl_certs": self.generate_local_ssl_certs,
         }
 
@@ -1291,7 +1291,11 @@ class NeonEnv:
                             ps_cfg[key] = value
 
             if self.pageserver_virtual_file_io_mode is not None:
-                ps_cfg["virtual_file_io_mode"] = self.pageserver_virtual_file_io_mode
+                # TODO(christian): https://github.com/neondatabase/neon/issues/11598
+                if not config.test_may_use_compatibility_snapshot_binaries:
+                    ps_cfg["virtual_file_io_mode"] = self.pageserver_virtual_file_io_mode
+                else:
+                    log.info("ignoring virtual_file_io_mode parametrization for compatibility test")
 
             if self.pageserver_wal_receiver_protocol is not None:
                 key, value = PageserverWalReceiverProtocol.to_config_key_value(
@@ -1420,7 +1424,7 @@ class NeonEnv:
                 self.storage_controller.on_safekeeper_deploy(sk_id, body)
                 self.storage_controller.safekeeper_scheduling_policy(sk_id, "Active")
 
-        self.object_storage.start(timeout_in_seconds=timeout_in_seconds)
+        self.endpoint_storage.start(timeout_in_seconds=timeout_in_seconds)
 
     def stop(self, immediate=False, ps_assert_metric_no_errors=False, fail_on_endpoint_errors=True):
         """
@@ -1439,7 +1443,7 @@ class NeonEnv:
         except Exception as e:
             raise_later = e
 
-        self.object_storage.stop(immediate=immediate)
+        self.endpoint_storage.stop(immediate=immediate)
 
         # Stop storage controller before pageservers: we don't want it to spuriously
         # detect a pageserver "failure" during test teardown
@@ -2660,24 +2664,24 @@ class NeonStorageController(MetricsGetter, LogUtils):
         self.stop(immediate=True)
 
 
-class ObjectStorage(LogUtils):
+class EndpointStorage(LogUtils):
     def __init__(self, env: NeonEnv):
-        service_dir = env.repo_dir / "object_storage"
-        super().__init__(logfile=service_dir / "object_storage.log")
-        self.conf_path = service_dir / "object_storage.json"
+        service_dir = env.repo_dir / "endpoint_storage"
+        super().__init__(logfile=service_dir / "endpoint_storage.log")
+        self.conf_path = service_dir / "endpoint_storage.json"
         self.env = env
 
     def base_url(self):
         return json.loads(self.conf_path.read_text())["listen"]
 
     def start(self, timeout_in_seconds: int | None = None):
-        self.env.neon_cli.object_storage_start(timeout_in_seconds)
+        self.env.neon_cli.endpoint_storage_start(timeout_in_seconds)
 
     def stop(self, immediate: bool = False):
-        self.env.neon_cli.object_storage_stop(immediate)
+        self.env.neon_cli.endpoint_storage_stop(immediate)
 
     def assert_no_errors(self):
-        assert_no_errors(self.logfile, "object_storage", [])
+        assert_no_errors(self.logfile, "endpoint_storage", [])
 
 
 class NeonProxiedStorageController(NeonStorageController):
@@ -3379,6 +3383,9 @@ class VanillaPostgres(PgProtocol):
     def get_subdir_size(self, subdir: Path) -> int:
         """Return size of pgdatadir subdirectory in bytes."""
         return get_dir_size(self.pgdatadir / subdir)
+
+    def is_running(self) -> bool:
+        return self.running
 
     def __enter__(self) -> Self:
         return self

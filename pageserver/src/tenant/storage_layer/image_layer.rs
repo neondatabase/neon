@@ -27,11 +27,11 @@
 //! actual page images are stored in the "values" part.
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
-use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
@@ -43,14 +43,13 @@ use pageserver_api::key::{DBDIR_KEY, KEY_SIZE, Key};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use pageserver_api::value::Value;
-use rand::Rng;
-use rand::distributions::Alphanumeric;
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::bin_ser::BeSer;
+use utils::bin_ser::SerializeError;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
@@ -72,8 +71,10 @@ use crate::tenant::vectored_blob_io::{
     BlobFlag, BufView, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadPlanner,
 };
+use crate::virtual_file::TempVirtualFile;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
-use crate::virtual_file::{self, IoBufferMut, MaybeFatalIo, VirtualFile};
+use crate::virtual_file::owned_buffers_io::write::{Buffer, BufferedWriterShutdownMode};
+use crate::virtual_file::{self, IoBuffer, IoBufferMut, MaybeFatalIo, VirtualFile};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 
 ///
@@ -112,6 +113,15 @@ impl From<&ImageLayer> for Summary {
 }
 
 impl Summary {
+    /// Serializes the summary header into an aligned buffer of lenth `PAGE_SZ`.
+    pub fn ser_into_page(&self) -> Result<IoBuffer, SerializeError> {
+        let mut buf = IoBufferMut::with_capacity(PAGE_SZ);
+        Self::ser_into(self, &mut buf)?;
+        // Pad zeroes to the buffer so the length is a multiple of the alignment.
+        buf.extend_with(0, buf.capacity() - buf.len());
+        Ok(buf.freeze())
+    }
+
     pub(super) fn expected(
         tenant_id: TenantId,
         timeline_id: TimelineId,
@@ -252,14 +262,18 @@ impl ImageLayer {
         tenant_shard_id: TenantShardId,
         fname: &ImageLayerName,
     ) -> Utf8PathBuf {
-        let rand_string: String = rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(8)
-            .map(char::from)
-            .collect();
+        // TempVirtualFile requires us to never reuse a filename while an old
+        // instance of TempVirtualFile created with that filename is not done dropping yet.
+        // So, we use a monotonic counter to disambiguate the filenames.
+        static NEXT_TEMP_DISAMBIGUATOR: AtomicU64 = AtomicU64::new(1);
+        let filename_disambiguator =
+            NEXT_TEMP_DISAMBIGUATOR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         conf.timeline_path(&tenant_shard_id, &timeline_id)
-            .join(format!("{fname}.{rand_string}.{TEMP_FILE_SUFFIX}"))
+            .join(format!(
+                "{fname}.{:x}.{TEMP_FILE_SUFFIX}",
+                filename_disambiguator
+            ))
     }
 
     ///
@@ -349,7 +363,7 @@ impl ImageLayer {
     where
         F: Fn(Summary) -> Summary,
     {
-        let mut file = VirtualFile::open_with_options(
+        let file = VirtualFile::open_with_options_v2(
             path,
             virtual_file::OpenOptions::new().read(true).write(true),
             ctx,
@@ -366,11 +380,8 @@ impl ImageLayer {
 
         let new_summary = rewrite(actual_summary);
 
-        let mut buf = Vec::with_capacity(PAGE_SZ);
-        // TODO: could use smallvec here but it's a pain with Slice<T>
-        Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
-        file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
+        let buf = new_summary.ser_into_page().context("serialize")?;
+        let (_buf, res) = file.write_all_at(buf.slice_len(), 0, ctx).await;
         res?;
         Ok(())
     }
@@ -674,6 +685,19 @@ impl ImageLayerInner {
     }
 
     pub(crate) fn iter<'a>(&'a self, ctx: &'a RequestContext) -> ImageLayerIterator<'a> {
+        self.iter_with_options(
+            ctx,
+            1024 * 8192, // The default value. Unit tests might use a different value. 1024 * 8K = 8MB buffer.
+            1024,        // The default value. Unit tests might use a different value
+        )
+    }
+
+    pub(crate) fn iter_with_options<'a>(
+        &'a self,
+        ctx: &'a RequestContext,
+        max_read_size: u64,
+        max_batch_size: usize,
+    ) -> ImageLayerIterator<'a> {
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
@@ -683,10 +707,7 @@ impl ImageLayerInner {
             index_iter: tree_reader.iter(&[0; KEY_SIZE], ctx),
             key_values_batch: VecDeque::new(),
             is_end: false,
-            planner: StreamingVectoredReadPlanner::new(
-                1024 * 8192, // The default value. Unit tests might use a different value. 1024 * 8K = 8MB buffer.
-                1024,        // The default value. Unit tests might use a different value
-            ),
+            planner: StreamingVectoredReadPlanner::new(max_read_size, max_batch_size),
         }
     }
 
@@ -739,7 +760,7 @@ struct ImageLayerWriterInner {
     // Number of keys in the layer.
     num_keys: usize,
 
-    blob_writer: BlobWriter<false>,
+    blob_writer: BlobWriter<TempVirtualFile>,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
 
     #[cfg(feature = "testing")]
@@ -773,19 +794,27 @@ impl ImageLayerWriterInner {
             },
         );
         trace!("creating image layer {}", path);
-        let mut file = {
-            VirtualFile::open_with_options(
+        let file = TempVirtualFile::new(
+            VirtualFile::open_with_options_v2(
                 &path,
                 virtual_file::OpenOptions::new()
-                    .write(true)
-                    .create_new(true),
+                    .create_new(true)
+                    .write(true),
                 ctx,
             )
-            .await?
-        };
-        // make room for the header block
-        file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
-        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64, gate, cancel, ctx);
+            .await?,
+            gate.enter()?,
+        );
+
+        // Start at `PAGE_SZ` to make room for the header block.
+        let blob_writer = BlobWriter::new(
+            file,
+            PAGE_SZ as u64,
+            gate,
+            cancel,
+            ctx,
+            info_span!(parent: None, "image_layer_writer_flush_task", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), timeline_id=%timeline_id, path = %path),
+        )?;
 
         // Initialize the b-tree index builder
         let block_buf = BlockBuf::new();
@@ -897,25 +926,6 @@ impl ImageLayerWriterInner {
         ctx: &RequestContext,
         end_key: Option<Key>,
     ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
-        let temp_path = self.path.clone();
-        let result = self.finish0(ctx, end_key).await;
-        if let Err(ref e) = result {
-            tracing::info!(%temp_path, "cleaning up temporary file after error during writing: {e}");
-            if let Err(e) = std::fs::remove_file(&temp_path) {
-                tracing::warn!(error=%e, %temp_path, "error cleaning up temporary layer file after error during writing");
-            }
-        }
-        result
-    }
-
-    ///
-    /// Finish writing the image layer.
-    ///
-    async fn finish0(
-        self,
-        ctx: &RequestContext,
-        end_key: Option<Key>,
-    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
         let index_start_blk = self.blob_writer.size().div_ceil(PAGE_SZ as u64) as u32;
 
         // Calculate compression ratio
@@ -932,15 +942,24 @@ impl ImageLayerWriterInner {
             crate::metrics::COMPRESSION_IMAGE_OUTPUT_BYTES.inc_by(compressed_size);
         };
 
-        let mut file = self.blob_writer.into_inner();
+        let file = self
+            .blob_writer
+            .shutdown(
+                BufferedWriterShutdownMode::ZeroPadToNextMultiple(PAGE_SZ),
+                ctx,
+            )
+            .await?;
 
         // Write out the index
-        file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
-            .await?;
+        let mut offset = index_start_blk as u64 * PAGE_SZ as u64;
         let (index_root_blk, block_buf) = self.tree.finish()?;
+
+        // TODO(yuchen): https://github.com/neondatabase/neon/issues/10092
+        // Should we just replace BlockBuf::blocks with one big buffer?
         for buf in block_buf.blocks {
-            let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
+            let (_buf, res) = file.write_all_at(buf.slice_len(), offset, ctx).await;
             res?;
+            offset += PAGE_SZ as u64;
         }
 
         let final_key_range = if let Some(end_key) = end_key {
@@ -961,11 +980,9 @@ impl ImageLayerWriterInner {
             index_root_blk,
         };
 
-        let mut buf = Vec::with_capacity(PAGE_SZ);
-        // TODO: could use smallvec here but it's a pain with Slice<T>
-        Summary::ser_into(&summary, &mut buf)?;
-        file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
+        // Writes summary at the first block (offset 0).
+        let buf = summary.ser_into_page()?;
+        let (_buf, res) = file.write_all_at(buf.slice_len(), 0, ctx).await;
         res?;
 
         let metadata = file
@@ -999,6 +1016,10 @@ impl ImageLayerWriterInner {
             .maybe_fatal_err("image_layer sync_all")?;
 
         trace!("created image layer {}", self.path);
+
+        // The gate guard stored in `destination_file` is dropped. Callers (e.g.. flush loop or compaction)
+        // keep the gate open also, so that it's safe for them to rename the file to its final destination.
+        file.disarm_into_inner();
 
         Ok((desc, self.path))
     }
@@ -1122,14 +1143,6 @@ impl ImageLayerWriter {
         ctx: &RequestContext,
     ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
         self.inner.take().unwrap().finish(ctx, Some(end_key)).await
-    }
-}
-
-impl Drop for ImageLayerWriter {
-    fn drop(&mut self) {
-        if let Some(inner) = self.inner.take() {
-            inner.blob_writer.into_inner().remove();
-        }
     }
 }
 

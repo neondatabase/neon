@@ -23,6 +23,7 @@ mod scheduler;
 mod schema;
 pub mod service;
 mod tenant_shard;
+mod timeline_import;
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Copy, Clone, Serialize)]
 struct Sequence(u64);

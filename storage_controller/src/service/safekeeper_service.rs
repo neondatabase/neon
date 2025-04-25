@@ -15,7 +15,7 @@ use http_utils::error::ApiError;
 use pageserver_api::controller_api::{
     SafekeeperDescribeResponse, SkSchedulingPolicy, TimelineImportRequest,
 };
-use pageserver_api::models::{self, SafekeeperInfo, SafekeepersInfo, TimelineInfo};
+use pageserver_api::models::{SafekeeperInfo, SafekeepersInfo, TimelineInfo};
 use safekeeper_api::membership::{MemberSet, SafekeeperId};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -207,7 +207,6 @@ impl Service {
         self: &Arc<Self>,
         tenant_id: TenantId,
         timeline_info: &TimelineInfo,
-        create_mode: models::TimelineCreateRequestMode,
     ) -> Result<SafekeepersInfo, ApiError> {
         let timeline_id = timeline_info.timeline_id;
         let pg_version = timeline_info.pg_version * 10000;
@@ -217,15 +216,8 @@ impl Service {
         // previously existed as on retries in theory endpoint might have
         // already written some data and advanced last_record_lsn, while we want
         // safekeepers to have consistent start_lsn.
-        let start_lsn = match create_mode {
-            models::TimelineCreateRequestMode::Bootstrap { .. } => timeline_info.last_record_lsn,
-            models::TimelineCreateRequestMode::Branch { .. } => timeline_info.last_record_lsn,
-            models::TimelineCreateRequestMode::ImportPgdata { .. } => {
-                return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                    "import pgdata doesn't specify the start lsn, aborting creation on safekeepers"
-                )))?;
-            }
-        };
+        let start_lsn = timeline_info.last_record_lsn;
+
         // Choose initial set of safekeepers respecting affinity
         let sks = self.safekeepers_for_new_timeline().await?;
         let sks_persistence = sks.iter().map(|sk| sk.id.0 as i64).collect::<Vec<_>>();

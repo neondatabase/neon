@@ -275,7 +275,7 @@ jobs:
                 for io_mode in buffered direct direct-rw ; do
                   NEON_PAGESERVER_UNIT_TEST_GET_VECTORED_CONCURRENT_IO=$get_vectored_concurrent_io \
                   NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine \
-                  NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOMODE=$io_mode \
+                  NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IO_MODE=$io_mode \
                   ${cov_prefix} \
                   cargo nextest run $CARGO_FLAGS $CARGO_FEATURES  -E 'package(pageserver)'
               done
@@ -395,7 +395,7 @@ jobs:
           BUILD_TAG: ${{ inputs.build-tag }}
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
           PAGESERVER_GET_VECTORED_CONCURRENT_IO: sidecar-task
-          PAGESERVER_VIRTUAL_FILE_IO_MODE: direct
+          PAGESERVER_VIRTUAL_FILE_IO_MODE: direct-rw
           USE_LFC: ${{ matrix.lfc_state == 'with-lfc' && 'true' || 'false' }}
 
       # Temporary disable this step until we figure out why it's so flaky

@@ -5,8 +5,6 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
-aws-config.workspace = true
-aws-sdk-s3.workspace = true
 either.workspace = true
 anyhow.workspace = true
 hex.workspace = true
