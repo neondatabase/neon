@@ -685,6 +685,19 @@ impl ImageLayerInner {
     }
 
     pub(crate) fn iter<'a>(&'a self, ctx: &'a RequestContext) -> ImageLayerIterator<'a> {
+        self.iter_with_options(
+            ctx,
+            1024 * 8192, // The default value. Unit tests might use a different value. 1024 * 8K = 8MB buffer.
+            1024,        // The default value. Unit tests might use a different value
+        )
+    }
+
+    pub(crate) fn iter_with_options<'a>(
+        &'a self,
+        ctx: &'a RequestContext,
+        max_read_size: u64,
+        max_batch_size: usize,
+    ) -> ImageLayerIterator<'a> {
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
@@ -694,10 +707,7 @@ impl ImageLayerInner {
             index_iter: tree_reader.iter(&[0; KEY_SIZE], ctx),
             key_values_batch: VecDeque::new(),
             is_end: false,
-            planner: StreamingVectoredReadPlanner::new(
-                1024 * 8192, // The default value. Unit tests might use a different value. 1024 * 8K = 8MB buffer.
-                1024,        // The default value. Unit tests might use a different value
-            ),
+            planner: StreamingVectoredReadPlanner::new(max_read_size, max_batch_size),
         }
     }
 

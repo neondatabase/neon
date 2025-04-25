@@ -1323,7 +1323,6 @@ dependencies = [
  "serde_json",
  "serde_with",
  "signal-hook",
- "spki 0.7.3",
  "tar",
  "thiserror 1.0.69",
  "tokio",

@@ -35,8 +35,9 @@ jobs:
       matrix:
         pg-version: [16, 17]
 
-    runs-on: small
+    runs-on: [ self-hosted, small ]
     container:
+      # We use the neon-test-extensions image here as it contains the source code for the extensions.
       image: ghcr.io/neondatabase/neon-test-extensions-v${{ matrix.pg-version }}:latest
       credentials:
         username: ${{ github.actor }}
@@ -63,7 +64,6 @@ jobs:
           settings=$(jq -c -n --arg libs $LIBS '{preload_libraries:{use_defaults:false,enabled_libraries:($libs| split(":"))}}')
           echo settings=$settings >> $GITHUB_OUTPUT
           
-
       - name: Create Neon Project
         id: create-neon-project
         uses: ./.github/actions/neon-project-create
@@ -71,7 +71,18 @@ jobs:
           region_id: ${{ inputs.region_id }}
           postgres_version: ${{ matrix.pg-version }}
           project_settings: ${{ steps.project-settings.outputs.settings }}
-          default_endpoint_settings: '{"pg_settings":{"DateStyle":"Postgres,MDY","TimeZone":"America/Los_Angeles","compute_query_id":"off","max_worker_processes":"10","neon.allow_unstable_extensions":"on"}}'
+          # We need these settings to get the expected output results.
+          # We cannot use the environment variables e.g. PGTZ due to
+          # https://github.com/neondatabase/neon/issues/1287
+          default_endpoint_settings: >
+            {
+              "pg_settings": {
+                "DateStyle": "Postgres,MDY",
+                "TimeZone": "America/Los_Angeles",
+                "compute_query_id": "off",
+                "neon.allow_unstable_extensions": "on"
+              }
+            }
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
           admin_api_key: ${{ secrets.NEON_STAGING_ADMIN_API_KEY }}
 

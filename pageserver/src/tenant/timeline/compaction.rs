@@ -2828,6 +2828,41 @@ impl Timeline {
         Ok(())
     }
 
+    /// Check if the memory usage is within the limit.
+    async fn check_memory_usage(
+        self: &Arc<Self>,
+        layer_selection: &[Layer],
+    ) -> Result<(), CompactionError> {
+        let mut estimated_memory_usage_mb = 0.0;
+        let mut num_image_layers = 0;
+        let mut num_delta_layers = 0;
+        let target_layer_size_bytes = 256 * 1024 * 1024;
+        for layer in layer_selection {
+            let layer_desc = layer.layer_desc();
+            if layer_desc.is_delta() {
+                // Delta layers at most have 1MB buffer; 3x to make it safe (there're deltas as large as 16KB).
+                // Multiply the layer size so that tests can pass.
+                estimated_memory_usage_mb +=
+                    3.0 * (layer_desc.file_size / target_layer_size_bytes) as f64;
+                num_delta_layers += 1;
+            } else {
+                // Image layers at most have 1MB buffer but it might be compressed; assume 5x compression ratio.
+                estimated_memory_usage_mb +=
+                    5.0 * (layer_desc.file_size / target_layer_size_bytes) as f64;
+                num_image_layers += 1;
+            }
+        }
+        if estimated_memory_usage_mb > 1024.0 {
+            return Err(CompactionError::Other(anyhow!(
+                "estimated memory usage is too high: {}MB, giving up compaction; num_image_layers={}, num_delta_layers={}",
+                estimated_memory_usage_mb,
+                num_image_layers,
+                num_delta_layers
+            )));
+        }
+        Ok(())
+    }
+
     /// Get a watermark for gc-compaction, that is the lowest LSN that we can use as the `gc_horizon` for
     /// the compaction algorithm. It is min(space_cutoff, time_cutoff, latest_gc_cutoff, standby_horizon).
     /// Leases and retain_lsns are considered in the gc-compaction job itself so we don't need to account for them
@@ -3264,6 +3299,17 @@ impl Timeline {
         self.check_compaction_space(&job_desc.selected_layers)
             .await?;
 
+        self.check_memory_usage(&job_desc.selected_layers).await?;
+        if job_desc.selected_layers.len() > 100
+            && job_desc.rewrite_layers.len() as f64 >= job_desc.selected_layers.len() as f64 * 0.7
+        {
+            return Err(CompactionError::Other(anyhow!(
+                "too many layers to rewrite: {} / {}, giving up compaction",
+                job_desc.rewrite_layers.len(),
+                job_desc.selected_layers.len()
+            )));
+        }
+
         // Generate statistics for the compaction
         for layer in &job_desc.selected_layers {
             let desc = layer.layer_desc();
@@ -3359,7 +3405,13 @@ impl Timeline {
             .context("failed to collect gc compaction keyspace")
             .map_err(CompactionError::Other)?;
         let mut merge_iter = FilterIterator::create(
-            MergeIterator::create(&delta_layers, &image_layers, ctx),
+            MergeIterator::create_with_options(
+                &delta_layers,
+                &image_layers,
+                ctx,
+                128 * 8192, /* 1MB buffer for each of the inner iterators */
+                128,
+            ),
             dense_ks,
             sparse_ks,
         )

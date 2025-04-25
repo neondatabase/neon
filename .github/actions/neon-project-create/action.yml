@@ -141,6 +141,8 @@ runs:
         fi
         # XXX
         # This is a workaround for project's settings which don't work well in public API now
+        # https://github.com/neondatabase/cloud/issues/27143
+        # https://github.com/neondatabase/cloud/issues/27108
         if ( [[ -n "${PROJECT_SETTINGS}" ]] && [[ "${PROJECT_SETTINGS}" != "{}" ]] ) || ( [[ -n "${DEFAULT_ENDPOINT_SETTINGS}" ]] && [[ "${DEFAULT_ENDPOINT_SETTINGS}" != "{}" ]] ); then
           PROJECT_DATA=$(curl -X GET \
               "https://${API_HOST}/regions/${REGION_ID}/api/v1/admin/projects/${project_id}" \
